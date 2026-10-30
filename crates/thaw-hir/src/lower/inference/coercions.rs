@@ -1374,8 +1374,8 @@ impl<'a> FnLowerer<'a> {
                 );
             }
             // A native `bigint` is a Json BigInt, the same value an array/object push builds.
-            if actual == HirType::BigInt {
-                return self.wrap_native_value_as_json(value, HirType::BigInt);
+            if matches!(actual, HirType::I64 | HirType::BigInt) {
+                return self.wrap_native_value_as_json(value, actual);
             }
             if matches!(&actual, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _)) {
                 // `registerNativeCallback`'s own inferred type is always

@@ -3045,7 +3045,7 @@ impl<'a> FnLowerer<'a> {
                         HirType::Bytes => Some("Uint8Array"),
                         HirType::Symbol => Some("Symbol"),
                         HirType::Promise(_) => Some("Promise"),
-                        HirType::BigInt => Some("BigInt"),
+                        HirType::I64 | HirType::BigInt => Some("BigInt"),
                         _ => None,
                     }
                 };

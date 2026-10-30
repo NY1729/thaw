@@ -584,7 +584,10 @@ impl<'a> FnLowerer<'a> {
                         Ok(HirType::Bool)
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
-                        if left_ty == HirType::BigInt && right_ty == HirType::BigInt {
+                        if matches!(
+                            (&left_ty, &right_ty),
+                            (HirType::I64, HirType::I64) | (HirType::BigInt, HirType::BigInt)
+                        ) {
                             return Ok(HirType::Bool);
                         }
                         if !matches!(left_ty, HirType::F64 | HirType::Dynamic)
@@ -608,11 +611,14 @@ impl<'a> FnLowerer<'a> {
                     | BinOp::LShift
                     | BinOp::RShift
                     | BinOp::ZeroFillRShift => {
-                        if left_ty == HirType::BigInt && right_ty == HirType::BigInt {
+                        if matches!(
+                            (&left_ty, &right_ty),
+                            (HirType::I64, HirType::I64) | (HirType::BigInt, HirType::BigInt)
+                        ) {
                             if *op == BinOp::ZeroFillRShift {
                                 return Err("bigint does not support unsigned right shift".into());
                             }
-                            return Ok(HirType::BigInt);
+                            return Ok(left_ty);
                         }
                         if !matches!(left_ty, HirType::F64 | HirType::Dynamic)
                             || !matches!(right_ty, HirType::F64 | HirType::Dynamic)

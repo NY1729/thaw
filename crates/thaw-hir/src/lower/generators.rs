@@ -329,6 +329,7 @@ fn generator_placeholder(ty: &HirType) -> Option<HirExpr> {
     Some(match ty {
         HirType::F64 => HirExpr::Lit(HirLit::F64(0.0)),
         HirType::I64 => HirExpr::Lit(HirLit::I64(0)),
+        HirType::BigInt => HirExpr::Lit(HirLit::BigInt("0".into())),
         HirType::Bool => HirExpr::Lit(HirLit::Bool(false)),
         HirType::Str => HirExpr::Lit(HirLit::Str(String::new())),
         HirType::Array(_) => HirExpr::ArrayLit(Vec::new()),

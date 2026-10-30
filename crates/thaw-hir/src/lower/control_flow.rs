@@ -931,7 +931,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
     match ty {
         HirType::F64 => Some("number"),
         HirType::BigInt => Some("bigint"),
-        HirType::I64 => None,
+        HirType::I64 => Some("bigint"),
         HirType::Undefined => Some("undefined"),
         HirType::Null => Some("object"),
         HirType::Str | HirType::StrLiteral(_) => Some("string"),

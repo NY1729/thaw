@@ -14,7 +14,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into_pointer_value();
                 let expected = match ty {
                     HirType::F64 => "number",
-                    HirType::BigInt => "bigint",
+                    HirType::I64 | HirType::BigInt => "bigint",
                     HirType::Str => "string",
                     HirType::Bool => "boolean",
                     _ => "object",
@@ -856,6 +856,11 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
             HirType::BigInt => self.compile_json_as_bigint(json),
+            HirType::I64 => {
+                let value = self.compile_json_as_value(json, "thaw_json_as_bigint_i64")?;
+                self.compile_check_json_host_error(json, None)?;
+                Ok(value)
+            }
             HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string_value"),
             HirType::Bool => self.compile_json_as_bool_value(json),
             HirType::Json | HirType::Dictionary(_) => Ok(json),

@@ -1351,6 +1351,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     value = self.compile_json_bigint(value)?;
                     "thaw_json_object_set_json"
                 }
+                // Raw compiler-internal integers keep the exact-i64 Json BigInt.
+                HirType::I64 => {
+                    value = self.bigint_call("thaw_json_receiver_bigint", &[value.into()])?;
+                    "thaw_json_object_set_json"
+                }
                 HirType::Map(..) | HirType::Set(_) if self.console_omit_absent_fields => {
                     value = self.compile_native_collection_to_json(value.into_pointer_value(), field_type, preserve_undefined)?;
                     "thaw_json_object_set_json"
@@ -2259,6 +2264,10 @@ impl<'ctx> HirCompiler<'ctx> {
             // A bigint element becomes a Json BigInt (printed `123n`; `JSON.stringify` rejects it).
             HirType::BigInt => {
                 value = self.compile_json_bigint(value)?;
+                "thaw_json_array_push_json"
+            }
+            HirType::I64 => {
+                value = self.bigint_call("thaw_json_receiver_bigint", &[value.into()])?;
                 "thaw_json_array_push_json"
             }
             HirType::Map(..) | HirType::Set(_) if self.console_omit_absent_fields => {
