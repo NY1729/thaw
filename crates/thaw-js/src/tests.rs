@@ -1017,3 +1017,17 @@ fn large_maps_and_sets_agree_with_linear_semantics() {
         "400 51 8 nan zero false true true false true true false|false 50 again k0,0,k1 0,1,2,4|1 2 undefined big num undefined"
     );
 }
+
+#[test]
+fn crypto_global_fills_random_values_and_makes_uuids() {
+    assert_eq!(
+        one("var a = new Uint8Array(32), r = crypto.getRandomValues(a);
+             var u = crypto.randomUUID(), m = globalThis.__thaw_crypto_module;
+             var big = 0; try { crypto.getRandomValues(new Uint8Array(65537)); } catch (e) { big = e.name; }
+             var bad = ''; try { crypto.getRandomValues(new Float64Array(1)); } catch (e) { bad = e.name; }
+             console.log(r === a, a.some(function (x) { return x !== 0; }),
+               /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(u),
+               m.randomBytes(5).length, m.randomInt(3, 4), big, bad)"),
+        "true true true 5 3 QuotaExceededError TypeMismatchError"
+    );
+}

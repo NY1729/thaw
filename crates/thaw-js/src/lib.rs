@@ -42,6 +42,8 @@ mod typed;
 mod url;
 #[path = "web/abort.rs"]
 mod web_abort;
+#[path = "web/crypto.rs"]
+mod web_crypto;
 #[path = "web/dom_exception.rs"]
 mod web_dom_exception;
 #[path = "web/event_target.rs"]
@@ -675,6 +677,7 @@ impl Interp {
         web_text_codec::install(&mut it);
         web_event_target::install(&mut it);
         web_abort::install(&mut it);
+        web_crypto::install(&mut it);
         it.install_url();
         it.run(extras::EXTRAS_LATE)
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
@@ -794,7 +797,12 @@ impl Interp {
             }
         }
         for o in objs {
-            names.extend(o.props.borrow().iter().map(|p| p.key.to_string()));
+            // inherited methods count too (`%TypedArray%.prototype.subarray` on `Uint8Array.prototype`)
+            let mut cur = Some(o);
+            while let Some(o) = cur {
+                names.extend(o.props.borrow().iter().map(|p| p.key.to_string()));
+                cur = o.proto.borrow().clone();
+            }
         }
         names.extend(["next", "return", "throw", "require"].map(String::from)); // iterator protocol / `module.require` (user-defined)
         names
