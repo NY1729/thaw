@@ -805,7 +805,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Null => vec![1],
             HirType::Bool => vec![2],
             HirType::F64 => vec![3],
-            HirType::I64 => vec![4],
+            HirType::I64 | HirType::BigInt => vec![4],
             HirType::Str | HirType::StrLiteral(_) => vec![5],
             HirType::Symbol => vec![6],
             HirType::Json => vec![0, 1, 2, 3, 5, 7, 8],
@@ -1602,7 +1602,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_bit_cast(word, self.context.f64_type(), "receiver_number")
                     .map_err(|error| error.to_string())?,
             ),
-            HirType::I64 => (4, word.into()),
+            HirType::I64 | HirType::BigInt => (4, word.into()),
             HirType::Str | HirType::StrLiteral(_) | HirType::Symbol => {
                 let expected = if matches!(receiver, HirType::Symbol) {
                     6
@@ -1821,20 +1821,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .ok_or("number receiver constructor returned no value")?
                         .into_pointer_value()
                 }
-                4 => self
-                    .builder
-                    .build_call(
-                        self.module
-                            .get_function("thaw_json_receiver_bigint")
-                            .unwrap(),
-                        &[word.into()],
-                        "receiver_json_bigint_root",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("BigInt receiver constructor returned no value")?
-                    .into_pointer_value(),
+                4 => self.compile_json_bigint(word.into())?.into_pointer_value(),
                 5 => {
                     let value = self
                         .builder

@@ -60,11 +60,40 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i64_type.into()], false),
             Some(Linkage::External),
         );
-        self.module.add_function(
-            "thaw_i64_from_number",
-            i64_type.fn_type(&[self.context.f64_type().into()], false),
-            Some(Linkage::External),
-        );
+        {
+            let f64_type = self.context.f64_type();
+            let i32_type = self.context.i32_type();
+            let bool_type = self.context.bool_type();
+            let word = |function: &mut Vec<(&'static str, inkwell::types::FunctionType<'ctx>)>, name| {
+                function.push((name, i64_type.fn_type(&[i64_type.into(), i64_type.into()], false)));
+            };
+            let mut declarations: Vec<(&'static str, inkwell::types::FunctionType<'ctx>)> = vec![
+                ("thaw_bigint_from_f64", i64_type.fn_type(&[f64_type.into()], false)),
+                ("thaw_bigint_from_i64", i64_type.fn_type(&[i64_type.into()], false)),
+                ("thaw_bigint_from_u64", i64_type.fn_type(&[i64_type.into()], false)),
+                ("thaw_bigint_to_i64_wrapping", i64_type.fn_type(&[i64_type.into()], false)),
+                ("thaw_bigint_to_f64", f64_type.fn_type(&[i64_type.into()], false)),
+                ("thaw_bigint_neg", i64_type.fn_type(&[i64_type.into()], false)),
+                ("thaw_bigint_not", i64_type.fn_type(&[i64_type.into()], false)),
+                ("thaw_bigint_is_zero", bool_type.fn_type(&[i64_type.into()], false)),
+                ("thaw_bigint_parse_ok", bool_type.fn_type(&[i8_ptr.into()], false)),
+                ("thaw_bigint_parse_error_message", i8_ptr.fn_type(&[i8_ptr.into()], false)),
+                ("thaw_bigint_cmp", i32_type.fn_type(&[i64_type.into(), i64_type.into()], false)),
+                ("thaw_bigint_cmp_f64", i32_type.fn_type(&[i64_type.into(), f64_type.into()], false)),
+                ("thaw_bigint_binop_error", i32_type.fn_type(&[i32_type.into(), i64_type.into(), i64_type.into()], false)),
+                ("thaw_json_as_bigint_decimal", i8_ptr.fn_type(&[i8_ptr.into()], false)),
+                ("thaw_json_receiver_bigint_decimal", i8_ptr.fn_type(&[i8_ptr.into()], false)),
+            ];
+            for name in [
+                "thaw_bigint_add", "thaw_bigint_sub", "thaw_bigint_mul", "thaw_bigint_div", "thaw_bigint_mod",
+                "thaw_bigint_and", "thaw_bigint_or", "thaw_bigint_xor", "thaw_bigint_shl", "thaw_bigint_shr",
+            ] {
+                word(&mut declarations, name);
+            }
+            for (name, ty) in declarations {
+                self.module.add_function(name, ty, Some(Linkage::External));
+            }
+        }
         self.module.add_function(
             "thaw_i64_from_string",
             i64_type.fn_type(&[i8_ptr.into()], false),
@@ -1115,11 +1144,6 @@ impl<'ctx> HirCompiler<'ctx> {
             );
             self.module.add_function(name, ty, Some(Linkage::External));
         }
-        self.module.add_function(
-            "thaw_bigint_pow_overflows",
-            self.context.bool_type().fn_type(&[i64_type.into(), i64_type.into()], false),
-            Some(Linkage::External),
-        );
         self.module.add_function(
             "thaw_bigint_pow",
             i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),

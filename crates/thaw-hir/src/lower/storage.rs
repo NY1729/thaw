@@ -1385,7 +1385,7 @@ fn is_unset_number_field(fields: &[(Symbol, HirType)], property: &str) -> bool {
 /// containers keep their shape with `any` elements.
 fn widen_sink_type(source: HirType) -> HirType {
     match source {
-        HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str => HirType::Json,
+        HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Bool | HirType::Str => HirType::Json,
         HirType::Array(_) => HirType::Array(Box::new(HirType::Json)),
         HirType::Map(key, _) => HirType::Map(key, Box::new(HirType::Json)),
         HirType::Set(_) => HirType::Set(Box::new(HirType::Json)),
@@ -2342,7 +2342,7 @@ impl FnLowerer<'_> {
             Expr::Lit(Lit::Str(value)) => Some(HirExpr::Lit(HirLit::Str(value.value.to_string_lossy().into_owned()))),
             Expr::Lit(Lit::Bool(value)) => Some(HirExpr::Lit(HirLit::Bool(value.value))),
             Expr::Lit(Lit::Null(_)) => Some(HirExpr::Lit(HirLit::Null)),
-            Expr::Lit(Lit::BigInt(value)) => value.value.to_string().parse().ok().map(|value| HirExpr::Lit(HirLit::I64(value))),
+            Expr::Lit(Lit::BigInt(value)) => Some(HirExpr::Lit(HirLit::BigInt(value.value.to_string()))),
             Expr::Ident(identifier) => {
                 let name = self.resolve_binding(identifier.sym.as_ref());
                 let narrowed = self.union_narrowings.get(&name).and_then(|(allowed, elements)| {
