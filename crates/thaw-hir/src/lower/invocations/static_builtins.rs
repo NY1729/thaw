@@ -860,6 +860,24 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    /// A callable field, directly or inside a nested object: `JSON.stringify` must then
+    /// see the live object (a nested `toJSON` method is called there).
+    fn type_holds_callable_field(ty: &HirType) -> bool {
+        match ty {
+            HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..) => true,
+            HirType::Object(fields) => fields
+                .iter()
+                .any(|(name, field)| !is_hidden_accessor_field(name) && Self::type_holds_callable_field(field)),
+            // (An array of callables keeps its null-element serialisation.)
+            HirType::Optional(element) | HirType::Nullable(element) | HirType::Nullish(element)
+                if matches!(element.as_ref(), HirType::Object(_)) =>
+            {
+                Self::type_holds_callable_field(element)
+            }
+            _ => false,
+        }
+    }
+
     fn lower_static_builtin_call(
         &mut self,
         object: &swc_ecma_ast::Ident,
@@ -3279,12 +3297,7 @@ impl<'a> FnLowerer<'a> {
                                 if native_accessor_fields.is_none()
                                     && fields.iter().any(|(name, ty)| {
                                         !is_hidden_accessor_field(name)
-                                && matches!(
-                                    ty,
-                                    HirType::Function(_, _)
-                                                | HirType::CallableFunction(..)
-                                        | HirType::FunctionWithThis(..)
-                                )
+                                            && Self::type_holds_callable_field(ty)
                                     })
                                     && Self::fixed_object_supports_live_projection(&value_type) =>
                             {

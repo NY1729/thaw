@@ -1534,7 +1534,9 @@ impl<'a> FnLowerer<'a> {
                             self.next_binding += 1;
                             self.scope.insert(receiver_name.clone(), array_type.clone());
                             self.scope.insert(separator_name.clone(), HirType::Str);
-                            let result = if matches!(element.as_ref(), HirType::Json | HirType::JsValue) {
+                            let result = if matches!(element.as_ref(), HirType::Json | HirType::JsValue)
+                                || self.object_has_custom_string_conversion(element.as_ref())
+                            {
                                 let slot_type = element.as_ref().clone();
                                 // A native Array<Json> uses this HIR loop. Its slots
                                 // have join semantics: null and undefined become empty,

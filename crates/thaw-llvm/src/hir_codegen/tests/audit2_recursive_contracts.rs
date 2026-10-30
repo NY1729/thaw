@@ -332,3 +332,68 @@ function main(): void {
         "2 s1\n2 n2 2 true\n"
     );
 }
+
+#[test]
+fn audit2_contract_to_string_is_used_by_join_and_array_conversion() {
+    let source = r##"class A { toString(): string { return "A!"; } }
+function main(): void {
+  const a = new A();
+  const o = { toString() { return "O"; } };
+  console.log(String(a), `${a}`, a + "", [a].join(), [a, a].join("-"), [a].toString(), "" + [a]);
+  console.log(String(o), `${o}`, [o].join());
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_to_string_is_used_by_join_and_array_conversion"),
+        "A! A! A! A! A!-A! A! A!\nO O O\n"
+    );
+}
+
+#[test]
+fn audit2_contract_nested_to_json_methods_are_called() {
+    let source = r##"class A { toJSON(): { t: number } { return { t: 1 }; } }
+function main(): void {
+  console.log(JSON.stringify(new A()), JSON.stringify([new A()]), JSON.stringify({ k: new A() }));
+  console.log(JSON.stringify({ toJSON(k: string) { return "key:" + k; } }), JSON.stringify({ a: { toJSON(k: string) { return "key:" + k; } } }));
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_nested_to_json_methods_are_called"),
+        "{\"t\":1} [{\"t\":1}] {\"k\":{\"t\":1}}\n\"key:\" {\"a\":\"key:a\"}\n"
+    );
+}
+
+#[test]
+fn audit2_contract_this_in_plain_function_and_arrow() {
+    let source = r##"function main(): void {
+  console.log("before");
+  console.log((() => { return typeof this; })());
+  console.log(typeof this, "after");
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_this_in_plain_function_and_arrow"),
+        "before\nobject\nobject after\n"
+    );
+}
+
+#[test]
+fn audit2_contract_sort_follows_v8_timsort_call_order() {
+    let source = r##"function main(): void {
+  console.log([3, 1, 2, 5, 4].sort((a, b) => (a > b ? 1 : 0)));
+  console.log([5, 2, 9, 1, 7, 3, 8].sort((a, b) => (a < b ? -1 : 0)));
+  const a = [5, 2, 9, 1, 7, 3, 8, 4, 6, 0, 11, 15, 12, 13, 10, 14];
+  console.log(a.sort((x, y) => (x > y ? 1 : 0)).join());
+  const c = [3, 1, 2]; console.log(c.sort(() => -1), [3, 1, 2].sort(() => 1));
+  const calls: string[] = []; [4, 2, 3, 1].sort((x, y) => { calls.push(x + ">" + y); return x - y; });
+  console.log(calls.join(" "));
+  const s: string[] = []; ["d", "a", "c", "b", "e", "f", "g"].sort((x, y) => { s.push(x + y); return x < y ? -1 : x > y ? 1 : 0; });
+  console.log(s.join(" "));
+  console.log([2, 1].sort((x, y) => x - y), [1].sort((x, y) => x - y));
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_sort_follows_v8_timsort_call_order"),
+        "[ 3, 1, 2, 5, 4 ]\n[\n  1, 2, 3, 5,\n  7, 8, 9\n]\n5,2,9,1,7,3,8,4,6,0,11,15,12,13,10,14\n[ 2, 1, 3 ] [ 3, 1, 2 ]\n2>4 3>2 3>4 3>2 1>3 1>2\nad ca cd ca bc ba ec ed fc fe gd gf\n[ 1, 2 ] [ 1 ]\n"
+    );
+}

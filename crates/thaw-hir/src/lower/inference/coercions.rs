@@ -1679,6 +1679,13 @@ impl<'a> FnLowerer<'a> {
                     Ok(value)
                 };
             }
+            // A dictionary of arrays (`Object.groupBy`) is the same Json-backed value as the
+            // `Dictionary(Json)` that `Record<string, T[]>` now lowers to (see `dictionary_hir_type`).
+            if **element == HirType::Json
+                && matches!(&actual, HirType::Dictionary(inner) if matches!(inner.as_ref(), HirType::Array(_)))
+            {
+                return Ok(value);
+            }
             return self.coerce_object_literal_to_dictionary(element, value);
         }
         // A referenced union alias can nest an absence wrapper inside
