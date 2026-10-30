@@ -68,7 +68,7 @@ fn sym_block_cipher(
         });
     }
     let mut output = Vec::with_capacity(data.len());
-    for chunk in data.chunks_exact(16) {
+    for chunk in data.as_chunks::<16>().0.iter() {
         let mut block = [0u8; 16];
         block.copy_from_slice(chunk);
         if decrypt {
@@ -257,7 +257,7 @@ fn ripemd160_digest(value: &[u8]) -> Vec<u8> {
         padded.push(0);
     }
     padded.extend_from_slice(&(value.len() as u64 * 8).to_le_bytes());
-    for block in padded.chunks_exact(64) {
+    for block in padded.as_chunks::<64>().0.iter() {
         let mut words = [0u32; 16];
         for (word, bytes) in words.iter_mut().zip(block.as_chunks::<4>().0) {
             *word = u32::from_le_bytes(*bytes);
