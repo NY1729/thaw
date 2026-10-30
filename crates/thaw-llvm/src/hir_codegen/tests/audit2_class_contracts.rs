@@ -219,3 +219,27 @@ function main(): void {
         "{ '1': 'a', '2': 'b' } { a: 1, b: 2 }\n[ 1 ] 1 d r\n"
     );
 }
+
+#[test]
+fn audit2_subclass_prints_with_its_own_class_through_base_and_interface() {
+    let source = r##"interface Shape { area(): number; name: string }
+class Animal { constructor(public name: string) {} speak(): string { return this.name; } }
+class Dog extends Animal { tricks: string[] = ["sit"]; speak(): string { return "woof " + this.name; } }
+class Circle implements Shape { name = "c"; constructor(private r: number) {} area(): number { return 3 * this.r; } }
+function main(): void {
+  const d = new Dog("Rex");
+  const a: Animal = d;
+  const xs: Animal[] = [new Animal("Cat"), d];
+  console.log(a, xs);
+  const s: Shape = new Circle(2);
+  const shapes: Shape[] = [new Circle(1)];
+  console.log(s, shapes, s.constructor.name, shapes[0].constructor.name);
+  const plain: Shape = { name: "p", area: () => 1 };
+  console.log(plain.name);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_subclass_print"),
+        "Dog { name: 'Rex', tricks: [ 'sit' ] } [ Animal { name: 'Cat' }, Dog { name: 'Rex', tricks: [ 'sit' ] } ]\nCircle { name: 'c', r: 2 } [ Circle { name: 'c', r: 1 } ] Circle Circle\np\n"
+    );
+}

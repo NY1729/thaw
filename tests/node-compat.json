@@ -3452,6 +3452,11 @@
       "name": "audit2 Object.fromEntries of mapped pairs and Record over an enum key",
       "expect": "matched",
       "source": "enum State { Idle, Running, Done }\nconst next: Record<State, State[]> = { [State.Idle]: [State.Running], [State.Running]: [State.Done], [State.Done]: [] };\nconst labels: { [K in State]: string } = { [State.Idle]: \"i\", [State.Running]: \"r\", [State.Done]: \"d\" };\ninterface U { id: number; name: string }\nfunction main(): void {\n  const users: U[] = [{ id: 1, name: \"a\" }, { id: 2, name: \"b\" }];\n  console.log(Object.fromEntries(users.map((u) => [u.id, u.name])), Object.fromEntries(users.map((u) => [u.name, u.id])));\n  const s: State = State.Running;\n  console.log(next[State.Idle], s, labels[State.Done], labels[s]);\n}"
+    },
+    {
+      "name": "audit2 subclass instance prints with its own class through a base-typed and interface-typed slot",
+      "expect": "matched",
+      "source": "interface Shape { area(): number; name: string }\nclass Animal { constructor(public name: string) {} speak(): string { return this.name; } }\nclass Dog extends Animal { tricks: string[] = [\"sit\"]; speak(): string { return \"woof \" + this.name; } }\nclass Circle implements Shape { name = \"c\"; constructor(private r: number) {} area(): number { return 3 * this.r; } }\nfunction main(): void {\n  const d = new Dog(\"Rex\");\n  const a: Animal = d;\n  const xs: Animal[] = [new Animal(\"Cat\"), d];\n  console.log(a, xs);\n  const s: Shape = new Circle(2);\n  const shapes: Shape[] = [new Circle(1)];\n  console.log(s, shapes, s.constructor.name, shapes[0].constructor.name);\n  const plain: Shape = { name: \"p\", area: () => 1 };\n  console.log(plain.name);\n}"
     }
   ]
 }

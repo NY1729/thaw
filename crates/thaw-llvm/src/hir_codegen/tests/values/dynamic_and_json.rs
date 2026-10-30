@@ -928,6 +928,7 @@ fn structured_clone_checks_host_error_before_using_the_result() {
         ],
         extern_functions: Vec::new(),
         fn_locs: Default::default(),
+        class_layouts: Vec::new(),
     };
     let context = inkwell::context::Context::create();
     let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "structured_clone_host_error");
@@ -2678,6 +2679,7 @@ fn json_discard_candidates_are_revoked_when_pure_wrappers_store_the_result() {
         ],
         extern_functions: Vec::new(),
         fn_locs: Default::default(),
+        class_layouts: Vec::new(),
     };
     let context = inkwell::context::Context::create();
     let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "json_discard_store_wrappers");
@@ -2885,6 +2887,7 @@ fn json_discard_candidates_are_revoked_by_field_index_and_json_writes() {
         ],
         extern_functions: Vec::new(),
         fn_locs: Default::default(),
+        class_layouts: Vec::new(),
     };
     let context = inkwell::context::Context::create();
     let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "json_discard_write_sites");

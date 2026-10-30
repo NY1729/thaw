@@ -2823,6 +2823,15 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         functions: specialized,
         extern_functions,
         fn_locs: Default::default(),
+        class_layouts: {
+            let mut layouts = interfaces
+                .iter()
+                .filter(|(name, ty)| class_name_from_type(ty) == Some(name.as_str()))
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .collect::<Vec<_>>();
+            layouts.sort_by(|a, b| a.0.cmp(&b.0));
+            layouts.into_iter().map(|(_, ty)| ty).collect()
+        },
     })
 }
 

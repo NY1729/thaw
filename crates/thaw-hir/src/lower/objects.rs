@@ -2913,8 +2913,22 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         }
         let instance = self.lower_expr(&member.obj)?;
-        let is_instance = class_name_from_type(&self.infer_expr_type(&instance)?).is_some();
-        Ok(is_instance.then_some(instance))
+        let ty = self.infer_expr_type(&instance)?;
+        let (instance, ty) = match &ty {
+            HirType::Optional(payload) if matches!(payload.as_ref(), HirType::Object(_)) => {
+                let strict = self.receiver_requires_narrowing(&member.obj);
+                self.unwrap_required_optional_member(instance, ty.clone(), "constructor", strict)?
+            }
+            _ => (instance, ty),
+        };
+        if class_name_from_type(&ty).is_some() {
+            return Ok(Some(instance));
+        }
+        // An interface-typed value: the class instance behind it (a view remembers it).
+        if matches!(&ty, HirType::Object(fields) if !fields.is_empty()) {
+            return self.view_unwrap(instance, &ty).map(Some);
+        }
+        Ok(None)
     }
 
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
