@@ -1356,7 +1356,7 @@ fn add_arguments_rest(function: &mut swc_ecma_ast::Function) {
 /// `arguments`, bound to the declared parameters plus (once
 /// `add_arguments_rest` runs) the surplus arguments. `None` when a parameter
 /// is itself named `arguments` or isn't a simple identifier.
-fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Stmt> {
+fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Vec<Stmt>> {
     use swc_ecma_ast::*;
     let mut elements = Vec::new();
     for parameter in &function.params {
@@ -1382,7 +1382,7 @@ fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Stmt> {
         span: swc_common::DUMMY_SP,
         kind: TsKeywordTypeKind::TsAnyKeyword,
     });
-    Some(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+    let declaration = Stmt::Decl(Decl::Var(Box::new(VarDecl {
         span: swc_common::DUMMY_SP,
         ctxt: Default::default(),
         kind: VarDeclKind::Const,
@@ -1405,7 +1405,54 @@ fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Stmt> {
             }))),
             definite: false,
         }],
-    }))))
+    })));
+    // Call sites do not pass an argument count, so omitted trailing arguments
+    // (which arrive as `undefined`) are trimmed when no surplus was passed:
+    // `while (rest.length === 0 && arguments.length > 0 && arguments[arguments.length - 1] === undefined) arguments.pop()`.
+    // ponytail: an explicit trailing `undefined` argument is also dropped; exact counts need a call-site arity channel.
+    let sp = swc_common::DUMMY_SP;
+    let ident = |name: &str| Box::new(Expr::Ident(Ident::new_no_ctxt(name.into(), sp)));
+    let member = |obj: Box<Expr>, prop: &str| {
+        Box::new(Expr::Member(MemberExpr {
+            span: sp,
+            obj,
+            prop: MemberProp::Ident(IdentName::new(prop.into(), sp)),
+        }))
+    };
+    let number = |value: f64| Box::new(Expr::Lit(Lit::Num(Number { span: sp, value, raw: None })));
+    let bin = |op: BinaryOp, left: Box<Expr>, right: Box<Expr>| {
+        Box::new(Expr::Bin(BinExpr { span: sp, op, left, right }))
+    };
+    let length = || member(ident("arguments"), "length");
+    let last = Box::new(Expr::Member(MemberExpr {
+        span: sp,
+        obj: ident("arguments"),
+        prop: MemberProp::Computed(ComputedPropName {
+            span: sp,
+            expr: bin(BinaryOp::Sub, length(), number(1.0)),
+        }),
+    }));
+    let test = bin(
+        BinaryOp::LogicalAnd,
+        bin(
+            BinaryOp::LogicalAnd,
+            bin(BinaryOp::EqEqEq, member(ident("__thaw_arguments_rest"), "length"), number(0.0)),
+            bin(BinaryOp::Gt, length(), number(0.0)),
+        ),
+        bin(BinaryOp::EqEqEq, last, ident("undefined")),
+    );
+    let pop = Stmt::Expr(ExprStmt {
+        span: sp,
+        expr: Box::new(Expr::Call(CallExpr {
+            span: sp,
+            ctxt: Default::default(),
+            callee: Callee::Expr(member(ident("arguments"), "pop")),
+            args: vec![],
+            type_args: None,
+        })),
+    });
+    let trim = Stmt::While(WhileStmt { span: sp, test, body: Box::new(pop) });
+    Some(vec![declaration, trim])
 }
 
 /// Normalize inferred value-returning callable bodies before signatures are
@@ -1459,7 +1506,7 @@ pub fn normalize_implicit_returns(module: &Module) -> Module {
                 if let Some(binding) = arguments_binding(function) {
                     add_arguments_rest(function);
                     if let Some(body) = &mut function.body {
-                        body.stmts.insert(0, binding);
+                        body.stmts.splice(0..0, binding);
                     }
                 }
             }
