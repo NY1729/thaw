@@ -275,7 +275,7 @@ impl<'a> FnLowerer<'a> {
                     .or_else(|| self.nullable_narrowings.get(&name))
                     .or_else(|| self.nullish_narrowings.get(&name))
                 {
-                    if native_base_type(payload).is_some() {
+                    if native_base_type(payload).is_some() || class_name_from_type(payload).is_some() {
                         return Some(payload.clone());
                     }
                 }
@@ -464,11 +464,7 @@ impl<'a> FnLowerer<'a> {
         args: &[swc_ecma_ast::ExprOrSpread],
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
-        if args.iter().any(|argument| argument.spread.is_some()) {
-            return Err(format!(
-                "dynamic value method `{property}` does not support spread arguments"
-            ));
-        }
+        let spread_arguments = args.iter().any(|argument| argument.spread.is_some());
         let intrinsic = match (property, expected) {
             ("toString", _) => "__thaw_call_selected_dynamic_method",
             (_, Some(HirType::Dynamic)) => "__thaw_call_selected_dynamic_method_raw",
@@ -530,8 +526,20 @@ impl<'a> FnLowerer<'a> {
         // `Expr::Call`, consumed and cleared the moment that call is
         // lowered), so this can't affect an ordinary literal/variable
         // argument.
+        // `x.push(...a, b)`: the argument list is the spread array literal `[...a, b]`.
+        let spread_list = if spread_arguments {
+            let literal = Expr::Array(swc_ecma_ast::ArrayLit {
+                span: swc_common::DUMMY_SP,
+                elems: args.iter().cloned().map(Some).collect(),
+            });
+            let lowered = self.lower_expr(&literal)?;
+            Some(self.coerce_to_declared(&HirType::Json, lowered)?)
+        } else {
+            None
+        };
         let json_args = args
             .iter()
+            .filter(|_| !spread_arguments)
             .map(|argument| {
                 let value = match argument.expr.as_ref() {
                     // Preserve a fixed native object until the Json coercion
@@ -570,7 +578,9 @@ impl<'a> FnLowerer<'a> {
         // Preserve the exact owned producer at this ABI boundary. The
         // generated Array<Json> wrapper otherwise hides which temporary Box
         // must be dropped after cloning into the call graph.
-        let array = if json_args.iter().any(Self::is_owned_consumed_dynamic_json) {
+        let array = if let Some(list) = spread_list {
+            list
+        } else if json_args.iter().any(Self::is_owned_consumed_dynamic_json) {
             HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_json_argument_array".into())),
                 json_args,

@@ -803,4 +803,5 @@ include!("tests/inference_audit_contracts.rs");
 include!("tests/generators_g034_contracts.rs");
 include!("tests/arguments_object_contracts.rs");
 include!("tests/accessor_inspect_contracts.rs");
+include!("tests/audit2_recursive_contracts.rs");
 include!("tests/error_inspect_contracts.rs");

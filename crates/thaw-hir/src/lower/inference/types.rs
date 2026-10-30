@@ -318,6 +318,8 @@ impl<'a> FnLowerer<'a> {
         if actual == HirType::Dynamic
             || *expected == HirType::Dynamic
             || actual == *expected
+            || ((actual.contains_recursive() || expected.contains_recursive())
+                && actual.expand() == expected.expand())
             || bytes_layout_eq(expected, &actual)
             || callable_compatible
             || class_identity_subtype(expected, &actual)
@@ -3312,7 +3314,7 @@ impl<'a> FnLowerer<'a> {
                 HirType::Object(fields) => fields
                     .iter()
                     .find(|(name, _)| name == field)
-                    .map(|(_, ty)| ty.clone())
+                    .map(|(_, ty)| ty.expand())
                     .ok_or_else(|| format!("object has no field `{field}`")),
                 other => Err(format!(
                     "cannot access `.{field}` on a value of type {other:?}"

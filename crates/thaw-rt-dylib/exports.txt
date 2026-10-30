@@ -59,6 +59,7 @@ thaw_bigint_decimal_shr
 thaw_bigint_decimal_sub
 thaw_bigint_decimal_xor
 thaw_bigint_pow
+thaw_bigint_pow_overflows
 thaw_bool_array_fill
 thaw_bool_array_includes
 thaw_bool_array_index_of
@@ -529,6 +530,9 @@ thaw_promise_state
 thaw_promise_subscribe
 thaw_promise_take_report_activity
 thaw_promise_take_unhandled_failure
+thaw_recursive_lookup
+thaw_recursive_register
+thaw_recursive_unregister
 thaw_regex_exec
 thaw_regex_exec_advance
 thaw_regex_exec_groups

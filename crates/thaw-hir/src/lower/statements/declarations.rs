@@ -743,6 +743,15 @@ impl<'a> FnLowerer<'a> {
                         )
                     })
                     .transpose()?;
+                // A local `any[]` starting empty is a dynamic array (a builder/cursor): holding it as `Json` keeps nested arrays
+                // pushed into it shared (a native `Array(Json)` boxes each element by copy).
+                let annotated = if matches!(init, Expr::Array(array) if array.elems.is_empty()) && binding.type_ann.as_ref().is_some_and(|annotation| matches!(
+                    annotation.type_ann.as_ref(),
+                    TsType::TsArrayType(array) if matches!(
+                        array.elem_type.as_ref(),
+                        TsType::TsKeywordType(keyword) if keyword.kind == TsKeywordTypeKind::TsAnyKeyword
+                    )
+                )) { Some(HirType::Json) } else { annotated };
                 let source_annotation = annotated.clone();
                 let mut source_hint = self.source_value_hint(init).and_then(|hint| self.infer_expr_type(&hint).ok());
                 if has_dynamic_storage(binding.id.span) || has_dynamic_storage(init.span()) {
