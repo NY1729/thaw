@@ -5442,10 +5442,14 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
         if let Some(node) = aggregate_error_inspect_node(0, &fields, stack) {
             node
         } else {
-            let entries = ordered_object_fields(&fields)
+            let entries: Vec<_> = ordered_object_fields(&fields)
                 .into_iter()
-                .map(|(key, value)| (wtf8_decode_utf16(key), inspect_node(value, stack)))
+                .map(|(key, value)| (inspect_key(key), inspect_node(value, stack)))
                 .collect();
+            let (mut entries, symbols): (Vec<_>, Vec<_>) = entries
+                .into_iter()
+                .partition(|(key, _)| key.first() != Some(&1));
+            entries.extend(symbols);
             let ctor = match host_query(lease, 23) {
                 _ if null_proto => Ctor::NullProto,
                 Some(name) if !name.is_empty() => Ctor::Named(name),
@@ -5704,8 +5708,13 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                             && !is_private_slot_key(key)
                             && !key_is_hidden(shared, key)
                     })
-                    .map(|(key, value)| (wtf8_decode_utf16(key), inspect_node(value, stack)))
-                    .collect();
+                    .map(|(key, value)| (inspect_key(key), inspect_node(value, stack)))
+                    .collect::<Vec<_>>();
+                // Node lists enumerable symbol keys after the string keys.
+                let (mut entries, symbols): (Vec<_>, Vec<_>) = entries
+                    .into_iter()
+                    .partition(|(key, _)| key.first() != Some(&1));
+                entries.extend(symbols);
                 let ctor = match class {
                     // module-scoped classes are mangled `__thawmod<N>_Name`
                     Some(name) if name != "Object" => {
@@ -5729,6 +5738,25 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
         stack.pop();
     }
     node
+}
+
+/// The inspector key for a stored property key: a Symbol key's wire text prints as
+/// `[Symbol(desc)]` (the inspector shows a `\u{1}`-prefixed key verbatim).
+fn inspect_key(key: &[u8]) -> Vec<u16> {
+    if !is_symbol_key_wire(key) {
+        return wtf8_decode_utf16(key);
+    }
+    let description = if let Some(name) = key.strip_prefix(b"\x1f@@") {
+        format!("Symbol.{}", String::from_utf8_lossy(name))
+    } else {
+        let rest = &key[1..];
+        let rest = rest.strip_prefix(b"R").unwrap_or(rest);
+        let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+        String::from_utf8_lossy(rest.get(digits + 1..).unwrap_or_default()).into_owned()
+    };
+    format!("\u{1}[Symbol({description})]")
+        .encode_utf16()
+        .collect()
 }
 
 /// The class name console.log tags a `Map`/`Set` subclass wrapper with
@@ -5902,6 +5930,11 @@ unsafe fn error_inspect(value: *const c_char, console: bool) -> *const c_char {
     if value.is_null() {
         return value;
     }
+    // A string that only starts with U+0001 is plain text, not a framed Error.
+    let raw = unsafe { CStr::from_ptr(value) }.to_bytes();
+    if raw.first() == Some(&1) && !is_error_frame_text(raw) {
+        return value;
+    }
     // A Json copy of an Error prints the live Error it refers to.
     let value = error_ref_bytes(unsafe { CStr::from_ptr(value) }.to_bytes()).unwrap_or(value);
     let merged = unsafe { thaw_error_with_props(value) };
@@ -5940,6 +5973,12 @@ unsafe fn error_inspect(value: *const c_char, console: bool) -> *const c_char {
         )),
         None => unsafe { thaw_error_to_string(value) },
     }
+}
+
+/// Whether `bytes` could be a framed Error string (`\u{1}Name\u{1}message`). A user string
+/// that merely starts with U+0001 has no closing frame delimiter and stays a plain string.
+fn is_error_frame_text(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&1) && bytes[1..].contains(&1)
 }
 
 /// `util.inspect(value)` with Node's default options.
@@ -6041,10 +6080,12 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
     let text = match value {
         // A bare top-level string prints unquoted; everything else (including a nested
         // string) goes through `util.inspect`.
-        Value::String(text) if text.as_bytes().first() == Some(&1) => CString::new(text.as_bytes())
-            .ok()
-            .map(|owned| to_str(unsafe { thaw_error_console_inspect(owned.as_ptr()) }))
-            .unwrap_or_else(|| text.clone()),
+        Value::String(text) if is_error_frame_text(text.as_bytes()) => {
+            CString::new(text.as_bytes())
+                .ok()
+                .map(|owned| to_str(unsafe { thaw_error_console_inspect(owned.as_ptr()) }))
+                .unwrap_or_else(|| text.clone())
+        }
         Value::String(value) => value.clone(),
         Value::Wtf8(bytes) => wtf8_to_string(bytes),
         other => inspect_json(other),
@@ -6151,6 +6192,40 @@ fn console_table_text(data: &Value, columns: Option<&Value>) -> String {
     if !matches!(data, Value::Array(_) | Value::Object(_)) {
         return console_format(std::slice::from_ref(data));
     }
+    // A Map/Set lists its entries under `(iteration index)` with `Key`/`Values` columns.
+    if let Some(fields) = data.as_object() {
+        let map = fields
+            .get(b"__thaw_map_entries__".as_slice())
+            .and_then(Value::as_array);
+        let set = fields
+            .get(b"__thaw_set_values__".as_slice())
+            .and_then(Value::as_array);
+        if map.is_some() || set.is_some() {
+            let items = map.or(set).unwrap();
+            let mut index = Vec::new();
+            let (mut keys, mut values) = (Vec::new(), Vec::new());
+            for (i, item) in items.iter().enumerate() {
+                index.push(i.to_string());
+                match map.and(item.as_array()) {
+                    Some(pair) if pair.len() == 2 => {
+                        keys.push(console_table_cell(&pair[0]));
+                        values.push(console_table_cell(&pair[1]));
+                    }
+                    _ => values.push(console_table_cell(item)),
+                }
+            }
+            let rows = index.len();
+            let mut head = vec!["(iteration index)".to_string()];
+            let mut cols = vec![index];
+            if map.is_some() {
+                head.push("Key".into());
+                cols.push(keys);
+            }
+            head.push("Values".into());
+            cols.push(values);
+            return console_table_render(head, cols, rows);
+        }
+    }
     let index_keys = console_table_keys(data);
     let properties: Option<Vec<String>> = columns.and_then(Value::as_array).map(|items| {
         items
@@ -6210,6 +6285,11 @@ fn console_table_text(data: &Value, columns: Option<&Value>) -> String {
         head.push("Values".into());
         columns_out.push(primitives);
     }
+    console_table_render(head, columns_out, rows)
+}
+
+/// Renders Node's box-drawing table from column titles and their cells.
+fn console_table_render(head: Vec<String>, columns_out: Vec<Vec<String>>, rows: usize) -> String {
     let width = |text: &str| text.chars().count();
     let widths: Vec<usize> = head
         .iter()
@@ -6261,10 +6341,12 @@ pub extern "C" fn thaw_console_table_text(value: *mut Value, columns: *mut Value
 fn console_format(args: &[Value]) -> String {
     let bare = |value: &Value| match value {
         // A framed Error argument prints like a lone `console.log(error)`.
-        Value::String(text) if text.as_bytes().first() == Some(&1) => CString::new(text.as_bytes())
-            .ok()
-            .map(|owned| to_str(unsafe { thaw_error_console_inspect(owned.as_ptr()) }))
-            .unwrap_or_else(|| text.clone()),
+        Value::String(text) if is_error_frame_text(text.as_bytes()) => {
+            CString::new(text.as_bytes())
+                .ok()
+                .map(|owned| to_str(unsafe { thaw_error_console_inspect(owned.as_ptr()) }))
+                .unwrap_or_else(|| text.clone())
+        }
         Value::String(text) => text.clone(),
         Value::Wtf8(bytes) => wtf8_to_string(bytes),
         other => inspect_json(other),
@@ -6314,10 +6396,9 @@ fn console_format(args: &[Value]) -> String {
                             ..Default::default()
                         },
                     ),
-                    Value::BigInt(_) => format!("{}n", bare(arg)),
                     other => bare(other),
                 }),
-                'd' if matches!(arg, Value::BigInt(_)) => out.push_str(&format!("{}n", bare(arg))),
+                'd' if matches!(arg, Value::BigInt(_)) => out.push_str(&bare(arg)),
                 'd' => out.push_str(&inspect_json(&number_value(number(arg)))),
                 'i' | 'f' => {
                     let text = bare(arg);
@@ -8622,7 +8703,7 @@ fn enumerable_entries(value: &Value) -> Vec<(Vec<u8>, Value)> {
                 .unwrap_or_default()
         }
         Value::String(text)
-            if text.as_bytes().first() == Some(&1)
+            if is_error_frame_text(text.as_bytes())
                 && thaw_arena::error_wire::parse_tagged(text.as_bytes()).is_some() =>
         {
             let mut fields = indexmap::IndexMap::new();
@@ -9453,7 +9534,7 @@ pub extern "C" fn thaw_json_receiver_string(value: *const c_char) -> *mut Value 
     // A framed error string widened to `any` must keep its Error properties and identity.
     if !value.is_null() {
         let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
-        if bytes.first() == Some(&1) || bytes.starts_with(b"\x1eE1:") {
+        if is_error_frame_text(bytes) || bytes.starts_with(b"\x1eE1:") {
             if let Some(error) = error_value_from_text(value, bytes) {
                 return leak(error);
             }
@@ -9470,7 +9551,7 @@ pub extern "C" fn thaw_json_receiver_string(value: *const c_char) -> *mut Value 
 /// The Error-shaped object for a framed error string, or `None` when `bytes` is
 /// not one.
 fn error_value_from_text(value: *const c_char, bytes: &[u8]) -> Option<Value> {
-    if !(bytes.first() == Some(&1) || bytes.starts_with(b"\x1eE1:")) {
+    if !(is_error_frame_text(bytes) || bytes.starts_with(b"\x1eE1:")) {
         return None;
     }
     if let Some(operations) = ERROR_FACTORY_OPERATIONS.with(|slot| slot.get()) {
@@ -9676,7 +9757,7 @@ fn add_error_suffix_properties(
 
 fn revive_framed_errors(value: Value) -> Value {
     match &value {
-        Value::String(text) if text.as_bytes().first() == Some(&1) => {
+        Value::String(text) if is_error_frame_text(text.as_bytes()) => {
             match CString::new(text.as_bytes()) {
                 Ok(owned) => {
                     error_value_from_text(owned.as_ptr(), text.as_bytes()).unwrap_or(value)
