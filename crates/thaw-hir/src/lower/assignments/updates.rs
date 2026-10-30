@@ -758,6 +758,28 @@ impl<'a> FnLowerer<'a> {
         } else {
             current
         };
+        if let (Target::Var(name), HirType::BigInt) = (&target, self.infer_expr_type(&current)?) {
+            self.record_binding_write(name);
+            let old_name = format!("__thaw_bigint_update_old_{}", self.next_binding);
+            let new_name = format!("__thaw_bigint_update_new_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(old_name.clone(), HirType::BigInt);
+            self.scope.insert(new_name.clone(), HirType::BigInt);
+            let updated = HirExpr::BinOp(
+                op,
+                Box::new(HirExpr::Var(old_name.clone())),
+                Box::new(HirExpr::Lit(HirLit::BigInt("1".into()))),
+            );
+            let write = self.lower_assignment_target_write(target.clone(), HirExpr::Var(new_name.clone()))?;
+            let result = HirExpr::Block(vec![
+                HirStmt::Expr(write),
+                HirStmt::Return(Some(HirExpr::Var(if update.prefix { new_name.clone() } else { old_name.clone() }))),
+            ]);
+            return self.wrap_call_argument_bindings(
+                result,
+                &[(old_name, HirType::BigInt, current), (new_name, HirType::BigInt, updated)],
+            );
+        }
         self.expect_type(&HirType::F64, &current, "update operand")?;
         if let Target::Var(name) = &target {
             self.record_binding_write(name);

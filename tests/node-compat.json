@@ -3552,6 +3552,21 @@
       "name": "class with a method returning its own type can be used as an instanceof operand",
       "expect": "matched",
       "source": "class E { n: number = 0; add(): E { this.n++; return this; } }\nclass S extends E {}\nfunction main(): void { const s = new S(); s.add(); console.log(s.n, s instanceof E, s instanceof S); }"
+    },
+    {
+      "name": "bigint arbitrary precision: values beyond 64 bits do not wrap",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(2n ** 64n, 2n ** 100n, 10n ** 20n, 1n << 70n);\n  let x = 1n; let i = 1n;\n  while (i <= 25n) { x *= i; i++; }\n  console.log(x);\n  console.log(BigInt.asUintN(64, -1n), BigInt.asIntN(64, 18446744073709551615n), BigInt.asIntN(8, 255n));\n  console.log(BigInt(1e21), BigInt(\"123456789012345678901234567890\") + 1n);\n  console.log(9223372036854775807n * 9223372036854775807n);\n}"
+    },
+    {
+      "name": "bigint arbitrary precision: division shift compare and conversion",
+      "expect": "matched",
+      "source": "function main(): void {\n  const big = 2n ** 80n;\n  console.log(big / 3n, big % 1000n, -big / 7n, -7n / 2n, -7n % 2n, big >> 70n, -big >> 79n);\n  console.log(big > big - 1n, big === 2n ** 80n, big !== big + 1n, big < 5n, -big < 5n);\n  console.log(big.toString(), big.toString(16), (-big).toString(36), String(big), `${big}`, Number(big));\n  console.log(~big, big & 255n, (big + 5n) | 2n, big ^ big, typeof big);\n  console.log(1n < 1.5, 2n == 2, 3n > 2.5);\n}"
+    },
+    {
+      "name": "bigint arbitrary precision: errors json and catch",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { console.log(1n / 0n); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { console.log(2n ** -1n); } catch (e) { console.log((e as Error).name); }\n  try { console.log(BigInt(\"12x\")); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { throw 2n ** 70n; } catch (e) { console.log(e); }\n  console.log(BigInt(\"0xff\"), BigInt(\"  42 \"), BigInt(\"\"), [2n ** 65n], { v: 2n ** 65n });\n}"
     }
   ]
 }

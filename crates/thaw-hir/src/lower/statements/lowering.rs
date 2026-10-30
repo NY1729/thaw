@@ -360,7 +360,7 @@ impl<'a> FnLowerer<'a> {
         let mut out = Vec::new();
         match ty {
             HirType::F64 => out.push(call("__thaw_set_pending_exception_f64", vec![value])),
-            HirType::I64 => out.push(call("__thaw_set_pending_exception_i64", vec![value])),
+            HirType::BigInt => out.push(call("__thaw_set_pending_exception_i64", vec![value])),
             HirType::Bool => out.push(call("__thaw_set_pending_exception_bool", vec![value])),
             HirType::Str | HirType::StrLiteral(_) => out.push(tag(4)),
             HirType::Undefined | HirType::Void => out.push(tag(5)),
@@ -486,7 +486,7 @@ impl<'a> FnLowerer<'a> {
         ty: &HirType,
     ) -> Result<HirExpr, String> {
         match ty {
-            HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str
+            HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Bool | HirType::Str
             | HirType::StrLiteral(_) | HirType::Null | HirType::Undefined => {
                 self.coerce_primitive_to_string(value)
             }

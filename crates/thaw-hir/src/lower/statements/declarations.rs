@@ -419,6 +419,7 @@ impl<'a> FnLowerer<'a> {
                         match ty {
                             HirType::F64 => Some(HirLit::F64(0.0)),
                             HirType::I64 => Some(HirLit::I64(0)),
+                            HirType::BigInt => Some(HirLit::BigInt("0".into())),
                             HirType::Bool => Some(HirLit::Bool(false)),
                             HirType::Str => Some(HirLit::Str(String::new())),
                             _ => None,

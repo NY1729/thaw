@@ -189,7 +189,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             | HirType::Object(_)
                             | HirType::Null
                             | HirType::Undefined
-                            | HirType::I64
+                            | HirType::I64 | HirType::BigInt
                             | HirType::Optional(_)
                             | HirType::Nullable(_)
                             | HirType::Nullish(_)
@@ -364,7 +364,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_console_promise(value.into_pointer_value(), inner, newline, descriptor)?;
         } else if hir_type == Some(HirType::JsValue) {
             self.compile_console_js_value(value.into_int_value(), newline, descriptor)?;
-        } else if hir_type == Some(HirType::I64) {
+        } else if hir_type == Some(HirType::BigInt) {
             // A real `i64`, not the `i1` the fallback `IntValue` arm below
             // assumes -- reachable now that `Buffer.prototype.
             // readBigInt64LE`/`readBigUInt64LE` &c. hand back a genuine
@@ -1133,8 +1133,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 )?;
             }
             // Same path as a bare I64 (`123n`); catch carriers can hold bigint members.
-            HirType::I64 => {
-                self.compile_console_arg(Some(HirType::I64), value, newline, descriptor)?
+            HirType::BigInt => {
+                self.compile_console_arg(Some(HirType::BigInt), value, newline, descriptor)?
             }
             HirType::Undefined => {
                 let undefined = self
@@ -1477,8 +1477,8 @@ impl<'ctx> HirCompiler<'ctx> {
 
         self.builder.position_at_end(present_block);
         match payload_type {
-            HirType::I64 => {
-                self.compile_console_arg(Some(HirType::I64), payload, newline, descriptor)?;
+            HirType::BigInt => {
+                self.compile_console_arg(Some(HirType::BigInt), payload, newline, descriptor)?;
             }
             HirType::F64 => {
                 self.compile_console_number(

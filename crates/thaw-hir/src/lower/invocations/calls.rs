@@ -1941,7 +1941,7 @@ impl<'a> FnLowerer<'a> {
                 let private_primitive_receiver = matches!(
                     receiver_type.as_ref(),
                     Some(HirType::NonArrowReceiver(inner))
-                        if matches!(inner.as_ref(), HirType::Str | HirType::I64)
+                        if matches!(inner.as_ref(), HirType::Str | HirType::I64 | HirType::BigInt)
                 );
                 let receiver_is_dynamic = receiver_type.as_ref() == Some(&HirType::JsValue)
                     || private_primitive_receiver;
@@ -2090,7 +2090,7 @@ impl<'a> FnLowerer<'a> {
                                 expected_return_hint.as_ref(),
                             );
                         }
-                        let primitive_receiver = matches!(callable_shape, HirType::Str | HirType::I64);
+                        let primitive_receiver = matches!(callable_shape, HirType::Str | HirType::I64 | HirType::BigInt);
                         if primitive_receiver && Self::is_native_instance_builtin(requested_property) {
                             return self.lower_dynamic_value_method_call(
                                 &member.obj,

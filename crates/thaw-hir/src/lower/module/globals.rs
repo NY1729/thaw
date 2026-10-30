@@ -570,7 +570,7 @@ fn bridge_field_comparable(ty: &HirType) -> bool {
     matches!(
         ty,
         HirType::F64
-            | HirType::I64
+            | HirType::I64 | HirType::BigInt
             | HirType::Bool
             | HirType::Str
             | HirType::Symbol

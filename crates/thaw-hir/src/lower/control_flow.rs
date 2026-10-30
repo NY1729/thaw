@@ -930,7 +930,8 @@ fn lower_bin_op(op: BinaryOp) -> Result<BinOp, String> {
 fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
     match ty {
         HirType::F64 => Some("number"),
-        HirType::I64 => Some("bigint"),
+        HirType::BigInt => Some("bigint"),
+        HirType::I64 => None,
         HirType::Undefined => Some("undefined"),
         HirType::Null => Some("object"),
         HirType::Str | HirType::StrLiteral(_) => Some("string"),

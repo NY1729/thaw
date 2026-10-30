@@ -105,20 +105,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_check_json_host_error(value, None);
             }
             "__thaw_json_as_bigint_i64" => {
-                let value = self.compile_single_arg_call(
-                    "thaw_json_as_bigint_i64", args, "checked Json BigInt assertion",
-                )?;
-                // Host-backed Json may need a reentrant query for the exact
-                // decimal. Consume its error before another host operation.
-                return self.compile_check_json_host_error(value, None);
+                let [json] = args else {
+                    return Err("checked Json BigInt assertion expects one operand".into());
+                };
+                let json = self.compile_expr(json)?;
+                return self.compile_json_as_bigint(json);
             }
             "__thaw_json_borrowed_handle_id" => {
                 return self.compile_single_arg_call(
                     "thaw_json_borrowed_handle_id", args, "borrowed JSON handle");
             }
             "__thaw_json_receiver_bigint" => {
-                return self.compile_single_arg_call(
-                    "thaw_json_receiver_bigint", args, "JSON bigint");
+                let [value] = args else {
+                    return Err("JSON bigint expects one operand".into());
+                };
+                let value = self.compile_expr(value)?;
+                return self.compile_json_bigint(value);
             }
             "__thaw_json_receiver_number" => {
                 return self.compile_single_arg_call(

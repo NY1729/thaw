@@ -8,13 +8,13 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(());
         }
         let valid = match ty {
-            HirType::F64 | HirType::I64 | HirType::Str | HirType::Bool | HirType::Object(_) => {
+            HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Str | HirType::Bool | HirType::Object(_) => {
                 let kind = self
                     .compile_json_as_value(json, "thaw_json_typeof")?
                     .into_pointer_value();
                 let expected = match ty {
                     HirType::F64 => "number",
-                    HirType::I64 => "bigint",
+                    HirType::BigInt => "bigint",
                     HirType::Str => "string",
                     HirType::Bool => "boolean",
                     _ => "object",
@@ -398,7 +398,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::OverloadedFunction(_, physical) => {
                 self.compile_json_value_to_native(json, physical)
             }
-            HirType::F64 | HirType::I64 | HirType::Str | HirType::Bool => {
+            HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Str | HirType::Bool => {
                 self.compile_json_value_to_native(json, ty)
             }
             HirType::Array(element) => self.compile_json_to_native_array(json, element),
@@ -855,11 +855,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_json_value_to_native(json, physical)
             }
             HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
-            HirType::I64 => {
-                let value = self.compile_json_as_value(json, "thaw_json_as_bigint_i64")?;
-                self.compile_check_json_host_error(json, None)?;
-                Ok(value)
-            }
+            HirType::BigInt => self.compile_json_as_bigint(json),
             HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string_value"),
             HirType::Bool => self.compile_json_as_bool_value(json),
             HirType::Json | HirType::Dictionary(_) => Ok(json),

@@ -1086,7 +1086,7 @@ impl<'a> FnLowerer<'a> {
                         let primitive = matches!(
                             value_type,
                             HirType::F64
-                                | HirType::I64
+                                | HirType::I64 | HirType::BigInt
                                 | HirType::Str
                                 | HirType::StrLiteral(_)
                                 | HirType::Symbol
@@ -5798,7 +5798,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         let bits = self.coerce_primitive_to_number(bits.clone())?;
                         let value = value.clone();
-                        self.expect_type(&HirType::I64, &value, &format!("{label} value"))?;
+                        self.expect_type(&HirType::BigInt, &value, &format!("{label} value"))?;
                         let intrinsic = if property.sym == *"asIntN" {
                             "__thaw_i64_as_int_n"
                         } else {

@@ -48,7 +48,7 @@ fn jit_type_needs_live_json_adaptation(ty: &thaw_hir::HirType) -> bool {
         // In particular, JsValue is a live QuickJS handle rather than a
         // native aggregate that needs a JSON adapter.
         HirType::F64
-        | HirType::I64
+        | HirType::I64 | HirType::BigInt
         | HirType::Bool
         | HirType::Undefined
         | HirType::Null

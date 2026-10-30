@@ -776,7 +776,7 @@ impl<'a> FnLowerer<'a> {
             HirType::Bytes => "Uint8Array",
             HirType::Symbol => "Symbol",
             HirType::Promise(_) => "Promise",
-            HirType::I64 => "BigInt",
+            HirType::BigInt => "BigInt",
             _ if native_base_tag(ty).is_some() => native_base_tag(ty).unwrap_or("Object"),
             _ => "Object",
         };
