@@ -373,7 +373,7 @@ fn audit2_contract_this_in_plain_function_and_arrow() {
 "##;
     assert_eq!(
         compile_and_run(source, "audit2_contract_this_in_plain_function_and_arrow"),
-        "before\nobject\nobject after\n"
+        "before\nundefined\nundefined after\n"
     );
 }
 
