@@ -210,13 +210,42 @@ fn lower_module_once(module: &Module) -> Result<HirProgram, String> {
     PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
     PROGRAM_DELETES_STACK.with(|flag| flag.set(module_deletes_stack(module)));
     FN_LOCS.with(|locs| locs.borrow_mut().clear());
-    let normalized = normalize_module_for_lowering(module)?;
+    let mut normalized = normalize_module_for_lowering(module)?;
+    delay_top_level_closures(&mut normalized);
     let mut program = lower_normalized_module(&normalized)?;
     program.fn_locs = FnLocs(FN_LOCS.with(|locs| std::mem::take(&mut *locs.borrow_mut())));
     // `HirType::Bytes` is a lowering-time distinction only; nothing past
     // here knows it, so collapse it to its physical `Array(F64)`.
     erase_bytes(&mut program);
     Ok(program)
+}
+
+/// A top-level closure that mentions a later-declared binding (`const f = () => y; let y = 2;`)
+/// only runs after it: move it down to its first use, run by run of plain statements (internal
+/// module boundary markers and imports/exports are barriers).
+fn delay_top_level_closures(module: &mut Module) {
+    let mut body: Vec<ModuleItem> = Vec::with_capacity(module.body.len());
+    let mut run: Vec<Stmt> = Vec::new();
+    let flush = |run: &mut Vec<Stmt>, body: &mut Vec<ModuleItem>| {
+        let reordered = FnLowerer::delay_forward_closure_consts(run).into_owned();
+        body.extend(reordered.into_iter().map(ModuleItem::Stmt));
+        run.clear();
+    };
+    for item in std::mem::take(&mut module.body) {
+        match item {
+            ModuleItem::Stmt(Stmt::Expr(ref statement)) if statement.span == swc_common::DUMMY_SP => {
+                flush(&mut run, &mut body);
+                body.push(item);
+            }
+            ModuleItem::Stmt(statement) => run.push(statement),
+            _ => {
+                flush(&mut run, &mut body);
+                body.push(item);
+            }
+        }
+    }
+    flush(&mut run, &mut body);
+    module.body = body;
 }
 
 /// TypeScript rejects a default parameter that reads itself or a later parameter outside a
