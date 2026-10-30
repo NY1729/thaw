@@ -3409,6 +3409,11 @@
       "source": "function* g() { const x: number = yield 1; console.log(\"got\", x); try { yield 2; } finally { console.log(\"cleanup\"); } return 3; }\nfunction* acc() { let total = 0; while (total < 10) { const n: number = yield total; total += n; } return total; }\nfunction main(): void {\n  const it = g();\n  console.log(it.next(), it.next(5), it.return(7), it.next());\n  const a = acc();\n  a.next();\n  console.log(a.next(4).value, a.next(3).value, a.next(5));\n}"
     },
     {
+      "name": "arguments object and surplus call arguments",
+      "expect": "matched",
+      "source": "function f(a: number, b: number) { return arguments.length; }\nfunction g(a: number) { return arguments[1] + a; }\nfunction h(): number { return Array.from(arguments).length; }\nfunction s(): number { let t = 0; for (let i = 0; i < arguments.length; i++) t += arguments[i]; return t; }\nfunction main(): void {\n  console.log((f as any)(1, 2, 3), (g as any)(1, 2), (h as any)(5, 6, 7, 8), (s as any)(1, 2, 3, 4));\n  console.log((function () { return Array.prototype.slice.call(arguments, 1); })(1, 2, 3));\n  const k = (a: number) => a * 2;\n  const log: number[] = [];\n  console.log((k as any)(4, log.push(7)), log);\n}"
+    },
+    {
       "name": "accessor props on object literal print as [Getter]/[Setter]/[Getter/Setter] without invoking",
       "expect": "matched",
       "source": "function main(): void { let calls = 0; const o = { get a() { calls++; return 1; }, set s(v: number) { calls++; }, get b() { return 2; }, set b(v: number) {} }; console.log(o); console.log(calls); console.log({ x: 1, get y() { return 2; } }, JSON.stringify(o), calls); }"
