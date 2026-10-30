@@ -3717,6 +3717,11 @@
       "name": "audit2 leftovers closure referencing a later-declared binding",
       "expect": "matched",
       "source": "const f = () => y;\nlet y = 2;\nconsole.log(f());\nfunction main(): void {\n  const k = () => w + y;\n  let w = 5;\n  console.log(k());\n  const p = (): number => q() + 1;\n  const q = (): number => 10;\n  console.log(p());\n}"
+    },
+    {
+      "name": "this field method call on a class-typed field",
+      "expect": "matched",
+      "source": "class Foo { x = 1; dbl() { return this.x * 2; } }\nclass Bar { c: Foo = new Foo(); run() { return this.c.dbl(); } }\nfunction main(): void {\n  console.log(new Bar().run());\n}"
     }
   ]
 }
