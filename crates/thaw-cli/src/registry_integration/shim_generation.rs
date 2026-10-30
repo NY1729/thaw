@@ -502,6 +502,14 @@ fn generate_registry_shims_pass(
         }
         functions.retain(|function| !type_only_value_names.contains(&function.name));
         values.retain(|value| !type_only_value_names.contains(&value.name));
+        if path_builtin.is_none() && !name.starts_with("node:") {
+            prune_unused_functions(
+                &mut functions,
+                name,
+                user_source,
+                std::env::var("THAW_PRUNE_SHIMS").as_deref() == Ok("1"),
+            );
+        }
         restrict_type_only_class_values(&mut classes, &type_only_value_names);
         let commonjs_export_name =
             commonjs_export_name_named(&package.dts_source, &dts_filename)
@@ -2698,4 +2706,88 @@ fn exclusive_type_only_value_names(
         }
     }
     exclusive
+}
+
+/// `THAW_PRUNE_SHIMS=1`: drop `.d.ts` functions the program never mentions, so no shim is emitted
+/// for them. Conservative: it only acts when every mention of the package is a plain
+/// `import ... from 'pkg'` and every default/namespace binding is only used as `binding.member`;
+/// otherwise (require, re-exports, bare namespace use, no import at all) all functions are kept.
+/// A function is kept when its name (first dotted segment) appears as any identifier token in the
+/// source, including inside string literals.
+fn prune_unused_functions(
+    functions: &mut Vec<thaw_bridge::DtsFunction>,
+    package: &str,
+    user_source: &str,
+    enabled: bool,
+) {
+    if !enabled {
+        return;
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut bindings = Vec::new();
+    let mut import_ranges = Vec::new();
+    for quote in ['\'', '"', '`'] {
+        let needle = format!("{quote}{package}{quote}");
+        for (pos, _) in user_source.match_indices(&needle) {
+            let before = &user_source[..pos];
+            let Some(before) = before.trim_end().strip_suffix("from") else {
+                return;
+            };
+            let Some(start) = before.rfind("import") else {
+                return;
+            };
+            import_ranges.push(start..pos);
+            let clause = &before[start + "import".len()..];
+            let head = &before[..start];
+            if clause.contains(';')
+                || clause.contains("import")
+                || head.chars().next_back().is_some_and(is_word)
+                || head.trim_end().ends_with('.')
+            {
+                return;
+            }
+            // Strip `{ ... }` named imports (used by name), keep default / `* as ns` locals.
+            let mut outside = String::new();
+            let mut depth = 0;
+            for c in clause.chars() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ if depth == 0 => outside.push(c),
+                    _ => {}
+                }
+            }
+            bindings.extend(
+                outside
+                    .replace('*', " ")
+                    .split(|c: char| !is_word(c))
+                    .filter(|word| !word.is_empty() && *word != "as" && *word != "type")
+                    .map(str::to_string),
+            );
+        }
+    }
+    if import_ranges.is_empty() {
+        return;
+    }
+    for binding in &bindings {
+        for (pos, _) in user_source.match_indices(binding.as_str()) {
+            let prev = user_source[..pos].chars().next_back();
+            let rest = &user_source[pos + binding.len()..];
+            if prev.is_some_and(is_word) || rest.chars().next().is_some_and(is_word) {
+                continue;
+            }
+            let in_import = import_ranges.iter().any(|range| range.contains(&pos));
+            if !in_import && !rest.trim_start().starts_with('.') {
+                return;
+            }
+        }
+    }
+    let tokens = user_source
+        .split(|c: char| !is_word(c))
+        .filter(|word| !word.is_empty())
+        .collect::<std::collections::HashSet<_>>();
+    functions.retain(|function| {
+        function.name == "default"
+            || tokens.contains(function.name.split('.').next().unwrap_or(&function.name))
+    });
 }
