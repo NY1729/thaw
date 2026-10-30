@@ -468,6 +468,7 @@ impl<'a> FnLowerer<'a> {
             args.first(),
             args.len() == 1
                 && args[0].spread.is_none()
+                && matches!(base_name, "Map" | "Set")
                 && self.native_super_dispatches_overrides(base_name, &this_type),
         ) {
             // `new Map(iterable)` calls `this.set(key, value)` per entry (`add` for a `Set`),
@@ -1010,7 +1011,7 @@ impl<'a> FnLowerer<'a> {
             // (its own generated initializer function already runs this
             // assignment as part of its body), so only a *direct* `extends
             // Error`-family base needs this.
-            if matches!(base_name.as_str(), "Map" | "Set" | "Array") && !self.signatures.contains_key(&symbol) {
+            if matches!(base_name.as_str(), "Map" | "Set" | "Array" | "Date" | "RegExp") && !self.signatures.contains_key(&symbol) {
                 return self.lower_native_collection_super(&base_name, &call.args);
             }
             if matches!(
