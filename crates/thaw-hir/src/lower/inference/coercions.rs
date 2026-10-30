@@ -1155,7 +1155,7 @@ impl<'a> FnLowerer<'a> {
                     let provided_by_method = |name: &String, expected: &HirType| {
                         matches!(expected, HirType::Function(..))
                             && !actual_fields.iter().any(|(n, _)| n == name)
-                            && self.signatures.get(&class_method_symbol(class, name)).is_some_and(|s| !s.is_async)
+                            && self.signatures.contains_key(&class_method_symbol(class, name))
                     };
                     if declared_fields.iter().any(|(n, t)| provided_by_method(n, t)) {
                         self.class_method_view_made = true;

@@ -169,10 +169,9 @@ impl<'a> FnLowerer<'a> {
 
     fn is_primitive_array_index(&self, expr: &Expr, element: &HirType) -> bool {
         let Expr::Member(member) = expr else { return false };
-        matches!(element, HirType::F64 | HirType::Str)
-            && matches!(member.prop, MemberProp::Computed(_))
-            && self.infer_member_receiver_type(&member.obj)
-                == Some(HirType::Array(Box::new(element.clone())))
+        // Any computed read (`xs[i]`, `dictionary[key][i]`) of a primitive slot: an absent value
+        // widens the way a sparse element does.
+        matches!(element, HirType::F64 | HirType::Str) && matches!(member.prop, MemberProp::Computed(_))
     }
 
     /// Records a declared parameter whose type includes `undefined`/`null` (see
