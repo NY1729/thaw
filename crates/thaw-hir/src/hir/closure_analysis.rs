@@ -252,41 +252,6 @@ fn collect_closure_captures_stmt(stmt: &HirStmt, names: &mut BTreeSet<Symbol>) {
     }
 }
 
-#[cfg(test)]
-mod thaw_remaining_traversals_closure_controls {
-    use super::*;
-
-    #[test]
-    fn thaw_remaining_function_ref_this_contributes_no_captured_names() {
-        let callable = HirExpr::FunctionRefThis(
-            "callable_with_this".into(),
-            HirType::Bytes,
-            vec![HirType::Bytes],
-            HirType::Bytes,
-        );
-
-        assert!(closure_captured_names_in_while(&callable, &[]).is_empty());
-    }
-
-    #[test]
-    fn thaw_remaining_lambda_uses_declared_captures_without_scanning_its_body() {
-        let lambda = HirExpr::Lambda(
-            vec![HirParam {
-                name: "declared_capture".into(),
-                ty: HirType::F64,
-            }],
-            Vec::new(),
-            HirType::Void,
-            Box::new(HirExpr::Var("body_only_name".into())),
-        );
-
-        assert_eq!(
-            closure_captured_names_in_while(&lambda, &[]),
-            ["declared_capture".to_string()].into_iter().collect()
-        );
-    }
-}
-
 /// How an early-return guard of an immediately-invoked lambda leaves the body.
 pub enum IifeExit {
     Return(HirExpr),
@@ -352,9 +317,12 @@ pub fn is_inlinable_iife(callee: &HirExpr, args: &[HirExpr]) -> bool {
     params.len() == args.len()
         && *ret != HirType::Void
         && !has_promise(ret)
-        && params
-            .iter()
-            .all(|param| param.name != "__thaw_this" && !has_promise(&param.ty))
+        // Only compiler-generated argument bindings (`__thaw_*` parameters); a lambda the user
+        // wrote keeps its closure.
+        && !params.is_empty()
+        && params.iter().all(|param| {
+            param.name.starts_with("__thaw") && param.name != "__thaw_this" && !has_promise(&param.ty)
+        })
         && iife_body_plan(body).is_some_and(|plan| {
             is_plain_value_expr(&plan.value)
                 && plan.guards.iter().all(|(test, exit)| {
@@ -407,5 +375,40 @@ fn is_plain_value_expr(expr: &HirExpr) -> bool {
             callee_ok && args.iter().all(is_plain_value_expr)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod thaw_remaining_traversals_closure_controls {
+    use super::*;
+
+    #[test]
+    fn thaw_remaining_function_ref_this_contributes_no_captured_names() {
+        let callable = HirExpr::FunctionRefThis(
+            "callable_with_this".into(),
+            HirType::Bytes,
+            vec![HirType::Bytes],
+            HirType::Bytes,
+        );
+
+        assert!(closure_captured_names_in_while(&callable, &[]).is_empty());
+    }
+
+    #[test]
+    fn thaw_remaining_lambda_uses_declared_captures_without_scanning_its_body() {
+        let lambda = HirExpr::Lambda(
+            vec![HirParam {
+                name: "declared_capture".into(),
+                ty: HirType::F64,
+            }],
+            Vec::new(),
+            HirType::Void,
+            Box::new(HirExpr::Var("body_only_name".into())),
+        );
+
+        assert_eq!(
+            closure_captured_names_in_while(&lambda, &[]),
+            ["declared_capture".to_string()].into_iter().collect()
+        );
     }
 }
