@@ -252,7 +252,7 @@ fn collect_native_classes<'a>(
                     .value
                     .as_deref()
                     .and_then(|value| {
-                        infer_class_field_expr_type(value, &|class, member| match class {
+                        infer_class_field_type(value, interfaces, generic_interfaces, &|class, member| match class {
                             None => fields
                                 .iter()
                                 .find(|(candidate, _)| candidate == member)

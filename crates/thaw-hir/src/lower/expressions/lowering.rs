@@ -1253,6 +1253,9 @@ impl<'a> FnLowerer<'a> {
             }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
             Expr::TsAs(assertion) => {
+                if let Some(cast) = self.lower_interface_view_class_cast(assertion)? {
+                    return Ok(cast);
+                }
                 // `(e as T)` on a caught exception (`e`, always
                 // `HirType::Str` -- see `statements/lowering.rs`) reads the
                 // parallel object channel an object `throw`
@@ -2636,6 +2639,32 @@ impl<'a> FnLowerer<'a> {
                             "native `instanceof` right operand `{}` is not a known class",
                             class.sym
                         ));
+                    }
+                    // An interface-typed object is the class instance itself or a view that
+                    // remembers it: ask the instance's allocation identity.
+                    if native_builtin_match.is_none()
+                        && !extends_error_family
+                        && matches!(&value_type, HirType::Object(fields) if !fields.is_empty()
+                            && !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")))
+                    {
+                        let source = self.view_unwrap(value, &value_type)?;
+                        let name = format!("__thaw_instanceof_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let opaque = self.infer_expr_type(&source)?;
+                        self.scope.insert(name.clone(), opaque.clone());
+                        let mut query = None;
+                        for class_name in &class_names {
+                            let check = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
+                                vec![HirExpr::Var(name.clone()), HirExpr::Lit(HirLit::Str(class_name.clone()))],
+                            );
+                            query = Some(match query {
+                                None => check,
+                                Some(previous) => self.lower_logical_expr(previous, check, false)?,
+                            });
+                        }
+                        let query = query.expect("an instanceof target names at least itself");
+                        return self.wrap_call_argument_bindings(query, &[(name, opaque, source)]);
                     }
                     let result = native_builtin_match.unwrap_or_else(|| {
                         class_names
@@ -4157,11 +4186,21 @@ impl<'a> FnLowerer<'a> {
                 let alternate_optional =
                     alternate_optional.filter(|(name, _, _)| still_valid(name));
                 let saved_narrowings = self.save_narrowings();
-                let mut consequent = self.lower_expr_with_union_narrowing(
+                let downcast = self.class_downcast_narrowing(&conditional.test)
+                    .map(|narrowing| (narrowing.0.clone(), self.begin_class_downcast(&narrowing)));
+                let consequent = self.lower_expr_with_union_narrowing(
                     &conditional.cons,
                     consequent_union.as_deref(),
                     consequent_optional.as_ref(),
-                )?;
+                );
+                let mut consequent = match downcast {
+                    Some((source, (hir_name, HirStmt::Let(_, derived, value)))) => {
+                        self.end_class_downcast(&source);
+                        self.wrap_call_argument_bindings(consequent?, &[(hir_name, derived, value)])?
+                    }
+                    Some(_) => return Err("downcast binding lost".into()),
+                    None => consequent?,
+                };
                 self.restore_narrowings_for_sibling(&saved_narrowings);
                 let mut alternate = self.lower_expr_with_union_narrowing(
                     &conditional.alt,

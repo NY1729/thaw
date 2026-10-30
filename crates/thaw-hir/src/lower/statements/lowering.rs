@@ -1795,6 +1795,8 @@ impl<'a> FnLowerer<'a> {
                         .map(|ty| (name.clone(), ty.clone()))
                 });
                 let saved_narrowings = self.save_narrowings();
+                let downcast = self.class_downcast_narrowing(&if_stmt.test)
+                    .map(|narrowing| (narrowing.0.clone(), self.begin_class_downcast(&narrowing)));
                 let then_branch = self
                     .lower_body_with_union_narrowing(
                         &if_stmt.cons,
@@ -1802,7 +1804,14 @@ impl<'a> FnLowerer<'a> {
                         then_narrowing.as_ref(),
                         then_json.as_ref(),
                         exception_narrowing.as_ref(),
-                    )?;
+                    );
+                let then_branch = match downcast {
+                    Some((source, (_, prelude))) => {
+                        self.end_class_downcast(&source);
+                        then_branch.map(|mut body| { body.insert(0, prelude); body })
+                    }
+                    None => then_branch,
+                }?;
                 self.restore_narrowings_for_sibling(&saved_narrowings);
                 let else_branch = match &if_stmt.alt {
                     Some(alt) => self.lower_body_with_union_narrowing(
