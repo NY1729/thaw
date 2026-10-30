@@ -2345,18 +2345,29 @@ impl<'a> FnLowerer<'a> {
                         // A native view's kind: 0 Buffer / Uint8Array, 1 ArrayBuffer, 2 DataView.
                         let result = match class.sym.as_ref() {
                             "Array" => HirExpr::Lit(HirLit::Bool(false)),
-                            other => HirExpr::BinOp(
-                                BinOp::EqEqEq,
-                                Box::new(HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_bytes_kind".into())),
-                                    vec![HirExpr::Var(name.clone())],
-                                )),
-                                Box::new(HirExpr::Lit(HirLit::F64(match other {
-                                    "ArrayBuffer" => 1.0,
-                                    "DataView" => 2.0,
-                                    _ => 0.0,
-                                }))),
-                            ),
+                            other => {
+                                let is_kind = |kind: f64| {
+                                    HirExpr::BinOp(
+                                        BinOp::EqEqEq,
+                                        Box::new(HirExpr::Call(
+                                            Box::new(HirExpr::Var("__thaw_bytes_kind".into())),
+                                            vec![HirExpr::Var(name.clone())],
+                                        )),
+                                        Box::new(HirExpr::Lit(HirLit::F64(kind))),
+                                    )
+                                };
+                                match other {
+                                    "ArrayBuffer" => is_kind(1.0),
+                                    "DataView" => is_kind(2.0),
+                                    // A `Buffer` (kind 0) and a plain `Uint8Array` (kind 3) are both Uint8Arrays.
+                                    _ => HirExpr::Conditional(
+                                        Box::new(is_kind(0.0)),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                        Box::new(is_kind(3.0)),
+                                        HirType::Bool,
+                                    ),
+                                }
+                            }
                         };
                         return self.wrap_call_argument_bindings(
                             result,
