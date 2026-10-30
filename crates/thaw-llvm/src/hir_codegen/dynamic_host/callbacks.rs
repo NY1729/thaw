@@ -2033,7 +2033,13 @@ impl<'ctx> HirCompiler<'ctx> {
         let [closure_expr] = args else {
             return Err("registerNativeCallback expects exactly one argument".into());
         };
-        let callback_has_this = matches!(
+        // An inline `function (this: T) {}` argument: its type is the visible signature, but the
+        // lambda takes the receiver first, so it is entered like a `FunctionWithThis` value (the
+        // host call's `this` becomes the receiver).
+        let inline_receiver = matches!(closure_expr, HirExpr::NonArrowFunction(inner)
+            if matches!(inner.as_ref(), HirExpr::Lambda(_, params, _, _)
+                if matches!(params.first(), Some(HirParam { ty: HirType::NonArrowReceiver(_), .. }))));
+        let callback_has_this = inline_receiver || matches!(
             self.expr_hir_type(closure_expr),
             Some(HirType::FunctionWithThis(_, _))
         );

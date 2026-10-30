@@ -477,7 +477,13 @@ pub extern "C" fn thaw_runtime_unwatch_fd(id: u64) -> bool {
 #[no_mangle]
 pub extern "C" fn thaw_runtime_run_one_event() -> bool {
     promote_due_timers();
-    if thaw_runtime_poll_one() != 0 {
+    let progressed = thaw_runtime_poll_one() != 0;
+    // A reported unhandled rejection is fatal (Node exits 1): stop driving the loop so a
+    // live server cannot keep it blocked in `poll` forever.
+    if UNHANDLED_FAILURE.with(Cell::get) {
+        return false;
+    }
+    if progressed {
         return true;
     }
     let delay = next_timer_delay();
@@ -720,6 +726,9 @@ pub extern "C" fn thaw_runtime_async_work_pending() -> u8 {
 #[no_mangle]
 pub extern "C" fn thaw_runtime_abort_pending_work() {
     purge_pending_async_state();
+    // A fatal exit also ends listening servers: live fd watchers (an `http.Server`)
+    // must not keep the terminal loop waiting after the failure was reported.
+    FD_WATCHERS.with(|watchers| watchers.borrow_mut().clear());
 }
 
 #[no_mangle]
