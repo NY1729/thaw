@@ -3609,6 +3609,21 @@
       "source": "class E { n: number = 0; add(): E { this.n++; return this; } }\nclass S extends E {}\nfunction main(): void { const s = new S(); s.add(); console.log(s.n, s instanceof E, s instanceof S); }"
     },
     {
+      "name": "bigint arbitrary precision: values beyond 64 bits do not wrap",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(2n ** 64n, 2n ** 100n, 10n ** 20n, 1n << 70n);\n  let x = 1n; let i = 1n;\n  while (i <= 25n) { x *= i; i++; }\n  console.log(x);\n  console.log(BigInt.asUintN(64, -1n), BigInt.asIntN(64, 18446744073709551615n), BigInt.asIntN(8, 255n));\n  console.log(BigInt(1e21), BigInt(\"123456789012345678901234567890\") + 1n);\n  console.log(9223372036854775807n * 9223372036854775807n);\n}"
+    },
+    {
+      "name": "bigint arbitrary precision: division shift compare and conversion",
+      "expect": "matched",
+      "source": "function main(): void {\n  const big = 2n ** 80n;\n  console.log(big / 3n, big % 1000n, -big / 7n, -7n / 2n, -7n % 2n, big >> 70n, -big >> 79n);\n  console.log(big > big - 1n, big === 2n ** 80n, big !== big + 1n, big < 5n, -big < 5n);\n  console.log(big.toString(), big.toString(16), (-big).toString(36), String(big), `${big}`, Number(big));\n  console.log(~big, big & 255n, (big + 5n) | 2n, big ^ big, typeof big);\n  console.log(1n < 1.5, 2n == 2, 3n > 2.5);\n}"
+    },
+    {
+      "name": "bigint arbitrary precision: errors json and catch",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { console.log(1n / 0n); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { console.log(2n ** -1n); } catch (e) { console.log((e as Error).name); }\n  try { console.log(BigInt(\"12x\")); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { throw 2n ** 70n; } catch (e) { console.log(e); }\n  console.log(BigInt(\"0xff\"), BigInt(\"  42 \"), BigInt(\"\"), [2n ** 65n], { v: 2n ** 65n });\n}"
+    },
+    {
       "name": "audit2 D U+0001-prefixed strings stay plain",
       "expect": "matched",
       "source": "function main(): void {\n  const s: string = \"\\u0001abc\";\n  console.log(s.length, s === \"\\u0001abc\", JSON.stringify(s), s.charCodeAt(0));\n  console.log([\"\\u0001\", \"\\u0001x\"], { k: \"\\u0001y\" });\n  console.log(\"\\u0001q\");\n}"
@@ -3637,6 +3652,21 @@
       "name": "audit2 D console.log symbol keys",
       "expect": "matched",
       "source": "function main(): void {\n  const k = Symbol(\"k\");\n  const o: any = { a: 2 };\n  o[k] = 1;\n  console.log(o);\n  const p = { a: 2, [k]: 1 };\n  console.log(p);\n}"
+    },
+    {
+      "name": "perf2 native Uint8Array element access and constructors",
+      "expect": "matched",
+      "source": "function main(): void {\n  const n = 50;\n  const s = new Uint8Array(n + 1);\n  for (let i = 2; i <= n; i++) {\n    if (!s[i]) {\n      for (let j = i * 2; j <= n; j += i) s[j] = 1;\n    }\n  }\n  const primes: number[] = [];\n  for (let i = 2; i <= n; i++) if (!s[i]) primes.push(i);\n  console.log(primes.join(\",\"), s.length, s instanceof Uint8Array);\n  const w = new Uint8Array([1, 255, 256, -1, 1.9]);\n  console.log(w, w.length);\n  const frac = new Uint8Array(2.7);\n  const nan = new Uint8Array(NaN);\n  console.log(frac.length, nan.length);\n  s[100] = 5;\n  s[-1] = 5;\n  console.log(s[100], s[-1], s.length);\n  try {\n    const bad = new Uint8Array(-1);\n    console.log(bad.length);\n  } catch (e: any) {\n    console.log(e.name, e.message);\n  }\n  const sub = s.subarray(2, 5);\n  sub[0] = 9;\n  console.log(s[2], Array.from(sub), new Uint8Array(3));\n  const v = new Uint8Array(40);\n  let total = 0;\n  for (let i = 0; i < 20000; i++) v[i % 40] = i;\n  for (let i = 0; i < v.length; i++) total += v[i];\n  console.log(total, Uint8Array.from([1]) instanceof Uint8Array);\n}"
+    },
+    {
+      "name": "perf2 ASCII and non-ASCII string slicing, charCodeAt and ordering",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = \"hello world\";\n  const u = \"héllo 😀 wörld\";\n  for (const s of [a, u, \"\"]) {\n    console.log(s.length, s.charCodeAt(0), s.charCodeAt(4), s.charCodeAt(s.length - 1), s.charCodeAt(99), s.charCodeAt(-1));\n    console.log(s.slice(1, 4), s.slice(-3), s.slice(3, 1), s.substring(4, 1), s.substring(-2, 3), s.substr(-4, 2), s.substr(2));\n  }\n  console.log(\"a\" < \"b\", \"z\" < \"é\", \"😀\" < \"￿\", \"￿\" < \"😀\", \"abc\" < \"abd\", \"abc\" === \"abc\", \"ab\" < \"abc\", \"abc\" > \"ab\");\n  console.log([\"b\", \"a\", \"é\", \"😀\", \"￿\", \"B\", \"\"].sort().join(\"|\"));\n  let h = 0;\n  for (let i = 0; i < a.length; i++) h = (Math.imul(h, 31) + a.charCodeAt(i)) | 0;\n  console.log(h);\n  const m = new Map<string, number>();\n  for (const w of [\"item1\", \"item2\", \"item1\", \"x\" + 1, \"item\" + 2]) m.set(w.slice(0, 5), (m.get(w.slice(0, 5)) ?? 0) + 1);\n  console.log(Array.from(m.keys()).join(\",\"), Array.from(m.values()).join(\",\"));\n}"
+    },
+    {
+      "name": "perf2 in-place native argument bindings with closures and exceptions",
+      "expect": "matched",
+      "source": "function main(): void {\n  const fs: (() => number)[] = [];\n  let acc = 0;\n  for (let i = 0; i < 5; i++) {\n    const s = \"abc\" + i;\n    const k = Math.imul(i + 1, 31) + s.charCodeAt(2) + s.length;\n    acc += k;\n    fs.push(() => k + s.charCodeAt(3));\n  }\n  console.log(acc, fs.map((f) => f()).join(\",\"));\n  const t = (x: string) => x.charCodeAt(0) + x.charCodeAt(5) + x.length;\n  console.log(t(\"ab\"), t(\"abcdefg\"));\n  let h = 0;\n  const words = [\"alpha\", \"beta\", \"gamma\"];\n  for (const w of words) for (let k = 0; k < w.length; k++) h = (Math.imul(h, 31) + w.charCodeAt(k)) | 0;\n  console.log(h);\n  try {\n    const bad: any = null;\n    console.log(Math.imul(1, 2) + bad.x.charCodeAt(0));\n  } catch (e: any) {\n    console.log(\"caught\", e instanceof TypeError);\n  }\n}"
     },
     {
       "name": "audit2 C async generator with timer await under for await",

@@ -144,6 +144,7 @@ fn raw_value_layout(ty: &HirType) -> Result<(u64, u64), String> {
         HirType::Void => Ok((4, 4)),
         HirType::F64
         | HirType::I64
+        | HirType::BigInt
         | HirType::Str
         | HirType::Symbol
         | HirType::StrLiteral(_)
@@ -2498,6 +2499,8 @@ include!("hir_codegen/dynamic_host.rs");
 include!("hir_codegen/json_bridge.rs");
 
 include!("hir_codegen/operators.rs");
+
+include!("hir_codegen/bigint.rs");
 
 include!("hir_codegen/invocations.rs");
 

@@ -1990,6 +1990,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(Self::unreachable_value(result)?),
             )),
             HirType::I64 => Ok(HirExpr::Lit(HirLit::I64(0))),
+            HirType::BigInt => Ok(HirExpr::Lit(HirLit::BigInt("0".into()))),
             HirType::Symbol => Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_symbol_new".into())),
                 vec![HirExpr::Lit(HirLit::Str(String::new()))],
@@ -3058,7 +3059,7 @@ impl<'a> FnLowerer<'a> {
                         HirType::Bytes => Some("Uint8Array"),
                         HirType::Symbol => Some("Symbol"),
                         HirType::Promise(_) => Some("Promise"),
-                        HirType::I64 => Some("BigInt"),
+                        HirType::I64 | HirType::BigInt => Some("BigInt"),
                         _ => None,
                     }
                 };
@@ -3402,7 +3403,7 @@ impl<'a> FnLowerer<'a> {
                                 if !matches!(
                                     payload,
                                     HirType::F64
-                                        | HirType::I64
+                                        | HirType::I64 | HirType::BigInt
                                         | HirType::Bool
                                         | HirType::Str
                                         | HirType::Json

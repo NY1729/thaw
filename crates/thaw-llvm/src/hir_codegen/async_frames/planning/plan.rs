@@ -15,7 +15,7 @@ impl<'ctx> HirCompiler<'ctx> {
             ("aggregate", HirType::Object(Vec::new())),
             ("tag", HirType::I64),
             ("f64", HirType::F64),
-            ("i64", HirType::I64),
+            ("i64", HirType::BigInt),
             ("bool", HirType::Bool),
             ("native", HirType::NativeException),
         ] {

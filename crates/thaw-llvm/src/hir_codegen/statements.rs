@@ -1342,6 +1342,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 match suffix {
                     "f64" => HirType::F64,
                     "bool" => HirType::Bool,
+                    "i64" => HirType::BigInt,
                     _ => HirType::I64,
                 },
             );

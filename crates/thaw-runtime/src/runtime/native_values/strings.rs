@@ -65,6 +65,22 @@ unsafe fn wtf8_case_map(value: *const c_char, upper: bool, language: &icu_locale
     arena_wtf8(&wtf8_encode_utf16(&out)).map_or(std::ptr::null(), |value| value.cast())
 }
 
+/// The substring of `value` selected by `range(utf16_length) -> (start, end)` in UTF-16 units.
+/// ASCII text slices its bytes directly; anything else goes through a UTF-16 decode.
+///
+/// # Safety
+/// `value` must be non-null and reference a valid NUL-terminated WTF-8 string.
+unsafe fn utf16_range_string(value: *const c_char, range: impl Fn(usize) -> (usize, usize)) -> *const c_char {
+    let bytes = unsafe { wtf8_bytes(value) };
+    if bytes.is_ascii() {
+        let (start, end) = range(bytes.len());
+        return arena_wtf8(&bytes[start..end]).map_or(std::ptr::null(), |value| value.cast());
+    }
+    let units = wtf8_decode_utf16(bytes);
+    let (start, end) = range(units.len());
+    arena_wtf8(&wtf8_encode_utf16(&units[start..end])).map_or(std::ptr::null(), |value| value.cast())
+}
+
 /// Allocates a NUL-terminated copy of raw WTF-8 bytes in the arena,
 /// preserving both embedded NULs and lone surrogates.
 fn arena_wtf8(bytes: &[u8]) -> Option<*const u8> {
@@ -224,8 +240,18 @@ pub unsafe extern "C" fn thaw_string_compare(left: *const c_char, right: *const 
     if left.is_null() || right.is_null() {
         return 0;
     }
-    let left = wtf8_decode_utf16(unsafe { wtf8_bytes(left) });
-    let right = wtf8_decode_utf16(unsafe { wtf8_bytes(right) });
+    let (left, right) = unsafe { (wtf8_bytes(left), wtf8_bytes(right)) };
+    // Identical bytes are equal; ASCII bytes order like their UTF-16 units. Both skip the decode.
+    let (left, right) = if left == right {
+        (Vec::new(), Vec::new())
+    } else if left.is_ascii() && right.is_ascii() {
+        return match left.cmp(right) {
+            std::cmp::Ordering::Less => -1,
+            _ => 1,
+        };
+    } else {
+        (wtf8_decode_utf16(left), wtf8_decode_utf16(right))
+    };
     match left.cmp(&right) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -804,20 +830,20 @@ pub unsafe extern "C" fn thaw_string_slice(
     if value.is_null() {
         return std::ptr::null();
     }
-    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
-    let index = |position: f64| {
-        if position.is_nan() {
-            0
-        } else if position < 0.0 {
-            (units.len() as f64 + position.trunc()).max(0.0) as usize
-        } else {
-            position.trunc().min(units.len() as f64) as usize
-        }
+    let range = |length: usize| {
+        let index = |position: f64| {
+            if position.is_nan() {
+                0
+            } else if position < 0.0 {
+                (length as f64 + position.trunc()).max(0.0) as usize
+            } else {
+                position.trunc().min(length as f64) as usize
+            }
+        };
+        let start = index(start);
+        (start, index(end).max(start))
     };
-    let start = index(start);
-    let end = index(end).max(start);
-    arena_wtf8(&wtf8_encode_utf16(&units[start..end]))
-        .map_or(std::ptr::null(), |value| value.cast())
+    unsafe { utf16_range_string(value, range) }
 }
 
 #[no_mangle]
@@ -836,24 +862,20 @@ pub unsafe extern "C" fn thaw_string_substring(
     if value.is_null() {
         return std::ptr::null();
     }
-    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
-    let length = units.len() as f64;
-    let clamp = |position: f64| {
-        if position.is_nan() {
-            0.0
-        } else {
-            position.trunc().clamp(0.0, length)
-        }
+    let range = |units: usize| {
+        let length = units as f64;
+        let clamp = |position: f64| {
+            if position.is_nan() {
+                0.0
+            } else {
+                position.trunc().clamp(0.0, length)
+            }
+        };
+        let (start, end) = (clamp(start), clamp(end));
+        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        (start as usize, end as usize)
     };
-    let start = clamp(start);
-    let end = clamp(end);
-    let (start, end) = if start <= end {
-        (start, end)
-    } else {
-        (end, start)
-    };
-    arena_wtf8(&wtf8_encode_utf16(&units[start as usize..end as usize]))
-        .map_or(std::ptr::null(), |value| value.cast())
+    unsafe { utf16_range_string(value, range) }
 }
 
 #[no_mangle]
@@ -871,22 +893,23 @@ pub unsafe extern "C" fn thaw_string_substr(
     if value.is_null() {
         return std::ptr::null();
     }
-    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
-    let count = units.len() as f64;
-    let start = if start.is_nan() { 0.0 } else { start.trunc() };
-    let start = if start < 0.0 {
-        (count + start).max(0.0)
-    } else {
-        start.min(count)
-    } as usize;
-    let length = if length.is_nan() { 0.0 } else { length.trunc() };
-    let length = if length < 0.0 {
-        0.0
-    } else {
-        length.min(count - start as f64)
-    } as usize;
-    arena_wtf8(&wtf8_encode_utf16(&units[start..start + length]))
-        .map_or(std::ptr::null(), |value| value.cast())
+    let range = |units: usize| {
+        let count = units as f64;
+        let start = if start.is_nan() { 0.0 } else { start.trunc() };
+        let start = if start < 0.0 {
+            (count + start).max(0.0)
+        } else {
+            start.min(count)
+        } as usize;
+        let length = if length.is_nan() { 0.0 } else { length.trunc() };
+        let length = if length < 0.0 {
+            0.0
+        } else {
+            length.min(count - start as f64)
+        } as usize;
+        (start, start + length)
+    };
+    unsafe { utf16_range_string(value, range) }
 }
 
 fn is_javascript_whitespace(character: char) -> bool {
@@ -994,7 +1017,12 @@ pub unsafe extern "C" fn thaw_string_length(value: *const c_char) -> f64 {
     if value.is_null() {
         return 0.0;
     }
-    wtf8_decode_utf16(unsafe { wtf8_bytes(value) }).len() as f64
+    let bytes = unsafe { wtf8_bytes(value) };
+    // ASCII: one UTF-16 unit per byte, no decode (the common case in hot loops).
+    if bytes.is_ascii() {
+        return bytes.len() as f64;
+    }
+    wtf8_decode_utf16(bytes).len() as f64
 }
 
 #[no_mangle]
@@ -1011,9 +1039,14 @@ pub unsafe extern "C" fn thaw_string_char_code_at(value: *const c_char, index: f
     if index < 0.0 || index > usize::MAX as f64 {
         return f64::NAN;
     }
-    wtf8_decode_utf16(unsafe { wtf8_bytes(value) })
-        .get(index as usize)
-        .map_or(f64::NAN, |unit| f64::from(*unit))
+    let bytes = unsafe { wtf8_bytes(value) };
+    let index = index as usize;
+    // ASCII prefix: the unit at `index` is the byte itself, no whole-string decode.
+    // ponytail: still O(index) per call; cache ASCII-ness per string if long-string loops matter.
+    if let Some(prefix) = bytes.get(..=index).filter(|prefix| prefix.is_ascii()) {
+        return f64::from(prefix[index]);
+    }
+    wtf8_decode_utf16(bytes).get(index).map_or(f64::NAN, |unit| f64::from(*unit))
 }
 
 #[no_mangle]

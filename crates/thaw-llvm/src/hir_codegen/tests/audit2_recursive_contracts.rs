@@ -29,21 +29,6 @@ fn audit2_contract_math_max_spread_with_extra_arguments_and_sets() {
 }
 
 #[test]
-fn audit2_contract_native_bigint_overflow_throws_instead_of_wrapping() {
-    let source = r##"function main(): void {
-  console.log(2n ** 62n, 3n * 4n, 1n << 62n);
-  try { console.log(2n ** 64n); } catch (e) { console.log((e as Error).name); }
-  try { let x = 1n; let i = 1n; while (i < 30n) { x = x * i; i = i + 1n; } console.log(x); } catch (e) { console.log((e as Error).name); }
-  try { console.log(1n << 70n); } catch (e) { console.log((e as Error).name); }
-}
-"##;
-    assert_eq!(
-        compile_and_run(source, "audit2_contract_bigint_overflow"),
-        "4611686018427387904n 12n 4611686018427387904n\nRangeError\nRangeError\nRangeError\n"
-    );
-}
-
-#[test]
 fn audit2_contract_dictionary_array_values_are_shared_and_mutable() {
     let source = r##"function main(): void {
   const o: { [k: string]: number[] } = { x: [1] };

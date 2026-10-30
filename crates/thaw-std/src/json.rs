@@ -7182,17 +7182,12 @@ pub extern "C" fn thaw_json_as_number(value: *mut Value) -> f64 {
     json_to_number(value)
 }
 
-/// Read a Json-backed BigInt into Thaw's native signed-i64 representation.
-/// Values outside that representation fail through the existing host-error
-/// channel; this must never round through f64 or wrap on overflow.
-///
-/// # Safety
-/// `value` must point to a live Json value allocated by this runtime.
-#[no_mangle]
-pub unsafe extern "C" fn thaw_json_as_bigint_i64(value: *const Value) -> i64 {
+/// The canonical decimal text of a Json-backed BigInt, or `None` after
+/// recording a host error.
+fn json_bigint_decimal(value: *const Value) -> Option<String> {
     let Some(value) = (unsafe { value.as_ref() }) else {
         set_host_error("Missing Json BigInt value".into());
-        return 0;
+        return None;
     };
     let decimal = match value {
         Value::BigInt(decimal) => decimal.clone(),
@@ -7201,26 +7196,37 @@ pub unsafe extern "C" fn thaw_json_as_bigint_i64(value: *const Value) -> i64 {
                 Some("bigint") => {}
                 Some(_) => {
                     set_host_error("Json value is not a BigInt".into());
-                    return 0;
+                    return None;
                 }
-                None => return 0,
+                None => return None,
             }
-            let Some(decimal) = host_query(lease, 10) else {
-                // `host_query` recorded the callback error. Return immediately
-                // so the LLVM caller consumes it before any further host call.
-                return 0;
-            };
-            decimal
+            // `host_query` recorded the callback error on failure. Return
+            // immediately so the LLVM caller consumes it before any further host call.
+            host_query(lease, 10)?
         }
         _ => {
             set_host_error("Json value is not a BigInt".into());
-            return 0;
+            return None;
         }
     };
     if !canonical_bigint_decimal(&decimal) {
         set_host_error("Invalid Json BigInt decimal".into());
-        return 0;
+        return None;
     }
+    Some(decimal)
+}
+
+/// Read a Json-backed BigInt into a raw signed i64 (values outside that range
+/// fail through the host-error channel). Compiled code uses
+/// `thaw_json_as_bigint_decimal` instead and parses arbitrary precision.
+///
+/// # Safety
+/// `value` must point to a live Json value allocated by this runtime.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_as_bigint_i64(value: *const Value) -> i64 {
+    let Some(decimal) = json_bigint_decimal(value) else {
+        return 0;
+    };
     match decimal.parse::<i64>() {
         Ok(value) => value,
         Err(_) => {
@@ -7228,6 +7234,17 @@ pub unsafe extern "C" fn thaw_json_as_bigint_i64(value: *const Value) -> i64 {
             0
         }
     }
+}
+
+/// The exact decimal digits of a Json-backed BigInt (null after a host error).
+///
+/// # Safety
+/// `value` must point to a live Json value allocated by this runtime.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_as_bigint_decimal(value: *const Value) -> *const c_char {
+    json_bigint_decimal(value).map_or(std::ptr::null(), |decimal| {
+        thaw_arena::owned_string(decimal).cast_const()
+    })
 }
 
 /// Real ECMAScript `ToNumber`, for every `Value` shape this file can
@@ -9544,6 +9561,19 @@ pub extern "C" fn thaw_json_array_push_json(array: *mut Value, value: *mut Value
 #[no_mangle]
 pub extern "C" fn thaw_json_receiver_bigint(value: i64) -> *mut Value {
     leak(Value::BigInt(value.to_string()))
+}
+
+/// A Json BigInt from its exact decimal digits (any size).
+///
+/// # Safety
+/// `decimal` must be a valid NUL-terminated canonical decimal integer.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_receiver_bigint_decimal(decimal: *const c_char) -> *mut Value {
+    leak(Value::BigInt(
+        unsafe { CStr::from_ptr(decimal) }
+            .to_string_lossy()
+            .into_owned(),
+    ))
 }
 
 #[no_mangle]
