@@ -3697,6 +3697,21 @@
       "name": "this field method call on a class-typed field",
       "expect": "matched",
       "source": "class Foo { x = 1; dbl() { return this.x * 2; } }\nclass Bar { c: Foo = new Foo(); run() { return this.c.dbl(); } }\nfunction main(): void {\n  console.log(new Bar().run());\n}"
+    },
+    {
+      "name": "var hoisting: read before declaration and redeclare",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(a, b);\n  var a = 1, b = 2;\n  var a = 3;\n  console.log(a, b);\n  var plain = 7;\n  console.log(plain);\n}"
+    },
+    {
+      "name": "var hoisting: closure capture, branch var read outside, typeof",
+      "expect": "matched",
+      "source": "function f(): void {\n  const g = () => k;\n  var k = 4;\n  console.log(g());\n}\nfunction h(n: number): number {\n  for (let i = 0; i < 2; i++) { if (i === 1) { var last = i + n; } }\n  return last === undefined ? -1 : last;\n}\nfunction w(flag: boolean): string {\n  console.log(typeof q);\n  if (flag) { var q = \"set\"; }\n  return String(q);\n}\nfunction main(): void {\n  f();\n  console.log(h(5), w(true), w(false));\n}"
+    },
+    {
+      "name": "let/const straight-line TDZ ReferenceError",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { console.log(x); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  let x = 5;\n  console.log(x);\n  try { console.log(c + 1); } catch (e) { console.log((e as Error).message); }\n  const c = 2;\n  console.log(c);\n}"
     }
   ]
 }

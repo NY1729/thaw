@@ -8,6 +8,7 @@ impl<'a> FnLowerer<'a> {
         let source_continue_depths = std::mem::take(&mut self.source_continue_depths);
         let labels = std::mem::take(&mut self.labels);
         let function_var_names = std::mem::take(&mut self.function_var_names);
+        let tdz_pending = std::mem::take(&mut self.tdz_pending);
         let source_return = self.source_ret_type.take();
         let source_scope = self.source_scope.clone();
         let implicit_any_callbacks = std::mem::take(&mut self.implicit_any_callbacks);
@@ -16,6 +17,7 @@ impl<'a> FnLowerer<'a> {
         self.source_ret_type = source_return;
         self.source_scope = source_scope;
         self.function_var_names = function_var_names;
+        self.tdz_pending = tdz_pending;
         self.loop_depth = loop_depth;
         self.source_break_depths = source_break_depths;
         self.source_continue_depths = source_continue_depths;

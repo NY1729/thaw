@@ -31,6 +31,10 @@ struct FnLowerer<'a> {
     /// `var` names already declared in the current function, mapped to the
     /// HIR binding they own; a redeclaration reuses that binding.
     function_var_names: HashMap<String, Symbol>,
+    /// `let`/`const` names of the statement lists being lowered whose declaration has not been
+    /// reached yet, mapped to the binding they resolve to now and a placeholder of their type
+    /// (straight-line TDZ).
+    tdz_pending: HashMap<String, (Symbol, HirLit)>,
     /// Declared (annotated) function/method parameters whose type may be `undefined`/`null`:
     /// an un-narrowed property read on one is a compile error, as in `tsc`.
     strict_nullable_bindings: HashSet<Symbol>,
