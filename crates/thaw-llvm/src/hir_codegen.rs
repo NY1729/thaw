@@ -159,6 +159,7 @@ fn raw_value_layout(ty: &HirType) -> Result<(u64, u64), String> {
         | HirType::WeakSet(_)
         | HirType::Tuple(_)
         | HirType::Object(_)
+        | HirType::Recursive(_)
         | HirType::Function(_, _)
         | HirType::CallableFunction(..)
         | HirType::NativeException
@@ -444,6 +445,11 @@ pub struct HirCompiler<'ctx> {
     /// Set while `console.log` converts a typed value for inspection: an `Optional` field with no
     /// value is a property that was never set, so it is omitted instead of printed as `undefined`.
     console_omit_absent_fields: bool,
+    /// The native object the recursive-layout encoder is converting: registered with the runtime
+    /// as soon as its Json object exists, so a revisit becomes a shared reference (a cycle).
+    recursive_register: Option<PointerValue<'ctx>>,
+    /// Set by the recursive-layout helper for its own object so the entry router lets it through.
+    bypass_recursive_route: bool,
     /// Set while encoding the fields of a class instance for console output.
     encoding_class_instance_fields: bool,
     /// Set while encoding a `JSON.stringify` argument: an Error-family record then shows only the
@@ -838,6 +844,8 @@ impl<'ctx> HirCompiler<'ctx> {
             planning_var_types: std::cell::RefCell::new(HashMap::new()),
             variable_hir_types: HashMap::new(),
             console_omit_absent_fields: false,
+            recursive_register: None,
+            bypass_recursive_route: false,
             encoding_stringify_errors: false,
             encoding_class_instance_fields: false,
             arena_variables: HashSet::new(),

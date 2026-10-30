@@ -32,6 +32,7 @@ fn jit_type_needs_live_json_adaptation(ty: &thaw_hir::HirType) -> bool {
         HirType::Array(_)
         | HirType::Tuple(_)
         | HirType::Object(_)
+        | HirType::Recursive(_)
         | HirType::Dictionary(_)
         | HirType::Bytes
         | HirType::Map(..)

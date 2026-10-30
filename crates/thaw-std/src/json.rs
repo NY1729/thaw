@@ -2551,6 +2551,44 @@ pub unsafe extern "C" fn thaw_json_share(value: *const Value) -> *mut Value {
     leak(value.clone())
 }
 
+thread_local! {
+    /// Native objects currently being converted to Json by the recursive-layout encoder, with the
+    /// Json object built for each so far (see `thaw_recursive_lookup`).
+    static RECURSIVE_ACTIVE: std::cell::RefCell<Vec<(usize, Value)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The Json object under construction for native object `node`, shared (not copied), or null
+/// when `node` is not being converted. A revisit during conversion is a reference cycle.
+#[no_mangle]
+pub extern "C" fn thaw_recursive_lookup(node: usize) -> *mut Value {
+    RECURSIVE_ACTIVE.with(|active| {
+        active
+            .borrow()
+            .iter()
+            .find(|(candidate, _)| *candidate == node)
+            .map_or(std::ptr::null_mut(), |(_, value)| leak(value.clone()))
+    })
+}
+
+/// # Safety
+/// `json` must point to a valid JSON `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_recursive_register(node: usize, json: *const Value) {
+    if let Some(json) = unsafe { json.as_ref() } {
+        RECURSIVE_ACTIVE.with(|active| active.borrow_mut().push((node, json.clone())));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_recursive_unregister(node: usize) {
+    RECURSIVE_ACTIVE.with(|active| {
+        let mut active = active.borrow_mut();
+        if let Some(index) = active.iter().rposition(|(candidate, _)| *candidate == node) {
+            active.remove(index);
+        }
+    });
+}
+
 #[no_mangle]
 /// `structuredClone` on a dynamic (`Json`-typed) value -- unlike this
 /// file's derived `Clone` (which shares the same `Rc`-backed `Array`/

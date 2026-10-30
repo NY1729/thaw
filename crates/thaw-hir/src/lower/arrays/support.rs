@@ -507,6 +507,18 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(right.clone(), element_type.clone());
         let left_string = self.coerce_primitive_to_string(HirExpr::Var(left.clone()))?;
         let right_string = self.coerce_primitive_to_string(HirExpr::Var(right.clone()))?;
+        // Spec default order: -1 / 0 / 1 over the String() forms (each converted once).
+        let left_text = format!("__thaw_sort_default_left_text_{}", self.next_binding);
+        self.next_binding += 1;
+        let right_text = format!("__thaw_sort_default_right_text_{}", self.next_binding);
+        self.next_binding += 1;
+        let text_call = |name: &str, a: &str, b: &str| {
+            HirExpr::Call(
+                Box::new(HirExpr::Var(name.into())),
+                vec![HirExpr::Var(a.to_string()), HirExpr::Var(b.to_string())],
+            )
+        };
+        let number = |value: f64| HirExpr::Lit(HirLit::F64(value));
         let comparator = HirExpr::Lambda(
             Vec::new(),
             vec![
@@ -514,15 +526,21 @@ impl<'a> FnLowerer<'a> {
                 HirParam { name: right, ty: element_type.clone() },
             ],
             HirType::F64,
-            Box::new(HirExpr::Conditional(
-                Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_string_gt".into())),
-                    vec![left_string, right_string],
-                )),
-                Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
-                HirType::F64,
-            )),
+            Box::new(HirExpr::Block(vec![
+                HirStmt::Let(left_text.clone(), HirType::Str, left_string),
+                HirStmt::Let(right_text.clone(), HirType::Str, right_string),
+                HirStmt::Return(Some(HirExpr::Conditional(
+                    Box::new(text_call("__thaw_string_gt", &left_text, &right_text)),
+                    Box::new(number(1.0)),
+                    Box::new(HirExpr::Conditional(
+                        Box::new(text_call("__thaw_string_lt", &left_text, &right_text)),
+                        Box::new(number(-1.0)),
+                        Box::new(number(0.0)),
+                        HirType::F64,
+                    )),
+                    HirType::F64,
+                ))),
+            ])),
         );
         self.lower_array_sort_comparator(
             receiver,
@@ -709,6 +727,148 @@ impl<'a> FnLowerer<'a> {
                 ],
             ),
         ];
+        // Arrays shorter than 64 are one V8 TimSort run: `CountAndMakeRun` (a descending prefix is
+        // reversed) and a binary insertion sort of the rest, so an inconsistent comparator sees
+        // and produces exactly V8's calls and order. Longer arrays use the merge sort below.
+        let small_run = {
+            let mut names = Vec::new();
+            for label in ["run", "idx", "order", "stop", "lo2", "hi2", "start", "left", "right", "mid", "p", "desc"] {
+                self.next_binding += 1;
+                let name = format!("__thaw_ts_{label}_{}", self.next_binding);
+                self.scope.insert(name.clone(), HirType::F64);
+                names.push(name);
+            }
+            let [run, idx, order, stop, lo2, hi2, start, left, right, mid_i, p, desc] = &names[..] else {
+                unreachable!()
+            };
+            let mut elements = Vec::new();
+            for label in ["prev", "cur", "tmp", "pivot"] {
+                self.next_binding += 1;
+                let name = format!("__thaw_ts_{label}_{}", self.next_binding);
+                self.scope.insert(name.clone(), element_type.clone());
+                elements.push(name);
+            }
+            let [prev, cur, tmp, pivot] = &elements[..] else { unreachable!() };
+            let call = |this: &mut Self, a: HirExpr, b: HirExpr| -> Result<HirExpr, String> {
+                Ok(HirExpr::Call(
+                    Box::new(variable(&comparator_name)),
+                    vec![
+                        this.coerce_to_declared(&comparator_element_type, a)?,
+                        this.coerce_to_declared(&comparator_element_type, b)?,
+                    ],
+                ))
+            };
+            let sub_one = |value: HirExpr| HirExpr::BinOp(BinOp::Sub, Box::new(value), Box::new(number(1.0)));
+            let gt = |l: HirExpr, r: HirExpr| HirExpr::BinOp(BinOp::Gt, Box::new(l), Box::new(r));
+            let ge = |l: HirExpr, r: HirExpr| HirExpr::BinOp(BinOp::GtEq, Box::new(l), Box::new(r));
+            let eq = |l: HirExpr, r: HirExpr| HirExpr::BinOp(BinOp::EqEqEq, Box::new(l), Box::new(r));
+            let at = |index: HirExpr| HirExpr::TypedIndex(Box::new(variable(&array_name)), Box::new(index), element_type.clone());
+            let store = |index: HirExpr, value: HirExpr| {
+                HirStmt::Expr(HirExpr::IndexAssign(Box::new(variable(&array_name)), Box::new(index), Box::new(value)))
+            };
+            // CountAndMakeRun
+            let first = call(self, at(number(1.0)), at(number(0.0)))?;
+            let in_run = call(self, variable(cur), variable(prev))?;
+            let count_run = vec![
+                assign(run, number(2.0)),
+                assign(order, first),
+                assign(desc, HirExpr::Conditional(
+                    Box::new(lt(variable(order), number(0.0))),
+                    Box::new(number(1.0)), Box::new(number(0.0)), HirType::F64,
+                )),
+                HirStmt::Let(prev.clone(), element_type.clone(), at(number(1.0))),
+                assign(idx, number(2.0)),
+                HirStmt::While(lt(variable(idx), variable(&length_name)), vec![
+                    HirStmt::Let(cur.clone(), element_type.clone(), at(variable(idx))),
+                    assign(order, in_run),
+                    assign(stop, HirExpr::Conditional(
+                        Box::new(eq(variable(desc), number(1.0))),
+                        Box::new(HirExpr::Conditional(
+                            Box::new(ge(variable(order), number(0.0))),
+                            Box::new(number(1.0)), Box::new(number(0.0)), HirType::F64,
+                        )),
+                        Box::new(HirExpr::Conditional(
+                            Box::new(lt(variable(order), number(0.0))),
+                            Box::new(number(1.0)), Box::new(number(0.0)), HirType::F64,
+                        )),
+                        HirType::F64,
+                    )),
+                    HirStmt::If(
+                        eq(variable(stop), number(1.0)),
+                        vec![assign(idx, variable(&length_name))],
+                        vec![
+                            assign(prev, variable(cur)),
+                            assign(run, add_one(variable(run))),
+                            assign(idx, add_one(variable(idx))),
+                        ],
+                    ),
+                ]),
+                HirStmt::If(
+                    eq(variable(desc), number(1.0)),
+                    vec![
+                        assign(lo2, number(0.0)),
+                        assign(hi2, sub_one(variable(run))),
+                        HirStmt::While(lt(variable(lo2), variable(hi2)), vec![
+                            HirStmt::Let(tmp.clone(), element_type.clone(), at(variable(lo2))),
+                            store(variable(lo2), at(variable(hi2))),
+                            store(variable(hi2), variable(tmp)),
+                            assign(lo2, add_one(variable(lo2))),
+                            assign(hi2, sub_one(variable(hi2))),
+                        ]),
+                    ],
+                    Vec::new(),
+                ),
+            ];
+            // BinaryInsertionSort(0, run, length)
+            let probe = call(self, variable(pivot), at(variable(mid_i)))?;
+            let insertion = vec![
+                assign(start, variable(run)),
+                HirStmt::While(lt(variable(start), variable(&length_name)), vec![
+                    assign(left, number(0.0)),
+                    assign(right, variable(start)),
+                    HirStmt::Let(pivot.clone(), element_type.clone(), at(variable(right))),
+                    HirStmt::While(lt(variable(left), variable(right)), vec![
+                        assign(mid_i, HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(variable(left)),
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_math_floor".into())),
+                                vec![HirExpr::BinOp(
+                                    BinOp::Div,
+                                    Box::new(HirExpr::BinOp(BinOp::Sub, Box::new(variable(right)), Box::new(variable(left)))),
+                                    Box::new(number(2.0)),
+                                )],
+                            )),
+                        )),
+                        assign(order, probe),
+                        HirStmt::If(
+                            lt(variable(order), number(0.0)),
+                            vec![assign(right, variable(mid_i))],
+                            vec![assign(left, add_one(variable(mid_i)))],
+                        ),
+                    ]),
+                    assign(p, variable(start)),
+                    HirStmt::While(gt(variable(p), variable(left)), vec![
+                        store(variable(p), at(sub_one(variable(p)))),
+                        assign(p, sub_one(variable(p))),
+                    ]),
+                    store(variable(left), variable(pivot)),
+                    assign(start, add_one(variable(start))),
+                ]),
+            ];
+            let mut body = count_run;
+            body.push(HirStmt::If(
+                lt(variable(run), variable(&length_name)),
+                insertion,
+                Vec::new(),
+            ));
+            let mut declared: Vec<HirStmt> = names
+                .iter()
+                .map(|name| HirStmt::Let(name.clone(), HirType::F64, number(0.0)))
+                .collect();
+            declared.push(HirStmt::If(ge(variable(&length_name), number(2.0)), body, Vec::new()));
+            declared
+        };
         let mut pass = vec![assign(lo, number(0.0)), HirStmt::While(lt(variable(lo), variable(&length_name)), merge_run)];
         pass.extend(copy_back);
         pass.push(assign(
@@ -750,7 +910,11 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Let(copy_index.clone(), HirType::F64, number(0.0)),
             HirStmt::Let(inner_name.clone(), HirType::F64, number(0.0)),
             HirStmt::Let(j.clone(), HirType::F64, number(0.0)),
-            HirStmt::While(lt(variable(width), variable(&length_name)), pass),
+            HirStmt::If(
+                lt(variable(&length_name), number(64.0)),
+                small_run,
+                vec![HirStmt::While(lt(variable(width), variable(&length_name)), pass)],
+            ),
         ];
         if !copy {
             let write_index = format!("__thaw_sort_write_{}", self.next_binding);
