@@ -3972,6 +3972,31 @@
       "name": "native setImmediate from a timer callback runs before the next timer",
       "expect": "matched",
       "source": "function main(): void {\n  setTimeout(() => {\n    console.log(\"timer\");\n    setImmediate(() => console.log(\"imm1\"));\n    setTimeout(() => console.log(\"timeout0\"), 0);\n    setImmediate(() => console.log(\"imm2\"));\n  }, 1);\n}\n"
+    },
+    {
+      "name": "nd5a default import of a node builtin destructured",
+      "expect": "matched",
+      "source": "import fs from \"node:fs\";\nimport os from \"node:os\";\nfunction main(): void {\n  const { existsSync } = fs;\n  const { EOL: eol } = os;\n  console.log(existsSync(\"/\"), JSON.stringify(eol));\n}\n"
+    },
+    {
+      "name": "nd5a RegExp and Intl constructors called without new",
+      "expect": "matched",
+      "source": "function main(): void {\n  const r = RegExp(\"a+\", \"g\");\n  console.log(r.test(\"caat\"), \"aa\".replace(r, \"x\"));\n  const f = Intl.DateTimeFormat(\"en-US\", { timeZone: \"UTC\" });\n  console.log(f.format(new Date(0)));\n  console.log(Intl.NumberFormat(\"en-US\").format(1234.5));\n}\n"
+    },
+    {
+      "name": "nd5a Buffer isEncoding compare swap and URL canParse",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Buffer.isEncoding(\"utf8\"), Buffer.isEncoding(\"HEX\"), Buffer.isEncoding(\"nope\"));\n  console.log(Buffer.compare(Buffer.from(\"a\"), Buffer.from(\"b\")), Buffer.compare(Buffer.from(\"b\"), Buffer.from(\"a\")), Buffer.compare(Buffer.from(\"a\"), Buffer.from(\"a\")));\n  const b = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);\n  console.log(b.swap16().toString(\"hex\"));\n  console.log(b.swap32().toString(\"hex\"));\n  console.log(b.swap64().toString(\"hex\"));\n  console.log(URL.canParse(\"http://x.com\"), URL.canParse(\"nope\"));\n}\n"
+    },
+    {
+      "name": "nd5a http response writeHead",
+      "expect": "matched",
+      "source": "import http from \"node:http\";\nfunction main(): void {\n  const s = http.createServer((req, res) => {\n    res.writeHead(201, { \"Content-Type\": \"text/plain\", \"X-N\": 5 });\n    res.end(\"hi\");\n  });\n  s.listen(0, () => {\n    const port = (s.address() as any).port;\n    http.get({ port }, (res) => {\n      let d = \"\";\n      res.on(\"data\", (c) => (d += c));\n      res.on(\"end\", () => {\n        console.log(res.statusCode, res.headers[\"content-type\"], res.headers[\"x-n\"], d);\n        s.close();\n      });\n    });\n  });\n}\n"
+    },
+    {
+      "name": "nd5a timers as values and global alias",
+      "expect": "matched",
+      "source": "function main(): void {\n  const t = setTimeout;\n  t(() => console.log(\"t\"), 1);\n  const si = setImmediate;\n  si(() => console.log(\"si\"));\n  console.log(global === globalThis);\n}\n"
     }
   ]
 }

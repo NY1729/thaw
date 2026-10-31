@@ -421,6 +421,38 @@ impl<'a> FnLowerer<'a> {
                 return self.lower_array_constructor(&call.args, call.type_args.as_deref(), None);
             }
         }
+        if let Some(head) = self.try_lower_response_write_head(call)? {
+            return Ok(head);
+        }
+        if let Some(snippet) = self.try_lower_snippet_builtin(call)? {
+            return Ok(snippet);
+        }
+        // `RegExp(..)` / `Intl.DateTimeFormat(..)` construct like their `new` forms.
+        if let Callee::Expr(callee) = &call.callee {
+            let constructs = match callee.as_ref() {
+                Expr::Ident(name) => name.sym == *"RegExp" && !self.scope.contains_key("RegExp"),
+                Expr::Member(member) => matches!(
+                    (member.obj.as_ref(), &member.prop),
+                    (Expr::Ident(ns), MemberProp::Ident(class))
+                        if ns.sym == *"Intl"
+                            && !self.scope.contains_key("Intl")
+                            && matches!(
+                                class.sym.as_ref(),
+                                "DateTimeFormat" | "NumberFormat" | "Collator"
+                            )
+                ),
+                _ => false,
+            };
+            if constructs {
+                return self.lower_expr(&Expr::New(swc_ecma_ast::NewExpr {
+                    span: call.span,
+                    ctxt: Default::default(),
+                    callee: callee.clone(),
+                    args: Some(call.args.clone()),
+                    type_args: call.type_args.clone(),
+                }));
+            }
+        }
         if let Some(receiver) = self.array_constructor_fill_receiver(call) {
             let mut typed = call.clone();
             if let Callee::Expr(callee) = &mut typed.callee {
@@ -431,6 +463,196 @@ impl<'a> FnLowerer<'a> {
             return self.lower_call_with_class_guard_and_target(&typed, None, None);
         }
         self.lower_call_with_class_guard_and_target(call, None, None)
+    }
+
+    /// `res.writeHead(code, { "Name": value, .. })` on a native `ServerResponse` (a response
+    /// object exposing `statusCode` + `setHeader`) is `res.statusCode = code` followed by one
+    /// `res.setHeader(name, String(value))` per header of the (literal) headers object.
+    fn try_lower_response_write_head(
+        &mut self,
+        call: &CallExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        use swc_ecma_ast::{
+            AssignExpr, AssignOp, AssignTarget, Prop, PropName, PropOrSpread, SeqExpr,
+            SimpleAssignTarget,
+        };
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return Ok(None);
+        };
+        let (Expr::Ident(response), MemberProp::Ident(property)) =
+            (member.obj.as_ref(), &member.prop)
+        else {
+            return Ok(None);
+        };
+        if property.sym != *"writeHead"
+            || call.args.is_empty()
+            || call.args.iter().any(|a| a.spread.is_some())
+        {
+            return Ok(None);
+        }
+        let Some(HirType::Object(fields)) = self.peek_type_without_lowering(&member.obj) else {
+            return Ok(None);
+        };
+        if !fields.iter().any(|(name, _)| name == "setHeader")
+            || !fields.iter().any(|(name, _)| name == "statusCode")
+        {
+            return Ok(None);
+        }
+        // `writeHead(code, statusMessage?, headers?)`
+        let headers = call
+            .args
+            .iter()
+            .skip(1)
+            .find_map(|a| match a.expr.as_ref() {
+                Expr::Object(object) => Some(Ok(object)),
+                Expr::Lit(swc_ecma_ast::Lit::Str(_)) => None,
+                _ => Some(Err(
+                    "`writeHead` headers must be an object literal".to_string()
+                )),
+            });
+        let span = call.span;
+        let ident = |name: &str| Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.into(), span));
+        let target = |prop: &str| {
+            Expr::Member(MemberExpr {
+                span,
+                obj: Box::new(ident(response.sym.as_ref())),
+                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(prop.into(), span)),
+            })
+        };
+        let mut parts: Vec<Box<Expr>> = vec![Box::new(Expr::Assign(AssignExpr {
+            span,
+            op: AssignOp::Assign,
+            left: AssignTarget::Simple(SimpleAssignTarget::Member(match target("statusCode") {
+                Expr::Member(member) => member,
+                _ => unreachable!(),
+            })),
+            right: call.args[0].expr.clone(),
+        }))];
+        if let Some(headers) = headers {
+            for property in &headers?.props {
+                let PropOrSpread::Prop(property) = property else {
+                    return Err("`writeHead` headers cannot contain spreads".into());
+                };
+                let (name, value): (String, Box<Expr>) = match property.as_ref() {
+                    Prop::KeyValue(pair) => {
+                        let name = match &pair.key {
+                            PropName::Ident(i) => i.sym.to_string(),
+                            PropName::Str(s) => s.value.to_string_lossy().into_owned(),
+                            _ => return Err("`writeHead` header names must be literal".into()),
+                        };
+                        (name, pair.value.clone())
+                    }
+                    Prop::Shorthand(i) => (i.sym.to_string(), Box::new(Expr::Ident(i.clone()))),
+                    _ => return Err("unsupported `writeHead` header".into()),
+                };
+                parts.push(Box::new(Expr::Call(CallExpr {
+                    span,
+                    ctxt: Default::default(),
+                    callee: Callee::Expr(Box::new(target("setHeader"))),
+                    args: vec![
+                        swc_ecma_ast::ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(Expr::Lit(swc_ecma_ast::Lit::Str(name.into()))),
+                        },
+                        swc_ecma_ast::ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(Expr::Call(CallExpr {
+                                span,
+                                ctxt: Default::default(),
+                                callee: Callee::Expr(Box::new(ident("String"))),
+                                args: vec![swc_ecma_ast::ExprOrSpread {
+                                    spread: None,
+                                    expr: value,
+                                }],
+                                type_args: None,
+                            })),
+                        },
+                    ],
+                    type_args: None,
+                })));
+            }
+        }
+        parts.push(Box::new(ident(response.sym.as_ref())));
+        self.lower_expr(&Expr::Seq(SeqExpr { span, exprs: parts }))
+            .map(Some)
+    }
+
+    /// Builtins with no native entry point that a short typed TS arrow expresses exactly:
+    /// `Buffer.isEncoding/compare`, `URL.canParse`, `buf.swap16/32/64()`. The arrow is
+    /// applied to the original arguments (receiver first for `swap*`).
+    fn try_lower_snippet_builtin(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return Ok(None);
+        };
+        let MemberProp::Ident(property) = &member.prop else {
+            return Ok(None);
+        };
+        let swap = |width: usize| {
+            format!(
+                "(b: Buffer): Buffer => {{ for (let i = 0; i + {w} <= b.length; i += {w}) {{ \
+                 for (let j = 0; j < {h}; j++) {{ const t = b[i + j]; b[i + j] = b[i + {m} - j]; \
+                 b[i + {m} - j] = t; }} }} return b; }}",
+                w = width,
+                h = width / 2,
+                m = width - 1
+            )
+        };
+        let (source, receiver_arg) = match (member.obj.as_ref(), property.sym.as_ref()) {
+            (Expr::Ident(object), name)
+                if object.sym == *"Buffer" && !self.scope.contains_key("Buffer") =>
+            {
+                match name {
+                    "isEncoding" => (
+                        "(e: string): boolean => ['utf8','utf-8','hex','base64','base64url','ascii','latin1','binary','ucs2','ucs-2','utf16le','utf-16le'].includes(String(e).toLowerCase())".to_string(),
+                        false,
+                    ),
+                    "compare" => (
+                        "(a: Buffer, b: Buffer): number => { const n = Math.min(a.length, b.length); for (let i = 0; i < n; i++) { if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1; } return a.length < b.length ? -1 : a.length > b.length ? 1 : 0; }".to_string(),
+                        false,
+                    ),
+                    _ => return Ok(None),
+                }
+            }
+            (Expr::Ident(object), "canParse")
+                if object.sym == *"URL" && !self.scope.contains_key("URL") =>
+            {
+                (
+                    "(u: string, base?: string): boolean => { try { new URL(u, base); return true; } catch (e) { return false; } }".to_string(),
+                    false,
+                )
+            }
+            (_, "swap16" | "swap32" | "swap64")
+                if call.args.is_empty() && self.expr_is_bytes_syntax(&member.obj) =>
+            {
+                let width = match property.sym.as_ref() { "swap16" => 2, "swap32" => 4, _ => 8 };
+                (swap(width), true)
+            }
+            _ => return Ok(None),
+        };
+        let module = thaw_parser::parse_typescript(&format!("({source});"))?;
+        let Some(swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Expr(statement))) =
+            module.body.first()
+        else {
+            return Err("internal: builtin snippet did not parse".into());
+        };
+        let args = if receiver_arg {
+            vec![swc_ecma_ast::ExprOrSpread {
+                spread: None,
+                expr: member.obj.clone(),
+            }]
+        } else {
+            call.args.clone()
+        };
+        let mut applied = call.clone();
+        applied.callee = Callee::Expr(statement.expr.clone());
+        applied.args = args;
+        self.lower_expr(&Expr::Call(applied)).map(Some)
     }
 
     /// `super(...)` of a class extending `Map`/`Set`: build the wrapped native
