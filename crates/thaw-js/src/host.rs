@@ -707,6 +707,92 @@ pub struct HandleResult {
     pub error: *mut c_char,
 }
 
+/// The realm user code without a package runs in (`new Function`, `eval`, `any` literals): the
+/// package last entered, or, in a program that loaded none, a bare interpreter created on first use.
+/// ponytail: a program mixing packages and dynamic code shares the last-entered package's realm.
+fn default_realm() -> usize {
+    if PACKAGES.with(|ps| ps.borrow().is_empty()) {
+        let mut interp = Box::new(Interp::new());
+        let stack = process_stack_bytes();
+        if stack != 0 {
+            interp.configure_stack(stack);
+        }
+        let package = Package {
+            interp,
+            exports: Value::Undefined,
+        };
+        PACKAGES.with(|ps| ps.borrow_mut().push(Some(package)));
+        LAST_PACKAGE.with(|l| l.set(0));
+    }
+    LAST_PACKAGE.with(|l| l.get())
+}
+
+/// `new Function(...args)` from the JSON array of the constructor's string arguments (the last is the
+/// body); the function is kept as a handle. The counterpart of QuickJS's `thaw_js_new_function`.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_new_function(args_json: *const c_char) -> HandleResult {
+    handle_result((|| {
+        let args = cstr(args_json).ok_or("invalid `new Function` arguments")?;
+        let Native::Array(args) = Native::from_json(&args).map_err(|e| e.to_string())? else {
+            return Err("invalid `new Function` arguments".to_string());
+        };
+        let owner = default_realm();
+        with_package(owner, |p| {
+            let it = &mut p.interp;
+            let args = args.iter().map(|a| to_value(it, a)).collect::<Vec<_>>();
+            let ctor = it
+                .lookup(&it.global.clone(), "Function")
+                .unwrap_or(Value::Undefined);
+            let f = it.construct(&ctor, &args).map_err(|c| classify(it, c))?;
+            Ok(store_handle(owner, f))
+        })
+        .map_err(error_text)
+    })())
+}
+
+/// Call the global function `name` (a dotted path, `eval`) with the graph-wire argument array; the
+/// result is a plain graph wire. The counterpart of QuickJS's `thaw_js_call_graph_result`.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_call_graph_result(
+    name: *const c_char,
+    args_json: *const c_char,
+) -> ThawResult {
+    graph_result((|| {
+        let name = cstr(name).ok_or("invalid function name")?;
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (owner, args) = decode_wire(&args_json)?;
+        with_package(owner, |p| {
+            let it = &mut p.interp;
+            let args = it.array_items(&args);
+            let mut parts = name.split('.');
+            let first = parts.next().unwrap_or("");
+            let mut this = Value::Undefined;
+            let mut f = it
+                .lookup(&it.global.clone(), first)
+                .unwrap_or(Value::Undefined);
+            for part in parts {
+                this = f.clone();
+                f = it.get(&this, part).map_err(|c| classify(it, c))?;
+            }
+            let result = it.call(&f, &this, &args).map_err(|c| classify(it, c))?;
+            let result = awaited(it, result)?;
+            let mut out = WireOut {
+                owner,
+                plain: true,
+                live_functions: false,
+                copy_root: false,
+                receiver: None,
+                nodes: Vec::new(),
+                seen: Vec::new(),
+                leases: Vec::new(),
+            };
+            let root = out.token(it, &result)?;
+            Ok(out.finish(root))
+        })
+        .map_err(error_text)
+    })())
+}
+
 /// Decode a graph wire (`thaw_json_graph_encode`) into `(owning package, value)`. The package is the one
 /// that owns a handle the wire references, else the package last entered (a value only needs an
 /// interpreter to be built in and a package for later method calls on it).
@@ -733,7 +819,7 @@ fn decode_wire(wire: &str) -> Result<(usize, Value), String> {
             },
             _ => None,
         })
-        .unwrap_or_else(|| LAST_PACKAGE.with(|l| l.get()));
+        .unwrap_or_else(default_realm);
     with_package(owner, |p| {
         let mut memo = vec![None; nodes.len()];
         let mut busy = vec![false; nodes.len()];
@@ -817,6 +903,9 @@ pub extern "C" fn thaw_tjs_get_property_json_key_result(
         let Native::Str(key) = Native::from_json(&key_json).map_err(|e| e.to_string())? else {
             return Err("Invalid host property key".to_string());
         };
+        if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+            eprintln!("thaw-js get({handle}, {key})");
+        }
         on_handle(handle, |p, owner, v| property(p, owner, &v, &key))
     })())
 }
@@ -1094,6 +1183,40 @@ pub extern "C" fn thaw_tjs_call_selected_method_graph_result(
     })())
 }
 
+/// The dynamic prelude's helpers live in the realm that serves compiled code; a package realm that never
+/// ran `default_realm` lacks them.
+fn default_realm_prelude_check(it: &mut Interp) -> Result<(), HostError> {
+    if it
+        .lookup(&it.global.clone(), "__thaw_json_host_enumerate")
+        .is_none()
+    {
+        it.run_sloppy(include_str!("dynamic_prelude.js"))
+            .map_err(|c| classify(it, c))?;
+    }
+    Ok(())
+}
+
+/// Call the prelude helper `name(value, operation)`; its string result is the query answer.
+fn prelude_call(
+    it: &mut Interp,
+    name: &str,
+    v: &Value,
+    operation: u8,
+) -> Result<String, HostError> {
+    default_realm_prelude_check(it)?;
+    let helper = it
+        .lookup(&it.global.clone(), name)
+        .unwrap_or(Value::Undefined);
+    let answer = it
+        .call(
+            &helper,
+            &Value::Undefined,
+            &[v.clone(), Value::Number(f64::from(operation))],
+        )
+        .map_err(|c| classify(it, c))?;
+    Ok(it.to_str(&answer).to_string())
+}
+
 fn unsupported_text(what: &str) -> ThawResult {
     ThawResult {
         value: ptr::null_mut(),
@@ -1110,6 +1233,9 @@ fn unsupported_text(what: &str) -> ThawResult {
 /// wrappers) answer "no".
 #[no_mangle]
 pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> ThawResult {
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        eprintln!("thaw-js host_query({handle}, {operation})");
+    }
     text_result(on_handle(handle, |p, _, v| {
         let it = &mut p.interp;
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
@@ -1158,8 +1284,11 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             14 => flag(v.is_callable()),
             16 => number(it, &v),
             26 => flag(matches!(&v, Value::Object(o) if o.proto.borrow().is_none())),
-            11 | 12 | 17..=20 | 22 | 25 => "0".to_string(),
-            21 | 23 | 24 | 27 => String::new(),
+            11 | 25 => "0".to_string(),
+            12 => flag(it.date_target(&v)),
+            13 => crate::number_to_string(it.date_time(&v).map_err(|c| classify(it, c))?),
+            17..=20 | 22..=24 => prelude_call(it, "__thaw_json_host_query", &v, operation)?,
+            21 | 27 => String::new(),
             28 => "{}".to_string(),
             _ => {
                 return Err(HostError::Thrown(format!(
@@ -1179,24 +1308,23 @@ pub extern "C" fn thaw_tjs_host_date_set_result(_handle: u64, _timestamp: f64) -
 /// 1 and 2 keys, 3 values); the elements of the returned array stay live handles.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_host_enumerate_result(handle: u64, operation: u8) -> ThawResult {
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        eprintln!("thaw-js host_enumerate({handle}, {operation})");
+    }
     graph_result(on_handle(handle, |p, owner, v| {
         let it = &mut p.interp;
-        let keys = it.own_keys(&v);
-        let mut items = Vec::new();
-        for k in keys {
-            let value = it.get(&v, &k).map_err(|c| classify(it, c))?;
-            items.push(match operation {
-                0 => it.array(vec![Value::Str(k), value]),
-                1 | 2 => Value::Str(k),
-                3 => value,
-                _ => {
-                    return Err(HostError::Thrown(format!(
-                        "TypeError: thaw-js does not support the host enumeration {operation}"
-                    )))
-                }
-            });
-        }
-        let list = it.array(items);
+        default_realm_prelude_check(it)?;
+        let list = {
+            let helper = it
+                .lookup(&it.global.clone(), "__thaw_json_host_enumerate")
+                .unwrap_or(Value::Undefined);
+            it.call(
+                &helper,
+                &Value::Undefined,
+                &[v, Value::Number(f64::from(operation))],
+            )
+            .map_err(|c| classify(it, c))?
+        };
         let mut out = WireOut {
             owner,
             plain: false,
@@ -1401,23 +1529,71 @@ pub extern "C" fn thaw_tjs_error_from_tagged_handle(value: *const c_char) -> Han
     })())
 }
 
-/// No native-object identity cache in thaw-js: always a miss.
-#[no_mangle]
-pub extern "C" fn thaw_tjs_lookup_native_object(
-    _pointer: *const c_void,
-    _layout: *const c_char,
-) -> HandleResult {
-    handle_result(Ok(0))
+/// `(owning package, wrapper, pin on the native allocation)`.
+type NativeWrapper = (usize, Value, thaw_arena::ArenaRoot);
+
+thread_local! {
+    /// The canonical wrapper of each projected native object: `(pointer, layout)` -> `(package, wrapper)`.
+    /// The `ArenaRoot` keeps the native allocation alive, so a pointer is never reused for another object.
+    static NATIVE_OBJECTS: RefCell<HashMap<(usize, String), NativeWrapper>> =
+        RefCell::new(HashMap::new());
 }
 
-/// Without an identity cache the candidate is canonical (ownership passes back to the caller).
+/// The retained canonical wrapper already made for this native object and layout, else 0.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_lookup_native_object(
+    pointer: *const c_void,
+    layout: *const c_char,
+) -> HandleResult {
+    handle_result((|| {
+        let layout = cstr(layout).ok_or("native object lookup requires a layout")?;
+        if pointer.is_null() {
+            return Err("native object lookup requires pointer and layout".to_string());
+        }
+        Ok(NATIVE_OBJECTS.with(|m| {
+            m.borrow()
+                .get(&(pointer as usize, layout))
+                .map_or(0, |(owner, value, _)| store_handle(*owner, value.clone()))
+        }))
+    })())
+}
+
+/// Consumes a candidate wrapper handle and returns one retained canonical wrapper for the native object.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_intern_native_object(
-    _pointer: *const c_void,
-    _layout: *const c_char,
+    pointer: *const c_void,
+    layout: *const c_char,
     candidate_handle: u64,
 ) -> HandleResult {
-    handle_result(Ok(candidate_handle as i64))
+    let result = handle_result((|| {
+        let layout = cstr(layout).ok_or("native object identity requires a layout")?;
+        if pointer.is_null() {
+            return Err("native object identity requires pointer and layout".to_string());
+        }
+        let (owner, candidate) = HANDLES
+            .with(|h| {
+                h.borrow()
+                    .get((candidate_handle as usize).wrapping_sub(1))
+                    .cloned()
+            })
+            .ok_or("invalid JavaScript handle")?;
+        Ok(NATIVE_OBJECTS.with(|m| {
+            let mut m = m.borrow_mut();
+            let entry = m
+                .entry((pointer as usize, layout))
+                // SAFETY: the compiler passes a live arena allocation; the root pins it.
+                .or_insert_with(|| {
+                    (
+                        owner,
+                        candidate,
+                        thaw_arena::ArenaRoot::new(pointer as usize),
+                    )
+                });
+            store_handle(entry.0, entry.1.clone())
+        }))
+    })());
+    thaw_tjs_release_handle(candidate_handle as i64);
+    result
 }
 
 /// As [`thaw_tjs_call_selected_method_graph_result`], the result kept as a new handle.
@@ -1461,6 +1637,9 @@ pub extern "C" fn thaw_tjs_call_selected_method_handle_graph_args_result(
 #[no_mangle]
 pub extern "C" fn thaw_tjs_get_global(name: *const c_char) -> i64 {
     let Some(name) = cstr(name) else { return 0 };
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        eprintln!("thaw-js get_global({name})");
+    }
     let found = (|| -> Result<Option<(usize, Value)>, HostError> {
         if let Some((package, path)) = name.split_once("::") {
             let Some(handle) = BY_NAME.with(|m| m.borrow().get(package).copied()) else {
@@ -1468,9 +1647,12 @@ pub extern "C" fn thaw_tjs_get_global(name: *const c_char) -> i64 {
             };
             return with_package(handle, |p| p.exports_member(path)).map(|v| Some((handle, v)));
         }
-        let handle = LAST_PACKAGE.with(|l| l.get());
+        let handle = default_realm();
         with_package(handle, |p| {
             let it = &mut p.interp;
+            if name.starts_with("__thaw_") {
+                default_realm_prelude_check(it)?;
+            }
             let mut parts = name.split('.');
             let first = parts.next().unwrap_or("");
             let mut value = it
@@ -1484,7 +1666,7 @@ pub extern "C" fn thaw_tjs_get_global(name: *const c_char) -> i64 {
         .map(|v| Some((handle, v)))
     })();
     match found {
-        Ok(Some((package, value))) if !matches!(value, Value::Undefined) => {
+        Ok(Some((package, value))) if !matches!(value, Value::Undefined) || name == "undefined" => {
             store_handle(package, value)
         }
         _ => {
@@ -1847,6 +2029,332 @@ unsafe fn exact_call(
     }
 }
 
+/// `[u64 count][u64; count]` native handle array -> ids (empty for null).
+///
+/// # Safety
+/// `handles` is null or a live native handle array.
+unsafe fn direct_handle_ids(handles: *const u8) -> Vec<u64> {
+    if handles.is_null() {
+        return Vec::new();
+    }
+    let count = unsafe { *(handles.cast::<u64>()) } as usize;
+    unsafe { std::slice::from_raw_parts(handles.add(8).cast::<u64>(), count) }.to_vec()
+}
+
+/// `handle(...args, ...direct handles)` with an `undefined` receiver; the result is kept as a new
+/// handle and a returned Promise is not awaited. `consuming` releases the callee and every direct handle.
+unsafe fn call_mixed_handle(
+    handle: u64,
+    args_json: *const c_char,
+    handles: *const u8,
+    consuming: bool,
+) -> HandleResult {
+    let direct = unsafe { direct_handle_ids(handles) };
+    let result = handle_result((|| {
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (_, args) = decode_wire(&args_json)?;
+        let mut values = Vec::new();
+        for h in &direct {
+            values.push(on_handle(*h, |_, _, v| Ok(v))?);
+        }
+        on_handle(handle, |p, owner, f| {
+            let it = &mut p.interp;
+            let mut args = it.array_items(&args);
+            args.extend(values);
+            let value = it
+                .call(&f, &Value::Undefined, &args)
+                .map_err(|c| classify(it, c))?;
+            Ok(store_handle(owner, value))
+        })
+    })());
+    if consuming {
+        for h in direct {
+            thaw_tjs_release_handle(h as i64);
+        }
+        thaw_tjs_release_handle(handle as i64);
+    }
+    result
+}
+
+/// # Safety
+/// `handles` is null or a live native handle array.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_tjs_call_handle_mixed_handle_graph_args_result(
+    handle: u64,
+    args_json: *const c_char,
+    handles: *const u8,
+) -> HandleResult {
+    unsafe { call_mixed_handle(handle, args_json, handles, false) }
+}
+
+/// # Safety
+/// `handles` is null or a live native handle array.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_tjs_call_handle_mixed_handle_graph_args_consuming_result(
+    handle: u64,
+    args_json: *const c_char,
+    handles: *const u8,
+) -> HandleResult {
+    unsafe { call_mixed_handle(handle, args_json, handles, true) }
+}
+
+/// `handle[name](...args)`; the result is kept as a new handle (a Promise is awaited unless
+/// `chain_intermediate`).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_call_method_handle_graph_args_result(
+    handle: u64,
+    name: *const c_char,
+    args_json: *const c_char,
+    chain_intermediate: bool,
+) -> HandleResult {
+    handle_result((|| {
+        let name = cstr(name).ok_or("invalid method name")?;
+        let (_, args) = decode_wire(&cstr(args_json).ok_or("invalid arguments")?)?;
+        on_handle(handle, |p, owner, this| {
+            let it = &mut p.interp;
+            let method = it.get(&this, &name).map_err(|c| classify(it, c))?;
+            let args = it.array_items(&args);
+            let result = it
+                .call(&method, &this, &args)
+                .map_err(|c| classify(it, c))?;
+            let result = if chain_intermediate {
+                result
+            } else {
+                awaited(it, result)?
+            };
+            Ok(store_handle(owner, result))
+        })
+    })())
+}
+
+/// `handle[name] = args[0]` (`args_json` a graph wire array); the result is the assigned value as a graph wire.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_set_property_json_graph_result(
+    handle: u64,
+    name: *const c_char,
+    args_json: *const c_char,
+) -> ThawResult {
+    graph_result((|| {
+        let name = cstr(name).ok_or("invalid property name")?;
+        let (_, args) = decode_wire(&cstr(args_json).ok_or("invalid arguments")?)?;
+        on_handle(handle, |p, owner, target| {
+            let it = &mut p.interp;
+            let value = it
+                .array_items(&args)
+                .into_iter()
+                .next()
+                .unwrap_or(Value::Undefined);
+            it.set(&target, &name, value.clone())
+                .map_err(|c| classify(it, c))?;
+            let mut out = WireOut {
+                owner,
+                plain: false,
+                live_functions: false,
+                copy_root: false,
+                receiver: None,
+                nodes: Vec::new(),
+                seen: Vec::new(),
+                leases: Vec::new(),
+            };
+            let root = out.token(it, &value)?;
+            Ok(out.finish(root))
+        })
+    })())
+}
+
+/// `GetIterator` / `GetAsyncIterator` as JS (the QuickJS bootstrap helpers `__thaw_to_iterator` /
+/// `__thaw_to_async_iterator`): a sync result is wrapped so `next`/`return`/`throw` are plain calls.
+const ITERATOR_HELPERS: &str = r#"({
+  sync: (value) => {
+    if (value == null) return value;
+    const method = value[Symbol.iterator];
+    const iterator = typeof method === 'function' ? method.call(value) : value;
+    if (iterator == null) return iterator;
+    const next = iterator.next;
+    if (typeof next !== 'function') return iterator;
+    return {
+      next: () => next.call(iterator),
+      return: () => { const close = iterator.return; return typeof close === 'function' ? close.call(iterator) : { value: undefined, done: true }; },
+      throw: (error) => { const resume = iterator.throw; return typeof resume === 'function' ? resume.call(iterator, error) : { value: undefined, done: true }; },
+    };
+  },
+  async: (value) => {
+    if (value == null) throw new TypeError('value is not async iterable');
+    const asyncMethod = value[Symbol.asyncIterator];
+    const object = (x) => x !== null && (typeof x === 'object' || typeof x === 'function');
+    if (asyncMethod != null) {
+      if (typeof asyncMethod !== 'function') throw new TypeError('value is not async iterable');
+      const iterator = asyncMethod.call(value);
+      if (!object(iterator)) throw new TypeError('Result of the Symbol.asyncIterator method is not an object');
+      return iterator;
+    }
+    const method = value[Symbol.iterator];
+    if (typeof method !== 'function') throw new TypeError('value is not async iterable');
+    const iterator = method.call(value);
+    if (!object(iterator)) throw new TypeError('Result of the Symbol.iterator method is not an object');
+    const settle = (result) => {
+      if (!object(result)) throw new TypeError('Iterator result is not an object');
+      const done = !!result.done;
+      return Promise.resolve(result.value).then((settled) => ({ done, value: settled }));
+    };
+    return {
+      next: () => { const next = iterator.next; if (typeof next !== 'function') throw new TypeError('Iterator method is not callable'); return settle(next.call(iterator)); },
+      return: () => { const close = iterator.return; return typeof close === 'function' ? settle(close.call(iterator)) : { value: undefined, done: true }; },
+      throw: (error) => { const resume = iterator.throw; return typeof resume === 'function' ? settle(resume.call(iterator, error)) : { value: undefined, done: true }; },
+    };
+  },
+})"#;
+
+fn to_iterator_exact(source: u64, asynchronous: bool) -> ExactResult {
+    let none = ExactResult {
+        value: 0,
+        exception_handle: 0,
+        exception_object_like: 0,
+        error: ptr::null_mut(),
+    };
+    let outcome: Result<Result<i64, (i64, bool)>, String> = on_handle(source, |p, owner, value| {
+        let it = &mut p.interp;
+        let step = (|it: &mut Interp| -> R<Value> {
+            let helpers = it.run_sloppy(ITERATOR_HELPERS)?;
+            let helper = it.get(&helpers, if asynchronous { "async" } else { "sync" })?;
+            it.call(&helper, &Value::Undefined, &[value])
+        })(it);
+        Ok(match step {
+            Ok(v) => Ok(store_handle(owner, v)),
+            Err(Ctl::Throw(t)) => {
+                let like = matches!(t, Value::Object(_));
+                Err((store_handle(owner, t), like))
+            }
+            Err(c) => return Err(classify(it, c)),
+        })
+    });
+    match outcome {
+        Ok(Ok(value)) => ExactResult {
+            value: value as u64,
+            ..none
+        },
+        Ok(Err((thrown, like))) => ExactResult {
+            exception_handle: thrown as u64,
+            exception_object_like: u8::from(like),
+            ..none
+        },
+        Err(e) => ExactResult {
+            error: thaw_arena::owned_string(e),
+            ..none
+        },
+    }
+}
+
+/// `for...of` iterator acquisition on the value behind `source`.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_to_iterator_exact_result(source: u64) -> ExactResult {
+    to_iterator_exact(source, false)
+}
+
+/// `for await...of` acquisition: `Symbol.asyncIterator`, then the sync iterator.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_to_async_iterator_exact_result(source: u64) -> ExactResult {
+    to_iterator_exact(source, true)
+}
+
+/// One iterator step (`mode` 0 next, 1 return, 2 throw(`thrown_text`); +3 captures the completion value;
+/// +6 awaits the step: an async iterator). The `{done, value}` record is kept as a handle; a thrown
+/// value becomes the exception handle.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_iterator_step_exact_result(
+    iterator: u64,
+    mode: u8,
+    thrown_text: *const c_char,
+) -> ExactResult {
+    let none = ExactResult {
+        value: 0,
+        exception_handle: 0,
+        exception_object_like: 0,
+        error: ptr::null_mut(),
+    };
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        eprintln!("thaw-js iterator_step({iterator}, {mode})");
+    }
+    let outcome: Result<Result<i64, (i64, bool)>, String> = (|| {
+        if mode > 11 {
+            return Err("Invalid iterator step mode".to_string());
+        }
+        let (asynchronous, mode) = (mode >= 6, if mode >= 6 { mode - 6 } else { mode });
+        let (capture, mode) = (mode >= 3, if mode >= 3 { mode - 3 } else { mode });
+        let error = cstr(thrown_text);
+        on_handle(iterator, |p, owner, iter| {
+            let it = &mut p.interp;
+            let step = (|it: &mut Interp| -> R<Value> {
+                let key = ["next", "return", "throw"][mode as usize];
+                let method = it.get(&iter, key)?;
+                if mode == 1 && matches!(method, Value::Undefined | Value::Null) {
+                    let o = Value::Object(it.plain());
+                    it.set(&o, "done", Value::Bool(true))?;
+                    if capture {
+                        it.set(&o, "value", Value::Undefined)?;
+                    }
+                    return Ok(o);
+                }
+                if !method.is_callable() {
+                    return it.throw_error("TypeError", "Iterator method is not callable");
+                }
+                let args = if mode == 2 {
+                    vec![Value::str(error.as_deref().unwrap_or(""))]
+                } else {
+                    vec![]
+                };
+                let mut step = it.call(&method, &iter, &args)?;
+                if asynchronous {
+                    step = match it.await_settled(&step)? {
+                        Some(Ok(v)) => v,
+                        Some(Err(e)) => return Err(Ctl::Throw(e)),
+                        None => return Err(Ctl::Throw(Value::str("promise never settled"))),
+                    };
+                }
+                if !matches!(step, Value::Object(_)) {
+                    return it.throw_error("TypeError", "Iterator result is not an object");
+                }
+                let out = Value::Object(it.plain());
+                if mode == 1 && !capture {
+                    it.set(&out, "done", Value::Bool(true))?;
+                    return Ok(out);
+                }
+                let done = it.get(&step, "done")?;
+                let done = done.truthy();
+                it.set(&out, "done", Value::Bool(done))?;
+                if !done || capture {
+                    let value = it.get(&step, "value")?;
+                    it.set(&out, "value", value)?;
+                }
+                Ok(out)
+            })(it);
+            Ok(match step {
+                Ok(v) => Ok(store_handle(owner, v)),
+                Err(Ctl::Throw(t)) => {
+                    let like = matches!(t, Value::Object(_));
+                    Err((store_handle(owner, t), like))
+                }
+                Err(c) => return Err(classify(it, c)),
+            })
+        })
+    })();
+    match outcome {
+        Ok(Ok(value)) => ExactResult {
+            value: value as u64,
+            ..none
+        },
+        Ok(Err((thrown, like))) => ExactResult {
+            exception_handle: thrown as u64,
+            exception_object_like: u8::from(like),
+            ..none
+        },
+        Err(e) => ExactResult {
+            error: thaw_arena::owned_string(e),
+            ..none
+        },
+    }
+}
+
 /// The value behind `handle` as a plain graph wire (a JSON-like copy).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_resolve_handle_graph_result(handle: u64) -> ThawResult {
@@ -2038,11 +2546,34 @@ pub extern "C" fn thaw_tjs_register_native_callback_graph(
         finish as usize,
         has_rest != 0,
     );
-    let owner = LAST_PACKAGE.with(|l| l.get());
+    let owner = default_realm();
     handle_result(
         with_package(owner, |p| Ok(callback_value(&mut p.interp, id as usize)))
             .map(|f| store_handle(owner, f))
             .map_err(|e| e.to_string()),
+    )
+}
+
+/// As [`thaw_tjs_register_native_callback_graph`], for an object-literal method (the receiver already
+/// crosses as the leading `this` of every graph callback).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_register_native_method_callback_graph(
+    adapter: *const c_void,
+    context: *const c_void,
+    jsvalue_param_mask: u64,
+    param_count: u64,
+    void_result: u8,
+    finish: *const c_void,
+    has_rest: u8,
+) -> HandleResult {
+    thaw_tjs_register_native_callback_graph(
+        adapter,
+        context,
+        jsvalue_param_mask,
+        param_count,
+        void_result,
+        finish,
+        has_rest,
     )
 }
 
@@ -2121,6 +2652,9 @@ fn take_callback_result(it: &mut Interp, result: *mut c_char) -> Result<Option<S
         unsafe { thaw_arena::destroy_string(result) };
         s
     };
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        eprintln!("thaw-js callback result: {out:?}");
+    }
     if packet.is_some() || out.starts_with('\u{2}') {
         return Err(tagged_error(it, &out));
     }
@@ -2319,6 +2853,9 @@ fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<
         unsafe { thaw_arena::destroy_string(result) };
         s
     };
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        eprintln!("thaw-js callback({id}) result: {out:?} args={}", args.len());
+    }
     if packet.is_some() || out.starts_with('\u{2}') {
         return Err(tagged_error(it, &out));
     }
@@ -2812,6 +3349,26 @@ pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) 
         }
         Err(e) => {
             LAST_ERROR.with(|l| *l.borrow_mut() = e.to_string());
+            0
+        }
+    }
+}
+
+/// Run a script (sloppy, global scope) in the default realm; 1 on success. The counterpart of
+/// QuickJS's `thaw_js_load` for the class values compiled code defines.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_load_script(source: *const c_char) -> u8 {
+    let Some(source) = cstr(source) else { return 0 };
+    let owner = default_realm();
+    let result = with_package(owner, |p| {
+        p.interp
+            .run_sloppy(&source)
+            .map_err(|c| classify(&mut p.interp, c))
+    });
+    match result {
+        Ok(_) => 1,
+        Err(e) => {
+            eprintln!("thaw-js: failed to load script: {e}");
             0
         }
     }

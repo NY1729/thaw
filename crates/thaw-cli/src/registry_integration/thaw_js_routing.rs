@@ -6,6 +6,13 @@ fn thaw_js_routing_enabled() -> bool {
     std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1")
 }
 
+/// `THAW_JS_USER_DYNAMIC=1` (with `THAW_JS_RUNTIME=1`) also serves the program's own dynamic code
+/// (`new Function`, `eval`) on thaw-js. Opt-in until the dynamic-storage cases it cannot yet run
+/// (see the QuickJS-removal readiness audit, class 3) match Node.
+fn thaw_js_user_dynamic_enabled() -> bool {
+    std::env::var("THAW_JS_USER_DYNAMIC").as_deref() == Ok("1")
+}
+
 /// Whether the program text names `name` (the last segment of a dotted path) as a whole
 /// identifier (`hash` is not mentioned by `hashSync`).
 fn thaw_js_mentions(user_source: &str, name: &str) -> bool {

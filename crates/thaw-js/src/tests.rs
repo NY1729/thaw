@@ -925,6 +925,29 @@ fn global_construct_and_call_handles() {
     assert!(r.error.is_null() && r.value > 0);
 }
 
+#[test]
+fn user_dynamic_code_runs_in_a_bare_realm() {
+    use crate::host::*;
+    use std::ffi::{CStr, CString};
+    let q = |s: &str| CString::new(s).unwrap();
+    let made = thaw_tjs_new_function(q(r#"["a","b","return a * b"]"#).as_ptr());
+    assert!(made.error.is_null() && made.value > 0);
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"v":6},{"v":7}]}]}"#);
+    let product = thaw_tjs_call_handle_graph_result(made.value, args.as_ptr());
+    assert!(product.error.is_null());
+    // SAFETY: a non-null result is a NUL-terminated wire.
+    let wire = unsafe { CStr::from_ptr(product.value) }.to_str().unwrap();
+    assert!(wire.contains("42"), "{wire}");
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"v":"1 + 2"}]}]}"#);
+    let evaluated = thaw_tjs_call_graph_result(q("eval").as_ptr(), args.as_ptr());
+    assert!(evaluated.error.is_null());
+    // SAFETY: as above.
+    let wire = unsafe { CStr::from_ptr(evaluated.value) }.to_str().unwrap();
+    assert!(wire.contains('3'), "{wire}");
+    let bad = thaw_tjs_new_function(q(r#"["return ("]"#).as_ptr());
+    assert!(!bad.error.is_null());
+}
+
 // ----- WeakMap / WeakSet / WeakRef / FinalizationRegistry (expected text recorded from Node 22) -----
 
 #[test]
@@ -1759,4 +1782,29 @@ fn a_regexp_marker_argument_becomes_a_real_regexp() {
     assert_eq!(&*it.to_str(&got), "b+");
     let got = it.get(&value, "flags").unwrap();
     assert_eq!(&*it.to_str(&got), "i");
+}
+
+#[test]
+fn async_generator_return_runs_finally() {
+    let mut it = Interp::new();
+    it.run(
+        "async function* g(){ try{ yield 1; yield 2; } finally { console.log('cleanup'); } }\n\
+         const it = g(); it.next().then(() => it.return()).then(r => console.log(JSON.stringify(r)));",
+    )
+    .ok()
+    .unwrap();
+    it.run_event_loop().ok().unwrap();
+    assert_eq!(it.out, vec!["cleanup", "{\"done\":true}"]);
+}
+
+#[test]
+fn get_prototype_of_runs_the_proxy_trap() {
+    assert_eq!(
+        one("try { Object.getPrototypeOf(new Proxy({}, { getPrototypeOf() { throw new Error('trap'); } })); console.log('accepted'); } catch (e) { console.log(e.message); }"),
+        "trap"
+    );
+    assert_eq!(
+        one("console.log(Object.getPrototypeOf(new Proxy({}, {})) === Object.prototype, Reflect.getPrototypeOf(new Proxy({}, { getPrototypeOf() { return null; } })))"),
+        "true null"
+    );
 }
