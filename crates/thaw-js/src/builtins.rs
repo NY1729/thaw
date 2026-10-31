@@ -978,7 +978,10 @@ impl Interp {
                 Ok(arg(args, 0))
             });
             self.set_native(o, "getPrototypeOf", |it, _, args| match arg(args, 0) {
-                Value::Object(o) => Ok(o.proto.borrow().clone().map_or(Value::Null, Value::Object)),
+                Value::Object(o) => match it.proxy_get_prototype_of(&o)? {
+                    Some(proto) => Ok(proto),
+                    None => Ok(o.proto.borrow().clone().map_or(Value::Null, Value::Object)),
+                },
                 Value::Str(_) => Ok(Value::Object(it.string_proto.clone())),
                 Value::Undefined | Value::Null => {
                     it.throw_error("TypeError", "Cannot convert undefined or null to object")
