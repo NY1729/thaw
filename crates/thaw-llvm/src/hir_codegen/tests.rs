@@ -826,3 +826,4 @@ include!("tests/audit2_leftovers_contracts.rs");
 include!("tests/numeric_comparator_sort_contracts.rs");
 include!("tests/sort_nan_contracts.rs");
 include!("tests/native_timer_contracts.rs");
+include!("tests/thaw_js_builtin_contracts.rs");
