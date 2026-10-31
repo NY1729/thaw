@@ -2255,12 +2255,7 @@ impl<'ctx> HirCompiler<'ctx> {
         graph_mode: bool,
         method_mode: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        if method_mode {
-            self.uses_quickjs = true;
-            self.uses_quickjs_handles = true;
-        } else {
-            self.js_mark_handles_used();
-        }
+        self.js_mark_handles_used();
         // Callback failures can carry tracked Box<Value> payloads across a
         // JavaScript Error carrier. Start tracing before module initialization
         // so the packet lease can preserve the existing arena owner graph.
