@@ -361,14 +361,17 @@ impl<'a> FnLowerer<'a> {
         let call_returns_json = |call: &CallExpr, awaited: bool| -> bool {
             let Callee::Expr(callee) = &call.callee else { return false };
             match callee.as_ref() {
-                Expr::Ident(ident) => self
-                    .signatures
-                    .get(&self.resolve_binding(ident.sym.as_ref()))
-                    .is_some_and(|sig| match (&sig.ret, awaited) {
-                        (HirType::Json, _) => !sig.is_async || awaited,
-                        (HirType::Promise(inner), true) => **inner == HirType::Json,
-                        _ => false,
-                    }),
+                Expr::Ident(ident) => {
+                    self.signatures
+                        .get(&self.resolve_binding(ident.sym.as_ref()))
+                        .is_some_and(|sig| match (&sig.ret, awaited) {
+                            (HirType::Json, _) => !sig.is_async || awaited,
+                            (HirType::Promise(inner), true) => **inner == HirType::Json,
+                            _ => false,
+                        })
+                        // calling a Json-typed value (`$("li")` on a loaded cheerio API) yields Json
+                        || (!awaited && self.peek_type_without_lowering(callee) == Some(HirType::Json))
+                }
                 Expr::Member(callee) if !awaited => match (callee.obj.as_ref(), &callee.prop) {
                     (Expr::Ident(object), MemberProp::Ident(property)) if object.sym == *"JSON" => {
                         property.sym == *"parse"

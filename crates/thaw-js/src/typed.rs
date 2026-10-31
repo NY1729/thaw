@@ -194,6 +194,11 @@ impl Interp {
         self.new_typed(ty, abuf, data, 0, len)
     }
 
+    /// An `ArrayBuffer` owning `bytes`.
+    pub(crate) fn array_buffer_from_vec(&self, bytes: Vec<u8>) -> Value {
+        Value::Object(self.new_array_buffer(Rc::new(RefCell::new(bytes))))
+    }
+
     /// A `Uint8Array` over a copy of `bytes`.
     pub(crate) fn u8_from_vec(&self, bytes: Vec<u8>) -> Value {
         let len = bytes.len();

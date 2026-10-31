@@ -38,10 +38,12 @@ pub mod host;
 #[cfg(feature = "intl")]
 mod intl;
 mod json;
+mod net;
 mod numfmt;
 mod proxy;
 pub mod scan;
 mod sysio;
+mod tls;
 mod typed;
 mod url;
 #[path = "web/abort.rs"]
@@ -60,6 +62,7 @@ mod web_fetch;
 mod web_streams;
 #[path = "web/text_codec.rs"]
 mod web_text_codec;
+mod zlib;
 
 /// Feature names (as reported by [`scan`] and [`Ctl::Unsupported`]) the evaluator runs.
 pub const SUPPORTED_FEATURES: &[&str] = &[
@@ -703,6 +706,9 @@ impl Interp {
         it.install_typed();
         it.install_buffer();
         it.install_sysio();
+        net::install(&mut it);
+        zlib::install(&mut it);
+        tls::install(&mut it);
         it.install_fs_host();
         web_dom_exception::install(&mut it);
         web_text_codec::install(&mut it);
@@ -3350,5 +3356,7 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
     }
 }
 
+#[cfg(test)]
+mod net_tests;
 #[cfg(test)]
 mod tests;

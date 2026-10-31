@@ -261,6 +261,25 @@ const DYNAMIC_HELPERS: &str = r#"
 (function () {
   function put(name, fn) { Object.defineProperty(globalThis, name, { value: fn, writable: false, configurable: false, enumerable: false }); }
   put('__thaw_unary_plus', function (v) { return +v; });
+  put('__thaw_error_properties_json', function (error) {
+    if (!error || (typeof error !== 'object' && typeof error !== 'function')) return '';
+    var out = {};
+    for (var key in error) {
+      if (key === 'message' || key === 'name' || key === 'stack') continue;
+      var value = error[key], type = typeof value;
+      if (type === 'string' || type === 'number' || type === 'boolean' || value === null || type === 'object') out[key] = value;
+    }
+    // cycle- and depth-safe: a nested response/request graph (axios) is copied as far as it is a tree
+    var stack = [];
+    return JSON.stringify(out, function (k, v) {
+      if (typeof v !== 'object' || v === null) return v;
+      while (stack.length && stack[stack.length - 1] !== this) stack.pop();
+      if (stack.length > 5 || stack.indexOf(v) >= 0) return undefined;
+      stack.push(v);
+      return v;
+    });
+  });
+  put('__thaw_json_stringify_direct', function (v) { return JSON.stringify(v); });
   put('__thaw_update_dynamic_value', function (value, increment) { var updated = value; var old = increment ? updated++ : updated--; return [old, updated]; });
   put('__thaw_dynamic_add', function (l, r) { return l + r; });
   put('__thaw_typeof_dynamic_value', function (v) { return typeof v; });

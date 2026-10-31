@@ -1097,6 +1097,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 ),
                 ("thaw_js_get_global", "thaw_tjs_get_global"),
                 (
+                    "thaw_js_release_native_handle_array",
+                    "thaw_tjs_release_native_handle_array",
+                ),
+                (
+                    "thaw_js_call_handle_value_graph_result",
+                    "thaw_tjs_call_handle_value_graph_result",
+                ),
+                (
                     "thaw_js_construct_handle_graph_args_result",
                     "thaw_tjs_construct_handle_graph_args_result",
                 ),
