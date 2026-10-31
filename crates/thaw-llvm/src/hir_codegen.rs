@@ -1100,8 +1100,40 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_tjs_call_handle_graph_result",
                 ),
                 (
+                    "thaw_js_set_property_result",
+                    "thaw_tjs_set_property_result",
+                ),
+                (
+                    "thaw_js_delete_property_result",
+                    "thaw_tjs_delete_property_result",
+                ),
+                (
+                    "thaw_js_has_property_result",
+                    "thaw_tjs_has_property_result",
+                ),
+                (
+                    "thaw_js_resolve_handle_handle_result",
+                    "thaw_tjs_resolve_handle_handle_result",
+                ),
+                (
+                    "thaw_js_call_method_graph_result",
+                    "thaw_tjs_call_method_graph_result",
+                ),
+                (
+                    "thaw_js_call_handle_mixed_graph_result",
+                    "thaw_tjs_call_handle_mixed_graph_result",
+                ),
+                (
                     "thaw_js_call_handle_mixed_exact_consuming_result",
                     "thaw_tjs_call_handle_mixed_exact_consuming_result",
+                ),
+                (
+                    "thaw_js_call_handle_mixed_exact_resolved_consuming_result",
+                    "thaw_tjs_call_handle_mixed_exact_resolved_consuming_result",
+                ),
+                (
+                    "thaw_js_register_native_callback_graph",
+                    "thaw_tjs_register_native_callback_graph",
                 ),
                 ("thaw_js_run_event_loop", "thaw_tjs_run_event_loop"),
                 (
