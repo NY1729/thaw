@@ -275,17 +275,17 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
-    /// A thaw-js routed build holds no QuickJS values, so a caught JsValue / live native projection
-    /// (the arms of the caught-exception Json adapter) cannot occur there: evaluate the operand and
-    /// yield an empty object instead of depending on the QuickJS host. A program that does throw such
-    /// a value registers a projector through a QuickJS operation, which sends the build back to the
-    /// unrouted path.
-    fn compile_routed_no_host_json(&mut self, source: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
-        self.compile_expr(source)?;
-        let json = self.builder.build_call(
-            self.module.get_function("thaw_json_object_new").unwrap(), &[], "routed_no_host_json",
-        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-            .ok_or("thaw_json_object_new returned no value")?;
+    /// A thaw-js routed build converts a live handle to `Json` by capturing it as a graph (the thaw-js
+    /// twin of the QuickJS host conversion): the capture owns its leases, `consume_handle` releases the input.
+    fn compile_routed_host_json(
+        &mut self,
+        source: &HirExpr,
+        consume_handle: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.js_mark_handles_used();
+        self.tracks_owned_json_roots = true;
+        let handle = self.compile_expr(source)?;
+        let json = self.compile_original_quickjs_exception_handle(handle, consume_handle)?;
         self.mark_fresh_owned_json_result(json)?;
         Ok(json)
     }
@@ -298,7 +298,7 @@ impl<'ctx> HirCompiler<'ctx> {
             return Err("live JSON host conversion expects one handle".into());
         };
         if self.thaw_js_routed {
-            return self.compile_routed_no_host_json(source);
+            return self.compile_routed_host_json(source, true);
         }
         self.js_mark_handles_used();
         self.tracks_owned_json_roots = true;
@@ -329,6 +329,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let [source] = args else {
             return Err("consuming JSON conversion expects one handle".into());
         };
+        if self.thaw_js_routed {
+            return self.compile_routed_host_json(source, true);
+        }
         self.js_mark_handles_used();
         self.tracks_owned_json_roots = true;
         let handle = self.compile_expr(source)?.into_int_value();
@@ -357,7 +360,7 @@ impl<'ctx> HirCompiler<'ctx> {
             return Err("borrowed live JSON host conversion expects one handle".into());
         };
         if self.thaw_js_routed {
-            return self.compile_routed_no_host_json(source);
+            return self.compile_routed_host_json(source, false);
         }
         self.js_mark_handles_used();
         self.tracks_owned_json_roots = true;
