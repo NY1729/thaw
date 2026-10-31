@@ -908,8 +908,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
 
                 self.builder.position_at_end(frozen_blocked);
+                // V8 names the receiver: `#<Object>` for a literal, `#<Class>` for an instance.
+                let class = fields
+                    .first()
+                    .and_then(|(name, _)| name.strip_prefix("__thaw_class_identity_\u{1e}"))
+                    .and_then(|ids| ids.split('\u{1f}').next())
+                    .map(|name| match name.strip_prefix("__thawmod") {
+                        Some(rest) => rest.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start_matches('_'),
+                        None => name,
+                    })
+                    .unwrap_or("Object");
                 self.compile_throw_type_error(&format!(
-                    "Cannot assign to read only property '{field}' of object"
+                    "Cannot assign to read only property '{field}' of object '#<{class}>'"
                 ))?;
 
                 self.builder.position_at_end(store_field);

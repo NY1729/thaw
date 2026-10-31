@@ -1573,8 +1573,32 @@ impl<'a> FnLowerer<'a> {
                             self.validate_storage_source(arg, &source)?;
                         }
                         let value = self.lower_expr_with_expected_type(arg, Some(&ret_type))?;
+                        // An async function with an inferred result adopts a returned
+                        // promise (`return p` behaves as `return await p`).
+                        if self.async_return && ret_type == HirType::Dynamic {
+                            if let HirType::Promise(inner) = self.infer_expr_type(&value)? {
+                                let inner = *inner;
+                                let awaited = HirExpr::AwaitPromise(Box::new(value), inner.clone());
+                                return Ok(if inner == HirType::Void {
+                                    vec![HirStmt::Expr(awaited), HirStmt::Return(None)]
+                                } else {
+                                    vec![HirStmt::Return(Some(awaited))]
+                                });
+                            }
+                        }
                         if self.ret_type == HirType::Void {
-                            if self.infer_expr_type(&value)? != HirType::Void {
+                            let value_type = self.infer_expr_type(&value)?;
+                            // `return promise` of a `Promise<void>` from an async function
+                            // settles after the promise does (as `return await promise`).
+                            if self.async_return
+                                && matches!(&value_type, HirType::Promise(inner) if **inner == HirType::Void)
+                            {
+                                return Ok(vec![
+                                    HirStmt::Expr(HirExpr::AwaitPromise(Box::new(value), HirType::Void)),
+                                    HirStmt::Return(None),
+                                ]);
+                            }
+                            if value_type != HirType::Void {
                                 return Ok(vec![
                                     HirStmt::Expr(value),
                                     HirStmt::Return(None),

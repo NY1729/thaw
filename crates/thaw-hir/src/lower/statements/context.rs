@@ -108,6 +108,7 @@ impl<'a> FnLowerer<'a> {
             enum_values,
             enum_reverse_values,
             ret_type,
+            async_return: false,
             call_constraints,
             generic_call_returns: HashMap::new(),
             generic_arrows: HashMap::new(),
