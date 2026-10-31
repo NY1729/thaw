@@ -4981,6 +4981,7 @@ pub extern "C" fn thaw_js_set_property_key_handle_graph_result(
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
                 error => error.to_string().into(),
             })?;
+        let key_name = key.as_string().and_then(|text| text.to_string().ok());
         let written: bool = set
             .call((object, key, value))
             .map_err(|error| match error {
@@ -4988,7 +4989,7 @@ pub extern "C" fn thaw_js_set_property_key_handle_graph_result(
                 error => error.to_string().into(),
             })?;
         if !written {
-            return Err("\u{1}TypeError\u{1}Cannot assign to read only property".into());
+            return Err(read_only_property_error(key_name.as_deref()).into());
         }
         Ok(1)
     });
@@ -5572,6 +5573,7 @@ fn thaw_js_set_property_graph_impl(
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
                 error => error.to_string().into(),
             })?;
+        let key_name = key.as_string().and_then(|text| text.to_string().ok());
         let written: bool = set
             .call((object, key, value))
             .map_err(|error| match error {
@@ -5579,7 +5581,7 @@ fn thaw_js_set_property_graph_impl(
                 error => error.to_string().into(),
             })?;
         if !written {
-            return Err("\u{1}TypeError\u{1}Cannot assign to read only property".into());
+            return Err(read_only_property_error(key_name.as_deref()).into());
         }
         Ok(1)
     });
@@ -5658,13 +5660,14 @@ fn property_write_with_exception_result(
             }
             Err(error) => return Err(error.to_string().into()),
         };
+        let key_name = key.as_string().and_then(|text| text.to_string().ok());
         match set.call::<_, bool>((object, key, value)) {
             Ok(true) => Ok(Outcome::Written),
             // Ordinary [[Set]] through a receiver (Reflect.set / a Proxy set
             // trap) reports a rejected write as `false`; only a strict
             // assignment turns it into a TypeError.
             Ok(false) if receiver_data => Ok(Outcome::Rejected),
-            Ok(false) => Err("\u{1}TypeError\u{1}Cannot assign to read only property".into()),
+            Ok(false) => Err(read_only_property_error(key_name.as_deref()).into()),
             Err(rquickjs::Error::Exception) => {
                 let thrown = ctx.catch();
                 let object_like = thrown.is_object() || thrown.is_function();
@@ -9288,5 +9291,13 @@ mod forced_root_graph_wire_controls {
             release_input(handle);
             assert_eq!(registry_state(handle), (0, false), "final O retirement reaches zero");
         }).join().unwrap();
+    }
+}
+
+/// V8's strict-mode message for a rejected write, naming the property when it is a string key.
+fn read_only_property_error(key: Option<&str>) -> String {
+    match key {
+        Some(key) => format!("\u{1}TypeError\u{1}Cannot assign to read only property '{key}' of object '#<Object>'"),
+        None => "\u{1}TypeError\u{1}Cannot assign to read only property".to_string(),
     }
 }
