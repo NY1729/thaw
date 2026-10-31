@@ -355,13 +355,14 @@ fn rewrite_qualified_calls(
     rewrites: &[QualifiedCallRewrite],
     imported_overload_aliases: &std::collections::HashSet<String>,
 ) -> Result<String, String> {
-    rewrite_qualified_calls_named(source, rewrites, imported_overload_aliases, &thaw_parser::common::FileName::Custom("input.ts".into()))
+    rewrite_qualified_calls_named(source, rewrites, imported_overload_aliases, &Default::default(), &thaw_parser::common::FileName::Custom("input.ts".into()))
 }
 
 fn rewrite_qualified_calls_named(
     source: &str,
     rewrites: &[QualifiedCallRewrite],
     imported_overload_aliases: &std::collections::HashSet<String>,
+    package_qualifiers: &std::collections::HashMap<String, String>,
     source_name: &thaw_parser::common::FileName,
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
@@ -377,6 +378,7 @@ fn rewrite_qualified_calls_named(
         imported_names: std::collections::HashSet<String>,
         imported_packages: std::collections::HashMap<String, String>,
         imported_overload_aliases: &'a std::collections::HashSet<String>,
+        package_qualifiers: &'a std::collections::HashMap<String, String>,
         matches: Vec<(u32, u32, String)>,
     }
     impl Visit for Finder<'_> {
@@ -396,7 +398,10 @@ fn rewrite_qualified_calls_named(
                         let package = self
                             .imported_packages
                             .get(obj.sym.as_str())
-                            .map(String::as_str)
+                            // An import specifier (`node:fs/promises`) is keyed by its qualifier.
+                            .map(|specifier| {
+                                self.package_qualifiers.get(specifier).unwrap_or(specifier).as_str()
+                            })
                             .unwrap_or(obj.sym.as_str());
                         if let Some((_, _, alias)) =
                             self.rewrites.iter().find(|(pkg, name, _)| {
@@ -446,6 +451,7 @@ fn rewrite_qualified_calls_named(
         imported_names,
         imported_packages,
         imported_overload_aliases,
+        package_qualifiers,
         matches: Vec::new(),
     };
     module.visit_with(&mut finder);
