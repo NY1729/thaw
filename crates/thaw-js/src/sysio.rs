@@ -261,6 +261,7 @@ const DYNAMIC_HELPERS: &str = r#"
 (function () {
   function put(name, fn) { Object.defineProperty(globalThis, name, { value: fn, writable: false, configurable: false, enumerable: false }); }
   put('__thaw_unary_plus', function (v) { return +v; });
+  put('__thaw_json_stringify_direct', function (v) { return JSON.stringify(v); });
   put('__thaw_update_dynamic_value', function (value, increment) { var updated = value; var old = increment ? updated++ : updated--; return [old, updated]; });
   put('__thaw_dynamic_add', function (l, r) { return l + r; });
   put('__thaw_typeof_dynamic_value', function (v) { return typeof v; });

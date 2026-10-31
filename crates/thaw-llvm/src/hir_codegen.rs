@@ -1081,6 +1081,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 ),
                 ("thaw_js_get_global", "thaw_tjs_get_global"),
                 (
+                    "thaw_js_release_native_handle_array",
+                    "thaw_tjs_release_native_handle_array",
+                ),
+                (
+                    "thaw_js_call_handle_value_graph_result",
+                    "thaw_tjs_call_handle_value_graph_result",
+                ),
+                (
                     "thaw_js_construct_handle_graph_args_result",
                     "thaw_tjs_construct_handle_graph_args_result",
                 ),
@@ -1093,8 +1101,40 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_tjs_call_handle_graph_result",
                 ),
                 (
+                    "thaw_js_set_property_result",
+                    "thaw_tjs_set_property_result",
+                ),
+                (
+                    "thaw_js_delete_property_result",
+                    "thaw_tjs_delete_property_result",
+                ),
+                (
+                    "thaw_js_has_property_result",
+                    "thaw_tjs_has_property_result",
+                ),
+                (
+                    "thaw_js_resolve_handle_handle_result",
+                    "thaw_tjs_resolve_handle_handle_result",
+                ),
+                (
+                    "thaw_js_call_method_graph_result",
+                    "thaw_tjs_call_method_graph_result",
+                ),
+                (
+                    "thaw_js_call_handle_mixed_graph_result",
+                    "thaw_tjs_call_handle_mixed_graph_result",
+                ),
+                (
                     "thaw_js_call_handle_mixed_exact_consuming_result",
                     "thaw_tjs_call_handle_mixed_exact_consuming_result",
+                ),
+                (
+                    "thaw_js_call_handle_mixed_exact_resolved_consuming_result",
+                    "thaw_tjs_call_handle_mixed_exact_resolved_consuming_result",
+                ),
+                (
+                    "thaw_js_register_native_callback_graph",
+                    "thaw_tjs_register_native_callback_graph",
                 ),
                 ("thaw_js_run_event_loop", "thaw_tjs_run_event_loop"),
                 (
