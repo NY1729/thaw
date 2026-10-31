@@ -323,3 +323,62 @@ fn thaw_js_async_overload_is_plain_when_its_resolved_type_is() {
         "declare function __thaw_typed_js_6d73(t: Promise<string>): string;"
     ));
 }
+
+#[test]
+fn thaw_js_path_flavours_are_registry_bundles_exporting_the_selected_flavour() {
+    let root = thaw_registry::resolve_builtin("node:path")
+        .unwrap()
+        .bundle_js
+        .unwrap();
+    for (builtin, separator) in [
+        ("node:path", "/"),
+        ("node:path/posix", "/"),
+        ("node:path/win32", "\\"),
+    ] {
+        let form = thaw_js_path_bundle(&root, builtin);
+        let report = thaw_js::scan::scan_bundle(&form).unwrap();
+        assert!(report.is_clean(), "{builtin}: {:?}", report.blockers);
+        assert_eq!(report.entry, builtin);
+        let mut package = thaw_js::host::Package::load(&form).unwrap();
+        assert_eq!(
+            package.get("sep").ok(),
+            Some(thaw_js::host::Native::Str(separator.into())),
+            "{builtin}"
+        );
+    }
+}
+
+#[test]
+fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
+    for module in [
+        "node:events",
+        "node:path",
+        "node:assert",
+        "node:os",
+        "node:util",
+    ] {
+        assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
+    }
+    // modules whose cases do not match Node on thaw-js yet stay on QuickJS
+    for module in [
+        "node:fs",
+        "node:stream",
+        "node:crypto",
+        "node:net",
+        "node:zlib",
+    ] {
+        assert!(!THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
+    }
+}
+
+#[test]
+fn thaw_js_bundle_form_wraps_plain_scripts_and_keeps_registered_forms() {
+    let mut forms = std::collections::HashMap::new();
+    forms.insert("node:x".to_string(), "registered".to_string());
+    assert_eq!(
+        thaw_js_bundle_form(&forms, "node:x", "ignored"),
+        "registered"
+    );
+    let wrapped = thaw_js_bundle_form(&forms, "node:y", "module.exports = 1;");
+    assert!(thaw_js::scan::scan_bundle(&wrapped).unwrap().is_clean());
+}

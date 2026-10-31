@@ -260,6 +260,7 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 const DYNAMIC_HELPERS: &str = r#"
 (function () {
   function put(name, fn) { Object.defineProperty(globalThis, name, { value: fn, writable: false, configurable: false, enumerable: false }); }
+  put('__thaw_storage_value', function (values) { return values; });
   put('__thaw_unary_plus', function (v) { return +v; });
   put('__thaw_error_properties_json', function (error) {
     if (!error || (typeof error !== 'object' && typeof error !== 'function')) return '';
@@ -296,9 +297,133 @@ const DYNAMIC_HELPERS: &str = r#"
   put('__thaw_strict_equal_bigint_dynamic', function (digits, v) { return typeof v === 'bigint' && v === BigInt(digits); });
   put('__thaw_native_loose_equal', function (l, r, lk, rk) { return (lk === 1 ? BigInt(l) : l) == (rk === 1 ? BigInt(r) : r); });
   put('__thaw_instanceof_dynamic_value', function (v, target) { return typeof target === 'function' ? v instanceof target : false; });
+  // A native object literal handed to JS as a live object (spreads, accessors, methods and data properties in order).
+  // ponytail: a symbol key needs `__thaw_property_key` (QuickJS realm only); it is used when present.
+  put('__thaw_object_from_operations', function (kinds, keysText, keyKinds, values) {
+    var callbacks = Array.prototype.slice.call(arguments, 4), keys = JSON.parse(keysText), object = {}, callback = 0;
+    for (var i = 0; i < kinds.length; i++) {
+      var kind = kinds[i];
+      if (kind === 'spread') {
+        var source = values[i];
+        if (source == null) continue;
+        var spread = Object(source), own = Reflect.ownKeys(spread);
+        for (var j = 0; j < own.length; j++) {
+          var descriptor = Object.getOwnPropertyDescriptor(spread, own[j]);
+          if (descriptor && descriptor.enumerable) Object.defineProperty(object, own[j], { value: spread[own[j]], writable: true, enumerable: true, configurable: true });
+        }
+        continue;
+      }
+      if (kind === 'proto') {
+        var prototype = values[i];
+        if (prototype === null || typeof prototype === 'object' || typeof prototype === 'function') Object.setPrototypeOf(object, prototype);
+        continue;
+      }
+      var key = keyKinds[i] && typeof globalThis.__thaw_property_key === 'function' ? globalThis.__thaw_property_key(keys[i]) : keys[i];
+      if (kind === 'data') { Object.defineProperty(object, key, { value: values[i], writable: true, enumerable: true, configurable: true }); continue; }
+      var fn = callbacks[callback++];
+      if (kind === 'method') {
+        Object.defineProperty(object, key, { value: function () { return fn.apply(undefined, [this].concat(Array.prototype.slice.call(arguments))); }, writable: true, enumerable: true, configurable: true });
+        continue;
+      }
+      var previous = Object.getOwnPropertyDescriptor(object, key), accessor = previous && !('value' in previous) ? previous : {};
+      Object.defineProperty(object, key, {
+        get: kind === 'getter' ? function () { return fn(this); } : accessor.get,
+        set: kind === 'setter' ? function (value) { fn(this, value); } : accessor.set,
+        enumerable: true, configurable: true
+      });
+    }
+    return object;
+  });
   put('__thaw_instanceof_dynamic_value_by_name', function (name, v) { var c = globalThis[name]; return typeof c === 'function' && v instanceof c; });
 })();
 "#;
+
+/// `os.networkInterfaces()` as JSON: IPv4/IPv6 entries grouped by interface name (POSIX `getifaddrs`; the
+/// MAC comes from `/sys/class/net/<name>/address`, all zero when absent), the shape thaw-quickjs returns.
+#[cfg(unix)]
+fn network_interfaces_json() -> Result<String, String> {
+    use std::ffi::CStr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    let mut groups = std::collections::BTreeMap::<String, Vec<serde_json::Value>>::new();
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `head` is a valid out-pointer; the list is walked read-only and freed below.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return Err(format!(
+            "getifaddrs failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut entry = head;
+    while !entry.is_null() {
+        // SAFETY: `entry` is a live node of the getifaddrs list.
+        let ifa = unsafe { &*entry };
+        entry = ifa.ifa_next;
+        if ifa.ifa_addr.is_null() {
+            continue;
+        }
+        // SAFETY: a non-null `ifa_addr` points to a sockaddr whose family tells its concrete type.
+        let family = unsafe { (*ifa.ifa_addr).sa_family } as i32;
+        if family != libc::AF_INET && family != libc::AF_INET6 {
+            continue;
+        }
+        // SAFETY: `ifa_name` is a NUL-terminated interface name.
+        let name = unsafe { CStr::from_ptr(ifa.ifa_name) }
+            .to_string_lossy()
+            .into_owned();
+        let internal = ifa.ifa_flags & (libc::IFF_LOOPBACK as libc::c_uint) != 0;
+        let mac = std::fs::read_to_string(format!("/sys/class/net/{name}/address"))
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "00:00:00:00:00:00".to_string());
+        let entries = groups.entry(name).or_default();
+        if family == libc::AF_INET {
+            // SAFETY: AF_INET addresses are `sockaddr_in`.
+            let address = unsafe { *(ifa.ifa_addr as *const libc::sockaddr_in) };
+            let ip = Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
+            let mask_bits = if ifa.ifa_netmask.is_null() {
+                0
+            } else {
+                // SAFETY: the netmask of an AF_INET address is a `sockaddr_in`.
+                u32::from_be(
+                    unsafe { *(ifa.ifa_netmask as *const libc::sockaddr_in) }
+                        .sin_addr
+                        .s_addr,
+                )
+            };
+            entries.push(serde_json::json!({
+                "address": ip.to_string(), "netmask": Ipv4Addr::from(mask_bits).to_string(), "family": "IPv4",
+                "mac": mac, "internal": internal, "cidr": format!("{ip}/{}", mask_bits.count_ones()),
+            }));
+        } else {
+            // SAFETY: AF_INET6 addresses are `sockaddr_in6`.
+            let address = unsafe { *(ifa.ifa_addr as *const libc::sockaddr_in6) };
+            let ip = Ipv6Addr::from(address.sin6_addr.s6_addr);
+            let mask_bytes = if ifa.ifa_netmask.is_null() {
+                [0u8; 16]
+            } else {
+                // SAFETY: the netmask of an AF_INET6 address is a `sockaddr_in6`.
+                unsafe { *(ifa.ifa_netmask as *const libc::sockaddr_in6) }
+                    .sin6_addr
+                    .s6_addr
+            };
+            let prefix: u32 = mask_bytes.iter().map(|byte| byte.count_ones()).sum();
+            entries.push(serde_json::json!({
+                "address": ip.to_string(), "netmask": Ipv6Addr::from(mask_bytes).to_string(), "family": "IPv6",
+                "mac": mac, "internal": internal, "cidr": format!("{ip}/{prefix}"), "scopeid": address.sin6_scope_id,
+            }));
+        }
+    }
+    // SAFETY: `head` came from a successful getifaddrs.
+    unsafe { libc::freeifaddrs(head) };
+    Ok(serde_json::to_string(&groups).unwrap_or_else(|_| "{}".to_string()))
+}
+
+#[cfg(not(unix))]
+fn network_interfaces_json() -> Result<String, String> {
+    Err("os.networkInterfaces() is not supported by thaw-js on this platform".into())
+}
 
 impl Interp {
     pub(crate) fn install_sysio(&mut self) {
@@ -323,12 +448,9 @@ impl Interp {
             Ok(Value::str(&priority_result(set_priority(pid, prio))))
         });
         g.declare("__thaw_os_set_priority", f, true);
-        // ponytail: per-interface addresses need getifaddrs; add when a package reads os.networkInterfaces()
-        let f = self.native(|it, _, _| {
-            it.throw_error(
-                "Error",
-                "os.networkInterfaces() is not supported by thaw-js yet",
-            )
+        let f = self.native(|it, _, _| match network_interfaces_json() {
+            Ok(json) => Ok(Value::str(&json)),
+            Err(message) => it.throw_error("Error", &message),
         });
         g.declare("__thaw_os_network_interfaces", f, true);
         let f = self.native(|it, _, a| {

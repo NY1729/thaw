@@ -19,6 +19,7 @@ pub(crate) const PRELUDE: &str = r#"
     };
     def(C, 'name', name);
     C.prototype = Parent ? Object.create(Parent.prototype) : {};
+    if (Parent) Object.setPrototypeOf(C, Parent);
     def(C.prototype, 'constructor', C);
     def(C.prototype, 'name', name);
     def(C.prototype, 'message', '');

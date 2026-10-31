@@ -5,7 +5,7 @@
 //! booleans, arrays, string-keyed objects). They are *copied* in and out here; the designed live
 //! views (`Json` / native class instances, design.md section 2) are milestone M4.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
@@ -329,6 +329,9 @@ type Adapter = unsafe extern "C" fn(*const c_void, *const c_char) -> *mut c_char
 struct CompiledCallback {
     adapter: usize,
     context: usize,
+    /// The closure's identity (aliases resolved) when the compiler gave one: registrations of the same
+    /// closure share one id, so `off(listener)` finds what `on(listener)` registered. 0 when unknown.
+    identity: usize,
     params: usize,
     /// Graph-wire callback (`thaw_tjs_register_callback_graph`): arguments cross as `[this, ...args]`
     /// with live objects behind handle leases, the result is a graph wire; `finish` (when not 0)
@@ -1620,6 +1623,90 @@ pub unsafe extern "C" fn thaw_tjs_call_handle_mixed_graph_result(
     })())
 }
 
+/// `handle(...args, ...direct handles)` with an `undefined` receiver (`handles` is `[count, h1, ...]`,
+/// not consumed); the result is kept as a new handle (a returned Promise is not awaited).
+///
+/// # Safety
+/// `handles` is a live native handle array (`[u64 count][u64; count]`).
+#[no_mangle]
+pub unsafe extern "C" fn thaw_tjs_call_handle_mixed_handle_graph_args_result(
+    handle: u64,
+    args_json: *const c_char,
+    handles: *const u8,
+) -> HandleResult {
+    let direct: Option<Vec<u64>> = (!handles.is_null()).then(|| {
+        let count = unsafe { *(handles.cast::<u64>()) } as usize;
+        unsafe { std::slice::from_raw_parts(handles.add(8).cast::<u64>(), count) }.to_vec()
+    });
+    handle_result((|| {
+        let direct = direct.as_ref().ok_or("null JsValue array")?;
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (_, args) = decode_wire(&args_json)?;
+        let mut values = Vec::new();
+        for h in direct {
+            values.push(on_handle(*h, |_, _, v| Ok(v))?);
+        }
+        on_handle(handle, |p, owner, f| {
+            let it = &mut p.interp;
+            let mut args = it.array_items(&args);
+            args.extend(values);
+            let value = it
+                .call(&f, &Value::Undefined, &args)
+                .map_err(|c| classify(it, c))?;
+            Ok(store_handle(owner, value))
+        })
+    })())
+}
+
+/// As [`thaw_tjs_call_handle_mixed_handle_graph_args_result`], then releases the direct handles and the callee
+/// (the native-object projection builder's callbacks live on in the returned object).
+///
+/// # Safety
+/// `handles` is a live native handle array (`[u64 count][u64; count]`).
+#[no_mangle]
+pub unsafe extern "C" fn thaw_tjs_call_handle_mixed_handle_graph_args_consuming_result(
+    handle: u64,
+    args_json: *const c_char,
+    handles: *const u8,
+) -> HandleResult {
+    // Snapshot before the call: user code it runs may re-enter compiled code and mutate the array.
+    let acquired: Vec<u64> = if handles.is_null() {
+        Vec::new()
+    } else {
+        let count = unsafe { *(handles.cast::<u64>()) } as usize;
+        unsafe { std::slice::from_raw_parts(handles.add(8).cast::<u64>(), count) }.to_vec()
+    };
+    let result =
+        unsafe { thaw_tjs_call_handle_mixed_handle_graph_args_result(handle, args_json, handles) };
+    for h in acquired {
+        thaw_tjs_release_handle(h as i64);
+    }
+    thaw_tjs_release_handle(handle as i64);
+    result
+}
+
+/// A native object-literal method: the graph callback already receives `this` as its leading argument.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_register_native_method_callback_graph(
+    adapter: *const c_void,
+    context: *const c_void,
+    jsvalue_param_mask: u64,
+    param_count: u64,
+    void_result: u8,
+    finish: *const c_void,
+    has_rest: u8,
+) -> HandleResult {
+    thaw_tjs_register_native_callback_graph(
+        adapter,
+        context,
+        jsvalue_param_mask,
+        param_count,
+        void_result,
+        finish,
+        has_rest,
+    )
+}
+
 /// Release every handle of a native handle array (`[u64 count][u64; count]`) that was never passed to a consuming call.
 ///
 /// # Safety
@@ -1875,12 +1962,26 @@ pub extern "C" fn thaw_tjs_register_callback(
     context: *const c_void,
     params: i64,
 ) -> i64 {
-    register_callback(adapter, context, params as usize, false, 0, false)
+    let identity = PENDING_IDENTITY.with(|p| p.replace(0));
+    register_callback(adapter, context, identity, params as usize, false, 0, false)
+}
+
+thread_local! {
+    /// Identity announced by [`thaw_tjs_callback_identity`] for the next `thaw_tjs_register_callback`.
+    static PENDING_IDENTITY: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Announce the identity (the compiler's alias-resolved closure pointer) of the closure the next
+/// `thaw_tjs_register_callback` registers: registering the same closure again returns the same id.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_callback_identity(identity: *const c_void) {
+    PENDING_IDENTITY.with(|p| p.set(identity as usize));
 }
 
 fn register_callback(
     adapter: *const c_void,
     context: *const c_void,
+    identity: usize,
     params: usize,
     graph: bool,
     finish: usize,
@@ -1890,9 +1991,11 @@ fn register_callback(
         let mut callbacks = callbacks.borrow_mut();
         let (adapter, context) = (adapter as usize, context as usize);
         if let Some(id) = callbacks.iter().position(|c| {
-            c.adapter == adapter
-                && c.context == context
-                && c.params == params
+            (if identity != 0 && c.identity != 0 {
+                c.identity == identity
+            } else {
+                c.adapter == adapter && c.context == context
+            }) && c.params == params
                 && c.graph == graph
                 && c.finish == finish
                 && c.has_rest == has_rest
@@ -1902,6 +2005,7 @@ fn register_callback(
         callbacks.push(CompiledCallback {
             adapter,
             context,
+            identity,
             params,
             graph,
             finish,
@@ -1928,6 +2032,7 @@ pub extern "C" fn thaw_tjs_register_native_callback_graph(
     let id = register_callback(
         adapter,
         context,
+        0,
         param_count as usize,
         true,
         finish as usize,
@@ -1954,10 +2059,18 @@ fn callback_value(it: &mut Interp, id: usize) -> Value {
 /// Rebuild a thrown error from the compiled side's `\u{1}Name\u{1}message` framing.
 pub(crate) fn tagged_error(it: &mut Interp, tagged: &str) -> Ctl {
     let tagged = tagged.strip_prefix('\u{2}').unwrap_or(tagged);
-    let (name, message) = match tagged
-        .strip_prefix('\u{1}')
-        .and_then(|t| t.split_once('\u{1}'))
-    {
+    // a native error token (`\u{1}Name\u{1}\u{1e}E1:<units>:-:<message>`): the name and the message it frames
+    let framed = thaw_arena::error_wire::parse_tagged(tagged.as_bytes()).and_then(|f| {
+        Some((
+            std::str::from_utf8(f.chain).ok()?,
+            std::str::from_utf8(f.display).ok()?,
+        ))
+    });
+    let (name, message) = match framed.or_else(|| {
+        tagged
+            .strip_prefix('\u{1}')
+            .and_then(|t| t.split_once('\u{1}'))
+    }) {
         Some((name, message)) => (
             name,
             message
@@ -2333,6 +2446,23 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
         // `{"__thaw_tjs_date__": ms}`: a compiled `Date` (`null` for an Invalid Date).
         Native::Object(fields) if matches!(fields.as_slice(), [(k, _)] if k == DATE_KEY) => {
             new_date(it, &fields[0].1).unwrap_or(Value::Undefined)
+        }
+        // `{"__thaw_regexp__": {source, flags, lastIndex}}`: a compiled `RegExp` crossing as plain data.
+        Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Object(_))] if k == "__thaw_regexp__") =>
+        {
+            let Native::Object(parts) = &fields[0].1 else {
+                unreachable!()
+            };
+            let text = |name: &str| match parts.iter().find(|(k, _)| k == name) {
+                Some((_, Native::Str(s))) => s.as_str(),
+                _ => "",
+            };
+            let made = construct_global(
+                it,
+                "RegExp",
+                &[Value::str(text("source")), Value::str(text("flags"))],
+            );
+            made.unwrap_or(Value::Undefined)
         }
         // The compiled side's `undefined` marker (absent optional argument, undefined result).
         Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Bool(true))] if k == UNDEFINED_KEY) => {
