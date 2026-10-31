@@ -690,6 +690,22 @@ impl<'a> FnLowerer<'a> {
             "toReversed" | "sort" | "toSorted" | "some" | "every" | "find" | "findIndex"
             | "findLast" | "findLastIndex" | "reduce" | "reduceRight" | "toSpliced" | "at"
             | "with" | "flat" | "flatMap" | "map" | "filter" => {
+                // `arr.sort(collator.compare)`: a dynamic (`JsValue`) method value used as the
+                // comparator is forwarded through a synthesized arrow.
+                if matches!(property.sym.as_ref(), "sort" | "toSorted") && call.args.len() == 1 && call.args[0].spread.is_none() {
+                    if let Expr::Member(callback) = call.args[0].expr.as_ref() {
+                        if matches!(callback.obj.as_ref(), Expr::Ident(_))
+                            && matches!(callback.prop, swc_ecma_ast::MemberProp::Ident(_))
+                        {
+                            let value = self.lower_expr(&call.args[0].expr)?;
+                            if matches!(self.infer_expr_type(&value)?, HirType::JsValue | HirType::Json | HirType::Dynamic) {
+                                let mut forwarded = call.clone();
+                                forwarded.args[0].expr = Box::new(Expr::Arrow(member_forwarder(callback, 2)));
+                                return self.lower_native_array_transform_method(member, property, &forwarded);
+                            }
+                        }
+                    }
+                }
                 self.lower_native_array_transform_method(member, property, call)
             }
             "forEach" | "slice" | "subarray" | "substring" | "substr" | "copyWithin" | "fill"
