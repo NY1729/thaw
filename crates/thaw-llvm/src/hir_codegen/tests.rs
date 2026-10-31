@@ -813,5 +813,6 @@ include!("tests/perf_audit2_contracts.rs");
 include!("tests/perf_audit2_leftovers_contracts.rs");
 include!("tests/audit2_async_streams_contracts.rs");
 include!("tests/generator_any_contracts.rs");
+include!("tests/compile_speed_contracts.rs");
 include!("tests/object_create_contracts.rs");
 include!("tests/audit2_leftovers_contracts.rs");

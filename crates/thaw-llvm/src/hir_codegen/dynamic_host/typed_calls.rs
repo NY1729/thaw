@@ -557,9 +557,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .into(),
                 );
             }
-            let name = self
-                .builder
-                .build_global_string_ptr(&signature.symbol, "jit_symbol")
+            let name = self.intern_string(&signature.symbol, "jit_symbol")
                 .map_err(|error| error.to_string())?;
             let argument_storage = self
                 .builder
@@ -1402,9 +1400,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for argument in &fresh_json_arguments {
             self.release_fresh_json_argument_if_active(argument)?;
         }
-        let name = self
-            .builder
-            .build_global_string_ptr(&signature.symbol, "dynamic_symbol")
+        let name = self.intern_string(&signature.symbol, "dynamic_symbol")
             .map_err(|error| error.to_string())?;
         if signature.backend == DynamicBackend::Napi && signature.ret == HirType::JsValue {
             let Some(constructor_name) = napi_constructor_export_name(&signature.symbol) else {
@@ -1475,9 +1471,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.branch_on_pending_exception()?;
                 return Ok(value);
             };
-            let constructor_name = self
-                .builder
-                .build_global_string_ptr(constructor_name, "napi_constructor_name")
+            let constructor_name = self.intern_string(constructor_name, "napi_constructor_name")
                 .map_err(|error| error.to_string())?;
             // Looking up a missing N-API constructor can set a pending
             // exception before argument graph encoding starts. Keep fresh
@@ -1538,9 +1532,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // QuickJS handle support even though it does not enter that helper.
             self.uses_quickjs_handles = true;
             if let Some(constructor_name) = napi_constructor_export_name(&signature.symbol) {
-                let constructor_name = self
-                    .builder
-                    .build_global_string_ptr(constructor_name, "typed_dynamic_constructor_name")
+                let constructor_name = self.intern_string(constructor_name, "typed_dynamic_constructor_name")
                     .map_err(|error| error.to_string())?;
                 let constructor = self
                     .builder
@@ -1713,9 +1705,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_typed_dynamic_argument(array, value, ty)
                 .map_err(|error| format!("thaw-js argument {} ({ty:?}): {error}", index + 1))?;
         }
-        let name = self
-            .builder
-            .build_global_string_ptr(&signature.symbol, "thaw_js_symbol")
+        let name = self.intern_string(&signature.symbol, "thaw_js_symbol")
             .map_err(|error| error.to_string())?;
         let mut json = self.compile_json_backend_values_with_extra(
             name.as_pointer_value().into(),
@@ -1785,9 +1775,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// Calling an unsupported thaw-js signature throws instead of failing the build (every generated
     /// wrapper is compiled, called or not).
     fn compile_thaw_js_unsupported_stub(&mut self, message: &str) -> Result<(), String> {
-        let name = self
-            .builder
-            .build_global_string_ptr(message, "thaw_js_unsupported")
+        let name = self.intern_string(message, "thaw_js_unsupported")
             .map_err(|error| error.to_string())?;
         let empty = self
             .builder
@@ -1867,9 +1855,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_typed_dynamic_argument(array, value, ty)
                 .map_err(|error| format!("thaw-js class argument {} ({ty:?}): {error}", index + 1))?;
         }
-        let name = self
-            .builder
-            .build_global_string_ptr(symbol, "thaw_js_class_symbol")
+        let name = self.intern_string(symbol, "thaw_js_class_symbol")
             .map_err(|error| error.to_string())?;
         let want_handle = self.context.i8_type().const_int(u64::from(ret_handle), false);
         let json = self.compile_json_backend_values_with_extra(
@@ -1906,9 +1892,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_object_new returned no value")?;
-        let key = self
-            .builder
-            .build_global_string_ptr("__thaw_tjs_handle__", "thaw_js_handle_key")
+        let key = self.intern_string("__thaw_tjs_handle__", "thaw_js_handle_key")
             .map_err(|error| error.to_string())?;
         self.builder
             .build_call(
@@ -1992,7 +1976,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let marker = self.builder.build_call(self.module.get_function("thaw_json_object_new").unwrap(), &[], "thaw_js_callback_marker")
             .map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("thaw_json_object_new returned no value")?;
-        let key = self.builder.build_global_string_ptr("__thaw_tjs_cb__", "thaw_js_callback_key")
+        let key = self.intern_string("__thaw_tjs_cb__", "thaw_js_callback_key")
             .map_err(|error| error.to_string())?;
         self.builder.build_call(
             self.module.get_function("thaw_json_object_set_number").unwrap(),
