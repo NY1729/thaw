@@ -557,7 +557,8 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
             }
         }
         for m in &w.called {
-            if !known_methods.contains(m) && !defined.contains(m) {
+            // `util.styleText` calls `stream.hasColors()` only after `typeof stream.hasColors === 'function'`
+            if !known_methods.contains(m) && !defined.contains(m) && m != "hasColors" {
                 add(&mut report, format!("method:{m}"), 1, key);
             }
         }
