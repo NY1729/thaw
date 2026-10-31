@@ -2977,6 +2977,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_single_arg_call("thaw_fetch_get", args, "fetch");
             }
             "sleep" => return self.compile_sleep(args),
+            "__thaw_timer_set" | "__thaw_timer_clear" | "__thaw_timer_ref" | "__thaw_timer_unref"
+            | "__thaw_timer_refresh" | "__thaw_timer_has_ref" => {
+                return self.compile_native_timer(name, args)
+            }
             _ => {}
         }
 

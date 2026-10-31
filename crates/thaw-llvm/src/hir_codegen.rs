@@ -509,6 +509,10 @@ pub struct HirCompiler<'ctx> {
     share_error_setter: bool,
     interned_strings: std::cell::RefCell<HashMap<String, inkwell::values::GlobalValue<'ctx>>>,
     uses_napi: bool,
+    /// The program lowered a timer to thaw-runtime's native queue (`__thaw_timer_*`).
+    uses_native_timers: bool,
+    /// The program's entry is a Lambda `handler` (per-invocation event loop).
+    has_lambda_handler: bool,
     /// Backend optimisation level for `write_object_file` (`Default` unless `set_codegen_opt`).
     codegen_opt: OptimizationLevel,
     uses_thaw_js: bool,
@@ -885,6 +889,8 @@ impl<'ctx> HirCompiler<'ctx> {
             share_error_setter: false,
             interned_strings: std::cell::RefCell::new(HashMap::new()),
             uses_napi: false,
+            uses_native_timers: false,
+            has_lambda_handler: false,
             uses_thaw_js: false,
             uses_intl: false,
             thaw_js_routed: false,
@@ -1001,7 +1007,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("a program can define `main` or `handler`, not both".to_string())
                 }
                 (true, None) => self.emit_c_main_entry(),
-                (false, Some(handler)) => self.emit_lambda_entry(handler)?,
+                (false, Some(handler)) => {
+                    self.has_lambda_handler = true;
+                    self.emit_lambda_entry(handler)?
+                }
                 (false, None) => self.emit_c_main_entry(),
             }
         }
@@ -1253,6 +1262,23 @@ impl<'ctx> HirCompiler<'ctx> {
 
     pub fn uses_napi(&self) -> bool {
         self.uses_napi
+    }
+
+    /// Native timers are only driven by the plain entry's terminal loop: any JS engine, N-API, native
+    /// `http.Server` or Lambda handler in the same program needs the JS timer heap instead, so the
+    /// caller must rebuild without native timers.
+    pub fn native_timers_conflict(&self) -> bool {
+        self.uses_native_timers
+            && (self.uses_quickjs
+                || self.uses_quickjs_handles
+                || self.uses_thaw_js
+                || self.uses_napi
+                || self.has_lambda_handler
+                || self.module.get_function("createServer").is_some())
+    }
+
+    pub fn uses_native_timers(&self) -> bool {
+        self.uses_native_timers
     }
 
     fn declare_exception_state(&self) {
@@ -2562,6 +2588,7 @@ include!("hir_codegen/json_discard.rs");
 include!("hir_codegen/values/expressions.rs");
 include!("hir_codegen/values/unions.rs");
 include!("hir_codegen/values/closures.rs");
+include!("hir_codegen/timers.rs");
 
 include!("hir_codegen/collections.rs");
 

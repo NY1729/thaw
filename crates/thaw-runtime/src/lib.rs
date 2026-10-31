@@ -260,6 +260,7 @@ fn purge_pending_async_state() {
     uncount_pending_promise_all_states_for_invocation();
     READY_CONTINUATIONS.with(|queue| queue.borrow_mut().clear());
     TIMERS.with(|timers| timers.borrow_mut().clear());
+    NATIVE_TIMERS.with(|timers| timers.borrow_mut().clear());
     FD_WAITS.with(|waits| waits.borrow_mut().clear());
     ACTIVE_PROMISE_JOINS.with(|count| count.set(0));
     PROMISE_REPORT_ACTIVITY.with(|activity| activity.set(0));
@@ -611,13 +612,17 @@ fn promote_due_timers() {
 
 fn next_timer_delay() -> Option<Duration> {
     let now = Instant::now();
-    TIMERS.with(|timers| {
+    let promise_timer = TIMERS.with(|timers| {
         timers
             .borrow()
             .iter()
             .map(|timer| timer.deadline.saturating_duration_since(now))
             .min()
-    })
+    });
+    match (promise_timer, next_native_timer_delay()) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Runs one ready continuation or dispatches ready I/O and returns 1. Returns
@@ -640,6 +645,14 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
                     promise.rejected && !promise.handled && !promise.reported_unhandled
                 })
             });
+        // Ready continuations and rejection reports come first: promise jobs drain between timers.
+        if io_events == 0
+            && !reporting_work
+            && !UNHANDLED_FAILURE.with(Cell::get)
+            && run_one_native_timer()
+        {
+            return 1;
+        }
         return u8::from(
             io_events != 0
                 || READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
@@ -700,6 +713,7 @@ fn thaw_runtime_wait_fd_until(
 }
 
 include!("runtime/http.rs");
+include!("runtime/timers.rs");
 
 /// Drains all continuations which are ready now and returns how many ran.
 /// Callbacks may enqueue more work; that work is included in the same drain.
@@ -718,6 +732,7 @@ pub extern "C" fn thaw_runtime_async_work_pending() -> u8 {
     u8::from(
         READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
             || TIMERS.with(|timers| !timers.borrow().is_empty())
+            || native_timers_keep_alive()
             || has_fd_waits(),
     )
 }
@@ -734,7 +749,19 @@ pub extern "C" fn thaw_runtime_abort_pending_work() {
 
 #[no_mangle]
 pub extern "C" fn thaw_runtime_shutdown_wait() {
-    std::thread::sleep(Duration::from_millis(1));
+    // Only native timers pending: sleep to the next one instead of polling every millisecond.
+    let only_timers = native_timers_pending()
+        && !has_fd_waits()
+        && READY_CONTINUATIONS.with(|ready| ready.borrow().is_empty())
+        && TIMERS.with(|timers| timers.borrow().is_empty());
+    let nap = if only_timers {
+        next_native_timer_delay()
+            .unwrap_or_default()
+            .min(Duration::from_millis(25))
+    } else {
+        Duration::ZERO
+    };
+    std::thread::sleep(nap.max(Duration::from_millis(1)));
 }
 
 /// Reports rejections nobody handled yet. The generated entry point calls it

@@ -714,4 +714,11 @@ thaw_temporal_zoned_start_of_day
 thaw_temporal_zoned_to_string
 thaw_temporal_zoned_transition
 thaw_temporal_zoned_zone_from_string
+thaw_timer_clear
+thaw_timer_has_ref
+thaw_timer_ref
+thaw_timer_refresh
+thaw_timer_run_until_idle
+thaw_timer_set
+thaw_timer_unref
 thaw_unescape
