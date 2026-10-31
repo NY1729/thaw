@@ -240,7 +240,7 @@ function main(): void {
 "##;
     assert_eq!(
         compile_and_run(source, "audit2_subclass_print"),
-        "Dog { name: 'Rex', tricks: [ 'sit' ] } [ Animal { name: 'Cat' }, Dog { name: 'Rex', tricks: [ 'sit' ] } ]\nCircle { name: 'c', r: 2 } [ Circle { name: 'c', r: 1 } ] Circle Circle\np\n"
+        "Dog { name: 'Rex', tricks: [ 'sit' ] } [ Animal { name: 'Cat' }, Dog { name: 'Rex', tricks: [ 'sit' ] } ]\nCircle { r: 2, name: 'c' } [ Circle { r: 1, name: 'c' } ] Circle Circle\np\n"
     );
 }
 

@@ -3305,8 +3305,10 @@ impl<'a> FnLowerer<'a> {
                 // Block-scoped locals of the case bodies keep their (unique) scope entries so
                 // the enclosing function's return-type inference can still type `return x`.
                 let inner_scope = std::mem::replace(&mut self.scope, saved_scope);
-                for (name, ty) in inner_scope {
-                    self.scope.entry(name).or_insert(ty);
+                if lowered.is_ok() {
+                    for (name, ty) in inner_scope {
+                        self.scope.entry(name).or_insert(ty);
+                    }
                 }
                 lowered
             }
