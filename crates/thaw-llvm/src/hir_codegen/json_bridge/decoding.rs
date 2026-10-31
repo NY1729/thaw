@@ -163,6 +163,69 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(result.as_basic_value())
     }
 
+    /// A native `Date` object (authenticated identity + timestamp) of time value `timestamp`.
+    pub(super) fn compile_native_date_from_timestamp(
+        &mut self,
+        fields: &[(String, HirType)],
+        timestamp: inkwell::values::FloatValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let object = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    self.context
+                        .i64_type()
+                        .const_int(object_storage_bytes(fields)?, false)
+                        .into(),
+                    self.context.i64_type().const_int(8, false).into(),
+                ],
+                "dynamic_result_date_object",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+        let values: [BasicValueEnum<'ctx>; 2] = [
+            self.context.bool_type().const_int(1, false).into(),
+            timestamp.into(),
+        ];
+        for (index, value) in values.into_iter().enumerate() {
+            let offset = self
+                .context
+                .i64_type()
+                .const_int(object_field_offset(fields, index)?, false);
+            let pointer = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        object,
+                        &[offset],
+                        "decoded_date_field",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            self.builder
+                .build_store(pointer, value)
+                .map_err(|error| error.to_string())?;
+        }
+        let marker = self
+            .builder
+            .build_global_string_ptr(&fields[0].0, "decoded_date_identity")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_object_set_class_identity")
+                    .unwrap(),
+                &[object.into(), marker.as_pointer_value().into()],
+                "register_decoded_date_identity",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(object.into())
+    }
+
     fn compile_json_to_native_object(
         &mut self,
         json: BasicValueEnum<'ctx>,
@@ -195,61 +258,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .into_float_value();
             self.compile_check_json_host_error(json, None)?;
 
-            let object = self
-                .builder
-                .build_call(
-                    self.module.get_function("thaw_arena_alloc").unwrap(),
-                    &[
-                        self.context
-                            .i64_type()
-                            .const_int(object_storage_bytes(fields)?, false)
-                            .into(),
-                        self.context.i64_type().const_int(8, false).into(),
-                    ],
-                    "dynamic_result_date_object",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap()
-                .into_pointer_value();
-            let values: [BasicValueEnum<'ctx>; 2] = [
-                self.context.bool_type().const_int(1, false).into(),
-                timestamp.into(),
-            ];
-            for (index, value) in values.into_iter().enumerate() {
-                let offset = self
-                    .context
-                    .i64_type()
-                    .const_int(object_field_offset(fields, index)?, false);
-                let pointer = unsafe {
-                    self.builder
-                        .build_in_bounds_gep(
-                            self.context.i8_type(),
-                            object,
-                            &[offset],
-                            "decoded_date_field",
-                        )
-                        .map_err(|error| error.to_string())?
-                };
-                self.builder
-                    .build_store(pointer, value)
-                    .map_err(|error| error.to_string())?;
-            }
-            let marker = self
-                .builder
-                .build_global_string_ptr(&fields[0].0, "decoded_date_identity")
-                .map_err(|error| error.to_string())?;
-            self.builder
-                .build_call(
-                    self.module
-                        .get_function("thaw_object_set_class_identity")
-                        .unwrap(),
-                    &[object.into(), marker.as_pointer_value().into()],
-                    "register_decoded_date_identity",
-                )
-                .map_err(|error| error.to_string())?;
-            return Ok(object.into());
+            return self.compile_native_date_from_timestamp(fields, timestamp);
         }
         self.compile_validate_native_argument(json, ty)?;
         let object = self

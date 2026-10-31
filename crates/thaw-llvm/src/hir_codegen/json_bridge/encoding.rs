@@ -79,6 +79,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let stringify_fn = self.module.get_function(
             if backend_symbol.ends_with("_graph_result") {
                 "thaw_json_graph_encode"
+            } else if matches!(backend_symbol, "thaw_tjs_call_typed_result" | "thaw_tjs_class_call") {
+                "thaw_json_stringify_tjs"
             } else {
                 "thaw_json_stringify"
             }

@@ -182,3 +182,18 @@ fn routed_graph_retain_uses_the_tjs_symbol_and_not_quickjs() {
     assert!(uses_quickjs, "{ir}");
     assert!(ir.contains("call { i64, ptr } @thaw_js_retain_graph_result("), "{ir}");
 }
+
+#[test]
+fn typed_thaw_js_calls_carry_dates_on_the_date_wire_and_accept_live_value_params() {
+    assert!(thaw_js_param_type(&thaw_hir::HirType::JsValue));
+    // "dt::plus"
+    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_program(
+        "declare function __thaw_typed_tjs_64743a3a706c7573(d: Date, n: number): Date;
+         function main(): void { console.log(__thaw_typed_tjs_64743a3a706c7573(new Date(0), 5).getTime()); }",
+    );
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    // arguments serialize through the Date-wire stringifier; the Date result is requested as a wire node
+    assert!(ir.contains("@thaw_json_stringify_tjs("), "{ir}");
+    assert!(ir.contains("\\03dt::plus"), "{ir}");
+    assert!(ir.contains("__thaw_tjs_date__"), "{ir}");
+}
