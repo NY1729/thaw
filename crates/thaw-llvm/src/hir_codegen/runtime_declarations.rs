@@ -1711,6 +1711,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module
             .add_function("thaw_regex_exec", regex_split_type, Some(Linkage::External));
         self.module.add_function(
+            "thaw_regex_check",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_regex_exec_groups",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
@@ -1718,6 +1723,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_regex_exec_index",
             f64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_regex_console_wrap",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -2997,6 +3007,11 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_json_own_keys",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_own_symbols",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );

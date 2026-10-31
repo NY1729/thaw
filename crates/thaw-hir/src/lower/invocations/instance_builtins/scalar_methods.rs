@@ -318,9 +318,16 @@ impl<'a> FnLowerer<'a> {
                         HirStmt::Expr(HirExpr::Assign(normalized_name.clone(), Box::new(value)))
                     };
                     let range_error = || {
-                        HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                            "Invalid count value for String.prototype.repeat".into(),
-                        )))
+                        let concat = |a, b| HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".into())), vec![a, b],
+                        );
+                        HirStmt::Throw(concat(
+                            HirExpr::Lit(HirLit::Str("\u{1}RangeError\u{1}Invalid count value: ".into())),
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                                vec![var(&count_name)],
+                            ),
+                        ))
                     };
                     let body = HirExpr::Block(vec![
                         HirStmt::Let(normalized_name.clone(), HirType::F64, var(&count_name)),
