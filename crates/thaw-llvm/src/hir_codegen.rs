@@ -1088,6 +1088,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_js_call_handle_handle_graph_args_result",
                     "thaw_tjs_call_handle_handle_graph_args_result",
                 ),
+                (
+                    "thaw_js_call_handle_graph_result",
+                    "thaw_tjs_call_handle_graph_result",
+                ),
+                (
+                    "thaw_js_call_handle_mixed_exact_consuming_result",
+                    "thaw_tjs_call_handle_mixed_exact_consuming_result",
+                ),
                 ("thaw_js_run_event_loop", "thaw_tjs_run_event_loop"),
                 (
                     "thaw_js_terminal_work_pending",

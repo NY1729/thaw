@@ -1816,7 +1816,8 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_thaw_js = true;
         let symbol = signature.symbol.as_str();
-        let is_new = symbol.starts_with("$new$");
+        let is_value = symbol.starts_with("$value$");
+        let is_new = symbol.starts_with("$new$") || is_value;
         let is_static = symbol.starts_with("$staticmethod$") || symbol.starts_with("$staticmethodvoid$");
         let is_method = symbol.starts_with("$method$") || symbol.starts_with("$methodvoid$");
         let handle_param = |ty: &HirType| *ty == HirType::JsValue;
@@ -2033,8 +2034,11 @@ impl<'ctx> HirCompiler<'ctx> {
         resolve_success: bool,
         fresh_argument_handles: &[FreshEventKeyHandle<'ctx>],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
+        if resolve_success {
+            // (the thaw-js twin does not await a returned Promise)
+            self.uses_quickjs = true;
+        }
         self.compile_register_js_callback_host_operations()?;
         let callable = self.builder.build_call(
             self.module.get_function("thaw_js_get_global").unwrap(),
