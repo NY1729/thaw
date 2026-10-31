@@ -353,7 +353,7 @@ struct GuardReads<'a> {
 impl GuardReads<'_> {
     fn closure<N: VisitWith<BoundNames> + VisitMutWith<Self>>(&mut self, node: &mut N) {
         let mut bound = BoundNames::default();
-        (&*node).visit_with(&mut bound);
+        (*node).visit_with(&mut bound);
         if bound.0.contains(self.name) {
             return;
         }
