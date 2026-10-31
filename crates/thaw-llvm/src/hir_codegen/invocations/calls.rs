@@ -2733,6 +2733,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 return Ok(map);
             }
+            "__thaw_closure_resolve" => {
+                let [closure] = args else {
+                    return Err("closure identity expects one operand".to_string());
+                };
+                let closure = self.compile_expr(closure)?.into_pointer_value();
+                return Ok(self.resolve_closure_alias(closure)?.into());
+            }
             "__thaw_object_to_string" => return self.compile_object_to_string(args),
             "__thaw_number_is_nan" => return self.compile_number_predicate(args, false),
             "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
