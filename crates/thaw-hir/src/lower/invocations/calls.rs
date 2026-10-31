@@ -3071,19 +3071,6 @@ impl<'a> FnLowerer<'a> {
                 return self.lower_primitive_conversion(&callee_name, value.clone(), bindings);
             }
             let value = self.lower_expr(&arg.expr)?;
-            // An object literal argument (`Number({ valueOf() { return 7 } })`) is
-            // converted through its methods: evaluate it once, into a temporary.
-            if matches!(arg.expr.as_ref(), Expr::Object(_)) {
-                let ty = self.infer_expr_type(&value)?;
-                let name = format!("__thaw_primitive_operand_{}", self.next_binding);
-                self.next_binding += 1;
-                self.scope.insert(name.clone(), ty.clone());
-                return self.lower_primitive_conversion(
-                    &callee_name,
-                    HirExpr::Var(name.clone()),
-                    vec![(name, ty, value)],
-                );
-            }
             return self.lower_primitive_conversion(&callee_name, value, Vec::new());
         }
 
