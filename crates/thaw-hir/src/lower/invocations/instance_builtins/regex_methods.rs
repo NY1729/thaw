@@ -220,7 +220,7 @@ impl<'a> FnLowerer<'a> {
                         let error_message = if property.sym == *"replace" {
                             "invalid regular expression"
                         } else {
-                            "replaceAll must be called with a global RegExp"
+                            "\u{1}TypeError\u{1}String.prototype.replaceAll called with a non-global RegExp argument"
                         };
                         let body = HirExpr::Block(vec![
                             HirStmt::Let(
