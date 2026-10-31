@@ -440,6 +440,9 @@ fn collect_native_classes<'a>(
                             (
                                 method.function.is_async,
                                 method_type(name, method, interfaces, generic_interfaces),
+                                // An unannotated return is inferred from the body later; the
+                                // placeholder `Void` here must not be compared to the contract.
+                                method.function.return_type.is_none() && !method.function.is_generator,
                             )
                         })
                     });
@@ -456,10 +459,12 @@ fn collect_native_classes<'a>(
                 // An async method's native type carries the awaited result, so
                 // its interface's `Promise<T>` return compares as `T`.
                 let mut async_method = false;
+                let mut unannotated_return = false;
                 let actual_type = match (field_type, implemented_method) {
                     (Some(ty), _) => ty,
-                    (None, Some((is_async, ty))) => {
+                    (None, Some((is_async, ty, unannotated))) => {
                         async_method = is_async;
+                        unannotated_return = unannotated;
                         ty?
                     }
                     (None, None) => {
@@ -476,7 +481,10 @@ fn collect_native_classes<'a>(
                     },
                     _ => required_type.clone(),
                 };
-                if &actual_type != required_type {
+                let params_only_match = unannotated_return
+                    && matches!((&actual_type, required_type),
+                        (HirType::Function(actual, _), HirType::Function(required, _)) if actual == required);
+                if &actual_type != required_type && !params_only_match {
                     return Err(format!(
                         "class `{name}` field `{field}` has type {actual_type:?}, but `{}` requires {required_type:?}",
                         target.sym
