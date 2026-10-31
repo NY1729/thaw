@@ -1308,6 +1308,12 @@ impl Visit for StorageGraph {
                                 }
                             }
                         }
+                        // `Object.create(proto)` yields a host object whose own-ness only dynamic storage models.
+                        if matches!(&member.prop, swc_ecma_ast::MemberProp::Ident(method) if method.sym == "create")
+                            && matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Object" && self.lookup("Object").is_none())
+                        {
+                            self.expose(span);
+                        }
                         if !self.is_fresh_static_builtin(member) {
                             self.link(span, member.obj.span());
                             for argument in &call.args { self.contain(member.obj.span(), argument.expr.span()); }
