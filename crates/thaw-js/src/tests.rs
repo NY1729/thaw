@@ -1507,3 +1507,142 @@ fn scan_knows_fetch_globals_and_tolerates_service_worker_listener() {
     let r = crate::scan::scan_bundle(&blocked).ok().unwrap();
     assert!(r.is_clean(), "{:?}", r.blockers);
 }
+
+// ----- graph callbacks and awaited Promises -----
+
+const GRAPH_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"gr/index.js": function(module, exports, require) {
+  exports.echo = function (f) { var o = { k: 3 }; return f(o) === o; };
+  exports.number = function (f) { return f({ k: 1 }) + 1; };
+  exports.later = function () { return new Promise(function (r) { setTimeout(function () { r(42); }, 1); }); };
+  exports.laterThrow = function () { return new Promise(function (_, j) { setTimeout(function () { j(new Error('late')); }, 1); }); };
+},
+};
+var __thaw_bundle_require_maps = { "gr/index.js": {}, };
+var __thaw_bundle_entry_key = "gr/index.js";
+})(globalThis.require);"#;
+
+/// A graph-callback adapter: consumes the `[this, object]` wire like `thaw_json_graph_decode`, then
+/// answers with the object lease it received (identity echo) or the number 7.
+unsafe extern "C" fn graph_adapter(
+    context: *const std::ffi::c_void,
+    wire: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let text = unsafe { std::ffi::CStr::from_ptr(wire) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(unsafe { thaw_arena::take_owned_graph_wire(wire) });
+    let id = text
+        .split("\"hdl\":")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .and_then(|n| n.parse::<i64>().ok())
+        .expect("the object argument is a handle lease");
+    let echo = !context.is_null();
+    let answer = if echo {
+        crate::host::thaw_tjs_retain_handle(id);
+        format!("{{\"root\":{{\"r\":0}},\"nodes\":[{{\"hdl\":{id}}}],\"leases\":[{id}],\"napiLeases\":[]}}")
+    } else {
+        "{\"root\":{\"v\":7},\"nodes\":[],\"leases\":[],\"napiLeases\":[]}".to_string()
+    };
+    crate::host::thaw_tjs_release_handle(id);
+    let ptr = thaw_arena::owned_string(answer);
+    assert!(unsafe { thaw_arena::register_owned_graph_wire(ptr) });
+    ptr
+}
+
+#[test]
+fn graph_callbacks_receive_live_objects_and_return_graph_wires() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(GRAPH_BUNDLE).unwrap();
+    assert_eq!(thaw_tjs_register(c"gr".as_ptr(), source.as_ptr()), 1);
+    let handle_of = |context: *const std::ffi::c_void| {
+        let made = thaw_tjs_register_native_callback_graph(
+            graph_adapter as *const _,
+            context,
+            0,
+            1,
+            0,
+            std::ptr::null(),
+            0,
+        );
+        assert!(made.error.is_null() && made.value > 0);
+        made.value
+    };
+    let echo = handle_of(std::ptr::dangling());
+    let number = handle_of(std::ptr::null());
+    let call = |export: &str, callback: u64| {
+        let function = thaw_tjs_get_global(
+            std::ffi::CString::new(format!("gr::{export}"))
+                .unwrap()
+                .as_ptr(),
+        );
+        assert!(function > 0);
+        let wire = std::ffi::CString::new(format!(
+            "{{\"root\":{{\"r\":0}},\"nodes\":[{{\"a\":[{{\"r\":1}}]}},{{\"hdl\":{callback}}}]}}"
+        ))
+        .unwrap();
+        thaw_tjs_retain_handle(callback as i64);
+        let result =
+            thaw_tjs_call_handle_handle_graph_args_result(function as u64, wire.as_ptr(), false);
+        assert!(result.error.is_null(), "{export}");
+        result.value
+    };
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(call("echo", echo))) }
+            .to_str()
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(call("number", number))) }
+            .to_str()
+            .unwrap(),
+        "8"
+    );
+}
+
+#[test]
+fn exact_calls_await_returned_promises_only_when_resolving() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(GRAPH_BUNDLE.replace("gr/", "pr/")).unwrap();
+    assert_eq!(thaw_tjs_register(c"pr".as_ptr(), source.as_ptr()), 1);
+    let wire = c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}]}";
+    let none: [u64; 1] = [0];
+    let call = |export: &str, resolve: bool| {
+        let function = thaw_tjs_get_global(
+            std::ffi::CString::new(format!("pr::{export}"))
+                .unwrap()
+                .as_ptr(),
+        );
+        let handles = none.as_ptr().cast::<u8>();
+        unsafe {
+            if resolve {
+                thaw_tjs_call_handle_mixed_exact_resolved_consuming_result(
+                    function as u64,
+                    wire.as_ptr(),
+                    handles,
+                )
+            } else {
+                thaw_tjs_call_handle_mixed_exact_consuming_result(
+                    function as u64,
+                    wire.as_ptr(),
+                    handles,
+                )
+            }
+        }
+    };
+    let text = |h: u64| {
+        unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(h)) }
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(text(call("later", true).value), "42");
+    assert_eq!(text(call("later", false).value), "[object Promise]");
+    let rejected = call("laterThrow", true);
+    assert_eq!(rejected.value, 0);
+    assert!(rejected.exception_handle > 0 && rejected.exception_object_like == 1);
+}
