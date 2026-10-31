@@ -649,8 +649,7 @@ impl<'ctx> HirCompiler<'ctx> {
         symbol: &str,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let values = args
             .iter()
             .map(|argument| self.compile_expr(argument).map(Into::into))
@@ -1418,8 +1417,7 @@ impl<'ctx> HirCompiler<'ctx> {
         json_args: &HirExpr,
         handles: &HirExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let json_args = self.compile_expr(json_args)?;
         let handles = self.compile_expr(handles)?.into_pointer_value();
         let handles = self.compile_array_data(handles)?;

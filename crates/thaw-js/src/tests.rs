@@ -1426,6 +1426,78 @@ var __thaw_bundle_entry_key = \"p/index.js\";
     assert!(report.is_clean(), "{:?}", report.blockers);
 }
 
+/// Run `src` through the full event loop (child processes are polled there) and return the log lines.
+fn run_loop(src: &str) -> String {
+    let mut it = Interp::new();
+    it.run(src).expect("script runs");
+    it.run_event_loop().expect("loop runs");
+    it.out.join("|")
+}
+
+const CHILD_SHIM: &str = r#"
+function hexs(h) { var s = ''; for (var i = 0; i < h.length; i += 2) s += String.fromCharCode(parseInt(h.slice(i, i + 2), 16)); return s; }
+var logs = [];
+globalThis.__thaw_poll_platform_events = function () {
+  JSON.parse(__thaw_child_process_poll()).forEach(function (e) {
+    logs.push(e.type + (e.value !== undefined ? ':' + hexs(e.value) : '') + (e.type === 'exit' || e.type === 'exited' ? ':' + e.code + '/' + e.signal : '') + (e.code && e.type === 'error' ? ':' + e.code : ''));
+  });
+};
+"#;
+
+#[test]
+fn child_process_async_orders_output_before_close() {
+    let src = format!(
+        "{CHILD_SHIM}
+__thaw_child_process_spawn('/bin/sh', JSON.stringify(['-c', 'echo out; echo err >&2; exit 3']), JSON.stringify({{stdio: ['ignore','pipe','pipe']}}));
+setTimeout(function () {{ console.log(logs.join(',')); }}, 400);"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("spawn,"), "{out}");
+    assert!(
+        out.contains("stdout:out|") && out.contains("stderr:err|"),
+        "{out}"
+    );
+    // `exited` (the process ended) may precede the last pipe data; `exit` (close) always comes last.
+    assert!(out.ends_with(",exit:3/null"), "{out}");
+    let exited = out.find("exited:3/null").expect("exited event");
+    assert!(exited < out.rfind(",exit:3/null").unwrap(), "{out}");
+}
+
+#[test]
+fn child_process_keeps_loop_alive_and_reports_signal_and_spawn_error() {
+    let src = format!(
+        "{CHILD_SHIM}
+var h = __thaw_child_process_spawn('/bin/sleep', JSON.stringify(['5']), JSON.stringify({{}}));
+setTimeout(function () {{ console.log(__thaw_child_process_kill(h, 15)); }}, 50);
+__thaw_child_process_spawn('/nonexistent/x', '[]', '{{}}');
+process.on('exit', function () {{ console.log(logs.join(',')); }});"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("true|"), "{out}");
+    assert!(
+        out.contains("error:ENOENT") && out.contains("exit:null/15"),
+        "{out}"
+    );
+}
+
+#[test]
+fn child_process_stdin_env_cwd_and_sync() {
+    let src = format!(
+        "{CHILD_SHIM}
+var h = __thaw_child_process_spawn('/bin/cat', '[]', JSON.stringify({{cwd: '/'}}));
+__thaw_child_process_stdin(h, '68690a', false);
+__thaw_child_process_stdin(h, '', true);
+var r = JSON.parse(__thaw_child_process_sync('/bin/sh', JSON.stringify(['-c', 'echo $FOO; pwd; cat; exit 2']), JSON.stringify({{env: {{FOO: 'bar'}}, cwd: '/tmp', input: '78'}})));
+console.log(r.status, hexs(r.stdout).replace(/\\n/g, '+'));
+var t = JSON.parse(__thaw_child_process_sync('/bin/sleep', JSON.stringify(['5']), JSON.stringify({{timeout: 50, killSignal: 9}})));
+console.log(t.timedOut, t.signal);
+setTimeout(function () {{ console.log(logs.join(',')); }}, 300);"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("2 bar+/tmp+x|true 9|"), "{out}");
+    assert!(out.contains("stdout:hi|"), "{out}");
+}
+
 #[test]
 fn scan_knows_fetch_globals_and_tolerates_service_worker_listener() {
     let blocked = MINI.replace(
@@ -1434,4 +1506,143 @@ fn scan_knows_fetch_globals_and_tolerates_service_worker_listener() {
     );
     let r = crate::scan::scan_bundle(&blocked).ok().unwrap();
     assert!(r.is_clean(), "{:?}", r.blockers);
+}
+
+// ----- graph callbacks and awaited Promises -----
+
+const GRAPH_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"gr/index.js": function(module, exports, require) {
+  exports.echo = function (f) { var o = { k: 3 }; return f(o) === o; };
+  exports.number = function (f) { return f({ k: 1 }) + 1; };
+  exports.later = function () { return new Promise(function (r) { setTimeout(function () { r(42); }, 1); }); };
+  exports.laterThrow = function () { return new Promise(function (_, j) { setTimeout(function () { j(new Error('late')); }, 1); }); };
+},
+};
+var __thaw_bundle_require_maps = { "gr/index.js": {}, };
+var __thaw_bundle_entry_key = "gr/index.js";
+})(globalThis.require);"#;
+
+/// A graph-callback adapter: consumes the `[this, object]` wire like `thaw_json_graph_decode`, then
+/// answers with the object lease it received (identity echo) or the number 7.
+unsafe extern "C" fn graph_adapter(
+    context: *const std::ffi::c_void,
+    wire: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let text = unsafe { std::ffi::CStr::from_ptr(wire) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(unsafe { thaw_arena::take_owned_graph_wire(wire) });
+    let id = text
+        .split("\"hdl\":")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .and_then(|n| n.parse::<i64>().ok())
+        .expect("the object argument is a handle lease");
+    let echo = !context.is_null();
+    let answer = if echo {
+        crate::host::thaw_tjs_retain_handle(id);
+        format!("{{\"root\":{{\"r\":0}},\"nodes\":[{{\"hdl\":{id}}}],\"leases\":[{id}],\"napiLeases\":[]}}")
+    } else {
+        "{\"root\":{\"v\":7},\"nodes\":[],\"leases\":[],\"napiLeases\":[]}".to_string()
+    };
+    crate::host::thaw_tjs_release_handle(id);
+    let ptr = thaw_arena::owned_string(answer);
+    assert!(unsafe { thaw_arena::register_owned_graph_wire(ptr) });
+    ptr
+}
+
+#[test]
+fn graph_callbacks_receive_live_objects_and_return_graph_wires() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(GRAPH_BUNDLE).unwrap();
+    assert_eq!(thaw_tjs_register(c"gr".as_ptr(), source.as_ptr()), 1);
+    let handle_of = |context: *const std::ffi::c_void| {
+        let made = thaw_tjs_register_native_callback_graph(
+            graph_adapter as *const _,
+            context,
+            0,
+            1,
+            0,
+            std::ptr::null(),
+            0,
+        );
+        assert!(made.error.is_null() && made.value > 0);
+        made.value
+    };
+    let echo = handle_of(std::ptr::dangling());
+    let number = handle_of(std::ptr::null());
+    let call = |export: &str, callback: u64| {
+        let function = thaw_tjs_get_global(
+            std::ffi::CString::new(format!("gr::{export}"))
+                .unwrap()
+                .as_ptr(),
+        );
+        assert!(function > 0);
+        let wire = std::ffi::CString::new(format!(
+            "{{\"root\":{{\"r\":0}},\"nodes\":[{{\"a\":[{{\"r\":1}}]}},{{\"hdl\":{callback}}}]}}"
+        ))
+        .unwrap();
+        thaw_tjs_retain_handle(callback as i64);
+        let result =
+            thaw_tjs_call_handle_handle_graph_args_result(function as u64, wire.as_ptr(), false);
+        assert!(result.error.is_null(), "{export}");
+        result.value
+    };
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(call("echo", echo))) }
+            .to_str()
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(call("number", number))) }
+            .to_str()
+            .unwrap(),
+        "8"
+    );
+}
+
+#[test]
+fn exact_calls_await_returned_promises_only_when_resolving() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(GRAPH_BUNDLE.replace("gr/", "pr/")).unwrap();
+    assert_eq!(thaw_tjs_register(c"pr".as_ptr(), source.as_ptr()), 1);
+    let wire = c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}]}";
+    let none: [u64; 1] = [0];
+    let call = |export: &str, resolve: bool| {
+        let function = thaw_tjs_get_global(
+            std::ffi::CString::new(format!("pr::{export}"))
+                .unwrap()
+                .as_ptr(),
+        );
+        let handles = none.as_ptr().cast::<u8>();
+        unsafe {
+            if resolve {
+                thaw_tjs_call_handle_mixed_exact_resolved_consuming_result(
+                    function as u64,
+                    wire.as_ptr(),
+                    handles,
+                )
+            } else {
+                thaw_tjs_call_handle_mixed_exact_consuming_result(
+                    function as u64,
+                    wire.as_ptr(),
+                    handles,
+                )
+            }
+        }
+    };
+    let text = |h: u64| {
+        unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(h)) }
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(text(call("later", true).value), "42");
+    assert_eq!(text(call("later", false).value), "[object Promise]");
+    let rejected = call("laterThrow", true);
+    assert_eq!(rejected.value, 0);
+    assert!(rejected.exception_handle > 0 && rejected.exception_object_like == 1);
 }
