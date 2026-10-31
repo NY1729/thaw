@@ -31,9 +31,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
     /// `console.trace(...data)`: `Trace: <data>` on stderr (the stack frames are not reproduced).
     fn compile_console_trace(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
-        let prefix = self
-            .builder
-            .build_global_string_ptr(if args.is_empty() { "Trace" } else { "Trace: " }, "console_trace_prefix")
+        let prefix = self.intern_string(if args.is_empty() { "Trace" } else { "Trace: " }, "console_trace_prefix")
             .map_err(|error| error.to_string())?;
         self.compile_console_text(prefix.as_pointer_value(), args.is_empty(), "console_trace_prefix", 2)?;
         if !args.is_empty() {
@@ -131,9 +129,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(failed);
-        let prefix = self
-            .builder
-            .build_global_string_ptr(
+        let prefix = self.intern_string(
                 if values.is_empty() {
                     "Assertion failed"
                 } else {
@@ -166,9 +162,7 @@ impl<'ctx> HirCompiler<'ctx> {
         descriptor: u64,
     ) -> Result<(), String> {
         if values.is_empty() {
-            let empty = self
-                .builder
-                .build_global_string_ptr("", "console_empty")
+            let empty = self.intern_string("", "console_empty")
                 .map_err(|error| error.to_string())?;
             self.compile_console_text(empty.as_pointer_value(), true, "console_empty", descriptor)?;
         }
@@ -205,9 +199,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for (index, (hir_type, value)) in values.into_iter().enumerate() {
             self.compile_console_arg(hir_type, value, index + 1 == value_count, descriptor)?;
             if index + 1 != value_count {
-                let separator = self
-                    .builder
-                    .build_global_string_ptr(" ", "console_separator")
+                let separator = self.intern_string(" ", "console_separator")
                     .map_err(|error| error.to_string())?;
                 self.compile_console_text(
                     separator.as_pointer_value(),
@@ -421,9 +413,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // A void expression has no runtime value, so it prints as the
         // JavaScript value `undefined` (for example, awaiting Promise<void>).
         } else if matches!(hir_type, Some(HirType::Undefined | HirType::Void)) {
-            let undefined = self
-                .builder
-                .build_global_string_ptr("undefined", "undefined_value")
+            let undefined = self.intern_string("undefined", "undefined_value")
                 .map_err(|error| error.to_string())?;
             self.compile_console_text(
                 undefined.as_pointer_value(),
@@ -432,9 +422,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 descriptor,
             )?;
         } else if hir_type == Some(HirType::Null) {
-            let null = self
-                .builder
-                .build_global_string_ptr("null", "null_value")
+            let null = self.intern_string("null", "null_value")
                 .map_err(|error| error.to_string())?;
             self.compile_console_text(null.as_pointer_value(), newline, "null_value", descriptor)?;
         } else {
@@ -477,13 +465,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 // only `IntValue` left untyped/reaching here is `i1`
                 // (`HirType::Bool`).
                 BasicValueEnum::IntValue(b) => {
-                    let true_str = self
-                        .builder
-                        .build_global_string_ptr("true", "true_str")
+                    let true_str = self.intern_string("true", "true_str")
                         .map_err(|e| e.to_string())?;
-                    let false_str = self
-                        .builder
-                        .build_global_string_ptr("false", "false_str")
+                    let false_str = self.intern_string("false", "false_str")
                         .map_err(|e| e.to_string())?;
                     let selected = self
                         .builder
@@ -779,11 +763,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let state_number = self.builder
             .build_unsigned_int_to_float(state, self.context.f64_type(), "console_promise_state_number")
             .map_err(|error| error.to_string())?;
-        let state_key = self.builder
-            .build_global_string_ptr("__thaw_promise_state__", "console_promise_state_key")
+        let state_key = self.intern_string("__thaw_promise_state__", "console_promise_state_key")
             .map_err(|error| error.to_string())?.as_pointer_value();
-        let value_key = self.builder
-            .build_global_string_ptr("value", "console_promise_value_key")
+        let value_key = self.intern_string("value", "console_promise_value_key")
             .map_err(|error| error.to_string())?.as_pointer_value();
         call(self, "thaw_json_object_set_number", &[object.into(), state_key.into(), state_number.into()])?;
         let function = self.current_function();
@@ -848,8 +830,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(scalar);
-        let tag_key = self.builder
-            .build_global_string_ptr("__thaw_promise_reason_tag__", "console_promise_tag_key")
+        let tag_key = self.intern_string("__thaw_promise_reason_tag__", "console_promise_tag_key")
             .map_err(|error| error.to_string())?.as_pointer_value();
         let tag_number = self.builder
             .build_unsigned_int_to_float(tag, self.context.f64_type(), "console_promise_tag_number")
@@ -860,8 +841,7 @@ impl<'ctx> HirCompiler<'ctx> {
         call(self, "thaw_json_object_set_number", &[object.into(), value_key.into(), number.into_float_value().into()])?;
         let flag = call(self, "thaw_promise_exception_bool", &[promise.into()])?
             .try_as_basic_value().basic().ok_or("exception bool returned no value")?;
-        let flag_key = self.builder
-            .build_global_string_ptr("__thaw_promise_reason_bool__", "console_promise_bool_key")
+        let flag_key = self.intern_string("__thaw_promise_reason_bool__", "console_promise_bool_key")
             .map_err(|error| error.to_string())?.as_pointer_value();
         let flag = self.builder
             .build_int_z_extend_or_bit_cast(flag.into_int_value(), self.context.i8_type(), "console_promise_bool")
@@ -885,9 +865,7 @@ impl<'ctx> HirCompiler<'ctx> {
         name: &str,
         descriptor: u64,
     ) -> Result<(), String> {
-        let value = self
-            .builder
-            .build_global_string_ptr(text, name)
+        let value = self.intern_string(text, name)
             .map_err(|error| error.to_string())?;
         self.compile_console_text(value.as_pointer_value(), newline, name, descriptor)
     }
@@ -1099,13 +1077,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 )?;
             }
             HirType::Bool => {
-                let yes = self
-                    .builder
-                    .build_global_string_ptr("true", "union_true")
+                let yes = self.intern_string("true", "union_true")
                     .map_err(|error| error.to_string())?;
-                let no = self
-                    .builder
-                    .build_global_string_ptr("false", "union_false")
+                let no = self.intern_string("false", "union_false")
                     .map_err(|error| error.to_string())?;
                 let selected = self
                     .builder
@@ -1149,9 +1123,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_console_arg(Some(HirType::BigInt), value, newline, descriptor)?
             }
             HirType::Undefined => {
-                let undefined = self
-                    .builder
-                    .build_global_string_ptr("undefined", "union_undefined")
+                let undefined = self.intern_string("undefined", "union_undefined")
                     .map_err(|error| error.to_string())?;
                 self.compile_console_text(
                     undefined.as_pointer_value(),
@@ -1161,9 +1133,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 )?;
             }
             HirType::Null => {
-                let null = self
-                    .builder
-                    .build_global_string_ptr("null", "union_null")
+                let null = self.intern_string("null", "union_null")
                     .map_err(|error| error.to_string())?;
                 self.compile_console_text(
                     null.as_pointer_value(),
@@ -1297,9 +1267,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(render);
-        let key = self
-            .builder
-            .build_global_string_ptr("message", "console_caught_message_key")
+        let key = self.intern_string("message", "console_caught_message_key")
             .map_err(|error| error.to_string())?;
         let message = self
             .builder
@@ -1473,9 +1441,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(absent_block);
-        let absent = self
-            .builder
-            .build_global_string_ptr(absent_text, "tagged_absent_string")
+        let absent = self.intern_string(absent_text, "tagged_absent_string")
             .map_err(|error| error.to_string())?;
         self.compile_console_text(
             absent.as_pointer_value(),
@@ -1501,13 +1467,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 )?;
             }
             HirType::Bool => {
-                let true_string = self
-                    .builder
-                    .build_global_string_ptr("true", "optional_true")
+                let true_string = self.intern_string("true", "optional_true")
                     .map_err(|error| error.to_string())?;
-                let false_string = self
-                    .builder
-                    .build_global_string_ptr("false", "optional_false")
+                let false_string = self.intern_string("false", "optional_false")
                     .map_err(|error| error.to_string())?;
                 let selected = self
                     .builder
@@ -1637,9 +1599,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(undefined_block);
-        let undefined = self
-            .builder
-            .build_global_string_ptr("undefined", "nullish_undefined_string")
+        let undefined = self.intern_string("undefined", "nullish_undefined_string")
             .map_err(|error| error.to_string())?;
         self.compile_console_text(
             undefined.as_pointer_value(),
