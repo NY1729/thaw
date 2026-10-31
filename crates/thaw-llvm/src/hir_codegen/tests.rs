@@ -815,3 +815,4 @@ include!("tests/audit2_async_streams_contracts.rs");
 include!("tests/compile_speed_contracts.rs");
 include!("tests/object_create_contracts.rs");
 include!("tests/audit2_leftovers_contracts.rs");
+include!("tests/sort_nan_contracts.rs");
