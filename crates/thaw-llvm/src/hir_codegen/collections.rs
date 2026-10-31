@@ -994,9 +994,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // even when a user supplied a marker-like field name.
         if let Some((marker, HirType::Bool)) = fields.first().filter(|_| class_constructor) {
             if marker.starts_with("__thaw_class_identity_\u{1e}") {
-                let marker = self
-                    .builder
-                    .build_global_string_ptr(marker, "class_identity_marker")
+                let marker = self.intern_string(marker, "class_identity_marker")
                     .map_err(|error| error.to_string())?;
                 self.builder
                     .build_call(
@@ -1031,7 +1029,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let field_hex = fields[index].0.as_bytes().iter()
             .map(|byte| format!("{byte:02x}")).collect::<String>();
-        let field_hex = self.builder.build_global_string_ptr(&field_hex, "native_field_name_hex")
+        let field_hex = self.intern_string(&field_hex, "native_field_name_hex")
             .map_err(|error| error.to_string())?;
         let offset = self.builder.build_call(
             self.module.get_function("thaw_object_field_offset").unwrap(),
