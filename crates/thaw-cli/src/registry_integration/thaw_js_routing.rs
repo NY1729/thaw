@@ -347,16 +347,7 @@ fn thaw_js_package_eligible(
             let Some(target) = typed_targets.get(&(pkg.name.clone(), function.name.clone())) else {
                 return reject(format!("`{}` has no typed target", function.name));
             };
-            // A class-typed result is also an opaque `JsValue`; it must stay a live object.
-            if let thaw_bridge::DtsType::Unsupported(reason) = &function.ret {
-                if pkg
-                    .classes
-                    .iter()
-                    .any(|class| reason.contains(class.name.as_str()))
-                {
-                    return reject(format!("`{}` returns a class instance", function.name));
-                }
-            }
+            // A class-instance result is a Json value carrying a thaw-js handle (adopted at the call).
             if target.starts_with("__thaw_typed_jit_") {
                 return true;
             }
