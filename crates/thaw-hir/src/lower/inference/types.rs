@@ -2496,7 +2496,8 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "structuredClone JSON operand")?;
                         return Ok(HirType::Json);
                     }
-                    "__thaw_json_keys" | "__thaw_json_for_in_keys" | "__thaw_json_own_keys" => {
+                    "__thaw_json_keys" | "__thaw_json_for_in_keys" | "__thaw_json_own_keys"
+                    | "__thaw_json_own_symbols" => {
                         let [value] = args.as_slice() else {
                             return Err("Object.keys expects one operand".into());
                         };
@@ -2506,7 +2507,7 @@ impl<'a> FnLowerer<'a> {
                                 "Object.keys expected a JSON value or dictionary, got {ty:?}"
                             ));
                         }
-                        return Ok(HirType::Array(Box::new(if name == "__thaw_json_own_keys" {
+                        return Ok(HirType::Array(Box::new(if name != "__thaw_json_keys" && name != "__thaw_json_for_in_keys" {
                             HirType::Json
                         } else {
                             HirType::Str
