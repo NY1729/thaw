@@ -5804,7 +5804,9 @@ fn inspect_key(key: &[u8]) -> Vec<u16> {
     if !is_symbol_key_wire(key) {
         return wtf8_decode_utf16(key);
     }
-    format!("\u{1}[{}]", symbol_text(key)).encode_utf16().collect()
+    format!("\u{1}[{}]", symbol_text(key))
+        .encode_utf16()
+        .collect()
 }
 
 /// `Symbol(desc)` for a Symbol's wire text.
@@ -9001,7 +9003,11 @@ pub unsafe extern "C" fn thaw_json_own_keys(value: *const Value) -> *mut u8 {
                 .into_iter()
                 .map(|(key, _)| key)
                 .partition(|key| is_symbol_key_wire(key));
-            strings.into_iter().chain(symbols).map(Value::Wtf8).collect()
+            strings
+                .into_iter()
+                .chain(symbols)
+                .map(Value::Wtf8)
+                .collect()
         }
         None => Vec::new(),
     };
