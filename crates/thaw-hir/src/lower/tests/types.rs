@@ -2262,7 +2262,7 @@ fn record_and_mapped_keys_accept_literal_union_aliases() {
 }
 
 #[test]
-fn map_accepts_object_and_array_keys_but_rejects_function_keys() {
+fn map_accepts_object_array_and_function_keys_but_rejects_union_keys() {
     let program = lower(
         r#"function main(): void {
             const byPoint: Map<{ x: number }, string> = new Map<{ x: number }, string>();
@@ -2277,12 +2277,19 @@ fn map_accepts_object_and_array_keys_but_rejects_function_keys() {
 
     let module = thaw_parser::parse_typescript(
         r#"function main(): void {
-            const byCallback: Map<() => void, string> = new Map<() => void, string>();
+            const byUnion: Map<string | number, string> = new Map<string | number, string>();
         }"#,
     )
     .unwrap();
     let error = lower_module(&module).unwrap_err();
     assert!(error.contains("Map/Set keys must be"), "{error}");
+
+    lower(
+        r#"function main(): void {
+            const byCallback: Map<() => void, string> = new Map<() => void, string>();
+            console.log(byCallback.size);
+        }"#,
+    );
 }
 
 #[test]

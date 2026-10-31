@@ -410,6 +410,11 @@ impl Interp {
         }
     }
 
+    /// `__thaw_report_uncaught(error)`: hand an error to `process.on('uncaughtException')` or rethrow it.
+    pub(crate) fn report_uncaught(&mut self, v: Value) -> R<Value> {
+        self.uncaught(Ctl::Throw(v)).map(|()| Value::Undefined)
+    }
+
     /// Drain `nextTick` callbacks, then promise jobs, until both queues are empty; then report
     /// unhandled rejections (which may queue more work).
     pub fn run_jobs(&mut self) -> R<()> {
