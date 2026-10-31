@@ -5,7 +5,7 @@
 use swc_common::errors::Handler;
 use swc_common::sync::Lrc;
 use swc_common::{FileName, SourceMap};
-use swc_ecma_ast::Module;
+use swc_ecma_ast::{Module, ModuleItem};
 use swc_ecma_parser::{lexer::Lexer, EsSyntax, Parser, StringInput, Syntax, TsSyntax};
 
 pub use swc_common as common;
@@ -104,7 +104,56 @@ pub fn parse_declarations_with_source_map_named(
     parse_typescript_source(source, filename, true, false)
 }
 
+/// Parsed declaration files by (name, text), so each `.d.ts` is parsed once per build instead of
+/// once per bridge pass. Callers get a clone, so they stay free to mutate their copy.
+type DeclarationCache = Vec<(FileName, String, Module, Lrc<SourceMap>)>;
+
+thread_local! {
+    static DECLARATION_CACHE: std::cell::RefCell<(usize, DeclarationCache)> = const { std::cell::RefCell::new((0, Vec::new())) };
+}
+
+/// Cache budget in source bytes; the cache is dropped wholesale when exceeded.
+const DECLARATION_CACHE_BYTES: usize = 64 << 20;
+
 fn parse_typescript_source(
+    source: &str,
+    filename: FileName,
+    declarations: bool,
+    shared: bool,
+) -> Result<(Module, Lrc<SourceMap>), String> {
+    if !declarations || shared {
+        return parse_typescript_uncached(source, filename, declarations, shared);
+    }
+    let hit = DECLARATION_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .1
+            .iter()
+            .find(|(name, text, ..)| *name == filename && text == source)
+            .map(|(_, _, module, cm)| (module.clone(), cm.clone()))
+    });
+    if let Some(hit) = hit {
+        return Ok(hit);
+    }
+    let parsed = parse_typescript_uncached(source, filename.clone(), declarations, shared)?;
+    DECLARATION_CACHE.with(|cache| {
+        let (bytes, entries) = &mut *cache.borrow_mut();
+        if *bytes + source.len() > DECLARATION_CACHE_BYTES {
+            entries.clear();
+            *bytes = 0;
+        }
+        *bytes += source.len();
+        entries.push((
+            filename,
+            source.to_string(),
+            parsed.0.clone(),
+            parsed.1.clone(),
+        ));
+    });
+    Ok(parsed)
+}
+
+fn parse_typescript_uncached(
     source: &str,
     filename: FileName,
     declarations: bool,
@@ -192,11 +241,62 @@ pub fn parse_javascript_with_source_map_named(
     Ok((module, cm))
 }
 
+/// Parse JavaScript as a sloppy-mode *script* (`with`, legacy octals, ... allowed unless the
+/// text opts into `"use strict"`), for `eval` / `new Function` source.
+pub fn parse_javascript_script(source: &str) -> Result<Module, String> {
+    let cm: Lrc<SourceMap> = Default::default();
+    let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
+    let fm = cm.new_source_file(
+        Lrc::new(FileName::Custom("input.js".into())),
+        source.to_string(),
+    );
+    let lexer = Lexer::new(
+        Syntax::Es(EsSyntax::default()),
+        Default::default(),
+        StringInput::from(&*fm),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+    let script = parser.parse_script().map_err(|err| {
+        err.into_diagnostic(&handler).emit();
+        "failed to parse JavaScript source".to_string()
+    })?;
+    if parser.take_errors().is_empty() {
+        Ok(Module {
+            span: script.span,
+            body: script.body.into_iter().map(ModuleItem::Stmt).collect(),
+            shebang: script.shebang,
+        })
+    } else {
+        Err("failed to parse JavaScript source".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use swc_common::Spanned;
     use swc_ecma_ast::{Decl, ModuleItem, Stmt};
+
+    #[test]
+    fn declaration_parse_cache_returns_independent_equal_modules() {
+        let source = "export declare function f(x: number): number;";
+        let name = FileName::Custom("cached.d.ts".into());
+        let (mut first, _) =
+            parse_declarations_with_source_map_named(source, name.clone()).unwrap();
+        let (second, _) = parse_declarations_with_source_map_named(source, name.clone()).unwrap();
+        assert_eq!(first.body.len(), 1);
+        assert_eq!(first, second);
+        first.body.clear();
+        let (third, _) = parse_declarations_with_source_map_named(source, name).unwrap();
+        assert_eq!(third, second);
+        let (other, _) = parse_declarations_with_source_map_named(
+            "export declare const y: string;",
+            FileName::Custom("cached.d.ts".into()),
+        )
+        .unwrap();
+        assert_ne!(other, second);
+    }
 
     #[test]
     fn named_parsers_record_source_map_filename() {
