@@ -5,8 +5,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [iterator, mode, error_text] = args else {
             return Err("exact iterator step expects iterator, mode, and error text".into());
         };
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         // The iterator result is captured as a live graph; reading its `done`/`value`
         // later needs the host operations, like the other dynamic call paths.
         self.compile_register_js_callback_host_operations()?;
@@ -50,8 +49,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [source] = args else {
             return Err("exact iterator acquisition expects one source".into());
         };
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         self.compile_register_js_callback_host_operations()?;
         let source = self.compile_expr(source)?.into_int_value();
         let function = if asynchronous {
@@ -302,8 +300,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if self.thaw_js_routed {
             return self.compile_routed_no_host_json(source);
         }
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         self.tracks_owned_json_roots = true;
         let handle = self.compile_expr(source)?.into_int_value();
         let json = self.builder.build_call(
@@ -332,8 +329,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [source] = args else {
             return Err("consuming JSON conversion expects one handle".into());
         };
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         self.tracks_owned_json_roots = true;
         let handle = self.compile_expr(source)?.into_int_value();
         let json = self.builder.build_call(
@@ -363,8 +359,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if self.thaw_js_routed {
             return self.compile_routed_no_host_json(source);
         }
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         self.tracks_owned_json_roots = true;
         let handle = self.compile_expr(source)?.into_int_value();
         let json = self.builder.build_call(
@@ -388,8 +383,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [value] = args else {
             return Err("@@thaw_retain_borrowed_dynamic_handle expects one JsValue".into());
         };
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let handle = self.compile_expr(value)?.into_int_value();
         let retained = self.builder.build_call(
             self.module.get_function("thaw_js_retain_handle").unwrap(),
@@ -568,8 +562,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if !matches!(value_type, HirType::Str | HirType::Symbol) {
             return Err("retainEventKey only accepts native strings and Symbols".into());
         }
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let value = self.compile_expr(value)?.into_pointer_value();
         let is_symbol = self.compile_expr(is_symbol)?.into_int_value();
         let is_symbol = self.builder.build_int_z_extend(
@@ -622,8 +615,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [receiver, name, value] = args else {
             return Err("setDynamicPropertyJson expects receiver, name, and value".into());
         };
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let receiver = self.compile_expr(receiver)?.into_int_value();
         let name = self.compile_expr(name)?.into_pointer_value();
         let value = self.compile_expr(value)?.into_pointer_value();
@@ -713,8 +705,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [source, HirExpr::Lit(HirLit::Str(layout))] = args else {
             return Err("native object lookup expects object and static layout".into());
         };
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let source = self.compile_expr(source)?.into_pointer_value();
         let layout = self.intern_string(layout, "cached_native_object_layout")
             .map_err(|error| error.to_string())?;
@@ -750,8 +741,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [item, native, detail] = args else {
             return Err("json link expects a handle, a native value and a kind".into());
         };
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let handle = self.compile_expr(item)?.into_int_value();
         let native = self.compile_expr(native)?.into_pointer_value();
         let serial = self.builder.build_call(
@@ -791,8 +781,7 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         let owner_type = self.expr_hir_type(witness)
             .ok_or("native view target requires a typed witness")?;
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let handle = self.compile_expr(item)?.into_int_value();
         let layout = self.intern_string(layout, "native_view_target_layout")
             .map_err(|error| error.to_string())?;
@@ -1011,8 +1000,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [source, HirExpr::Lit(HirLit::Str(layout)), candidate] = args else {
             return Err("native object interning expects object, static layout, and wrapper".into());
         };
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let source = self.compile_expr(source)?.into_pointer_value();
         let layout = self.intern_string(layout, "native_object_layout")
             .map_err(|error| error.to_string())?;
