@@ -260,7 +260,6 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 const DYNAMIC_HELPERS: &str = r#"
 (function () {
   function put(name, fn) { Object.defineProperty(globalThis, name, { value: fn, writable: false, configurable: false, enumerable: false }); }
-  put('__thaw_storage_value', function (values) { return values; });
   put('__thaw_unary_plus', function (v) { return +v; });
   put('__thaw_error_properties_json', function (error) {
     if (!error || (typeof error !== 'object' && typeof error !== 'function')) return '';
@@ -297,43 +296,6 @@ const DYNAMIC_HELPERS: &str = r#"
   put('__thaw_strict_equal_bigint_dynamic', function (digits, v) { return typeof v === 'bigint' && v === BigInt(digits); });
   put('__thaw_native_loose_equal', function (l, r, lk, rk) { return (lk === 1 ? BigInt(l) : l) == (rk === 1 ? BigInt(r) : r); });
   put('__thaw_instanceof_dynamic_value', function (v, target) { return typeof target === 'function' ? v instanceof target : false; });
-  // A native object literal handed to JS as a live object (spreads, accessors, methods and data properties in order).
-  // ponytail: a symbol key needs `__thaw_property_key` (QuickJS realm only); it is used when present.
-  put('__thaw_object_from_operations', function (kinds, keysText, keyKinds, values) {
-    var callbacks = Array.prototype.slice.call(arguments, 4), keys = JSON.parse(keysText), object = {}, callback = 0;
-    for (var i = 0; i < kinds.length; i++) {
-      var kind = kinds[i];
-      if (kind === 'spread') {
-        var source = values[i];
-        if (source == null) continue;
-        var spread = Object(source), own = Reflect.ownKeys(spread);
-        for (var j = 0; j < own.length; j++) {
-          var descriptor = Object.getOwnPropertyDescriptor(spread, own[j]);
-          if (descriptor && descriptor.enumerable) Object.defineProperty(object, own[j], { value: spread[own[j]], writable: true, enumerable: true, configurable: true });
-        }
-        continue;
-      }
-      if (kind === 'proto') {
-        var prototype = values[i];
-        if (prototype === null || typeof prototype === 'object' || typeof prototype === 'function') Object.setPrototypeOf(object, prototype);
-        continue;
-      }
-      var key = keyKinds[i] && typeof globalThis.__thaw_property_key === 'function' ? globalThis.__thaw_property_key(keys[i]) : keys[i];
-      if (kind === 'data') { Object.defineProperty(object, key, { value: values[i], writable: true, enumerable: true, configurable: true }); continue; }
-      var fn = callbacks[callback++];
-      if (kind === 'method') {
-        Object.defineProperty(object, key, { value: function () { return fn.apply(undefined, [this].concat(Array.prototype.slice.call(arguments))); }, writable: true, enumerable: true, configurable: true });
-        continue;
-      }
-      var previous = Object.getOwnPropertyDescriptor(object, key), accessor = previous && !('value' in previous) ? previous : {};
-      Object.defineProperty(object, key, {
-        get: kind === 'getter' ? function () { return fn(this); } : accessor.get,
-        set: kind === 'setter' ? function (value) { fn(this, value); } : accessor.set,
-        enumerable: true, configurable: true
-      });
-    }
-    return object;
-  });
   put('__thaw_instanceof_dynamic_value_by_name', function (name, v) { var c = globalThis[name]; return typeof c === 'function' && v instanceof c; });
 })();
 "#;
