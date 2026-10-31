@@ -1711,6 +1711,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module
             .add_function("thaw_regex_exec", regex_split_type, Some(Linkage::External));
         self.module.add_function(
+            "thaw_regex_check",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_regex_exec_groups",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),

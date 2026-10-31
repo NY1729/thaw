@@ -2196,7 +2196,19 @@ pub extern "C" fn thaw_js_handle_to_console_string(handle: u64) -> *const c_char
         let value = value_for_handle(&ctx, handle)?;
         let format: Function = ctx
             .eval(
-                "(value) => { const s = typeof value === 'bigint' ? String(value) + 'n' : String(value); \
+                "(value) => { let s; \
+                 if (typeof value === 'function') { \
+                   const src = Function.prototype.toString.call(value), name = value.name; \
+                   if (/^class[\\s{]/.test(src)) { \
+                     const base = Object.getPrototypeOf(value); \
+                     s = '[class ' + (name || '(anonymous)') + (base && base !== Function.prototype && base.name ? ' extends ' + base.name : '') + ']'; \
+                     const keys = Object.keys(value).filter(key => !key.startsWith('__thaw')); \
+                     if (keys.length) s += ' { ' + keys.map(key => key + ': ' + (typeof value[key] === 'string' ? \"'\" + value[key] + \"'\" : typeof value[key] === 'function' ? '[Function: ' + value[key].name + ']' : String(value[key]))).join(', ') + ' }'; \
+                   } else if (/\\{\\s*\\[native code\\]\\s*\\}\\s*$/.test(src)) { \
+                     s = name ? '[Function: ' + name + ']' : '[Function (anonymous)]'; \
+                   } \
+                 } \
+                 if (s === undefined) s = typeof value === 'bigint' ? String(value) + 'n' : String(value); \
                  const parts = []; for (let i = 0; i < s.length; i++) parts.push(s.charCodeAt(i)); \
                  return parts.join(','); }",
             )

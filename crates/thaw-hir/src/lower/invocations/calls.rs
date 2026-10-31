@@ -2642,7 +2642,23 @@ impl<'a> FnLowerer<'a> {
         if self.scope.get(&callee_name) == Some(&HirType::Json) {
             let callee =
                 self.coerce_to_declared(&HirType::JsValue, HirExpr::Var(callee_name.clone()))?;
-            return self.lower_dynamic_value_call_on(callee, &call.args);
+            let fallback = callee.clone();
+            let invoked = self.lower_dynamic_value_call_on(callee, &call.args)?;
+            // A nullish `any` callee is a TypeError, not a call through handle 0.
+            return Ok(HirExpr::Conditional(
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                    vec![HirExpr::Var(callee_name.clone())],
+                )),
+                Box::new(HirExpr::ThrowValue(
+                    Box::new(HirExpr::Lit(HirLit::Str(format!(
+                        "\u{1}TypeError\u{1}{callee_name} is not a function"
+                    )))),
+                    Box::new(fallback),
+                )),
+                Box::new(invoked),
+                HirType::JsValue,
+            ));
         }
 
         match known_template.or_else(|| canonical_target.is_none().then(|| self.generic_callable_template(&callee_name)).flatten()) {
