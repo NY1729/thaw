@@ -451,6 +451,10 @@ pub struct HirCompiler<'ctx> {
     recursive_register: Option<PointerValue<'ctx>>,
     /// Set by the recursive-layout helper for its own object so the entry router lets it through.
     bypass_recursive_route: bool,
+    /// Interface layouts whose class-view expansion is being emitted; a nested
+    /// occurrence is encoded plainly so a class field of that interface type
+    /// cannot re-expand the same view forever.
+    interface_views_in_progress: Vec<HirType>,
     /// Set while encoding the fields of a class instance for console output.
     encoding_class_instance_fields: bool,
     /// Set while encoding a `JSON.stringify` argument: an Error-family record then shows only the
@@ -858,6 +862,7 @@ impl<'ctx> HirCompiler<'ctx> {
             console_omit_absent_fields: false,
             recursive_register: None,
             bypass_recursive_route: false,
+            interface_views_in_progress: Vec::new(),
             encoding_stringify_errors: false,
             encoding_class_instance_fields: false,
             arena_variables: HashSet::new(),
@@ -1185,6 +1190,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 (
                     "thaw_js_register_native_callback_graph",
                     "thaw_tjs_register_native_callback_graph",
+                ),
+                (
+                    "thaw_js_register_native_method_callback_graph",
+                    "thaw_tjs_register_native_method_callback_graph",
+                ),
+                (
+                    "thaw_js_call_handle_mixed_handle_graph_args_result",
+                    "thaw_tjs_call_handle_mixed_handle_graph_args_result",
+                ),
+                (
+                    "thaw_js_call_handle_mixed_handle_graph_args_consuming_result",
+                    "thaw_tjs_call_handle_mixed_handle_graph_args_consuming_result",
                 ),
                 ("thaw_js_run_event_loop", "thaw_tjs_run_event_loop"),
                 (
