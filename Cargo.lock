@@ -3188,9 +3188,11 @@ dependencies = [
  "icu_datetime",
  "icu_decimal",
  "icu_experimental",
+ "icu_list",
  "icu_locale",
  "icu_plurals",
  "icu_provider",
+ "icu_segmenter",
  "icu_time",
  "jiff",
  "serde_json",
@@ -3221,6 +3223,7 @@ dependencies = [
  "sha2",
  "swc_ecma_visit",
  "thaw-arena",
+ "thaw-intl",
  "thaw-parser",
 ]
 

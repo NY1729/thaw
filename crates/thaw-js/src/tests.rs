@@ -1257,3 +1257,63 @@ var __thaw_bundle_entry_key = \"p/index.js\";
         .blockers
         .contains_key("dynamic-with-code"));
 }
+
+#[test]
+fn scan_accepts_method_calls_guarded_by_a_truthiness_test_of_the_same_name() {
+    let src = "module.exports = (function(require) {
+var __thaw_bundle_factories = {
+\"p/index.js\": function(module, exports, require) {
+  exports.a = function (options, date) { return options?.in ? options.in(date) : date; };
+  exports.b = function (locale, parts) { if (locale.localize.preprocessor) { parts = locale.localize.preprocessor(parts); } return parts; };
+},
+};
+var __thaw_bundle_require_maps = { \"p/index.js\": {}, };
+var __thaw_bundle_entry_key = \"p/index.js\";
+})(globalThis.require);";
+    let report = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    let unguarded = src.replace("options?.in ? options.in(date) : date", "options.in(date)");
+    assert!(!crate::scan::scan_bundle(&unguarded).unwrap().is_clean());
+}
+
+#[cfg(feature = "intl")]
+#[test]
+fn intl_formats_numbers_dates_and_lists_through_the_native_icu_data() {
+    let out = run(
+        "console.log(new Intl.NumberFormat('de-DE').format(1234567.5));
+         console.log(new Intl.PluralRules('en').select(1));
+         console.log(new Intl.ListFormat('en').format(['a','b','c']));
+         console.log(new Intl.DateTimeFormat('en-US',{timeZone:'UTC'}).format(new Date(0)));
+         console.log(new Intl.Collator('en',{numeric:true}).compare('a2','a10'));",
+    );
+    assert_eq!(out.join("|"), "1.234.567,5|one|a, b, and c|1/1/1970|-1");
+}
+
+#[cfg(feature = "intl")]
+#[test]
+fn intl_date_time_format_reports_parts_range_and_resolved_options() {
+    let out = run(
+        "const f = new Intl.DateTimeFormat('en-US',{timeZone:'UTC',year:'numeric',month:'short',day:'2-digit'});
+         const d = new Date(Date.UTC(2024,0,5));
+         console.log(f.formatToParts(d).map(p => p.type).join());
+         console.log(typeof f.formatRange(d, new Date(Date.UTC(2024,0,9))));
+         console.log(f.resolvedOptions().timeZone);",
+    );
+    assert_eq!(out.join("|"), "month,literal,day,literal,year|string|UTC");
+}
+
+#[cfg(feature = "intl")]
+#[test]
+fn scan_knows_intl_globals_and_namespace_prototype_methods() {
+    let src = "module.exports = (function(require) {
+var __thaw_bundle_factories = {
+\"p/index.js\": function(module, exports, require) {
+  exports.a = function (d) { return new Intl.DateTimeFormat('en').formatRange(d, d) + Intl.NumberFormat.supportedLocalesOf; };
+},
+};
+var __thaw_bundle_require_maps = { \"p/index.js\": {}, };
+var __thaw_bundle_entry_key = \"p/index.js\";
+})(globalThis.require);";
+    let report = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+}
