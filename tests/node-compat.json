@@ -3797,6 +3797,11 @@
       "name": "object create this method on typed view",
       "expect": "matched",
       "source": "function main(): void {\n  const proto = { greet() { return \"hi \" + this.name; }, name: \"base\" };\n  const o = Object.create(proto) as { name: string; greet(): string };\n  console.log(o.greet(), JSON.stringify(o));\n  o.name = \"own\";\n  console.log(o.greet(), JSON.stringify(o));\n}"
+    },
+    {
+      "name": "sort comparator NaN result and random stable sorts",
+      "expect": "matched",
+      "source": "let seed = 12345;\nfunction rnd(m: number): number { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % m; }\nfunction main(): void {\n  console.log([5, 1, NaN, 4, 2].sort((x, y) => x - y).join(\",\"));\n  console.log([3, NaN, 1].toSorted((x, y) => x - y).join(\",\"));\n  let h1 = 0, h2 = 0, h3 = 0;\n  for (let n = 1; n <= 300; n++) {\n    const objs: { k: number; i: number }[] = [];\n    const nums: number[] = [];\n    for (let i = 0; i < n; i++) { const v = rnd(n < 20 ? 5 : 40); objs.push({ k: v, i }); nums.push(v * 3 - 20); }\n    const so = objs.sort((a, b) => a.k - b.k);\n    for (let i = 0; i < n; i++) h1 = (h1 * 31 + so[i].k * 1000 + so[i].i) % 1000000007;\n    const sn = nums.toSorted((a, b) => a - b);\n    for (let i = 0; i < n; i++) h2 = (h2 * 31 + sn[i] + 100) % 1000000007;\n    const strs = nums.map((v) => \"s\" + (v % 7));\n    const ss = strs.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));\n    for (let i = 0; i < n; i++) h3 = (h3 * 31 + ss[i].charCodeAt(1)) % 1000000007;\n  }\n  console.log(h1, h2, h3);\n}\n"
     }
   ]
 }
