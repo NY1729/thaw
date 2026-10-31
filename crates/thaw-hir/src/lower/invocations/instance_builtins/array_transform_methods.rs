@@ -1103,7 +1103,10 @@ impl<'a> FnLowerer<'a> {
                     let HirType::Array(receiver_element) = &current_type else {
                         unreachable!()
                     };
-                    if receiver_element.as_ref() == &HirType::Json {
+                    // `[string, number][]` (e.g. `Object.entries(o)`) flattens into a mixed
+                    // array that has no static element type: take the dynamic path.
+                    let tuple_elements = matches!(receiver_element.as_ref(), HirType::Tuple(_)) && depth > 0;
+                    if receiver_element.as_ref() == &HirType::Json || tuple_elements {
                         // Whether a `Json`-typed element is itself an
                         // array is only knowable at runtime -- the loop
                         // below unwraps a *statically* nested `T[][]`
@@ -1120,12 +1123,17 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             depth as f64
                         };
+                        let flat_source = if tuple_elements {
+                            self.coerce_to_declared(
+                                &HirType::Array(Box::new(HirType::Json)),
+                                HirExpr::Var(source_name.clone()),
+                            )?
+                        } else {
+                            HirExpr::Var(source_name.clone())
+                        };
                         let result = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_any_array_flat".to_string())),
-                            vec![
-                                HirExpr::Var(source_name.clone()),
-                                HirExpr::Lit(HirLit::F64(depth_value)),
-                            ],
+                            vec![flat_source, HirExpr::Lit(HirLit::F64(depth_value))],
                         );
                         let mut bindings = vec![(source_name, source_type, receiver)];
                         bindings.extend(spread_bindings);
