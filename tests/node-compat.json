@@ -3779,6 +3779,26 @@
       "source": "class Foo { x = 1; dbl() { return this.x * 2; } }\nclass Bar { c: Foo = new Foo(); run() { return this.c.dbl(); } }\nfunction main(): void {\n  console.log(new Bar().run());\n}"
     },
     {
+      "name": "audit2f atob btoa InvalidCharacterError and Buffer.concat empty list",
+      "expect": "matched",
+      "source": "function main(): void { const t = (f: () => unknown) => { try { console.log(f()); } catch (e: any) { console.log(e.name, e.code, e instanceof Error); } }; t(() => atob(\"***\")); t(() => atob(\"aGVsbG8\")); t(() => atob(\" aGVs bG8= \")); t(() => btoa(\"€\")); t(() => btoa(\"é\")); console.log(Buffer.concat([]).length, Buffer.concat([], 3).length); }"
+    },
+    {
+      "name": "audit2f structuredClone keeps Date and rejects functions with DataCloneError",
+      "expect": "matched",
+      "source": "function main(): void { const t = (f: () => unknown) => { try { console.log(f()); } catch (e: any) { console.log(e.name, e.code, e instanceof Error); } }; const c = structuredClone({ d: new Date(5), n: 1 }); console.log(c, c.d instanceof Date, c.d.getTime()); t(() => structuredClone(() => 1)); t(() => structuredClone({ f: () => 1 })); }"
+    },
+    {
+      "name": "audit2f cipher update arrays join through Buffer.concat",
+      "expect": "matched",
+      "source": "import * as crypto from \"node:crypto\"; function main(): void { const key = Buffer.alloc(32, 1), iv = Buffer.alloc(16, 2); const c = crypto.createCipheriv(\"aes-256-cbc\", key, iv); const a: Buffer = c.update(\"secret message\", \"utf8\"); const b: Buffer = c.final(); console.log(Buffer.concat([a, b]).toString(\"hex\")); }"
+    },
+    {
+      "name": "audit2f event listener with an optional parameter",
+      "expect": "matched",
+      "source": "import { EventEmitter } from \"node:events\"; function main(): void { const e = new EventEmitter(); e.on(\"a\", (x: number, y?: string) => console.log(\"a\", x, y)); e.emit(\"a\", 1); e.emit(\"a\", 1, \"s\", \"extra\"); e.once(\"b\", (x: number) => console.log(\"b\", x)); e.emit(\"b\", 7); e.emit(\"b\", 8); console.log(e.listenerCount(\"b\"), e.eventNames()); }"
+    },
+    {
       "name": "numeric comparator sort native fast path (asc, desc, toSorted, NaN fallback)",
       "expect": "matched",
       "source": "function mk(n: number, nan: boolean): number[] { const a: number[] = []; let s = 12345; for (let i = 0; i < n; i++) { s = (s * 1103515245 + 12345) % 2147483648; a.push((s % 1000) - 500); } a.push(Infinity, -Infinity, 0, -0, Infinity); if (nan) a.splice(7, 0, NaN); return a; }\nfunction show(a: number[]): string { return a.slice(0, 12).map((x) => Object.is(x, -0) ? \"-0\" : String(x)).join(\",\") + \"|\" + a.slice(-6).join(\",\"); }\nfunction main(): void {\n  const a = mk(300, false); a.sort((x, y) => x - y); console.log(show(a), a.length);\n  const b = mk(300, false); b.sort((p, q) => q - p); console.log(show(b), b.length);\n  const c = mk(300, false); const d = c.toSorted((m, n) => n - m); console.log(show(d), show(c));\n  const e = mk(20, true); e.sort((x, y) => x - y); console.log(e.length, e.includes(NaN));\n  const f = mk(20, false); f.sort((x, y) => x - y); console.log(show(f));\n  const g = mk(300, false); g.sort((x, y) => y - x + 0); console.log(show(g));\n}"

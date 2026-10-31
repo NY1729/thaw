@@ -72,6 +72,11 @@ impl<'a> FnLowerer<'a> {
                 )));
                 for (_, name, _, _) in &cloned {
                     if name.starts_with("__thaw_class_identity_\u{1e}") {
+                        // The clone keeps the source's nominal identity (a `Date` stays a `Date`).
+                        body.push(HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_set_class_identity".into())),
+                            vec![result.clone(), HirExpr::Lit(HirLit::Str(name.clone()))],
+                        )));
                         body.push(HirStmt::Expr(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_object_hide_marker".into())),
                             vec![result.clone(), HirExpr::Lit(HirLit::Str(name.clone()))],
@@ -149,6 +154,20 @@ impl<'a> FnLowerer<'a> {
                     &[(source_name, value_type, value)],
                 )
             }
+            // Functions are not cloneable: the specification throws a
+            // `DataCloneError` DOMException (code 25).
+            HirType::Function(..) => Ok(HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    Vec::new(),
+                    value_type.clone(),
+                    Box::new(HirExpr::Block(vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                        "\u{1}DataCloneError\u{1}function could not be cloned.\u{5}{\"code\":25}"
+                            .into(),
+                    )))])),
+                )),
+                Vec::new(),
+            )),
             other => Err(format!("`structuredClone` does not support {other:?}")),
         }
     }
