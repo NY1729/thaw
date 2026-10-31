@@ -51,6 +51,8 @@ mod web_crypto;
 mod web_dom_exception;
 #[path = "web/event_target.rs"]
 mod web_event_target;
+#[path = "web/fetch.rs"]
+mod web_fetch;
 #[path = "web/streams.rs"]
 mod web_streams;
 #[path = "web/text_codec.rs"]
@@ -685,6 +687,7 @@ impl Interp {
         web_event_target::install(&mut it);
         web_abort::install(&mut it);
         web_blob::install(&mut it);
+        web_fetch::install(&mut it);
         web_streams::install(&mut it);
         web_crypto::install(&mut it);
         it.install_url();
