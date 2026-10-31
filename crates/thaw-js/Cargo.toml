@@ -19,3 +19,4 @@ jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bun
 sha1 = "0.10"
 sha2 = "0.10"
 md-5 = "0.10"
+libc = "0.2"
