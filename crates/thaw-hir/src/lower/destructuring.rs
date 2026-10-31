@@ -1,4 +1,20 @@
 impl<'a> FnLowerer<'a> {
+    /// A `= default` on a destructured field: an empty array literal takes the field's array
+    /// type (`{ list = [] }` over `list?: string[]` is a `string[]`, not `number[]`).
+    fn lower_field_default(&mut self, default: &Expr, field_type: &HirType) -> Result<HirExpr, String> {
+        let expected = match field_type {
+            HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => inner.as_ref(),
+            other => other,
+        };
+        let lowered = self.lower_expr(default)?;
+        if matches!(expected, HirType::Array(_))
+            && matches!(&lowered, HirExpr::ArrayLit(elements) if elements.is_empty())
+        {
+            return Ok(HirExpr::TypedClosure(expected.clone(), Box::new(lowered)));
+        }
+        Ok(lowered)
+    }
+
     // A recursive object/array pattern can read several children from one
     // parent expression. Bind that expression before the first child read so
     // an accessor, array index, or default is evaluated only once.
@@ -327,7 +343,7 @@ impl<'a> FnLowerer<'a> {
                                 .lower_fixed_object_property_read(value.clone(), fields, &key)?;
                             let mut binding_type = field_type.clone();
                             if let Some(default) = &property.value {
-                                let default = self.lower_expr(default)?;
+                                let default = self.lower_field_default(default, &field_type)?;
                                 field_value = self.lower_undefined_default(field_value, default)?;
                                 binding_type = self.infer_expr_type(&field_value)?;
                             }
@@ -658,7 +674,7 @@ impl<'a> FnLowerer<'a> {
                     let mut field_type = self.infer_expr_type(&field_value)?;
                     used.insert(key.clone());
                     if let Some(default) = &property.value {
-                        let default = self.lower_expr(default)?;
+                        let default = self.lower_field_default(default, &field_type)?;
                         let default_type = self.infer_expr_type(&default)?;
                         field_value = self.lower_undefined_default(field_value, default)?;
                         field_type = self.infer_expr_type(&field_value)?;
@@ -779,7 +795,7 @@ impl<'a> FnLowerer<'a> {
                     let mut field_type = self.infer_expr_type(&field_value)?;
                     used.insert(key.clone());
                     if let Some(default) = &property.value {
-                        let default = self.lower_expr(default)?;
+                        let default = self.lower_field_default(default, &field_type)?;
                         field_value = self.lower_undefined_default(field_value, default)?;
                         field_type = self.infer_expr_type(&field_value)?;
                     }

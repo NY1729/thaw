@@ -2,6 +2,7 @@
   const thawProcessMonotonicClock = globalThis.__thaw_process_monotonic_clock_bootstrap;
   const thawProcessBigInt = BigInt;
   globalThis.global = globalThis;
+  Object.defineProperty(globalThis, Symbol.toStringTag, { value: "global", configurable: true });
   const thawDateConstructor = Date;
   const thawDateGetTime = Date.prototype.getTime;
   const thawDateApply = Reflect.apply;
@@ -3010,7 +3011,9 @@
     if (!(number >= 0)) return 0;
     return Math.trunc(number);
   };
-  const timerHandle = (id, record) => ({
+  class Timeout {}
+  class Immediate {}
+  const timerHandle = (id, record, api) => Object.setPrototypeOf({
     ref() { const timer = timers.get(id); if (timer && !timer.clock) timer.refed = true; return this; },
     unref() { const timer = timers.get(id); if (timer && !timer.clock) timer.refed = false; return this; },
     hasRef() { const timer = timers.get(id); return Boolean(timer && (timer.clock || timer.refed)); },
@@ -3023,7 +3026,7 @@
     },
     close() { const timer = timers.get(id); if (timer) timer.cancelled = true; else if (record) record.cancelled = true; timers.delete(id); destroyTimerResource(timer || record); },
     [Symbol.toPrimitive]() { return id; }
-  });
+  }, api === 'setImmediate' ? Immediate.prototype : Timeout.prototype);
   const schedule = (callback, delay, repeat, args, refed = true, api = 'setTimeout', forceReal = false, alreadyValidatedDelay = false) => {
     if (typeof callback !== 'function') {
       throw new TypeError('timer callback must be a function');
@@ -3036,7 +3039,7 @@
                      asyncContext: thawAsyncContext.get(),
                      clock, due: (clock ? clock.now : milliseconds === 1 && api !== 'setImmediate' ? loopNow : timerNow()) + (clock && api === 'setImmediate' ? -1 : milliseconds) };
     timers.set(id, record);
-    const handle = timerHandle(id, record);
+    const handle = timerHandle(id, record, api);
     const hookBus = globalThis.__thaw_async_hook_bus;
     if (hookBus && hookBus.enabled && !forceReal)
       record.asyncId = hookBus.init(api === 'setImmediate' ? 'Immediate' : 'Timeout', handle);

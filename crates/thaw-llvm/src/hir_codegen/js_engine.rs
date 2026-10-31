@@ -30,6 +30,18 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
+    /// After the thaw-js renames: a routed build still calling a QuickJS symbol needs QuickJS, so
+    /// the build falls back to it instead of failing to link.
+    fn js_unported_symbols_used(&mut self) {
+        let called = self.module.get_functions().any(|function| {
+            function.get_name().to_string_lossy().starts_with("thaw_js_")
+                && function.as_global_value().as_pointer_value().get_first_use().is_some()
+        });
+        if called {
+            self.uses_quickjs = true;
+        }
+    }
+
     /// Whether the program holds live JS handles under either engine.
     fn js_handles_used(&self) -> bool {
         self.uses_quickjs_handles || self.uses_thaw_js_handles

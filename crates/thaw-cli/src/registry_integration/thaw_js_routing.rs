@@ -6,6 +6,13 @@ fn thaw_js_routing_enabled() -> bool {
     std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1")
 }
 
+/// `THAW_JS_USER_DYNAMIC=1` (with `THAW_JS_RUNTIME=1`) also serves the program's own dynamic code
+/// (`new Function`, `eval`) on thaw-js. Opt-in until the dynamic-storage cases it cannot yet run
+/// (see the QuickJS-removal readiness audit, class 3) match Node.
+fn thaw_js_user_dynamic_enabled() -> bool {
+    std::env::var("THAW_JS_USER_DYNAMIC").as_deref() == Ok("1")
+}
+
 /// Whether the program text names `name` (the last segment of a dotted path) as a whole
 /// identifier (`hash` is not mentioned by `hashSync`).
 fn thaw_js_mentions(user_source: &str, name: &str) -> bool {
@@ -58,8 +65,13 @@ fn thaw_js_value_export_needs_handle(pkg: &ResolvedPackage, user_source: &str, n
             let end = member.find(|c: char| !is_word(c)).unwrap_or(member.len());
             (&member[..end], member[end..].trim_start())
         });
+        // (a builtin's other value exports -- `path.posix`, `path.win32` -- are objects of their own
+        // whose members differ from the module's functions, so `posix.join(..)` needs the value)
+        let namespace_like = !pkg.name.starts_with("node:") || pkg.name.ends_with(name);
         let called_function = member.is_some_and(|(member, tail)| {
-            tail.starts_with('(') && pkg.functions.iter().any(|function| function.name == member)
+            namespace_like
+                && tail.starts_with('(')
+                && pkg.functions.iter().any(|function| function.name == member)
         }) || (after.trim_start().starts_with('(')
             && pkg.functions.iter().any(|function| {
                 function.name == name || function.name == name.rsplit('.').next().unwrap_or(name)
@@ -292,6 +304,61 @@ fn thaw_js_declared_function(line: &str, package: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Node builtin modules whose registry bundle and typed operations are validated on thaw-js (their
+/// node-compat cases match Node under `THAW_JS_RUNTIME=1`). Any other `node:*` package stays on QuickJS
+/// until its own cases pass: plan Q2 flips builtin modules one at a time.
+const THAW_JS_BUILTIN_MODULES: &[&str] = &[
+    "node:events",
+    "node:path",
+    "node:path/posix",
+    "node:path/win32",
+    "node:assert",
+    "node:assert/strict",
+    "node:os",
+    "node:util",
+];
+
+/// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
+/// bundle itself (a plain script is wrapped into a one-module registry bundle).
+fn thaw_js_bundle_form<'a>(
+    forms: &'a std::collections::HashMap<String, String>,
+    package: &str,
+    bundle_js: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    match forms.get(package) {
+        Some(form) => form.as_str().into(),
+        None => thaw_js::scan::script_as_bundle(bundle_js),
+    }
+}
+
+/// `node:path/posix` / `node:path/win32` as a registry bundle: the `node:path` bundle plus one factory
+/// that exports the selected flavour of the root (the QuickJS form is a script wrapper thaw-js cannot scan).
+fn thaw_js_path_bundle(root_bundle: &str, builtin: &str) -> String {
+    let Some(flavour) = builtin.strip_prefix("node:path/") else {
+        return root_bundle.to_string();
+    };
+    root_bundle
+        .replacen(
+            "var __thaw_bundle_factories = {\n",
+            &format!(
+                "var __thaw_bundle_factories = {{\n\"{builtin}\": function(module, exports, require) {{ module.exports = require(\"node:path\").{flavour}; }},\n"
+            ),
+            1,
+        )
+        .replacen(
+            "var __thaw_bundle_require_maps = {\n",
+            &format!(
+                "var __thaw_bundle_require_maps = {{\n\"{builtin}\": {{\"node:path\": \"node:path\"}},\n"
+            ),
+            1,
+        )
+        .replacen(
+            "var __thaw_bundle_entry_key = \"node:path\";",
+            &format!("var __thaw_bundle_entry_key = \"{builtin}\";"),
+            1,
+        )
+}
+
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
 /// feature scan, the program touches no class of it (those are live JavaScript objects), and
 /// every function the program mentions is a typed call whose declaration only carries plain data.
@@ -316,6 +383,9 @@ fn thaw_js_package_eligible(
     };
     if pkg.native_addon.is_some() {
         return reject("native addon".into());
+    }
+    if pkg.name.starts_with("node:") && !THAW_JS_BUILTIN_MODULES.contains(&pkg.name.as_str()) {
+        return reject("builtin module not validated on thaw-js".into());
     }
     // A class the program names is served through thaw-js handles (`new`, instance and static
     // methods); every operation the shim declares for it must be plain data or an instance handle.
