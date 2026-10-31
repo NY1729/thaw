@@ -40,6 +40,7 @@ mod numfmt;
 mod proxy;
 pub mod scan;
 mod sysio;
+mod tls;
 mod typed;
 mod url;
 #[path = "web/abort.rs"]
@@ -685,6 +686,7 @@ impl Interp {
         it.install_sysio();
         net::install(&mut it);
         zlib::install(&mut it);
+        tls::install(&mut it);
         it.install_fs_host();
         web_dom_exception::install(&mut it);
         web_text_codec::install(&mut it);

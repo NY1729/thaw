@@ -1,6 +1,5 @@
 //! `node:net` host (plain TCP): the `__thaw_net_*` / `__thaw_async_*` functions the registry shim calls, plus
-//! stubs for `__thaw_tls_*` (TLS is not linked: every TLS entry reports a clear error, exactly like a QuickJS
-//! build without the `tls` feature) and the small hosts the http stack needs (HPACK huffman, hash, timer refs).
+//! the small hosts the http stack needs (HPACK huffman, hash, timer refs).
 //! Same wire protocol and logic as crates/thaw-quickjs networking.rs; sockets are tables owned by the
 //! interpreter thread, slow work (connect) runs on a worker thread and is collected by `__thaw_async_poll`.
 
@@ -42,14 +41,14 @@ impl<T> With<T> for std::sync::LazyLock<Mutex<T>> {
 
 pub(crate) type Table<T> = std::sync::LazyLock<Mutex<T>>;
 
-static NET_STREAMS: Table<(u32, HashMap<u32, TcpStream>)> =
+pub(crate) static NET_STREAMS: Table<(u32, HashMap<u32, TcpStream>)> =
     Table::new(|| Mutex::new((1, HashMap::new())));
-static NET_LISTENERS: Table<(u32, HashMap<u32, TcpListener>)> =
+pub(crate) static NET_LISTENERS: Table<(u32, HashMap<u32, TcpListener>)> =
     Table::new(|| Mutex::new((1, HashMap::new())));
 
 /// Ports arrive from JavaScript as 32-bit numbers; narrowing without a range
 /// check would silently turn 65536 into 0 ("any free port").
-fn checked_port(port: u32) -> Result<u16, String> {
+pub(crate) fn checked_port(port: u32) -> Result<u16, String> {
     u16::try_from(port).map_err(|_| format!("err:port should be >= 0 and < 65536. Received {port}"))
 }
 
@@ -73,7 +72,7 @@ fn errno_name(errno: i32) -> Option<&'static str> {
 
 /// `err:<CODE>|<errno>|<syscall>|<address>|<message>`: the structured failure the JS sockets turn into a Node-shaped error
 /// (`code`, `errno`, `syscall`, `address`, `port` / `hostname`).
-fn connect_failure_wire(error: &io::Error, address: &str) -> String {
+pub(crate) fn connect_failure_wire(error: &io::Error, address: &str) -> String {
     let errno = error.raw_os_error();
     let name = errno.and_then(errno_name).unwrap_or(match error.kind() {
         io::ErrorKind::TimedOut => "ETIMEDOUT",
@@ -92,7 +91,7 @@ fn connect_failure_wire(error: &io::Error, address: &str) -> String {
 
 /// Resolves and connects like Node: a name that does not resolve is `ENOTFOUND` (`getaddrinfo`), a refused or unreachable
 /// address keeps the OS error.
-fn tcp_connect_structured(host: &str, port: u16) -> Result<TcpStream, String> {
+pub(crate) fn tcp_connect_structured(host: &str, port: u16) -> Result<TcpStream, String> {
     use std::net::ToSocketAddrs;
     let addresses: Vec<std::net::SocketAddr> = match (host, port).to_socket_addrs() {
         Ok(addresses) => addresses.collect(),
@@ -158,7 +157,7 @@ fn async_op_insert(receiver: std::sync::mpsc::Receiver<AsyncFinisher>) -> u32 {
 }
 
 /// Runs `work` on a worker thread; `work` returns the finisher that completes the operation on the JavaScript thread.
-fn async_op_start<W>(work: W) -> u32
+pub(crate) fn async_op_start<W>(work: W) -> u32
 where
     W: FnOnce() -> AsyncFinisher + Send + 'static,
 {
@@ -179,14 +178,14 @@ where
 }
 
 /// An operation whose outcome is already known (for example an argument error); it completes on the first poll.
-fn async_op_ready(outcome: String) -> u32 {
+pub(crate) fn async_op_ready(outcome: String) -> u32 {
     let (sender, receiver) = std::sync::mpsc::channel();
     let _ = sender.send(Box::new(move || outcome) as AsyncFinisher);
     async_op_insert(receiver)
 }
 
 /// `"pending"` until the worker finished; then the finisher's wire string (the operation is removed).
-fn async_op_poll(id: u32) -> String {
+pub(crate) fn async_op_poll(id: u32) -> String {
     let outcome = ASYNC_OPS.with(|ops| {
         let mut ops = ops.borrow_mut();
         let Some(op) = ops.1.get(&id) else {
@@ -212,13 +211,13 @@ fn async_op_poll(id: u32) -> String {
 }
 
 /// Forgets a pending operation; a socket the worker connects afterwards is dropped by the worker.
-fn async_op_cancel(id: u32) {
+pub(crate) fn async_op_cancel(id: u32) {
     ASYNC_OPS.with(|ops| {
         ops.borrow_mut().1.remove(&id);
     });
 }
 
-fn net_connect_start(host: &str, port: u32) -> u32 {
+pub(crate) fn net_connect_start(host: &str, port: u32) -> u32 {
     let port = match checked_port(port) {
         Ok(port) => port,
         Err(wire) => return async_op_ready(wire),
@@ -423,7 +422,7 @@ fn net_shutdown_write(handle: u32) -> String {
 }
 
 /// TCP_NODELAY / SO_KEEPALIVE (+ idle time) on an already connected socket.
-fn tcp_socket_option(
+pub(crate) fn tcp_socket_option(
     stream: &TcpStream,
     option: &str,
     enable: bool,
@@ -490,6 +489,7 @@ fn net_set_option(kind: &str, handle: u32, option: &str, enable: bool, delay_ms:
                 .get(&handle)
                 .map(|stream| tcp_socket_option(stream, option, enable, delay_ms))
         }),
+        "tls" => crate::tls::socket_option(handle, option, enable, delay_ms),
         _ => None,
     };
     match outcome {
@@ -560,6 +560,13 @@ fn net_poll_read_stream(handle: u32, retain_on_eof: bool) -> String {
             }
         }
     })
+}
+
+/// Hands the connected stream behind `handle` to the caller (STARTTLS). The socket's writer thread
+/// drains what is already queued and exits when its channel closes.
+pub(crate) fn net_take_stream(handle: u32) -> Option<TcpStream> {
+    NET_WRITERS.with(|writers| writers.borrow_mut().remove(&handle));
+    NET_STREAMS.with(|streams| streams.borrow_mut().1.remove(&handle))
 }
 
 fn net_destroy(handle: u32) {
@@ -679,14 +686,11 @@ fn net_close_listener(handle: u32) {
     });
 }
 
-const TLS_UNAVAILABLE: &str =
-    "err:TLS support is not linked into thaw-js yet (https requests are unsupported)";
-
-fn s(it: &mut Interp, a: &[Value], i: usize) -> String {
+pub(crate) fn s(it: &mut Interp, a: &[Value], i: usize) -> String {
     it.to_str(&arg(a, i)).to_string()
 }
 
-fn n(it: &mut Interp, a: &[Value], i: usize) -> u32 {
+pub(crate) fn n(it: &mut Interp, a: &[Value], i: usize) -> u32 {
     it.num(&arg(a, i)) as u32
 }
 
@@ -769,68 +773,6 @@ pub(crate) fn install(it: &mut Interp) {
     def!("__thaw_net_close_listener", |it, _, a| {
         net_close_listener(n(it, a, 0));
         Ok(Value::Undefined)
-    });
-
-    // ----- TLS: not linked (rustls/ring would collide with thaw-runtime's copy in the combined link) -----
-    for name in [
-        "connect",
-        "connect_with_identity",
-        "connect_with_options",
-        "write",
-        "finish",
-        "shutdown",
-        "poll_read",
-        "server_listen",
-        "server_listen_with_ca",
-        "server_listen_with_options",
-        "server_accept",
-        "server_poll_accept",
-        "server_read",
-    ] {
-        def!(&format!("__thaw_tls_{name}"), |_, _, _| Ok(Value::str(
-            TLS_UNAVAILABLE
-        )));
-    }
-    for name in ["connect_start", "wrap_start"] {
-        def!(&format!("__thaw_tls_{name}"), |_, _, _| Ok(Value::Number(
-            f64::from(async_op_ready(TLS_UNAVAILABLE.to_string()))
-        )));
-    }
-    for name in ["destroy", "server_close"] {
-        def!(&format!("__thaw_tls_{name}"), |_, _, _| Ok(
-            Value::Undefined
-        ));
-    }
-    for name in [
-        "alpn",
-        "session_info",
-        "peer_certificate",
-        "local_certificate",
-    ] {
-        def!(&format!("__thaw_tls_{name}"), |_, _, _| Ok(Value::str("")));
-    }
-    for name in [
-        "peer_certificate_metadata",
-        "local_certificate_metadata",
-        "certificate_metadata_hex",
-    ] {
-        def!(&format!("__thaw_tls_{name}"), |_, _, _| Ok(Value::str(
-            "{}"
-        )));
-    }
-    def!("__thaw_tls_peer_chain", |_, _, _| Ok(Value::str("[]")));
-    def!("__thaw_tls_authorization", |_, _, _| {
-        Ok(Value::str(
-            r#"{"authorized":false,"authorizationError":"TLS support is unavailable","chainVerified":false}"#,
-        ))
-    });
-    def!("__thaw_tls_canonical_ip", |it, _, a| {
-        Ok(Value::str(
-            &s(it, a, 0)
-                .parse::<std::net::IpAddr>()
-                .map(|ip| ip.to_string())
-                .unwrap_or_default(),
-        ))
     });
 
     // ----- HPACK huffman (node:http2), hash, timer refs -----

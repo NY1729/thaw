@@ -9,7 +9,7 @@ fn run_ok(src: &str) -> String {
 }
 
 #[test]
-fn tcp_loopback_listen_connect_write_read_and_tls_stub() {
+fn tcp_loopback_listen_connect_write_read() {
     let out = run_ok(
         r#"
         var l = __thaw_net_listen('127.0.0.1', 0).split(':'); // ok:<handle>:<port>
@@ -34,12 +34,11 @@ fn tcp_loopback_listen_connect_write_read_and_tls_stub() {
           })();
         })();
         console.log(__thaw_net_connect('127.0.0.1', 70000));
-        console.log(__thaw_tls_connect('h', 443).slice(0, 29));
         "#,
     );
     assert_eq!(
         out,
-        "err:port should be >= 0 and < 65536. Received 70000|err:TLS support is not linked|ok|ping"
+        "err:port should be >= 0 and < 65536. Received 70000|ok|ping"
     );
 }
 
@@ -80,4 +79,62 @@ fn hpack_hash_and_timer_ref_hosts() {
         out,
         "f1e3c2e5f23a6ba0ab90f4ff www.example.com|ba7816bf8f01cfea|[object process]"
     );
+}
+
+#[test]
+fn thrown_error_properties_survive_the_framed_text_round_trip() {
+    let mut it = Interp::new();
+    let err = it
+        .run(
+            "var e = new Error('Request failed'); e.name = 'AxiosError'; e.code = 'ERR_BAD_REQUEST'; e.isAxiosError = true;\n\
+             var req = { path: '/x' }; req.self = req; e.response = { status: 404, data: 'nope', request: req, fn: function () {} };\n\
+             e",
+        )
+        .unwrap_or_else(|_| panic!("script must run"));
+    let (_, framed) = crate::host::frame_error(&mut it, &err).expect("error-like value");
+    let crate::Ctl::Throw(back) = crate::host::tagged_error(&mut it, &framed) else {
+        panic!("tagged_error must produce a throw");
+    };
+    let g = Value::Object(it.global_object.clone());
+    it.set(&g, "back", back).unwrap_or_else(|_| panic!("set"));
+    it.run(
+        "console.log(back.message, back.isAxiosError, back.code, back.response.status, back.response.data, typeof back.response.request.self, typeof back.response.fn);",
+    )
+    .unwrap_or_else(|_| panic!("script must run"));
+    assert_eq!(
+        it.out.join("|"),
+        "Request failed true ERR_BAD_REQUEST 404 nope undefined undefined"
+    );
+}
+
+#[test]
+fn tls_loopback_handshake_alpn_and_round_trip_with_a_trusted_ca() {
+    let hex = |s: &str| s.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+    let cert = hex(include_str!("../tests/fixtures/tls/cert.pem"));
+    let key = hex(include_str!("../tests/fixtures/tls/key.pem"));
+    let ca = hex(include_str!("../tests/fixtures/tls/ca.pem"));
+    let script = format!(
+        r#"
+        var cert = '{cert}', key = '{key}', ca = '{ca}';
+        var l = __thaw_tls_server_listen('127.0.0.1', 0, cert, key).split(':'); // ok:<handle>:<port>
+        // verification|alpn|deferName|versions
+        var op = __thaw_tls_connect_start('127.0.0.1', Number(l[2]), 'localhost', ca, '', '', '1|' + Buffer.from('http/1.1').toString('hex') + '|0|');
+        var client, server;
+        (function step() {{
+          if (!client) {{ var r = __thaw_async_poll(op); if (r !== 'pending') {{ client = r.split(':'); console.log(r.slice(0, 3)); }} }}
+          if (!server) {{ var a = __thaw_tls_server_poll_accept(Number(l[1])); if (a.indexOf('ok:') === 0) server = a.split(':'); }}
+          if (!client || !server) return setTimeout(step, 1);
+          console.log(__thaw_tls_write(Number(client[1]), Buffer.from('hello tls').toString('hex')));
+          (function read() {{
+            var d = __thaw_tls_poll_read(Number(server[1]));
+            if (d.indexOf('ok:') !== 0) {{ if (++reads > 2000) {{ console.log('gave up', d); return; }} return setTimeout(read, 1); }}
+            console.log(Buffer.from(d.slice(3), 'hex').toString());
+            console.log(JSON.parse(__thaw_tls_authorization(Number(client[1]))).authorized);
+            __thaw_tls_destroy(Number(client[1])); __thaw_tls_server_close(Number(l[1]));
+          }})();
+        }})();
+        "#
+    );
+    let out = run_ok(&script);
+    assert_eq!(out, "ok:|ok|hello tls|true");
 }
