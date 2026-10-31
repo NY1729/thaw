@@ -71,7 +71,10 @@ fn thaw_js_fixture(name: &str, main: &str) -> (PathBuf, PathBuf, PathBuf) {
         "export declare function describe(items: string[], label: string): any;\n\
          export declare function add(a: number, b: number): number;\n\
          export declare function apply(items: number[], f: (x: number) => number): number[];\n\
-         export declare function pairs(items: string[]): string[][];\n",
+         export declare function pairs(items: string[]): string[][];\n\
+         export type DateArg<D extends Date> = D | number | string;\n\
+         export declare function shift<T extends Date, R extends Date = T>(date: DateArg<T> & {}, days: number): R;\n\
+         export declare function iso<T extends Date>(date: DateArg<T> & {}): string;\n",
     )
     .unwrap();
     // The registry's bundle layout (one factory per module, a require map and the entry key), plus
@@ -84,6 +87,8 @@ fn thaw_js_fixture(name: &str, main: &str) -> (PathBuf, PathBuf, PathBuf) {
            exports.describe = function (items, label) { var m = new Map(); items.forEach(function (x) { m.set(x, (m.get(x) || 0) + 1); }); var counts = {}; m.forEach(function (n, k) { counts[k] = n; }); return { label: label.toUpperCase(), counts: counts }; };\n\
            exports.add = function (a, b) { var m = new Map(); m.set('t', a); return m.get('t') + b; };\n\
            exports.apply = function (items, f) { return items.map(f); };\n\
+           exports.shift = function (d, n) { return new Date(d.getTime() + n * 86400000); };\n\
+           exports.iso = function (d) { return d.toISOString(); };\n\
            exports.pairs = function (items) { var out = []; for (var i = 0; i < items.length; i += 2) out.push(items.slice(i, i + 2)); return out; };\n\
          },\n\
          };\n\
@@ -153,6 +158,25 @@ fn thaw_js_routing_serves_a_plain_data_package_without_linking_quickjs() {
     assert!(
         !bytes.windows(8).any(|window| window == b"rquickjs"),
         "QuickJS was linked"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_routing_carries_dates_both_ways_without_linking_quickjs() {
+    let (dir, registry, entry) = thaw_js_fixture(
+        "dates",
+        "import { shift, iso } from 'tjs-kit';\n\
+         function main(): void { const d = new Date(Date.UTC(2024, 2, 5, 10)); console.log(iso(shift(d, 2))); console.log(iso(shift(d, 1))); console.log(iso(d)); }\n",
+    );
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(
+        thaw_js_run(&output),
+        "2024-03-07T10:00:00.000Z\n2024-03-06T10:00:00.000Z\n2024-03-05T10:00:00.000Z\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -282,4 +306,20 @@ fn thaw_js_routing_serves_real_leaf_packages_like_node_when_enabled() {
         assert_eq!(thaw_js_run(&output), expected, "{package}");
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+#[test]
+fn thaw_js_async_overload_is_plain_when_its_resolved_type_is() {
+    assert!(thaw_js_async_declaration_plain(
+        "declare function __thaw_typed_js_6d73(t: string, d: Json): Promise<string>;"
+    ));
+    assert!(thaw_js_async_declaration_plain(
+        "declare function __thaw_typed_js_6d73(t: string): string | Promise<string>;"
+    ));
+    assert!(!thaw_js_async_declaration_plain(
+        "declare function __thaw_typed_js_6d73(t: string): Promise<Buffer>;"
+    ));
+    assert!(!thaw_js_async_declaration_plain(
+        "declare function __thaw_typed_js_6d73(t: Promise<string>): string;"
+    ));
 }

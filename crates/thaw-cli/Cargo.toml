@@ -20,7 +20,8 @@ thaw-parser = { version = "0.1.0", path = "../thaw-parser" }
 thaw-registry = { version = "0.1.0", path = "../thaw-registry" }
 swc_ecma_visit = "29.0.0"
 serde_json = "1"
-thaw-js = { version = "0.1.0", path = "../thaw-js" }
+# `intl`: the eligibility scan must see the same `Intl` global a program built with the feature runs on.
+thaw-js = { version = "0.1.0", path = "../thaw-js", features = ["intl"] }
 thaw-js-infer = { version = "0.1.0", path = "../thaw-js-infer" }
 semver = "1"
 

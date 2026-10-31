@@ -320,6 +320,7 @@ fn classify(it: &mut Interp, c: Ctl) -> HostError {
 const CALLBACK_KEY: &str = "__thaw_tjs_cb__";
 const TIMER_KEY: &str = "__thaw_tjs_timer__";
 const HANDLE_KEY: &str = "__thaw_tjs_handle__";
+const DATE_KEY: &str = "__thaw_tjs_date__";
 const UNDEFINED_KEY: &str = "$__thaw_napi_undefined$";
 
 /// `(adapter, context)` of a compiled callback: `adapter(context, args_json) -> result_json`.
@@ -576,6 +577,25 @@ fn graph_token(
     }
 }
 
+/// `new <global ctor>(args)`.
+fn construct_global(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String> {
+    let global = it.global.clone();
+    let ctor = it
+        .lookup(&global, name)
+        .ok_or_else(|| format!("{name} is not defined"))?;
+    it.construct(&ctor, args)
+        .map_err(|c| classify(it, c).to_string())
+}
+
+/// A `Date` of time value `ms` (`null`, how `NaN` crosses as JSON, is an Invalid Date).
+fn new_date(it: &mut Interp, ms: &Native) -> Result<Value, String> {
+    let ms = match ms {
+        Native::Number(n) => *n,
+        _ => f64::NAN,
+    };
+    construct_global(it, "Date", &[Value::Number(ms)])
+}
+
 /// Node `index` of a graph wire; shared nodes decode to one value (identity kept).
 fn graph_node(
     it: &mut Interp,
@@ -655,7 +675,24 @@ fn graph_node(
             thaw_tjs_release_handle(*id as i64);
             v
         }
-        _ => return Err("unsupported graph node (Date, Buffer, Map, Set, RegExp, BigInt)".into()),
+        [(k, ms)] if k == "d" => new_date(it, ms)?,
+        [(k, Native::Str(decimal))] if k == "bi" => Value::BigInt(Rc::new(
+            crate::bigint::parse_bigint(decimal).ok_or("malformed graph bigint")?,
+        )),
+        [(k, Native::Array(parts))] if k == "re" => {
+            let (Some(Native::Str(source)), Some(Native::Str(flags))) =
+                (parts.first(), parts.get(1))
+            else {
+                return Err("malformed graph regexp".into());
+            };
+            it.new_regexp(source, flags)
+                .map_err(|c| classify(it, c).to_string())?
+        }
+        [(k, token)] if k == "m" || k == "s" => {
+            let items = graph_token(it, token, nodes, memo, busy)?;
+            construct_global(it, if k == "m" { "Map" } else { "Set" }, &[items])?
+        }
+        _ => return Err("unsupported graph node (Buffer)".into()),
     };
     memo[index] = Some(value.clone());
     Ok(value)
@@ -874,7 +911,9 @@ impl WireOut {
                 return Ok(self.lease(id));
             }
         }
-        if self.plain && matches!(v, Value::Object(_)) && !v.is_callable() {
+        // (A class instance keeps its identity and methods even when it defines `toJSON`.)
+        if self.plain && matches!(v, Value::Object(_)) && !v.is_callable() && !is_live_value(it, &v)
+        {
             let to_json = it.get(&v, "toJSON").map_err(|c| classify(it, c))?;
             if to_json.is_callable() {
                 v = it
@@ -2234,6 +2273,10 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
             };
             it.timer_object(*id as u64)
         }
+        // `{"__thaw_tjs_date__": ms}`: a compiled `Date` (`null` for an Invalid Date).
+        Native::Object(fields) if matches!(fields.as_slice(), [(k, _)] if k == DATE_KEY) => {
+            new_date(it, &fields[0].1).unwrap_or(Value::Undefined)
+        }
         // The compiled side's `undefined` marker (absent optional argument, undefined result).
         Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Bool(true))] if k == UNDEFINED_KEY) => {
             Value::Undefined
@@ -2281,6 +2324,17 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
                         })
                         .collect::<Result<_, _>>()?,
                 ));
+            }
+            // a Date crosses as its time value
+            if matches!(&*o.kind.borrow(), Kind::Plain) && it.date_target(v) {
+                let ms = it.date_time(v).map_err(|c| classify(it, c))?;
+                // a non-finite time value (Invalid Date) crosses as "NaN": JSON has no NaN
+                let ms = if ms.is_finite() {
+                    Native::Number(ms)
+                } else {
+                    Native::Str("NaN".into())
+                };
+                return Ok(Native::Object(vec![(DATE_KEY.to_string(), ms)]));
             }
             // a Timeout/Immediate crosses as its id and is resolved back to the live timer
             if let Some(id) = it.timer_handle_id(v) {
@@ -2606,6 +2660,15 @@ pub extern "C" fn thaw_tjs_call_typed_result(
         if let Some(message) = symbol.strip_prefix('\u{1}') {
             return Err(message.to_string());
         }
+        // `\u{2}` prefix: the result is wanted as a handle id (a `JsValue` result); `\u{3}`: as a Date node.
+        let (want_handle, want_date, symbol) = match symbol.as_str() {
+            s if s.starts_with('\u{2}') => (true, false, &s[1..]),
+            s if s.starts_with('\u{3}') => (false, true, &s[1..]),
+            s => (false, false, s),
+        };
+        if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+            eprintln!("thaw-js call: {symbol} {args}");
+        }
         let (package, export) = symbol.split_once("::").ok_or("malformed thaw-js symbol")?;
         let handle = BY_NAME
             .with(|m| m.borrow().get(package).copied())
@@ -2615,7 +2678,10 @@ pub extern "C" fn thaw_tjs_call_typed_result(
         };
         with_package(handle, |p| {
             let r = p.call_or_get_value(export, Some(&args), true)?;
-            if is_live_value(&p.interp, &r) {
+            if want_handle {
+                return Ok(store_handle(handle, r).to_string());
+            }
+            if is_live_value(&p.interp, &r) && !(want_date && p.interp.date_target(&r)) {
                 return Ok(handle_marker_json(store_handle(handle, r)));
             }
             from_value(&mut p.interp, &r, 0).map(|n| n.to_json())

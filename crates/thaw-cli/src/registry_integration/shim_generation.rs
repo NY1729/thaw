@@ -507,7 +507,9 @@ fn generate_registry_shims_pass(
                 &mut functions,
                 name,
                 user_source,
-                std::env::var("THAW_PRUNE_SHIMS").as_deref() == Ok("1"),
+                // a thaw-js build also compiles every shim it emits, so an unmentioned function's
+                // adapter (ejs `compile`'s callable result) must not be emitted at all
+                thaw_js_routing || std::env::var("THAW_PRUNE_SHIMS").as_deref() == Ok("1"),
             );
         }
         restrict_type_only_class_values(&mut classes, &type_only_value_names);
@@ -2737,7 +2739,7 @@ fn prune_unused_functions(
             let Some(start) = before.rfind("import") else {
                 return;
             };
-            import_ranges.push(start..pos);
+            import_ranges.push(start..pos + needle.len());
             let clause = &before[start + "import".len()..];
             let head = &before[..start];
             if clause.contains(';')

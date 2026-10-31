@@ -8,7 +8,11 @@ description = "EXPERIMENTAL Thaw-native JavaScript runtime (prototype of milesto
 [lib]
 crate-type = ["staticlib", "rlib"]
 
+[features]
+intl = ["dep:thaw-intl"]
+
 [dependencies]
+thaw-intl = { path = "../thaw-intl", optional = true }
 thaw-parser = { path = "../thaw-parser" }
 thaw-arena = { path = "../thaw-arena" }
 swc_ecma_visit = "29.0.0"

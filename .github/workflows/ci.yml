@@ -1,8 +1,10 @@
 name: CI
 
 on:
-  push:
+  # Pull requests only: a push trigger on every branch ran each PR commit twice, and the run after a
+  # merge repeats what the PR already verified. `workflow_dispatch` runs it by hand when needed.
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
