@@ -27,9 +27,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 return Ok(i64_type.const_int(((value << 1) | 1) as u64, false).into());
             }
         }
-        let pointer = self
-            .builder
-            .build_global_string_ptr(text, "bigint_literal")
+        let pointer = self.intern_string(text, "bigint_literal")
             .map_err(|error| error.to_string())?
             .as_pointer_value();
         self.bigint_call("thaw_i64_from_string", &[pointer.into()])
@@ -50,10 +48,10 @@ impl<'ctx> HirCompiler<'ctx> {
         let continue_bb = self.context.append_basic_block(function, "bigint_ok");
         self.builder.build_conditional_branch(failed, error_bb, continue_bb).map_err(|error| error.to_string())?;
         self.builder.position_at_end(error_bb);
-        let mut message = self.builder.build_global_string_ptr("Maximum BigInt size exceeded", "bigint_size_message")
+        let mut message = self.intern_string("Maximum BigInt size exceeded", "bigint_size_message")
             .map_err(|error| error.to_string())?.as_pointer_value();
         for (value, text) in [(2u64, "Exponent must be non-negative"), (1, "Division by zero")] {
-            let text = self.builder.build_global_string_ptr(text, "bigint_error_message")
+            let text = self.intern_string(text, "bigint_error_message")
                 .map_err(|error| error.to_string())?.as_pointer_value();
             let is = self.builder
                 .build_int_compare(IntPredicate::EQ, code, i32_type.const_int(value, false), "bigint_code")
