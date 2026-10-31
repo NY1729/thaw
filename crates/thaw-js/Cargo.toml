@@ -20,3 +20,6 @@ sha1 = "0.10"
 sha2 = "0.10"
 md-5 = "0.10"
 libc = "0.2"
+flate2 = { version = "1", features = ["zlib-rs"] }
+brotli = "8"
+httlib-huffman = "0.3.4"

@@ -35,6 +35,7 @@ mod extras;
 mod generators;
 pub mod host;
 mod json;
+mod net;
 mod numfmt;
 mod proxy;
 pub mod scan;
@@ -51,10 +52,13 @@ mod web_crypto;
 mod web_dom_exception;
 #[path = "web/event_target.rs"]
 mod web_event_target;
+#[path = "web/fetch.rs"]
+mod web_fetch;
 #[path = "web/streams.rs"]
 mod web_streams;
 #[path = "web/text_codec.rs"]
 mod web_text_codec;
+mod zlib;
 
 /// Feature names (as reported by [`scan`] and [`Ctl::Unsupported`]) the evaluator runs.
 pub const SUPPORTED_FEATURES: &[&str] = &[
@@ -679,12 +683,15 @@ impl Interp {
         it.install_typed();
         it.install_buffer();
         it.install_sysio();
+        net::install(&mut it);
+        zlib::install(&mut it);
         it.install_fs_host();
         web_dom_exception::install(&mut it);
         web_text_codec::install(&mut it);
         web_event_target::install(&mut it);
         web_abort::install(&mut it);
         web_blob::install(&mut it);
+        web_fetch::install(&mut it);
         web_streams::install(&mut it);
         web_crypto::install(&mut it);
         it.install_url();
@@ -708,7 +715,10 @@ impl Interp {
             return true;
         }
         let marker = 0u8;
-        self.stack_limit != 0 && (&marker as *const u8 as usize) < self.stack_limit
+        let sp = &marker as *const u8 as usize;
+        // below the configured limit is only deep if this thread's own stack agrees: compiled code may
+        // enter from a thread other than the one that configured the limit (an async continuation)
+        self.stack_limit != 0 && sp < self.stack_limit && !thread_stack_has_room(sp)
     }
 
     pub(crate) fn native(
@@ -3062,6 +3072,28 @@ pub(crate) fn order_keys(keys: Vec<Rc<str>>) -> Vec<Rc<str>> {
 }
 
 /// Create or overwrite an enumerable, writable data property.
+/// Whether the calling thread's own stack still has room at `sp` (same reserve as `configure_stack`).
+#[cfg(target_os = "linux")]
+fn thread_stack_has_room(sp: usize) -> bool {
+    // SAFETY: plain pthread queries on the current thread with a zeroed attribute object.
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+            return false;
+        }
+        let mut addr: *mut libc::c_void = std::ptr::null_mut();
+        let mut size: libc::size_t = 0;
+        let ok = libc::pthread_attr_getstack(&attr, &mut addr, &mut size) == 0;
+        libc::pthread_attr_destroy(&mut attr);
+        ok && size != 0 && sp >= addr as usize + (size / 8 + (4 << 20)).min(size / 2)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn thread_stack_has_room(_sp: usize) -> bool {
+    false
+}
+
 pub(crate) fn put(o: &Obj, key: &str, value: Value) {
     let pos = o.position(key);
     let mut props = o.props.borrow_mut();
@@ -3202,5 +3234,7 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
     }
 }
 
+#[cfg(test)]
+mod net_tests;
 #[cfg(test)]
 mod tests;

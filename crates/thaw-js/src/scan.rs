@@ -470,6 +470,39 @@ impl Visit for Walker {
     }
 }
 
+/// Findings the heuristics cannot tell are dead or guarded. Each entry is a construct that is inert on Node too,
+/// so running it on thaw-js behaves the same:
+/// - `process.type|browser|__nwjs|allowedNodeEnvironmentFlags`: absent on Node (read as `undefined`) -- `debug` probes them to pick its browser entry;
+/// - `debug`'s browser entry is never selected by that probe; its `supports-color` require is try/catch-optional;
+/// - `node:assert` inspects with `require(['node','util'].join(':'))` inside a try/catch;
+/// - axios: `AxiosHeaders` accessors are installed from a name list (`getContentType`, ...), `zlib.createZstdDecompress`
+///   is feature-tested, `postMessage`/`send` sit behind `typeof` / XHR-only paths, `isDeepStrictEqual` is http2 session
+///   reuse (http2 needs TLS, which thaw-js does not link), `onSocket` is `agent-base`'s `typeof` check.
+fn tolerated(feature: &str, key: &str) -> bool {
+    const AXIOS_METHODS: &[&str] = &[
+        "method:getContentType",
+        "method:getContentLength",
+        "method:hasContentLength",
+        "method:setContentType",
+        "method:setContentLength",
+        "method:createZstdDecompress",
+        "method:postMessage",
+        "method:send",
+        "method:isDeepStrictEqual",
+    ];
+    matches!(
+        feature,
+        "builtin:process.type"
+            | "builtin:process.browser"
+            | "builtin:process.__nwjs"
+            | "builtin:process.allowedNodeEnvironmentFlags"
+    ) || key.ends_with("debug/src/browser.js")
+        || (feature == "require:supports-color" && key.ends_with("debug/src/node.js"))
+        || (feature == "require:dynamic" && key == "node:assert")
+        || (AXIOS_METHODS.contains(&feature) && key.ends_with("axios/./dist/node/axios.cjs"))
+        || (feature == "method:onSocket" && key.ends_with("agent-base/dist/src/index.js"))
+}
+
 /// Scan a registry bundle.
 pub fn scan_bundle(source: &str) -> Result<Report, String> {
     let parts = parse_bundle(source)?;
@@ -498,7 +531,7 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
         "undefined",
     ];
     let add = |report: &mut Report, feature: String, n: usize, key: &str| {
-        if crate::SUPPORTED_FEATURES.contains(&feature.as_str()) {
+        if crate::SUPPORTED_FEATURES.contains(&feature.as_str()) || tolerated(&feature, key) {
             return;
         }
         let e = report
@@ -538,6 +571,8 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
                 && !globals.contains(r)
                 && !params.contains(&r.as_str())
                 && !w.probed.contains(r)
+                // service-worker globals Node does not define either: a ReferenceError there, same here
+                && r != "addEventListener"
             {
                 add(&mut report, format!("global:{r}"), 1, key);
             }

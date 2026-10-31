@@ -3211,6 +3211,9 @@ dependencies = [
 name = "thaw-js"
 version = "0.1.0"
 dependencies = [
+ "brotli",
+ "flate2",
+ "httlib-huffman",
  "jiff",
  "libc",
  "md-5",

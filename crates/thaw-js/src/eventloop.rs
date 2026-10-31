@@ -623,6 +623,11 @@ impl Interp {
 
     // ----- timers / event loop -----
 
+    /// Run `f` from the next timer round (keeps the loop alive until it has run).
+    pub(crate) fn defer_tick(&mut self, f: Value) -> R<()> {
+        self.add_timer(&[f, Value::Number(0.0)], false).map(|_| ())
+    }
+
     fn add_timer(&mut self, args: &[Value], repeat: bool) -> R<Value> {
         let cb = arg(args, 0);
         self.need_callback(&cb)?;
@@ -772,19 +777,69 @@ impl Interp {
         Ok(())
     }
 
+    /// Drive jobs, timers and immediates until the promise `v` settles or no work remains; a
+    /// non-promise settles at once. Does not emit `beforeExit`/`exit`.
+    pub fn await_settled(&mut self, v: &Value) -> R<Option<Result<Value, Value>>> {
+        if !self.is_promise(v) {
+            return Ok(Some(Ok(v.clone())));
+        }
+        self.mark_handled(v);
+        loop {
+            self.run_jobs()?;
+            if let Some(state) = self.promise_state(v) {
+                return Ok(Some(state));
+            }
+            if !self.loop_alive() {
+                return Ok(None);
+            }
+            self.rt.now = clock_ms();
+            self.run_timers()?;
+            if !self.rt.immediates.is_empty() {
+                self.run_immediates()?;
+                continue;
+            }
+            if let Some(next) = self
+                .rt
+                .timers
+                .iter()
+                .map(|t| t.expiry)
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                let wait = next - clock_ms();
+                if wait > 0.0 {
+                    std::thread::sleep(Duration::from_secs_f64(wait / 1000.0));
+                }
+            }
+        }
+    }
+
     /// Referenced timers/immediates or queued jobs remain.
     pub fn work_pending(&self) -> bool {
         self.loop_alive() || !self.rt.ticks.is_empty() || !self.rt.micro.is_empty()
     }
 
     fn loop_alive(&self) -> bool {
-        self.rt.timers.iter().any(|t| t.refd) || self.rt.immediates.iter().any(|i| i.refd)
+        self.rt.timers.iter().any(|t| t.refd)
+            || self.rt.immediates.iter().any(|i| i.refd)
+            || crate::zlib::active()
+    }
+
+    /// Call the shim-installed `globalThis.__thaw_poll_platform_events` (async zlib jobs, child processes).
+    fn poll_platform_events(&mut self) -> R<()> {
+        let g = Value::Object(self.global_object.clone());
+        let f = self.get(&g, "__thaw_poll_platform_events")?;
+        if matches!(f, Value::Object(_)) {
+            self.call(&f, &g, &[])?;
+            self.run_jobs()?;
+        }
+        Ok(())
     }
 
     fn loop_inner(&mut self) -> R<()> {
         self.run_jobs()?;
         while self.loop_alive() {
             self.rt.now = clock_ms();
+            self.poll_platform_events()?;
             self.run_timers()?;
             if !self.rt.immediates.is_empty() {
                 self.run_immediates()?;
@@ -800,10 +855,15 @@ impl Interp {
                 .map(|t| t.expiry)
                 .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             {
-                let wait = next - clock_ms();
+                let mut wait = next - clock_ms();
+                if crate::zlib::active() {
+                    wait = wait.min(2.0);
+                }
                 if wait > 0.0 {
                     std::thread::sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
+            } else if crate::zlib::active() {
+                std::thread::sleep(Duration::from_millis(2));
             }
         }
         Ok(())
