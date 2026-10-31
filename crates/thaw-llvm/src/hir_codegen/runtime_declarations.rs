@@ -4148,6 +4148,24 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
 
+        let void_type = self.context.void_type();
+        let f64_type = self.context.f64_type();
+        for (symbol, ty) in [
+            (
+                "thaw_timer_set",
+                i64_type.fn_type(
+                    &[self.context.i8_type().into(), f64_type.into(), i8_ptr.into(), i8_ptr.into()],
+                    false,
+                ),
+            ),
+            ("thaw_timer_clear", void_type.fn_type(&[i64_type.into()], false)),
+            ("thaw_timer_ref", void_type.fn_type(&[i64_type.into()], false)),
+            ("thaw_timer_unref", void_type.fn_type(&[i64_type.into()], false)),
+            ("thaw_timer_refresh", void_type.fn_type(&[i64_type.into()], false)),
+            ("thaw_timer_has_ref", self.context.i8_type().fn_type(&[i64_type.into()], false)),
+        ] {
+            self.module.add_function(symbol, ty, Some(Linkage::External));
+        }
         let sleep_type = i8_ptr.fn_type(&[i64_type.into()], false);
         self.module
             .add_function("thaw_sleep_ms", sleep_type, Some(Linkage::External));

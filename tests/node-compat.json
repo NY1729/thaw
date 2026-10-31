@@ -3802,6 +3802,31 @@
       "name": "sort comparator NaN result and random stable sorts",
       "expect": "matched",
       "source": "let seed = 12345;\nfunction rnd(m: number): number { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % m; }\nfunction main(): void {\n  console.log([5, 1, NaN, 4, 2].sort((x, y) => x - y).join(\",\"));\n  console.log([3, NaN, 1].toSorted((x, y) => x - y).join(\",\"));\n  let h1 = 0, h2 = 0, h3 = 0;\n  for (let n = 1; n <= 300; n++) {\n    const objs: { k: number; i: number }[] = [];\n    const nums: number[] = [];\n    for (let i = 0; i < n; i++) { const v = rnd(n < 20 ? 5 : 40); objs.push({ k: v, i }); nums.push(v * 3 - 20); }\n    const so = objs.sort((a, b) => a.k - b.k);\n    for (let i = 0; i < n; i++) h1 = (h1 * 31 + so[i].k * 1000 + so[i].i) % 1000000007;\n    const sn = nums.toSorted((a, b) => a - b);\n    for (let i = 0; i < n; i++) h2 = (h2 * 31 + sn[i] + 100) % 1000000007;\n    const strs = nums.map((v) => \"s\" + (v % 7));\n    const ss = strs.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));\n    for (let i = 0; i < n; i++) h3 = (h3 * 31 + ss[i].charCodeAt(1)) % 1000000007;\n  }\n  console.log(h1, h2, h3);\n}\n"
+    },
+    {
+      "name": "native timers fire in due then creation order",
+      "expect": "matched",
+      "source": "function main(): void {\n  setTimeout(() => console.log(\"t10\"), 10);\n  setTimeout(() => console.log(\"t0\"), 0);\n  setTimeout(() => console.log(\"t1\"), 1);\n  setTimeout(() => console.log(\"t5\"), 5);\n  setTimeout(() => console.log(\"t2a\"), 2);\n  setTimeout(() => console.log(\"t2b\"), 2);\n  console.log(\"sync\");\n}\n"
+    },
+    {
+      "name": "native interval cleared in its own callback and clear before fire",
+      "expect": "matched",
+      "source": "function main(): void {\n  let n = 0;\n  const id = setInterval(() => {\n    n++;\n    console.log(\"tick \" + n);\n    if (n === 3) { clearInterval(id); console.log(\"cleared\"); }\n  }, 5);\n  const gone = setTimeout(() => console.log(\"never\"), 3);\n  clearTimeout(gone);\n  const imm = setImmediate(() => console.log(\"never imm\"));\n  clearImmediate(imm);\n}\n"
+    },
+    {
+      "name": "native unref ref hasRef and nested timers",
+      "expect": "matched",
+      "source": "function main(): void {\n  setTimeout(() => console.log(\"unref never\"), 500).unref();\n  const t = setTimeout(() => console.log(\"kept\"), 80);\n  console.log(t.hasRef());\n  t.unref();\n  console.log(t.hasRef());\n  t.ref();\n  console.log(t.hasRef());\n  setTimeout(() => {\n    console.log(\"outer\");\n    setTimeout(() => {\n      console.log(\"inner\");\n      setTimeout(() => console.log(\"innermost\"), 0);\n    }, 0);\n  }, 2);\n}\n"
+    },
+    {
+      "name": "native timers drain promise jobs between callbacks",
+      "expect": "matched",
+      "source": "function main(): void {\n  setTimeout(() => { console.log(\"a\"); Promise.resolve().then(() => console.log(\"a micro\")); }, 1);\n  setTimeout(() => { console.log(\"b\"); Promise.resolve().then(() => console.log(\"b micro\")); }, 1);\n  setTimeout(() => console.log(\"c\"), 1);\n  Promise.resolve().then(() => console.log(\"main micro\"));\n}\n"
+    },
+    {
+      "name": "native setImmediate from a timer callback runs before the next timer",
+      "expect": "matched",
+      "source": "function main(): void {\n  setTimeout(() => {\n    console.log(\"timer\");\n    setImmediate(() => console.log(\"imm1\"));\n    setTimeout(() => console.log(\"timeout0\"), 0);\n    setImmediate(() => console.log(\"imm2\"));\n  }, 1);\n}\n"
     }
   ]
 }

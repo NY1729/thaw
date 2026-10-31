@@ -463,6 +463,10 @@ impl<'ctx> HirCompiler<'ctx> {
                         }
                         "pollNativeAddonEvents" => return Some(HirType::F64),
                         "sleep" => return Some(HirType::Promise(Box::new(HirType::Void))),
+                        "__thaw_timer_set" | "__thaw_timer_ref" | "__thaw_timer_unref"
+                        | "__thaw_timer_refresh" => return Some(HirType::I64),
+                        "__thaw_timer_clear" => return Some(HirType::Void),
+                        "__thaw_timer_has_ref" => return Some(HirType::Bool),
                         _ => {}
                     }
                     if name == "__thaw_string_to_array" {

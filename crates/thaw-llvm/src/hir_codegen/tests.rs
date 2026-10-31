@@ -816,3 +816,4 @@ include!("tests/compile_speed_contracts.rs");
 include!("tests/object_create_contracts.rs");
 include!("tests/audit2_leftovers_contracts.rs");
 include!("tests/sort_nan_contracts.rs");
+include!("tests/native_timer_contracts.rs");

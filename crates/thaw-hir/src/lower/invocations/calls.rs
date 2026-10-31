@@ -382,6 +382,9 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        if let Some(timer) = self.try_lower_native_timer(call)? {
+            return Ok(timer);
+        }
         // `o["name"](...)` is `o.name(...)`: canonicalize identifier-like
         // string keys so every member-call path (dynamic receivers, nested
         // receivers, optional chains) handles them.
