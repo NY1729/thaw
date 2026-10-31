@@ -784,7 +784,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or_else(|| "thaw_json_index_get_mut returned no value".to_string());
             }
-            "__thaw_json_keys" | "__thaw_json_for_in_keys" | "__thaw_json_own_keys" => {
+            "__thaw_json_keys" | "__thaw_json_for_in_keys" | "__thaw_json_own_keys"
+            | "__thaw_json_own_symbols" => {
                 return self.compile_json_enumeration(name.trim_start_matches("__"), args);
             }
             "__thaw_array_keys" => {
