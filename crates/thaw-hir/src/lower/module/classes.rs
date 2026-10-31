@@ -443,8 +443,10 @@ fn collect_native_classes<'a>(
                         .then(|| {
                             (
                                 method.function.is_async,
-                                method.function.return_type.is_none(),
                                 method_type(name, method, interfaces, generic_interfaces),
+                                // An unannotated return is inferred from the body later; the
+                                // placeholder `Void` here must not be compared to the contract.
+                                method.function.return_type.is_none() && !method.function.is_generator,
                             )
                         })
                     });
@@ -464,7 +466,7 @@ fn collect_native_classes<'a>(
                 let mut unannotated_return = false;
                 let actual_type = match (field_type, implemented_method) {
                     (Some(ty), _) => ty,
-                    (None, Some((is_async, unannotated, ty))) => {
+                    (None, Some((is_async, ty, unannotated))) => {
                         async_method = is_async;
                         unannotated_return = unannotated;
                         ty?
@@ -483,16 +485,15 @@ fn collect_native_classes<'a>(
                     },
                     _ => required_type.clone(),
                 };
-                // A method may declare fewer parameters than the member (and leave its return
-                // type to inference); its extra arguments are dropped.
-                let fewer_parameters = match (&actual_type, required_type) {
-                    (HirType::Function(actual_params, actual_ret), HirType::Function(required_params, required_ret)) => {
-                        required_params.starts_with(actual_params)
-                            && (actual_ret == required_ret || (unannotated_return && **actual_ret == HirType::Void))
-                    }
-                    _ => false,
-                };
-                if &actual_type != required_type && !fewer_parameters {
+                // A method may declare fewer parameters than the member; an unannotated return is
+                // inferred later, so only the parameters are compared then.
+                let params_only_match = unannotated_return
+                    && matches!((&actual_type, required_type),
+                        (HirType::Function(actual, _), HirType::Function(required, _)) if required.starts_with(actual));
+                let fewer_parameters = matches!((&actual_type, required_type),
+                    (HirType::Function(actual_params, actual_ret), HirType::Function(required_params, required_ret))
+                        if required_params.starts_with(actual_params) && actual_ret == required_ret);
+                if &actual_type != required_type && !params_only_match && !fewer_parameters {
                     return Err(format!(
                         "class `{name}` field `{field}` has type {actual_type:?}, but `{}` requires {required_type:?}",
                         target.sym
