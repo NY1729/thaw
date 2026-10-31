@@ -101,7 +101,7 @@ impl Interp {
         if let Some(r) = self.proxy_has(o, key)? {
             return Ok(r);
         }
-        let is_index = matches!(&*o.kind.borrow(), Kind::Array(items) if key.parse::<usize>().is_ok_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))));
+        let is_index = matches!(&*o.kind.borrow(), Kind::Array(items) if key == "length" || key.parse::<usize>().is_ok_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))));
         Ok(is_index || find_in_chain(o, key).is_some())
     }
 

@@ -1268,6 +1268,39 @@ fn scan_knows_fetch_globals_and_tolerates_service_worker_listener() {
     assert!(r.is_clean(), "{:?}", r.blockers);
 }
 
+#[test]
+fn in_operator_sees_array_length() {
+    assert_eq!(
+        one("console.log('length' in [1,2], 'length' in [], 1 in [5,6], 2 in [5,6], 'x' in [])"),
+        "true true true false false"
+    );
+}
+
+const CHEERIO_UNDICI: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"cheerio/index.js": function(module, exports, require) {
+  var undici = require('undici');
+  exports.ok = function () { return 1; };
+  exports.fromURL = function () { return new undici.Client('http://a'); };
+},
+"undici/index.js": function(module, exports, require) { WebAssembly.compile; new MessageChannel(); },
+};
+var __thaw_bundle_require_maps = { "cheerio/index.js": {"undici": "undici/index.js"}, "undici/index.js": {}, };
+var __thaw_bundle_entry_key = "cheerio/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn cheerio_undici_is_stubbed_with_a_clear_error() {
+    // the scan no longer sees undici's WebAssembly/MessageChannel use ...
+    let r = crate::scan::scan_bundle(CHEERIO_UNDICI).ok().unwrap();
+    assert!(r.is_clean(), "{:?}", r.blockers);
+    // ... the rest of the package loads and runs, and fromURL fails loudly instead of silently
+    let mut p = crate::host::Package::load(CHEERIO_UNDICI).unwrap();
+    assert!(p.call("ok", &[]).is_ok());
+    let e = format!("{:?}", p.call("fromURL", &[]));
+    assert!(e.contains("undici is not available"), "{e}");
+}
+
 // ----- graph callbacks and awaited Promises -----
 
 const GRAPH_BUNDLE: &str = r#"module.exports = (function(require){
@@ -1331,7 +1364,7 @@ fn graph_callbacks_receive_live_objects_and_return_graph_wires() {
         assert!(made.error.is_null() && made.value > 0);
         made.value
     };
-    let echo = handle_of(1 as *const _);
+    let echo = handle_of(std::ptr::dangling());
     let number = handle_of(std::ptr::null());
     let call = |export: &str, callback: u64| {
         let function = thaw_tjs_get_global(
