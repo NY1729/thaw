@@ -3947,6 +3947,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_tjs_callback_identity",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_tjs_register_callback",
             self.context.i64_type().fn_type(
                 &[i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into()],
@@ -3957,6 +3962,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_tjs_retain_graph_result",
             handle_result_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_tjs_load_script",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

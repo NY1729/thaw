@@ -105,6 +105,23 @@ impl Interp {
         Ok(is_index || find_in_chain(o, key).is_some())
     }
 
+    /// `[[GetPrototypeOf]]` of a proxy: its trap's answer, else the target's prototype (`None`: not a proxy).
+    pub(crate) fn proxy_get_prototype_of(&mut self, o: &Obj) -> R<Option<Value>> {
+        let Some((target, handler, trap)) = self.proxy_trap(o, "getPrototypeOf")? else {
+            return Ok(None);
+        };
+        if trap.is_callable() {
+            return Ok(Some(self.call(&trap, &handler, &[target])?));
+        }
+        Ok(Some(match &target {
+            Value::Object(t) => match self.proxy_get_prototype_of(t)? {
+                Some(proto) => proto,
+                None => t.proto.borrow().clone().map_or(Value::Null, Value::Object),
+            },
+            _ => Value::Null,
+        }))
+    }
+
     pub(crate) fn proxy_delete(&mut self, o: &Obj, key: &str) -> R<Option<bool>> {
         let Some((target, handler, trap)) = self.proxy_trap(o, "deleteProperty")? else {
             return Ok(None);

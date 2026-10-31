@@ -1096,6 +1096,40 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_tjs_intern_native_object",
                 ),
                 ("thaw_js_get_global", "thaw_tjs_get_global"),
+                ("thaw_js_new_function", "thaw_tjs_new_function"),
+                (
+                    "thaw_js_call_handle_mixed_handle_graph_args_result",
+                    "thaw_tjs_call_handle_mixed_handle_graph_args_result",
+                ),
+                (
+                    "thaw_js_call_handle_mixed_handle_graph_args_consuming_result",
+                    "thaw_tjs_call_handle_mixed_handle_graph_args_consuming_result",
+                ),
+                (
+                    "thaw_js_call_method_handle_graph_args_result",
+                    "thaw_tjs_call_method_handle_graph_args_result",
+                ),
+                (
+                    "thaw_js_set_property_json_graph_result",
+                    "thaw_tjs_set_property_json_graph_result",
+                ),
+                (
+                    "thaw_js_to_iterator_exact_result",
+                    "thaw_tjs_to_iterator_exact_result",
+                ),
+                (
+                    "thaw_js_to_async_iterator_exact_result",
+                    "thaw_tjs_to_async_iterator_exact_result",
+                ),
+                (
+                    "thaw_js_iterator_step_exact_result",
+                    "thaw_tjs_iterator_step_exact_result",
+                ),
+                (
+                    "thaw_js_register_native_method_callback_graph",
+                    "thaw_tjs_register_native_method_callback_graph",
+                ),
+                ("thaw_js_call_graph_result", "thaw_tjs_call_graph_result"),
                 (
                     "thaw_js_release_native_handle_array",
                     "thaw_tjs_release_native_handle_array",
@@ -1152,6 +1186,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_js_register_native_callback_graph",
                     "thaw_tjs_register_native_callback_graph",
                 ),
+                (
+                    "thaw_js_register_native_method_callback_graph",
+                    "thaw_tjs_register_native_method_callback_graph",
+                ),
+                (
+                    "thaw_js_call_handle_mixed_handle_graph_args_result",
+                    "thaw_tjs_call_handle_mixed_handle_graph_args_result",
+                ),
+                (
+                    "thaw_js_call_handle_mixed_handle_graph_args_consuming_result",
+                    "thaw_tjs_call_handle_mixed_handle_graph_args_consuming_result",
+                ),
                 ("thaw_js_run_event_loop", "thaw_tjs_run_event_loop"),
                 (
                     "thaw_js_terminal_work_pending",
@@ -1164,6 +1210,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     function.set_linkage(Linkage::External);
                 }
             }
+            self.js_unported_symbols_used();
         }
         self.hoist_static_allocas();
         // Verification costs real time on large modules; debug builds (tests, CI's `cargo run`)

@@ -215,6 +215,38 @@ fn discriminant_literal(ty: &TsType, generic: &GenericInterfaces<'_>) -> Option<
     }
 }
 
+/// Guards a walk over self-referential plain aliases (`type Tree = { l?: Tree }`), which resolve
+/// to object literals and so escape the interface-name guards. `None` = already being visited.
+fn enter_alias(
+    ty: &TsType,
+    generic: &GenericInterfaces<'_>,
+    visiting: &mut HashSet<Symbol>,
+) -> Option<Option<String>> {
+    let name = match strip_parenthesized_ts_type(ty) {
+        TsType::TsTypeRef(reference) => match &reference.type_name {
+            swc_ecma_ast::TsEntityName::Ident(name)
+                if generic.plain_aliases.contains_key(name.sym.as_ref()) =>
+            {
+                Some(format!("alias:{}", name.sym))
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(name) = &name {
+        if !visiting.insert(name.clone()) {
+            return None;
+        }
+    }
+    Some(name)
+}
+
+fn leave_alias(guard: Option<String>, visiting: &mut HashSet<Symbol>) {
+    if let Some(name) = guard {
+        visiting.remove(&name);
+    }
+}
+
 fn object_union_discriminants(
     ty: &TsType,
     generic: &GenericInterfaces<'_>,
@@ -274,6 +306,18 @@ fn nested_object_union_discriminants(
     generic: &GenericInterfaces<'_>,
 ) -> HashMap<Symbol, UnionDiscriminants> {
     fn collect(
+        ty: &TsType,
+        generic: &GenericInterfaces<'_>,
+        prefix: &str,
+        visiting: &mut HashSet<Symbol>,
+        result: &mut HashMap<Symbol, UnionDiscriminants>,
+    ) {
+        let Some(guard) = enter_alias(ty, generic, visiting) else { return };
+        collect_body(ty, generic, prefix, visiting, result);
+        leave_alias(guard, visiting);
+    }
+
+    fn collect_body(
         ty: &TsType,
         generic: &GenericInterfaces<'_>,
         prefix: &str,
@@ -450,6 +494,18 @@ fn object_array_property_discriminants(
     generic: &GenericInterfaces<'_>,
 ) -> ObjectArrayPropertyDiscriminants {
     fn collect(
+        ty: &TsType,
+        generic: &GenericInterfaces<'_>,
+        prefix: &mut Vec<Symbol>,
+        visiting: &mut HashSet<Symbol>,
+        result: &mut ObjectArrayPropertyDiscriminants,
+    ) {
+        let Some(guard) = enter_alias(ty, generic, visiting) else { return };
+        collect_body(ty, generic, prefix, visiting, result);
+        leave_alias(guard, visiting);
+    }
+
+    fn collect_body(
         ty: &TsType,
         generic: &GenericInterfaces<'_>,
         prefix: &mut Vec<Symbol>,
@@ -693,6 +749,18 @@ fn object_function_property_discriminants(
     generic: &GenericInterfaces<'_>,
 ) -> ObjectFunctionPropertyDiscriminants {
     fn collect(
+        ty: &TsType,
+        generic: &GenericInterfaces<'_>,
+        prefix: &mut Vec<Symbol>,
+        visiting: &mut HashSet<Symbol>,
+        result: &mut ObjectFunctionPropertyDiscriminants,
+    ) {
+        let Some(guard) = enter_alias(ty, generic, visiting) else { return };
+        collect_body(ty, generic, prefix, visiting, result);
+        leave_alias(guard, visiting);
+    }
+
+    fn collect_body(
         ty: &TsType,
         generic: &GenericInterfaces<'_>,
         prefix: &mut Vec<Symbol>,

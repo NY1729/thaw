@@ -605,6 +605,9 @@ impl<'a> FnLowerer<'a> {
             HirType::Function(expected_params, result) => {
                 fixed == expected_params
                     && (&ret == result.as_ref()
+                        // An unannotated method's return is still the `Dynamic` placeholder
+                        // until a later pass infers it from the body.
+                        || ret == HirType::Dynamic
                         || Self::async_signature_returns(signature.is_async, &ret, result))
             }
             HirType::CallableFunction(expected_params, _, expected_rest, result) => {
