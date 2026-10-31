@@ -1038,11 +1038,23 @@ fn build_with_native_mode_routed(
             build_staticlib_with_features("thaw-quickjs", &features)
         })
         .transpose()?;
+    // thaw-js carries its own copy of thaw-intl (a leaf crate, `Intl` polyfill natives) when the program
+    // references `Intl`; its `thaw_intl_*` exports then also serve the native locale calls, so the
+    // standalone thaw-intl archive would define them twice.
+    let thaw_js_intl = compiler.uses_thaw_js() && runtime_features.contains("intl");
     let thaw_js_lib = compiler
         .uses_thaw_js()
-        .then(|| build_staticlib("thaw-js"))
+        .then(|| {
+            if thaw_js_intl {
+                build_staticlib_with_features("thaw-js", &["intl"])
+            } else {
+                build_staticlib("thaw-js")
+            }
+        })
         .transpose()?;
-    let intl_lib = compiler.uses_intl().then(|| build_staticlib("thaw-intl")).transpose()?;
+    let intl_lib = (compiler.uses_intl() && !thaw_js_intl)
+        .then(|| build_staticlib("thaw-intl"))
+        .transpose()?;
     let napi_lib = uses_napi
         .then(|| {
             if !uses_quickjs {

@@ -615,6 +615,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_stringify_tjs",
+            json_stringify_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_encode_public",
             json_stringify_type,
             Some(Linkage::External),
@@ -1265,6 +1270,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, array_sort_type, Some(Linkage::External));
         }
+        self.module.add_function(
+            "thaw_number_array_comparator_sort",
+            f64_type.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_array_undefined_index_of",
             f64_type.fn_type(
