@@ -3,6 +3,8 @@ struct NativeSpreadOptions {
     array_reads: bool,
     snapshot_expanded_values: bool,
     logical_argument_offsets: bool,
+    /// Coerce an object/array literal to its expected slot type before it is bound.
+    precoerce_literals: bool,
 }
 
 impl<'a> FnLowerer<'a> {
@@ -51,7 +53,7 @@ impl<'a> FnLowerer<'a> {
         arguments: &[swc_ecma_ast::ExprOrSpread],
         label: &str,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, &[], None, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: true, logical_argument_offsets: false })
+        self.lower_native_spread_values_impl(arguments, label, &[], None, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: true, logical_argument_offsets: false, precoerce_literals: false })
     }
 
     fn lower_native_spread_array_values(
@@ -59,7 +61,19 @@ impl<'a> FnLowerer<'a> {
         arguments: &[swc_ecma_ast::ExprOrSpread],
         label: &str,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, &[], None, NativeSpreadOptions { array_reads: true, snapshot_expanded_values: false, logical_argument_offsets: false })
+        self.lower_native_spread_values_impl(arguments, label, &[], None, NativeSpreadOptions { array_reads: true, snapshot_expanded_values: false, logical_argument_offsets: false, precoerce_literals: false })
+    }
+
+    /// `lower_native_spread_array_values` with the receiver's element type as context, so an
+    /// object/tuple literal is built against it (`out.push({ text: s[i] })`).
+    fn lower_native_spread_array_values_for(
+        &mut self,
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        label: &str,
+        element: Option<&HirType>,
+    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
+        let element = element.filter(|ty| matches!(ty, HirType::Object(_) | HirType::Tuple(_) | HirType::Array(_)));
+        self.lower_native_spread_values_impl(arguments, label, &[], element, NativeSpreadOptions { array_reads: true, snapshot_expanded_values: false, logical_argument_offsets: false, precoerce_literals: true })
     }
 
     fn lower_error_constructor_arguments(
@@ -67,7 +81,7 @@ impl<'a> FnLowerer<'a> {
         arguments: &[swc_ecma_ast::ExprOrSpread],
         label: &str,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, &[], None, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: true, logical_argument_offsets: false })
+        self.lower_native_spread_values_impl(arguments, label, &[], None, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: true, logical_argument_offsets: false, precoerce_literals: false })
     }
 
     fn lower_native_spread_values_with_expected(
@@ -77,7 +91,17 @@ impl<'a> FnLowerer<'a> {
         expected: &[HirType],
         rest: Option<&HirType>,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, expected, rest, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: false, logical_argument_offsets: false })
+        self.lower_native_spread_values_impl(arguments, label, expected, rest, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: false, logical_argument_offsets: false, precoerce_literals: false })
+    }
+
+    /// `lower_native_spread_values_with_expected` for stores into a typed slot (`Map.set`).
+    fn lower_native_spread_values_for_store(
+        &mut self,
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        label: &str,
+        expected: &[HirType],
+    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
+        self.lower_native_spread_values_impl(arguments, label, expected, None, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: false, logical_argument_offsets: false, precoerce_literals: true })
     }
 
     fn lower_native_spread_values_with_overload_expected(
@@ -87,7 +111,7 @@ impl<'a> FnLowerer<'a> {
         expected: &[HirType],
         rest: Option<&HirType>,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, expected, rest, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: false, logical_argument_offsets: true })
+        self.lower_native_spread_values_impl(arguments, label, expected, rest, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: false, logical_argument_offsets: true, precoerce_literals: false })
     }
 
     fn lower_native_spread_values_impl(
@@ -125,6 +149,30 @@ impl<'a> FnLowerer<'a> {
             let value = match ambient_value {
                 Some(value) => value,
                 None => self.lower_expr_with_expected_type(&argument.expr, expected_type)?,
+            };
+            // A literal stored into a typed slot is coerced while it is still a literal
+            // (`Optional` field reads then unwrap like a declaration's; `[]` takes the slot's
+            // element type instead of `number[]`).
+            let value = match expected_type {
+                Some(expected @ (HirType::Object(_) | HirType::Array(_)))
+                    if options.precoerce_literals
+                        && match expected {
+                            HirType::Object(_) => matches!(value, HirExpr::ObjectLit(_)) || Self::is_wrapped_object_literal(&value),
+                            _ => matches!(value, HirExpr::ArrayLit(_)),
+                        } =>
+                {
+                    match (self.coerce_to_declared(expected, value.clone()), expected) {
+                        // A bare `[]` always infers `number[]`; allocate the slot's element type.
+                        (Ok(HirExpr::ArrayLit(items)), HirType::Array(element))
+                            if items.is_empty() && **element != HirType::F64 =>
+                        {
+                            HirExpr::ArrayAlloc(Box::new(HirExpr::Lit(HirLit::F64(0.0))), element.as_ref().clone())
+                        }
+                        (Ok(coerced), _) => coerced,
+                        (Err(_), _) => value,
+                    }
+                }
+                _ => value,
             };
             let value = if argument.spread.is_some() {
                 let value = self.project_native_base(value)?;

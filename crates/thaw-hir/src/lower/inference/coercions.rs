@@ -148,7 +148,8 @@ impl<'a> FnLowerer<'a> {
                         let Some(name) = Self::wrapped_field_for_param(&body, &param.name) else { continue };
                         let Some((_, field_type)) = declared_fields.iter().find(|(field, _)| *field == name) else { continue };
                         if param.ty != *field_type {
-                            if let Ok(coerced) = self.coerce_to_declared(field_type, arg.clone()) {
+                            let unwrapped = self.unwrap_element_read_for_field(field_type, arg.clone())?;
+                            if let Ok(coerced) = self.coerce_to_declared(field_type, unwrapped) {
                                 *arg = coerced;
                                 param.ty = field_type.clone();
                                 self.scope.insert(param.name.clone(), field_type.clone());
@@ -305,8 +306,11 @@ impl<'a> FnLowerer<'a> {
                     name: format!("__thaw_method_view_arg_{}_{i}", self.next_binding), ty: ty.clone(),
                 }).collect();
                 self.next_binding += 1;
+                // The method itself may declare fewer parameters than the interface member.
+                let taken = self.signatures.get(&class_method_symbol(class, name))
+                    .map_or(lambda_params.len(), |signature| signature.params.len().saturating_sub(1));
                 let mut args = vec![HirExpr::Var(source.clone())];
-                args.extend(lambda_params.iter().map(|p| HirExpr::Var(p.name.clone())));
+                args.extend(lambda_params.iter().take(taken).map(|p| HirExpr::Var(p.name.clone())));
                 let call = HirExpr::Call(Box::new(HirExpr::Var(class_method_symbol(class, name))), args);
                 visible.push((name.clone(), HirExpr::Lambda(
                     vec![capture.clone()], lambda_params, ret.as_ref().clone(), Box::new(call),
@@ -488,7 +492,8 @@ impl<'a> FnLowerer<'a> {
         let result = (|| {
             for (name, source) in lit_fields {
                 let value = if let Some((_, expected)) = declared_fields.iter().find(|(key, _)| key == name) {
-                    self.coerce_to_declared(expected, source.clone())
+                    let source = self.unwrap_element_read_for_field(expected, source.clone())?;
+                    self.coerce_to_declared(expected, source)
                         .map_err(|error| format!("field `{name}`: {error}"))?
                 } else {
                     source.clone()
@@ -603,8 +608,12 @@ impl<'a> FnLowerer<'a> {
         match expected {
             HirType::Dynamic if !signature.generic_type_params.is_empty() => true,
             HirType::Function(expected_params, result) => {
-                fixed == expected_params
+                // A method may take fewer parameters than the member declares (extra arguments
+                // are dropped by the view).
+                expected_params.starts_with(fixed)
                     && (&ret == result.as_ref()
+                        // Return type still to be inferred from the method body.
+                        || ret == HirType::Dynamic
                         || Self::async_signature_returns(signature.is_async, &ret, result))
             }
             HirType::CallableFunction(expected_params, _, expected_rest, result) => {
@@ -704,6 +713,74 @@ impl<'a> FnLowerer<'a> {
             .map(Some)
     }
 
+    /// An index/regex-group read (`s[i]`, `m[1]`) is typed `Optional<T>`; an object-literal field
+    /// that is a native number/string cannot carry `undefined`, so it takes the same primitive
+    /// conversion a call argument gets (see `coerce_primitive_array_argument`). A named binding
+    /// keeps its declared `T | undefined` (and is rejected as before) unless it was initialised
+    /// from an element read.
+    fn unwrap_element_read_for_field(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+        let named_optional = match &value {
+            HirExpr::Var(name) => !self.index_read_bindings.contains(name),
+            HirExpr::PropAccess(..) => true,
+            _ => false,
+        };
+        if named_optional {
+            return Ok(value);
+        }
+        if let Ok(HirType::Optional(payload)) = self.infer_expr_type(&value) {
+            if payload.as_ref() == declared {
+                match declared {
+                    HirType::F64 => return self.coerce_primitive_to_number(value),
+                    HirType::Str => return self.coerce_primitive_to_string(value),
+                    _ => {}
+                }
+            }
+        }
+        Ok(value)
+    }
+
+    /// A function with fewer parameters than the slot declares (`{ apply: (t) => t }` for
+    /// `apply(t, extra)`): wrap it so the extra arguments are accepted and dropped.
+    fn adapt_callback_to_more_parameters(
+        &mut self,
+        declared: &HirType,
+        value: &HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let HirType::Function(declared_params, declared_ret) = declared else {
+            return Ok(None);
+        };
+        let Ok(HirType::Function(actual_params, actual_ret)) = self.infer_expr_type(value) else {
+            return Ok(None);
+        };
+        if actual_params.len() >= declared_params.len()
+            || !declared_params.starts_with(&actual_params)
+            || actual_ret != *declared_ret
+        {
+            return Ok(None);
+        }
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let callback_name = format!("__thaw_arity_callback_{id}");
+        let callback_type = HirType::Function(actual_params.clone(), actual_ret);
+        self.scope.insert(callback_name.clone(), callback_type.clone());
+        let params: Vec<HirParam> = declared_params.iter().enumerate()
+            .map(|(index, ty)| HirParam { name: format!("__thaw_arity_arg_{id}_{index}"), ty: ty.clone() })
+            .collect();
+        let call = HirExpr::Call(
+            Box::new(HirExpr::Var(callback_name.clone())),
+            params.iter().take(actual_params.len()).map(|param| HirExpr::Var(param.name.clone())).collect(),
+        );
+        let adapter = HirExpr::Lambda(
+            vec![HirParam { name: callback_name.clone(), ty: callback_type.clone() }],
+            params,
+            declared_ret.as_ref().clone(),
+            Box::new(call),
+        );
+        let closure = HirExpr::TypedClosure(declared.clone(), Box::new(adapter));
+        self.wrap_call_argument_bindings(closure, &[(callback_name, callback_type, value.clone())])
+            .map(Some)
+    }
+
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
         // A slot typed through a class back-edge coerces to the layout it names; a value that
         // already has that layout (modulo back-edges) needs no conversion.
@@ -737,6 +814,9 @@ impl<'a> FnLowerer<'a> {
             }
         }
         if let Some(adapted) = self.adapt_callback_to_json_rest(declared, &value)? {
+            return Ok(adapted);
+        }
+        if let Some(adapted) = self.adapt_callback_to_more_parameters(declared, &value)? {
             return Ok(adapted);
         }
         // An observed read of a maybe-uninitialised class field arrives with
@@ -2064,6 +2144,57 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                 }
+            }
+            // A dynamic value (a `Record<string, string | boolean>` entry, a parsed field) flowing
+            // into a union of primitives: pick the member by its runtime type.
+            if actual == HirType::Json
+                && elements.iter().all(|element| matches!(element, HirType::Str | HirType::F64 | HirType::Bool))
+            {
+                let parameter = format!("__thaw_json_to_union_{}", self.next_binding);
+                self.next_binding += 1;
+                let previous = self.scope.insert(parameter.clone(), HirType::Json);
+                let typeof_name = |element: &HirType| match element {
+                    HirType::Str => "string",
+                    HirType::F64 => "number",
+                    _ => "boolean",
+                };
+                let mut statements = Vec::new();
+                for (index, element) in elements.iter().enumerate() {
+                    let json = HirExpr::Var(parameter.clone());
+                    let decoded = match element {
+                        HirType::Str => HirExpr::JsonAsString(Box::new(json)),
+                        HirType::F64 => HirExpr::JsonAsNumber(Box::new(json)),
+                        _ => HirExpr::JsonAsBool(Box::new(json)),
+                    };
+                    let injected = HirExpr::UnionInject(Box::new(decoded), index, elements.clone());
+                    if index + 1 == elements.len() {
+                        statements.push(HirStmt::Return(Some(injected)));
+                    } else {
+                        statements.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                                    vec![HirExpr::Var(parameter.clone())],
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::Str(typeof_name(element).into()))),
+                            ),
+                            vec![HirStmt::Return(Some(injected))],
+                            Vec::new(),
+                        ));
+                    }
+                }
+                match previous {
+                    Some(previous) => { self.scope.insert(parameter.clone(), previous); }
+                    None => { self.scope.remove(&parameter); }
+                }
+                let adapter = HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam { name: parameter, ty: HirType::Json }],
+                    declared.clone(),
+                    Box::new(HirExpr::Block(statements)),
+                );
+                return Ok(HirExpr::Call(Box::new(adapter), vec![value]));
             }
             // A live `JsValue` handle reaching a union that has a `Json` member
             // (`resolve(value)` of a `Promise<Json>`): wrap it as `Json` first.

@@ -1282,6 +1282,23 @@ pub fn normalize_uninitialized_globals(module: &Module) -> Module {
                 _ => None,
             });
             let sp = swc_common::DUMMY_SP;
+            // `let m: T | null;` (no `undefined` member) starts as `null`.
+            let nullable_only = binding.type_ann.as_ref().is_some_and(|a| match a.type_ann.as_ref() {
+                TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+                    let has = |wanted: TsKeywordTypeKind| union.types.iter().any(|member| {
+                        matches!(member.as_ref(), TsType::TsKeywordType(k) if k.kind == wanted)
+                    });
+                    has(TsKeywordTypeKind::TsNullKeyword)
+                        && !has(TsKeywordTypeKind::TsUndefinedKeyword)
+                        && !has(TsKeywordTypeKind::TsAnyKeyword)
+                        && !has(TsKeywordTypeKind::TsUnknownKeyword)
+                }
+                _ => false,
+            });
+            if nullable_only {
+                declarator.init = Some(Box::new(Expr::Lit(Lit::Null(Null { span: sp }))));
+                continue;
+            }
             declarator.init = Some(Box::new(match kind {
                 Some(TsKeywordTypeKind::TsNumberKeyword) => {
                     Expr::Lit(Lit::Num(Number { span: sp, value: 0.0, raw: None }))
@@ -1496,6 +1513,28 @@ fn normalize_inferred_return_body(statements: &mut Vec<Stmt>) {
     }
 }
 
+/// Whether any call in `statements` has the plain identifier `name` as its callee.
+fn arrow_calls(statements: &[swc_ecma_ast::Stmt], name: &str) -> bool {
+    use swc_ecma_visit::{Visit, VisitWith};
+    struct Finder<'a> {
+        name: &'a str,
+        found: bool,
+    }
+    impl Visit for Finder<'_> {
+        fn visit_call_expr(&mut self, call: &swc_ecma_ast::CallExpr) {
+            if matches!(&call.callee, swc_ecma_ast::Callee::Expr(callee)
+                if matches!(callee.as_ref(), Expr::Ident(ident) if ident.sym == *self.name))
+            {
+                self.found = true;
+            }
+            call.visit_children_with(self);
+        }
+    }
+    let mut finder = Finder { name, found: false };
+    statements.visit_with(&mut finder);
+    finder.found
+}
+
 pub fn normalize_implicit_returns(module: &Module) -> Module {
     use swc_ecma_ast::*;
     struct Rewriter;
@@ -1515,6 +1554,28 @@ pub fn normalize_implicit_returns(module: &Module) -> Module {
                     normalize_inferred_return_body(&mut body.stmts);
                 }
             }
+        }
+
+        // `const visit = (n) => { ...; visit(next); }`: a self-recursive arrow that never returns
+        // a value is `void`; its own call needs that signature before its body is typed.
+        fn visit_mut_var_declarator(&mut self, declarator: &mut VarDeclarator) {
+            declarator.visit_mut_children_with(self);
+            let (Pat::Ident(name), Some(init)) = (&declarator.name, declarator.init.as_deref_mut()) else { return };
+            let Expr::Arrow(arrow) = init else { return };
+            if arrow.return_type.is_some() || arrow.is_async || arrow.is_generator {
+                return;
+            }
+            let ArrowFunctionBody::FunctionBody(body) = arrow.body.as_ref() else { return };
+            if ast_block_has_value_return(&body.stmts) || !arrow_calls(&body.stmts, name.id.sym.as_ref()) {
+                return;
+            }
+            arrow.return_type = Some(Box::new(TsTypeAnn {
+                span: swc_common::DUMMY_SP,
+                type_ann: Box::new(TsType::TsKeywordType(TsKeywordType {
+                    span: swc_common::DUMMY_SP,
+                    kind: TsKeywordTypeKind::TsVoidKeyword,
+                })),
+            }));
         }
 
         fn visit_mut_arrow_expr(&mut self, arrow: &mut ArrowExpr) {

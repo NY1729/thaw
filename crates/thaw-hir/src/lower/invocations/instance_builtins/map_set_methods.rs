@@ -174,8 +174,9 @@ impl<'a> FnLowerer<'a> {
                     let key_type = key_type.as_ref().clone();
                     let value_type = value_type.as_ref().clone();
                     let key_suffix = map_key_intrinsic_suffix(&key_type)?;
-                    let (arguments, spread_bindings) =
-                        self.lower_native_spread_values(&call.args, "Map.set")?;
+                    let (arguments, spread_bindings) = self.lower_native_spread_values_for_store(
+                        &call.args, "Map.set", &[key_type.clone(), value_type.clone()],
+                    )?;
                     let [key, value] = arguments.as_slice() else {
                         return Err("native `.set()` expects exactly two arguments".into());
                     };

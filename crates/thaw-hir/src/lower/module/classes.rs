@@ -219,6 +219,7 @@ fn collect_native_classes<'a>(
             HirType::Bool,
         )];
         fields.extend(inherited_fields);
+        let own_start = fields.len();
         let maybe_uninit = maybe_uninit_fields_with(&declaration.class, &|field| bare_field_observed(name, field));
         // Abstract fields are laid out after the concrete ones: the abstract
         // base is never instantiated, and a subclass overriding them keeps
@@ -358,6 +359,7 @@ fn collect_native_classes<'a>(
                 fields.push((field_name, field_type));
             }
         }
+        let param_props_start = fields.len();
         for property in declaration
             .class
             .body
@@ -392,6 +394,8 @@ fn collect_native_classes<'a>(
             }
             fields.push((field_name, ty));
         }
+        // Node (type stripping) declares parameter properties before the class's own fields.
+        fields[own_start..].rotate_left(param_props_start - own_start);
         for implementation in &declaration.class.implements {
             let Expr::Ident(target) = implementation.expr.as_ref() else {
                 return Err(format!(
@@ -439,6 +443,7 @@ fn collect_native_classes<'a>(
                         .then(|| {
                             (
                                 method.function.is_async,
+                                method.function.return_type.is_none(),
                                 method_type(name, method, interfaces, generic_interfaces),
                             )
                         })
@@ -456,10 +461,12 @@ fn collect_native_classes<'a>(
                 // An async method's native type carries the awaited result, so
                 // its interface's `Promise<T>` return compares as `T`.
                 let mut async_method = false;
+                let mut unannotated_return = false;
                 let actual_type = match (field_type, implemented_method) {
                     (Some(ty), _) => ty,
-                    (None, Some((is_async, ty))) => {
+                    (None, Some((is_async, unannotated, ty))) => {
                         async_method = is_async;
+                        unannotated_return = unannotated;
                         ty?
                     }
                     (None, None) => {
@@ -476,7 +483,16 @@ fn collect_native_classes<'a>(
                     },
                     _ => required_type.clone(),
                 };
-                if &actual_type != required_type {
+                // A method may declare fewer parameters than the member (and leave its return
+                // type to inference); its extra arguments are dropped.
+                let fewer_parameters = match (&actual_type, required_type) {
+                    (HirType::Function(actual_params, actual_ret), HirType::Function(required_params, required_ret)) => {
+                        required_params.starts_with(actual_params)
+                            && (actual_ret == required_ret || (unannotated_return && **actual_ret == HirType::Void))
+                    }
+                    _ => false,
+                };
+                if &actual_type != required_type && !fewer_parameters {
                     return Err(format!(
                         "class `{name}` field `{field}` has type {actual_type:?}, but `{}` requires {required_type:?}",
                         target.sym
@@ -491,12 +507,6 @@ fn collect_native_classes<'a>(
             .body
             .iter()
             .filter_map(|member| match member {
-                ClassMember::ClassProp(property) if !property.is_static && !property.is_abstract => {
-                    class_property_name(&property.key).ok()
-                }
-                _ => None,
-            })
-            .chain(declaration.class.body.iter().filter_map(|member| match member {
                 ClassMember::Constructor(constructor) if constructor.body.is_some() => Some(&constructor.params),
                 _ => None,
             }).flatten().filter_map(|parameter| match parameter {
@@ -504,6 +514,12 @@ fn collect_native_classes<'a>(
                     parameter_property_binding(property).ok().map(|binding| binding.id.sym.to_string())
                 }
                 ParamOrTsParamProp::Param(_) => None,
+            })
+            .chain(declaration.class.body.iter().filter_map(|member| match member {
+                ClassMember::ClassProp(property) if !property.is_static && !property.is_abstract => {
+                    class_property_name(&property.key).ok()
+                }
+                _ => None,
             }))
             .collect();
         let mut defined = match declaration.class.super_class.as_deref() {
