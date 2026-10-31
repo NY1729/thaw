@@ -38,6 +38,7 @@ mod json;
 mod numfmt;
 mod proxy;
 pub mod scan;
+mod sysio;
 mod typed;
 mod url;
 #[path = "web/abort.rs"]
@@ -50,6 +51,8 @@ mod web_crypto;
 mod web_dom_exception;
 #[path = "web/event_target.rs"]
 mod web_event_target;
+#[path = "web/streams.rs"]
+mod web_streams;
 #[path = "web/text_codec.rs"]
 mod web_text_codec;
 
@@ -675,11 +678,14 @@ impl Interp {
         it.install_array_iteration();
         it.install_typed();
         it.install_buffer();
+        it.install_sysio();
+        it.install_fs_host();
         web_dom_exception::install(&mut it);
         web_text_codec::install(&mut it);
         web_event_target::install(&mut it);
         web_abort::install(&mut it);
         web_blob::install(&mut it);
+        web_streams::install(&mut it);
         web_crypto::install(&mut it);
         it.install_url();
         it.run(extras::EXTRAS_LATE)
@@ -807,7 +813,17 @@ impl Interp {
                 cur = o.proto.borrow().clone();
             }
         }
-        names.extend(["next", "return", "throw", "require"].map(String::from)); // iterator protocol / `module.require` (user-defined)
+        names.extend(
+            [
+                "next",
+                "return",
+                "throw",
+                "require",
+                "enqueue",
+                "releaseLock",
+            ]
+            .map(String::from),
+        ); // iterator protocol / `module.require` (user-defined) / stream controller and reader methods
         names
     }
 

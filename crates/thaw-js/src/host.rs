@@ -405,9 +405,21 @@ pub extern "C" fn thaw_tjs_release_handle(handle: i64) -> u8 {
 
 /// What a class operation does (the symbol prefix compiled code passes).
 enum ClassOp<'a> {
-    New { class: &'a str },
-    Method { receiver: i64, name: &'a str },
-    Static { class: &'a str, name: &'a str },
+    New {
+        class: &'a str,
+    },
+    /// `$value$pkg::name$arity0`: the export itself, kept as a handle
+    Value {
+        path: &'a str,
+    },
+    Method {
+        receiver: i64,
+        name: &'a str,
+    },
+    Static {
+        class: &'a str,
+        name: &'a str,
+    },
 }
 
 /// `$new$pkg::Class$arityN[...]` / `$method$pkg::Class$name$overloadK$arityN` /
@@ -435,6 +447,7 @@ fn class_call(
         .ok_or_else(|| HostError::Bundle(format!("malformed class symbol `{symbol}`")))?;
     let op = match kind {
         "new" => ClassOp::New { class: class_path },
+        "value" => ClassOp::Value { path: class_path },
         "method" | "methodvoid" => ClassOp::Method {
             receiver,
             name: member.unwrap_or(""),
@@ -475,6 +488,7 @@ fn class_call(
                 let it = &mut p.interp;
                 it.construct(&ctor, &args).map_err(|c| classify(it, c))?
             }
+            ClassOp::Value { path } => p.exports_member(path)?,
             ClassOp::Method { receiver, name } => {
                 let this = HANDLES
                     .with(|h| {
@@ -1270,7 +1284,12 @@ pub extern "C" fn thaw_tjs_get_global(name: *const c_char) -> i64 {
         Ok(Some((package, value))) if !matches!(value, Value::Undefined) => {
             store_handle(package, value)
         }
-        _ => 0,
+        _ => {
+            if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+                eprintln!("thaw-js get_global: `{name}` is not defined");
+            }
+            0
+        }
     }
 }
 
@@ -1312,6 +1331,102 @@ pub extern "C" fn thaw_tjs_call_handle_handle_graph_args_result(
             Ok(store_handle(owner, value))
         })
     })())
+}
+
+/// `handle(...args)` with an `undefined` receiver; the result is a plain graph wire (a Promise result is
+/// not awaited, like [`thaw_tjs_call_handle_handle_graph_args_result`]).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_call_handle_graph_result(
+    handle: u64,
+    args_json: *const c_char,
+) -> ThawResult {
+    graph_result((|| {
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (_, args) = decode_wire(&args_json)?;
+        on_handle(handle, |p, owner, f| {
+            let it = &mut p.interp;
+            let args = it.array_items(&args);
+            let result = it
+                .call(&f, &Value::Undefined, &args)
+                .map_err(|c| classify(it, c))?;
+            let mut out = WireOut {
+                owner,
+                plain: true,
+                live_functions: false,
+                copy_root: false,
+                receiver: None,
+                nodes: Vec::new(),
+                seen: Vec::new(),
+                leases: Vec::new(),
+            };
+            let root = out.token(it, &result)?;
+            Ok(out.finish(root))
+        })
+    })())
+}
+
+/// The compiler-private exact call: `handle(...args, ...direct handles)`, consuming the callee and every
+/// direct handle (`handles` is `[count, h1, ...]`); a returned value or a thrown value gets its own handle.
+///
+/// # Safety
+/// `handles` is a live native handle array (`[u64 count][u64; count]`).
+#[no_mangle]
+pub unsafe extern "C" fn thaw_tjs_call_handle_mixed_exact_consuming_result(
+    handle: u64,
+    args_json: *const c_char,
+    handles: *const u8,
+) -> ExactResult {
+    let none = ExactResult {
+        value: 0,
+        exception_handle: 0,
+        exception_object_like: 0,
+        error: ptr::null_mut(),
+    };
+    let direct: Option<Vec<u64>> = (!handles.is_null()).then(|| {
+        let count = unsafe { *(handles.cast::<u64>()) } as usize;
+        unsafe { std::slice::from_raw_parts(handles.add(8).cast::<u64>(), count) }.to_vec()
+    });
+    let outcome: Result<Result<i64, (i64, bool)>, String> = (|| {
+        let direct = direct.as_ref().ok_or("null JsValue array")?;
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (_, args) = decode_wire(&args_json)?;
+        let mut values = Vec::new();
+        for h in direct {
+            values.push(on_handle(*h, |_, _, v| Ok(v))?);
+        }
+        on_handle(handle, |p, owner, f| {
+            let it = &mut p.interp;
+            let mut args = it.array_items(&args);
+            args.extend(values);
+            Ok(match it.call(&f, &Value::Undefined, &args) {
+                Ok(v) => Ok(store_handle(owner, v)),
+                Err(Ctl::Throw(t)) => {
+                    let like = matches!(t, Value::Object(_));
+                    Err((store_handle(owner, t), like))
+                }
+                Err(c) => return Err(classify(it, c)),
+            })
+        })
+    })();
+    for h in direct.into_iter().flatten() {
+        thaw_tjs_release_handle(h as i64);
+    }
+    thaw_tjs_release_handle(handle as i64);
+    match outcome {
+        Ok(Ok(value)) => ExactResult {
+            value: value as u64,
+            ..none
+        },
+        Ok(Err((thrown, like))) => ExactResult {
+            exception_handle: thrown as u64,
+            exception_object_like: u8::from(like),
+            ..none
+        },
+        Err(e) => ExactResult {
+            error: thaw_arena::owned_string(e),
+            ..none
+        },
+    }
 }
 
 /// The value behind `handle` as a plain graph wire (a JSON-like copy).
