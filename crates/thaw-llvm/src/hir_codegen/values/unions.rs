@@ -220,6 +220,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_float_compare(FloatPredicate::OEQ, left, right, "union_float_equal")
                 .map_err(|error| error.to_string()),
+            // Tagged `bigint` handles compare by value, never by handle bits.
+            (BasicValueEnum::IntValue(left), BasicValueEnum::IntValue(right)) if ty == &HirType::BigInt => {
+                Ok(self.compile_bigint_binop(BinOp::EqEqEq, left, right)?.into_int_value())
+            }
             (BasicValueEnum::IntValue(left), BasicValueEnum::IntValue(right)) => self
                 .builder
                 .build_int_compare(IntPredicate::EQ, left, right, "union_int_equal")

@@ -1612,6 +1612,19 @@ pub unsafe extern "C" fn thaw_number_array_sort(array: *mut u8) -> *mut u8 {
 }
 
 #[no_mangle]
+/// Default (string-order) sort of `bigint` handles, as `Array.prototype.sort()` without a comparator.
+///
+/// # Safety
+/// `array` must point to a writable Thaw `bigint` handle array.
+pub unsafe extern "C" fn thaw_bigint_array_sort(array: *mut u8) -> *mut u8 {
+    let Some(slots) = (unsafe { native_array_slots(array) }) else {
+        return std::ptr::null_mut();
+    };
+    slots.sort_by_cached_key(|slot| bigint_decode(*slot as i64).to_string());
+    array
+}
+
+#[no_mangle]
 /// Sorts the first `length` slots of a number-array buffer for the `(x, y) => x - y`
 /// / `y - x` comparator shapes. Returns 0.0 without touching the data when any NaN is
 /// present (V8's order for an inconsistent comparator is algorithm-defined), else 1.0.
@@ -1717,6 +1730,7 @@ macro_rules! array_to_sorted {
 }
 
 array_to_sorted!(thaw_number_array_to_sorted, thaw_number_array_sort);
+array_to_sorted!(thaw_bigint_array_to_sorted, thaw_bigint_array_sort);
 array_to_sorted!(thaw_string_array_to_sorted, thaw_string_array_sort);
 array_to_sorted!(thaw_bool_array_to_sorted, thaw_bool_array_sort);
 array_to_sorted!(thaw_object_array_to_sorted, thaw_object_array_sort);
@@ -1842,6 +1856,36 @@ pub unsafe extern "C" fn thaw_number_array_join(
         }
         let slot = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
         result.extend_from_slice(javascript_number_string(slot).as_bytes());
+    }
+    arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `array` must point to a Thaw array containing `bigint` handle slots and
+/// `separator` must point to a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_bigint_array_join(
+    array: *const u8,
+    presence: *const u8,
+    separator: *const c_char,
+) -> *const c_char {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null();
+    };
+    if separator.is_null() {
+        return std::ptr::null();
+    }
+    let separator = unsafe { wtf8_bytes(separator) };
+    let mut result = Vec::new();
+    for index in 0..length {
+        if index != 0 {
+            result.extend_from_slice(separator);
+        }
+        if unsafe { array_index_present(presence, index) } {
+            let slot = unsafe { array.add(8 + index * 8).cast::<i64>().read_unaligned() };
+            result.extend_from_slice(bigint_decode(slot).to_string().as_bytes());
+        }
     }
     arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
 }
@@ -2665,6 +2709,45 @@ unsafe fn object_array_search(
         }
     }
     -1.0
+}
+
+/// `bigint` element search: values compare by value (`thaw_bigint_cmp`), never by handle bits.
+unsafe fn bigint_array_search(array: *const u8, presence: *const u8, needle: i64, from_index: f64, last: bool) -> f64 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return -1.0;
+    };
+    let matches = |index: usize| {
+        (unsafe { array_index_present(presence, index) })
+            && thaw_bigint_cmp(unsafe { array.add(8 + index * 8).cast::<i64>().read_unaligned() }, needle) == 0
+    };
+    if last {
+        let Some(start) = array_search_end(length, from_index) else {
+            return -1.0;
+        };
+        return (0..=start).rev().find(|&index| matches(index)).map_or(-1.0, |index| index as f64);
+    }
+    (array_search_start(length, from_index)..length).find(|&index| matches(index)).map_or(-1.0, |index| index as f64)
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing `bigint` handle slots.
+pub unsafe extern "C" fn thaw_bigint_array_index_of(array: *const u8, presence: *const u8, needle: i64, from_index: f64) -> f64 {
+    unsafe { bigint_array_search(array, presence, needle, from_index, false) }
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing `bigint` handle slots.
+pub unsafe extern "C" fn thaw_bigint_array_includes(array: *const u8, presence: *const u8, needle: i64, from_index: f64) -> u8 {
+    (unsafe { bigint_array_search(array, presence, needle, from_index, false) } >= 0.0).into()
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing `bigint` handle slots.
+pub unsafe extern "C" fn thaw_bigint_array_last_index_of(array: *const u8, presence: *const u8, needle: i64, from_index: f64) -> f64 {
+    unsafe { bigint_array_search(array, presence, needle, from_index, true) }
 }
 
 #[no_mangle]
