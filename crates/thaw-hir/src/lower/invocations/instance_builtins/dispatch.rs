@@ -143,7 +143,7 @@ impl<'a> FnLowerer<'a> {
         // A Json storage slot may still be a live Buffer or another host object.
         // Calling its method through the Json snapshot path loses the receiver's
         // actual `toString` implementation (for example, Buffer's byte decoder).
-        if matches!(property.sym.as_ref(), "toString" | "join")
+        if matches!(property.sym.as_ref(), "toString" | "join" | "valueOf")
             && self.json_receiver_candidate(&member.obj)
         {
             let name = property.sym.as_ref();

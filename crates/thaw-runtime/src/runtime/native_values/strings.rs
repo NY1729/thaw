@@ -1297,6 +1297,9 @@ pub unsafe extern "C" fn thaw_btoa(value: *const c_char) -> *const c_char {
         return std::ptr::null();
     }
     let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    if value.encode_utf16().any(|unit| unit > 0xFF) {
+        return std::ptr::null();
+    }
     let bytes = value
         .encode_utf16()
         .map(|unit| unit as u8)
@@ -1309,17 +1312,32 @@ pub unsafe extern "C" fn thaw_btoa(value: *const c_char) -> *const c_char {
 /// `value` must reference a valid NUL-terminated UTF-8 string.
 ///
 /// `atob(value)`: base64-decode into a "binary string" (each byte becomes
-/// one Latin-1 character). Non-alphabet bytes -- whitespace, padding, or an
-/// invalid character -- are skipped rather than throwing.
+/// one Latin-1 character). ASCII whitespace and up to two trailing `=` are
+/// skipped; anything else outside the alphabet, or a length of 1 mod 4,
+/// yields null so the caller throws `InvalidCharacterError`.
 pub unsafe extern "C" fn thaw_atob(value: *const c_char) -> *const c_char {
     if value.is_null() {
         return std::ptr::null();
     }
     let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let mut data: Vec<u8> = value
+        .bytes()
+        .filter(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | 0x0c | b'\r'))
+        .collect();
+    if data.len().is_multiple_of(4) {
+        for _ in 0..2 {
+            if data.last() == Some(&b'=') {
+                data.pop();
+            }
+        }
+    }
+    if data.len() % 4 == 1 || data.iter().any(|&byte| base64_decode_value(byte).is_none()) {
+        return std::ptr::null();
+    }
     let mut bytes = Vec::new();
     let mut buffer = 0u32;
     let mut bits = 0u32;
-    for byte in value.bytes() {
+    for byte in data {
         let Some(sextet) = base64_decode_value(byte) else {
             continue;
         };

@@ -1940,7 +1940,8 @@ impl<'a> FnLowerer<'a> {
                                     HirType::F64 => "number",
                                     HirType::Str => "string",
                                     HirType::Bool => "bool",
-                                    HirType::Object(_) => "object",
+                                    // ponytail: pointer compare; an element held through a secondary ABI view of the same function is not aliased
+                                    HirType::Object(_) | HirType::Function(_, _) | HirType::CallableFunction(_, _, _, _) => "object",
                                     other => return Err(format!("array search does not support element type {other:?}")),
                                 };
                                 HirExpr::Call(
@@ -2148,7 +2149,8 @@ impl<'a> FnLowerer<'a> {
                         HirType::F64 => "number",
                         HirType::Str => "string",
                         HirType::Bool => "bool",
-                        HirType::Object(_) => "object",
+                        // ponytail: pointer compare; an element held through a secondary ABI view of the same function is not aliased
+                                    HirType::Object(_) | HirType::Function(_, _) | HirType::CallableFunction(_, _, _, _) => "object",
                         other => {
                             return Err(format!(
                                 "array search does not support element type {other:?}"

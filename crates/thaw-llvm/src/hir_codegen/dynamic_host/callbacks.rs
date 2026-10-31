@@ -1054,7 +1054,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
                 &[args_json.into()], "destroy_invalid_callback_graph")
                 .map_err(|error| error.to_string())?;
-            let message = self.builder.build_global_string_ptr(
+            let message = self.intern_string(
                 "\u{1}TypeError\u{1}Invalid native callback graph", "invalid_callback_graph_message",
             ).map_err(|error| error.to_string())?;
             let invalid_result = if defer_promise && matches!(ret, HirType::Promise(_)) {
@@ -2132,7 +2132,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_unconditional_branch(done)
                 .map_err(|error| error.to_string())?;
             self.builder.position_at_end(absent);
-            let undefined = self.builder.build_global_string_ptr("undefined", "native_callback_undefined")
+            let undefined = self.intern_string("undefined", "native_callback_undefined")
                 .map_err(|error| error.to_string())?;
             let undefined = self.builder.build_call(
                 self.module.get_function("thaw_js_get_global").unwrap(),
@@ -2376,7 +2376,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(absent_block);
-        let undefined_name = self.builder.build_global_string_ptr("undefined", "native_callback_undefined_name")
+        let undefined_name = self.intern_string("undefined", "native_callback_undefined_name")
             .map_err(|error| error.to_string())?;
         let undefined = self.builder.build_call(
             self.module.get_function("thaw_js_get_global").unwrap(),
@@ -2405,9 +2405,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_object_new returned no value")?;
-        let key = self
-            .builder
-            .build_global_string_ptr("$__thaw_napi_undefined$", "napi_undefined_key")
+        let key = self.intern_string("$__thaw_napi_undefined$", "napi_undefined_key")
             .map_err(|error| error.to_string())?;
         self.builder
             .build_call(
@@ -2677,9 +2675,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.get_function("thaw_json_typed_decode_scope_own").unwrap(),
             &[object.into()], "own_optional_result_container",
         ).map_err(|error| error.to_string())?;
-        let key = self
-            .builder
-            .build_global_string_ptr("value", "napi_optional_result_key")
+        let key = self.intern_string("value", "napi_optional_result_key")
             .map_err(|error| error.to_string())?
             .as_pointer_value();
         let is_undefined = self.compile_json_is_napi_undefined(json)?;
@@ -3000,9 +2996,7 @@ impl<'ctx> HirCompiler<'ctx> {
         typeof_string: PointerValue<'ctx>,
         expected: &str,
     ) -> Result<IntValue<'ctx>, String> {
-        let expected = self
-            .builder
-            .build_global_string_ptr(expected, "dynamic_union_typeof_expected")
+        let expected = self.intern_string(expected, "dynamic_union_typeof_expected")
             .map_err(|error| error.to_string())?;
         let comparison = self
             .builder
@@ -3234,7 +3228,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.build_unconditional_branch(done_block).map_err(|error| error.to_string())?;
 
                 self.builder.position_at_end(wrapper_block);
-                let key = self.builder.build_global_string_ptr("data", "bytes_result_data_key").map_err(|error| error.to_string())?;
+                let key = self.intern_string("data", "bytes_result_data_key").map_err(|error| error.to_string())?;
                 let data = self.builder.build_call(
                     self.module.get_function("thaw_json_get").unwrap(),
                     &[json.into(), key.as_pointer_value().into()],

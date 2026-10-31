@@ -821,10 +821,11 @@ impl Interp {
     fn loop_alive(&self) -> bool {
         self.rt.timers.iter().any(|t| t.refd)
             || self.rt.immediates.iter().any(|i| i.refd)
+            || crate::child::active()
             || crate::zlib::active()
     }
 
-    /// Call the shim-installed `globalThis.__thaw_poll_platform_events` (async zlib jobs, child processes).
+    /// Call the shim-installed `globalThis.__thaw_poll_platform_events` (async zlib jobs, child process output and exits).
     fn poll_platform_events(&mut self) -> R<()> {
         let g = Value::Object(self.global_object.clone());
         let f = self.get(&g, "__thaw_poll_platform_events")?;
@@ -856,13 +857,13 @@ impl Interp {
                 .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             {
                 let mut wait = next - clock_ms();
-                if crate::zlib::active() {
+                if crate::child::active() || crate::zlib::active() {
                     wait = wait.min(2.0);
                 }
                 if wait > 0.0 {
                     std::thread::sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
-            } else if crate::zlib::active() {
+            } else if crate::child::active() || crate::zlib::active() {
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
@@ -1006,6 +1007,12 @@ impl Interp {
     }
 
     // ----- installation -----
+
+    /// Advance the timer base by `ms` (start-up work that must not count against program timers).
+    #[cfg(feature = "intl")]
+    pub(crate) fn skip_timer_clock(&mut self, ms: f64) {
+        self.rt.now += ms;
+    }
 
     pub(crate) fn install_eventloop(&mut self) {
         let g = self.global.clone();

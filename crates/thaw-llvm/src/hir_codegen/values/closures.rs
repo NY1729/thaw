@@ -566,9 +566,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.context.i64_type().const_zero(),
                 )?
             } else if *receiver == HirType::JsValue {
-                let name = self
-                    .builder
-                    .build_global_string_ptr("undefined", "ordinary_this_name")
+                let name = self.intern_string("undefined", "ordinary_this_name")
                     .map_err(|error| error.to_string())?;
                 self.builder
                     .build_call(
@@ -744,9 +742,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.context.bool_type().const_zero(),
             ));
         }
-        let expected = self
-            .builder
-            .build_global_string_ptr(expected, "native_receiver_layout")
+        let expected = self.intern_string(expected, "native_receiver_layout")
             .map_err(|error| error.to_string())?;
         let handle = self
             .builder
@@ -990,9 +986,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 let class = marker.split('\u{1f}').next().unwrap();
-                let expected = self
-                    .builder
-                    .build_global_string_ptr(class, "receiver_expected_class")
+                let expected = self.intern_string(class, "receiver_expected_class")
                     .map_err(|error| error.to_string())?;
                 let identity = self
                     .builder
@@ -1520,9 +1514,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 "receiver_union_class_pointer",
                             )
                             .map_err(|error| error.to_string())?;
-                        let expected = self
-                            .builder
-                            .build_global_string_ptr(&class, "receiver_union_class_name")
+                        let expected = self.intern_string(&class, "receiver_union_class_name")
                             .map_err(|error| error.to_string())?;
                         let is_class = self
                             .builder
@@ -1661,9 +1653,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .strip_prefix("__thaw_class_identity_\u{1e}")
                 .unwrap();
             let class = marker.split('\u{1f}').next().unwrap();
-            let expected_class = self
-                .builder
-                .build_global_string_ptr(class, "receiver_expected_class")
+            let expected_class = self.intern_string(class, "receiver_expected_class")
                 .map_err(|error| error.to_string())?;
             let identity = self
                 .builder
@@ -1951,9 +1941,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .builder
                         .build_int_to_ptr(word, pointer, "receiver_native_object")
                         .map_err(|error| error.to_string())?;
-                    let empty_layout = self
-                        .builder
-                        .build_global_string_ptr("", "receiver_full_projector_layout")
+                    let empty_layout = self.intern_string("", "receiver_full_projector_layout")
                         .map_err(|error| error.to_string())?;
                     let projector = self
                         .builder
@@ -2313,9 +2301,7 @@ impl<'ctx> HirCompiler<'ctx> {
         closure: BasicValueEnum<'ctx>,
         label: &str,
     ) -> Result<(), String> {
-        let label = self
-            .builder
-            .build_global_string_ptr(label, "function_label")
+        let label = self.intern_string(label, "function_label")
             .map_err(|error| error.to_string())?;
         self.builder
             .build_call(
@@ -2349,6 +2335,7 @@ impl<'ctx> HirCompiler<'ctx> {
             })
             .map(|(_, closure)| *closure)
         {
+            self.alias_secondary_function_ref(&target_symbol, closure)?;
             return Ok(closure.into());
         }
         let adapter_name = format!("__thaw_function_ref_{}", self.next_lambda);
@@ -2401,10 +2388,33 @@ impl<'ctx> HirCompiler<'ctx> {
         closure.set_alignment(8);
         let closure = closure.as_pointer_value();
         self.function_ref_closures
-            .entry(target_symbol)
+            .entry(target_symbol.clone())
             .or_default()
             .push((abi_signature, closure));
+        self.alias_secondary_function_ref(&target_symbol, closure)?;
         Ok(closure.into())
+    }
+
+    /// A function referenced through a second ABI signature gets a second
+    /// constant closure; record it as an alias of the first so `===` and
+    /// Map/Set keys see one identity.
+    fn alias_secondary_function_ref(
+        &mut self,
+        target_symbol: &str,
+        closure: PointerValue<'ctx>,
+    ) -> Result<(), String> {
+        let first = self.function_ref_closures[target_symbol][0].1;
+        if first == closure {
+            return Ok(());
+        }
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_closure_alias_register").unwrap(),
+                &[closure.into(), first.into()],
+                "function_ref_alias",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// Allocates `[i64 length][f64 elem0]...[f64 elemN-1]` from the arena
@@ -2426,13 +2436,28 @@ impl<'ctx> HirCompiler<'ctx> {
             .module
             .get_function(&Self::llvm_symbol_for(explicit))
             .ok_or_else(|| format!("explicit method entry `{explicit}` is not declared"))?;
+        // A method reference captures nothing, so it is one interned constant
+        // closure per (entries, ABI): `k.m === k.m` (one shared prototype
+        // function in JS).
+        let abi_signature = self.function_type(params, ret)?;
+        let cache_key = format!(
+            "method_ref|{}|{}|{receiver_class:?}",
+            unbound_target.get_name().to_string_lossy(),
+            explicit_target.get_name().to_string_lossy()
+        );
+        if let Some(closure) = self
+            .function_ref_closures
+            .get(&cache_key)
+            .and_then(|entries| entries.iter().find(|(signature, _)| *signature == abi_signature))
+            .map(|(_, closure)| *closure)
+        {
+            return Ok(closure.into());
+        }
         let ordinary_name = format!("__thaw_method_ref_{}", self.next_lambda);
         self.next_lambda += 1;
-        let ordinary = self.module.add_function(
-            &ordinary_name,
-            self.function_type(params, ret)?,
-            Some(Linkage::Internal),
-        );
+        let ordinary = self
+            .module
+            .add_function(&ordinary_name, abi_signature, Some(Linkage::Internal));
         let parent = self.builder.get_insert_block().unwrap();
         let entry = self.context.append_basic_block(ordinary, "entry");
         self.builder.position_at_end(entry);
@@ -2488,9 +2513,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     "method_receiver",
                 )
                 .map_err(|error| error.to_string())?;
-            let expected = self
-                .builder
-                .build_global_string_ptr(receiver_class, "expected_receiver_class")
+            let expected = self.intern_string(receiver_class, "expected_receiver_class")
                 .map_err(|error| error.to_string())?;
             let actual_class = self
                 .builder
@@ -2562,43 +2585,24 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
         }
         self.builder.position_at_end(parent);
-        let closure = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_arena_alloc").unwrap(),
-                &[
-                    self.context
-                        .i64_type()
-                        .const_int(CLOSURE_CAPTURE_BASE, false)
-                        .into(),
-                    self.context.i64_type().const_int(8, false).into(),
-                ],
-                "method_ref_closure",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or("method reference closure allocation returned no value")?
-            .into_pointer_value();
-        self.builder
-            .build_store(closure, ordinary.as_global_value().as_pointer_value())
-            .map_err(|error| error.to_string())?;
-        let this_slot = unsafe {
-            self.builder
-                .build_in_bounds_gep(
-                    self.context.i8_type(),
-                    closure,
-                    &[self
-                        .context
-                        .i64_type()
-                        .const_int(CLOSURE_THIS_ENTRY_OFFSET, false)],
-                    "method_ref_this_entry",
-                )
-                .map_err(|error| error.to_string())?
-        };
-        self.builder
-            .build_store(this_slot, this_entry.as_global_value().as_pointer_value())
-            .map_err(|error| error.to_string())?;
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let global = self.module.add_global(
+            pointer_type.array_type(2),
+            None,
+            &format!("{ordinary_name}__closure"),
+        );
+        global.set_linkage(Linkage::Private);
+        global.set_initializer(&pointer_type.const_array(&[
+            ordinary.as_global_value().as_pointer_value(),
+            this_entry.as_global_value().as_pointer_value(),
+        ]));
+        global.set_constant(true);
+        global.set_alignment(8);
+        let closure = global.as_pointer_value();
+        self.function_ref_closures
+            .entry(cache_key)
+            .or_default()
+            .push((abi_signature, closure));
         Ok(closure.into())
     }
 }
