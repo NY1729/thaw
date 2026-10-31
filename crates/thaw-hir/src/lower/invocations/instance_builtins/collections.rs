@@ -219,7 +219,11 @@ impl<'a> FnLowerer<'a> {
             // cases above; safe now that `AnyKey` (thaw-runtime's
             // `maps.rs`) hashes/compares a primitive by value, not by
             // its own fresh pointer.
-            HirType::Json => self.coerce_to_declared_aliasing(&HirType::Json, key),
+            // A Map/Set used as a key stays one object (live view), so `s.add(s); s.has(s)` holds.
+            HirType::Json if self.infer_expr_type(&key).is_ok_and(|ty| matches!(ty, HirType::Map(..) | HirType::Set(_))) => {
+                self.coerce_to_declared_aliasing(&HirType::Json, key)
+            }
+            HirType::Json => self.coerce_to_declared(&HirType::Json, key),
             HirType::Function(_, _) | HirType::CallableFunction(_, _, _, _) => {
                 self.expect_type(key_type, &key, "Map/Set key")?;
                 Ok(HirExpr::Call(
