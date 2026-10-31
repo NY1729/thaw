@@ -1679,3 +1679,84 @@ fn exact_calls_await_returned_promises_only_when_resolving() {
     assert_eq!(rejected.value, 0);
     assert!(rejected.exception_handle > 0 && rejected.exception_object_like == 1);
 }
+
+#[test]
+fn node_builtin_script_is_scanned_and_run_as_a_one_module_bundle() {
+    let script = "module.exports = { twice: function (n) { return n * 2; } };";
+    assert!(crate::scan::scan_bundle(script).is_err()); // a plain script is not a registry bundle
+    let wrapped = crate::scan::script_as_bundle(script);
+    assert!(crate::scan::scan_bundle(&wrapped).unwrap().is_clean());
+    let mut p = crate::host::Package::load(&wrapped).expect("loads");
+    assert_eq!(
+        p.call("twice", &[crate::host::Native::Number(21.0)]).ok(),
+        Some(crate::host::Native::Number(42.0))
+    );
+    // a registry bundle passes through unchanged
+    let registry = "module.exports = (function(require){ var __thaw_bundle_entry_key = \"a\"; var __thaw_bundle_factories = { \"a\": function(module){ module.exports = 1; } }; var __thaw_bundle_require_maps = { \"a\": {} }; })(globalThis.require);";
+    assert_eq!(crate::scan::script_as_bundle(registry), registry);
+}
+
+#[test]
+fn error_subclasses_inherit_from_error_and_native_error_tokens_keep_their_message() {
+    let src =
+        "console.log(Object.getPrototypeOf(TypeError) === Error, Error.isPrototypeOf(RangeError));";
+    assert_eq!(one(src), "true true");
+    let mut it = crate::Interp::new();
+    let ctl = crate::host::tagged_error(&mut it, "\u{1}RangeError\u{1}\u{1e}E1:3:-:abc");
+    let crate::Ctl::Throw(error) = ctl else {
+        panic!("expected a throw")
+    };
+    let got = it.get(&error, "message").unwrap();
+    assert_eq!(&*it.to_str(&got), "abc");
+    let got = it.get(&error, "name").unwrap();
+    assert_eq!(&*it.to_str(&got), "RangeError");
+}
+
+#[test]
+fn os_network_interfaces_are_grouped_by_name_with_real_addresses() {
+    let src = "var all = JSON.parse(__thaw_os_network_interfaces()); var names = Object.keys(all);\
+               console.log(names.length > 0, names.every(function (n) { return all[n].every(function (a) { return typeof a.address === 'string' && (a.family === 'IPv4' || a.family === 'IPv6') && typeof a.internal === 'boolean'; }); }));";
+    assert_eq!(one(src), "true true");
+}
+
+#[test]
+fn registering_the_same_closure_identity_twice_returns_one_callback_id() {
+    use crate::host::{thaw_tjs_callback_identity, thaw_tjs_register_callback};
+    let identity = 0x1000 as *const std::ffi::c_void;
+    thaw_tjs_callback_identity(identity);
+    let first = thaw_tjs_register_callback(sum_adapter as *const _, 0x10 as *const _, 3);
+    // a different wrapper (adapter and context) of the same closure
+    thaw_tjs_callback_identity(identity);
+    let second = thaw_tjs_register_callback(throwing_adapter as *const _, 0x20 as *const _, 3);
+    assert_eq!(first, second);
+    thaw_tjs_callback_identity(0x2000 as *const _);
+    assert_ne!(
+        first,
+        thaw_tjs_register_callback(sum_adapter as *const _, 0x30 as *const _, 3)
+    );
+}
+
+#[test]
+fn dynamic_helpers_build_native_object_literals_from_operations() {
+    let src = "var o = __thaw_object_from_operations(['data','method','spread'], '[\"a\",\"m\",\"\"]', [false,false,false], [1, null, {z: 2}], function (self, k) { return self.a + k; });\
+               console.log(o.a, o.m(10), o.z, Object.keys(o).join());";
+    assert_eq!(one(src), "1 11 2 a,m,z");
+}
+
+#[test]
+fn a_regexp_marker_argument_becomes_a_real_regexp() {
+    use crate::host::Native;
+    let mut it = crate::Interp::new();
+    let marker = Native::Object(vec![(
+        "__thaw_regexp__".into(),
+        Native::Object(vec![
+            ("source".into(), Native::Str("b+".into())),
+            ("flags".into(), Native::Str("i".into())),
+        ]),
+    )]);
+    let value = crate::host::to_value(&mut it, &marker);
+    let got = it.get(&value, "source").unwrap();
+    assert_eq!(&*it.to_str(&got), "b+");
+    let got = it.get(&value, "flags").unwrap();
+    assert_eq!(&*it.to_str(&got), "i");
+}
