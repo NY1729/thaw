@@ -765,6 +765,7 @@ fn time_string_part(timestamp: f64, fields: &CivilDateTime) -> String {
             }
         }
     };
+    let zone = zone_long_name(zone);
     format!(
         "{:02}:{:02}:{:02} GMT{sign}{:02}{:02} ({zone})",
         fields.hours,
@@ -773,6 +774,33 @@ fn time_string_part(timestamp: f64, fields: &CivilDateTime) -> String {
         offset_minutes / 60,
         offset_minutes % 60,
     )
+}
+
+/// V8 prints the long zone name; only the common ones are tabulated (the runtime cannot link thaw-intl),
+/// others fall back to the abbreviation.
+// ponytail: table mirrors thaw-js date.rs zone_long_name; real CLDR names would need a runtime-side data copy
+fn zone_long_name(abbrev: &str) -> &str {
+    match abbrev {
+        "UTC" | "Z" => "Coordinated Universal Time",
+        "GMT" => "Greenwich Mean Time",
+        "JST" => "Japan Standard Time",
+        "KST" => "Korean Standard Time",
+        "IST" => "India Standard Time",
+        "CET" => "Central European Standard Time",
+        "CEST" => "Central European Summer Time",
+        "EET" => "Eastern European Standard Time",
+        "EEST" => "Eastern European Summer Time",
+        "BST" => "British Summer Time",
+        "EST" => "Eastern Standard Time",
+        "EDT" => "Eastern Daylight Time",
+        "CST" => "Central Standard Time",
+        "CDT" => "Central Daylight Time",
+        "MST" => "Mountain Standard Time",
+        "MDT" => "Mountain Daylight Time",
+        "PST" => "Pacific Standard Time",
+        "PDT" => "Pacific Daylight Time",
+        other => other,
+    }
 }
 
 fn arena_c_string_or_invalid_date(text: Option<String>) -> *const c_char {

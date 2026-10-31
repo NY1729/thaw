@@ -664,6 +664,11 @@ impl<'a> FnLowerer<'a> {
         if argument.spread.is_some() {
             return Err("Object.prototype.toString.call does not support a spread argument".into());
         }
+        if matches!(argument.expr.as_ref(), Expr::Ident(name) if name.sym == *"globalThis")
+            && !self.scope.contains_key("globalThis")
+        {
+            return Ok(Some(HirExpr::Lit(HirLit::Str("[object global]".into()))));
+        }
         let value = self.lower_expr(&argument.expr)?;
         let ty = self.infer_expr_type(&value)?;
         // WeakRef is modeled as an array and FinalizationRegistry as a plain object;

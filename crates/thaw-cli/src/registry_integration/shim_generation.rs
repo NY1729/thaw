@@ -48,7 +48,8 @@ fn jit_type_needs_live_json_adaptation(ty: &thaw_hir::HirType) -> bool {
         // In particular, JsValue is a live QuickJS handle rather than a
         // native aggregate that needs a JSON adapter.
         HirType::F64
-        | HirType::I64 | HirType::BigInt
+        | HirType::I64
+        | HirType::BigInt
         | HirType::Bool
         | HirType::Undefined
         | HirType::Null
@@ -350,6 +351,8 @@ fn generate_registry_shims_pass(
             .extend(arities);
     }
     let mut resolved = Vec::new();
+    // thaw-js form of builtin bundles whose QuickJS form is a script wrapper (see `thaw_js_bundle_form`)
+    let mut thaw_js_bundles = std::collections::HashMap::<String, String>::new();
     for name in use_packages {
         // Scopes `Buffer`/`Uint8Array` -> `HirType::Bytes` classification
         // (see `thaw_bridge::allow_native_bytes_type`'s doc comment) to
@@ -408,6 +411,7 @@ fn generate_registry_shims_pass(
                 "node:path/posix" => "root.posix",
                 _ => "root.win32",
             };
+            thaw_js_bundles.insert(name.clone(), thaw_js_path_bundle(&root_bundle, builtin));
             package.bundle_js = Some(format!(
                 "(function(){{var cache=globalThis.__thaw_bundle_exports||(globalThis.__thaw_bundle_exports={{}}),root;if(Object.prototype.hasOwnProperty.call(cache,\"node:path\"))root=cache[\"node:path\"];else{{{root_bundle}\nroot=module.exports;cache[\"node:path\"]=root;}}var selected={selected};module.exports=selected;if(selected&&(typeof selected===\"object\"||typeof selected===\"function\")){{selected.default=selected;selected.__esModule=true;}}cache[{canonical}]=selected;}})();",
                 canonical = serde_json::to_string(builtin).unwrap(),
@@ -2126,10 +2130,8 @@ fn generate_registry_shims_pass(
                         sanitize_identifier(&pkg.name),
                         class_identifier(&value.name)
                     );
-                    // thaw-js serves a value export as a handle (`$value$` class operation)
-                    if thaw_js_package && rendered != "JsValue" {
-                        return None;
-                    }
+                    // thaw-js serves a value export through the `$value$` class operation: a handle, or the
+                    // plain data itself (`EOL`)
                     let runtime_getter = if thaw_js_package {
                         format!("$value${}::{}$arity0", pkg.name, value.name)
                     } else {
@@ -2303,7 +2305,7 @@ fn generate_registry_shims_pass(
                     && nested_namespace_aliases.iter().all(|(path, _)| !thaw_js_blocking_nested_alias(pkg, user_source, path))
                     && thaw_js_package_eligible(
                         pkg,
-                        bundle_js,
+                        &thaw_js_bundle_form(&thaw_js_bundles, &pkg.name, bundle_js),
                         user_source,
                         &typed_targets,
                         &shim[segment_start..segment_end],
@@ -2313,7 +2315,11 @@ fn generate_registry_shims_pass(
                 }
                 bundles.push((
                     pkg.name.clone(),
-                    bundle_js.clone(),
+                    if thaw_js_routed.contains(&pkg.name) {
+                        thaw_js_bundle_form(&thaw_js_bundles, &pkg.name, bundle_js).into_owned()
+                    } else {
+                        bundle_js.clone()
+                    },
                     fallback_names,
                     class_names,
                     qualified_aliases,
