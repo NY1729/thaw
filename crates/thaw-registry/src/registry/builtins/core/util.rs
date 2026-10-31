@@ -3,6 +3,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
         "util" => Some(
             "var inspectCustom = Symbol.for('nodejs.util.inspect.custom');\n\
              function inspect(value, options) {\n\
+             \x20\x20if (typeof options === 'boolean') options = { showHidden: options, depth: arguments[2], colors: arguments[3] };\n\
              \x20\x20options = options || {};\n\
              \x20\x20var depth = options.depth === undefined ? 2 : options.depth === null ? Infinity : options.depth, seen = new Set();\n\
              \x20\x20function renderProperty(owner, key, remaining) {\n\
@@ -37,7 +38,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20}\n\
              \x20\x20return render(value, depth);\n\
              }\n\
-             inspect.custom = inspectCustom; inspect.defaultOptions = {};\n\
+             inspect.custom = inspectCustom; inspect.defaultOptions = { showHidden: false, depth: 2, colors: false, customInspect: true, showProxy: false, maxArrayLength: 100, maxStringLength: 10000, breakLength: 128, compact: 3, sorted: false, getters: false, numericSeparator: false };\n\
              function fmtNumber(n) { return Object.is(n, -0) ? '-0' : String(n); }\n\
              function hasBuiltInToString(value) {\n\
              \x20\x20if (typeof value.toString !== 'function') return true;\n\
@@ -141,8 +142,38 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20Object.keys(definitions).forEach(function(name) { if (!Object.prototype.hasOwnProperty.call(values, name)) { var definition = definitions[name] || {}, defaultValue = definition.default; if (defaultValue !== undefined) values[name] = definition.multiple ? Array.from(defaultValue) : defaultValue; } });\n\
              \x20\x20var result = { values: values, positionals: positionals }; if (config.tokens) result.tokens = tokens; return result;\n\
              }\n\
+             function strictDeep(actual, expected, seen) {\n\
+             if (Object.is(actual, expected)) return true;\n\
+             if (actual === null || expected === null || typeof actual !== 'object' || typeof expected !== 'object') return false;\n\
+             if (Object.getPrototypeOf(actual) !== Object.getPrototypeOf(expected)) return false;\n\
+             seen = seen || new Map(); if (seen.get(actual) === expected) return true; seen.set(actual, expected);\n\
+             if (actual instanceof Date) return expected instanceof Date && actual.getTime() === expected.getTime();\n\
+             if (actual instanceof RegExp) return expected instanceof RegExp && actual.source === expected.source && actual.flags === expected.flags;\n\
+             if ((actual instanceof Number || actual instanceof String || actual instanceof Boolean) && !Object.is(actual.valueOf(), expected.valueOf())) return false;\n\
+             if (actual instanceof Error) { if (actual.name !== expected.name || actual.message !== expected.message || ('cause' in actual) !== ('cause' in expected) || !strictDeep(actual.cause, expected.cause, seen) || !strictDeep(actual.errors, expected.errors, seen)) return false; }\n\
+             if (Array.isArray(actual) && actual.length !== expected.length) return false;\n\
+             if (actual instanceof ArrayBuffer || actual instanceof DataView) { if (actual.byteLength !== expected.byteLength) return false; var left = actual instanceof DataView ? new Uint8Array(actual.buffer, actual.byteOffset, actual.byteLength) : new Uint8Array(actual), right = expected instanceof DataView ? new Uint8Array(expected.buffer, expected.byteOffset, expected.byteLength) : new Uint8Array(expected); for (var at = 0; at < left.length; at++) if (left[at] !== right[at]) return false; return true; }\n\
+             if (ArrayBuffer.isView(actual)) { if (!ArrayBuffer.isView(expected) || actual.length !== expected.length) return false; for (var i = 0; i < actual.length; i++) if (!Object.is(actual[i], expected[i])) return false; return true; }\n\
+             if (actual instanceof Map) { if (actual.size !== expected.size) return false; var usedKeys = new Set(); for (var entry of actual) { if (expected.has(entry[0]) && strictDeep(entry[1], expected.get(entry[0]), seen)) { usedKeys.add(entry[0]); continue; } var found = false; for (var other of expected) { if (usedKeys.has(other[0])) continue; if (strictDeep(entry[0], other[0], seen) && strictDeep(entry[1], other[1], seen)) { usedKeys.add(other[0]); found = true; break; } } if (!found) return false; } }\n\
+             if (actual instanceof Set) { if (actual.size !== expected.size) return false; var usedValues = new Set(); for (var item of actual) { if (expected.has(item)) { usedValues.add(item); continue; } var matched = false; for (var candidate of expected) { if (usedValues.has(candidate)) continue; if (strictDeep(item, candidate, seen)) { usedValues.add(candidate); matched = true; break; } } if (!matched) return false; } }\n\
+             var left = Object.keys(actual); var right = Object.keys(expected); if (left.length !== right.length) return false;\n\
+             for (var index = 0; index < left.length; index++) { var key = left[index]; if (!Object.prototype.hasOwnProperty.call(expected, key) || !strictDeep(actual[key], expected[key], seen)) return false; }\n\
+             return true;\n\
+             }\n\
+             function isDeepStrictEqual(left, right) { return strictDeep(left, right); }\n\
+             var styleCodes = { reset: [0, 0], bold: [1, 22], dim: [2, 22], italic: [3, 23], underline: [4, 24], blink: [5, 25], inverse: [7, 27], hidden: [8, 28], strikethrough: [9, 29], doubleunderline: [21, 24], black: [30, 39], red: [31, 39], green: [32, 39], yellow: [33, 39], blue: [34, 39], magenta: [35, 39], cyan: [36, 39], white: [37, 39], gray: [90, 39], grey: [90, 39], blackBright: [90, 39], redBright: [91, 39], greenBright: [92, 39], yellowBright: [93, 39], blueBright: [94, 39], magentaBright: [95, 39], cyanBright: [96, 39], whiteBright: [97, 39], bgBlack: [40, 49], bgRed: [41, 49], bgGreen: [42, 49], bgYellow: [43, 49], bgBlue: [44, 49], bgMagenta: [45, 49], bgCyan: [46, 49], bgWhite: [47, 49], bgGray: [100, 49], bgGrey: [100, 49], bgBlackBright: [100, 49], bgRedBright: [101, 49], bgGreenBright: [102, 49], bgYellowBright: [103, 49], bgBlueBright: [104, 49], bgMagentaBright: [105, 49], bgCyanBright: [106, 49], bgWhiteBright: [107, 49] };\n\
+             function styleText(format, text, options) {\n\
+             \x20\x20if (typeof text !== 'string') { var textError = new TypeError('The \"text\" argument must be of type string. Received ' + (text === null ? 'null' : typeof text === 'object' ? 'an instance of ' + (text.constructor && text.constructor.name) : 'type ' + typeof text + ' (' + String(text) + ')')); textError.code = 'ERR_INVALID_ARG_TYPE'; throw textError; }\n\
+             \x20\x20var names = Array.isArray(format) ? format : [format], left = '', right = '';\n\
+             \x20\x20names.forEach(function(name) { var code = styleCodes[name]; if (!code) { var formatError = new TypeError('The argument \\'format\\' must be one of: ' + Object.keys(styleCodes).map(function(key) { return \"'\" + key + \"'\"; }).join(', ') + '. Received ' + format); formatError.code = 'ERR_INVALID_ARG_VALUE'; throw formatError; } left += '\\u001b[' + code[0] + 'm'; right = '\\u001b[' + code[1] + 'm' + right; });\n\
+             \x20\x20var stream = options && options.stream !== undefined ? options.stream : process.stdout;\n\
+             \x20\x20if (!(options && options.validateStream === false) && !(stream && stream.isTTY && (typeof stream.hasColors !== 'function' || stream.hasColors()))) return text;\n\
+             \x20\x20return left + text + right;\n\
+             }\n\
+             var systemErrorNames = {'-1':'EPERM','-2':'ENOENT','-3':'ESRCH','-4':'EINTR','-5':'EIO','-6':'ENXIO','-7':'E2BIG','-8':'ENOEXEC','-9':'EBADF','-10':'ECHILD','-11':'EWOULDBLOCK','-12':'ENOMEM','-13':'EACCES','-14':'EFAULT','-16':'EBUSY','-17':'EEXIST','-18':'EXDEV','-19':'ENODEV','-20':'ENOTDIR','-21':'EISDIR','-22':'EINVAL','-23':'ENFILE','-24':'EMFILE','-25':'ENOTTY','-26':'ETXTBSY','-27':'EFBIG','-28':'ENOSPC','-29':'ESPIPE','-30':'EROFS','-31':'EMLINK','-32':'EPIPE','-33':'EDOM','-34':'ERANGE','-35':'EDEADLK','-36':'ENAMETOOLONG','-37':'ENOLCK','-38':'ENOSYS','-39':'ENOTEMPTY','-40':'ELOOP','-42':'ENOMSG','-43':'EIDRM','-60':'ENOSTR','-61':'ENODATA','-62':'ETIME','-63':'ENOSR','-67':'ENOLINK','-71':'EPROTO','-72':'EMULTIHOP','-74':'EBADMSG','-75':'EOVERFLOW','-84':'EILSEQ','-88':'ENOTSOCK','-89':'EDESTADDRREQ','-90':'EMSGSIZE','-91':'EPROTOTYPE','-92':'ENOPROTOOPT','-93':'EPROTONOSUPPORT','-95':'EOPNOTSUPP','-97':'EAFNOSUPPORT','-98':'EADDRINUSE','-99':'EADDRNOTAVAIL','-100':'ENETDOWN','-101':'ENETUNREACH','-102':'ENETRESET','-103':'ECONNABORTED','-104':'ECONNRESET','-105':'ENOBUFS','-106':'EISCONN','-107':'ENOTCONN','-110':'ETIMEDOUT','-111':'ECONNREFUSED','-113':'EHOSTUNREACH','-114':'EALREADY','-115':'EINPROGRESS','-116':'ESTALE','-122':'EDQUOT','-125':'ECANCELED'}; function getSystemErrorName(code) { return systemErrorNames[code] || 'Unknown system error ' + code; }\n\
+             function isArray(value) { return Array.isArray(value); }\n\
              var types = globalThis.__thaw_util_types;\n\
-             module.exports = { inspect: inspect, format: format, formatWithOptions: formatWithOptions, inherits: inherits, promisify: promisify, callbackify: callbackify, deprecate: deprecate, debuglog: debuglog, stripVTControlCharacters: stripVTControlCharacters, toUSVString: toUSVString, parseArgs: parseArgs, TextEncoder: globalThis.TextEncoder, TextDecoder: globalThis.TextDecoder, types: types };\n\
+             module.exports = { inspect: inspect, format: format, formatWithOptions: formatWithOptions, inherits: inherits, promisify: promisify, callbackify: callbackify, deprecate: deprecate, debuglog: debuglog, isDeepStrictEqual: isDeepStrictEqual, styleText: styleText, getSystemErrorName: getSystemErrorName, isArray: isArray, stripVTControlCharacters: stripVTControlCharacters, toUSVString: toUSVString, parseArgs: parseArgs, TextEncoder: globalThis.TextEncoder, TextDecoder: globalThis.TextDecoder, types: types };\n\
              module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "util/types" => Some(

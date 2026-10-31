@@ -459,7 +459,7 @@ impl StorageGraph {
         self.lookup(object.sym.as_ref()).is_none()
             && matches!((object.sym.as_ref(), property.sym.as_ref()),
                 ("Object", "fromEntries" | "groupBy") | ("Map", "groupBy")
-                | ("Buffer", "from" | "concat" | "alloc") | ("Uint8Array", "from"))
+                | ("Buffer", "from" | "concat" | "alloc" | "allocUnsafe" | "allocUnsafeSlow") | ("Uint8Array", "from"))
     }
 
     fn link(&mut self, left: Span, right: Span) {
@@ -1307,6 +1307,12 @@ impl Visit for StorageGraph {
                                     self.sink_slots.insert(storage_key(binding));
                                 }
                             }
+                        }
+                        // `Object.create(proto)` yields a host object whose own-ness only dynamic storage models.
+                        if matches!(&member.prop, swc_ecma_ast::MemberProp::Ident(method) if method.sym == "create")
+                            && matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Object" && self.lookup("Object").is_none())
+                        {
+                            self.expose(span);
                         }
                         if !self.is_fresh_static_builtin(member) {
                             self.link(span, member.obj.span());
