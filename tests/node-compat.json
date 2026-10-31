@@ -3972,6 +3972,36 @@
       "name": "native setImmediate from a timer callback runs before the next timer",
       "expect": "matched",
       "source": "function main(): void {\n  setTimeout(() => {\n    console.log(\"timer\");\n    setImmediate(() => console.log(\"imm1\"));\n    setTimeout(() => console.log(\"timeout0\"), 0);\n    setImmediate(() => console.log(\"imm2\"));\n  }, 1);\n}\n"
+    },
+    {
+      "name": "nd5e fs errors carry node errno, message, syscall and path",
+      "expect": "matched",
+      "source": "import fs from \"node:fs\";\nfunction t(f: () => void): void {\n  try { f(); } catch (e: any) { console.log(Object.keys(e), e.errno, e.code, e.syscall, e.path, e.dest, e.message); }\n}\nfunction main(): void {\n  t(() => { fs.readFileSync(\"/nonexistent/x\"); });\n  t(() => { fs.readdirSync(\"/etc/hostname\"); });\n  t(() => { fs.rmdirSync(\"/nonexistent\"); });\n  t(() => { fs.readFileSync(\"/etc\"); });\n  t(() => { fs.renameSync(\"/nonexistent/a\", \"/nonexistent/b\"); });\n  t(() => { fs.statSync(\"/nonexistent\"); });\n  const st = fs.statSync(\"/etc/hostname\");\n  console.log(Object.keys(st).slice(0, 10));\n}\n"
+    },
+    {
+      "name": "nd5e child_process error shapes",
+      "expect": "matched",
+      "source": "import cp from \"node:child_process\";\nfunction main(): void {\n  const r = cp.spawnSync(\"sh\", [\"-c\", \"exit 3\"]);\n  console.log(Object.keys(r), r.status, r.signal);\n  const r2 = cp.spawnSync(\"nonexistent-cmd-xyz\") as any;\n  console.log(Object.keys(r2), r2.status, r2.error.code, r2.error.errno, r2.error.syscall, r2.error.path, r2.error.spawnargs, r2.error.message, Object.keys(r2.error));\n  try { cp.execSync(\"exit 2\", { stdio: \"pipe\" }); } catch (e: any) { console.log(e.status, e.message, Object.keys(e)); }\n  try { cp.execSync(\"echo bad >&2; exit 2\", { stdio: \"pipe\" }); } catch (e: any) { console.log(e.message); }\n}\n"
+    },
+    {
+      "name": "nd5e zlib gunzip error has errno and code",
+      "expect": "matched",
+      "source": "import z from \"node:zlib\";\nfunction main(): void {\n  try { z.gunzipSync(Buffer.from(\"notgzip\")); } catch (e: any) { console.log(e.code, e.errno, e.message); }\n  try { z.inflateSync(Buffer.from(\"xx\")); } catch (e: any) { console.log(e.code, e.errno, e.message); }\n}\n"
+    },
+    {
+      "name": "nd5e crypto hash reuse after digest has a code",
+      "expect": "matched",
+      "source": "import c from \"node:crypto\";\nfunction main(): void {\n  try { const h = c.createHash(\"md5\"); h.digest(); h.update(\"x\"); } catch (e: any) { console.log(e.code, e.message); }\n}\n"
+    },
+    {
+      "name": "nd5e Timeout class name and globalThis tag",
+      "expect": "matched",
+      "source": "function main(): void {\n  const t = setTimeout(() => console.log(\"a\"), 1, \"x\");\n  console.log(typeof t, t.constructor.name, Object.prototype.toString.call(globalThis));\n}\n"
+    },
+    {
+      "name": "nd5e object literal accessors print named functions",
+      "expect": "matched",
+      "source": "function main(): void {\n  const o = { get x() { return 1; }, set y(v: number) {} };\n  console.log(Object.getOwnPropertyDescriptor(o, \"x\")!.get, Object.getOwnPropertyDescriptor(o, \"y\")!.set);\n  console.log(Object.getOwnPropertyDescriptor(o, \"x\"));\n}\n"
     }
   ]
 }
