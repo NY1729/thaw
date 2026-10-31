@@ -286,16 +286,7 @@ impl Interp {
         self.run(DYNAMIC_HELPERS)
             .unwrap_or_else(|_| panic!("thaw-js dynamic helper prelude must evaluate"));
         let g = self.global.clone();
-        // ponytail: child processes need the event loop to poll them; the node:child_process shim loads
-        // (commander only spawns for executable sub-commands) but every call fails clearly. Plan: designs/quickjs-removal/slice4-remaining.md
-        for name in ["spawn", "kill", "ref", "stdin", "sync"] {
-            let f = self.native(|it, _, _| {
-                it.throw_error("Error", "child_process is not supported by thaw-js yet")
-            });
-            g.declare(&format!("__thaw_child_process_{name}"), f, true);
-        }
-        let f = self.native(|_, _, _| Ok(Value::str("[]")));
-        g.declare("__thaw_child_process_poll", f, true);
+        self.install_child_process();
         let f = self.native(|it, _, a| it.report_uncaught(arg(a, 0)));
         g.declare("__thaw_report_uncaught", f, true);
         let f = self.native(|_, _, _| Ok(Value::str(&identity())));

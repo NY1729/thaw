@@ -1257,3 +1257,72 @@ var __thaw_bundle_entry_key = \"p/index.js\";
         .blockers
         .contains_key("dynamic-with-code"));
 }
+
+/// Run `src` through the full event loop (child processes are polled there) and return the log lines.
+fn run_loop(src: &str) -> String {
+    let mut it = Interp::new();
+    it.run(src).expect("script runs");
+    it.run_event_loop().expect("loop runs");
+    it.out.join("|")
+}
+
+const CHILD_SHIM: &str = r#"
+function hexs(h) { var s = ''; for (var i = 0; i < h.length; i += 2) s += String.fromCharCode(parseInt(h.slice(i, i + 2), 16)); return s; }
+var logs = [];
+globalThis.__thaw_poll_platform_events = function () {
+  JSON.parse(__thaw_child_process_poll()).forEach(function (e) {
+    logs.push(e.type + (e.value !== undefined ? ':' + hexs(e.value) : '') + (e.type === 'exit' || e.type === 'exited' ? ':' + e.code + '/' + e.signal : '') + (e.code && e.type === 'error' ? ':' + e.code : ''));
+  });
+};
+"#;
+
+#[test]
+fn child_process_async_orders_output_before_close() {
+    let src = format!(
+        "{CHILD_SHIM}
+__thaw_child_process_spawn('/bin/sh', JSON.stringify(['-c', 'echo out; echo err >&2; exit 3']), JSON.stringify({{stdio: ['ignore','pipe','pipe']}}));
+setTimeout(function () {{ console.log(logs.join(',')); }}, 400);"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("spawn,"), "{out}");
+    assert!(
+        out.contains("stdout:out|") && out.contains("stderr:err|"),
+        "{out}"
+    );
+    assert!(out.ends_with("exited:3/null,exit:3/null"), "{out}");
+}
+
+#[test]
+fn child_process_keeps_loop_alive_and_reports_signal_and_spawn_error() {
+    let src = format!(
+        "{CHILD_SHIM}
+var h = __thaw_child_process_spawn('/bin/sleep', JSON.stringify(['5']), JSON.stringify({{}}));
+setTimeout(function () {{ console.log(__thaw_child_process_kill(h, 15)); }}, 50);
+__thaw_child_process_spawn('/nonexistent/x', '[]', '{{}}');
+process.on('exit', function () {{ console.log(logs.join(',')); }});"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("true|"), "{out}");
+    assert!(
+        out.contains("error:ENOENT") && out.contains("exit:null/15"),
+        "{out}"
+    );
+}
+
+#[test]
+fn child_process_stdin_env_cwd_and_sync() {
+    let src = format!(
+        "{CHILD_SHIM}
+var h = __thaw_child_process_spawn('/bin/cat', '[]', JSON.stringify({{cwd: '/'}}));
+__thaw_child_process_stdin(h, '68690a', false);
+__thaw_child_process_stdin(h, '', true);
+var r = JSON.parse(__thaw_child_process_sync('/bin/sh', JSON.stringify(['-c', 'echo $FOO; pwd; cat; exit 2']), JSON.stringify({{env: {{FOO: 'bar'}}, cwd: '/tmp', input: '78'}})));
+console.log(r.status, hexs(r.stdout).replace(/\\n/g, '+'));
+var t = JSON.parse(__thaw_child_process_sync('/bin/sleep', JSON.stringify(['5']), JSON.stringify({{timeout: 50, killSignal: 9}})));
+console.log(t.timedOut, t.signal);
+setTimeout(function () {{ console.log(logs.join(',')); }}, 300);"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("2 bar+/tmp+x|true 9|"), "{out}");
+    assert!(out.contains("stdout:hi|"), "{out}");
+}
