@@ -194,7 +194,7 @@ impl<'a> FnLowerer<'a> {
                                     );
                                     let branch = match &comparator {
                                         Some(value) if self.infer_expr_type(value)? != HirType::Undefined => self.lower_array_sort_comparator(
-                                            source, member.clone(), element.as_ref().clone(), callback_element.clone(), value.clone(), property.sym == *"toSorted",
+                                            source, member.clone(), element.as_ref().clone(), callback_element.clone(), value.clone(), property.sym == *"toSorted", None,
                                         )?,
                                         _ => self.lower_array_sort_default(
                                             source, member.clone(), element.as_ref().clone(), property.sym == *"toSorted",
@@ -257,6 +257,7 @@ impl<'a> FnLowerer<'a> {
                                 element_type,
                                 comparator,
                                 property.sym == *"toSorted",
+                                None,
                             )?
                         } else {
                             self.lower_array_sort_default(
@@ -303,6 +304,11 @@ impl<'a> FnLowerer<'a> {
                             &[element_type.clone(), element_type.clone()],
                             Some(&HirType::F64),
                         )?;
+                        let native_descending = if element_type == HirType::F64 {
+                            Self::numeric_comparator_direction(&argument.expr)
+                        } else {
+                            None
+                        };
                         return self.lower_array_sort_comparator(
                             receiver,
                             receiver_type,
@@ -310,6 +316,7 @@ impl<'a> FnLowerer<'a> {
                             element_type,
                             comparator,
                             property.sym == *"toSorted",
+                            native_descending,
                         );
                     }
                     return self.lower_array_sort_default(
