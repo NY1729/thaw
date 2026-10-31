@@ -926,24 +926,10 @@ impl<'a> FnLowerer<'a> {
                 vec![HirExpr::Lit(HirLit::Str("ReferenceError".into())), message],
             ));
         }
-        // `process.hrtime.bigint()`: a BigInt cannot cross the JSON boundary of a
-        // dynamic `process` call, so rebuild the exact value from `hrtime()`'s
-        // `[seconds, nanoseconds]` pair as a native bigint.
-        if let Callee::Expr(callee) = &call.callee {
-            if let Expr::Member(bigint) = callee.as_ref() {
-                if let (Expr::Member(hrtime), MemberProp::Ident(property)) = (bigint.obj.as_ref(), &bigint.prop) {
-                    if let (Expr::Ident(process), MemberProp::Ident(method)) = (hrtime.obj.as_ref(), &hrtime.prop) {
-                        if property.sym == "bigint"
-                            && method.sym == "hrtime"
-                            && process.sym == "process"
-                            && call.args.is_empty()
-                            && !self.scope.contains_key(&self.resolve_binding("process"))
-                        {
-                            return self.lower_expr(&hrtime_bigint_expression(process.sym.as_ref()));
-                        }
-                    }
-                }
-            }
+        // `process.hrtime.bigint()` / `process.hrtime()` / `process.hrtime(previous)`: native monotonic
+        // clock, so the first use never creates the JavaScript realm (~30 ms).
+        if let Some(kind) = self.native_hrtime_kind(call) {
+            return self.lower_expr(&native_hrtime_expression(kind));
         }
         if matches!(
             &call.callee,
@@ -5174,6 +5160,37 @@ impl<'a> FnLowerer<'a> {
 }
 
 impl<'a> FnLowerer<'a> {
+    /// Which native `process.hrtime` form `call` is, when `process` and `performance` are the
+    /// unshadowed globals (the difference form needs a `number[]` local to subtract).
+    fn native_hrtime_kind(&self, call: &CallExpr) -> Option<HrtimeKind> {
+        let Callee::Expr(callee) = &call.callee else { return None };
+        let Expr::Member(member) = callee.as_ref() else { return None };
+        let free = |name: &str| !self.scope.contains_key(&self.resolve_binding(name));
+        if !free("process") || !free("performance") {
+            return None;
+        }
+        if let (Expr::Member(hrtime), MemberProp::Ident(property)) = (member.obj.as_ref(), &member.prop) {
+            let is_hrtime = matches!((hrtime.obj.as_ref(), &hrtime.prop),
+                (Expr::Ident(process), MemberProp::Ident(method)) if process.sym == "process" && method.sym == "hrtime");
+            return (is_hrtime && property.sym == "bigint" && call.args.is_empty()).then_some(HrtimeKind::Bigint);
+        }
+        let (Expr::Ident(process), MemberProp::Ident(method)) = (member.obj.as_ref(), &member.prop) else {
+            return None;
+        };
+        if process.sym != "process" || method.sym != "hrtime" {
+            return None;
+        }
+        match call.args.as_slice() {
+            [] => Some(HrtimeKind::Pair),
+            [argument] if argument.spread.is_none() => {
+                let Expr::Ident(previous) = argument.expr.as_ref() else { return None };
+                let name = self.resolve_binding(previous.sym.as_ref());
+                matches!(self.scope.get(&name), Some(HirType::Array(element)) if **element == HirType::F64)
+                    .then(|| HrtimeKind::Since(previous.sym.to_string()))
+            }
+            _ => None,
+        }
+    }
     /// A Json-typed `.includes` receiver can either be an ordinary decoded
     /// value or a live QuickJS handle carried through the JSON bridge. Reuse
     /// the selected-method path in both cases: preserve an existing handle
@@ -5239,11 +5256,14 @@ impl<'a> FnLowerer<'a> {
     }
 }
 
-/// `((t: any) => BigInt(Number(t[0])) * BigInt(1000000000) + BigInt(Number(t[1])))(process.hrtime())`
-fn hrtime_bigint_expression(process: &str) -> Expr {
+/// Native `process.hrtime.bigint()` / `process.hrtime()` / `process.hrtime(previous)` built from the
+/// native monotonic `performance.now()` (nanoseconds since process start), so they never create the
+/// JavaScript realm. `previous` names a `number[]` local for the difference form.
+fn native_hrtime_expression(kind: HrtimeKind) -> Expr {
     use swc_common::{SyntaxContext, DUMMY_SP};
     use swc_ecma_ast::*;
     let ident = |name: &str| Ident::new_no_ctxt(name.into(), DUMMY_SP);
+    let var = |name: &str| Expr::Ident(ident(name));
     let call = |callee: Expr, args: Vec<Expr>| {
         Expr::Call(CallExpr {
             span: DUMMY_SP,
@@ -5254,40 +5274,103 @@ fn hrtime_bigint_expression(process: &str) -> Expr {
         })
     };
     let number = |value: f64| Expr::Lit(Lit::Num(swc_ecma_ast::Number { span: DUMMY_SP, value, raw: None }));
-    let part = |index: f64| {
-        let element = Expr::Member(MemberExpr {
-            span: DUMMY_SP,
-            obj: Box::new(Expr::Ident(ident("__thaw_hr"))),
-            prop: MemberProp::Computed(ComputedPropName { span: DUMMY_SP, expr: Box::new(number(index)) }),
-        });
-        call(Expr::Ident(ident("BigInt")), vec![call(Expr::Ident(ident("Number")), vec![element])])
-    };
-    let scale = call(Expr::Ident(ident("BigInt")), vec![number(1_000_000_000.0)]);
     let binary = |op: BinaryOp, left: Expr, right: Expr| {
         Expr::Bin(BinExpr { span: DUMMY_SP, op, left: Box::new(left), right: Box::new(right) })
     };
-    let body = binary(BinaryOp::Add, binary(BinaryOp::Mul, part(0.0), scale), part(1.0));
-    let parameter = Pat::Ident(BindingIdent {
-        id: ident("__thaw_hr"),
-        type_ann: Some(Box::new(TsTypeAnn {
+    let member = |object: Expr, property: &str| {
+        Expr::Member(MemberExpr {
             span: DUMMY_SP,
-            type_ann: Box::new(TsType::TsKeywordType(TsKeywordType { span: DUMMY_SP, kind: TsKeywordTypeKind::TsAnyKeyword })),
-        })),
-    });
+            obj: Box::new(object),
+            prop: MemberProp::Ident(IdentName::new(property.into(), DUMMY_SP)),
+        })
+    };
+    let element = |array: &str, index: f64| {
+        Expr::Member(MemberExpr {
+            span: DUMMY_SP,
+            obj: Box::new(var(array)),
+            prop: MemberProp::Computed(ComputedPropName { span: DUMMY_SP, expr: Box::new(number(index)) }),
+        })
+    };
+    let math = |name: &str, argument: Expr| call(member(var("Math"), name), vec![argument]);
+    let pair = |seconds: Expr, nanoseconds: Expr| {
+        Expr::Array(ArrayLit {
+            span: DUMMY_SP,
+            elems: [seconds, nanoseconds]
+                .into_iter()
+                .map(|expr| Some(ExprOrSpread { spread: None, expr: Box::new(expr) }))
+                .collect(),
+        })
+    };
+    let conditional = |test: Expr, consequent: Expr, alternate: Expr| {
+        Expr::Cond(CondExpr {
+            span: DUMMY_SP,
+            test: Box::new(test),
+            cons: Box::new(consequent),
+            alt: Box::new(alternate),
+        })
+    };
+    let typed = |name: &str, keyword: TsType| {
+        Pat::Ident(BindingIdent {
+            id: ident(name),
+            type_ann: Some(Box::new(TsTypeAnn { span: DUMMY_SP, type_ann: Box::new(keyword) })),
+        })
+    };
+    let number_type = || TsType::TsKeywordType(TsKeywordType { span: DUMMY_SP, kind: TsKeywordTypeKind::TsNumberKeyword });
+    let nanoseconds = math("round", binary(
+        BinaryOp::Mul,
+        call(member(var("performance"), "now"), Vec::new()),
+        number(1_000_000.0),
+    ));
+    if matches!(kind, HrtimeKind::Bigint) {
+        return call(var("BigInt"), vec![nanoseconds]);
+    }
+    let seconds = math("floor", binary(BinaryOp::Div, var("__thaw_hn"), number(1e9)));
+    let remainder = binary(BinaryOp::Mod, var("__thaw_hn"), number(1e9));
+    let (params, body, arguments) = match kind {
+        HrtimeKind::Bigint => unreachable!(),
+        HrtimeKind::Pair => (
+            vec![typed("__thaw_hn", number_type())],
+            pair(seconds, remainder),
+            vec![nanoseconds],
+        ),
+        HrtimeKind::Since(previous) => {
+            let borrow = binary(BinaryOp::Lt, remainder.clone(), element("__thaw_hp", 1.0));
+            let seconds = binary(
+                BinaryOp::Sub,
+                binary(BinaryOp::Sub, seconds, element("__thaw_hp", 0.0)),
+                conditional(borrow.clone(), number(1.0), number(0.0)),
+            );
+            let remainder = binary(
+                BinaryOp::Add,
+                binary(BinaryOp::Sub, remainder, element("__thaw_hp", 1.0)),
+                conditional(borrow, number(1e9), number(0.0)),
+            );
+            let array_type = TsType::TsArrayType(TsArrayType {
+                span: DUMMY_SP,
+                elem_type: Box::new(number_type()),
+            });
+            (
+                vec![typed("__thaw_hn", number_type()), typed("__thaw_hp", array_type)],
+                pair(seconds, remainder),
+                vec![nanoseconds, var(&previous)],
+            )
+        }
+    };
     let arrow = Expr::Arrow(ArrowExpr {
         span: DUMMY_SP,
         ctxt: SyntaxContext::empty(),
-        params: vec![parameter],
+        params,
         body: Box::new(ArrowFunctionBody::Expr(Box::new(body))),
         is_async: false,
         is_generator: false,
         type_params: None,
         return_type: None,
     });
-    let hrtime = Expr::Member(MemberExpr {
-        span: DUMMY_SP,
-        obj: Box::new(Expr::Ident(ident(process))),
-        prop: MemberProp::Ident(IdentName::new("hrtime".into(), DUMMY_SP)),
-    });
-    call(Expr::Paren(ParenExpr { span: DUMMY_SP, expr: Box::new(arrow) }), vec![call(hrtime, Vec::new())])
+    call(Expr::Paren(ParenExpr { span: DUMMY_SP, expr: Box::new(arrow) }), arguments)
+}
+
+enum HrtimeKind {
+    Bigint,
+    Pair,
+    Since(String),
 }
