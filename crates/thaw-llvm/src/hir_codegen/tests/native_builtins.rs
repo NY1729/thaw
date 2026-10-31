@@ -1935,7 +1935,7 @@ fn compiles_local_date_string_formatting() {
             "local_date_string_formatting",
             &[("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")],
         ),
-        "Sun Dec 31 2023\n19:00:00 GMT-0500 (EST)\nSun Dec 31 2023 19:00:00 GMT-0500 (EST)\n20:00:00 GMT-0400 (EDT)\nMon, 01 Jul 2024 00:00:00 GMT\n"
+        "Sun Dec 31 2023\n19:00:00 GMT-0500 (Eastern Standard Time)\nSun Dec 31 2023 19:00:00 GMT-0500 (Eastern Standard Time)\n20:00:00 GMT-0400 (Eastern Daylight Time)\nMon, 01 Jul 2024 00:00:00 GMT\n"
     );
 }
 

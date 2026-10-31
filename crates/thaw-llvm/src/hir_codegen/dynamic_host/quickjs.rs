@@ -140,12 +140,24 @@ impl<'ctx> HirCompiler<'ctx> {
     /// same reason (the extern function avoids relying on `bool`'s C ABI
     /// shape).
     fn compile_load_script(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
         let [source] = args else {
             return Err("loadScript expects exactly one argument".to_string());
         };
+        // Only the class values the program defines itself (`class_value_js_script`) run on
+        // thaw-js; any other script (a package bundle) needs the QuickJS host.
+        let class_value = matches!(source, HirExpr::Lit(HirLit::Str(text))
+            if text.starts_with("globalThis[\"__thaw_class_value_"));
+        let on_thaw_js = class_value && self.js_engine() == JsEngine::ThawJs;
+        if on_thaw_js {
+            self.js_mark_handles_used();
+        } else {
+            self.uses_quickjs = true;
+        }
         let source_val = self.compile_expr(source)?;
-        let function = self.module.get_function("thaw_js_load").unwrap();
+        let function = self
+            .module
+            .get_function(if on_thaw_js { "thaw_tjs_load_script" } else { "thaw_js_load" })
+            .unwrap();
         let call = self
             .builder
             .build_call(function, &[source_val.into()], "load_script_u8")
@@ -410,8 +422,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let [call_args] = args else {
             return Err("newDynamicFunction expects exactly one argument".into());
         };
@@ -886,8 +897,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         // May be the first QuickJS operation on the thread; Json arguments can
         // carry Host leases, so install the retained-value callbacks first
         // (same reasoning as compile_call_dynamic_value_mixed_exact).
@@ -1057,8 +1067,7 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
         chain_intermediate: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         // May be the first QuickJS operation on the thread; Json arguments can
         // carry Host leases, so install the retained-value callbacks first
         // (same reasoning as compile_call_dynamic_value_mixed_exact).
@@ -1496,8 +1505,7 @@ impl<'ctx> HirCompiler<'ctx> {
         space: &HirExpr,
         handles: &HirExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let value = self.compile_expr(value)?;
         let space = self.compile_expr(space)?;
         let handles = self.compile_expr(handles)?.into_pointer_value();

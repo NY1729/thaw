@@ -539,7 +539,7 @@ fn util_helpers_run_through_bundled_commonjs_require() {
              \x20 util.inspect(selected, { getters: true }); if (onlyCalls !== 2 || bothCalls !== 2) throw new Error('inspect all getters');\n\
              \x20 if (util.inspect(accessed, { getters: true }).indexOf('Inspection threw') < 0 || getterCalls !== 1) throw new Error('inspect throwing explicit getter');\n\
              \x20 var hookCalls = 0, hookObject = { value: 3 };\n\
-             \x20 hookObject[util.inspect.custom] = function(depth, options, inspect) { hookCalls++; if (depth !== 0 || options.customInspect !== undefined || inspect !== util.inspect || this !== hookObject) throw new Error('inspect hook arguments'); return 'hook'; };\n\
+             \x20 hookObject[util.inspect.custom] = function(depth, options, inspect) { hookCalls++; if (depth !== 0 || options.customInspect !== true || inspect !== util.inspect || this !== hookObject) throw new Error('inspect hook arguments'); return 'hook'; };\n\
              \x20 if (util.inspect(hookObject, { depth: 0 }) !== 'hook' || hookCalls !== 1) throw new Error('inspect enabled custom');\n\
              \x20 if (util.inspect(hookObject, { customInspect: false }).indexOf('value: 3') < 0 || hookCalls !== 1) throw new Error('inspect disabled custom');\n\
              \x20 var symbolAccessorCalls = 0, symbolAccessor = { value: 4 }; Object.defineProperty(symbolAccessor, util.inspect.custom, { get: function() { symbolAccessorCalls++; throw new Error('hook lookup'); } });\n\
@@ -550,7 +550,7 @@ fn util_helpers_run_through_bundled_commonjs_require() {
              \x20 if (util.inspect([[1]], { depth: 0 }).indexOf('[Array]') < 0 || util.inspect(new Map([['x', { deep: 1 }]]), { depth: 0 }).indexOf('[Object]') < 0 || util.inspect(new Set([{ deep: 1 }]), { depth: 0 }).indexOf('[Object]') < 0) throw new Error('inspect container depth');\n\
              \x20 var depthGetterCalls = 0, depthGuard = { child: {} }; Object.defineProperty(depthGuard.child, 'hidden', { enumerable: true, get: function() { depthGetterCalls++; return 1; } });\n\
              \x20 if (util.inspect(depthGuard, { depth: 0 }).indexOf('[Object]') < 0 || depthGetterCalls !== 0) throw new Error('inspect depth getter guard');\n\
-             \x20 var cycle = {}; cycle.self = cycle; if (util.inspect(cycle, { depth: null }).indexOf('[Circular]') < 0) throw new Error('inspect circular');\n\
+             \x20 var cycle = {}; cycle.self = cycle; if (util.inspect(cycle, { depth: null }).indexOf('[Circular *1]') < 0) throw new Error('inspect circular');\n\
              \x20 var numericSymbol = Symbol('numeric');\n\
              \x20 if (util.format('%d:%i:%f', numericSymbol, numericSymbol, numericSymbol) !== 'NaN:NaN:NaN') throw new Error('format numeric Symbol');\n\
              \x20 if (util.format('%d %s', numericSymbol, 'next', 7) !== 'NaN next 7') throw new Error('format Symbol argument consumption');\n\
