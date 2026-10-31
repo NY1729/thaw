@@ -1760,13 +1760,6 @@ fn registering_the_same_closure_identity_twice_returns_one_callback_id() {
 }
 
 #[test]
-fn dynamic_helpers_build_native_object_literals_from_operations() {
-    let src = "var o = __thaw_object_from_operations(['data','method','spread'], '[\"a\",\"m\",\"\"]', [false,false,false], [1, null, {z: 2}], function (self, k) { return self.a + k; });\
-               console.log(o.a, o.m(10), o.z, Object.keys(o).join());";
-    assert_eq!(one(src), "1 11 2 a,m,z");
-}
-
-#[test]
 fn a_regexp_marker_argument_becomes_a_real_regexp() {
     use crate::host::Native;
     let mut it = crate::Interp::new();

@@ -329,9 +329,6 @@ impl<'ctx> HirCompiler<'ctx> {
         let [source] = args else {
             return Err("consuming JSON conversion expects one handle".into());
         };
-        if self.thaw_js_routed {
-            return self.compile_routed_host_json(source, true);
-        }
         self.js_mark_handles_used();
         self.tracks_owned_json_roots = true;
         let handle = self.compile_expr(source)?.into_int_value();
