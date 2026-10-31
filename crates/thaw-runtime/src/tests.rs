@@ -5161,3 +5161,5 @@ fn late_adopted_input_does_not_settle_a_released_output() {
     assert_eq!(thaw_promise_state(reused), 0);
     unsafe { thaw_promise_destroy(reused) };
 }
+
+include!("tests_timers.rs");

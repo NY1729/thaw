@@ -40,6 +40,17 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 thread_local! {
     static THAW_JS_ROUTED: Cell<bool> = const { Cell::new(false) };
+    static NATIVE_TIMERS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Lower eligible `setTimeout`/`setInterval`/`setImmediate` calls to thaw-runtime's native timer
+/// queue. The CLI turns it on first and re-lowers with it off when the program still needs QuickJS.
+pub fn set_native_timers(enabled: bool) {
+    NATIVE_TIMERS.with(|flag| flag.set(enabled));
+}
+
+pub(crate) fn native_timers() -> bool {
+    NATIVE_TIMERS.with(Cell::get)
 }
 
 /// Lower for a thaw-js routed build (the CLI retries unrouted if it still needs QuickJS): values
