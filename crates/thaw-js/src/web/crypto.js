@@ -28,7 +28,21 @@ function randomUUID() {
   }
   return h;
 }
+var hashSizes = { md5: 16, sha1: 20, sha256: 32, sha384: 48, sha512: 64 };
+var subtle = {};
+def(subtle, 'digest', function digest(algorithm, data) {
+  try {
+    var name = String(typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name).toLowerCase().replace('-', '');
+    if (name === 'md5' || !hashSizes[name]) throw new DOMException('Unrecognized algorithm name', 'NotSupportedError');
+    if (!ArrayBuffer.isView(data) && !(data instanceof ArrayBuffer)) throw new TypeError('The data argument must be an instance of ArrayBuffer or ArrayBufferView');
+    var bytes = ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
+    var out = new Uint8Array(hashSizes[name]);
+    __thaw_hash(name, bytes, out);
+    return Promise.resolve(out.buffer);
+  } catch (e) { return Promise.reject(e); }
+});
 var webcrypto = {};
+def(webcrypto, 'subtle', subtle);
 def(webcrypto, 'getRandomValues', getRandomValues);
 def(webcrypto, 'randomUUID', randomUUID);
 def(globalThis, 'crypto', webcrypto);
@@ -53,7 +67,6 @@ function randomInt(min, max, cb) {
   if (typeof cb === 'function') { setImmediate(function () { cb(null, v); }); return undefined; }
   return v;
 }
-var hashSizes = { md5: 16, sha1: 20, sha256: 32, sha512: 64 };
 function Hash(alg) {
   var name = String(alg).toLowerCase().replace('-', '');
   if (!hashSizes[name]) throw new Error('Digest method not supported');
