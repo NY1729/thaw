@@ -1279,6 +1279,8 @@ thread_local! {
     static FROM_ENTRIES_ERROR: Cell<bool> = const { Cell::new(false) };
     static PARSE_ERROR: Cell<bool> = const { Cell::new(false) };
     static STRINGIFY_ERROR: Cell<bool> = const { Cell::new(false) };
+    /// Set by `thaw_json_stringify_tjs`: a Date-shaped value is written as the thaw-js Date wire node.
+    static DATE_WIRE: Cell<bool> = const { Cell::new(false) };
     static STRINGIFY_ANCESTORS: RefCell<Vec<(usize, *const Value)>> = const { RefCell::new(Vec::new()) };
     static STRINGIFY_CYCLE_MESSAGE: RefCell<Option<String>> = const { RefCell::new(None) };
     static WRAPPER_BRANDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
@@ -2791,6 +2793,18 @@ fn ordered_json(value: &Value) -> Value {
     let Some(_ancestor) = stringify_ancestor(value) else {
         return Value::Null;
     };
+    if DATE_WIRE.with(Cell::get) && thaw_json_is_date_shape(value as *const Value) == 1 {
+        let time = thaw_json_date_timestamp(value as *const Value);
+        let time = if time.is_finite() {
+            number_value(time)
+        } else {
+            Value::String("NaN".into())
+        };
+        return Value::shared_object(indexmap::IndexMap::from([(
+            b"__thaw_tjs_date__".to_vec(),
+            time,
+        )]));
+    }
     match value {
         Value::Object(fields) => Value::shared_object(
             ordered_object_fields_shared(fields)
@@ -4615,6 +4629,16 @@ pub extern "C" fn thaw_json_stringify(value: *mut Value) -> *const c_char {
     begin_stringify();
     let value = unsafe { &*value };
     stringify_value(&ordered_json(value), &[])
+}
+
+/// `thaw_json_stringify` for a thaw-js call's argument array: a Date-shaped value becomes
+/// `{"__thaw_tjs_date__": ms}` (`"NaN"` for an Invalid Date) so thaw-js revives a real `Date`.
+#[no_mangle]
+pub extern "C" fn thaw_json_stringify_tjs(value: *mut Value) -> *const c_char {
+    DATE_WIRE.with(|flag| flag.set(true));
+    let text = thaw_json_stringify(value);
+    DATE_WIRE.with(|flag| flag.set(false));
+    text
 }
 
 /// Real `JSON.stringify(x)` returns the actual JS value `undefined`
@@ -12962,6 +12986,24 @@ mod tests {
         assert_eq!(thaw_json_is_date_shape(ordinary), 0);
         let trusted = thaw_json_brand_wrapper(parse(r#"{"timestamp":0}"#));
         assert_eq!(thaw_json_is_date_shape(trusted), 1);
+    }
+
+    #[test]
+    fn tjs_stringify_writes_dates_as_wire_nodes_and_leaves_plain_objects() {
+        let root = thaw_json_object_new();
+        let date = thaw_json_brand_wrapper(parse(r#"{"timestamp":86400000}"#));
+        thaw_json_object_set_json(root, CString::new("when").unwrap().as_ptr(), date);
+        let plain = parse(r#"{"timestamp":0}"#);
+        thaw_json_object_set_json(root, CString::new("plain").unwrap().as_ptr(), plain);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_tjs(root)),
+            r#"{"when":{"__thaw_tjs_date__":86400000},"plain":{"timestamp":0}}"#
+        );
+        // the ordinary stringifier (and a later call) is unaffected
+        assert_eq!(
+            read_c_string(thaw_json_stringify(root)),
+            r#"{"when":{"timestamp":86400000},"plain":{"timestamp":0}}"#
+        );
     }
 
     #[test]
