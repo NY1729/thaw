@@ -372,7 +372,7 @@ impl<'a> FnLowerer<'a> {
                                 vec![var(&raw_name)],
                             ),
                             vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                                "Invalid time value".into(),
+                                "\u{1}RangeError\u{1}Invalid time value".into(),
                             )))],
                             Vec::new(),
                         ),
