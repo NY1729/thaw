@@ -3772,6 +3772,26 @@
       "name": "numeric comparator sort native fast path (asc, desc, toSorted, NaN fallback)",
       "expect": "matched",
       "source": "function mk(n: number, nan: boolean): number[] { const a: number[] = []; let s = 12345; for (let i = 0; i < n; i++) { s = (s * 1103515245 + 12345) % 2147483648; a.push((s % 1000) - 500); } a.push(Infinity, -Infinity, 0, -0, Infinity); if (nan) a.splice(7, 0, NaN); return a; }\nfunction show(a: number[]): string { return a.slice(0, 12).map((x) => Object.is(x, -0) ? \"-0\" : String(x)).join(\",\") + \"|\" + a.slice(-6).join(\",\"); }\nfunction main(): void {\n  const a = mk(300, false); a.sort((x, y) => x - y); console.log(show(a), a.length);\n  const b = mk(300, false); b.sort((p, q) => q - p); console.log(show(b), b.length);\n  const c = mk(300, false); const d = c.toSorted((m, n) => n - m); console.log(show(d), show(c));\n  const e = mk(20, true); e.sort((x, y) => x - y); console.log(e.length, e.includes(NaN));\n  const f = mk(20, false); f.sort((x, y) => x - y); console.log(show(f));\n  const g = mk(300, false); g.sort((x, y) => y - x + 0); console.log(show(g));\n}"
+    },
+    {
+      "name": "object create typed view own vs inherited keys",
+      "expect": "matched",
+      "source": "function main(): void {\n  const proto = { f() { return 1; }, a: 1 };\n  const o = Object.create(proto) as { a: number; f(): number; b?: number };\n  o.b = 2;\n  console.log(JSON.stringify(o), o.a, o.f(), Object.keys(o), o.hasOwnProperty(\"a\"), o.hasOwnProperty(\"b\"));\n}"
+    },
+    {
+      "name": "object create typed view write stays own",
+      "expect": "matched",
+      "source": "function main(): void {\n  const proto = { a: 1 };\n  const o = Object.create(proto) as { a: number; b?: number };\n  o.a = 5;\n  console.log(JSON.stringify(o), JSON.stringify(proto));\n}"
+    },
+    {
+      "name": "object create annotated interface view",
+      "expect": "matched",
+      "source": "function main(): void {\n  interface V { a: number; b?: number }\n  const proto: V = { a: 1 };\n  const o: V = Object.create(proto);\n  o.b = 2;\n  const s = JSON.stringify(o);\n  console.log(s);\n}"
+    },
+    {
+      "name": "object create this method on typed view",
+      "expect": "matched",
+      "source": "function main(): void {\n  const proto = { greet() { return \"hi \" + this.name; }, name: \"base\" };\n  const o = Object.create(proto) as { name: string; greet(): string };\n  console.log(o.greet(), JSON.stringify(o));\n  o.name = \"own\";\n  console.log(o.greet(), JSON.stringify(o));\n}"
     }
   ]
 }
