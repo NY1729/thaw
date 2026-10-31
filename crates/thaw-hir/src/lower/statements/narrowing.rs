@@ -548,11 +548,43 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
+        let class_checked;
+        let stmts = match class_tdz_throws(stmts, false) {
+            Some(rewritten) => {
+                class_checked = rewritten;
+                &class_checked[..]
+            }
+            None => stmts,
+        };
+        let flagged;
+        let stmts = match closure_tdz_flags(stmts, false) {
+            Some(rewritten) => {
+                flagged = rewritten;
+                &flagged[..]
+            }
+            None => stmts,
+        };
+        let hoisted_vars = pre_read_var_names(stmts)
+            .into_iter()
+            .filter(|name| self.bindings.get(name).is_none_or(Vec::is_empty))
+            .collect::<Vec<_>>();
+        let var_hoisted;
+        let stmts = if hoisted_vars.is_empty() {
+            stmts
+        } else {
+            var_hoisted = hoist_var_names(stmts, &hoisted_vars);
+            &var_hoisted[..]
+        };
+        self.lower_stmts_in_order(stmts)
+    }
+
+    fn lower_stmts_in_order(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
         let hoisted_closures = Self::hoist_forward_closure_consts(stmts);
         let hoisted_closures = Self::delay_forward_closure_consts(&hoisted_closures);
         let forward = Self::forward_declare_arrows(&hoisted_closures);
         let hoisted = Self::hoist_function_declarations(&forward);
         let stmts: &[Stmt] = &hoisted;
+        // Straight-line TDZ: a `let`/`const` read before its declaration statement.
         #[derive(Default)]
         struct BindingConsumers {
             members: HashSet<Symbol>,

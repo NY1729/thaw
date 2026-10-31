@@ -1400,3 +1400,13 @@ var __thaw_bundle_entry_key = \"p/index.js\";
     let report = crate::scan::scan_bundle(src).ok().unwrap();
     assert!(report.is_clean(), "{:?}", report.blockers);
 }
+
+#[test]
+fn scan_knows_fetch_globals_and_tolerates_service_worker_listener() {
+    let blocked = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.F = () => { addEventListener('fetch', () => {}); return [new Request('http://a/'), new Response(''), new Headers(), new FormData(), new TransformStream(), new TextEncoderStream(), crypto.subtle.digest]; };",
+    );
+    let r = crate::scan::scan_bundle(&blocked).ok().unwrap();
+    assert!(r.is_clean(), "{:?}", r.blockers);
+}

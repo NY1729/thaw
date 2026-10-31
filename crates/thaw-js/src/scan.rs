@@ -551,6 +551,8 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
                 && !globals.contains(r)
                 && !params.contains(&r.as_str())
                 && !w.probed.contains(r)
+                // service-worker globals Node does not define either: a ReferenceError there, same here
+                && r != "addEventListener"
             {
                 add(&mut report, format!("global:{r}"), 1, key);
             }
