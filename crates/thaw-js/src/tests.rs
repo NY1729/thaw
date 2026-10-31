@@ -898,6 +898,33 @@ fn class_instances_live_behind_handles_and_can_be_passed_back() {
     assert_eq!(crate::host::thaw_tjs_release_handle(id), 0);
 }
 
+#[test]
+fn global_construct_and_call_handles() {
+    use crate::host::*;
+    use std::ffi::CString;
+    let (name, source) = (
+        CString::new("g").unwrap(),
+        CString::new(
+            CLASS_BUNDLE
+                .replace("\"k/", "\"g/")
+                .replace("k/index", "g/index"),
+        )
+        .unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let q = |s: &str| CString::new(s).unwrap();
+    let ctor = thaw_tjs_get_global(q("g::Box").as_ptr());
+    assert!(ctor > 0);
+    assert!(thaw_tjs_get_global(q("Math.max").as_ptr()) > 0);
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"v":5}]}]}"#);
+    let made = thaw_tjs_construct_handle_graph_args_result(ctor as u64, args.as_ptr());
+    assert!(made.error.is_null() && made.value > 0);
+    let max = thaw_tjs_get_global(q("Math.max").as_ptr());
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"v":3},{"v":9}]}]}"#);
+    let r = thaw_tjs_call_handle_handle_graph_args_result(max as u64, args.as_ptr(), false);
+    assert!(r.error.is_null() && r.value > 0);
+}
+
 // ----- WeakMap / WeakSet / WeakRef / FinalizationRegistry (expected text recorded from Node 22) -----
 
 #[test]
@@ -1119,4 +1146,503 @@ fn handle_intrinsics_read_properties_call_methods_and_capture_graphs() {
         .error
         .is_null());
     assert_eq!(thaw_tjs_exception_native_token(id), 0);
+}
+
+// ----- slice 4: mixed bundles, host os/tty/fs pieces, web streams -----
+
+#[test]
+fn mixed_bundle_runs_native_modules_with_origin_reads_and_opaque_edges() {
+    use crate::host::{Native, Package};
+    let payload = r#"{"main":"m/u.js","modules":[{"key":"m/u.js","source":"import { origin as __thaw_esm_origin_0 } from \"__thaw_private_origin_spec/m/u.js\";\nimport \"node:os\";\nexport function shout(s) { return s.toUpperCase() + __thaw_esm_origin_0.readDefault(\"node:os\").EOL; }\nexport default 7;","imports":{"__thaw_private_origin_spec/m/u.js":"__thaw_private_origin_key/m/u.js","node:os":"__thaw_private_opaque_edge/m/u.js/0"}}],"opaqueEdges":[{"key":"__thaw_private_opaque_edge/m/u.js/0","importer":"m/u.js","specifier":"node:os","target":"node:os","factory":"node:os","asynchronous":false}]}"#;
+    let mut literal = String::new();
+    crate::builtins::json_quote(payload, &mut literal);
+    let bundle = format!(
+        r#"module.exports = (function(require) {{
+var __thaw_bundle_factories = {{
+"m/index.js": function(module, exports, require) {{ var u = require("./u.js"); exports.up = function (s) {{ return u.shout(s); }}; exports.seven = u.default; }},
+"node:os": function(module, exports, require) {{ module.exports = {{ EOL: "!" }}; module.exports.default = module.exports; module.exports.__esModule = true; }},
+"m/u.js": function() {{ throw new TypeError('Native ESM must be loaded by its registered entry'); }},
+}};
+var __thaw_bundle_require_maps = {{ "m/index.js": {{"./u.js": "m/u.js"}}, "node:os": {{}}, "m/u.js": {{}}, }};
+var __thaw_bundle_entry_key = "m/index.js";
+var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal});
+}})(globalThis.require);"#
+    );
+    assert!(crate::scan::scan_bundle(&bundle).unwrap().is_clean());
+    let mut p = Package::load(&bundle).expect("loads");
+    assert_eq!(
+        p.call("up", &[Native::Str("ab".into())]).unwrap(),
+        Native::Str("AB!".into())
+    );
+    assert_eq!(p.get("seven").unwrap(), Native::Number(7.0));
+}
+
+#[test]
+fn os_tty_process_and_fs_host_functions() {
+    assert_eq!(
+        one("var i = JSON.parse(__thaw_os_identity()); var o = JSON.parse(__thaw_os_info());
+             console.log(i.platform, typeof i.userInfo.uid, o.cpus.length > 0, o.totalmem > 0, o.availableParallelism >= 1,
+               JSON.parse(__thaw_os_get_priority(0)).ok, JSON.parse(__thaw_os_get_priority(-5)).code,
+               __thaw_process_is_tty(-1))"),
+        "linux number true true true true ESRCH false"
+    );
+    let dir = std::env::temp_dir().join(format!("thaw-js-sysio-{}", std::process::id()));
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let src = format!(
+        "var d = '{d}'; var f = (op, p, v, r) => JSON.parse(__thaw_fs(op, p, v || '', !!r));
+         console.log(f('mkdir', d + '/a/b', '', true).ok, f('exists', d + '/a/b').exists);
+         console.log(f('write', d + '/a/b/x.txt', '68690a').ok, f('read', d + '/a/b/x.txt').data);
+         var s = f('stat', d + '/a/b/x.txt'); console.log(s.file, s.directory, s.length, typeof s.exact.ino);
+         console.log(f('readdir', d + '/a/b', 'typed').entries.map(e => e.stat.file).join());
+         var o = f('fd_open', d + '/a/b/x.txt', 'r,438'); var rd = f('fd_read_all', String(o.fd));
+         console.log(rd.data, f('fd_close', String(o.fd)).ok, f('fd_close', String(o.fd)).code);
+         console.log(f('read', d + '/nope').code, f('chown', d, '').code);
+         console.log(f('rmdir', d, '', true).ok, f('exists', d).exists);"
+    );
+    assert_eq!(
+        run(&src).join("|"),
+        "true true|true 68690a|true false 3 string|true|68690a true EBADF|ENOENT ENOSYS|true false"
+    );
+}
+
+#[test]
+fn web_streams_read_write_and_iterate() {
+    let (out, _) = main_run(
+        "var chunks = [];
+         var rs = new ReadableStream({ start(c) { c.enqueue('a'); c.enqueue('b'); c.close(); } });
+         (async () => {
+           for await (const v of rs) chunks.push(v);
+           const ws = new WritableStream({ write(v) { chunks.push(v + '!'); }, close() { chunks.push('closed'); } });
+           const w = ws.getWriter(); await w.write('x'); await w.close();
+           const src = new ReadableStream({ pull(c) { c.enqueue(1); c.close(); } });
+           const r = src.getReader(); const first = await r.read(); const second = await r.read();
+           chunks.push(first.value, first.done, second.done, src.locked);
+           console.log(chunks.join());
+         })();",
+    );
+    assert_eq!(out.join("|"), "a,b,x!,closed,1,false,true,true");
+}
+
+#[test]
+fn scan_accepts_global_presence_probes_and_the_globalthis_polyfill() {
+    let src = "module.exports = (function(require) {
+var __thaw_bundle_factories = {
+\"p/index.js\": function(module, exports, require) {
+  exports.a = globalThis.Deno ? 1 : 2;
+  exports.b = typeof globalThis.Bun === 'undefined';
+  exports.c = globalThis.Zed && 1;
+  exports.poly = function () {
+    if (typeof globalThis === 'object') return;
+    __magic__.globalThis = __magic__;
+  };
+},
+};
+var __thaw_bundle_require_maps = { \"p/index.js\": {}, };
+var __thaw_bundle_entry_key = \"p/index.js\";
+})(globalThis.require);";
+    let report = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    let called = src.replace(
+        "exports.c = globalThis.Zed && 1;",
+        "exports.c = globalThis.Zed();",
+    );
+    assert!(!crate::scan::scan_bundle(&called).unwrap().is_clean());
+    // generated `with (..)` source is supported (sloppy `new Function`), no longer a blocker
+    let with_code = src.replace(
+        "exports.a = ",
+        "exports.w = '  with (locals || {}) {'; exports.a = ",
+    );
+    assert!(crate::scan::scan_bundle(&with_code).unwrap().is_clean());
+}
+
+#[test]
+fn sloppy_with_statement_via_new_function() {
+    assert_eq!(
+        one("var f = new Function('o', 'with (o) { b = a + 1; return typeof a + typeof zz + say(b) }'); \
+             var o = { a: 1, b: 0, say(x) { return this === o ? 'T' + x : 'F' } }; \
+             console.log(f(o), o.b)"),
+        "numberundefinedT2 2"
+    );
+    // outer names still resolve, a local shadows nothing the object lacks
+    assert_eq!(
+        one("var y = 5; var f = new Function('o', 'with (o) { return a + y }'); console.log(f({ a: 1 }))"),
+        "6"
+    );
+    // Symbol.unscopables hides a property
+    assert_eq!(
+        one(
+            "var x = 'outer'; var o = { x: 'in', [Symbol.unscopables]: { x: true } }; \
+             console.log(new Function('o', 'with (o) { return x }').call(null, o))"
+        ),
+        "outer"
+    );
+}
+
+#[test]
+fn string_literal_with_text_is_not_code() {
+    assert_eq!(one("console.log('with (x) {')"), "with (x) {");
+}
+
+#[test]
+fn scan_accepts_method_calls_guarded_by_a_truthiness_test_of_the_same_name() {
+    let src = "module.exports = (function(require) {
+var __thaw_bundle_factories = {
+\"p/index.js\": function(module, exports, require) {
+  exports.a = function (options, date) { return options?.in ? options.in(date) : date; };
+  exports.b = function (locale, parts) { if (locale.localize.preprocessor) { parts = locale.localize.preprocessor(parts); } return parts; };
+},
+};
+var __thaw_bundle_require_maps = { \"p/index.js\": {}, };
+var __thaw_bundle_entry_key = \"p/index.js\";
+})(globalThis.require);";
+    let report = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    let unguarded = src.replace("options?.in ? options.in(date) : date", "options.in(date)");
+    assert!(!crate::scan::scan_bundle(&unguarded).unwrap().is_clean());
+}
+
+const DATES: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"d/index.js": function(module, exports, require) {
+  exports.iso = function (d) { return d.toISOString(); };
+  exports.plus = function (d, n) { return new Date(d.getTime() + n); };
+  exports.bad = function (d) { return isNaN(d.getTime()); };
+  exports.nested = function () { return { at: new Date(5), n: [new Date(7)], none: new Date(NaN) }; };
+},
+};
+var __thaw_bundle_require_maps = { "d/index.js": {}, };
+var __thaw_bundle_entry_key = "d/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn a_date_crosses_the_typed_abi_as_a_wire_node_both_ways() {
+    use std::ffi::CString;
+    let bundle = CString::new(DATES).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"dt".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    let date = |ms: &str| format!("{{\"__thaw_tjs_date__\":{ms}}}");
+    assert_eq!(
+        typed_call("dt::iso", &format!("[{}]", date("86400000"))).unwrap(),
+        "\"1970-01-02T00:00:00.000Z\""
+    );
+    // an Invalid Date crosses as "NaN" (or null, how compiled JSON spells NaN)
+    for nan in ["\"NaN\"", "null"] {
+        assert_eq!(
+            typed_call("dt::bad", &format!("[{}]", date(nan))).unwrap(),
+            "true"
+        );
+    }
+    // a Date result is a live handle, unless the caller asks for the wire node (`\u{3}`)
+    assert!(typed_call("dt::plus", &format!("[{},5]", date("86400000")))
+        .unwrap()
+        .starts_with("{\"__thaw_tjs_handle__\":"));
+    assert_eq!(
+        typed_call("\u{3}dt::plus", &format!("[{},5]", date("86400000"))).unwrap(),
+        date("86400005")
+    );
+    assert_eq!(
+        typed_call("dt::nested", "[]").unwrap(),
+        format!(
+            "{{\"at\":{},\"n\":[{}],\"none\":{}}}",
+            date("5"),
+            date("7"),
+            date("\"NaN\"")
+        )
+    );
+}
+
+#[test]
+fn graph_wire_date_bigint_regexp_map_and_set_nodes_decode() {
+    use crate::host::*;
+    use std::ffi::{CStr, CString};
+    let bundle = CString::new(MINI).unwrap();
+    assert_eq!(thaw_tjs_register(c"gw".as_ptr(), bundle.as_ptr()), 1);
+    let text_of = |wire: &str| {
+        let wire = CString::new(wire).unwrap();
+        let handle = thaw_tjs_retain_graph_result(wire.as_ptr());
+        assert!(handle.error.is_null(), "{wire:?}");
+        // SAFETY: a NUL-terminated string owned by the handle table.
+        unsafe { CStr::from_ptr(thaw_tjs_handle_to_string(handle.value)) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let one = |node: &str| {
+        format!(r#"{{"root":{{"r":0}},"nodes":[{node}],"leases":[],"napiLeases":[]}}"#)
+    };
+    assert!(text_of(&one(r#"{"d":17280000000}"#)).contains("1970"));
+    assert_eq!(text_of(&one(r#"{"d":null}"#)), "Invalid Date");
+    assert_eq!(
+        text_of(&one(r#"{"bi":"123456789012345678901234567890"}"#)),
+        "123456789012345678901234567890"
+    );
+    assert_eq!(text_of(&one(r#"{"re":["a+","gi",0]}"#)), "/a+/gi");
+    let set = r#"{"root":{"r":0},"nodes":[{"s":{"r":1}},{"a":[{"v":1},{"v":2},{"v":2}]}],"leases":[],"napiLeases":[]}"#;
+    assert_eq!(text_of(set), "[object Set]");
+    let map = r#"{"root":{"r":0},"nodes":[{"m":{"r":1}},{"a":[{"r":2}]},{"a":[{"v":"k"},{"v":1}]}],"leases":[],"napiLeases":[]}"#;
+    assert_eq!(text_of(map), "[object Map]");
+}
+
+#[cfg(feature = "intl")]
+#[test]
+fn intl_formats_numbers_dates_and_lists_through_the_native_icu_data() {
+    let out = run(
+        "console.log(new Intl.NumberFormat('de-DE').format(1234567.5));
+         console.log(new Intl.PluralRules('en').select(1));
+         console.log(new Intl.ListFormat('en').format(['a','b','c']));
+         console.log(new Intl.DateTimeFormat('en-US',{timeZone:'UTC'}).format(new Date(0)));
+         console.log(new Intl.Collator('en',{numeric:true}).compare('a2','a10'));",
+    );
+    assert_eq!(out.join("|"), "1.234.567,5|one|a, b, and c|1/1/1970|-1");
+}
+
+#[cfg(feature = "intl")]
+#[test]
+fn intl_date_time_format_reports_parts_range_and_resolved_options() {
+    let out = run(
+        "const f = new Intl.DateTimeFormat('en-US',{timeZone:'UTC',year:'numeric',month:'short',day:'2-digit'});
+         const d = new Date(Date.UTC(2024,0,5));
+         console.log(f.formatToParts(d).map(p => p.type).join());
+         console.log(typeof f.formatRange(d, new Date(Date.UTC(2024,0,9))));
+         console.log(f.resolvedOptions().timeZone);",
+    );
+    assert_eq!(out.join("|"), "month,literal,day,literal,year|string|UTC");
+}
+
+#[cfg(feature = "intl")]
+#[test]
+fn scan_knows_intl_globals_and_namespace_prototype_methods() {
+    let src = "module.exports = (function(require) {
+var __thaw_bundle_factories = {
+\"p/index.js\": function(module, exports, require) {
+  exports.a = function (d) { return new Intl.DateTimeFormat('en').formatRange(d, d) + Intl.NumberFormat.supportedLocalesOf; };
+},
+};
+var __thaw_bundle_require_maps = { \"p/index.js\": {}, };
+var __thaw_bundle_entry_key = \"p/index.js\";
+})(globalThis.require);";
+    let report = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+}
+
+/// Run `src` through the full event loop (child processes are polled there) and return the log lines.
+fn run_loop(src: &str) -> String {
+    let mut it = Interp::new();
+    it.run(src).expect("script runs");
+    it.run_event_loop().expect("loop runs");
+    it.out.join("|")
+}
+
+const CHILD_SHIM: &str = r#"
+function hexs(h) { var s = ''; for (var i = 0; i < h.length; i += 2) s += String.fromCharCode(parseInt(h.slice(i, i + 2), 16)); return s; }
+var logs = [];
+globalThis.__thaw_poll_platform_events = function () {
+  JSON.parse(__thaw_child_process_poll()).forEach(function (e) {
+    logs.push(e.type + (e.value !== undefined ? ':' + hexs(e.value) : '') + (e.type === 'exit' || e.type === 'exited' ? ':' + e.code + '/' + e.signal : '') + (e.code && e.type === 'error' ? ':' + e.code : ''));
+  });
+};
+"#;
+
+#[test]
+fn child_process_async_orders_output_before_close() {
+    let src = format!(
+        "{CHILD_SHIM}
+__thaw_child_process_spawn('/bin/sh', JSON.stringify(['-c', 'echo out; echo err >&2; exit 3']), JSON.stringify({{stdio: ['ignore','pipe','pipe']}}));
+setTimeout(function () {{ console.log(logs.join(',')); }}, 400);"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("spawn,"), "{out}");
+    assert!(
+        out.contains("stdout:out|") && out.contains("stderr:err|"),
+        "{out}"
+    );
+    // `exited` (the process ended) may precede the last pipe data; `exit` (close) always comes last.
+    assert!(out.ends_with(",exit:3/null"), "{out}");
+    let exited = out.find("exited:3/null").expect("exited event");
+    assert!(exited < out.rfind(",exit:3/null").unwrap(), "{out}");
+}
+
+#[test]
+fn child_process_keeps_loop_alive_and_reports_signal_and_spawn_error() {
+    let src = format!(
+        "{CHILD_SHIM}
+var h = __thaw_child_process_spawn('/bin/sleep', JSON.stringify(['5']), JSON.stringify({{}}));
+setTimeout(function () {{ console.log(__thaw_child_process_kill(h, 15)); }}, 50);
+__thaw_child_process_spawn('/nonexistent/x', '[]', '{{}}');
+process.on('exit', function () {{ console.log(logs.join(',')); }});"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("true|"), "{out}");
+    assert!(
+        out.contains("error:ENOENT") && out.contains("exit:null/15"),
+        "{out}"
+    );
+}
+
+#[test]
+fn child_process_stdin_env_cwd_and_sync() {
+    let src = format!(
+        "{CHILD_SHIM}
+var h = __thaw_child_process_spawn('/bin/cat', '[]', JSON.stringify({{cwd: '/'}}));
+__thaw_child_process_stdin(h, '68690a', false);
+__thaw_child_process_stdin(h, '', true);
+var r = JSON.parse(__thaw_child_process_sync('/bin/sh', JSON.stringify(['-c', 'echo $FOO; pwd; cat; exit 2']), JSON.stringify({{env: {{FOO: 'bar'}}, cwd: '/tmp', input: '78'}})));
+console.log(r.status, hexs(r.stdout).replace(/\\n/g, '+'));
+var t = JSON.parse(__thaw_child_process_sync('/bin/sleep', JSON.stringify(['5']), JSON.stringify({{timeout: 50, killSignal: 9}})));
+console.log(t.timedOut, t.signal);
+setTimeout(function () {{ console.log(logs.join(',')); }}, 300);"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("2 bar+/tmp+x|true 9|"), "{out}");
+    assert!(out.contains("stdout:hi|"), "{out}");
+}
+
+#[test]
+fn scan_knows_fetch_globals_and_tolerates_service_worker_listener() {
+    let blocked = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.F = () => { addEventListener('fetch', () => {}); return [new Request('http://a/'), new Response(''), new Headers(), new FormData(), new TransformStream(), new TextEncoderStream(), crypto.subtle.digest]; };",
+    );
+    let r = crate::scan::scan_bundle(&blocked).ok().unwrap();
+    assert!(r.is_clean(), "{:?}", r.blockers);
+}
+
+// ----- graph callbacks and awaited Promises -----
+
+const GRAPH_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"gr/index.js": function(module, exports, require) {
+  exports.echo = function (f) { var o = { k: 3 }; return f(o) === o; };
+  exports.number = function (f) { return f({ k: 1 }) + 1; };
+  exports.later = function () { return new Promise(function (r) { setTimeout(function () { r(42); }, 1); }); };
+  exports.laterThrow = function () { return new Promise(function (_, j) { setTimeout(function () { j(new Error('late')); }, 1); }); };
+},
+};
+var __thaw_bundle_require_maps = { "gr/index.js": {}, };
+var __thaw_bundle_entry_key = "gr/index.js";
+})(globalThis.require);"#;
+
+/// A graph-callback adapter: consumes the `[this, object]` wire like `thaw_json_graph_decode`, then
+/// answers with the object lease it received (identity echo) or the number 7.
+unsafe extern "C" fn graph_adapter(
+    context: *const std::ffi::c_void,
+    wire: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let text = unsafe { std::ffi::CStr::from_ptr(wire) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(unsafe { thaw_arena::take_owned_graph_wire(wire) });
+    let id = text
+        .split("\"hdl\":")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .and_then(|n| n.parse::<i64>().ok())
+        .expect("the object argument is a handle lease");
+    let echo = !context.is_null();
+    let answer = if echo {
+        crate::host::thaw_tjs_retain_handle(id);
+        format!("{{\"root\":{{\"r\":0}},\"nodes\":[{{\"hdl\":{id}}}],\"leases\":[{id}],\"napiLeases\":[]}}")
+    } else {
+        "{\"root\":{\"v\":7},\"nodes\":[],\"leases\":[],\"napiLeases\":[]}".to_string()
+    };
+    crate::host::thaw_tjs_release_handle(id);
+    let ptr = thaw_arena::owned_string(answer);
+    assert!(unsafe { thaw_arena::register_owned_graph_wire(ptr) });
+    ptr
+}
+
+#[test]
+fn graph_callbacks_receive_live_objects_and_return_graph_wires() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(GRAPH_BUNDLE).unwrap();
+    assert_eq!(thaw_tjs_register(c"gr".as_ptr(), source.as_ptr()), 1);
+    let handle_of = |context: *const std::ffi::c_void| {
+        let made = thaw_tjs_register_native_callback_graph(
+            graph_adapter as *const _,
+            context,
+            0,
+            1,
+            0,
+            std::ptr::null(),
+            0,
+        );
+        assert!(made.error.is_null() && made.value > 0);
+        made.value
+    };
+    let echo = handle_of(std::ptr::dangling());
+    let number = handle_of(std::ptr::null());
+    let call = |export: &str, callback: u64| {
+        let function = thaw_tjs_get_global(
+            std::ffi::CString::new(format!("gr::{export}"))
+                .unwrap()
+                .as_ptr(),
+        );
+        assert!(function > 0);
+        let wire = std::ffi::CString::new(format!(
+            "{{\"root\":{{\"r\":0}},\"nodes\":[{{\"a\":[{{\"r\":1}}]}},{{\"hdl\":{callback}}}]}}"
+        ))
+        .unwrap();
+        thaw_tjs_retain_handle(callback as i64);
+        let result =
+            thaw_tjs_call_handle_handle_graph_args_result(function as u64, wire.as_ptr(), false);
+        assert!(result.error.is_null(), "{export}");
+        result.value
+    };
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(call("echo", echo))) }
+            .to_str()
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(call("number", number))) }
+            .to_str()
+            .unwrap(),
+        "8"
+    );
+}
+
+#[test]
+fn exact_calls_await_returned_promises_only_when_resolving() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(GRAPH_BUNDLE.replace("gr/", "pr/")).unwrap();
+    assert_eq!(thaw_tjs_register(c"pr".as_ptr(), source.as_ptr()), 1);
+    let wire = c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}]}";
+    let none: [u64; 1] = [0];
+    let call = |export: &str, resolve: bool| {
+        let function = thaw_tjs_get_global(
+            std::ffi::CString::new(format!("pr::{export}"))
+                .unwrap()
+                .as_ptr(),
+        );
+        let handles = none.as_ptr().cast::<u8>();
+        unsafe {
+            if resolve {
+                thaw_tjs_call_handle_mixed_exact_resolved_consuming_result(
+                    function as u64,
+                    wire.as_ptr(),
+                    handles,
+                )
+            } else {
+                thaw_tjs_call_handle_mixed_exact_consuming_result(
+                    function as u64,
+                    wire.as_ptr(),
+                    handles,
+                )
+            }
+        }
+    };
+    let text = |h: u64| {
+        unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(h)) }
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(text(call("later", true).value), "42");
+    assert_eq!(text(call("later", false).value), "[object Promise]");
+    let rejected = call("laterThrow", true);
+    assert_eq!(rejected.value, 0);
+    assert!(rejected.exception_handle > 0 && rejected.exception_object_like == 1);
 }

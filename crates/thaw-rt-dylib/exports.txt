@@ -384,6 +384,7 @@ thaw_json_stringify_keys_string_space
 thaw_json_stringify_number_space
 thaw_json_stringify_public
 thaw_json_stringify_string_space
+thaw_json_stringify_tjs
 thaw_json_structured_clone
 thaw_json_take
 thaw_json_take_assign_error
@@ -443,6 +444,7 @@ thaw_math_random
 thaw_math_sum_precise
 thaw_native_wrapper_is_live
 thaw_non_arrow_receiver_new
+thaw_number_array_comparator_sort
 thaw_number_array_fill
 thaw_number_array_includes
 thaw_number_array_index_of

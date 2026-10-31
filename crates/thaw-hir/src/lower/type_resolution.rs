@@ -621,6 +621,10 @@ fn lower_ts_type(
             if ref_name == Some("Json") && ty_ref.type_params.is_none() {
                 return Ok(HirType::Json);
             }
+            // The `Function` interface: an untyped callable, held dynamically.
+            if ref_name == Some("Function") && ty_ref.type_params.is_none() {
+                return Ok(HirType::Json);
+            }
             if ref_name == Some("JsValue") && ty_ref.type_params.is_none() {
                 return Ok(HirType::JsValue);
             }

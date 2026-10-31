@@ -6,7 +6,11 @@ impl<'ctx> HirCompiler<'ctx> {
         backend_symbol: &str,
         source_name: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        if backend_symbol.starts_with("thaw_js_") {
+        if backend_symbol == "thaw_js_call_handle_graph_result"
+            && self.js_engine() == JsEngine::ThawJs
+        {
+            self.js_mark_handles_used();
+        } else if backend_symbol.starts_with("thaw_js_") {
             self.uses_quickjs = true;
         }
         if backend_symbol.starts_with("thaw_napi_") {
@@ -75,6 +79,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let stringify_fn = self.module.get_function(
             if backend_symbol.ends_with("_graph_result") {
                 "thaw_json_graph_encode"
+            } else if matches!(backend_symbol, "thaw_tjs_call_typed_result" | "thaw_tjs_class_call") {
+                "thaw_json_stringify_tjs"
             } else {
                 "thaw_json_stringify"
             }
