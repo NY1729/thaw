@@ -412,6 +412,19 @@ impl<'a> FnLowerer<'a> {
                 let forwarder = console_forwarder(&method, parameter_types.len(), false);
                 return self.lower_contextual_arrow(&forwarder, parameter_types, expected_return);
             }
+            // A dynamic (`JsValue`/`Json`) method value such as `new Intl.Collator().compare` passed
+            // as a callback: forward the call through a synthesized arrow instead of rejecting it.
+            Expr::Member(member)
+                if matches!(member.obj.as_ref(), Expr::Ident(_))
+                    && matches!(member.prop, swc_ecma_ast::MemberProp::Ident(_))
+                    && {
+                        let value = self.lower_expr(expr)?;
+                        matches!(self.infer_expr_type(&value)?, HirType::JsValue | HirType::Json | HirType::Dynamic)
+                    } =>
+            {
+                let forwarder = member_forwarder(member, parameter_types.len());
+                return self.lower_contextual_arrow(&forwarder, parameter_types, expected_return);
+            }
             Expr::Ident(ident) => {
                 let mut name = self.resolve_binding(ident.sym.as_ref());
                 if let Some(arrow) = self.generic_arrows.get(&name).cloned() {
@@ -548,7 +561,7 @@ impl<'a> FnLowerer<'a> {
                 (params, rest.map(Box::new), ret)
             },
             HirType::CallableFunction(params, _, rest, ret) => (params, rest, ret),
-            _ => return Err("Promise callback is not a function value".into()),
+            other => return Err(format!("Promise callback is not a function value (got {other:?})")),
         };
         let (source_params, source_rest, source_return) = match callback {
             HirExpr::FunctionRef(symbol, _, _) => self.signatures.get(symbol).map(|signature| {
