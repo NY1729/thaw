@@ -5,7 +5,7 @@
 use swc_common::errors::Handler;
 use swc_common::sync::Lrc;
 use swc_common::{FileName, SourceMap};
-use swc_ecma_ast::Module;
+use swc_ecma_ast::{Module, ModuleItem};
 use swc_ecma_parser::{lexer::Lexer, EsSyntax, Parser, StringInput, Syntax, TsSyntax};
 
 pub use swc_common as common;
@@ -239,6 +239,37 @@ pub fn parse_javascript_with_source_map_named(
         return Err("failed to parse JavaScript source".into());
     }
     Ok((module, cm))
+}
+
+/// Parse JavaScript as a sloppy-mode *script* (`with`, legacy octals, ... allowed unless the
+/// text opts into `"use strict"`), for `eval` / `new Function` source.
+pub fn parse_javascript_script(source: &str) -> Result<Module, String> {
+    let cm: Lrc<SourceMap> = Default::default();
+    let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
+    let fm = cm.new_source_file(
+        Lrc::new(FileName::Custom("input.js".into())),
+        source.to_string(),
+    );
+    let lexer = Lexer::new(
+        Syntax::Es(EsSyntax::default()),
+        Default::default(),
+        StringInput::from(&*fm),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+    let script = parser.parse_script().map_err(|err| {
+        err.into_diagnostic(&handler).emit();
+        "failed to parse JavaScript source".to_string()
+    })?;
+    if parser.take_errors().is_empty() {
+        Ok(Module {
+            span: script.span,
+            body: script.body.into_iter().map(ModuleItem::Stmt).collect(),
+            shebang: script.shebang,
+        })
+    } else {
+        Err("failed to parse JavaScript source".into())
+    }
 }
 
 #[cfg(test)]
