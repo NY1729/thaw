@@ -23,6 +23,14 @@ fn shim_pruning_keeps_only_used_functions_for_plain_imports() {
 }
 
 #[test]
+fn shim_pruning_handles_a_default_binding_named_like_the_package() {
+    assert_eq!(
+        pruned_names("import pkg from \"pkg\";\npkg.used(1);"),
+        ["used"]
+    );
+}
+
+#[test]
 fn shim_pruning_keeps_everything_when_reachability_is_unclear() {
     let all = ["used", "unusedA", "unusedB"];
     for source in [
