@@ -1079,6 +1079,14 @@ impl Interp {
         let immediate_proto = self.plain();
         self.rt.timeout_proto = Some(timeout_proto.clone());
         self.rt.immediate_proto = Some(immediate_proto.clone());
+        for (proto, class) in [(&timeout_proto, "Timeout"), (&immediate_proto, "Immediate")] {
+            let ctor = self.native(|_, _, _| Ok(Value::Undefined));
+            if let Value::Object(c) = &ctor {
+                put_hidden(c, "prototype", Value::Object(proto.clone()));
+                put_hidden(c, "name", Value::str(class));
+            }
+            put_hidden(proto, "constructor", ctor);
+        }
         for proto in [&timeout_proto, &immediate_proto] {
             self.set_native(proto, "ref", |it, this, _| {
                 it.set_ref(this, Some(true));
