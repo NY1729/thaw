@@ -212,6 +212,21 @@ fn generated_dynamic_wrappers_preserve_json_callback_boundaries() {
 }
 
 #[test]
+fn method_chain_on_a_call_of_a_json_value_lowers() {
+    // `$("li").first().text()` where `$` is a Json-typed (callable) value
+    let program = lower(
+        r#"
+        declare function load(): Json;
+        function main(): void {
+            const api: Json = load();
+            console.log(api("li").first().text());
+        }
+        "#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
 fn rejects_unsupported_ambient_variadic_element_types() {
     let module = thaw_parser::parse_typescript(
         r#"declare function native_merge(...values: (boolean | undefined)[][]): number;

@@ -49,6 +49,49 @@ fn prop_key(p: &a::PropName) -> Option<String> {
 
 /// Extract factories, require maps and the entry key from a registry bundle.
 pub fn parse_bundle(source: &str) -> Result<BundleParts, String> {
+    let mut parts = parse_bundle_raw(source)?;
+    stub_cheerio_undici(&mut parts)?;
+    Ok(parts)
+}
+
+const UNDICI_STUB_KEY: &str = "thaw-js:undici-unavailable";
+
+/// cheerio requires `undici` only for `fromURL` (fetch/WebAssembly llhttp/MessagePort/net stack). thaw-js does
+/// not run that stack: cheerio's requires of it resolve to a stub whose members throw a clear error when used,
+/// so the rest of cheerio (`load`, selectors, manipulation) runs and the scan no longer sees undici.
+// ponytail: fromURL/fromBuffer-over-network is unsupported on thaw-js; a native undici replacement would lift it.
+fn stub_cheerio_undici(parts: &mut BundleParts) -> Result<(), String> {
+    let mut hit = false;
+    for (requirer, map) in parts.require_maps.iter_mut() {
+        if !requirer.starts_with("cheerio/") {
+            continue;
+        }
+        for target in map.values_mut() {
+            if target.starts_with("undici/") {
+                *target = UNDICI_STUB_KEY.to_string();
+                hit = true;
+            }
+        }
+    }
+    if !hit {
+        return Ok(());
+    }
+    let stub = format!(
+        "module.exports = (function(require){{ var __thaw_bundle_factories = {{ \"{UNDICI_STUB_KEY}\": function(module, exports) {{ \
+         module.exports = new Proxy({{}}, {{ get: function(_, k) {{ \
+         if (k === '__esModule') return true; if (typeof k === 'symbol' || k === 'then') return undefined; \
+         return function() {{ throw new Error('undici is not available on the thaw-js runtime (cheerio.fromURL): ' + String(k)); }}; \
+         }} }}); }} }}; }})(globalThis.require);"
+    );
+    // re-parse source + stub so the stub factory's spans index the text the interpreter keeps
+    let mut combined = parse_factories(&format!("{}\n{stub}", parts.source))?;
+    combined.esm_problems = std::mem::take(&mut parts.esm_problems);
+    combined.require_maps = std::mem::take(&mut parts.require_maps);
+    *parts = combined;
+    Ok(())
+}
+
+fn parse_bundle_raw(source: &str) -> Result<BundleParts, String> {
     if let Some((native, problems, pure)) = crate::esm::native_bundle_to_factories(source)? {
         if pure {
             let mut parts = parse_factories(&native)?;
@@ -232,6 +275,13 @@ impl Visit for Walker {
     }
     fn visit_class_decl(&mut self, n: &a::ClassDecl) {
         self.declared.insert(n.ident.sym.to_string());
+        n.class.visit_with(self);
+    }
+    fn visit_class_expr(&mut self, n: &a::ClassExpr) {
+        // a class expression's own name is bound inside its body
+        if let Some(i) = &n.ident {
+            self.declared.insert(i.sym.to_string());
+        }
         n.class.visit_with(self);
     }
     fn visit_fn_decl(&mut self, n: &a::FnDecl) {
@@ -500,6 +550,8 @@ fn tolerated(feature: &str, key: &str) -> bool {
         || (feature == "require:supports-color" && key.ends_with("debug/src/node.js"))
         || (feature == "require:dynamic" && key == "node:assert")
         || (AXIOS_METHODS.contains(&feature) && key.ends_with("axios/./dist/node/axios.cjs"))
+        // iconv-lite calls the caller's optional `options.stripBOM` only after `typeof ... === 'function'`
+        || (feature == "method:stripBOM" && key.ends_with("iconv-lite/lib/bom-handling.js"))
         || (feature == "method:onSocket" && key.ends_with("agent-base/dist/src/index.js"))
 }
 
