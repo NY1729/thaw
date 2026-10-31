@@ -20,7 +20,34 @@ fn bigint_encode(value: BigInt) -> i64 {
             return (small << 1) | 1;
         }
     }
+    // A heap value exists, so the exception reporter may need to print one.
+    BIGINT_DECIMAL_TEXT.store(bigint_decimal_text as fn(i64) -> String as usize, std::sync::atomic::Ordering::Relaxed);
     Box::into_raw(Box::new(value)) as i64
+}
+
+/// Decimal formatter for heap handles, registered by `bigint_encode` the first time one is made.
+/// The always-linked exception reporter reads it through this pointer instead of calling
+/// `BigInt::to_string` directly, so a program that never creates a bigint does not link
+/// num-bigint's formatting code (a resident-memory regression on hello-world otherwise).
+static BIGINT_DECIMAL_TEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn bigint_decimal_text(handle: i64) -> String {
+    bigint_decode(handle).to_string()
+}
+
+/// Decimal text of a thrown/rejected `bigint` handle, without referencing num-bigint code unless
+/// a heap-backed value was ever created.
+fn bigint_report_text(handle: i64) -> String {
+    if handle & 1 == 1 {
+        return (handle >> 1).to_string();
+    }
+    match BIGINT_DECIMAL_TEXT.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => "0".to_string(),
+        formatter => {
+            let formatter: fn(i64) -> String = unsafe { std::mem::transmute::<usize, fn(i64) -> String>(formatter) };
+            formatter(handle)
+        }
+    }
 }
 
 fn bigint_decode(handle: i64) -> BigInt {

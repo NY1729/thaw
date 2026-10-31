@@ -554,7 +554,7 @@ struct DetachedPromise {
 fn promise_report_bytes(source: &ThawPromise) -> Vec<u8> {
     source.rejection_text.clone().unwrap_or_else(|| match source.exception_tag {
         1 => javascript_number_string(source.exception_f64).into_bytes(),
-        2 => bigint_decode(source.exception_i64).to_string().into_bytes(),
+        2 => bigint_report_text(source.exception_i64).into_bytes(),
         3 => source.exception_bool.to_string().into_bytes(),
         5 => b"undefined".to_vec(),
         6 => b"null".to_vec(),
