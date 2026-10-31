@@ -868,7 +868,9 @@ impl WireOut {
                 return Ok(self.lease(id));
             }
         }
-        if self.plain && matches!(v, Value::Object(_)) && !v.is_callable() {
+        // (A class instance keeps its identity and methods even when it defines `toJSON`.)
+        if self.plain && matches!(v, Value::Object(_)) && !v.is_callable() && !is_live_value(it, &v)
+        {
             let to_json = it.get(&v, "toJSON").map_err(|c| classify(it, c))?;
             if to_json.is_callable() {
                 v = it
