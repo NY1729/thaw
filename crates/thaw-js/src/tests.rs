@@ -1289,7 +1289,10 @@ setTimeout(function () {{ console.log(logs.join(',')); }}, 400);"
         out.contains("stdout:out|") && out.contains("stderr:err|"),
         "{out}"
     );
-    assert!(out.ends_with("exited:3/null,exit:3/null"), "{out}");
+    // `exited` (the process ended) may precede the last pipe data; `exit` (close) always comes last.
+    assert!(out.ends_with(",exit:3/null"), "{out}");
+    let exited = out.find("exited:3/null").expect("exited event");
+    assert!(exited < out.rfind(",exit:3/null").unwrap(), "{out}");
 }
 
 #[test]
