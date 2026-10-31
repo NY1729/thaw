@@ -385,6 +385,7 @@ thaw_json_stringify_keys_string_space
 thaw_json_stringify_number_space
 thaw_json_stringify_public
 thaw_json_stringify_string_space
+thaw_json_stringify_tjs
 thaw_json_structured_clone
 thaw_json_take
 thaw_json_take_assign_error

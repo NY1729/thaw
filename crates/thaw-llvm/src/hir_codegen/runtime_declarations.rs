@@ -615,6 +615,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_stringify_tjs",
+            json_stringify_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_encode_public",
             json_stringify_type,
             Some(Linkage::External),
