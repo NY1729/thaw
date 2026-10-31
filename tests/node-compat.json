@@ -3779,6 +3779,11 @@
       "source": "class Foo { x = 1; dbl() { return this.x * 2; } }\nclass Bar { c: Foo = new Foo(); run() { return this.c.dbl(); } }\nfunction main(): void {\n  console.log(new Bar().run());\n}"
     },
     {
+      "name": "numeric comparator sort native fast path (asc, desc, toSorted, NaN fallback)",
+      "expect": "matched",
+      "source": "function mk(n: number, nan: boolean): number[] { const a: number[] = []; let s = 12345; for (let i = 0; i < n; i++) { s = (s * 1103515245 + 12345) % 2147483648; a.push((s % 1000) - 500); } a.push(Infinity, -Infinity, 0, -0, Infinity); if (nan) a.splice(7, 0, NaN); return a; }\nfunction show(a: number[]): string { return a.slice(0, 12).map((x) => Object.is(x, -0) ? \"-0\" : String(x)).join(\",\") + \"|\" + a.slice(-6).join(\",\"); }\nfunction main(): void {\n  const a = mk(300, false); a.sort((x, y) => x - y); console.log(show(a), a.length);\n  const b = mk(300, false); b.sort((p, q) => q - p); console.log(show(b), b.length);\n  const c = mk(300, false); const d = c.toSorted((m, n) => n - m); console.log(show(d), show(c));\n  const e = mk(20, true); e.sort((x, y) => x - y); console.log(e.length, e.includes(NaN));\n  const f = mk(20, false); f.sort((x, y) => x - y); console.log(show(f));\n  const g = mk(300, false); g.sort((x, y) => y - x + 0); console.log(show(g));\n}"
+    },
+    {
       "name": "var hoisting: read before declaration and redeclare",
       "expect": "matched",
       "source": "function main(): void {\n  console.log(a, b);\n  var a = 1, b = 2;\n  var a = 3;\n  console.log(a, b);\n  var plain = 7;\n  console.log(plain);\n}"

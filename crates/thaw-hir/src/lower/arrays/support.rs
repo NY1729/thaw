@@ -549,9 +549,34 @@ impl<'a> FnLowerer<'a> {
             element_type,
             comparator,
             copy,
+            None,
         )
     }
 
+    /// `(x, y) => x - y` is ascending, `(x, y) => y - x` descending; anything else is None.
+    pub(super) fn numeric_comparator_direction(argument: &Expr) -> Option<bool> {
+        let Expr::Arrow(arrow) = argument else { return None };
+        let [left, right] = arrow.params.as_slice() else { return None };
+        let (Pat::Ident(left), Pat::Ident(right)) = (&left, &right) else { return None };
+        let (left, right) = (left.id.sym.as_ref(), right.id.sym.as_ref());
+        let swc_ecma_ast::ArrowFunctionBody::Expr(body) = arrow.body.as_ref() else { return None };
+        let Expr::Bin(swc_ecma_ast::BinExpr { op: swc_ecma_ast::BinaryOp::Sub, left: a, right: b, .. }) = body.as_ref() else {
+            return None;
+        };
+        let (Expr::Ident(a), Expr::Ident(b)) = (a.as_ref(), b.as_ref()) else { return None };
+        let (a, b) = (a.sym.as_ref(), b.sym.as_ref());
+        if left == right {
+            None
+        } else if (a, b) == (left, right) {
+            Some(false)
+        } else if (a, b) == (right, left) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn lower_array_sort_comparator(
         &mut self,
         receiver: HirExpr,
@@ -560,6 +585,7 @@ impl<'a> FnLowerer<'a> {
         comparator_element_type: HirType,
         comparator: HirExpr,
         copy: bool,
+        native_descending: Option<bool>,
     ) -> Result<HirExpr, String> {
         let receiver_name = format!("__thaw_sort_receiver_{}", self.next_binding);
         self.next_binding += 1;
@@ -911,12 +937,33 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Let(copy_index.clone(), HirType::F64, number(0.0)),
             HirStmt::Let(inner_name.clone(), HirType::F64, number(0.0)),
             HirStmt::Let(j.clone(), HirType::F64, number(0.0)),
-            HirStmt::If(
-                lt(variable(&length_name), number(64.0)),
-                small_run,
-                vec![HirStmt::While(lt(variable(width), variable(&length_name)), pass)],
-            ),
         ];
+        let generic_sort = HirStmt::If(
+            lt(variable(&length_name), number(64.0)),
+            small_run,
+            vec![HirStmt::While(lt(variable(width), variable(&length_name)), pass)],
+        );
+        match native_descending {
+            Some(descending) => {
+                let sorted_name = format!("__thaw_sort_native_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(sorted_name.clone(), HirType::F64);
+                statements.push(HirStmt::Let(
+                    sorted_name.clone(),
+                    HirType::F64,
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_comparator_sort".into())),
+                        vec![variable(&array_name), variable(&length_name), number(f64::from(descending))],
+                    ),
+                ));
+                statements.push(HirStmt::If(
+                    HirExpr::BinOp(BinOp::EqEqEq, Box::new(variable(&sorted_name)), Box::new(number(0.0))),
+                    vec![generic_sort],
+                    Vec::new(),
+                ));
+            }
+            None => statements.push(generic_sort),
+        }
         if !copy {
             let write_index = format!("__thaw_sort_write_{}", self.next_binding);
             self.next_binding += 1;
