@@ -282,6 +282,7 @@ const DYNAMIC_HELPERS: &str = r#"
   put('__thaw_json_stringify_direct', function (v) { return JSON.stringify(v); });
   put('__thaw_update_dynamic_value', function (value, increment) { var updated = value; var old = increment ? updated++ : updated--; return [old, updated]; });
   put('__thaw_dynamic_add', function (l, r) { return l + r; });
+  put('__thaw_dynamic_binary', function (op, l, r) { switch (op) { case '-': return l - r; case '*': return l * r; case '/': return l / r; case '%': return l % r; case '&': return l & r; case '|': return l | r; case '^': return l ^ r; case '<<': return l << r; default: return l >> r; } });
   put('__thaw_typeof_dynamic_value', function (v) { return typeof v; });
   put('__thaw_is_truthy_dynamic_value', function (v) { return !!v; });
   put('__thaw_is_undefined_dynamic_value', function (v) { return v === undefined; });
@@ -299,6 +300,93 @@ const DYNAMIC_HELPERS: &str = r#"
   put('__thaw_instanceof_dynamic_value_by_name', function (name, v) { var c = globalThis[name]; return typeof c === 'function' && v instanceof c; });
 })();
 "#;
+
+/// `os.networkInterfaces()` as JSON: IPv4/IPv6 entries grouped by interface name (POSIX `getifaddrs`; the
+/// MAC comes from `/sys/class/net/<name>/address`, all zero when absent), the shape thaw-quickjs returns.
+#[cfg(unix)]
+fn network_interfaces_json() -> Result<String, String> {
+    use std::ffi::CStr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    let mut groups = std::collections::BTreeMap::<String, Vec<serde_json::Value>>::new();
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `head` is a valid out-pointer; the list is walked read-only and freed below.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return Err(format!(
+            "getifaddrs failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut entry = head;
+    while !entry.is_null() {
+        // SAFETY: `entry` is a live node of the getifaddrs list.
+        let ifa = unsafe { &*entry };
+        entry = ifa.ifa_next;
+        if ifa.ifa_addr.is_null() {
+            continue;
+        }
+        // SAFETY: a non-null `ifa_addr` points to a sockaddr whose family tells its concrete type.
+        let family = unsafe { (*ifa.ifa_addr).sa_family } as i32;
+        if family != libc::AF_INET && family != libc::AF_INET6 {
+            continue;
+        }
+        // SAFETY: `ifa_name` is a NUL-terminated interface name.
+        let name = unsafe { CStr::from_ptr(ifa.ifa_name) }
+            .to_string_lossy()
+            .into_owned();
+        let internal = ifa.ifa_flags & (libc::IFF_LOOPBACK as libc::c_uint) != 0;
+        let mac = std::fs::read_to_string(format!("/sys/class/net/{name}/address"))
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "00:00:00:00:00:00".to_string());
+        let entries = groups.entry(name).or_default();
+        if family == libc::AF_INET {
+            // SAFETY: AF_INET addresses are `sockaddr_in`.
+            let address = unsafe { *(ifa.ifa_addr as *const libc::sockaddr_in) };
+            let ip = Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
+            let mask_bits = if ifa.ifa_netmask.is_null() {
+                0
+            } else {
+                // SAFETY: the netmask of an AF_INET address is a `sockaddr_in`.
+                u32::from_be(
+                    unsafe { *(ifa.ifa_netmask as *const libc::sockaddr_in) }
+                        .sin_addr
+                        .s_addr,
+                )
+            };
+            entries.push(serde_json::json!({
+                "address": ip.to_string(), "netmask": Ipv4Addr::from(mask_bits).to_string(), "family": "IPv4",
+                "mac": mac, "internal": internal, "cidr": format!("{ip}/{}", mask_bits.count_ones()),
+            }));
+        } else {
+            // SAFETY: AF_INET6 addresses are `sockaddr_in6`.
+            let address = unsafe { *(ifa.ifa_addr as *const libc::sockaddr_in6) };
+            let ip = Ipv6Addr::from(address.sin6_addr.s6_addr);
+            let mask_bytes = if ifa.ifa_netmask.is_null() {
+                [0u8; 16]
+            } else {
+                // SAFETY: the netmask of an AF_INET6 address is a `sockaddr_in6`.
+                unsafe { *(ifa.ifa_netmask as *const libc::sockaddr_in6) }
+                    .sin6_addr
+                    .s6_addr
+            };
+            let prefix: u32 = mask_bytes.iter().map(|byte| byte.count_ones()).sum();
+            entries.push(serde_json::json!({
+                "address": ip.to_string(), "netmask": Ipv6Addr::from(mask_bytes).to_string(), "family": "IPv6",
+                "mac": mac, "internal": internal, "cidr": format!("{ip}/{prefix}"), "scopeid": address.sin6_scope_id,
+            }));
+        }
+    }
+    // SAFETY: `head` came from a successful getifaddrs.
+    unsafe { libc::freeifaddrs(head) };
+    Ok(serde_json::to_string(&groups).unwrap_or_else(|_| "{}".to_string()))
+}
+
+#[cfg(not(unix))]
+fn network_interfaces_json() -> Result<String, String> {
+    Err("os.networkInterfaces() is not supported by thaw-js on this platform".into())
+}
 
 impl Interp {
     pub(crate) fn install_sysio(&mut self) {
@@ -323,12 +411,9 @@ impl Interp {
             Ok(Value::str(&priority_result(set_priority(pid, prio))))
         });
         g.declare("__thaw_os_set_priority", f, true);
-        // ponytail: per-interface addresses need getifaddrs; add when a package reads os.networkInterfaces()
-        let f = self.native(|it, _, _| {
-            it.throw_error(
-                "Error",
-                "os.networkInterfaces() is not supported by thaw-js yet",
-            )
+        let f = self.native(|it, _, _| match network_interfaces_json() {
+            Ok(json) => Ok(Value::str(&json)),
+            Err(message) => it.throw_error("Error", &message),
         });
         g.declare("__thaw_os_network_interfaces", f, true);
         let f = self.native(|it, _, a| {

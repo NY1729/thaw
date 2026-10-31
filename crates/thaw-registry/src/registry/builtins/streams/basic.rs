@@ -10,7 +10,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              module.exports.__esModule = true;\n",
         ),
         "string_decoder" => Some(
-            "function normalizeEncoding(encoding) { var value = String(encoding || 'utf8').toLowerCase().replace(/[-_]/g, ''); if (!globalThis.Buffer.isEncoding(value)) throw new TypeError('Unknown encoding: ' + encoding); return value; }\n\
+            "function normalizeEncoding(encoding) { var value = String(encoding || 'utf8').toLowerCase().replace(/[-_]/g, ''); if (!globalThis.Buffer.isEncoding(value)) { var unknown = new TypeError('Unknown encoding: ' + encoding); unknown.code = 'ERR_UNKNOWN_ENCODING'; throw unknown; } return value; }\n\
              function utf8CompleteLength(buffer) {\n\
              \x20\x20var index = buffer.length - 1; while (index >= 0 && (buffer[index] & 192) === 128) index--;\n\
              \x20\x20if (index < 0) return Math.max(0, buffer.length - Math.min(buffer.length, 3));\n\
