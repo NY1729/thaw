@@ -443,6 +443,7 @@ thaw_math_random
 thaw_math_sum_precise
 thaw_native_wrapper_is_live
 thaw_non_arrow_receiver_new
+thaw_number_array_comparator_sort
 thaw_number_array_fill
 thaw_number_array_includes
 thaw_number_array_index_of

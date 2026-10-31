@@ -1247,13 +1247,48 @@ var __thaw_bundle_entry_key = \"p/index.js\";
         "exports.c = globalThis.Zed();",
     );
     assert!(!crate::scan::scan_bundle(&called).unwrap().is_clean());
-    // generated `with (..)` source cannot be parsed by `new Function` here
+    // generated `with (..)` source is supported (sloppy `new Function`), no longer a blocker
     let with_code = src.replace(
         "exports.a = ",
         "exports.w = '  with (locals || {}) {'; exports.a = ",
     );
-    assert!(crate::scan::scan_bundle(&with_code)
-        .unwrap()
-        .blockers
-        .contains_key("dynamic-with-code"));
+    assert!(crate::scan::scan_bundle(&with_code).unwrap().is_clean());
+}
+
+#[test]
+fn sloppy_with_statement_via_new_function() {
+    assert_eq!(
+        one("var f = new Function('o', 'with (o) { b = a + 1; return typeof a + typeof zz + say(b) }'); \
+             var o = { a: 1, b: 0, say(x) { return this === o ? 'T' + x : 'F' } }; \
+             console.log(f(o), o.b)"),
+        "numberundefinedT2 2"
+    );
+    // outer names still resolve, a local shadows nothing the object lacks
+    assert_eq!(
+        one("var y = 5; var f = new Function('o', 'with (o) { return a + y }'); console.log(f({ a: 1 }))"),
+        "6"
+    );
+    // Symbol.unscopables hides a property
+    assert_eq!(
+        one(
+            "var x = 'outer'; var o = { x: 'in', [Symbol.unscopables]: { x: true } }; \
+             console.log(new Function('o', 'with (o) { return x }').call(null, o))"
+        ),
+        "outer"
+    );
+}
+
+#[test]
+fn string_literal_with_text_is_not_code() {
+    assert_eq!(one("console.log('with (x) {')"), "with (x) {");
+}
+
+#[test]
+fn scan_knows_fetch_globals_and_tolerates_service_worker_listener() {
+    let blocked = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.F = () => { addEventListener('fetch', () => {}); return [new Request('http://a/'), new Response(''), new Headers(), new FormData(), new TransformStream(), new TextEncoderStream(), crypto.subtle.digest]; };",
+    );
+    let r = crate::scan::scan_bundle(&blocked).ok().unwrap();
+    assert!(r.is_clean(), "{:?}", r.blockers);
 }
