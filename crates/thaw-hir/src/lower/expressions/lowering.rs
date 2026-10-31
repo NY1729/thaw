@@ -801,7 +801,9 @@ impl<'a> FnLowerer<'a> {
                 ),
                 (
                     "flags".to_string(),
-                    HirExpr::Lit(HirLit::Str(regex.flags.to_string())),
+                    HirExpr::Lit(HirLit::Str(
+                        "dgimsuvy".chars().filter(|c| regex.flags.contains(*c)).collect(),
+                    )),
                 ),
                 ("lastIndex".to_string(), HirExpr::Lit(HirLit::F64(0.0))),
             ])),
@@ -4965,11 +4967,62 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             HirExpr::Lit(HirLit::Str(String::new()))
                         };
-                        return Ok(HirExpr::ObjectLit(vec![
-                            ("source".to_string(), source),
+                        // Validate the pattern/flags and canonicalize the flag order (`__thaw_regex_check`
+                        // answers the canonical flags, or a `\u{1}F`/`\u{1}P` failure marker).
+                        let id = self.next_binding;
+                        self.next_binding += 1;
+                        let (source_name, flags_name, checked_name) = (
+                            format!("__thaw_regex_source_{id}"),
+                            format!("__thaw_regex_flags_{id}"),
+                            format!("__thaw_regex_checked_{id}"),
+                        );
+                        for name in [&source_name, &flags_name, &checked_name] {
+                            self.scope.insert(name.clone(), HirType::Str);
+                        }
+                        let var = |name: &str| HirExpr::Var(name.to_string());
+                        let concat = |parts: Vec<HirExpr>| parts.into_iter().reduce(|a, b| HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".into())), vec![a, b],
+                        )).expect("non-empty");
+                        let text = |t: &str| HirExpr::Lit(HirLit::Str(t.to_string()));
+                        let object = |flags: HirExpr| HirExpr::ObjectLit(vec![
+                            ("source".to_string(), var(&source_name)),
                             ("flags".to_string(), flags),
                             ("lastIndex".to_string(), HirExpr::Lit(HirLit::F64(0.0))),
-                        ]));
+                        ]);
+                        let fail = |message: HirExpr| HirExpr::ThrowValue(
+                            Box::new(concat(vec![text("\u{1}SyntaxError\u{1}"), message])),
+                            Box::new(object(var(&flags_name))),
+                        );
+                        let is_marker = |marker: &str| HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_starts_with".into())),
+                            vec![var(&checked_name), text(marker), HirExpr::Lit(HirLit::F64(0.0))],
+                        );
+                        let body = HirExpr::Conditional(
+                            Box::new(is_marker("\u{1}F")),
+                            Box::new(fail(concat(vec![
+                                text("Invalid flags supplied to RegExp constructor '"),
+                                var(&flags_name),
+                                text("'"),
+                            ]))),
+                            Box::new(HirExpr::Conditional(
+                                Box::new(is_marker("\u{1}P")),
+                                Box::new(fail(concat(vec![
+                                    text("Invalid regular expression: /"), var(&source_name), text("/: Invalid pattern"),
+                                ]))),
+                                Box::new(object(var(&checked_name))),
+                                regex_object_type(),
+                            )),
+                            regex_object_type(),
+                        );
+                        let check = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_regex_check".into())),
+                            vec![var(&source_name), var(&flags_name)],
+                        );
+                        return self.wrap_call_argument_bindings(body, &[
+                            (source_name.clone(), HirType::Str, source),
+                            (flags_name.clone(), HirType::Str, flags),
+                            (checked_name, HirType::Str, check),
+                        ]);
                     }
                     if matches!(class.sym.as_ref(), "Map" | "Set" | "WeakMap" | "WeakSet") {
                         // `new Map()`/`new Set()` are ambiguous on their

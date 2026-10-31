@@ -3972,6 +3972,51 @@
       "name": "native setImmediate from a timer callback runs before the next timer",
       "expect": "matched",
       "source": "function main(): void {\n  setTimeout(() => {\n    console.log(\"timer\");\n    setImmediate(() => console.log(\"imm1\"));\n    setTimeout(() => console.log(\"timeout0\"), 0);\n    setImmediate(() => console.log(\"imm2\"));\n  }, 1);\n}\n"
+    },
+    {
+      "name": "nd6 any undefined callee throws TypeError and optional call is undefined",
+      "expect": "matched",
+      "source": "function main(): void {\n  const f: any = undefined;\n  console.log(f?.(), 1);\n  try { f(); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  console.log(f?.call(null));\n  const g: any = null;\n  console.log(g?.(2));\n  try { g(); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n}\n"
+    },
+    {
+      "name": "nd6 regex exec groups without named groups is undefined",
+      "expect": "matched",
+      "source": "function main(): void {\n  const m = /(a)(b)?/.exec(\"ac\")!;\n  console.log(m.groups);\n  console.log(m.groups === undefined);\n  console.log(m.groups?.x);\n  const n = /(?<x>a)/.exec(\"ac\")!;\n  console.log(n.groups!.x);\n  console.log(\"ab\".match(/a/)!.groups);\n}\n"
+    },
+    {
+      "name": "nd6 map and set keep reference identity of stored containers",
+      "expect": "matched",
+      "source": "function main(): void {\n  const m = new Map<string, any>();\n  m.set(\"m\", m);\n  console.log(m.get(\"m\") === m);\n  const s = new Set<any>();\n  s.add(s);\n  console.log(s.has(s));\n  const arr: any[] = [];\n  const m2 = new Map<string, any>();\n  m2.set(\"a\", arr);\n  arr.push(1);\n  console.log(m2.get(\"a\") === arr, m2.get(\"a\").length);\n}\n"
+    },
+    {
+      "name": "nd6 loose equality of any array against primitives",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a: any[] = [[], [0], 0, \"\", \"0\", [1, 2], {}];\n  console.log(a[0] == a[2], a[1] == a[2], a[0] == a[3], a[1] == a[4], a[5] == \"1,2\", a[6] == \"[object Object]\", a[0] == a[1]);\n  const n: any[] = [null, 0, undefined];\n  console.log(n[0] == n[1], n[0] == n[2]);\n}\n"
+    },
+    {
+      "name": "nd6 Object.prototype.toString tags for errors and weak containers",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Object.prototype.toString.call(new Error(\"x\")), Object.prototype.toString.call(new TypeError()), Object.prototype.toString.call(\"s\"));\n  console.log(Object.prototype.toString.call(new WeakRef({ a: 1 })), Object.prototype.toString.call(new FinalizationRegistry(() => {})));\n}\n"
+    },
+    {
+      "name": "nd6 regex string conversion and canonical flags",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(String(/a\\nb/g), `${/a/g}`);\n  console.log(new RegExp(\"a\", \"yg\").flags, /a/gimsuyd.flags, new RegExp(\"a\").flags);\n}\n"
+    },
+    {
+      "name": "nd6 constructor and builtin errors use the right classes",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { const r = new RegExp(\"(\"); console.log(\"no throw\", r.source); } catch (e) { console.log((e as Error).name); }\n  try { const r = new RegExp(\"a\", \"gg\"); console.log(\"no throw\", r.flags); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { new Array(-1); console.log(\"no throw\"); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { new Date(NaN).toISOString(); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { \"a\".repeat(-1); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { \"a\".repeat(Infinity); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { \"a\".replaceAll(/a/, \"b\"); } catch (e) { console.log((e as Error).name); }\n}\n"
+    },
+    {
+      "name": "nd6 console.log of a class and a builtin constructor",
+      "expect": "matched",
+      "source": "class A { static x = 1; y = 2; z() { return 1; } }\nfunction main(): void {\n  console.log(A);\n  console.log(Number);\n  console.log(String, Boolean);\n}\n"
+    },
+    {
+      "name": "nd6 labeled try finally break in an arrow with a later return",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log((() => { l: try { return 1; } finally { break l; } return 3; })());\n  const f = (): number => { l: try { return 1; } finally { break l; } return 3; };\n  console.log(f());\n  console.log((() => { try { return 1; } finally { return 2; } })());\n}\n"
     }
   ]
 }
