@@ -3973,6 +3973,26 @@
       "expect": "matched",
       "source": "function main(): void {\n  setTimeout(() => {\n    console.log(\"timer\");\n    setImmediate(() => console.log(\"imm1\"));\n    setTimeout(() => console.log(\"timeout0\"), 0);\n    setImmediate(() => console.log(\"imm2\"));\n  }, 1);\n}\n"
     },
+    {
+      "name": "nd4 async function returning a timer promise waits for it",
+      "expect": "matched",
+      "source": "async function sleep(ms: number) { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function sleepTyped(ms: number): Promise<void> { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function f(n: number) { await sleep(n); return n * 2; }\nfunction other(): Promise<number> { return new Promise<number>(r => setTimeout(() => r(7), 20)); }\nasync function adopt() { return other(); }\nclass C { async m() { return sleep(20); } async n(): Promise<void> { return sleepTyped(20); } }\nasync function main(): Promise<void> {\n  const t = Date.now();\n  await sleep(40);\n  console.log(Date.now() - t >= 35);\n  await sleepTyped(40);\n  console.log(Date.now() - t >= 75);\n  console.log(await Promise.race([f(30), f(5)]));\n  console.log(await adopt());\n  const c = new C();\n  const u = Date.now();\n  await c.m();\n  await c.n();\n  console.log(Date.now() - u >= 35);\n}\n"
+    },
+    {
+      "name": "nd4 Array.from of a typed array map or slice result",
+      "expect": "matched",
+      "source": "function main(): void {\n  const u = new Uint8Array([1, 2, 3]);\n  console.log(Array.from(u.map(x => x * 2)));\n  const s = u.slice(1);\n  console.log(Array.from(s), Array.from(u.subarray(1)));\n  const m = u.map(x => x + 1);\n  console.log(Array.from(m), Array.from(u));\n}\n"
+    },
+    {
+      "name": "nd4 Date string conversion of an invalid or valid date",
+      "expect": "matched",
+      "source": "function main(): void {\n  const d = new Date(NaN);\n  console.log(String(d), `${d}`, \"x\" + d, d.toString(), d.getTime(), JSON.stringify(d));\n  const v = new Date(0);\n  console.log(String(v) === v.toString(), `${v}` === v.toString(), (\"\" + v) === v.toString());\n}\n"
+    },
+    {
+      "name": "nd4 frozen object write names property and receiver",
+      "expect": "matched",
+      "source": "function main(): void {\n  const o: any = Object.freeze({ x: 1 });\n  try { o.x = 2; } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  console.log(o.x);\n}\n"
+    },
     {"name": "nd3 unannotated class method return satisfies interface contract", "expect": "matched", "source": "interface Shape { area(): number } class Circle implements Shape { r: number; constructor(r: number) { this.r = r; } area() { return 3 * this.r; } } class Sq { area() { return 4; } } function main(): void { const s: Shape = new Circle(2); const t: Shape = new Sq(); console.log(s.area(), t.area()); }" },
     {"name": "nd3 fs.existsSync with a computed path", "expect": "matched", "source": "import * as fs from \"node:fs\"; import * as path from \"node:path\"; function main(): void { const f = path.join(\"/etc\", \"hostname\"); console.log(fs.existsSync(f), fs.existsSync(path.join(\"/nonexistent\", \"zz\"))); }"},
     {"name": "nd3 self-referential object type alias with optional field", "expect": "matched", "source": "type Tree = { v: number; l?: Tree; r?: Tree }; function ins(t: Tree | undefined, v: number): Tree { if (!t) return { v }; if (v < t.v) t.l = ins(t.l, v); else t.r = ins(t.r, v); return t; } function* walk(t?: Tree): Generator<number> { if (!t) return; yield* walk(t.l); yield t.v; yield* walk(t.r); } function main(): void { let t: Tree | undefined; for (const v of [5, 2, 8, 1]) t = ins(t, v); console.log([...walk(t)], t); }"}
