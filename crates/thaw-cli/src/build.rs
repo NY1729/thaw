@@ -856,6 +856,7 @@ fn build_with_native_mode_routed(
                 source,
                 &qualified_call_rewrites,
                 &imported_overload_aliases,
+                &constructor_package_qualifiers,
                 &input_name,
             )?;
             let qualified_name = if qualified != source {
