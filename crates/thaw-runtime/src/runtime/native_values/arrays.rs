@@ -1624,6 +1624,7 @@ pub unsafe extern "C" fn thaw_bigint_array_sort(array: *mut u8) -> *mut u8 {
     array
 }
 
+#[no_mangle]
 /// Sorts the first `length` slots of a number-array buffer for the `(x, y) => x - y`
 /// / `y - x` comparator shapes. Returns 0.0 without touching the data when any NaN is
 /// present (V8's order for an inconsistent comparator is algorithm-defined), else 1.0.
