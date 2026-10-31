@@ -612,7 +612,8 @@ impl<'a> FnLowerer<'a> {
                 // are dropped by the view).
                 expected_params.starts_with(fixed)
                     && (&ret == result.as_ref()
-                        // Return type still to be inferred from the method body.
+                        // An unannotated method's return is still the `Dynamic` placeholder
+                        // until a later pass infers it from the body.
                         || ret == HirType::Dynamic
                         || Self::async_signature_returns(signature.is_async, &ret, result))
             }

@@ -4037,6 +4037,9 @@
       "name": "nd10 dynamic record entry flows into a string or boolean union field",
       "expect": "matched",
       "source": "interface Opt { name: string; value: string | boolean }\nfunction main(): void {\n  const flags: Record<string, string | boolean> = { a: true, b: \"x\" };\n  const opts: Opt[] = [];\n  for (const [name, value] of Object.entries(flags)) opts.push({ name, value });\n  console.log(opts);\n}\n"
-    }
+    },
+    {"name": "nd3 unannotated class method return satisfies interface contract", "expect": "matched", "source": "interface Shape { area(): number } class Circle implements Shape { r: number; constructor(r: number) { this.r = r; } area() { return 3 * this.r; } } class Sq { area() { return 4; } } function main(): void { const s: Shape = new Circle(2); const t: Shape = new Sq(); console.log(s.area(), t.area()); }" },
+    {"name": "nd3 fs.existsSync with a computed path", "expect": "matched", "source": "import * as fs from \"node:fs\"; import * as path from \"node:path\"; function main(): void { const f = path.join(\"/etc\", \"hostname\"); console.log(fs.existsSync(f), fs.existsSync(path.join(\"/nonexistent\", \"zz\"))); }"},
+    {"name": "nd3 self-referential object type alias with optional field", "expect": "matched", "source": "type Tree = { v: number; l?: Tree; r?: Tree }; function ins(t: Tree | undefined, v: number): Tree { if (!t) return { v }; if (v < t.v) t.l = ins(t.l, v); else t.r = ins(t.r, v); return t; } function* walk(t?: Tree): Generator<number> { if (!t) return; yield* walk(t.l); yield t.v; yield* walk(t.r); } function main(): void { let t: Tree | undefined; for (const v of [5, 2, 8, 1]) t = ins(t, v); console.log([...walk(t)], t); }"}
   ]
 }
