@@ -506,6 +506,7 @@ include!("lower/statements/context.rs");
 include!("lower/statements/narrowing.rs");
 include!("lower/statements/lowering.rs");
 include!("lower/statements/declarations.rs");
+include!("lower/statements/var_hoist.rs");
 
 impl<'a> FnLowerer<'a> {}
 
