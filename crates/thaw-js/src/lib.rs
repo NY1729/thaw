@@ -34,6 +34,8 @@ mod eventloop;
 mod extras;
 mod generators;
 pub mod host;
+#[cfg(feature = "intl")]
+mod intl;
 mod json;
 mod numfmt;
 mod proxy;
@@ -372,16 +374,33 @@ pub struct Scope {
     mask: Cell<u64>,
     parent: Option<Rc<Scope>>,
     strict: Cell<bool>,
+    /// Object environment record of a `with` statement (its `mask` matches every name).
+    with: Option<Obj>,
+    /// Some scope on the chain (self included) is a `with` record.
+    in_with: bool,
 }
 
 impl Scope {
     fn new(parent: Option<Rc<Scope>>) -> Rc<Scope> {
         let strict = parent.as_ref().is_some_and(|p| p.strict.get());
+        let in_with = parent.as_ref().is_some_and(|p| p.in_with);
         Rc::new(Scope {
             vars: RefCell::new(Vars::default()),
             mask: Cell::new(0),
             parent,
             strict: Cell::new(strict),
+            with: None,
+            in_with,
+        })
+    }
+    fn new_with(parent: Rc<Scope>, obj: Obj) -> Rc<Scope> {
+        Rc::new(Scope {
+            vars: RefCell::new(Vars::default()),
+            mask: Cell::new(u64::MAX),
+            strict: Cell::new(parent.strict.get()),
+            parent: Some(parent),
+            with: Some(obj),
+            in_with: true,
         })
     }
     fn declare(&self, name: &str, value: Value, mutable: bool) {
@@ -428,8 +447,10 @@ impl Scope {
         Rc::new(Scope {
             vars: RefCell::new(vars),
             mask: Cell::new(self.mask.get()),
+            in_with: self.in_with || parent.in_with,
             parent: Some(parent),
             strict: Cell::new(self.strict.get()),
+            with: self.with.clone(),
         })
     }
 }
@@ -691,6 +712,14 @@ impl Interp {
         web_streams::install(&mut it);
         web_crypto::install(&mut it);
         it.install_url();
+        #[cfg(feature = "intl")]
+        {
+            // timers are scheduled against `rt.now`, which only the event loop advances: do not let the
+            // polyfill's evaluation time make a timer created by the program overdue at the first turn
+            let started = std::time::Instant::now();
+            it.install_intl();
+            it.skip_timer_clock(started.elapsed().as_secs_f64() * 1000.0);
+        }
         it.run(extras::EXTRAS_LATE)
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
         it.name_builtins();
@@ -808,6 +837,23 @@ impl Interp {
                 objs.push(o.clone());
                 if let Some((Slot::Data(Value::Object(p)), _)) = find_own(o, "prototype") {
                     objs.push(p);
+                }
+                // namespace members such as `Intl.DateTimeFormat.prototype`
+                let members: Vec<Value> = o
+                    .props
+                    .borrow()
+                    .iter()
+                    .filter_map(|p| match &p.slot {
+                        Slot::Data(Value::Object(m)) => Some(Value::Object(m.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                for m in members {
+                    if let Value::Object(m) = m {
+                        if let Some((Slot::Data(Value::Object(p)), _)) = find_own(&m, "prototype") {
+                            objs.push(p);
+                        }
+                    }
                 }
             }
         }
@@ -1549,8 +1595,55 @@ impl Interp {
         let mut cur: &Scope = scope;
         loop {
             if cur.mask.get() & bit != 0 {
-                if let Some(b) = cur.vars.borrow().get(name) {
+                if let Some(o) = &cur.with {
+                    if let Some(v) = self.with_get(o, name) {
+                        return Some(v);
+                    }
+                } else if let Some(b) = cur.vars.borrow().get(name) {
                     return Some(b.value.clone());
+                }
+            }
+            cur = cur.parent.as_deref()?;
+        }
+    }
+
+    /// `HasBinding` of an object environment record: the property exists and is not blocked by
+    /// `Symbol.unscopables`. ponytail: accessors are skipped (no getter calls from `&self`).
+    fn with_get(&self, o: &Obj, name: &str) -> Option<Value> {
+        let Some(Slot::Data(v)) = find_in_chain(o, name) else {
+            return None;
+        };
+        let id = match self.lookup(&self.global, "Symbol") {
+            Some(Value::Object(sym)) => match find_in_chain(&sym, "unscopables") {
+                Some(Slot::Data(Value::Object(u))) => match &*u.kind.borrow() {
+                    Kind::Symbol { id, .. } => Some(*id),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(id) = id {
+            if let Some(Slot::Data(Value::Object(u))) = find_in_chain(o, &format!("@@sym:{id}")) {
+                if matches!(find_in_chain(&u, name), Some(Slot::Data(b)) if b.truthy()) {
+                    return None;
+                }
+            }
+        }
+        Some(v)
+    }
+
+    /// The `with` object that resolves `name` (the `this` of a call through it), if any.
+    fn with_base(&self, scope: &Rc<Scope>, name: &str) -> Option<Obj> {
+        let bit = name_bit(name);
+        let mut cur: &Scope = scope;
+        loop {
+            if cur.mask.get() & bit != 0 {
+                match &cur.with {
+                    Some(o) if self.with_get(o, name).is_some() => return Some(o.clone()),
+                    Some(_) => {}
+                    None if cur.vars.borrow().contains_key(name) => return None,
+                    None => {}
                 }
             }
             cur = cur.parent.as_deref()?;
@@ -1562,6 +1655,14 @@ impl Interp {
         let mut cur: Option<&Scope> = Some(scope);
         while let Some(s) = cur {
             if s.mask.get() & bit == 0 {
+                cur = s.parent.as_deref();
+                continue;
+            }
+            if let Some(o) = &s.with {
+                if self.with_get(o, name).is_some() {
+                    put(o, name, value);
+                    return Ok(());
+                }
                 cur = s.parent.as_deref();
                 continue;
             }
@@ -1690,8 +1791,16 @@ impl Interp {
 
     /// Evaluate a script in the global scope; the value is that of the last expression statement.
     pub fn run(&mut self, source: &str) -> R<Value> {
-        let module =
-            thaw_parser::parse_javascript(source).map_err(|e| Ctl::Throw(Value::str(&e)))?;
+        self.run_parsed(source, thaw_parser::parse_javascript(source))
+    }
+
+    /// Like [`run`](Self::run) for `eval` / `new Function` text: parsed as a sloppy-mode script.
+    pub fn run_sloppy(&mut self, source: &str) -> R<Value> {
+        self.run_parsed(source, thaw_parser::parse_javascript_script(source))
+    }
+
+    fn run_parsed(&mut self, source: &str, parsed: Result<a::Module, String>) -> R<Value> {
+        let module = parsed.map_err(|e| Ctl::Throw(Value::str(&e)))?;
         self.run_id += 1;
         self.sources.insert(self.run_id, Rc::from(source));
         let mut stmts = Vec::new();
@@ -1717,7 +1826,7 @@ impl Interp {
 
     /// Compile a function literal (`function (a, b) { ... }` expression source) in the global scope.
     pub fn eval_function(&mut self, source: &str) -> R<Value> {
-        self.run(&format!("({source})"))
+        self.run_sloppy(&format!("({source})"))
     }
 
     /// Run a CommonJS-style script and return `module.exports`.
@@ -1948,7 +2057,12 @@ impl Interp {
                 }
                 result
             }
-            a::Stmt::With(_) => unsupported("with"),
+            a::Stmt::With(w) => {
+                let Value::Object(o) = self.eval(&w.obj, scope)? else {
+                    return self.throw_error("TypeError", "with: object expected");
+                };
+                self.exec(&w.body, &Scope::new_with(scope.clone(), o))
+            }
         }
     }
 
@@ -2367,6 +2481,11 @@ impl Interp {
                         let key = self.member_key(&m.prop, scope)?;
                         (self.get(&obj, &key)?, obj)
                     }
+                    a::Expr::Ident(i) if scope.in_with => (
+                        self.eval(callee, scope)?,
+                        self.with_base(scope, &i.sym)
+                            .map_or(Value::Undefined, Value::Object),
+                    ),
                     other => (self.eval(other, scope)?, Value::Undefined),
                 };
                 let args = self.eval_args(&c.args, scope)?;
