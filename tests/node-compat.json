@@ -3807,6 +3807,26 @@
       "name": "module level new before class declaration throws ReferenceError",
       "expect": "matched",
       "source": "function main(): void {}\ntry { const a = new D(); console.log(a.v); } catch (e) { console.log((e as Error).name, (e as Error).message); }\nclass D { v = 1; }\nconsole.log(new D().v);"
+    },
+    {
+      "name": "object create typed view own vs inherited keys",
+      "expect": "matched",
+      "source": "function main(): void {\n  const proto = { f() { return 1; }, a: 1 };\n  const o = Object.create(proto) as { a: number; f(): number; b?: number };\n  o.b = 2;\n  console.log(JSON.stringify(o), o.a, o.f(), Object.keys(o), o.hasOwnProperty(\"a\"), o.hasOwnProperty(\"b\"));\n}"
+    },
+    {
+      "name": "object create typed view write stays own",
+      "expect": "matched",
+      "source": "function main(): void {\n  const proto = { a: 1 };\n  const o = Object.create(proto) as { a: number; b?: number };\n  o.a = 5;\n  console.log(JSON.stringify(o), JSON.stringify(proto));\n}"
+    },
+    {
+      "name": "object create annotated interface view",
+      "expect": "matched",
+      "source": "function main(): void {\n  interface V { a: number; b?: number }\n  const proto: V = { a: 1 };\n  const o: V = Object.create(proto);\n  o.b = 2;\n  const s = JSON.stringify(o);\n  console.log(s);\n}"
+    },
+    {
+      "name": "object create this method on typed view",
+      "expect": "matched",
+      "source": "function main(): void {\n  const proto = { greet() { return \"hi \" + this.name; }, name: \"base\" };\n  const o = Object.create(proto) as { name: string; greet(): string };\n  console.log(o.greet(), JSON.stringify(o));\n  o.name = \"own\";\n  console.log(o.greet(), JSON.stringify(o));\n}"
     }
   ]
 }
