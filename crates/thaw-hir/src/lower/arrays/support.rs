@@ -576,6 +576,7 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_array_sort_comparator(
         &mut self,
         receiver: HirExpr,
