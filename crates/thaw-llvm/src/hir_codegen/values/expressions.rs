@@ -54,25 +54,18 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn compile_throw_builtin_error(&mut self, kind: &str, message: &str) -> Result<(), String> {
-        let message = self
-            .builder
-            .build_global_string_ptr(message, "synthetic_error_message")
+        let message = self.intern_string(message, "synthetic_error_message")
             .map_err(|error| error.to_string())?
             .as_pointer_value();
         self.compile_throw_builtin_error_with(kind, message)
     }
 
-    /// Throws `kind` with a message computed at run time (a NUL-terminated string pointer).
-    fn compile_throw_builtin_error_with(
+    /// Records a synthetic error in the pending-exception globals and returns its frame.
+    fn emit_synthetic_error_stores(
         &mut self,
-        kind: &str,
+        name: PointerValue<'ctx>,
         message: PointerValue<'ctx>,
-    ) -> Result<(), String> {
-        let name = self
-            .builder
-            .build_global_string_ptr(kind, "synthetic_error_name")
-            .map_err(|error| error.to_string())?
-            .as_pointer_value();
+    ) -> Result<PointerValue<'ctx>, String> {
         let value = self.builder.build_call(
             self.module.get_function("thaw_error_frame").unwrap(),
             &[name.into(), message.into()],
@@ -103,6 +96,58 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_store(self.pending_exception_value(symbol).as_pointer_value(), zero)
                 .map_err(|error| error.to_string())?;
         }
+        Ok(value)
+    }
+
+    /// The straight-line "record a synthetic error" stores, emitted once per module as a private
+    /// function `(name, message) -> frame` instead of inline at every throw site.
+    fn synthetic_error_setter(&mut self) -> Result<FunctionValue<'ctx>, String> {
+        const SYMBOL: &str = "thaw_set_synthetic_error";
+        if let Some(function) = self.module.get_function(SYMBOL) {
+            return Ok(function);
+        }
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let function = self.module.add_function(
+            SYMBOL,
+            ptr.fn_type(&[ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::Internal),
+        );
+        let saved = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+        let name = function.get_nth_param(0).unwrap().into_pointer_value();
+        let message = function.get_nth_param(1).unwrap().into_pointer_value();
+        let value = self.emit_synthetic_error_stores(name, message)?;
+        self.builder
+            .build_return(Some(&value))
+            .map_err(|error| error.to_string())?;
+        if let Some(saved) = saved {
+            self.builder.position_at_end(saved);
+        }
+        Ok(function)
+    }
+
+    /// Throws `kind` with a message computed at run time (a NUL-terminated string pointer).
+    fn compile_throw_builtin_error_with(
+        &mut self,
+        kind: &str,
+        message: PointerValue<'ctx>,
+    ) -> Result<(), String> {
+        let name = self.intern_string(kind, "synthetic_error_name")
+            .map_err(|error| error.to_string())?
+            .as_pointer_value();
+        let value = if self.share_error_setter {
+            let setter = self.synthetic_error_setter()?;
+            self.builder
+                .build_call(setter, &[name.into(), message.into()], "synthetic_error_frame")
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("synthetic error setter returned no value")?
+                .into_pointer_value()
+        } else {
+            self.emit_synthetic_error_stores(name, message)?
+        };
         if let Some(catch) = self.catch_stack.last().cloned() {
             self.emit_stack_promise_cleanup_except(&catch.promise_boundary)?;
             self.builder.build_unconditional_branch(catch.target)
@@ -142,9 +187,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lit(HirLit::Null) => Ok(self.context.bool_type().const_int(1, false).into()),
             HirExpr::Lit(HirLit::Str(s)) => {
                 if s.as_bytes().contains(&0) { return self.compile_raw_string_literal(s.as_bytes()); }
-                let global = self
-                    .builder
-                    .build_global_string_ptr(s, "strlit")
+                let global = self.intern_string(s, "strlit")
                     .map_err(|e| e.to_string())?;
                 self.register_string_literal(global.as_pointer_value(), s.as_bytes())
             }
