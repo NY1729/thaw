@@ -283,3 +283,19 @@ fn thaw_js_routing_serves_real_leaf_packages_like_node_when_enabled() {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[test]
+fn thaw_js_async_overload_is_plain_when_its_resolved_type_is() {
+    assert!(thaw_js_async_declaration_plain(
+        "declare function __thaw_typed_js_6d73(t: string, d: Json): Promise<string>;"
+    ));
+    assert!(thaw_js_async_declaration_plain(
+        "declare function __thaw_typed_js_6d73(t: string): string | Promise<string>;"
+    ));
+    assert!(!thaw_js_async_declaration_plain(
+        "declare function __thaw_typed_js_6d73(t: string): Promise<Buffer>;"
+    ));
+    assert!(!thaw_js_async_declaration_plain(
+        "declare function __thaw_typed_js_6d73(t: Promise<string>): string;"
+    ));
+}

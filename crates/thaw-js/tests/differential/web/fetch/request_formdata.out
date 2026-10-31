@@ -1,0 +1,5 @@
+POST http://localhost/p?q=1 text/plain;charset=UTF-8
+v v,w false
+clone abc
+text abc
+k,v|k,w
