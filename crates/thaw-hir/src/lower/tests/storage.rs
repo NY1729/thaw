@@ -729,11 +729,18 @@ fn storage_handoff_typed_js_rest_wrapper_uses_logical_argument_types() {
 }
 
 #[test]
-fn storage_handoff_generator_to_dynamic_is_a_compile_error() {
+fn storage_handoff_generator_to_dynamic_lowers_to_protocol_object() {
     let module = thaw_parser::parse_typescript(r#"function* gen(): Generator<any> { yield 1; } function main(): void { const g: any = gen(); }"#).unwrap();
-    let error = lower_module(&module).unwrap_err();
-    assert!(error.contains("Generator"), "{error}");
-    assert!(!error.contains("I64"), "{error}");
+    let program = lower_module(&module).unwrap();
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("ObjectLit"), "{body}");
+    for field in ["\"next\"", "\"return\"", "\"throw\""] {
+        assert!(body.contains(field), "{field}: {body}");
+    }
+    // The internal i64 resume-mode producer is only called, never wrapped as a
+    // callable: no lambda in `main` takes an `i64` parameter.
+    assert!(!body.contains("ty: I64"), "{body}");
 }
 
 #[test]
