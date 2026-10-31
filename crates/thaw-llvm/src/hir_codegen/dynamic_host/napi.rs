@@ -24,9 +24,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .split('$')
                 .nth(2)
                 .ok_or("invalid typed N-API static setter symbol")?;
-            let class = self
-                .builder
-                .build_global_string_ptr(class, "napi_static_setter_class_name")
+            let class = self.intern_string(class, "napi_static_setter_class_name")
                 .map_err(|error| error.to_string())?;
             self.compile_napi_export_handle(class.as_pointer_value())?
         };
@@ -52,9 +50,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| format!("N-API setter value: {error}"))?;
         let property = dynamic_member_name(&signature.symbol, false)
             .ok_or("invalid typed N-API setter symbol")?;
-        let property = self
-            .builder
-            .build_global_string_ptr(&property, "napi_setter_name")
+        let property = self.intern_string(&property, "napi_setter_name")
             .map_err(|error| error.to_string())?;
         let args_json = self
             .builder
@@ -124,9 +120,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .split('$')
                 .nth(2)
                 .ok_or("invalid typed N-API static getter symbol")?;
-            let class = self
-                .builder
-                .build_global_string_ptr(class, "napi_static_getter_class_name")
+            let class = self.intern_string(class, "napi_static_getter_class_name")
                 .map_err(|error| error.to_string())?;
             self.compile_napi_export_handle(class.as_pointer_value())?
         } else {
@@ -137,9 +131,7 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         let property = dynamic_member_name(&signature.symbol, false)
             .ok_or("invalid typed N-API getter symbol")?;
-        let property = self
-            .builder
-            .build_global_string_ptr(&property, "napi_getter_name")
+        let property = self.intern_string(&property, "napi_getter_name")
             .map_err(|error| error.to_string())?;
         let result = self
             .builder
@@ -205,9 +197,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .split('$')
                 .nth(2)
                 .ok_or("invalid typed dynamic static method symbol")?;
-            let class = self
-                .builder
-                .build_global_string_ptr(class, "dynamic_static_class_name")
+            let class = self.intern_string(class, "dynamic_static_class_name")
                 .map_err(|error| error.to_string())?;
             // A static method's receiver is the class's own export/global
             // binding rather than an instance -- looked up the same way
@@ -269,9 +259,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let fresh_handles = self.finish_fresh_event_key_argument_scope()?;
         let method = dynamic_member_name(&signature.symbol, true)
             .ok_or("invalid typed N-API method symbol")?;
-        let method = self
-            .builder
-            .build_global_string_ptr(&method, "napi_method_name")
+        let method = self.intern_string(&method, "napi_method_name")
             .map_err(|error| error.to_string())?;
         let args_json = self
             .builder

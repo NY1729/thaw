@@ -1233,7 +1233,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.get_function("thaw_cstring_destroy").unwrap(),
             &[result.into()], "discard_cyclic_callback_json",
         ).map_err(|error| error.to_string())?;
-        let message = self.builder.build_global_string_ptr(
+        let message = self.intern_string(
             "\u{1}TypeError\u{1}Converting circular structure to JSON",
             "cyclic_callback_type_error",
         ).map_err(|error| error.to_string())?;
