@@ -819,4 +819,5 @@ include!("tests/function_identity_contracts.rs");
 include!("tests/compile_speed_contracts.rs");
 include!("tests/object_create_contracts.rs");
 include!("tests/audit2_leftovers_contracts.rs");
+include!("tests/numeric_comparator_sort_contracts.rs");
 include!("tests/sort_nan_contracts.rs");

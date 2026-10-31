@@ -1624,6 +1624,26 @@ pub unsafe extern "C" fn thaw_bigint_array_sort(array: *mut u8) -> *mut u8 {
     array
 }
 
+/// Sorts the first `length` slots of a number-array buffer for the `(x, y) => x - y`
+/// / `y - x` comparator shapes. Returns 0.0 without touching the data when any NaN is
+/// present (V8's order for an inconsistent comparator is algorithm-defined), else 1.0.
+///
+/// # Safety
+/// `buffer` must be a Thaw array buffer holding at least `length` f64 slots after its header.
+pub unsafe extern "C" fn thaw_number_array_comparator_sort(buffer: *mut u8, length: f64, descending: f64) -> f64 {
+    let slots = unsafe { std::slice::from_raw_parts_mut(buffer.add(8).cast::<f64>(), length as usize) };
+    if slots.iter().any(|value| value.is_nan()) {
+        return 0.0;
+    }
+    // Without NaN the comparator is a consistent total preorder (-0 == 0, inf - inf == equal).
+    if descending != 0.0 {
+        slots.sort_by(|left, right| right.partial_cmp(left).unwrap());
+    } else {
+        slots.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    }
+    1.0
+}
+
 unsafe fn thaw_number_array_numeric_sort(array: *mut u8, descending: bool) -> *mut u8 {
     let Some(slots) = (unsafe { native_array_slots(array) }) else {
         return std::ptr::null_mut();

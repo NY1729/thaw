@@ -95,6 +95,14 @@ measure_program() {
   # Node reference output (the program does not auto-invoke main() under node).
   cp "$name.ts" nodecmp.mts
   printf '\nawait main();\n' >> nodecmp.mts
+  if ! timeout 120 node --experimental-strip-types nodecmp.mts > "$SCRATCH/out/$name.node" 2>/dev/null; then
+    # A CommonJS package (lodash) has no ESM named exports under Node: retry with
+    # `import { a, b } from "p"` rewritten to a default import destructured at the top.
+    sed -E 's/^import \{([^}]*)\} from ("[^"]+");/import __p from \2; const {\1} = __p as any;/' \
+      nodecmp.mts > nodecmp_default.mts
+    cp nodecmp_default.mts nodecmp.mts
+    rm -f nodecmp_default.mts
+  fi
   if timeout 120 node --experimental-strip-types nodecmp.mts > "$SCRATCH/out/$name.node" 2>/dev/null; then
     row program "$name" node stdout_ok 1
   else
