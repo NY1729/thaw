@@ -504,6 +504,10 @@ pub struct HirCompiler<'ctx> {
     class_layouts: Vec<HirType>,
     /// Where each stack-visible function (by LLVM symbol) is defined, for `Error.stack`.
     stack_locs: HashMap<String, SourceLoc>,
+    /// NUL-terminated string constants already emitted, so each distinct text exists once.
+    /// Whole-program builds route synthetic errors through one shared setter function.
+    share_error_setter: bool,
+    interned_strings: std::cell::RefCell<HashMap<String, inkwell::values::GlobalValue<'ctx>>>,
     uses_napi: bool,
     /// Backend optimisation level for `write_object_file` (`Default` unless `set_codegen_opt`).
     codegen_opt: OptimizationLevel,
@@ -878,6 +882,8 @@ impl<'ctx> HirCompiler<'ctx> {
             fn_locs: HashMap::new(),
             class_layouts: Vec::new(),
             stack_locs: HashMap::new(),
+            share_error_setter: false,
+            interned_strings: std::cell::RefCell::new(HashMap::new()),
             uses_napi: false,
             uses_thaw_js: false,
             uses_intl: false,
@@ -908,6 +914,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
+        self.share_error_setter = true;
         self.stack_guard = true;
         self.fn_locs = program.fn_locs.0.clone();
         self.class_layouts = program.class_layouts.clone();
@@ -1142,9 +1149,30 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
         self.hoist_static_allocas();
-        self.module
-            .verify()
-            .map_err(|e| format!("module verification failed:\n{e}"))
+        // Verification costs real time on large modules; debug builds (tests, CI's `cargo run`)
+        // always verify, release builds only with `THAW_VERIFY_IR` set.
+        if cfg!(debug_assertions) || std::env::var_os("THAW_VERIFY_IR").is_some() {
+            self.module
+                .verify()
+                .map_err(|e| format!("module verification failed:\n{e}"))?;
+        }
+        Ok(())
+    }
+
+    /// `build_global_string_ptr`, but identical text shares one private constant.
+    fn intern_string(
+        &self,
+        text: &str,
+        name: &str,
+    ) -> Result<inkwell::values::GlobalValue<'ctx>, inkwell::builder::BuilderError> {
+        if let Some(global) = self.interned_strings.borrow().get(text) {
+            return Ok(*global);
+        }
+        let global = self.builder.build_global_string_ptr(text, name)?;
+        self.interned_strings
+            .borrow_mut()
+            .insert(text.to_string(), global);
+        Ok(global)
     }
 
     /// An `alloca` outside the entry block grows the native stack on every execution, so one
