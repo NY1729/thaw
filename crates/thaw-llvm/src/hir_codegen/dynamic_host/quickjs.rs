@@ -590,8 +590,7 @@ impl<'ctx> HirCompiler<'ctx> {
         callable: BasicValueEnum<'ctx>,
         argument: &HirExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let argument = self.compile_expr(argument)?;
         let result = self
             .builder
@@ -628,8 +627,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let released = self
             .compile_single_arg_call("thaw_js_release_handle", args, "releaseDynamicValue")?
             .into_int_value();
@@ -1264,8 +1262,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let [callable, json_args, handles] = args else {
             return Err("callDynamicValueMixedExact expects callable, JSON arguments, and owned handle array".into());
         };
@@ -1595,8 +1592,7 @@ impl<'ctx> HirCompiler<'ctx> {
         handles: &HirExpr,
         consume_handles: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let callable = callable.into_int_value();
         let json_args = self.compile_expr(json_args)?;
         let handles = self.compile_expr(handles)?.into_pointer_value();

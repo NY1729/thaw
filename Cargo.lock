@@ -3213,18 +3213,26 @@ dependencies = [
 name = "thaw-js"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "brotli",
+ "flate2",
+ "httlib-huffman",
  "jiff",
  "libc",
  "md-5",
  "num-bigint",
  "num-traits",
  "regress",
+ "rustls",
+ "serde_json",
  "sha1",
  "sha2",
  "swc_ecma_visit",
  "thaw-arena",
  "thaw-intl",
  "thaw-parser",
+ "webpki-roots",
+ "x509-parser",
 ]
 
 [[package]]

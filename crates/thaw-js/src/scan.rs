@@ -49,6 +49,49 @@ fn prop_key(p: &a::PropName) -> Option<String> {
 
 /// Extract factories, require maps and the entry key from a registry bundle.
 pub fn parse_bundle(source: &str) -> Result<BundleParts, String> {
+    let mut parts = parse_bundle_raw(source)?;
+    stub_cheerio_undici(&mut parts)?;
+    Ok(parts)
+}
+
+const UNDICI_STUB_KEY: &str = "thaw-js:undici-unavailable";
+
+/// cheerio requires `undici` only for `fromURL` (fetch/WebAssembly llhttp/MessagePort/net stack). thaw-js does
+/// not run that stack: cheerio's requires of it resolve to a stub whose members throw a clear error when used,
+/// so the rest of cheerio (`load`, selectors, manipulation) runs and the scan no longer sees undici.
+// ponytail: fromURL/fromBuffer-over-network is unsupported on thaw-js; a native undici replacement would lift it.
+fn stub_cheerio_undici(parts: &mut BundleParts) -> Result<(), String> {
+    let mut hit = false;
+    for (requirer, map) in parts.require_maps.iter_mut() {
+        if !requirer.starts_with("cheerio/") {
+            continue;
+        }
+        for target in map.values_mut() {
+            if target.starts_with("undici/") {
+                *target = UNDICI_STUB_KEY.to_string();
+                hit = true;
+            }
+        }
+    }
+    if !hit {
+        return Ok(());
+    }
+    let stub = format!(
+        "module.exports = (function(require){{ var __thaw_bundle_factories = {{ \"{UNDICI_STUB_KEY}\": function(module, exports) {{ \
+         module.exports = new Proxy({{}}, {{ get: function(_, k) {{ \
+         if (k === '__esModule') return true; if (typeof k === 'symbol' || k === 'then') return undefined; \
+         return function() {{ throw new Error('undici is not available on the thaw-js runtime (cheerio.fromURL): ' + String(k)); }}; \
+         }} }}); }} }}; }})(globalThis.require);"
+    );
+    // re-parse source + stub so the stub factory's spans index the text the interpreter keeps
+    let mut combined = parse_factories(&format!("{}\n{stub}", parts.source))?;
+    combined.esm_problems = std::mem::take(&mut parts.esm_problems);
+    combined.require_maps = std::mem::take(&mut parts.require_maps);
+    *parts = combined;
+    Ok(())
+}
+
+fn parse_bundle_raw(source: &str) -> Result<BundleParts, String> {
     if let Some((native, problems, pure)) = crate::esm::native_bundle_to_factories(source)? {
         if pure {
             let mut parts = parse_factories(&native)?;
@@ -245,6 +288,13 @@ impl Visit for Walker {
     }
     fn visit_class_decl(&mut self, n: &a::ClassDecl) {
         self.declared.insert(n.ident.sym.to_string());
+        n.class.visit_with(self);
+    }
+    fn visit_class_expr(&mut self, n: &a::ClassExpr) {
+        // a class expression's own name is bound inside its body
+        if let Some(i) = &n.ident {
+            self.declared.insert(i.sym.to_string());
+        }
         n.class.visit_with(self);
     }
     fn visit_fn_decl(&mut self, n: &a::FnDecl) {
@@ -476,6 +526,41 @@ impl Visit for Walker {
     }
 }
 
+/// Findings the heuristics cannot tell are dead or guarded. Each entry is a construct that is inert on Node too,
+/// so running it on thaw-js behaves the same:
+/// - `process.type|browser|__nwjs|allowedNodeEnvironmentFlags`: absent on Node (read as `undefined`) -- `debug` probes them to pick its browser entry;
+/// - `debug`'s browser entry is never selected by that probe; its `supports-color` require is try/catch-optional;
+/// - `node:assert` inspects with `require(['node','util'].join(':'))` inside a try/catch;
+/// - axios: `AxiosHeaders` accessors are installed from a name list (`getContentType`, ...), `zlib.createZstdDecompress`
+///   is feature-tested, `postMessage`/`send` sit behind `typeof` / XHR-only paths, `isDeepStrictEqual` is http2 session
+///   reuse (http2 needs TLS, which thaw-js does not link), `onSocket` is `agent-base`'s `typeof` check.
+fn tolerated(feature: &str, key: &str) -> bool {
+    const AXIOS_METHODS: &[&str] = &[
+        "method:getContentType",
+        "method:getContentLength",
+        "method:hasContentLength",
+        "method:setContentType",
+        "method:setContentLength",
+        "method:createZstdDecompress",
+        "method:postMessage",
+        "method:send",
+        "method:isDeepStrictEqual",
+    ];
+    matches!(
+        feature,
+        "builtin:process.type"
+            | "builtin:process.browser"
+            | "builtin:process.__nwjs"
+            | "builtin:process.allowedNodeEnvironmentFlags"
+    ) || key.ends_with("debug/src/browser.js")
+        || (feature == "require:supports-color" && key.ends_with("debug/src/node.js"))
+        || (feature == "require:dynamic" && key == "node:assert")
+        || (AXIOS_METHODS.contains(&feature) && key.ends_with("axios/./dist/node/axios.cjs"))
+        // iconv-lite calls the caller's optional `options.stripBOM` only after `typeof ... === 'function'`
+        || (feature == "method:stripBOM" && key.ends_with("iconv-lite/lib/bom-handling.js"))
+        || (feature == "method:onSocket" && key.ends_with("agent-base/dist/src/index.js"))
+}
+
 /// Scan a registry bundle.
 pub fn scan_bundle(source: &str) -> Result<Report, String> {
     let parts = parse_bundle(source)?;
@@ -504,7 +589,7 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
         "undefined",
     ];
     let add = |report: &mut Report, feature: String, n: usize, key: &str| {
-        if crate::SUPPORTED_FEATURES.contains(&feature.as_str()) {
+        if crate::SUPPORTED_FEATURES.contains(&feature.as_str()) || tolerated(&feature, key) {
             return;
         }
         let e = report
