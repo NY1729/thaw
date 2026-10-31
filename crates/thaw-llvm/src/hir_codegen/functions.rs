@@ -426,12 +426,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     None => name,
                 };
                 let loc = self.stack_locs.get(function.get_name().to_string_lossy().as_ref());
-                let name = self.builder.build_global_string_ptr(name, "stack_fn_name").map_err(|e| e.to_string())?;
+                let name = self.intern_string(name, "stack_fn_name").map_err(|e| e.to_string())?;
                 let file = match loc {
                     Some(loc) => *match files.entry(loc.file.clone()) {
                         std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                         std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
-                            self.builder.build_global_string_ptr(&loc.file, "stack_fn_file").map_err(|e| e.to_string())?.as_pointer_value(),
+                            self.intern_string(&loc.file, "stack_fn_file").map_err(|e| e.to_string())?.as_pointer_value(),
                         ),
                     },
                     None => pointer.const_null(),
@@ -468,7 +468,7 @@ impl<'ctx> HirCompiler<'ctx> {
             });
             global.as_pointer_value()
         };
-        let file = self.builder.build_global_string_ptr(&self.module.get_name().to_string_lossy(), "stack_file")
+        let file = self.intern_string(&self.module.get_name().to_string_lossy(), "stack_file")
             .map_err(|e| e.to_string())?;
         let register = self.module.get_function("thaw_register_fn_table").unwrap();
         self.builder

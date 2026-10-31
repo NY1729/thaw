@@ -15,12 +15,18 @@ use thaw_parser::common::{SourceMapper, Spanned};
 use crate::builtins::json_quote;
 use crate::host::Native;
 
-/// The JSON payload of `globalThis.__thaw_register_native_bundle("<json>")`, if `source` is one.
-fn native_payload(source: &str) -> Option<String> {
-    // only the pure native shape; a mixed bundle (CommonJS factories plus native modules) is left alone
+/// The JSON payload literal of `globalThis.__thaw_register_native_bundle("<json>")` and whether
+/// `source` is the pure native shape (otherwise a mixed bundle: CommonJS factories plus native modules).
+fn native_payload(source: &str) -> Option<(String, bool)> {
     const HEAD: &str =
         "module.exports = (function() {\nvar entry = globalThis.__thaw_register_native_bundle(";
-    let start = source.starts_with(HEAD).then_some(HEAD.len())?;
+    const CALL: &str = "globalThis.__thaw_register_native_bundle(";
+    let pure = source.starts_with(HEAD);
+    let start = if pure {
+        HEAD.len()
+    } else {
+        source.find(CALL)? + CALL.len()
+    };
     // a JavaScript string literal: find the closing quote, honouring backslash escapes
     let rest = source.get(start..)?;
     let mut chars = rest.char_indices();
@@ -35,7 +41,7 @@ fn native_payload(source: &str) -> Option<String> {
         } else if c == '\\' {
             escaped = true;
         } else if c == quote {
-            return Some(rest[..=i].to_string());
+            return Some((rest[..=i].to_string(), pure));
         }
     }
     None
@@ -82,6 +88,8 @@ fn export_name(n: &a::ModuleExportName) -> String {
     }
 }
 
+const ORIGIN_SPEC: &str = "__thaw_private_origin_spec/";
+
 fn getter(name: &str, expr: &str) -> String {
     let mut quoted = String::new();
     json_quote(name, &mut quoted);
@@ -122,7 +130,7 @@ fn reassigned_names(module: &a::Module) -> BTreeSet<String> {
     v.0
 }
 
-fn convert(source: &str) -> Result<Converted, String> {
+fn convert(source: &str, public_specs: &[String]) -> Result<Converted, String> {
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(source)?;
     let snippet = |span| cm.span_to_snippet(span).unwrap_or_default();
     let mut head = String::from(
@@ -136,6 +144,7 @@ fn convert(source: &str) -> Result<Converted, String> {
     let mut specs: Vec<String> = Vec::new();
     let mut problems: Vec<&'static str> = Vec::new();
     let mut counter = 0usize;
+    let mut uses_origin = false;
     let reassigned = reassigned_names(&module);
     fn tmp(counter: &mut usize) -> String {
         *counter += 1;
@@ -150,6 +159,29 @@ fn convert(source: &str) -> Result<Converted, String> {
             a::ModuleItem::ModuleDecl(decl) => match decl {
                 a::ModuleDecl::Import(i) => {
                     let spec = i.src.value.to_string_lossy().into_owned();
+                    if spec.starts_with(ORIGIN_SPEC) {
+                        // the registry's per-module origin: `readDefault("node:os")` etc. on literal requires
+                        let table: Vec<String> = public_specs
+                            .iter()
+                            .map(|p| {
+                                let mut q = String::new();
+                                json_quote(p, &mut q);
+                                specs.push(p.clone());
+                                format!("{q}: function () {{ return require({q}); }}")
+                            })
+                            .collect();
+                        for sp in &i.specifiers {
+                            if let a::ImportSpecifier::Named(n) = sp {
+                                body.push_str(&format!(
+                                    "var {} = __thaw_esm_origin_obj({{ {} }});\n",
+                                    n.local.sym,
+                                    table.join(", ")
+                                ));
+                            }
+                        }
+                        uses_origin = true;
+                        continue;
+                    }
                     let mut q = String::new();
                     json_quote(&spec, &mut q);
                     specs.push(spec);
@@ -297,6 +329,12 @@ fn convert(source: &str) -> Result<Converted, String> {
             },
         }
     }
+    if uses_origin {
+        head.push_str(
+            "function __thaw_esm_origin_obj(t) { return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, \
+             read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); } }; }\n",
+        );
+    }
     Ok(Converted {
         body: format!("{head}{body}"),
         specs,
@@ -304,12 +342,16 @@ fn convert(source: &str) -> Result<Converted, String> {
     })
 }
 
+/// The factory text, the unsound-construct feature names, and whether the bundle is the pure native shape.
+pub(crate) type NativeBundle = (String, BTreeSet<&'static str>, bool);
+
 /// Rewrite a native bundle into the registry's CommonJS factory bundle text. `Ok(None)`: `source`
 /// is not a native bundle. Problems that make the rewrite unsound are returned as feature names.
-pub(crate) fn native_bundle_to_factories(
-    source: &str,
-) -> Result<Option<(String, BTreeSet<&'static str>)>, String> {
-    let Some(literal) = native_payload(source) else {
+///
+/// For a mixed bundle the result is only the native modules' factories and maps (no entry key): the caller
+/// appends it to the original text, where its factories replace the stubs of the same key.
+pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBundle>, String> {
+    let Some((literal, pure)) = native_payload(source) else {
         return Ok(None);
     };
     // the payload is a JS string literal holding JSON
@@ -329,6 +371,17 @@ pub(crate) fn native_bundle_to_factories(
     let Some(Native::Array(modules)) = field(&root, "modules") else {
         return Err("native bundle has no modules".into());
     };
+    // opaque edges name the CommonJS factory behind an import of a non-native module
+    let mut opaque: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(Native::Array(edges)) = field(&root, "opaqueEdges") {
+        for e in edges {
+            if let Native::Object(f) = e {
+                if let (Some(k), Some(t)) = (text(field(f, "key")), text(field(f, "factory"))) {
+                    opaque.insert(k.to_string(), t.to_string());
+                }
+            }
+        }
+    }
     let mut factories = String::new();
     let mut maps = String::new();
     let mut problems: BTreeSet<&'static str> = BTreeSet::new();
@@ -339,16 +392,22 @@ pub(crate) fn native_bundle_to_factories(
             .ok_or("native module without key")?
             .to_string();
         let src = text(field(fields, "source")).ok_or("native module without source")?;
-        let converted = convert(src)?;
-        problems.extend(converted.problems);
         let mut imports: Vec<(String, String)> = Vec::new();
         if let Some(Native::Object(map)) = field(fields, "imports") {
             for (spec, target) in map {
                 if let Native::Str(t) = target {
+                    if spec.starts_with(ORIGIN_SPEC) || t.starts_with("__thaw_private_origin_key/")
+                    {
+                        continue;
+                    }
+                    let t = opaque.get(t).unwrap_or(t);
                     imports.push((spec.clone(), t.clone()));
                 }
             }
         }
+        let public: Vec<String> = imports.iter().map(|(s, _)| s.clone()).collect();
+        let converted = convert(src, &public)?;
+        problems.extend(converted.problems);
         graph.insert(
             key.clone(),
             imports
@@ -399,8 +458,13 @@ pub(crate) fn native_bundle_to_factories(
     }
     let mut qm = String::new();
     json_quote(&main, &mut qm);
+    let entry = if pure {
+        format!("var __thaw_bundle_entry_key = {qm};\n")
+    } else {
+        String::new()
+    };
     let bundle = format!(
-        "module.exports = (function (require) {{\nvar __thaw_bundle_factories = {{\n{factories}}};\nvar __thaw_bundle_require_maps = {{\n{maps}}};\nvar __thaw_bundle_entry_key = {qm};\n}})(globalThis.require);\n"
+        "module.exports = (function (require) {{\nvar __thaw_bundle_factories = {{\n{factories}}};\nvar __thaw_bundle_require_maps = {{\n{maps}}};\n{entry}}})(globalThis.require);\n"
     );
-    Ok(Some((bundle, problems)))
+    Ok(Some((bundle, problems, pure)))
 }

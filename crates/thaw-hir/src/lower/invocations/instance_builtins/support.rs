@@ -25,12 +25,10 @@ fn date_object_type() -> HirType {
 /// JavaScript's `SameValueZero` degenerates to `===` for non-primitive
 /// keys). `Optional`/`Nullable`/`Nullish`/`Union` don't fit `"ref"`:
 /// they're inline tagged structs, not a single pointer, so there's no
-/// stable identity word to hash. `Function`/`CallableFunction` don't
-/// either, for a different reason: referencing the same top-level named
-/// function as a value builds a fresh closure-ABI wrapper each time
-/// (confirmed empirically -- `f === f` is observably `false` here), so
-/// there is no stable identity to key by even though the value is
-/// pointer-shaped. Any other key type is rejected at `Map<K, V>`/
+/// stable identity word to hash. Function values are single closure
+/// pointers with a stable identity (named functions and method references
+/// are interned constants, second ABI views are aliased; see
+/// `coerce_map_key`, which resolves that alias), so they key as `"ref"`. Any other key type is rejected at `Map<K, V>`/
 /// `Set<T>` resolution time (`type_resolution.rs`) and at
 /// `new Map<K, V>()`/`new Set<T>()` construction time, so this should
 /// never actually fail once a `Map`/`Set` value exists, but a lowering
@@ -63,7 +61,9 @@ fn map_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String> 
         | HirType::Map(_, _)
         | HirType::WeakMap(_, _)
         | HirType::Set(_)
-        | HirType::WeakSet(_) => Ok("ref"),
+        | HirType::WeakSet(_)
+        | HirType::Function(_, _)
+        | HirType::CallableFunction(_, _, _, _) => Ok("ref"),
         other => Err(format!(
             "Map/Set keys must be `number`, `string`, or a reference type \
              (object, array, ...), got {other:?}"
