@@ -1301,6 +1301,89 @@ var __thaw_bundle_entry_key = \"p/index.js\";
     assert!(!crate::scan::scan_bundle(&unguarded).unwrap().is_clean());
 }
 
+const DATES: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"d/index.js": function(module, exports, require) {
+  exports.iso = function (d) { return d.toISOString(); };
+  exports.plus = function (d, n) { return new Date(d.getTime() + n); };
+  exports.bad = function (d) { return isNaN(d.getTime()); };
+  exports.nested = function () { return { at: new Date(5), n: [new Date(7)], none: new Date(NaN) }; };
+},
+};
+var __thaw_bundle_require_maps = { "d/index.js": {}, };
+var __thaw_bundle_entry_key = "d/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn a_date_crosses_the_typed_abi_as_a_wire_node_both_ways() {
+    use std::ffi::CString;
+    let bundle = CString::new(DATES).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"dt".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    let date = |ms: &str| format!("{{\"__thaw_tjs_date__\":{ms}}}");
+    assert_eq!(
+        typed_call("dt::iso", &format!("[{}]", date("86400000"))).unwrap(),
+        "\"1970-01-02T00:00:00.000Z\""
+    );
+    // an Invalid Date crosses as "NaN" (or null, how compiled JSON spells NaN)
+    for nan in ["\"NaN\"", "null"] {
+        assert_eq!(
+            typed_call("dt::bad", &format!("[{}]", date(nan))).unwrap(),
+            "true"
+        );
+    }
+    // a Date result is a live handle, unless the caller asks for the wire node (`\u{3}`)
+    assert!(typed_call("dt::plus", &format!("[{},5]", date("86400000")))
+        .unwrap()
+        .starts_with("{\"__thaw_tjs_handle__\":"));
+    assert_eq!(
+        typed_call("\u{3}dt::plus", &format!("[{},5]", date("86400000"))).unwrap(),
+        date("86400005")
+    );
+    assert_eq!(
+        typed_call("dt::nested", "[]").unwrap(),
+        format!(
+            "{{\"at\":{},\"n\":[{}],\"none\":{}}}",
+            date("5"),
+            date("7"),
+            date("\"NaN\"")
+        )
+    );
+}
+
+#[test]
+fn graph_wire_date_bigint_regexp_map_and_set_nodes_decode() {
+    use crate::host::*;
+    use std::ffi::{CStr, CString};
+    let bundle = CString::new(MINI).unwrap();
+    assert_eq!(thaw_tjs_register(c"gw".as_ptr(), bundle.as_ptr()), 1);
+    let text_of = |wire: &str| {
+        let wire = CString::new(wire).unwrap();
+        let handle = thaw_tjs_retain_graph_result(wire.as_ptr());
+        assert!(handle.error.is_null(), "{wire:?}");
+        // SAFETY: a NUL-terminated string owned by the handle table.
+        unsafe { CStr::from_ptr(thaw_tjs_handle_to_string(handle.value)) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let one = |node: &str| {
+        format!(r#"{{"root":{{"r":0}},"nodes":[{node}],"leases":[],"napiLeases":[]}}"#)
+    };
+    assert!(text_of(&one(r#"{"d":17280000000}"#)).contains("1970"));
+    assert_eq!(text_of(&one(r#"{"d":null}"#)), "Invalid Date");
+    assert_eq!(
+        text_of(&one(r#"{"bi":"123456789012345678901234567890"}"#)),
+        "123456789012345678901234567890"
+    );
+    assert_eq!(text_of(&one(r#"{"re":["a+","gi",0]}"#)), "/a+/gi");
+    let set = r#"{"root":{"r":0},"nodes":[{"s":{"r":1}},{"a":[{"v":1},{"v":2},{"v":2}]}],"leases":[],"napiLeases":[]}"#;
+    assert_eq!(text_of(set), "[object Set]");
+    let map = r#"{"root":{"r":0},"nodes":[{"m":{"r":1}},{"a":[{"r":2}]},{"a":[{"v":"k"},{"v":1}]}],"leases":[],"napiLeases":[]}"#;
+    assert_eq!(text_of(map), "[object Map]");
+}
+
 #[cfg(feature = "intl")]
 #[test]
 fn intl_formats_numbers_dates_and_lists_through_the_native_icu_data() {
