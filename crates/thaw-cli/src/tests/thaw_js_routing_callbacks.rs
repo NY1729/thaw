@@ -236,3 +236,62 @@ fn thaw_js_routing_passes_class_instances_back_into_the_package() {
     assert_eq!(thaw_js_run(&output), "12 24 b=11\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A package function returning a class instance (dayjs-style factory whose instances define `toJSON`
+/// and `valueOf`) is served by thaw-js: the instance stays a live handle through method chains.
+#[test]
+fn thaw_js_routing_serves_a_function_returning_a_class_instance() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-factory-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("tjs-fac");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Box {\n\
+           add(n: number): Box;\n\
+           label(prefix: string): string;\n\
+         }\n\
+         export declare function make(v?: any): Box;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = (function(require){\n\
+         var __thaw_bundle_factories = {\n\
+         \"tjs-fac/index.js\": function(module, exports, require) {\n\
+           class Box {\n\
+             constructor(v) { this.v = v; }\n\
+             add(n) { return new Box(this.v + n); }\n\
+             label(prefix) { return prefix + this.v; }\n\
+             valueOf() { return this.v; }\n\
+             toJSON() { return 'box:' + this.v; }\n\
+           }\n\
+           exports.make = function (v) { return new Box(v === undefined ? 0 : v); };\n\
+         },\n\
+         };\n\
+         var __thaw_bundle_require_maps = { \"tjs-fac/index.js\": {}, };\n\
+         var __thaw_bundle_entry_key = \"tjs-fac/index.js\";\n\
+         var __thaw_entry = { exports: {} };\n\
+         __thaw_bundle_factories[__thaw_bundle_entry_key](__thaw_entry, __thaw_entry.exports, require);\n\
+         return __thaw_entry.exports;\n\
+         })(globalThis.require);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { make } from 'tjs-fac';\n\
+         function main(): void {\n\
+           const b = make(5);\n\
+           console.log(b.add(2).add(3).label('v='));\n\
+           console.log(b.valueOf());\n\
+         }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-fac"]));
+    assert_eq!(thaw_js_run(&output), "v=10\n5\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
