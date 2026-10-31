@@ -315,7 +315,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         "__thaw_bytes_widen_list" | "__thaw_bytes_narrow_list" => {
                             return Some(HirType::Array(Box::new(HirType::Array(Box::new(HirType::F64)))))
                         }
-                        "__thaw_json_own_keys" => {
+                        "__thaw_json_own_keys" | "__thaw_json_own_symbols" => {
                             return Some(HirType::Array(Box::new(HirType::Json)))
                         }
                         "__thaw_json_values"

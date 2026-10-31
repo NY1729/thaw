@@ -591,7 +591,15 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_store(slot, json).map_err(|error| error.to_string())?;
         self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
         self.builder.position_at_end(plain);
-        let json = self.compile_native_array_to_json_with_undefined(array, element, true)?;
+        let mut json = self.compile_native_array_to_json_with_undefined(array, element, true)?;
+        if *element == HirType::Optional(Box::new(HirType::Str)) {
+            // `exec`/`match` results print their `index`/`input`/`groups` like Node.
+            json = self.builder.build_call(
+                self.module.get_function("thaw_regex_console_wrap").unwrap(),
+                &[array.into(), json.into()], "regex_console_wrap",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("regex console wrap returned no value")?;
+        }
         self.builder.build_store(slot, json).map_err(|error| error.to_string())?;
         self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
         self.builder.position_at_end(done);

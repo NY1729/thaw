@@ -192,6 +192,20 @@ fn is_hidden_accessor_field(name: &str) -> bool {
 /// storage only and is never an own property (keys, JSON, spread, clone).
 const PRIVATE_SLOT_PREFIX: &str = "__thaw_private_";
 
+/// Whether an object field name is a Symbol key's wire text (`\u{1f}@@name` for a
+/// well-known Symbol, `\u{3}<id>:desc` / `\u{3}R<id>:key` for a unique / registered one).
+pub fn is_symbol_key_wire(name: &str) -> bool {
+    if name.starts_with("\u{1f}@@") {
+        return true;
+    }
+    let Some(rest) = name.strip_prefix('\u{3}') else {
+        return false;
+    };
+    let rest = rest.strip_prefix('R').unwrap_or(rest);
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && matches!(rest.as_bytes().get(digits), None | Some(b':'))
+}
+
 fn ecmascript_field_order<T>(fields: &[(Symbol, T)]) -> Vec<usize> {
     let mut indices = fields
         .iter()
