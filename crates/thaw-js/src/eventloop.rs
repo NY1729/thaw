@@ -966,6 +966,12 @@ impl Interp {
 
     // ----- installation -----
 
+    /// Advance the timer base by `ms` (start-up work that must not count against program timers).
+    #[cfg(feature = "intl")]
+    pub(crate) fn skip_timer_clock(&mut self, ms: f64) {
+        self.rt.now += ms;
+    }
+
     pub(crate) fn install_eventloop(&mut self) {
         let g = self.global.clone();
         self.rt.now = clock_ms() - 2.0;
