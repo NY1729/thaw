@@ -137,11 +137,20 @@ pub struct Package {
 impl Package {
     /// Parse `bundle_js` (registry `bundle.js`) and evaluate its entry module.
     pub fn load(bundle_js: &str) -> Result<Package, HostError> {
+        Self::load_with_stack(bundle_js, 0)
+    }
+
+    /// As [`Package::load`], limiting recursion by the real stack (`stack_bytes` available from here)
+    /// instead of the fixed call depth; 0 keeps the depth cap.
+    pub fn load_with_stack(bundle_js: &str, stack_bytes: usize) -> Result<Package, HostError> {
         let parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
         if let Some(problem) = parts.esm_problems.iter().next() {
             return Err(HostError::Unsupported((*problem).to_string()));
         }
         let mut interp = Box::new(Interp::new());
+        if stack_bytes != 0 {
+            interp.configure_stack(stack_bytes);
+        }
         interp.run_id += 1; // factory spans come from this one parse
         interp
             .sources
@@ -396,9 +405,21 @@ pub extern "C" fn thaw_tjs_release_handle(handle: i64) -> u8 {
 
 /// What a class operation does (the symbol prefix compiled code passes).
 enum ClassOp<'a> {
-    New { class: &'a str },
-    Method { receiver: i64, name: &'a str },
-    Static { class: &'a str, name: &'a str },
+    New {
+        class: &'a str,
+    },
+    /// `$value$pkg::name$arity0`: the export itself, kept as a handle
+    Value {
+        path: &'a str,
+    },
+    Method {
+        receiver: i64,
+        name: &'a str,
+    },
+    Static {
+        class: &'a str,
+        name: &'a str,
+    },
 }
 
 /// `$new$pkg::Class$arityN[...]` / `$method$pkg::Class$name$overloadK$arityN` /
@@ -426,6 +447,7 @@ fn class_call(
         .ok_or_else(|| HostError::Bundle(format!("malformed class symbol `{symbol}`")))?;
     let op = match kind {
         "new" => ClassOp::New { class: class_path },
+        "value" => ClassOp::Value { path: class_path },
         "method" | "methodvoid" => ClassOp::Method {
             receiver,
             name: member.unwrap_or(""),
@@ -466,6 +488,7 @@ fn class_call(
                 let it = &mut p.interp;
                 it.construct(&ctor, &args).map_err(|c| classify(it, c))?
             }
+            ClassOp::Value { path } => p.exports_member(path)?,
             ClassOp::Method { receiver, name } => {
                 let this = HANDLES
                     .with(|h| {
@@ -1229,6 +1252,183 @@ pub extern "C" fn thaw_tjs_call_selected_method_handle_graph_args_result(
     })())
 }
 
+/// A handle on the global `name`: `pkg::Class.path` is a member of that package's exports (the
+/// qualified names the class shims use), anything else a property of the global object (dotted paths
+/// walk nested properties). 0 when it does not exist.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_get_global(name: *const c_char) -> i64 {
+    let Some(name) = cstr(name) else { return 0 };
+    let found = (|| -> Result<Option<(usize, Value)>, HostError> {
+        if let Some((package, path)) = name.split_once("::") {
+            let Some(handle) = BY_NAME.with(|m| m.borrow().get(package).copied()) else {
+                return Ok(None);
+            };
+            return with_package(handle, |p| p.exports_member(path)).map(|v| Some((handle, v)));
+        }
+        let handle = LAST_PACKAGE.with(|l| l.get());
+        with_package(handle, |p| {
+            let it = &mut p.interp;
+            let mut parts = name.split('.');
+            let first = parts.next().unwrap_or("");
+            let mut value = it
+                .lookup(&it.global.clone(), first)
+                .unwrap_or(Value::Undefined);
+            for part in parts {
+                value = it.get(&value, part).map_err(|c| classify(it, c))?;
+            }
+            Ok(value)
+        })
+        .map(|v| Some((handle, v)))
+    })();
+    match found {
+        Ok(Some((package, value))) if !matches!(value, Value::Undefined) => {
+            store_handle(package, value)
+        }
+        _ => {
+            if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+                eprintln!("thaw-js get_global: `{name}` is not defined");
+            }
+            0
+        }
+    }
+}
+
+/// `new handle(...args)`; the instance is kept as a new handle.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_construct_handle_graph_args_result(
+    handle: u64,
+    args_json: *const c_char,
+) -> HandleResult {
+    handle_result((|| {
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (_, args) = decode_wire(&args_json)?;
+        on_handle(handle, |p, owner, ctor| {
+            let it = &mut p.interp;
+            let args = it.array_items(&args);
+            let value = it.construct(&ctor, &args).map_err(|c| classify(it, c))?;
+            Ok(store_handle(owner, value))
+        })
+    })())
+}
+
+/// `handle(...args)` with an `undefined` receiver; the result is kept as a new handle.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_call_handle_handle_graph_args_result(
+    handle: u64,
+    args_json: *const c_char,
+    _defer_resolution: bool,
+) -> HandleResult {
+    // ponytail: a returned Promise is not awaited here (QuickJS resolves it when not deferred)
+    handle_result((|| {
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (_, args) = decode_wire(&args_json)?;
+        on_handle(handle, |p, owner, f| {
+            let it = &mut p.interp;
+            let args = it.array_items(&args);
+            let value = it
+                .call(&f, &Value::Undefined, &args)
+                .map_err(|c| classify(it, c))?;
+            Ok(store_handle(owner, value))
+        })
+    })())
+}
+
+/// `handle(...args)` with an `undefined` receiver; the result is a plain graph wire (a Promise result is
+/// not awaited, like [`thaw_tjs_call_handle_handle_graph_args_result`]).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_call_handle_graph_result(
+    handle: u64,
+    args_json: *const c_char,
+) -> ThawResult {
+    graph_result((|| {
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (_, args) = decode_wire(&args_json)?;
+        on_handle(handle, |p, owner, f| {
+            let it = &mut p.interp;
+            let args = it.array_items(&args);
+            let result = it
+                .call(&f, &Value::Undefined, &args)
+                .map_err(|c| classify(it, c))?;
+            let mut out = WireOut {
+                owner,
+                plain: true,
+                live_functions: false,
+                copy_root: false,
+                receiver: None,
+                nodes: Vec::new(),
+                seen: Vec::new(),
+                leases: Vec::new(),
+            };
+            let root = out.token(it, &result)?;
+            Ok(out.finish(root))
+        })
+    })())
+}
+
+/// The compiler-private exact call: `handle(...args, ...direct handles)`, consuming the callee and every
+/// direct handle (`handles` is `[count, h1, ...]`); a returned value or a thrown value gets its own handle.
+///
+/// # Safety
+/// `handles` is a live native handle array (`[u64 count][u64; count]`).
+#[no_mangle]
+pub unsafe extern "C" fn thaw_tjs_call_handle_mixed_exact_consuming_result(
+    handle: u64,
+    args_json: *const c_char,
+    handles: *const u8,
+) -> ExactResult {
+    let none = ExactResult {
+        value: 0,
+        exception_handle: 0,
+        exception_object_like: 0,
+        error: ptr::null_mut(),
+    };
+    let direct: Option<Vec<u64>> = (!handles.is_null()).then(|| {
+        let count = unsafe { *(handles.cast::<u64>()) } as usize;
+        unsafe { std::slice::from_raw_parts(handles.add(8).cast::<u64>(), count) }.to_vec()
+    });
+    let outcome: Result<Result<i64, (i64, bool)>, String> = (|| {
+        let direct = direct.as_ref().ok_or("null JsValue array")?;
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (_, args) = decode_wire(&args_json)?;
+        let mut values = Vec::new();
+        for h in direct {
+            values.push(on_handle(*h, |_, _, v| Ok(v))?);
+        }
+        on_handle(handle, |p, owner, f| {
+            let it = &mut p.interp;
+            let mut args = it.array_items(&args);
+            args.extend(values);
+            Ok(match it.call(&f, &Value::Undefined, &args) {
+                Ok(v) => Ok(store_handle(owner, v)),
+                Err(Ctl::Throw(t)) => {
+                    let like = matches!(t, Value::Object(_));
+                    Err((store_handle(owner, t), like))
+                }
+                Err(c) => return Err(classify(it, c)),
+            })
+        })
+    })();
+    for h in direct.into_iter().flatten() {
+        thaw_tjs_release_handle(h as i64);
+    }
+    thaw_tjs_release_handle(handle as i64);
+    match outcome {
+        Ok(Ok(value)) => ExactResult {
+            value: value as u64,
+            ..none
+        },
+        Ok(Err((thrown, like))) => ExactResult {
+            exception_handle: thrown as u64,
+            exception_object_like: u8::from(like),
+            ..none
+        },
+        Err(e) => ExactResult {
+            error: thaw_arena::owned_string(e),
+            ..none
+        },
+    }
+}
+
 /// The value behind `handle` as a plain graph wire (a JSON-like copy).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_resolve_handle_graph_result(handle: u64) -> ThawResult {
@@ -1870,7 +2070,7 @@ pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) 
     if std::env::var_os("THAW_JS_TRACE").is_some() {
         eprintln!("thaw-js: loading package `{name}`");
     }
-    match Package::load(&src) {
+    match Package::load_with_stack(&src, process_stack_bytes()) {
         Ok(p) => {
             PACKAGES.with(|ps| {
                 let mut ps = ps.borrow_mut();
@@ -1883,6 +2083,26 @@ pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) 
             LAST_ERROR.with(|l| *l.borrow_mut() = e.to_string());
             0
         }
+    }
+}
+
+/// The main thread's stack limit (`RLIMIT_STACK`), capped at 1 GiB (256 MiB when unlimited); 0 when unknown.
+fn process_stack_bytes() -> usize {
+    #[repr(C)]
+    struct RLimit {
+        cur: u64,
+        max: u64,
+    }
+    extern "C" {
+        fn getrlimit(resource: i32, rlim: *mut RLimit) -> i32;
+    }
+    let mut r = RLimit { cur: 0, max: 0 };
+    // SAFETY: `r` is a valid out-pointer; RLIMIT_STACK is 3 on Linux and macOS.
+    let ok = unsafe { getrlimit(3, &mut r) } == 0;
+    match (ok, r.cur) {
+        (true, u64::MAX) => 256 << 20,
+        (true, cur) => (cur as usize).min(1 << 30),
+        _ => 0,
     }
 }
 
