@@ -15,7 +15,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
-use thaw_arena::wtf8_decode_utf16;
+use thaw_arena::wtf8_decode_utf16 as arena_wtf8_decode_utf16;
 
 include!("../../thaw-quickjs/src/quickjs/intl.rs");
 include!("../../thaw-quickjs/src/quickjs/intl_time_zone_names.rs");
@@ -25,27 +25,10 @@ include!("../../thaw-quickjs/src/quickjs/intl_datetime.rs");
 include!("../../thaw-quickjs/src/quickjs/intl_number.rs");
 include!("../../thaw-quickjs/src/quickjs/intl_number_style.rs");
 include!("../../thaw-quickjs/src/quickjs/intl_collator.rs");
-
-/// Replaces each 3-byte WTF-8 lone surrogate with U+FFFD (same as thaw-quickjs's
-/// `wtf8_to_icu_text`, which lives in its segmenter file).
-fn wtf8_to_icu_text(bytes: &[u8]) -> String {
-    let mut fixed = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == 0xED
-            && index + 2 < bytes.len()
-            && (0xA0..=0xBF).contains(&bytes[index + 1])
-            && bytes[index + 2] & 0xC0 == 0x80
-        {
-            fixed.extend_from_slice("\u{FFFD}".as_bytes());
-            index += 3;
-        } else {
-            fixed.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(fixed).unwrap_or_default()
-}
+include!("../../thaw-quickjs/src/quickjs/intl_list.rs");
+include!("../../thaw-quickjs/src/quickjs/intl_plurals.rs");
+include!("../../thaw-quickjs/src/quickjs/intl_relative_time.rs");
+include!("../../thaw-quickjs/src/quickjs/intl_segmenter.rs");
 
 unsafe fn bytes<'a>(value: *const c_char) -> &'a [u8] {
     if value.is_null() {
@@ -155,7 +138,7 @@ pub unsafe extern "C" fn thaw_intl_compare(
             .and_then(|(_, collator)| collator.as_ref())
             .map(|collator| collator.as_borrowed().compare(&a_text, &b_text))
     });
-    match order.unwrap_or_else(|| wtf8_decode_utf16(a).cmp(&wtf8_decode_utf16(b))) {
+    match order.unwrap_or_else(|| arena_wtf8_decode_utf16(a).cmp(&arena_wtf8_decode_utf16(b))) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
@@ -526,4 +509,97 @@ pub unsafe extern "C" fn thaw_intl_date(
     let locale = resolve_locale(&unsafe { text(locales) });
     let options = parse_options(&unsafe { text(opts) });
     to_native(&format_date(timestamp, &locale, &options, kind as i32))
+}
+
+/// The `__thaw_intl_*` natives the shared `Intl` polyfill (`thaw-quickjs`'s `platform_globals/intl.js`)
+/// feature-detects, for embedders (thaw-js) that hold JS values themselves. Every argument arrives as a
+/// string (numbers in `f64` display form, booleans as `"true"`/`"false"`); `None` = unknown name.
+/// `currencyFractionDigits` answers `""` for an unknown currency, `collator_compare` the decimal `-1/0/1`.
+pub const JS_NATIVES: &[&str] = &[
+    "zoned_parts",
+    "locale_parse",
+    "locale_resolve",
+    "datetime_resolved_options",
+    "locale_maximize",
+    "locale_minimize",
+    "number_format",
+    "compact_number",
+    "currency_fraction_digits",
+    "percent_format",
+    "percent_format_large",
+    "currency_format",
+    "currency_format_large",
+    "unit_format",
+    "unit_format_large",
+    "time_zone_name",
+    "relative_time_format",
+    "segment",
+    "collator_compare",
+    "plural_category",
+    "plural_categories",
+    "list_format",
+    "datetime_format_parts",
+    "datetime_skeleton_parts",
+];
+
+pub fn js_native(name: &str, a: &[String]) -> Option<String> {
+    let s = |i: usize| a.get(i).map_or("", String::as_str);
+    let f = |i: usize| s(i).parse::<f64>().unwrap_or(f64::NAN);
+    let b = |i: usize| s(i) == "true";
+    Some(match name {
+        "zoned_parts" => intl_zoned_parts_json(s(0), f(1)),
+        "locale_parse" => intl_locale_parse_json(s(0)),
+        "locale_resolve" => intl_locale_resolve_json(s(0)),
+        "datetime_resolved_options" => intl_datetime_resolved_options_json(s(0)),
+        "locale_maximize" => intl_locale_maximize_json(s(0)),
+        "locale_minimize" => intl_locale_minimize_json(s(0)),
+        "number_format" => intl_number_format(s(0), s(1), b(2)),
+        "compact_number" => intl_compact_number(s(0), s(1), b(2)),
+        "currency_fraction_digits" => {
+            intl_currency_fraction_digits(s(0)).map_or(String::new(), |d| d.to_string())
+        }
+        "percent_format" => intl_percent_format(s(0), s(1), b(2)).unwrap_or_default(),
+        "percent_format_large" => {
+            intl_percent_format_large(s(0), s(1), s(2), b(3)).unwrap_or_default()
+        }
+        "currency_format" => intl_currency_format(s(0), s(1), s(2), s(3), b(4)).unwrap_or_default(),
+        "currency_format_large" => {
+            intl_currency_format_large(s(0), s(1), s(2), s(3), s(4), b(5)).unwrap_or_default()
+        }
+        "unit_format" => intl_unit_format(s(0), s(1), s(2), s(3), b(4)).unwrap_or_default(),
+        "unit_format_large" => {
+            intl_unit_format_large(s(0), s(1), s(2), s(3), s(4), b(5)).unwrap_or_default()
+        }
+        "time_zone_name" => {
+            intl_time_zone_name(s(0), s(1), f(2), f(3) as i32, b(4)).unwrap_or_default()
+        }
+        "relative_time_format" => intl_relative_time_format(s(0), s(1), s(2), s(3), f(4)),
+        "segment" => intl_segment(s(0), s(1), s(2).as_bytes()),
+        "collator_compare" => intl_collator_compare(
+            s(0),
+            s(1),
+            b(2),
+            b(3),
+            s(4),
+            s(5).as_bytes(),
+            s(6).as_bytes(),
+        )
+        .to_string(),
+        "plural_category" => intl_plural_category(s(0), s(1), s(2)),
+        "plural_categories" => intl_plural_categories(s(0), s(1)),
+        "list_format" => intl_list_format(s(0), s(1), s(2), s(3)),
+        "datetime_format_parts" => intl_datetime_format_parts_json(s(0), s(1), s(2)),
+        "datetime_skeleton_parts" => intl_datetime_skeleton_parts_native(s(0), s(1), s(2)),
+        _ => return None,
+    })
+}
+
+/// Referenced by embedders that re-export this crate's `thaw_intl_*` C symbols from their own staticlib,
+/// so the linker keeps them.
+pub fn keep_c_exports() -> [usize; 3] {
+    [
+        thaw_intl_compare as *const () as usize,
+        thaw_intl_number as *const () as usize,
+        thaw_intl_date as *const () as usize,
+    ]
 }
