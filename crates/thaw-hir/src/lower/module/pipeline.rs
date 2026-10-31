@@ -348,6 +348,9 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = normalize_implicit_returns(&normalized);
     let normalized = infer_collection_type_args(&normalized);
     let normalized = normalize_any_async_call_aliases(&normalized);
+    let normalized = hoist_top_level_vars(&normalized);
+    let normalized = throw_top_level_class_tdz(&normalized);
+    let normalized = flag_top_level_closure_tdz(&normalized);
     let normalized = normalize_uninitialized_globals(&normalized);
     specialize_named_promise_rejection_callbacks(&normalized)
 }
