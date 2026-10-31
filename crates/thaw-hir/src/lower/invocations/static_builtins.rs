@@ -86,10 +86,10 @@ impl<'a> FnLowerer<'a> {
                             let mut lower_protocol_method =
                                 |method: &str, parameter: Option<(String, HirType)>| {
                                 let protocol_call = CallExpr {
-                                    span: span,
-                                    ctxt: ctxt,
+                                    span,
+                                    ctxt,
                                     callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
-                                        span: span,
+                                        span,
                                 obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
                                                 producer.clone().into(),
                                                 span,
