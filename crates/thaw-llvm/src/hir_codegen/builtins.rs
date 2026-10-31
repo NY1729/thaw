@@ -178,14 +178,10 @@ impl<'ctx> HirCompiler<'ctx> {
             return Err("boolean string conversion expects one operand".to_string());
         };
         let value = self.compile_expr(value)?.into_int_value();
-        let true_value = self
-            .builder
-            .build_global_string_ptr("true", "bool_true")
+        let true_value = self.intern_string("true", "bool_true")
             .map_err(|error| error.to_string())?
             .as_pointer_value();
-        let false_value = self
-            .builder
-            .build_global_string_ptr("false", "bool_false")
+        let false_value = self.intern_string("false", "bool_false")
             .map_err(|error| error.to_string())?
             .as_pointer_value();
         self.builder
@@ -249,8 +245,7 @@ impl<'ctx> HirCompiler<'ctx> {
             return Err("object string conversion expects one operand".to_string());
         };
         let _ = self.compile_expr(value)?;
-        self.builder
-            .build_global_string_ptr("[object Object]", "object_string")
+        self.intern_string("[object Object]", "object_string")
             .map(|value| value.as_pointer_value().into())
             .map_err(|error| error.to_string())
     }
