@@ -4430,16 +4430,47 @@ impl<'a> FnLowerer<'a> {
                             // An `any` array (plain, JS-owned or a live view of a native array)
                             // decodes element by element, like the `Array<Json>` copy methods use.
                             // A `Map`/`Set` (wrapper or host collection) yields its entries.
-                            value = HirExpr::Call(
+                            // A reified `any` generator is drained through its
+                            // next/return/throw closures instead.
+                            let source = format!("__thaw_spread_source_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(source.clone(), HirType::Json);
+                            let iterator_name = format!("__thaw_iterator_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let (producer, producer_type) = self.dynamic_iterator_adapter(
+                                HirExpr::Var(source.clone()), iterator_name,
+                                HirType::Json, false, false, true)?;
+                            let (collected, _) = self
+                                .collect_generator_for_array_spread(producer, &producer_type)?
+                                .ok_or("spread of an `any` generator")?;
+                            let array_json = HirType::Array(Box::new(HirType::Json));
+                            let plain = HirExpr::Call(
                                 Box::new(HirExpr::Var(
                                     "__thaw_json_map_or_set_entries".to_string(),
                                 )),
+                                vec![HirExpr::Var(source.clone())],
+                            );
+                            let plain = self.coerce_to_declared(&array_json, plain)?;
+                            self.scope.remove(&source);
+                            value = HirExpr::Call(
+                                Box::new(HirExpr::Lambda(
+                                    Vec::new(),
+                                    vec![HirParam { name: source.clone(), ty: HirType::Json }],
+                                    array_json.clone(),
+                                    Box::new(HirExpr::Block(vec![HirStmt::Return(Some(
+                                        HirExpr::Conditional(
+                                            Box::new(HirExpr::Call(
+                                                Box::new(HirExpr::Var("__thaw_json_is_native_iterator".into())),
+                                                vec![HirExpr::Var(source)],
+                                            )),
+                                            Box::new(collected),
+                                            Box::new(plain),
+                                            array_json,
+                                        ),
+                                    ))])),
+                                )),
                                 vec![value],
                             );
-                            value = self.coerce_to_declared(
-                                &HirType::Array(Box::new(HirType::Json)),
-                                value,
-                            )?;
                         } else if spread_source_type == HirType::Str {
                             value = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_string_to_array".to_string())),

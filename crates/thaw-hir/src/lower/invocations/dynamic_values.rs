@@ -137,7 +137,7 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
-    fn wrap_call_argument_bindings(
+    pub(in crate::lower) fn wrap_call_argument_bindings(
         &mut self,
         mut result: HirExpr,
         bindings: &[(Symbol, HirType, HirExpr)],

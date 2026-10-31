@@ -1010,7 +1010,7 @@ fn throwing_an_unsupported_value_is_a_compile_error_not_a_crash() {
 /// the same producer shape itself and handles it natively, never
 /// reaching this coercion at all.
 #[test]
-fn coercing_a_generator_to_a_dynamic_value_is_a_clear_compile_error() {
+fn coercing_a_generator_to_a_dynamic_value_reifies_a_protocol_object() {
     let module = thaw_parser::parse_typescript(
         r#"function* gen(): Generator<any> {
             yield 1;
@@ -1020,9 +1020,9 @@ fn coercing_a_generator_to_a_dynamic_value_is_a_clear_compile_error() {
         }"#,
     )
     .unwrap();
-    let error = thaw_hir::lower_module(&module).unwrap_err();
-    assert!(error.contains("Generator"), "{error}");
-    assert!(!error.contains("I64"), "{error}");
+    // Node supports this: the `any` view is a next/return/throw protocol object
+    // (behaviour pinned in generator_any_contracts.rs), not a lowering error.
+    thaw_hir::lower_module(&module).unwrap();
 }
 
 #[test]

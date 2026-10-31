@@ -609,14 +609,16 @@ impl<'a> FnLowerer<'a> {
     /// three. A hand-rolled plain iterable *without* `.return`/`.throw`,
     /// reached this dynamically, would throw a dynamic "not a function"
     /// error, but only if the consuming loop exits early.
-    fn dynamic_iterator_adapter(
+    pub(in crate::lower) fn dynamic_iterator_adapter(
         &mut self,
         iterator: HirExpr,
         iterator_name: Symbol,
         value_type: HirType,
         capture_completion: bool,
         asynchronous: bool,
+        native_json: bool,
     ) -> Result<(HirExpr, HirType), String> {
+        let iterator_type = if native_json { HirType::Json } else { HirType::JsValue };
         let result_name = format!("{iterator_name}_result");
         let control = format!("{iterator_name}_control");
         let error = format!("{iterator_name}_error");
@@ -639,13 +641,46 @@ impl<'a> FnLowerer<'a> {
         // below: these names are scoped only to this producer's own
         // body, not the surrounding function actually being lowered.
         let saved_scope = self.scope.clone();
-        self.scope.insert(iterator_name.clone(), HirType::JsValue);
+        self.scope.insert(iterator_name.clone(), iterator_type.clone());
         self.scope.insert(control.clone(), HirType::I64);
         self.scope.insert(error.clone(), HirType::Str);
+        // A native `any` generator (protocol object of closures) is stepped by
+        // ordinary Json method calls instead of the JS host helper.
+        let native_calls = if native_json {
+            let lower_step = |this: &mut Self, method: &str, with_error: bool| {
+                let args = if with_error {
+                    vec![swc_ecma_ast::ExprOrSpread {
+                        spread: None,
+                        expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                            error.as_str().into(), swc_common::DUMMY_SP))),
+                    }]
+                } else { Vec::new() };
+                this.lower_call(&CallExpr {
+                    span: swc_common::DUMMY_SP,
+                    ctxt: Default::default(),
+                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                        span: swc_common::DUMMY_SP,
+                        obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                            iterator_name.as_str().into(), swc_common::DUMMY_SP))),
+                        prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                            method.into(), swc_common::DUMMY_SP)),
+                    }))),
+                    args,
+                    type_args: None,
+                })
+            };
+            Some([
+                lower_step(self, "next", false)?,
+                lower_step(self, "return", false)?,
+                lower_step(self, "throw", true)?,
+            ])
+        } else { None };
         // The iterator result is an ordinary JS object. Reading it through
         // callDynamicMethod would assimilate a Promise/thenable and snapshot
         // its value before the protocol's done/value property reads.
-        let call_method = |name: &str| HirExpr::Call(
+        let call_method = |name: &str| if let Some(calls) = &native_calls {
+            calls[match name { "next" => 0, "return" => 1, _ => 2 }].clone()
+        } else { HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_dynamic_iterator_step_exact".into())),
             vec![HirExpr::Var(iterator_name.clone()),
                 HirExpr::Lit(HirLit::I64(match name {
@@ -654,7 +689,7 @@ impl<'a> FnLowerer<'a> {
                 } + if capture_completion { 3 } else { 0 }
                     + if asynchronous { 6 } else { 0 })),
                 HirExpr::Var(error.clone())],
-        );
+        )};
         let result_statements = |lowerer: &mut FnLowerer<'_>, name: Symbol, call: HirExpr|
             -> Result<Vec<HirStmt>, String> {
             let result = HirExpr::Var(name.clone());
@@ -713,7 +748,7 @@ impl<'a> FnLowerer<'a> {
         let producer = HirExpr::Lambda(
             vec![HirParam {
                 name: iterator_name.clone(),
-                ty: HirType::JsValue,
+                ty: iterator_type.clone(),
             }],
             vec![
                 HirParam {
@@ -751,7 +786,7 @@ impl<'a> FnLowerer<'a> {
                     Vec::new(),
                     vec![HirParam {
                         name: iterator_name,
-                        ty: HirType::JsValue,
+                        ty: iterator_type,
                     }],
                     producer_type.clone(),
                     Box::new(HirExpr::Block(vec![HirStmt::Return(Some(producer))])),
@@ -961,6 +996,14 @@ impl<'a> FnLowerer<'a> {
                     value = producer;
                     value_type = producer_type;
                 }
+            } else if value_type == HirType::Json {
+                // An `any` generator: step its next/return/throw closures.
+                let name = format!("__thaw_iterator_{}", self.next_binding);
+                self.next_binding += 1;
+                let (producer, producer_type) =
+                    self.dynamic_iterator_adapter(value, name, element.clone(), true, false, true)?;
+                value = producer;
+                value_type = producer_type;
             } else if value_type == HirType::JsValue {
                 let iterator = HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_to_iterator_exact".into())),
@@ -969,7 +1012,7 @@ impl<'a> FnLowerer<'a> {
                 let name = format!("__thaw_iterator_{}", self.next_binding);
                 self.next_binding += 1;
                 let (producer, producer_type) =
-                    self.dynamic_iterator_adapter(iterator, name, element.clone(), true, false)?;
+                    self.dynamic_iterator_adapter(iterator, name, element.clone(), true, false, false)?;
                 value = producer;
                 value_type = producer_type;
             }
@@ -2051,15 +2094,18 @@ impl<'a> FnLowerer<'a> {
                         let saved_scope = self.scope.clone();
                         self.scope.insert(source.clone(), HirType::Json);
                         let mut branches = Vec::new();
-                        for dynamic in [true, false] {
+                        for dynamic in [true, false, true] {
+                            self.for_of_native_iterator = branches.len() == 2;
                             self.for_of_json_mode = Some(dynamic);
                             self.for_of_prelowered = Some(HirExpr::Var(source.clone()));
                             let lowered = self.lower_stmt_seq(stmt);
                             self.for_of_json_mode = None;
                             self.for_of_prelowered = None;
+                            self.for_of_native_iterator = false;
                             branches.push(lowered?);
                         }
                         self.scope = saved_scope;
+                        let native_loop = branches.pop().unwrap();
                         let array_loop = branches.pop().unwrap();
                         let live_loop = branches.pop().unwrap();
                         // A value that is neither an array, a string, a live
@@ -2080,11 +2126,18 @@ impl<'a> FnLowerer<'a> {
                             HirStmt::Let(source.clone(), HirType::Json, right),
                             HirStmt::If(
                                 HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_json_is_live_iterable".into())),
-                                    vec![HirExpr::Var(source)],
+                                    Box::new(HirExpr::Var("__thaw_json_is_native_iterator".into())),
+                                    vec![HirExpr::Var(source.clone())],
                                 ),
-                                live_loop,
-                                array_loop,
+                                native_loop,
+                                vec![HirStmt::If(
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_json_is_live_iterable".into())),
+                                        vec![HirExpr::Var(source)],
+                                    ),
+                                    live_loop,
+                                    array_loop,
+                                )],
                             ),
                         ]);
                     }
@@ -2191,7 +2244,14 @@ impl<'a> FnLowerer<'a> {
                             values_type = producer_type;
                         }
                     }
-                    if json_mode == Some(true) && values_type == HirType::Json {
+                    if self.for_of_native_iterator && values_type == HirType::Json {
+                        let name = format!("__thaw_iterator_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let (producer, producer_type) = self.dynamic_iterator_adapter(
+                            values.clone(), name, HirType::Json, false, false, true)?;
+                        values = producer;
+                        values_type = producer_type;
+                    } else if json_mode == Some(true) && values_type == HirType::Json {
                         values = HirExpr::JsonAsNative(Box::new(values), HirType::JsValue);
                         values_type = HirType::JsValue;
                     }
@@ -2214,6 +2274,7 @@ impl<'a> FnLowerer<'a> {
                                 HirType::Json,
                                 false,
                                 for_of.is_await,
+                                false,
                             )?;
                         values = producer;
                         values_type = producer_type;
