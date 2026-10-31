@@ -121,7 +121,7 @@ fn compiles_native_string_repeat() {
     "#;
     assert_eq!(
         compile_and_run(source, "string_repeat"),
-        "ababab\n😀😀\nxyxy\n0\nzz\nreceiver\ncount\nabab\nawaited receiver\nawaited count\n😀😀\nInvalid count value for String.prototype.repeat\nInvalid count value for String.prototype.repeat\n"
+        "ababab\n😀😀\nxyxy\n0\nzz\nreceiver\ncount\nabab\nawaited receiver\nawaited count\n😀😀\nRangeError: Invalid count value: -1\nRangeError: Invalid count value: Infinity\n"
     );
 }
 
@@ -965,7 +965,7 @@ fn compiles_date_getters_and_iso_string() {
     "#;
     assert_eq!(
         compile_and_run_with_env(source, "date_getters", &[("TZ", "UTC0")]),
-        "1704067200500\n1704067200500\n2024\n0\n1\n1\n0\n0\n0\n500\n2024\n2024-01-01T00:00:00.500Z\nfixed\n2024-01-01T00:00:00.500Z\n1970-01-01T00:00:00.000Z\ntrue\nInvalid time value\n"
+        "1704067200500\n1704067200500\n2024\n0\n1\n1\n0\n0\n0\n500\n2024\n2024-01-01T00:00:00.500Z\nfixed\n2024-01-01T00:00:00.500Z\n1970-01-01T00:00:00.000Z\ntrue\nRangeError: Invalid time value\n"
     );
 }
 
@@ -4753,7 +4753,7 @@ fn compiles_regex_split_and_replace() {
     "#;
     assert_eq!(
         compile_and_run(source, "regex_split_and_replace"),
-        "a\nb\nc\n\na\nb\nc\naXb2c3\naXbXcX\naXbXcX\nreplaceAll must be called with a global RegExp\n"
+        "a\nb\nc\n\na\nb\nc\naXb2c3\naXbXcX\naXbXcX\nTypeError: String.prototype.replaceAll called with a non-global RegExp argument\n"
     );
 }
 

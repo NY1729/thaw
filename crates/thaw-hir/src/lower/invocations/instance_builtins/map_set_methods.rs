@@ -181,7 +181,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let key = self.coerce_map_key(&key_type, key.clone())?;
                     let value = self
-                        .coerce_to_declared(&value_type, value.clone())
+                        .coerce_to_declared_aliasing(&value_type, value.clone())
                         .map_err(|error| format!("Map.set value: {error}"))?;
                     let receiver_name = format!("__thaw_map_set_receiver_{}", self.next_binding);
                     self.next_binding += 1;
