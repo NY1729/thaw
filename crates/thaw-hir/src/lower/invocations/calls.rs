@@ -4691,10 +4691,10 @@ impl<'a> FnLowerer<'a> {
                     self.next_binding += 1;
                     self.scope.insert(param.clone(), HirType::Json);
                     let mut from = from;
-                    from.args[0].expr = Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    *from.args[0].expr = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
                         param.as_str().into(),
                         call.span,
-                    )));
+                    ));
                     let lowered = self.lower_expr(&Expr::Call(from));
                     let lowered = lowered.and_then(|from| self.coerce_to_declared(&HirType::Json, from));
                     self.scope.remove(&param);
