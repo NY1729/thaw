@@ -36,9 +36,14 @@ fn tcp_loopback_listen_connect_write_read() {
         console.log(__thaw_net_connect('127.0.0.1', 70000));
         "#,
     );
-    assert_eq!(
-        out,
-        "err:port should be >= 0 and < 65536. Received 70000|ok|ping"
+    // The refused connect is synchronous, but a fast loopback can finish the whole accept chain before it
+    // runs; only the order of `ok|ping` relative to each other and the presence of the error are fixed.
+    let err = "err:port should be >= 0 and < 65536. Received 70000";
+    assert!(
+        out == format!("{err}|ok|ping")
+            || out == format!("ok|{err}|ping")
+            || out == format!("ok|ping|{err}"),
+        "{out}"
     );
 }
 
