@@ -3730,8 +3730,16 @@ fn future_native_timer_remains_pending_after_an_idle_drain() {
 #[test]
 fn terminal_exception_report_uses_provenance_or_typed_scalar_without_reading_opaque_pointer() {
     let opaque = std::ptr::dangling::<std::os::raw::c_char>();
-    let scalar =
-        unsafe { thaw_runtime_exception_report_text(opaque, std::ptr::null(), 2, 0.0, thaw_bigint_from_i64(42), false) };
+    let scalar = unsafe {
+        thaw_runtime_exception_report_text(
+            opaque,
+            std::ptr::null(),
+            2,
+            0.0,
+            thaw_bigint_from_i64(42),
+            false,
+        )
+    };
     assert_eq!(
         unsafe { thaw_arena::NativeStr::from_ptr(scalar) }.to_bytes(),
         b"42"
