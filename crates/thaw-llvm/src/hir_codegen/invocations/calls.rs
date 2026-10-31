@@ -101,7 +101,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_date_assert_native_identity" => {
                 let [value] = args else { return Err("Date identity assertion expects one operand".into()); };
                 let value = self.compile_expr(value)?;
-                let date = self.builder.build_global_string_ptr("Date", "date_assert_name")
+                let date = self.intern_string("Date", "date_assert_name")
                     .map_err(|error| error.to_string())?;
                 let trusted = self.builder.build_call(
                     self.module.get_function("thaw_object_has_class_identity").unwrap(),
@@ -122,7 +122,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_date_has_native_identity" => {
                 let [value] = args else { return Err("Date identity check expects one operand".into()); };
                 let value = self.compile_expr(value)?;
-                let date = self.builder.build_global_string_ptr("Date", "date_identity_name")
+                let date = self.intern_string("Date", "date_identity_name")
                     .map_err(|error| error.to_string())?;
                 return self.builder.build_call(
                     self.module.get_function("thaw_object_has_class_identity").unwrap(),
@@ -147,7 +147,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let trusted = if class_name.is_empty() && layout_checked {
                     self.context.bool_type().const_int(1, false)
                 } else {
-                    let expected = self.builder.build_global_string_ptr(class_name, "class_assert_name")
+                    let expected = self.intern_string(class_name, "class_assert_name")
                         .map_err(|error| error.to_string())?;
                     self.builder.build_call(
                         self.module.get_function("thaw_object_has_class_identity").unwrap(),
@@ -183,7 +183,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("class identity query expects an object and a literal class name".into());
                 };
                 let object = self.compile_expr(object)?.into_pointer_value();
-                let expected = self.builder.build_global_string_ptr(class_name, "class_identity_name")
+                let expected = self.intern_string(class_name, "class_identity_name")
                     .map_err(|error| error.to_string())?;
                 return self.builder.build_call(
                     self.module.get_function("thaw_object_has_class_identity").unwrap(),
@@ -1445,8 +1445,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.build_conditional_branch(invalid, error_bb, continue_bb)
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(error_bb);
-                let error = self.builder
-                    .build_global_string_ptr("\u{1}RangeError\u{1}Invalid Temporal field", "temporal_fields_range_error")
+                let error = self.intern_string("\u{1}RangeError\u{1}Invalid Temporal field", "temporal_fields_range_error")
                     .map_err(|error| error.to_string())?
                     .as_pointer_value();
                 self.builder.build_store(self.pending_exception().as_pointer_value(), error)
