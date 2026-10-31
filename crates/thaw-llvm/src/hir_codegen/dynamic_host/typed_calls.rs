@@ -2035,10 +2035,6 @@ impl<'ctx> HirCompiler<'ctx> {
         fresh_argument_handles: &[FreshEventKeyHandle<'ctx>],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.js_mark_handles_used();
-        if resolve_success {
-            // (the thaw-js twin does not await a returned Promise)
-            self.uses_quickjs = true;
-        }
         self.compile_register_js_callback_host_operations()?;
         let callable = self.builder.build_call(
             self.module.get_function("thaw_js_get_global").unwrap(),

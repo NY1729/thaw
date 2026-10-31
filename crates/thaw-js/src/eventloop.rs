@@ -623,6 +623,11 @@ impl Interp {
 
     // ----- timers / event loop -----
 
+    /// Run `f` from the next timer round (keeps the loop alive until it has run).
+    pub(crate) fn defer_tick(&mut self, f: Value) -> R<()> {
+        self.add_timer(&[f, Value::Number(0.0)], false).map(|_| ())
+    }
+
     fn add_timer(&mut self, args: &[Value], repeat: bool) -> R<Value> {
         let cb = arg(args, 0);
         self.need_callback(&cb)?;
@@ -770,6 +775,42 @@ impl Interp {
         }
         self.rt.cleared.clear();
         Ok(())
+    }
+
+    /// Drive jobs, timers and immediates until the promise `v` settles or no work remains; a
+    /// non-promise settles at once. Does not emit `beforeExit`/`exit`.
+    pub fn await_settled(&mut self, v: &Value) -> R<Option<Result<Value, Value>>> {
+        if !self.is_promise(v) {
+            return Ok(Some(Ok(v.clone())));
+        }
+        self.mark_handled(v);
+        loop {
+            self.run_jobs()?;
+            if let Some(state) = self.promise_state(v) {
+                return Ok(Some(state));
+            }
+            if !self.loop_alive() {
+                return Ok(None);
+            }
+            self.rt.now = clock_ms();
+            self.run_timers()?;
+            if !self.rt.immediates.is_empty() {
+                self.run_immediates()?;
+                continue;
+            }
+            if let Some(next) = self
+                .rt
+                .timers
+                .iter()
+                .map(|t| t.expiry)
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                let wait = next - clock_ms();
+                if wait > 0.0 {
+                    std::thread::sleep(Duration::from_secs_f64(wait / 1000.0));
+                }
+            }
+        }
     }
 
     /// Referenced timers/immediates or queued jobs remain.

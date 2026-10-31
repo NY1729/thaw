@@ -711,7 +711,10 @@ impl Interp {
             return true;
         }
         let marker = 0u8;
-        self.stack_limit != 0 && (&marker as *const u8 as usize) < self.stack_limit
+        let sp = &marker as *const u8 as usize;
+        // below the configured limit is only deep if this thread's own stack agrees: compiled code may
+        // enter from a thread other than the one that configured the limit (an async continuation)
+        self.stack_limit != 0 && sp < self.stack_limit && !thread_stack_has_room(sp)
     }
 
     pub(crate) fn native(
@@ -3065,6 +3068,28 @@ pub(crate) fn order_keys(keys: Vec<Rc<str>>) -> Vec<Rc<str>> {
 }
 
 /// Create or overwrite an enumerable, writable data property.
+/// Whether the calling thread's own stack still has room at `sp` (same reserve as `configure_stack`).
+#[cfg(target_os = "linux")]
+fn thread_stack_has_room(sp: usize) -> bool {
+    // SAFETY: plain pthread queries on the current thread with a zeroed attribute object.
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+            return false;
+        }
+        let mut addr: *mut libc::c_void = std::ptr::null_mut();
+        let mut size: libc::size_t = 0;
+        let ok = libc::pthread_attr_getstack(&attr, &mut addr, &mut size) == 0;
+        libc::pthread_attr_destroy(&mut attr);
+        ok && size != 0 && sp >= addr as usize + (size / 8 + (4 << 20)).min(size / 2)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn thread_stack_has_room(_sp: usize) -> bool {
+    false
+}
+
 pub(crate) fn put(o: &Obj, key: &str, value: Value) {
     let pos = o.position(key);
     let mut props = o.props.borrow_mut();
