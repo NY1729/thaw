@@ -2054,12 +2054,16 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
             }
             p.interp
                 .run_event_loop()
-                .map(|_| 0)
                 .map_err(|c| classify(&mut p.interp, c))
         });
-        if let Err(e) = ran {
-            eprintln!("{e}");
-            status = 1;
+        // `process.exit(n)` / `process.exitCode = n` inside a package (e.g. commander after a sub-command) is the program's status.
+        match ran {
+            Err(e) => {
+                eprintln!("{e}");
+                status = 1;
+            }
+            Ok(code) if code != 0 => status = code,
+            Ok(_) => {}
         }
     }
     status
