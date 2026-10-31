@@ -632,9 +632,13 @@ impl<'ctx> HirCompiler<'ctx> {
         if self.console_omit_absent_fields
             && !self.class_layouts.is_empty()
             && !fields.is_empty()
+            && !self.interface_views_in_progress.contains(ty)
             && !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}") || is_hidden_accessor_field(name))
         {
-            return self.compile_interface_view_to_json(object, ty, fields, preserve_undefined);
+            self.interface_views_in_progress.push(ty.clone());
+            let result = self.compile_interface_view_to_json(object, ty, fields, preserve_undefined);
+            self.interface_views_in_progress.pop();
+            return result;
         }
         let derived = if self.console_omit_absent_fields && !fields.iter().any(|(name, _)| name == "__thaw_base") {
             self.derived_class_layouts(fields)

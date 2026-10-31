@@ -192,6 +192,19 @@
   // here and lets JS pick numeric addition, concatenation, or BigInt
   // addition.
   globalThis.__thaw_dynamic_add = (left, right) => left + right;
+  globalThis.__thaw_dynamic_binary = (op, l, r) => {
+    switch (op) {
+      case '-': return l - r;
+      case '*': return l * r;
+      case '/': return l / r;
+      case '%': return l % r;
+      case '&': return l & r;
+      case '|': return l | r;
+      case '^': return l ^ r;
+      case '<<': return l << r;
+      default: return l >> r;
+    }
+  };
   globalThis.__thaw_json_binary_replacer = function (key, value) {
     const source = this[key];
     if (source instanceof Date) return { timestamp: source.getTime() };
