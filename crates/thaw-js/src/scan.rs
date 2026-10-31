@@ -47,6 +47,21 @@ fn prop_key(p: &a::PropName) -> Option<String> {
     }
 }
 
+/// A plain CommonJS script (the Node builtin shims: `node:path`, `node:assert`, ...) as a one-module
+/// registry bundle, so the scan and the loader treat it like any package. Registry bundles pass through.
+pub fn script_as_bundle(source: &str) -> std::borrow::Cow<'_, str> {
+    if source.contains("__thaw_bundle_factories") {
+        return source.into();
+    }
+    format!(
+        "module.exports = (function(require){{ var __thaw_bundle_entry_key = \"thaw-js:script\"; \
+         var __thaw_bundle_factories = {{ \"thaw-js:script\": function(module, exports, require, requireAsync, \
+         __filename, __dirname, __thaw_require) {{\n{source}\n}} }}; \
+         var __thaw_bundle_require_maps = {{ \"thaw-js:script\": {{}} }}; }})(globalThis.require);"
+    )
+    .into()
+}
+
 /// Extract factories, require maps and the entry key from a registry bundle.
 pub fn parse_bundle(source: &str) -> Result<BundleParts, String> {
     let mut parts = parse_bundle_raw(source)?;
@@ -554,7 +569,7 @@ fn tolerated(feature: &str, key: &str) -> bool {
             | "builtin:process.allowedNodeEnvironmentFlags"
     ) || key.ends_with("debug/src/browser.js")
         || (feature == "require:supports-color" && key.ends_with("debug/src/node.js"))
-        || (feature == "require:dynamic" && key == "node:assert")
+        || (matches!(feature, "require:dynamic" | "method:inspect") && key == "node:assert")
         || (AXIOS_METHODS.contains(&feature) && key.ends_with("axios/./dist/node/axios.cjs"))
         // iconv-lite calls the caller's optional `options.stripBOM` only after `typeof ... === 'function'`
         || (feature == "method:stripBOM" && key.ends_with("iconv-lite/lib/bom-handling.js"))
