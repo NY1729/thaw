@@ -461,8 +461,56 @@ fn build_with_thaw_js_routing(
     )
 }
 
+/// Marker error: a program that lowered timers to the native queue also needs a JS engine (or another
+/// event-loop owner), so it is rebuilt with the ordinary QuickJS timers.
+const NATIVE_TIMERS_MIXED: &str = "native timers need a JS engine";
+
+/// Native timers are on unless `THAW_NATIVE_TIMERS=0`.
+fn native_timers_enabled() -> bool {
+    std::env::var("THAW_NATIVE_TIMERS").as_deref() != Ok("0")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_with_thaw_js_routing_shared(
+    input: &Path,
+    output: &Path,
+    extra_links: &[PathBuf],
+    bridge_dts: &[PathBuf],
+    ffi_metadata: &[PathBuf],
+    registry_dir: &Path,
+    use_packages: &[String],
+    static_link: bool,
+    assets: Option<&Path>,
+    embed_native_addons: bool,
+    install_missing: bool,
+    icu4c: bool,
+    shared_rt: bool,
+    lib_mode: Option<&LibBuildMode>,
+    routing: bool,
+) -> Result<(), String> {
+    // Timers lower to thaw-runtime's queue first (no JS context for timer-only programs); any
+    // failure, or a program that also needs a JS engine, is rebuilt with the QuickJS timers.
+    if lib_mode.is_none() && native_timers_enabled() {
+        thaw_hir::set_native_timers(true);
+        let native = build_with_thaw_js_routing_inner(
+            input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
+            static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt, lib_mode,
+            routing,
+        );
+        thaw_hir::set_native_timers(false);
+        if native.is_ok() {
+            return native;
+        }
+    }
+    build_with_thaw_js_routing_inner(
+        input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
+        static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt, lib_mode,
+        routing,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_with_thaw_js_routing_inner(
     input: &Path,
     output: &Path,
     extra_links: &[PathBuf],
@@ -959,6 +1007,9 @@ fn build_with_native_mode_routed(
         compiler.set_library_mode(lib.exports.clone());
     }
     compiler.compile_program(&program)?;
+    if compiler.native_timers_conflict() {
+        return Err(NATIVE_TIMERS_MIXED.to_string());
+    }
     let uses_quickjs = compiler.uses_quickjs();
     let uses_napi = compiler.uses_napi();
     if thaw_js_routing && compiler.uses_thaw_js() {

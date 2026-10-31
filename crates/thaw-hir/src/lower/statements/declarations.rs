@@ -782,7 +782,13 @@ impl<'a> FnLowerer<'a> {
                                         | "setInterval"
                                         | "setImmediate"
                                 )
-                                .then_some(HirType::JsValue)
+                                .then_some(
+                                if native_timers() && self.native_timer_set_kind(init).is_some() {
+                                    HirType::I64
+                                } else {
+                                    HirType::JsValue
+                                },
+                            )
                             })
                     })
                 } else {

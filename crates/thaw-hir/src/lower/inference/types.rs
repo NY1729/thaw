@@ -2955,6 +2955,10 @@ impl<'a> FnLowerer<'a> {
                     }
                     "fetch" => return Ok(HirType::Str),
                     "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
+                    "__thaw_timer_set" | "__thaw_timer_ref" | "__thaw_timer_unref"
+                    | "__thaw_timer_refresh" => return Ok(HirType::I64),
+                    "__thaw_timer_clear" => return Ok(HirType::Void),
+                    "__thaw_timer_has_ref" => return Ok(HirType::Bool),
                     "Promise.all" => {
                         for (index, arg) in args.iter().enumerate() {
                             match self.infer_expr_type(arg)? {
