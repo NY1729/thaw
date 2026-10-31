@@ -3570,6 +3570,24 @@ impl<'a> FnLowerer<'a> {
                 )? {
                     return Ok(HirExpr::JsonAsNumber(Box::new(result)));
                 }
+                // `OrdinaryToPrimitive` with hint "number": a user `valueOf` runs first.
+                let object_type = HirType::Object(fields.clone());
+                if class_name_from_type(&object_type)
+                    .is_some_and(|class| self.signatures.contains_key(&class_method_symbol(class, "valueOf")))
+                {
+                    if let Some(result) = self.invoke_class_ordinary_to_primitive(
+                        value.clone(), &object_type, "number",
+                    )? {
+                        return Ok(HirExpr::JsonAsNumber(Box::new(result)));
+                    }
+                }
+                if fields.iter().any(|(name, ty)| name == "valueOf" && matches!(ty, HirType::Function(_, ret) if matches!(**ret, HirType::F64 | HirType::Json))) {
+                    if let Some(result) = self.invoke_object_conversion_method(
+                        value.clone(), &fields, "valueOf".to_string(), None,
+                    )? {
+                        return Ok(HirExpr::JsonAsNumber(Box::new(result)));
+                    }
+                }
                 let string = self.coerce_primitive_to_string(value)?;
                 Ok(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),

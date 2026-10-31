@@ -5624,6 +5624,10 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
         Value::Bool(value) => Node::Bool(*value),
         Value::Number(number) => Node::Number(number.as_f64().unwrap_or(f64::NAN)),
         Value::BigInt(text) => Node::BigInt(text.clone()),
+        Value::String(text) if is_symbol_key_wire(text.as_bytes()) => {
+            Node::Raw(symbol_text(text.as_bytes()))
+        }
+        Value::Wtf8(bytes) if is_symbol_key_wire(bytes) => Node::Raw(symbol_text(bytes)),
         Value::String(text) => {
             tagged_error_node(&live_error_bytes(text.as_bytes()), stack, error_ref(value))
                 .unwrap_or_else(|| Node::Str(text.encode_utf16().collect()))
@@ -5800,6 +5804,11 @@ fn inspect_key(key: &[u8]) -> Vec<u16> {
     if !is_symbol_key_wire(key) {
         return wtf8_decode_utf16(key);
     }
+    format!("\u{1}[{}]", symbol_text(key)).encode_utf16().collect()
+}
+
+/// `Symbol(desc)` for a Symbol's wire text.
+fn symbol_text(key: &[u8]) -> String {
     let description = if let Some(name) = key.strip_prefix(b"\x1f@@") {
         format!("Symbol.{}", String::from_utf8_lossy(name))
     } else {
@@ -5808,9 +5817,7 @@ fn inspect_key(key: &[u8]) -> Vec<u16> {
         let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
         String::from_utf8_lossy(rest.get(digits + 1..).unwrap_or_default()).into_owned()
     };
-    format!("\u{1}[Symbol({description})]")
-        .encode_utf16()
-        .collect()
+    format!("Symbol({description})")
 }
 
 /// The class name console.log tags a `Map`/`Set` subclass wrapper with
@@ -8988,15 +8995,41 @@ pub unsafe extern "C" fn thaw_json_own_keys(value: *const Value) -> *mut u8 {
             .map(|index| Value::String(index.to_string()))
             .chain(std::iter::once(Value::String("length".to_string())))
             .collect(),
-        Some(value) => enumerable_entries(value)
-            .into_iter()
-            .map(|(key, _)| Value::Wtf8(key))
-            .collect(),
+        Some(value) => {
+            // Strings first, then Symbols (each in insertion order), like `Reflect.ownKeys`.
+            let (symbols, strings): (Vec<_>, Vec<_>) = enumerable_entries(value)
+                .into_iter()
+                .map(|(key, _)| key)
+                .partition(|key| is_symbol_key_wire(key));
+            strings.into_iter().chain(symbols).map(Value::Wtf8).collect()
+        }
         None => Vec::new(),
     };
     alloc_pointer_array(
         keys.into_iter()
             .map(|key| Box::into_raw(Box::new(key)).cast())
+            .collect(),
+    )
+}
+
+/// `Object.getOwnPropertySymbols`: the Symbol keys (their wire text) of a `Json` object.
+///
+/// # Safety
+/// `value` must be null or point to a valid JSON `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_own_symbols(value: *const Value) -> *mut u8 {
+    let symbols = match unsafe { value.as_ref() } {
+        Some(value @ Value::Object(_)) => enumerable_entries(value)
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|key| is_symbol_key_wire(key))
+            .collect(),
+        _ => Vec::new(),
+    };
+    alloc_pointer_array(
+        symbols
+            .into_iter()
+            .map(|key| Box::into_raw(Box::new(Value::Wtf8(key))).cast())
             .collect(),
     )
 }
