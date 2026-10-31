@@ -875,6 +875,26 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 return Ok(target.into());
             }
+            "__thaw_array_comparator_sort" => {
+                let [array, length, descending] = args else {
+                    return Err("array comparator sort expects three operands".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
+                let length = self.compile_expr(length)?.into_float_value();
+                let descending = self.compile_expr(descending)?.into_float_value();
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_number_array_comparator_sort").unwrap(),
+                        &[buffer.into(), length.into(), descending.into()],
+                        "array_comparator_sort",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| "array comparator sort returned no value".to_string());
+            }
             "__thaw_array_compact_for_sort" => {
                 let [array] = args else {
                     return Err("array sort compaction expects one operand".into());
@@ -2732,6 +2752,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 return Ok(map);
+            }
+            "__thaw_closure_resolve" => {
+                let [closure] = args else {
+                    return Err("closure identity expects one operand".to_string());
+                };
+                let closure = self.compile_expr(closure)?.into_pointer_value();
+                return Ok(self.resolve_closure_alias(closure)?.into());
             }
             "__thaw_object_to_string" => return self.compile_object_to_string(args),
             "__thaw_number_is_nan" => return self.compile_number_predicate(args, false),

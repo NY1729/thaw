@@ -3902,3 +3902,19 @@ fn instanceof_against_an_any_variable_uses_the_host_instanceof() {
     let main = program.functions.iter().find(|function| function.name == "main").unwrap();
     assert!(format!("{:?}", main.body).contains("__thaw_json_host_instanceof"));
 }
+
+/// `.valueOf()` on an `any` receiver is a dynamic method call on the live value (like `.toString()`),
+/// not the native primitive/array lowering, which rejects a `Json` receiver.
+#[test]
+fn value_of_on_an_any_receiver_is_a_dynamic_method_call() {
+    let program = lower(
+        r#"
+            function main(): void {
+                const d: any = JSON.parse("{}");
+                console.log(d.valueOf());
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    assert!(source.contains("valueOf"), "{source}");
+}

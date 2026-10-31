@@ -2028,8 +2028,7 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
         graph_mode: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let [closure_expr] = args else {
             return Err("registerNativeCallback expects exactly one argument".into());
         };
@@ -2256,13 +2255,19 @@ impl<'ctx> HirCompiler<'ctx> {
         graph_mode: bool,
         method_mode: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        if method_mode {
+            self.uses_quickjs = true;
+            self.uses_quickjs_handles = true;
+        } else {
+            self.js_mark_handles_used();
+        }
         // Callback failures can carry tracked Box<Value> payloads across a
         // JavaScript Error carrier. Start tracing before module initialization
         // so the packet lease can preserve the existing arena owner graph.
         let graph_mode = graph_mode || json_callback_result_wants_graph(ret)
             || (has_rest && params.last().is_some_and(json_callback_result_wants_graph));
+        // thaw-js has no JSON-text protocol for live handle arguments: every callback is a graph callback.
+        let graph_mode = graph_mode || (!method_mode && self.js_engine() == JsEngine::ThawJs);
         self.tracks_owned_json_roots = true;
         let absent = self.builder.build_is_null(closure, "native_callback_is_undefined")
             .map_err(|error| error.to_string())?;

@@ -49,8 +49,24 @@ fn prop_key(p: &a::PropName) -> Option<String> {
 
 /// Extract factories, require maps and the entry key from a registry bundle.
 pub fn parse_bundle(source: &str) -> Result<BundleParts, String> {
-    if let Some((factories, problems)) = crate::esm::native_bundle_to_factories(source)? {
-        let mut parts = parse_factories(&factories)?;
+    if let Some((native, problems, pure)) = crate::esm::native_bundle_to_factories(source)? {
+        if pure {
+            let mut parts = parse_factories(&native)?;
+            parts.esm_problems = problems;
+            return Ok(parts);
+        }
+        // mixed bundle: the converted native modules follow the original text and replace its stubs
+        let combined = format!("{source}\n{native}");
+        let mut parts = parse_factories(&combined)?;
+        let mut seen = HashSet::new();
+        let mut kept: Vec<_> = parts
+            .factories
+            .drain(..)
+            .rev()
+            .filter(|(k, _)| seen.insert(k.clone()))
+            .collect();
+        kept.reverse();
+        parts.factories = kept;
         parts.esm_problems = problems;
         return Ok(parts);
     }
@@ -189,9 +205,34 @@ struct Walker {
     requires: Vec<Option<String>>,
     /// identifiers probed with `typeof X` (assumed guarded)
     probed: HashSet<String>,
+    /// `globalThis.X` members tested only for presence
+    probed_members: HashSet<String>,
+    probed_methods: HashSet<String>,
 }
 
 impl Walker {
+    /// `globalThis.X` tested for truthiness / `typeof` is a feature probe, not a use.
+    fn probe_member(&mut self, e: &a::Expr) {
+        // `if (x.m) x.m()` / `x?.m ? x.m(..) : ..`: a method call guarded by a truthiness test of the same name
+        let tested = match e {
+            a::Expr::Member(m) => Some(m),
+            a::Expr::OptChain(o) => match &*o.base {
+                a::OptChainBase::Member(m) => Some(m),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(a::MemberProp::Ident(p)) = tested.map(|m| &m.prop) {
+            self.probed_methods.insert(p.sym.to_string());
+        }
+        if let a::Expr::Member(m) = e {
+            if let (a::Expr::Ident(o), a::MemberProp::Ident(p)) = (&*m.obj, &m.prop) {
+                if &*o.sym == "globalThis" {
+                    self.probed_members.insert(p.sym.to_string());
+                }
+            }
+        }
+    }
     fn feature(&mut self, name: &str) {
         *self.features.entry(name.to_string()).or_insert(0) += 1;
     }
@@ -219,6 +260,16 @@ impl Visit for Walker {
         n.function.visit_with(self);
     }
     fn visit_function(&mut self, n: &a::Function) {
+        // the `globalThis` polyfill idiom: `if (typeof globalThis === 'object') return;` makes the rest dead
+        if let Some(a::Stmt::If(i)) = n.body.as_ref().and_then(|b| b.stmts.first()) {
+            let is_global_probe = matches!(&*i.test, a::Expr::Bin(b)
+                if matches!(&*b.left, a::Expr::Unary(u) if u.op == a::UnaryOp::TypeOf
+                    && matches!(&*u.arg, a::Expr::Ident(g) if &*g.sym == "globalThis"))
+                && matches!(&*b.right, a::Expr::Lit(a::Lit::Str(l)) if l.value.as_str() == Some("object")));
+            if is_global_probe && matches!(&*i.cons, a::Stmt::Return(_)) && i.alt.is_none() {
+                return;
+            }
+        }
         if n.is_async {
             self.feature("async");
         }
@@ -327,6 +378,9 @@ impl Visit for Walker {
         n.visit_children_with(self);
     }
     fn visit_bin_expr(&mut self, n: &a::BinExpr) {
+        if matches!(n.op, a::BinaryOp::LogicalAnd | a::BinaryOp::LogicalOr) {
+            self.probe_member(&n.left);
+        }
         if let (a::BinaryOp::InstanceOf, a::Expr::Ident(i)) = (n.op, &*n.right) {
             self.instance_refs.insert(i.sym.to_string());
             n.left.visit_with(self);
@@ -362,7 +416,18 @@ impl Visit for Walker {
             }
         }
     }
+    fn visit_cond_expr(&mut self, n: &a::CondExpr) {
+        self.probe_member(&n.test);
+        n.visit_children_with(self);
+    }
+    fn visit_if_stmt(&mut self, n: &a::IfStmt) {
+        self.probe_member(&n.test);
+        n.visit_children_with(self);
+    }
     fn visit_unary_expr(&mut self, n: &a::UnaryExpr) {
+        if n.op == a::UnaryOp::TypeOf {
+            self.probe_member(&n.arg);
+        }
         // `typeof X` is a feature probe, not a use.
         if let (a::UnaryOp::TypeOf, a::Expr::Ident(i)) = (n.op, &*n.arg) {
             self.probed.insert(i.sym.to_string());
@@ -479,6 +544,8 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
                 && !globals.contains(r)
                 && !params.contains(&r.as_str())
                 && !w.probed.contains(r)
+                // service-worker globals Node does not define either: a ReferenceError there, same here
+                && r != "addEventListener"
             {
                 add(&mut report, format!("global:{r}"), 1, key);
             }
@@ -499,13 +566,18 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
                 && !w.declared.contains(g)
                 && !interp.builtin_member_exists(g, p)
                 // the package creates its own `globalThis.x` slot (`globalThis.x ??= {}`)
-                && !(g == "globalThis" && defined.contains(p))
+                && !(g == "globalThis" && (defined.contains(p) || w.probed_members.contains(p)))
             {
                 add(&mut report, format!("builtin:{g}.{p}"), 1, key);
             }
         }
         for m in &w.called {
-            if !known_methods.contains(m) && !defined.contains(m) {
+            // `util.styleText` calls `stream.hasColors()` only after `typeof stream.hasColors === 'function'`
+            if !known_methods.contains(m)
+                && !defined.contains(m)
+                && !w.probed_methods.contains(m)
+                && m != "hasColors"
+            {
                 add(&mut report, format!("method:{m}"), 1, key);
             }
         }

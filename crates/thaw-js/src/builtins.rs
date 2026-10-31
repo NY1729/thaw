@@ -1280,7 +1280,7 @@ impl Interp {
         g.declare("Function", function, true);
         // Only the indirect (global-scope) form: the scan rejects a direct `eval(...)` call.
         let eval = self.native(|it, _, args| match arg(args, 0) {
-            Value::Str(src) => dynamic_code(it.run(&src)),
+            Value::Str(src) => dynamic_code(it.run_sloppy(&src)),
             other => Ok(other),
         });
         g.declare("eval", eval, true);

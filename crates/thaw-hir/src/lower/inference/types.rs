@@ -1099,6 +1099,12 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_closure_resolve" => {
+                        let [closure] = args.as_slice() else {
+                            return Err("closure identity expects one operand".into());
+                        };
+                        return self.infer_expr_type(closure);
+                    }
                     "__thaw_number_array_to_string"
                     | "__thaw_string_array_to_string"
                     | "__thaw_bool_array_to_string"
@@ -1291,6 +1297,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(ty);
                     }
+                    "__thaw_array_comparator_sort" => return Ok(HirType::F64),
                     "__thaw_array_compact_for_sort" => {
                         let [array] = args.as_slice() else {
                             return Err("array sort compaction expects one operand".into());
