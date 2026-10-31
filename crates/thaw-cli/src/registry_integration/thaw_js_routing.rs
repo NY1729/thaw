@@ -200,6 +200,17 @@ fn thaw_js_declaration_plain(line: &str) -> bool {
     identifiers_plain(params) && identifiers_plain(result)
 }
 
+/// An async overload (`...): Promise<string>;` or `string | Promise<string>`, ejs `render`): the typed
+/// call runs the event loop and unwraps the settled promise, so it is plain when its resolved type is.
+fn thaw_js_async_declaration_plain(line: &str) -> bool {
+    let Some(at) = line.rfind("): ") else {
+        return false;
+    };
+    let (params, result) = line.split_at(at);
+    result.contains("Promise<")
+        && thaw_js_declaration_plain(&format!("{params}{}", result.replace("Promise", "")))
+}
+
 /// Whether `line` declares an operation of `package`'s class `class` (`$new$`, `$method$`,
 /// `$staticmethod$`, ... keys carry `package::Class`).
 fn thaw_js_class_declaration(line: &str, package: &str, class: &str) -> bool {
@@ -391,7 +402,9 @@ fn thaw_js_package_eligible(
                 return reject(format!("`{}` has no declaration", function.name));
             }
             lines.into_iter().all(|line| {
-                thaw_js_declaration_plain(line) || reject(format!("`{}`: {line}", function.name))
+                thaw_js_declaration_plain(line)
+                    || thaw_js_async_declaration_plain(line)
+                    || reject(format!("`{}`: {line}", function.name))
             })
         })
 }
