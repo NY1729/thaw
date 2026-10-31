@@ -88,6 +88,8 @@ measure_program() {
   mkdir -p "$proj"
   cd "$proj" || return
   [ -f package.json ] || echo '{"name":"t","version":"1.0.0"}' > package.json
+  # a cached thaw_modules bundle from an older thaw is "up to date" to `add` and silently stale
+  rm -rf thaw_modules
   # shellcheck disable=SC2086
   timeout 300 "$THAW" add $specs --prefix . > "$SCRATCH/out/$name.add.log" 2>&1 || true
   cp "$PK_DIR/$name.ts" .
