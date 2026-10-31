@@ -4041,7 +4041,7 @@ fn compiles_regex_test_and_exec_with_an_any_typed_receiver() {
     "#;
     assert_eq!(
         compile_and_run(source, "regex_test_and_exec_any_receiver"),
-        "true\nfalse\n[ '12-34', '12', '34' ]\n"
+        "true\nfalse\n[ '12-34', '12', '34', index: 0, input: '12-34', groups: undefined ]\n"
     );
 }
 
