@@ -121,7 +121,7 @@
         const hasBase = base !== undefined;
         const baseValue = hasBase ? toUSV(base) : '';
         const parsed = parseURL(value, baseValue, hasBase);
-        if (parsed === null) throw new TypeError('Invalid URL');
+        if (parsed === null) { const error = new TypeError('Invalid URL'); error.code = 'ERR_INVALID_URL'; error.input = value; throw error; }
         this.__thawCommit(parsed);
       }
       __thawCommit(parsed, refresh = true) {
@@ -163,7 +163,7 @@
       get href() { return this.__thawState.href; }
       set href(value) {
         const parsed = parseURL(toUSV(value), '', false);
-        if (parsed === null) throw new TypeError('Invalid URL');
+        if (parsed === null) { const error = new TypeError('Invalid URL'); error.code = 'ERR_INVALID_URL'; error.input = String(value); throw error; }
         this.__thawCommit(parsed);
       }
       toString() { return this.href; }

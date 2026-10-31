@@ -4740,6 +4740,7 @@ impl<'a> FnLowerer<'a> {
         let getter = format!("__thaw_getter_{property}");
         let setter = format!("__thaw_setter_{property}");
         let mut accessor = |hidden: String| -> Result<Option<HirExpr>, String> {
+            let hidden_is_getter = hidden.starts_with("__thaw_getter_");
             let Some((_, ty)) = fields.iter().find(|(name, _)| name == &hidden) else {
                 return Ok(None);
             };
@@ -4780,14 +4781,20 @@ impl<'a> FnLowerer<'a> {
                 )),
                 arguments,
             );
-            Ok(Some(HirExpr::Lambda(
-                vec![HirParam {
-                    name: source_name.clone(),
-                    ty: target_type.clone(),
-                }],
-                adapter_params,
-                ret,
-                Box::new(call),
+            let label = format!("{} {property}", if hidden_is_getter { "get" } else { "set" });
+            Ok(Some(name_function_value(
+                HirExpr::Lambda(
+                    vec![HirParam {
+                        name: source_name.clone(),
+                        ty: target_type.clone(),
+                    }],
+                    adapter_params,
+                    ret,
+                    Box::new(call),
+                ),
+                Some(label),
+                false,
+                false,
             )))
         };
         let getter = accessor(getter)?;

@@ -4,41 +4,131 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
             "var inspectCustom = Symbol.for('nodejs.util.inspect.custom');\n\
              function inspect(value, options) {\n\
              \x20\x20if (typeof options === 'boolean') options = { showHidden: options, depth: arguments[2], colors: arguments[3] };\n\
-             \x20\x20options = options || {};\n\
-             \x20\x20var depth = options.depth === undefined ? 2 : options.depth === null ? Infinity : options.depth, seen = new Set();\n\
+             \x20\x20var merged = {}, defaults = inspect.defaultOptions, given = options || {};\n\
+             \x20\x20Object.keys(defaults).forEach(function(key) { merged[key] = defaults[key]; });\n\
+             \x20\x20Object.keys(given).forEach(function(key) { if (given[key] !== undefined) merged[key] = given[key]; });\n\
+             \x20\x20options = merged;\n\
+             \x20\x20var depth = options.depth === null ? Infinity : options.depth, seen = [], refs = new Map();\n\
+             \x20\x20var STYLES = { number: [33, 39], bigint: [33, 39], boolean: [33, 39], string: [32, 39], symbol: [32, 39], undefined: [90, 39], null: [1, 22], special: [36, 39], date: [35, 39], regexp: [31, 39] };\n\
+             \x20\x20function paint(text, kind) { if (!options.colors) return text; var style = STYLES[kind]; return '\\u001b[' + style[0] + 'm' + text + '\\u001b[' + style[1] + 'm'; }\n\
+             \x20\x20function quote(text) {\n\
+             \x20\x20\x20\x20var mark = \"'\";\n\
+             \x20\x20\x20\x20if (text.indexOf(\"'\") !== -1) { if (text.indexOf('\"') === -1) mark = '\"'; else if (text.indexOf('`') === -1 && text.indexOf('${') === -1) mark = '`'; }\n\
+             \x20\x20\x20\x20var out = '';\n\
+             \x20\x20\x20\x20for (var i = 0; i < text.length; i++) {\n\
+             \x20\x20\x20\x20\x20\x20var ch = text[i], code = text.charCodeAt(i);\n\
+             \x20\x20\x20\x20\x20\x20if (ch === mark || ch === '\\\\') out += '\\\\' + ch;\n\
+             \x20\x20\x20\x20\x20\x20else if (ch === '\\n') out += '\\\\n'; else if (ch === '\\t') out += '\\\\t'; else if (ch === '\\r') out += '\\\\r'; else if (ch === '\\b') out += '\\\\b'; else if (ch === '\\f') out += '\\\\f';\n\
+             \x20\x20\x20\x20\x20\x20else if (code < 32 || code === 127) out += '\\\\x' + (code < 16 ? '0' : '') + code.toString(16).toUpperCase();\n\
+             \x20\x20\x20\x20\x20\x20else out += ch;\n\
+             \x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20return mark + out + mark;\n\
+             \x20\x20}\n\
+             \x20\x20function renderString(text) {\n\
+             \x20\x20\x20\x20var rest = 0;\n\
+             \x20\x20\x20\x20if (text.length > options.maxStringLength) { rest = text.length - options.maxStringLength; text = text.slice(0, options.maxStringLength); }\n\
+             \x20\x20\x20\x20return paint(quote(text), 'string') + (rest ? '... ' + rest + ' more character' + (rest > 1 ? 's' : '') : '');\n\
+             \x20\x20}\n\
+             \x20\x20function groupDigits(text) {\n\
+             \x20\x20\x20\x20if (!options.numericSeparator || /[^0-9.\\-]/.test(text)) return text;\n\
+             \x20\x20\x20\x20var parts = text.split('.'), integer = parts[0].replace(/\\B(?=(\\d{3})+(?!\\d))/g, '_');\n\
+             \x20\x20\x20\x20return parts.length > 1 ? integer + '.' + parts[1].replace(/(\\d{3})(?=\\d)/g, '$1_') : integer;\n\
+             \x20\x20}\n\
+             \x20\x20function identifierKey(key) { return /^[a-zA-Z_][a-zA-Z_0-9]*$/.test(key) ? key : paint(quote(key), 'string'); }\n\
+             \x20\x20function constructorName(object) {\n\
+             \x20\x20\x20\x20for (var pointer = object; pointer; pointer = Object.getPrototypeOf(pointer)) {\n\
+             \x20\x20\x20\x20\x20\x20var descriptor = Object.getOwnPropertyDescriptor(pointer, 'constructor');\n\
+             \x20\x20\x20\x20\x20\x20if (descriptor && typeof descriptor.value === 'function' && descriptor.value.name !== '') return descriptor.value.name;\n\
+             \x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20return null;\n\
+             \x20\x20}\n\
              \x20\x20function renderProperty(owner, key, remaining) {\n\
              \x20\x20\x20\x20var descriptor = Object.getOwnPropertyDescriptor(owner, key);\n\
              \x20\x20\x20\x20if (!descriptor) return '';\n\
              \x20\x20\x20\x20if (Object.prototype.hasOwnProperty.call(descriptor, 'value')) return render(descriptor.value, remaining);\n\
              \x20\x20\x20\x20var getter = descriptor.get, setter = descriptor.set, evaluate = getter && (options.getters === true || options.getters === 'get' && !setter || options.getters === 'set' && setter);\n\
-             \x20\x20\x20\x20if (evaluate) { var value; try { value = getter.call(owner); } catch (_) { return '[Inspection threw]'; } return render(value, remaining); }\n\
-             \x20\x20\x20\x20return getter && setter ? '[Getter/Setter]' : getter ? '[Getter]' : setter ? '[Setter]' : '';\n\
+             \x20\x20\x20\x20if (evaluate) {\n\
+             \x20\x20\x20\x20\x20\x20var got; try { got = getter.call(owner); } catch (_) { return paint('[Inspection threw]', 'special'); }\n\
+             \x20\x20\x20\x20\x20\x20return paint(setter ? '[Getter/Setter:' : '[Getter:', 'special') + ' ' + render(got, remaining) + paint(']', 'special');\n\
+             \x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20return paint(getter && setter ? '[Getter/Setter]' : getter ? '[Getter]' : '[Setter]', 'special');\n\
              \x20\x20}\n\
+             \x20\x20function entriesOf(input, remaining, skipIndices) {\n\
+             \x20\x20\x20\x20var keys = Object.keys(input).filter(function(key) { return !skipIndices || !/^(0|[1-9][0-9]*)$/.test(key); });\n\
+             \x20\x20\x20\x20if (options.showHidden) Object.getOwnPropertyNames(input).forEach(function(key) { if (keys.indexOf(key) < 0 && !(skipIndices && (key === 'length' || /^(0|[1-9][0-9]*)$/.test(key))) && !(typeof input === 'function' && (key === 'length' || key === 'name' || key === 'prototype'))) keys.push(key); });\n\
+             \x20\x20\x20\x20if (options.sorted) keys.sort(typeof options.sorted === 'function' ? options.sorted : undefined);\n\
+             \x20\x20\x20\x20var out = keys.map(function(key) {\n\
+             \x20\x20\x20\x20\x20\x20var enumerable = Object.prototype.propertyIsEnumerable.call(input, key), label = identifierKey(key);\n\
+             \x20\x20\x20\x20\x20\x20return (enumerable ? label : '[' + label + ']') + ': ' + renderProperty(input, key, remaining);\n\
+             \x20\x20\x20\x20});\n\
+             \x20\x20\x20\x20Object.getOwnPropertySymbols(input).forEach(function(symbol) {\n\
+             \x20\x20\x20\x20\x20\x20if (Object.prototype.propertyIsEnumerable.call(input, symbol)) out.push('[' + paint(String(symbol), 'symbol') + ']: ' + renderProperty(input, symbol, remaining));\n\
+             \x20\x20\x20\x20});\n\
+             \x20\x20\x20\x20return out;\n\
+             \x20\x20}\n\
+             \x20\x20function wrap(prefix, open, items, close) { return items.length ? (prefix ? prefix + ' ' : '') + open + ' ' + items.join(', ') + ' ' + close : (prefix ? prefix + ' ' : '') + open + close; }\n\
              \x20\x20function render(input, remaining) {\n\
-             \x20\x20\x20\x20if (input && options.customInspect !== false) { var custom = input[inspectCustom]; if (typeof custom === 'function') return String(custom.call(input, remaining, options, inspect)); }\n\
-             \x20\x20if (input === null) return 'null';\n\
-             \x20\x20if (typeof input === 'bigint') return String(input) + 'n';\n\
-             \x20\x20if (typeof input === 'number') return fmtNumber(input);\n\
-             \x20\x20if (typeof input === 'string') return \"'\" + input.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, \"\\\\'\") + \"'\";\n\
-             \x20\x20if (typeof input === 'function') return '[Function' + (input.name ? ': ' + input.name : '') + ']';\n\
-             \x20\x20if (typeof input === 'symbol' || typeof input === 'bigint') return String(input);\n\
-             \x20\x20if (typeof input !== 'object') return String(input);\n\
+             \x20\x20\x20\x20if (input !== null && (typeof input === 'object' || typeof input === 'function') && options.customInspect !== false) {\n\
+             \x20\x20\x20\x20\x20\x20var custom = input[inspectCustom];\n\
+             \x20\x20\x20\x20\x20\x20if (typeof custom === 'function' && custom !== inspect) {\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20var hookOptions = Object.assign({}, options, { stylize: function(text, kind) { return paint(String(text), kind); } }); var result = custom.call(input, remaining, hookOptions, inspect);\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20if (result !== input) return typeof result === 'string' ? result : render(result, remaining);\n\
+             \x20\x20\x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20if (input === null) return paint('null', 'null');\n\
+             \x20\x20\x20\x20if (input === undefined) return paint('undefined', 'undefined');\n\
+             \x20\x20\x20\x20if (typeof input === 'bigint') return paint(groupDigits(String(input)) + 'n', 'bigint');\n\
+             \x20\x20\x20\x20if (typeof input === 'number') return paint(Object.is(input, -0) ? '-0' : groupDigits(String(input)), 'number');\n\
+             \x20\x20\x20\x20if (typeof input === 'boolean') return paint(String(input), 'boolean');\n\
+             \x20\x20\x20\x20if (typeof input === 'string') return renderString(input);\n\
+             \x20\x20\x20\x20if (typeof input === 'symbol') return paint(String(input), 'symbol');\n\
+             \x20\x20\x20\x20var base = '';\n\
+             \x20\x20\x20\x20if (typeof input === 'function') {\n\
+             \x20\x20\x20\x20\x20\x20var source = Function.prototype.toString.call(input), kind = /^class[\\s{]/.test(source) ? 'class' : 'Function';\n\
+             \x20\x20\x20\x20\x20\x20if (kind === 'class') { var parent = Object.getPrototypeOf(input); base = '[class ' + (input.name || '(anonymous)') + (parent && parent.name ? ' extends ' + parent.name : '') + ']'; }\n\
+             \x20\x20\x20\x20\x20\x20else { var tag = input.constructor && input.constructor.name && input.constructor.name !== 'Function' ? input.constructor.name : 'Function'; base = '[' + tag + (input.name ? ': ' + input.name : ' (anonymous)') + ']'; }\n\
+             \x20\x20\x20\x20\x20\x20base = paint(base, 'special');\n\
+             \x20\x20\x20\x20\x20\x20var extra = entriesOf(input, remaining - 1, false);\n\
+             \x20\x20\x20\x20\x20\x20return extra.length ? (remaining < 0 ? base : base + ' { ' + extra.join(', ') + ' }') : base;\n\
+             \x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20if (typeof input !== 'object') return String(input);\n\
              \x20\x20\x20\x20if (input instanceof Error) { var header = input.message ? input.name + ': ' + input.message : String(input.name), frames = String(input.stack || '').split('\\n').filter(function(line) { return /^\\s+at /.test(line) && !/thaw[A-Z]|eval_script/.test(line); }); return String(input.stack || '').indexOf(header) === 0 && frames.length === String(input.stack).split('\\n').length - 1 ? input.stack : [header].concat(frames).join('\\n'); }\n\
-             \x20\x20\x20\x20if (input instanceof Date) return isNaN(input.getTime()) ? 'Invalid Date' : input.toISOString();\n\
-             \x20\x20\x20\x20if (input instanceof RegExp) return String(input);\n\
-             \x20\x20\x20\x20if (ArrayBuffer.isView(input) && !(input instanceof DataView)) { if (typeof Buffer !== 'undefined' && Buffer.isBuffer(input)) { var hex = []; for (var b = 0; b < input.length && b < 50; b++) hex.push((input[b] < 16 ? '0' : '') + input[b].toString(16)); return '<Buffer' + (hex.length ? ' ' + hex.join(' ') : '') + (input.length > 50 ? ' ... ' + (input.length - 50) + ' more byte' + (input.length - 50 > 1 ? 's' : '') : '') + '>'; } var typedItems = []; for (var t = 0; t < input.length && t < 100; t++) typedItems.push(render(input[t], remaining - 1)); if (input.length > 100) typedItems.push('... ' + (input.length - 100) + ' more item' + (input.length - 100 > 1 ? 's' : '')); if (options.showHidden) typedItems.push('[BYTES_PER_ELEMENT]: ' + input.BYTES_PER_ELEMENT, '[length]: ' + input.length, '[byteLength]: ' + input.byteLength, '[byteOffset]: ' + input.byteOffset, '[buffer]: ' + render(input.buffer, remaining - 1)); return input[Symbol.toStringTag] + '(' + input.length + ') ' + (typedItems.length ? '[ ' + typedItems.join(', ') + ' ]' : '[]'); }\n\
-             \x20\x20\x20\x20if (remaining < 0) return Array.isArray(input) ? '[Array]' : input instanceof Map ? '[Map]' : input instanceof Set ? '[Set]' : '[Object]';\n\
-             \x20\x20\x20\x20if (seen.has(input)) return '[Circular]'; seen.add(input);\n\
+             \x20\x20\x20\x20if (input instanceof Date) return paint(isNaN(input.getTime()) ? 'Invalid Date' : input.toISOString(), 'date');\n\
+             \x20\x20\x20\x20if (input instanceof RegExp) return paint(String(input), 'regexp');\n\
+             \x20\x20\x20\x20if (ArrayBuffer.isView(input) && !(input instanceof DataView)) { if (typeof Buffer !== 'undefined' && Buffer.isBuffer(input)) { var hex = []; for (var b = 0; b < input.length && b < 50; b++) hex.push((input[b] < 16 ? '0' : '') + input[b].toString(16)); return '<Buffer' + (hex.length ? ' ' + hex.join(' ') : '') + (input.length > 50 ? ' ... ' + (input.length - 50) + ' more byte' + (input.length - 50 > 1 ? 's' : '') : '') + '>'; } var typedItems = [], typedMax = Math.min(input.length, options.maxArrayLength); for (var t = 0; t < typedMax; t++) typedItems.push(render(input[t], remaining - 1)); if (input.length > typedMax) typedItems.push('... ' + (input.length - typedMax) + ' more item' + (input.length - typedMax > 1 ? 's' : '')); if (options.showHidden) typedItems.push('[BYTES_PER_ELEMENT]: ' + input.BYTES_PER_ELEMENT, '[length]: ' + input.length, '[byteLength]: ' + input.byteLength, '[byteOffset]: ' + input.byteOffset, '[buffer]: ' + render(input.buffer, remaining - 1)); return input[Symbol.toStringTag] + '(' + input.length + ') ' + (typedItems.length ? '[ ' + typedItems.join(', ') + ' ]' : '[]'); }\n\
+             \x20\x20\x20\x20if (remaining < 0) { var shortName = constructorName(input); return paint('[' + (Array.isArray(input) ? 'Array' : input instanceof Map ? 'Map' : input instanceof Set ? 'Set' : shortName || 'Object') + ']', 'special'); }\n\
+             \x20\x20\x20\x20if (seen.indexOf(input) >= 0) { if (!refs.has(input)) refs.set(input, refs.size + 1); return paint('[Circular *' + refs.get(input) + ']', 'special'); }\n\
+             \x20\x20\x20\x20seen.push(input);\n\
              \x20\x20\x20\x20try {\n\
-             \x20\x20\x20\x20\x20\x20if (Array.isArray(input)) { var items = []; for (var index = 0; index < input.length; index++) items.push(renderProperty(input, String(index), remaining - 1)); if (options.showHidden) items.push('[length]: ' + input.length); return items.length ? '[ ' + items.join(', ') + ' ]' : '[]'; }\n\
-             \x20\x20\x20\x20\x20\x20if (input instanceof Map) return 'Map(' + input.size + ') { ' + Array.from(input).map(function(entry) { return render(entry[0], remaining - 1) + ' => ' + render(entry[1], remaining - 1); }).join(', ') + ' }';\n\
-             \x20\x20\x20\x20\x20\x20if (input instanceof Set) return 'Set(' + input.size + ') { ' + Array.from(input).map(function(value) { return render(value, remaining - 1); }).join(', ') + ' }';\n\
-             \x20\x20\x20\x20\x20\x20return '{ ' + Object.keys(input).map(function(key) { return key + ': ' + renderProperty(input, key, remaining - 1); }).join(', ') + ' }';\n\
-             \x20\x20\x20\x20} finally { seen.delete(input); }\n\
+             \x20\x20\x20\x20\x20\x20var name = constructorName(input), nullProto = Object.getPrototypeOf(input) === null, result;\n\
+             \x20\x20\x20\x20\x20\x20if (Array.isArray(input)) {\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20var items = [], holes = 0, shown = 0, length = input.length;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20for (var index = 0; index < length && shown < options.maxArrayLength; index++) {\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20if (!Object.prototype.hasOwnProperty.call(input, index)) { holes++; continue; }\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20if (holes) { items.push(paint('<' + holes + ' empty item' + (holes > 1 ? 's' : '') + '>', 'undefined')); shown++; holes = 0; if (shown >= options.maxArrayLength) { index--; continue; } }\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20items.push(renderProperty(input, String(index), remaining - 1)); shown++;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20if (holes && shown < options.maxArrayLength) { items.push(paint('<' + holes + ' empty item' + (holes > 1 ? 's' : '') + '>', 'undefined')); index = length; }\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20if (index < length) { var more = length - index; items.push('... ' + more + ' more item' + (more > 1 ? 's' : '')); }\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20items = items.concat(entriesOf(input, remaining - 1, true));\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20if (options.showHidden) items.push('[length]: ' + length);\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap(name && name !== 'Array' ? name + '(' + length + ')' : '', '[', items, ']');\n\
+             \x20\x20\x20\x20\x20\x20} else if (input instanceof Map) {\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap('Map(' + input.size + ')', '{', Array.from(input).map(function(entry) { return render(entry[0], remaining - 1) + ' => ' + render(entry[1], remaining - 1); }).concat(entriesOf(input, remaining - 1, false)), '}');\n\
+             \x20\x20\x20\x20\x20\x20} else if (input instanceof Set) {\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap('Set(' + input.size + ')', '{', Array.from(input).map(function(item) { return render(item, remaining - 1); }).concat(entriesOf(input, remaining - 1, false)), '}');\n\
+             \x20\x20\x20\x20\x20\x20} else {\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20var tagName = input[Symbol.toStringTag], label = nullProto ? '[Object: null prototype]' : name && name !== 'Object' ? name : '';\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20if (typeof tagName === 'string' && tagName !== '' && tagName !== name && !(options.showHidden ? Object.prototype.hasOwnProperty : Object.prototype.propertyIsEnumerable).call(input, Symbol.toStringTag)) label = (label || 'Object') + ' [' + tagName + ']';\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap(label, '{', entriesOf(input, remaining - 1, false), '}');\n\
+             \x20\x20\x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20\x20\x20if (refs.has(input)) result = '<ref *' + refs.get(input) + '> ' + result;\n\
+             \x20\x20\x20\x20\x20\x20return result;\n\
+             \x20\x20\x20\x20} finally { seen.pop(); }\n\
              \x20\x20}\n\
              \x20\x20return render(value, depth);\n\
              }\n\
-             inspect.custom = inspectCustom; inspect.defaultOptions = { showHidden: false, depth: 2, colors: false, customInspect: true, showProxy: false, maxArrayLength: 100, maxStringLength: 10000, breakLength: 128, compact: 3, sorted: false, getters: false, numericSeparator: false };\n\
+             inspect.custom = inspectCustom; inspect.defaultOptions = { showHidden: false, depth: 2, colors: false, customInspect: true, showProxy: false, maxArrayLength: 100, maxStringLength: 10000, breakLength: 80, compact: 3, sorted: false, getters: false, numericSeparator: false };\n\
              function fmtNumber(n) { return Object.is(n, -0) ? '-0' : String(n); }\n\
              function hasBuiltInToString(value) {\n\
              \x20\x20if (typeof value.toString !== 'function') return true;\n\
