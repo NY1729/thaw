@@ -1,4 +1,4 @@
-const u = setTimeout(() => console.log('never'), 50);
+const u = setTimeout(() => console.log('never'), 5000);
 u.unref();
 console.log(u.hasRef());
 const r = setTimeout(() => console.log('runs'), 5);

@@ -79,6 +79,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let stringify_fn = self.module.get_function(
             if backend_symbol.ends_with("_graph_result") {
                 "thaw_json_graph_encode"
+            } else if matches!(backend_symbol, "thaw_tjs_call_typed_result" | "thaw_tjs_class_call") {
+                "thaw_json_stringify_tjs"
             } else {
                 "thaw_json_stringify"
             }
@@ -235,7 +237,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let hidden = if visibility_name.as_bytes().contains(&0) {
             self.context.bool_type().const_zero()
         } else {
-            let marker_name = self.builder.build_global_string_ptr(
+            let marker_name = self.intern_string(
                 visibility_name, "native_field_visibility_name",
             ).map_err(|error| error.to_string())?;
             self.builder.build_call(
@@ -276,14 +278,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[self.context.i8_type().const_int(kind, false).into()], "console_accessor_sentinel",
             ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                 .ok_or("accessor sentinel returned no value")?;
-            let key = self.builder.build_global_string_ptr(name, "console_accessor_key")
+            let key = self.intern_string(name, "console_accessor_key")
                 .map_err(|error| error.to_string())?;
             self.compile_json_object_set_native_with_undefined(
                 json, key.as_pointer_value(), sentinel, &HirType::Json, preserve_undefined, false,
             )?;
         } else if getter.is_none() && has_setter {
             if preserve_undefined {
-                let key = self.builder.build_global_string_ptr(name, "dynamic_setter_only_key")
+                let key = self.intern_string(name, "dynamic_setter_only_key")
                     .map_err(|error| error.to_string())?;
                 let undefined = self.compile_napi_undefined_json()?;
                 self.compile_json_object_set_native_with_undefined(
@@ -299,7 +301,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     field_ty.clone(),
                 )
             };
-            let key = self.builder.build_global_string_ptr(name, "dynamic_object_key")
+            let key = self.intern_string(name, "dynamic_object_key")
                 .map_err(|error| error.to_string())?;
             // A class instance prints its absent optional fields as `undefined` (Node's
             // define semantics); plain objects and error-family instances omit them.
@@ -350,7 +352,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             "name" if *field_ty == HirType::Str => {
                 let value = self.compile_accessor_aware_field_read(object, ty, fields, index)?;
-                let default = self.builder.build_global_string_ptr(default, "stringify_default_error_name")
+                let default = self.intern_string(default, "stringify_default_error_name")
                     .map_err(|error| error.to_string())?;
                 let compared = self.builder.build_call(
                     self.module.get_function("thaw_string_compare").unwrap(),
@@ -406,7 +408,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.get_function("thaw_json_typed_decode_scope_own").unwrap(),
             &[object.into()], "track_marshaled_collection",
         ).map_err(|error| error.to_string())?;
-        let key = self.builder.build_global_string_ptr(wrapper_key, "console_collection_key")
+        let key = self.intern_string(wrapper_key, "console_collection_key")
             .map_err(|error| error.to_string())?;
         self.compile_json_object_set_native_with_undefined(
             object, key.as_pointer_value(), entries, &HirType::Json, preserve_undefined, true,
@@ -437,7 +439,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let done = self.context.append_basic_block(function, "subclass_name_done");
         self.builder.build_conditional_branch(known, write, done).map_err(|error| error.to_string())?;
         self.builder.position_at_end(write);
-        let key = self.builder.build_global_string_ptr("__thaw_class__", "console_class_key")
+        let key = self.intern_string("__thaw_class__", "console_class_key")
             .map_err(|error| error.to_string())?;
         self.builder.build_call(
             self.module.get_function("thaw_json_object_set_string").unwrap(),
@@ -654,7 +656,7 @@ impl<'ctx> HirCompiler<'ctx> {
             else {
                 continue;
             };
-            let expected = self.builder.build_global_string_ptr(name, "poly_class_name")
+            let expected = self.intern_string(name, "poly_class_name")
                 .map_err(|error| error.to_string())?;
             let matches = self.builder.build_call(
                 self.module.get_function("thaw_object_has_class_identity").unwrap(),
@@ -731,7 +733,7 @@ impl<'ctx> HirCompiler<'ctx> {
             else {
                 continue;
             };
-            let expected = self.builder.build_global_string_ptr(name, "view_class_name")
+            let expected = self.intern_string(name, "view_class_name")
                 .map_err(|error| error.to_string())?;
             let matches = self.builder.build_call(
                 self.module.get_function("thaw_object_has_class_identity").unwrap(),
@@ -788,9 +790,9 @@ impl<'ctx> HirCompiler<'ctx> {
             let class = fields[0].0.strip_prefix("__thaw_class_identity_\u{1e}")
                 .and_then(|ancestry| ancestry.split('\u{1f}').next())
                 .ok_or("native collection subclass has no identity marker")?;
-            let key = self.builder.build_global_string_ptr("__thaw_class__", "console_class_key")
+            let key = self.intern_string("__thaw_class__", "console_class_key")
                 .map_err(|error| error.to_string())?;
-            let name = self.builder.build_global_string_ptr(class, "console_class_name")
+            let name = self.intern_string(class, "console_class_name")
                 .map_err(|error| error.to_string())?;
             self.builder.build_call(
                 self.module.get_function("thaw_json_object_set_string").unwrap(),
@@ -843,7 +845,7 @@ impl<'ctx> HirCompiler<'ctx> {
             && fields[1].0 == "timestamp"
             && fields[1].1 == HirType::F64
         {
-            let date_name = self.builder.build_global_string_ptr("Date", "native_date_identity_name")
+            let date_name = self.intern_string("Date", "native_date_identity_name")
                 .map_err(|error| error.to_string())?;
             Some(self.builder.build_call(
                 self.module.get_function("thaw_object_has_class_identity").unwrap(),
@@ -890,7 +892,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let hidden = if name.as_bytes().contains(&0) {
                 self.context.bool_type().const_zero()
             } else {
-                let marker = self.builder.build_global_string_ptr(name, "native_field_initial_visibility")
+                let marker = self.intern_string(name, "native_field_initial_visibility")
                     .map_err(|error| error.to_string())?;
                 self.builder.build_call(
                     self.module.get_function("thaw_object_marker_hidden").unwrap(),
@@ -994,9 +996,9 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_conditional_branch(visible, write, done)
                 .map_err(|error| error.to_string())?;
             self.builder.position_at_end(write);
-            let key = self.builder.build_global_string_ptr("stack", "assigned_stack_key")
+            let key = self.intern_string("stack", "assigned_stack_key")
                 .map_err(|error| error.to_string())?;
-            let empty = self.builder.build_global_string_ptr("", "assigned_stack_empty")
+            let empty = self.intern_string("", "assigned_stack_empty")
                 .map_err(|error| error.to_string())?;
             let text = self.builder.build_call(
                 self.module.get_function("thaw_object_stack_get").unwrap(),
@@ -1040,9 +1042,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .filter(|_| !marker.unwrap().split('\u{1f}').any(thaw_hir::is_error_family_name))
             };
             if let Some(class) = class {
-                let key = self.builder.build_global_string_ptr("__thaw_class__", "console_class_key")
+                let key = self.intern_string("__thaw_class__", "console_class_key")
                     .map_err(|error| error.to_string())?;
-                let name = self.builder.build_global_string_ptr(class, "console_class_name")
+                let name = self.intern_string(class, "console_class_name")
                     .map_err(|error| error.to_string())?;
                 // The static type only says the record has the class's layout. A copy made by
                 // `{ ...instance }` carries the hidden marker but was never allocated as an
@@ -1692,9 +1694,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        let key = self
-            .builder
-            .build_global_string_ptr("__thaw_js_handle_id__", "dynamic_handle_placeholder_key")
+        let key = self.intern_string("__thaw_js_handle_id__", "dynamic_handle_placeholder_key")
             .map_err(|error| error.to_string())?;
         self.builder
             .build_call(
@@ -1977,13 +1977,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_object_new returned no value")?;
-        let ty_key = self
-            .builder
-            .build_global_string_ptr("type", "bytes_type_key")
+        let ty_key = self.intern_string("type", "bytes_type_key")
             .map_err(|error| error.to_string())?;
-        let ty_value = self
-            .builder
-            .build_global_string_ptr("Buffer", "bytes_type_value")
+        let ty_value = self.intern_string("Buffer", "bytes_type_value")
             .map_err(|error| error.to_string())?;
         self.builder
             .build_call(
@@ -1994,9 +1990,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         let widened = self.compile_bytes_widened_handle(value)?;
         let data = self.compile_native_array_to_json_with_undefined(widened, &HirType::F64, true)?;
-        let data_key = self
-            .builder
-            .build_global_string_ptr("data", "bytes_data_key")
+        let data_key = self.intern_string("data", "bytes_data_key")
             .map_err(|error| error.to_string())?;
         self.builder
             .build_call(

@@ -79,9 +79,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_typed_dynamic_argument(array, assigned, assigned_type)?;
         let property = dynamic_member_name(&signature.symbol, false)
             .ok_or("invalid typed QuickJS setter symbol")?;
-        let property = self
-            .builder
-            .build_global_string_ptr(&property, "quickjs_setter_name")
+        let property = self.intern_string(&property, "quickjs_setter_name")
             .map_err(|error| error.to_string())?;
         let args_json = self
             .builder

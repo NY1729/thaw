@@ -2698,6 +2698,26 @@ impl<'a> FnLowerer<'a> {
                             } else {
                                 list.clone()
                             };
+                            // `Buffer.concat([])`: nothing to join, so an empty buffer.
+                            if matches!(call.args.first().map(|arg| arg.expr.as_ref()),
+                                Some(Expr::Array(array)) if array.elems.is_empty())
+                            {
+                                return self.wrap_call_argument_bindings(
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_bytes_alloc".to_string())),
+                                        vec![HirExpr::Lit(HirLit::F64(0.0))],
+                                    ),
+                                    &bindings,
+                                );
+                            }
+                            // A list of dynamic buffers (`cipher.update()` results) decodes back.
+                            let list = &if matches!(self.infer_expr_type(list)?,
+                                HirType::Array(element) if *element == HirType::Json)
+                            {
+                                self.coerce_to_declared(&HirType::Array(Box::new(HirType::Bytes)), list.clone())?
+                            } else {
+                                list.clone()
+                            };
                             let list_type = self.infer_expr_type(list)?;
                             if !matches!(&list_type, HirType::Array(element)
                                 if matches!(element.as_ref(), HirType::Bytes)

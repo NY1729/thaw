@@ -1247,15 +1247,255 @@ var __thaw_bundle_entry_key = \"p/index.js\";
         "exports.c = globalThis.Zed();",
     );
     assert!(!crate::scan::scan_bundle(&called).unwrap().is_clean());
-    // generated `with (..)` source cannot be parsed by `new Function` here
+    // generated `with (..)` source is supported (sloppy `new Function`), no longer a blocker
     let with_code = src.replace(
         "exports.a = ",
         "exports.w = '  with (locals || {}) {'; exports.a = ",
     );
-    assert!(crate::scan::scan_bundle(&with_code)
+    assert!(crate::scan::scan_bundle(&with_code).unwrap().is_clean());
+}
+
+#[test]
+fn sloppy_with_statement_via_new_function() {
+    assert_eq!(
+        one("var f = new Function('o', 'with (o) { b = a + 1; return typeof a + typeof zz + say(b) }'); \
+             var o = { a: 1, b: 0, say(x) { return this === o ? 'T' + x : 'F' } }; \
+             console.log(f(o), o.b)"),
+        "numberundefinedT2 2"
+    );
+    // outer names still resolve, a local shadows nothing the object lacks
+    assert_eq!(
+        one("var y = 5; var f = new Function('o', 'with (o) { return a + y }'); console.log(f({ a: 1 }))"),
+        "6"
+    );
+    // Symbol.unscopables hides a property
+    assert_eq!(
+        one(
+            "var x = 'outer'; var o = { x: 'in', [Symbol.unscopables]: { x: true } }; \
+             console.log(new Function('o', 'with (o) { return x }').call(null, o))"
+        ),
+        "outer"
+    );
+}
+
+#[test]
+fn string_literal_with_text_is_not_code() {
+    assert_eq!(one("console.log('with (x) {')"), "with (x) {");
+}
+
+#[test]
+fn scan_accepts_method_calls_guarded_by_a_truthiness_test_of_the_same_name() {
+    let src = "module.exports = (function(require) {
+var __thaw_bundle_factories = {
+\"p/index.js\": function(module, exports, require) {
+  exports.a = function (options, date) { return options?.in ? options.in(date) : date; };
+  exports.b = function (locale, parts) { if (locale.localize.preprocessor) { parts = locale.localize.preprocessor(parts); } return parts; };
+},
+};
+var __thaw_bundle_require_maps = { \"p/index.js\": {}, };
+var __thaw_bundle_entry_key = \"p/index.js\";
+})(globalThis.require);";
+    let report = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    let unguarded = src.replace("options?.in ? options.in(date) : date", "options.in(date)");
+    assert!(!crate::scan::scan_bundle(&unguarded).unwrap().is_clean());
+}
+
+const DATES: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"d/index.js": function(module, exports, require) {
+  exports.iso = function (d) { return d.toISOString(); };
+  exports.plus = function (d, n) { return new Date(d.getTime() + n); };
+  exports.bad = function (d) { return isNaN(d.getTime()); };
+  exports.nested = function () { return { at: new Date(5), n: [new Date(7)], none: new Date(NaN) }; };
+},
+};
+var __thaw_bundle_require_maps = { "d/index.js": {}, };
+var __thaw_bundle_entry_key = "d/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn a_date_crosses_the_typed_abi_as_a_wire_node_both_ways() {
+    use std::ffi::CString;
+    let bundle = CString::new(DATES).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"dt".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    let date = |ms: &str| format!("{{\"__thaw_tjs_date__\":{ms}}}");
+    assert_eq!(
+        typed_call("dt::iso", &format!("[{}]", date("86400000"))).unwrap(),
+        "\"1970-01-02T00:00:00.000Z\""
+    );
+    // an Invalid Date crosses as "NaN" (or null, how compiled JSON spells NaN)
+    for nan in ["\"NaN\"", "null"] {
+        assert_eq!(
+            typed_call("dt::bad", &format!("[{}]", date(nan))).unwrap(),
+            "true"
+        );
+    }
+    // a Date result is a live handle, unless the caller asks for the wire node (`\u{3}`)
+    assert!(typed_call("dt::plus", &format!("[{},5]", date("86400000")))
         .unwrap()
-        .blockers
-        .contains_key("dynamic-with-code"));
+        .starts_with("{\"__thaw_tjs_handle__\":"));
+    assert_eq!(
+        typed_call("\u{3}dt::plus", &format!("[{},5]", date("86400000"))).unwrap(),
+        date("86400005")
+    );
+    assert_eq!(
+        typed_call("dt::nested", "[]").unwrap(),
+        format!(
+            "{{\"at\":{},\"n\":[{}],\"none\":{}}}",
+            date("5"),
+            date("7"),
+            date("\"NaN\"")
+        )
+    );
+}
+
+#[test]
+fn graph_wire_date_bigint_regexp_map_and_set_nodes_decode() {
+    use crate::host::*;
+    use std::ffi::{CStr, CString};
+    let bundle = CString::new(MINI).unwrap();
+    assert_eq!(thaw_tjs_register(c"gw".as_ptr(), bundle.as_ptr()), 1);
+    let text_of = |wire: &str| {
+        let wire = CString::new(wire).unwrap();
+        let handle = thaw_tjs_retain_graph_result(wire.as_ptr());
+        assert!(handle.error.is_null(), "{wire:?}");
+        // SAFETY: a NUL-terminated string owned by the handle table.
+        unsafe { CStr::from_ptr(thaw_tjs_handle_to_string(handle.value)) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let one = |node: &str| {
+        format!(r#"{{"root":{{"r":0}},"nodes":[{node}],"leases":[],"napiLeases":[]}}"#)
+    };
+    assert!(text_of(&one(r#"{"d":17280000000}"#)).contains("1970"));
+    assert_eq!(text_of(&one(r#"{"d":null}"#)), "Invalid Date");
+    assert_eq!(
+        text_of(&one(r#"{"bi":"123456789012345678901234567890"}"#)),
+        "123456789012345678901234567890"
+    );
+    assert_eq!(text_of(&one(r#"{"re":["a+","gi",0]}"#)), "/a+/gi");
+    let set = r#"{"root":{"r":0},"nodes":[{"s":{"r":1}},{"a":[{"v":1},{"v":2},{"v":2}]}],"leases":[],"napiLeases":[]}"#;
+    assert_eq!(text_of(set), "[object Set]");
+    let map = r#"{"root":{"r":0},"nodes":[{"m":{"r":1}},{"a":[{"r":2}]},{"a":[{"v":"k"},{"v":1}]}],"leases":[],"napiLeases":[]}"#;
+    assert_eq!(text_of(map), "[object Map]");
+}
+
+#[cfg(feature = "intl")]
+#[test]
+fn intl_formats_numbers_dates_and_lists_through_the_native_icu_data() {
+    let out = run(
+        "console.log(new Intl.NumberFormat('de-DE').format(1234567.5));
+         console.log(new Intl.PluralRules('en').select(1));
+         console.log(new Intl.ListFormat('en').format(['a','b','c']));
+         console.log(new Intl.DateTimeFormat('en-US',{timeZone:'UTC'}).format(new Date(0)));
+         console.log(new Intl.Collator('en',{numeric:true}).compare('a2','a10'));",
+    );
+    assert_eq!(out.join("|"), "1.234.567,5|one|a, b, and c|1/1/1970|-1");
+}
+
+#[cfg(feature = "intl")]
+#[test]
+fn intl_date_time_format_reports_parts_range_and_resolved_options() {
+    let out = run(
+        "const f = new Intl.DateTimeFormat('en-US',{timeZone:'UTC',year:'numeric',month:'short',day:'2-digit'});
+         const d = new Date(Date.UTC(2024,0,5));
+         console.log(f.formatToParts(d).map(p => p.type).join());
+         console.log(typeof f.formatRange(d, new Date(Date.UTC(2024,0,9))));
+         console.log(f.resolvedOptions().timeZone);",
+    );
+    assert_eq!(out.join("|"), "month,literal,day,literal,year|string|UTC");
+}
+
+#[cfg(feature = "intl")]
+#[test]
+fn scan_knows_intl_globals_and_namespace_prototype_methods() {
+    let src = "module.exports = (function(require) {
+var __thaw_bundle_factories = {
+\"p/index.js\": function(module, exports, require) {
+  exports.a = function (d) { return new Intl.DateTimeFormat('en').formatRange(d, d) + Intl.NumberFormat.supportedLocalesOf; };
+},
+};
+var __thaw_bundle_require_maps = { \"p/index.js\": {}, };
+var __thaw_bundle_entry_key = \"p/index.js\";
+})(globalThis.require);";
+    let report = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+}
+
+/// Run `src` through the full event loop (child processes are polled there) and return the log lines.
+fn run_loop(src: &str) -> String {
+    let mut it = Interp::new();
+    it.run(src).expect("script runs");
+    it.run_event_loop().expect("loop runs");
+    it.out.join("|")
+}
+
+const CHILD_SHIM: &str = r#"
+function hexs(h) { var s = ''; for (var i = 0; i < h.length; i += 2) s += String.fromCharCode(parseInt(h.slice(i, i + 2), 16)); return s; }
+var logs = [];
+globalThis.__thaw_poll_platform_events = function () {
+  JSON.parse(__thaw_child_process_poll()).forEach(function (e) {
+    logs.push(e.type + (e.value !== undefined ? ':' + hexs(e.value) : '') + (e.type === 'exit' || e.type === 'exited' ? ':' + e.code + '/' + e.signal : '') + (e.code && e.type === 'error' ? ':' + e.code : ''));
+  });
+};
+"#;
+
+#[test]
+fn child_process_async_orders_output_before_close() {
+    let src = format!(
+        "{CHILD_SHIM}
+__thaw_child_process_spawn('/bin/sh', JSON.stringify(['-c', 'echo out; echo err >&2; exit 3']), JSON.stringify({{stdio: ['ignore','pipe','pipe']}}));
+setTimeout(function () {{ console.log(logs.join(',')); }}, 400);"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("spawn,"), "{out}");
+    assert!(
+        out.contains("stdout:out|") && out.contains("stderr:err|"),
+        "{out}"
+    );
+    // `exited` (the process ended) may precede the last pipe data; `exit` (close) always comes last.
+    assert!(out.ends_with(",exit:3/null"), "{out}");
+    let exited = out.find("exited:3/null").expect("exited event");
+    assert!(exited < out.rfind(",exit:3/null").unwrap(), "{out}");
+}
+
+#[test]
+fn child_process_keeps_loop_alive_and_reports_signal_and_spawn_error() {
+    let src = format!(
+        "{CHILD_SHIM}
+var h = __thaw_child_process_spawn('/bin/sleep', JSON.stringify(['5']), JSON.stringify({{}}));
+setTimeout(function () {{ console.log(__thaw_child_process_kill(h, 15)); }}, 50);
+__thaw_child_process_spawn('/nonexistent/x', '[]', '{{}}');
+process.on('exit', function () {{ console.log(logs.join(',')); }});"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("true|"), "{out}");
+    assert!(
+        out.contains("error:ENOENT") && out.contains("exit:null/15"),
+        "{out}"
+    );
+}
+
+#[test]
+fn child_process_stdin_env_cwd_and_sync() {
+    let src = format!(
+        "{CHILD_SHIM}
+var h = __thaw_child_process_spawn('/bin/cat', '[]', JSON.stringify({{cwd: '/'}}));
+__thaw_child_process_stdin(h, '68690a', false);
+__thaw_child_process_stdin(h, '', true);
+var r = JSON.parse(__thaw_child_process_sync('/bin/sh', JSON.stringify(['-c', 'echo $FOO; pwd; cat; exit 2']), JSON.stringify({{env: {{FOO: 'bar'}}, cwd: '/tmp', input: '78'}})));
+console.log(r.status, hexs(r.stdout).replace(/\\n/g, '+'));
+var t = JSON.parse(__thaw_child_process_sync('/bin/sleep', JSON.stringify(['5']), JSON.stringify({{timeout: 50, killSignal: 9}})));
+console.log(t.timedOut, t.signal);
+setTimeout(function () {{ console.log(logs.join(',')); }}, 300);"
+    );
+    let out = run_loop(&src);
+    assert!(out.starts_with("2 bar+/tmp+x|true 9|"), "{out}");
+    assert!(out.contains("stdout:hi|"), "{out}");
 }
 
 #[test]
@@ -1331,7 +1571,7 @@ fn graph_callbacks_receive_live_objects_and_return_graph_wires() {
         assert!(made.error.is_null() && made.value > 0);
         made.value
     };
-    let echo = handle_of(1 as *const _);
+    let echo = handle_of(std::ptr::dangling());
     let number = handle_of(std::ptr::null());
     let call = |export: &str, callback: u64| {
         let function = thaw_tjs_get_global(
