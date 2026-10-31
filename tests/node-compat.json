@@ -3974,6 +3974,54 @@
       "source": "function main(): void {\n  setTimeout(() => {\n    console.log(\"timer\");\n    setImmediate(() => console.log(\"imm1\"));\n    setTimeout(() => console.log(\"timeout0\"), 0);\n    setImmediate(() => console.log(\"imm2\"));\n  }, 1);\n}\n"
     },
     {
+      "name": "nd7 crypto hkdfSync getCiphers getHashes",
+      "expect": "matched",
+      "source": "import * as crypto from \"node:crypto\";\nfunction main(): void {\n  const hex = (x: Uint8Array | ArrayBuffer): string => Array.from(new Uint8Array(x as any)).map((b) => b.toString(16).padStart(2, \"0\")).join(\"\");\n  console.log(hex(crypto.hkdfSync(\"sha256\", \"key\", \"salt\", \"info\", 16) as any));\n  console.log(hex(crypto.hkdfSync(\"sha512\", Buffer.from(\"k\"), \"\", \"\", 70) as any));\n  console.log(crypto.getCiphers().includes(\"aes-256-cbc\"), crypto.getCiphers().length > 50);\n  console.log(crypto.getHashes().includes(\"sha256\"), crypto.getHashes().includes(\"sha3-256\"), crypto.getHashes().length);\n}\n"
+    },
+    {
+      "name": "nd7 crypto pbkdf2 randomBytes scrypt hkdf callbacks",
+      "expect": "matched",
+      "source": "import * as crypto from \"node:crypto\";\nfunction main(): void {\n  crypto.pbkdf2(\"pw\", \"salt\", 10, 8, \"sha1\", (e, k) => {\n    console.log(\"pbkdf2\", e, k.toString(\"hex\"));\n    crypto.randomBytes(4, (e2, b) => {\n      console.log(\"randomBytes\", e2, b.length);\n      crypto.scrypt(\"pw\", \"salt\", 8, (e3, k3) => {\n        console.log(\"scrypt\", e3, k3.toString(\"hex\"));\n        crypto.hkdf(\"sha256\", \"key\", \"salt\", \"info\", 8, (e4, k4) => console.log(\"hkdf\", e4, k4.byteLength));\n      });\n    });\n  });\n}\n"
+    },
+    {
+      "name": "nd7 perf_hooks mark detail and PerformanceObserver export",
+      "expect": "matched",
+      "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  console.log(performance.mark(\"d\", { detail: { z: 1 } }).detail);\n  const o = new PerformanceObserver((list) => { console.log(\"obs\", list.getEntries().map((e) => e.name)); });\n  o.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"c\");\n  setTimeout(() => o.disconnect(), 20);\n}\n"
+    },
+    {
+      "name": "nd7 Intl supportedLocalesOf getCanonicalLocales RelativeTimeFormat formatToParts",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Intl.NumberFormat.supportedLocalesOf([\"en-US\", \"xx\", \"de\"]));\n  console.log(Intl.getCanonicalLocales(\"EN-us\"), Intl.getCanonicalLocales([\"en-US\", \"en-us\"]));\n  const rtf = new Intl.RelativeTimeFormat(\"en\", { numeric: \"auto\" });\n  console.log(rtf.format(-1, \"day\"), rtf.format(2, \"week\"));\n  console.log(rtf.formatToParts(-5, \"second\").map((p) => p.type + \":\" + p.value + \":\" + p.unit).join(\"|\"));\n  console.log(rtf.formatToParts(1, \"day\").map((p) => p.type + \":\" + p.value).join(\"|\"));\n}\n"
+    },
+    {
+      "name": "nd7 Intl NumberFormat unit names and infinity",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(new Intl.NumberFormat(\"de\").format(1234567.891), new Intl.NumberFormat(\"hi\").format(5));\n  console.log(new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"kilometer-per-hour\" }).format(5), new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"liter\", unitDisplay: \"long\" }).format(5), new Intl.NumberFormat().format(Infinity));\n  console.log(new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"celsius\" }).format(21.5), new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"kilometer-per-hour\", unitDisplay: \"long\" }).format(1), new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"megabyte\", unitDisplay: \"narrow\" }).format(3));\n  console.log(new Intl.NumberFormat(\"en-US\").format(-Infinity), new Intl.NumberFormat(\"en-US\", { style: \"percent\" }).format(Infinity), new Intl.NumberFormat(\"en-US\").format(NaN));\n  console.log(JSON.stringify(new Intl.NumberFormat(\"en-US\").formatToParts(Infinity)));\n}\n"
+    },
+    {
+      "name": "nd7 Intl Collator compare as sort callback",
+      "expect": "matched",
+      "source": "function main(): void {\n  const de = new Intl.Collator(\"de\");\n  console.log([\"z\", \"ä\", \"a\"].sort(de.compare));\n  const en = new Intl.Collator(\"en\");\n  console.log([\"b\", \"B\", \"a\", \"A\"].sort(en.compare));\n  const numeric = new Intl.Collator(\"en\", { numeric: true });\n  console.log([\"a10\", \"a9\", \"a1\"].toSorted(numeric.compare));\n}\n"
+    },
+    {
+      "name": "nd7 events errorMonitor and captureRejections",
+      "expect": "matched",
+      "source": "import { EventEmitter, errorMonitor } from \"node:events\";\nfunction main(): void {\n  const e = new EventEmitter();\n  e.on(errorMonitor, () => console.log(\"monitor\"));\n  e.on(\"error\", () => console.log(\"handler\"));\n  e.emit(\"error\", new Error(\"x\"));\n  const c = new EventEmitter({ captureRejections: true });\n  c.on(\"x\", async () => { throw new Error(\"async boom\"); });\n  c.on(\"error\", (er: Error) => console.log(\"captured\", er.message));\n  c.emit(\"x\");\n}\n"
+    },
+    {
+      "name": "nd7 CustomEvent construction and dispatch",
+      "expect": "matched",
+      "source": "function main(): void {\n  const ce = new CustomEvent(\"c\", { detail: { z: 1 } });\n  console.log(ce.type, ce.detail, ce instanceof Event);\n  const t = new EventTarget();\n  t.addEventListener(\"c\", (ev: any) => console.log(\"got\", ev.detail));\n  t.dispatchEvent(ce);\n}\n"
+    },
+    {
+      "name": "nd7 util inspect options strings numbers colors and defaults",
+      "expect": "matched",
+      "source": "import * as util from \"node:util\";\nfunction main(): void {\n  console.log(util.inspect([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], { maxArrayLength: 3 }));\n  console.log(util.inspect({ b: 1, a: 2 }, { sorted: true }));\n  console.log(util.inspect(\"x\".repeat(30), { maxStringLength: 5 }));\n  console.log(util.inspect(123456789.123, { numericSeparator: true }));\n  console.log(util.inspect({ a: 1, b: { c: \"s\" } }, { colors: true }));\n  console.log(util.inspect(\"a'b\"), util.inspect(\"a\\\"b'c\"), util.inspect(\"a\\nb\"));\n  console.log(util.inspect({ \"a-b\": 1, ok: [1, [2, [3, [4]]]] }));\n  console.log(util.inspect.defaultOptions.depth, typeof util.inspect.custom);\n}\n"
+    },
+    {
+      "name": "nd7 error codes for URL TextDecoder StringDecoder",
+      "expect": "matched",
+      "source": "import { StringDecoder } from \"node:string_decoder\";\nfunction main(): void {\n  try { new URL(\"nope\"); } catch (e: any) { console.log(e.name, e.code, e.message, e.input); }\n  try { new TextDecoder(\"zz\"); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  try { new TextDecoder(\"utf-8\", { fatal: true }).decode(new Uint8Array([0xff])); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  try { new StringDecoder(\"bogus\"); } catch (e: any) { console.log(e.name, e.code, e.message); }\n}\n",
       "name": "nd5e fs errors carry node errno, message, syscall and path",
       "expect": "matched",
       "source": "import fs from \"node:fs\";\nfunction t(f: () => void): void {\n  try { f(); } catch (e: any) { console.log(Object.keys(e), e.errno, e.code, e.syscall, e.path, e.dest, e.message); }\n}\nfunction main(): void {\n  t(() => { fs.readFileSync(\"/nonexistent/x\"); });\n  t(() => { fs.readdirSync(\"/etc/hostname\"); });\n  t(() => { fs.rmdirSync(\"/nonexistent\"); });\n  t(() => { fs.readFileSync(\"/etc\"); });\n  t(() => { fs.renameSync(\"/nonexistent/a\", \"/nonexistent/b\"); });\n  t(() => { fs.statSync(\"/nonexistent\"); });\n  const st = fs.statSync(\"/etc/hostname\");\n  console.log(Object.keys(st).slice(0, 10));\n}\n"
