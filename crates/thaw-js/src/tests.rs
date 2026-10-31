@@ -1331,7 +1331,7 @@ fn graph_callbacks_receive_live_objects_and_return_graph_wires() {
         assert!(made.error.is_null() && made.value > 0);
         made.value
     };
-    let echo = handle_of(1 as *const _);
+    let echo = handle_of(std::ptr::dangling());
     let number = handle_of(std::ptr::null());
     let call = |export: &str, callback: u64| {
         let function = thaw_tjs_get_global(
