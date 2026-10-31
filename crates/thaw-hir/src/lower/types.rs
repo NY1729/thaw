@@ -581,6 +581,13 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
                 public.iter().map(fingerprint).collect::<Vec<_>>().join("_"),
                 fingerprint(physical)
             ),
+            HirType::Promise(inner) => format!("promise_{}", fingerprint(inner)),
+            HirType::Dictionary(inner) => format!("dict_{}", fingerprint(inner)),
+            HirType::Undefined => "undefined".into(),
+            HirType::Null => "null".into(),
+            HirType::Void => "void".into(),
+            HirType::Symbol => "symbol".into(),
+            HirType::JsValue => "jsvalue".into(),
             other => panic!("unsupported generic specialization type: {other:?}"),
         }
     }

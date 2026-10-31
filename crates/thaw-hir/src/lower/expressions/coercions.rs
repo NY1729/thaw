@@ -4311,6 +4311,39 @@ impl<'a> FnLowerer<'a> {
         if !mixed && !both_dynamic {
             return Ok(None);
         }
+        if both_dynamic {
+            // Two live values may be numbers or bigints: let JS's own operator decide.
+            let symbol = match op {
+                BinaryOp::Sub => "-",
+                BinaryOp::Mul => "*",
+                BinaryOp::Div => "/",
+                BinaryOp::Mod => "%",
+                BinaryOp::BitAnd => "&",
+                BinaryOp::BitOr => "|",
+                BinaryOp::BitXor => "^",
+                BinaryOp::LShift => "<<",
+                _ => ">>",
+            };
+            let callable = HirExpr::Call(
+                Box::new(HirExpr::Var("getDynamicValue".into())),
+                vec![HirExpr::Lit(HirLit::Str("__thaw_dynamic_binary".into()))],
+            );
+            let operator = self.wrap_native_value_as_json(
+                HirExpr::ArrayLit(vec![HirExpr::Lit(HirLit::Str(symbol.into()))]),
+                HirType::Array(Box::new(HirType::Str)),
+            )?;
+            let call = HirExpr::Call(
+                Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
+                vec![callable, operator, HirExpr::ArrayLit(vec![lhs.clone(), rhs.clone()])],
+            );
+            let name = format!("__thaw_dynamic_binary_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), HirType::JsValue);
+            return Ok(Some(self.wrap_call_argument_bindings(
+                HirExpr::Var(name.clone()),
+                &[(name, HirType::JsValue, call)],
+            )?));
+        }
         let left = self.bigint_decimal_string(lhs.clone(), &lhs_type)?;
         let right = self.bigint_decimal_string(rhs.clone(), &rhs_type)?;
         let digits = HirExpr::Call(Box::new(HirExpr::Var(intrinsic.into())), vec![left, right]);
