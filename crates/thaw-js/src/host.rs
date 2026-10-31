@@ -83,6 +83,12 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         return it.get(&m, "exports");
     }
     let Some(factory) = loader.factories.get(key).cloned() else {
+        // ponytail: only the crypto stand-in is a builtin module; add others as packages need them
+        if matches!(key, "node:crypto" | "crypto") {
+            return Ok(it
+                .lookup(&it.global.clone(), "__thaw_crypto_module")
+                .unwrap_or(Value::Undefined));
+        }
         return Err(Ctl::Throw(Value::str(&format!(
             "Cannot find module '{key}'"
         ))));
@@ -111,11 +117,11 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         &[
             module.clone(),
             exports.clone(),
-            require,
+            require.clone(),
             Value::Undefined,
             file,
             Value::str("/"),
-            Value::Undefined,
+            require,
         ],
     )?;
     it.get(&module, "exports")
@@ -182,6 +188,30 @@ impl Package {
         args: Option<&[Native]>,
         export_fallback: bool,
     ) -> Result<Native, HostError> {
+        let r = self.call_or_get_value(path, args, export_fallback)?;
+        from_value(&mut self.interp, &r, 0)
+    }
+
+    fn call_or_get_value(
+        &mut self,
+        path: &str,
+        args: Option<&[Native]>,
+        export_fallback: bool,
+    ) -> Result<Value, HostError> {
+        let args = args.map(|a| {
+            a.iter()
+                .map(|a| to_value(&mut self.interp, a))
+                .collect::<Vec<_>>()
+        });
+        self.call_or_get_values(path, args.as_deref(), export_fallback)
+    }
+
+    fn call_or_get_values(
+        &mut self,
+        path: &str,
+        args: Option<&[Value]>,
+        export_fallback: bool,
+    ) -> Result<Value, HostError> {
         let it = &mut self.interp;
         let mut this = self.exports.clone();
         let mut f = this.clone();
@@ -202,8 +232,7 @@ impl Package {
         }
         let r = match args {
             Some(args) => {
-                let args: Vec<Value> = args.iter().map(|a| to_value(it, a)).collect();
-                let r = it.call(&f, &this, &args).map_err(|c| classify(it, c))?;
+                let r = it.call(&f, &this, args).map_err(|c| classify(it, c))?;
                 // an async export: run the event loop and unwrap the settled promise
                 if it.is_promise(&r) {
                     it.mark_handled(&r);
@@ -219,7 +248,7 @@ impl Package {
             }
             None => f,
         };
-        from_value(it, &r, 0)
+        Ok(r)
     }
 
     /// A member of the entry exports by (possibly dotted) path, with the same fallbacks as
@@ -308,6 +337,11 @@ thread_local! {
     /// Outstanding references per handle id (index + 1): compiled code retains and releases handles
     /// the way it does QuickJS ones.
     static HANDLE_REFS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+thread_local! {
+    /// The package last entered by `with_package`.
+    static LAST_PACKAGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn store_handle(package: usize, value: Value) -> i64 {
@@ -478,6 +512,809 @@ pub extern "C" fn thaw_tjs_class_call(
         }
         class_call(&symbol, &args, receiver, want_handle != 0).map_err(|e| e.to_string())
     })())
+}
+
+fn graph_field<'a>(fields: &'a [(String, Native)], key: &str) -> Option<&'a Native> {
+    fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
+/// One graph-wire token (`{"v":..}`, `{"r":i}`, `{"nf":..}`, `{"u":1}`) as a value.
+fn graph_token(
+    it: &mut Interp,
+    token: &Native,
+    nodes: &[Native],
+    memo: &mut Vec<Option<Value>>,
+    busy: &mut Vec<bool>,
+) -> Result<Value, String> {
+    let Native::Object(fields) = token else {
+        return Err("malformed graph token".into());
+    };
+    let [(key, payload)] = fields.as_slice() else {
+        return Err("malformed graph token".into());
+    };
+    match (key.as_str(), payload) {
+        ("v", v) => Ok(to_value(it, v)),
+        ("u", _) => Ok(Value::Undefined),
+        ("nf", Native::Str(s)) => Ok(Value::Number(match s.as_str() {
+            "-0" => -0.0,
+            "NaN" => f64::NAN,
+            "Infinity" => f64::INFINITY,
+            "-Infinity" => f64::NEG_INFINITY,
+            _ => return Err("malformed graph number".into()),
+        })),
+        ("r", Native::Number(i)) => graph_node(it, *i as usize, nodes, memo, busy),
+        _ => Err(format!("unsupported graph token `{key}`")),
+    }
+}
+
+/// Node `index` of a graph wire; shared nodes decode to one value (identity kept).
+fn graph_node(
+    it: &mut Interp,
+    index: usize,
+    nodes: &[Native],
+    memo: &mut Vec<Option<Value>>,
+    busy: &mut Vec<bool>,
+) -> Result<Value, String> {
+    if let Some(Some(v)) = memo.get(index) {
+        return Ok(v.clone());
+    }
+    let node = nodes.get(index).ok_or("graph node out of range")?;
+    // ponytail: cyclic graphs are rejected (containers are built whole); fill-after-create if a package needs them.
+    if std::mem::replace(&mut busy[index], true) {
+        return Err("cyclic graph is not supported".into());
+    }
+    let Native::Object(fields) = node else {
+        return Err("malformed graph node".into());
+    };
+    let value = match fields.as_slice() {
+        [(k, Native::Array(items))] if k == "a" => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(match item {
+                    Native::Object(f) if graph_field(f, "h").is_some() => Value::Hole,
+                    _ => graph_token(it, item, nodes, memo, busy)?,
+                });
+            }
+            it.array(out)
+        }
+        [(k, Native::Array(pairs))] if k == "o" => {
+            // The one-key markers compiled code puts in a `Json` (a live thaw-js value, a compiled callback,
+            // a timer, `undefined`), as `to_value` reads them from plain data.
+            if let [Native::Array(kv)] = pairs.as_slice() {
+                if let [Native::Str(name), Native::Object(v), ..] = kv.as_slice() {
+                    let found = match (name.as_str(), graph_field(v, "v")) {
+                        (HANDLE_KEY, Some(Native::Number(id))) => HANDLES.with(|h| {
+                            h.borrow()
+                                .get((*id as usize).wrapping_sub(1))
+                                .map(|(_, v)| v.clone())
+                        }),
+                        (CALLBACK_KEY, Some(Native::Number(id))) => {
+                            Some(callback_value(it, *id as usize))
+                        }
+                        (TIMER_KEY, Some(Native::Number(id))) => Some(it.timer_object(*id as u64)),
+                        (UNDEFINED_KEY, Some(Native::Bool(true))) => Some(Value::Undefined),
+                        _ => None,
+                    };
+                    if let Some(found) = found {
+                        memo[index] = Some(found.clone());
+                        return Ok(found);
+                    }
+                }
+            }
+            let o = it.plain();
+            for pair in pairs {
+                let Native::Array(kv) = pair else {
+                    return Err("malformed graph property".into());
+                };
+                let [Native::Str(name), token, ..] = kv.as_slice() else {
+                    return Err("malformed graph property".into());
+                };
+                let v = graph_token(it, token, nodes, memo, busy)?;
+                crate::put(&o, name, v);
+            }
+            Value::Object(o)
+        }
+        [(k, Native::Number(id))] if k == "hdl" => {
+            let v = HANDLES
+                .with(|h| {
+                    h.borrow()
+                        .get((*id as usize).wrapping_sub(1))
+                        .map(|(_, v)| v.clone())
+                })
+                .unwrap_or(Value::Undefined);
+            // The encoder retained this reference for the wire; the decoded value holds its own.
+            thaw_tjs_release_handle(*id as i64);
+            v
+        }
+        _ => return Err("unsupported graph node (Date, Buffer, Map, Set, RegExp, BigInt)".into()),
+    };
+    memo[index] = Some(value.clone());
+    Ok(value)
+}
+
+#[repr(C)]
+pub struct HandleResult {
+    pub value: u64,
+    pub error: *mut c_char,
+}
+
+/// Decode a graph wire (`thaw_json_graph_encode`) into `(owning package, value)`. The package is the one
+/// that owns a handle the wire references, else the package last entered (a value only needs an
+/// interpreter to be built in and a package for later method calls on it).
+fn decode_wire(wire: &str) -> Result<(usize, Value), String> {
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        eprintln!("thaw-js decode: {wire}");
+    }
+    let Native::Object(top) = Native::from_json(wire).map_err(|e| e.to_string())? else {
+        return Err("malformed graph wire".into());
+    };
+    let root = graph_field(&top, "root").ok_or("graph wire has no root")?;
+    let nodes = match graph_field(&top, "nodes") {
+        Some(Native::Array(nodes)) => nodes.as_slice(),
+        _ => &[],
+    };
+    let owner = nodes
+        .iter()
+        .find_map(|n| match n {
+            Native::Object(f) => match graph_field(f, "hdl") {
+                Some(Native::Number(id)) => {
+                    HANDLES.with(|h| h.borrow().get((*id as usize).wrapping_sub(1)).map(|e| e.0))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or_else(|| LAST_PACKAGE.with(|l| l.get()));
+    with_package(owner, |p| {
+        let mut memo = vec![None; nodes.len()];
+        let mut busy = vec![false; nodes.len()];
+        graph_token(&mut p.interp, root, nodes, &mut memo, &mut busy).map_err(HostError::Bundle)
+    })
+    .map(|v| (owner, v))
+    .map_err(|e| e.to_string())
+}
+
+fn handle_result(result: Result<i64, String>) -> HandleResult {
+    match result {
+        Ok(handle) => HandleResult {
+            value: handle as u64,
+            error: ptr::null_mut(),
+        },
+        Err(e) => HandleResult {
+            value: 0,
+            error: thaw_arena::owned_string(e),
+        },
+    }
+}
+
+/// Retain the value a graph wire (`thaw_json_graph_encode`) describes as a thaw-js handle. The
+/// counterpart of QuickJS's `thaw_js_retain_graph_result`.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_retain_graph_result(wire: *const c_char) -> HandleResult {
+    handle_result((|| {
+        let wire = cstr(wire).ok_or("invalid graph wire")?;
+        let (owner, value) = decode_wire(&wire)?;
+        Ok(store_handle(owner, value))
+    })())
+}
+
+/// The error text a failed handle operation reports: the framed form of the last `Error` object thrown.
+fn error_text(e: HostError) -> String {
+    let display = e.to_string();
+    LAST_FRAME.with(|f| match f.borrow_mut().take() {
+        Some((d, framed)) if d == display => framed,
+        _ => display,
+    })
+}
+
+/// Run `f(interpreter, package, value)` on the value behind `handle`, in the package that owns it.
+fn on_handle<T>(
+    handle: u64,
+    f: impl FnOnce(&mut Package, usize, Value) -> Result<T, HostError>,
+) -> Result<T, String> {
+    let (owner, value) = HANDLES
+        .with(|h| {
+            h.borrow()
+                .get((handle as usize).wrapping_sub(1))
+                .map(|(p, v)| (*p, v.clone()))
+        })
+        .ok_or("invalid JavaScript handle")?;
+    with_package(owner, |p| f(p, owner, value)).map_err(error_text)
+}
+
+fn property(p: &mut Package, owner: usize, value: &Value, key: &str) -> Result<i64, HostError> {
+    let it = &mut p.interp;
+    let v = it.get(value, key).map_err(|c| classify(it, c))?;
+    Ok(store_handle(owner, v))
+}
+
+/// Read property `name` (plain C string) of the value behind `handle`; the result is a new handle.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_get_property_result(handle: u64, name: *const c_char) -> HandleResult {
+    handle_result((|| {
+        let name = cstr(name).ok_or("invalid property name")?;
+        on_handle(handle, |p, owner, v| property(p, owner, &v, &name))
+    })())
+}
+
+/// As [`thaw_tjs_get_property_result`], the key being a JSON string literal.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_get_property_json_key_result(
+    handle: u64,
+    key_json: *const c_char,
+) -> HandleResult {
+    handle_result((|| {
+        let key_json = cstr(key_json).ok_or("invalid property key")?;
+        let Native::Str(key) = Native::from_json(&key_json).map_err(|e| e.to_string())? else {
+            return Err("Invalid host property key".to_string());
+        };
+        on_handle(handle, |p, owner, v| property(p, owner, &v, &key))
+    })())
+}
+
+#[repr(C)]
+pub struct ExactResult {
+    pub value: u64,
+    pub exception_handle: u64,
+    pub exception_object_like: u8,
+    pub error: *mut c_char,
+}
+
+/// Property read whose thrown value survives as a handle (`exception_handle`) instead of text.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_get_property_exact_result(
+    handle: u64,
+    name: *const c_char,
+) -> ExactResult {
+    let none = ExactResult {
+        value: 0,
+        exception_handle: 0,
+        exception_object_like: 0,
+        error: ptr::null_mut(),
+    };
+    let Some(name) = cstr(name) else {
+        return ExactResult {
+            error: thaw_arena::owned_string("invalid property name"),
+            ..none
+        };
+    };
+    let result = on_handle(handle, |p, owner, v| {
+        let it = &mut p.interp;
+        Ok(match it.get(&v, &name) {
+            Ok(v) => Ok(store_handle(owner, v)),
+            Err(Ctl::Throw(t)) => {
+                let like = matches!(t, Value::Object(_));
+                Err((store_handle(owner, t), like))
+            }
+            Err(c) => return Err(classify(it, c)),
+        })
+    });
+    match result {
+        Ok(Ok(value)) => ExactResult {
+            value: value as u64,
+            ..none
+        },
+        Ok(Err((thrown, like))) => ExactResult {
+            exception_handle: thrown as u64,
+            exception_object_like: u8::from(like),
+            ..none
+        },
+        Err(e) => ExactResult {
+            error: thaw_arena::owned_string(e),
+            ..none
+        },
+    }
+}
+
+/// Thrown carrier errors of native packets do not exist in thaw-js: always 0 ("no native token").
+#[no_mangle]
+pub extern "C" fn thaw_tjs_exception_native_token(_handle: u64) -> u64 {
+    0
+}
+
+/// Graph-wire builder for a result value. `plain` copies arrays and objects deeply (functions and
+/// symbols become `undefined`, `toJSON` is honored) like the QuickJS result lane; `receiver` is the
+/// value that stays a live handle wherever it recurs.
+struct WireOut {
+    owner: usize,
+    plain: bool,
+    /// Plain mode only: functions stay live handles instead of becoming `undefined`.
+    live_functions: bool,
+    /// Not plain mode: the root container is copied, only what it holds stays live.
+    copy_root: bool,
+    receiver: Option<(u64, Value)>,
+    nodes: Vec<String>,
+    seen: Vec<(*const crate::ObjData, usize)>,
+    leases: Vec<u64>,
+}
+
+impl WireOut {
+    /// A host-handle node for `id` (the wire owns one reference, released by the decoder); its token.
+    fn lease(&mut self, id: u64) -> String {
+        self.leases.push(id);
+        self.nodes.push(format!("{{\"hdl\":{id}}}"));
+        format!("{{\"r\":{}}}", self.nodes.len() - 1)
+    }
+
+    fn token(&mut self, it: &mut Interp, v: &Value) -> Result<String, HostError> {
+        let mut v = v.clone();
+        if let Some((id, r)) = &self.receiver {
+            if matches!((&v, r), (Value::Object(a), Value::Object(b)) if Rc::ptr_eq(a, b)) {
+                let id = *id;
+                thaw_tjs_retain_handle(id as i64);
+                return Ok(self.lease(id));
+            }
+        }
+        if self.plain && matches!(v, Value::Object(_)) && !v.is_callable() {
+            let to_json = it.get(&v, "toJSON").map_err(|c| classify(it, c))?;
+            if to_json.is_callable() {
+                v = it
+                    .call(&to_json, &v, &[Value::str("")])
+                    .map_err(|c| classify(it, c))?;
+            }
+        }
+        Ok(match &v {
+            Value::Undefined | Value::Hole => "{\"u\":1}".into(),
+            Value::Null => "{\"v\":null}".into(),
+            Value::Bool(b) => format!("{{\"v\":{b}}}"),
+            Value::Number(n) if *n == 0.0 && n.is_sign_negative() => "{\"nf\":\"-0\"}".into(),
+            Value::Number(n) if n.is_nan() => "{\"nf\":\"NaN\"}".into(),
+            Value::Number(n) if n.is_infinite() => {
+                format!("{{\"nf\":\"{}Infinity\"}}", if *n < 0.0 { "-" } else { "" })
+            }
+            Value::Number(n) => format!("{{\"v\":{}}}", crate::number_to_string(*n)),
+            Value::Str(s) => {
+                let mut q = String::new();
+                crate::builtins::json_quote(s, &mut q);
+                format!("{{\"v\":{q}}}")
+            }
+            Value::BigInt(_) => {
+                return Err(HostError::Thrown(
+                    "TypeError: Do not know how to serialize a BigInt".into(),
+                ))
+            }
+            Value::Object(o) => {
+                if self.plain && v.is_callable() && !self.live_functions {
+                    return Ok("{\"u\":1}".into());
+                }
+                // A class instance (prototype other than Object.prototype) keeps its identity and methods.
+                let instance = !v.is_callable() && is_live_value(it, &v);
+                let first = self.copy_root && self.nodes.is_empty();
+                let live = (!self.plain && !first)
+                    || v.is_callable()
+                    || instance
+                    || !matches!(&*o.kind.borrow(), Kind::Plain | Kind::Array(_));
+                if live {
+                    // ponytail: Date/Map/Set/RegExp/typed-array results stay live handles; give them wire nodes if a package needs the copy
+                    let id = store_handle(self.owner, v.clone()) as u64;
+                    return Ok(self.lease(id));
+                }
+                let key = Rc::as_ptr(o);
+                if let Some((_, i)) = self.seen.iter().find(|(p, _)| *p == key) {
+                    return Ok(format!("{{\"r\":{i}}}"));
+                }
+                let index = self.nodes.len();
+                self.nodes.push(String::new());
+                self.seen.push((key, index));
+                let node = if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                    let mut parts = Vec::new();
+                    for item in it.array_items_raw(&v) {
+                        parts.push(match item {
+                            Value::Hole => "{\"h\":1}".to_string(),
+                            item => self.token(it, &item)?,
+                        });
+                    }
+                    format!("{{\"a\":[{}]}}", parts.join(","))
+                } else {
+                    let mut parts = Vec::new();
+                    for k in it.own_keys(&v) {
+                        let val = it.get(&v, &k).map_err(|c| classify(it, c))?;
+                        let mut q = String::new();
+                        crate::builtins::json_quote(&k, &mut q);
+                        parts.push(format!("[{q},{},7]", self.token(it, &val)?));
+                    }
+                    format!("{{\"o\":[{}]}}", parts.join(","))
+                };
+                self.nodes[index] = node;
+                format!("{{\"r\":{index}}}")
+            }
+        })
+    }
+
+    fn finish(self, root: String) -> String {
+        let leases: Vec<String> = self.leases.iter().map(u64::to_string).collect();
+        format!(
+            "{{\"root\":{root},\"nodes\":[{}],\"leases\":[{}],\"napiLeases\":[]}}",
+            self.nodes.join(","),
+            leases.join(",")
+        )
+    }
+}
+
+/// Register `wire` with the arena so the decoder accepts its leases (the producer-side grant).
+fn graph_ok(wire: String) -> ThawResult {
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        eprintln!("thaw-js wire: {wire}");
+    }
+    let ptr = thaw_arena::owned_string(wire);
+    // SAFETY: `ptr` is a fresh arena-owned string.
+    if unsafe { thaw_arena::register_owned_graph_wire(ptr) } {
+        ThawResult {
+            value: ptr,
+            error: ptr::null_mut(),
+        }
+    } else {
+        ThawResult {
+            value: ptr::null_mut(),
+            error: thaw_arena::owned_string("Unable to register JavaScript graph result"),
+        }
+    }
+}
+
+fn graph_result(r: Result<String, String>) -> ThawResult {
+    match r {
+        Ok(wire) => graph_ok(wire),
+        Err(e) => ThawResult {
+            value: ptr::null_mut(),
+            error: thaw_arena::owned_string(e),
+        },
+    }
+}
+
+/// The exact value behind `handle` as a graph wire: an object stays a live handle (a thrown Promise is
+/// not assimilated), a primitive is copied.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_capture_handle_graph_result(handle: u64) -> ThawResult {
+    graph_result(on_handle(handle, |p, owner, v| {
+        let mut out = WireOut {
+            owner,
+            plain: false,
+            live_functions: false,
+            copy_root: false,
+            receiver: Some((handle, v.clone())),
+            nodes: Vec::new(),
+            seen: Vec::new(),
+            leases: Vec::new(),
+        };
+        let root = out.token(&mut p.interp, &v)?;
+        Ok(out.finish(root))
+    }))
+}
+
+/// Call the already-selected method `selected` on `receiver` with the graph-wire argument array; the
+/// result is a plain graph wire, the receiver itself staying a live handle.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_call_selected_method_graph_result(
+    receiver: u64,
+    selected: u64,
+    _name: *const c_char,
+    args_json: *const c_char,
+) -> ThawResult {
+    graph_result((|| {
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (_, args) = decode_wire(&args_json)?;
+        let method = HANDLES
+            .with(|h| {
+                h.borrow()
+                    .get((selected as usize).wrapping_sub(1))
+                    .map(|(_, v)| v.clone())
+            })
+            .ok_or("invalid JavaScript method")?;
+        on_handle(receiver, |p, owner, this| {
+            let it = &mut p.interp;
+            let args = it.array_items(&args);
+            let result = it
+                .call(&method, &this, &args)
+                .map_err(|c| classify(it, c))?;
+            let mut out = WireOut {
+                owner,
+                plain: true,
+                live_functions: false,
+                copy_root: false,
+                receiver: Some((receiver, this)),
+                nodes: Vec::new(),
+                seen: Vec::new(),
+                leases: Vec::new(),
+            };
+            let root = out.token(it, &result)?;
+            Ok(out.finish(root))
+        })
+    })())
+}
+
+fn unsupported_text(what: &str) -> ThawResult {
+    ThawResult {
+        value: ptr::null_mut(),
+        error: thaw_arena::owned_string(format!(
+            "thaw-js does not support the live host operation `{what}`"
+        )),
+    }
+}
+
+// The Json host-operation table (`thaw_json_register_host_operations`) names these; the ones a thaw-js
+// package has not needed yet report an error instead of linking the QuickJS runtime.
+/// Introspection of the value behind `handle` for the Json host bridge (the numbering is the QuickJS
+/// `__thaw_json_host_query`'s). Kinds thaw-js has no value for (Date, Buffer, Map, Set, native
+/// wrappers) answer "no".
+#[no_mangle]
+pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> ThawResult {
+    text_result(on_handle(handle, |p, _, v| {
+        let it = &mut p.interp;
+        let flag = |b: bool| if b { "1" } else { "0" }.to_string();
+        let is_array =
+            matches!(&v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)));
+        let is_object = matches!(v, Value::Object(_));
+        let number = |it: &mut Interp, v: &Value| {
+            let n = it.num(v);
+            if n == 0.0 && n.is_sign_negative() {
+                "-0".to_string()
+            } else {
+                crate::number_to_string(n)
+            }
+        };
+        Ok(match operation {
+            0 => match &v {
+                Value::Undefined | Value::Hole => "undefined",
+                Value::Null => "object",
+                Value::Bool(_) => "boolean",
+                Value::Number(_) => "number",
+                Value::Str(_) => "string",
+                Value::BigInt(_) => "bigint",
+                Value::Object(_) if v.is_callable() => "function",
+                Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Symbol { .. }) => "symbol",
+                Value::Object(_) => "object",
+            }
+            .to_string(),
+            1 => flag(v.truthy()),
+            2 => it.to_str(&v).to_string(),
+            3 => {
+                let mut q = String::new();
+                crate::builtins::json_quote(&it.to_str(&v), &mut q);
+                q
+            }
+            4 => flag(is_array),
+            5 => flag(matches!(v, Value::Undefined | Value::Hole)),
+            6 => flag(matches!(v, Value::Undefined | Value::Hole | Value::Null)),
+            7 => flag(matches!(v, Value::Null)),
+            // a function or class instance stays a handle in the text, so it survives as an argument
+            8 if is_live_value(it, &v) => handle_marker_json(handle as i64),
+            8 => from_value(it, &v, 0)
+                .map(|n| n.to_json())
+                .unwrap_or_else(|_| "null".into()),
+            9 => flag(is_object),
+            10 => number(it, &v),
+            14 => flag(v.is_callable()),
+            16 => number(it, &v),
+            26 => flag(matches!(&v, Value::Object(o) if o.proto.borrow().is_none())),
+            11 | 12 | 17..=20 | 22 | 25 => "0".to_string(),
+            21 | 23 | 24 | 27 => String::new(),
+            28 => "{}".to_string(),
+            _ => {
+                return Err(HostError::Thrown(format!(
+                    "TypeError: thaw-js does not support the host query {operation}"
+                )))
+            }
+        })
+    }))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_tjs_host_date_set_result(_handle: u64, _timestamp: f64) -> ThawResult {
+    unsupported_text("date_set")
+}
+
+/// Own keys / values / entries of the value behind `handle` as a graph wire (operations 0 entries,
+/// 1 and 2 keys, 3 values); the elements of the returned array stay live handles.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_host_enumerate_result(handle: u64, operation: u8) -> ThawResult {
+    graph_result(on_handle(handle, |p, owner, v| {
+        let it = &mut p.interp;
+        let keys = it.own_keys(&v);
+        let mut items = Vec::new();
+        for k in keys {
+            let value = it.get(&v, &k).map_err(|c| classify(it, c))?;
+            items.push(match operation {
+                0 => it.array(vec![Value::Str(k), value]),
+                1 | 2 => Value::Str(k),
+                3 => value,
+                _ => {
+                    return Err(HostError::Thrown(format!(
+                        "TypeError: thaw-js does not support the host enumeration {operation}"
+                    )))
+                }
+            });
+        }
+        let list = it.array(items);
+        let mut out = WireOut {
+            owner,
+            plain: false,
+            live_functions: false,
+            copy_root: true,
+            receiver: None,
+            nodes: Vec::new(),
+            seen: Vec::new(),
+            leases: Vec::new(),
+        };
+        let root = out.token(it, &list)?;
+        Ok(out.finish(root))
+    }))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_tjs_set_property_graph_result(
+    _handle: u64,
+    _key_json: *const c_char,
+    _graph_json: *const c_char,
+) -> HandleResult {
+    handle_result(Err(
+        "thaw-js does not support the live host operation `set`".into(),
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_tjs_property_predicate_json_key_result(
+    _handle: u64,
+    _key_json: *const c_char,
+    _operation: u8,
+) -> HandleResult {
+    handle_result(Err(
+        "thaw-js does not support the live host operation `predicate`".into(),
+    ))
+}
+
+/// A genuine `Error` object from the compiler's framed error text, as a new handle.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_error_from_tagged_handle(value: *const c_char) -> HandleResult {
+    handle_result((|| {
+        let text = cstr(value).ok_or("null framed Error text")?;
+        let owner = LAST_PACKAGE.with(|l| l.get());
+        with_package(owner, |p| {
+            let it = &mut p.interp;
+            let Ctl::Throw(err) = tagged_error(it, &text) else {
+                return Err(HostError::Bundle("cannot build an Error".into()));
+            };
+            Ok(store_handle(owner, err))
+        })
+        .map_err(error_text)
+    })())
+}
+
+/// No native-object identity cache in thaw-js: always a miss.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_lookup_native_object(
+    _pointer: *const c_void,
+    _layout: *const c_char,
+) -> HandleResult {
+    handle_result(Ok(0))
+}
+
+/// Without an identity cache the candidate is canonical (ownership passes back to the caller).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_intern_native_object(
+    _pointer: *const c_void,
+    _layout: *const c_char,
+    candidate_handle: u64,
+) -> HandleResult {
+    handle_result(Ok(candidate_handle as i64))
+}
+
+/// As [`thaw_tjs_call_selected_method_graph_result`], the result kept as a new handle.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_call_selected_method_handle_graph_args_result(
+    receiver: u64,
+    selected: u64,
+    _name: *const c_char,
+    args_json: *const c_char,
+    _defer_resolution: bool,
+) -> HandleResult {
+    // ponytail: a returned Promise is not awaited here (QuickJS resolves it when not deferred)
+    handle_result((|| {
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (_, args) = decode_wire(&args_json)?;
+        let method = HANDLES
+            .with(|h| {
+                h.borrow()
+                    .get((selected as usize).wrapping_sub(1))
+                    .map(|(_, v)| v.clone())
+            })
+            .ok_or("invalid JavaScript method")?;
+        on_handle(receiver, |p, owner, this| {
+            let it = &mut p.interp;
+            let args = it.array_items(&args);
+            let result = it
+                .call(&method, &this, &args)
+                .map_err(|c| classify(it, c))?;
+            Ok(store_handle(owner, result))
+        })
+    })())
+}
+
+/// The value behind `handle` as a plain graph wire (a JSON-like copy).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_resolve_handle_graph_result(handle: u64) -> ThawResult {
+    graph_result(on_handle(handle, |p, owner, v| {
+        let mut out = WireOut {
+            owner,
+            plain: true,
+            live_functions: false,
+            copy_root: false,
+            receiver: None,
+            nodes: Vec::new(),
+            seen: Vec::new(),
+            leases: Vec::new(),
+        };
+        let root = out.token(&mut p.interp, &v)?;
+        Ok(out.finish(root))
+    }))
+}
+
+/// A function or class instance: it cannot cross as plain data, so compiled code keeps it by handle.
+fn is_live_value(it: &Interp, v: &Value) -> bool {
+    match v {
+        Value::Object(o) => {
+            v.is_callable()
+                || (matches!(&*o.kind.borrow(), Kind::Plain)
+                    && o.proto
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|p| !Rc::ptr_eq(p, &it.object_proto)))
+        }
+        _ => false,
+    }
+}
+
+fn handle_marker_json(id: i64) -> String {
+    format!("{{\"{HANDLE_KEY}\":{id}}}")
+}
+
+fn handle_text(handle: u64, bigint_suffix: bool) -> *const c_char {
+    let text = on_handle(handle, |p, _, v| {
+        let it = &mut p.interp;
+        let text = it.to_str(&v).to_string();
+        Ok(if bigint_suffix && matches!(v, Value::BigInt(_)) {
+            format!("{text}n")
+        } else {
+            text
+        })
+    })
+    .unwrap_or_else(|_| "[invalid JsValue]".to_string());
+    thaw_arena::owned_string(text)
+}
+
+/// `String(value)` of the value behind `handle`.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_handle_to_string(handle: u64) -> *const c_char {
+    handle_text(handle, false)
+}
+
+/// `String(value)` as `console.log` prints it (a bigint with its `n`).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_handle_to_console_string(handle: u64) -> *const c_char {
+    handle_text(handle, true)
+}
+
+/// 1 for a plain array or plain object (`console.log` inspects those like a native `Json`).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_handle_is_plain_data(handle: u64) -> u8 {
+    on_handle(handle, |p, _, v| {
+        Ok(match &v {
+            Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => 1,
+            Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Plain) => u8::from(
+                o.proto
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(|q| Rc::ptr_eq(q, &p.interp.object_proto)),
+            ),
+            _ => 0,
+        })
+    })
+    .unwrap_or(0)
+}
+
+/// Typed arrays print through `String(value)` here: no probe text.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_handle_typed_array_probe(_handle: u64) -> *const c_char {
+    ptr::null()
 }
 
 /// Register a compiled closure callable from JS; returns its id. The same closure registered twice
@@ -867,6 +1704,7 @@ fn with_package<T>(
         }
         None => return Err(HostError::Bundle("bad handle".into())),
     };
+    LAST_PACKAGE.with(|l| l.set(handle));
     RUNNING.with(|r| r.borrow_mut().insert(handle, &mut package as *mut Package));
     let result = f(&mut package);
     RUNNING.with(|r| r.borrow_mut().remove(&handle));
@@ -1069,8 +1907,13 @@ pub extern "C" fn thaw_tjs_call_typed_result(
         let Native::Array(args) = Native::from_json(&args).map_err(|e| e.to_string())? else {
             return Err("arguments must be a JSON array".into());
         };
-        with_package(handle, |p| p.call_export(export, &args))
-            .map(|v| v.to_json())
-            .map_err(|e| e.to_string())
+        with_package(handle, |p| {
+            let r = p.call_or_get_value(export, Some(&args), true)?;
+            if is_live_value(&p.interp, &r) {
+                return Ok(handle_marker_json(store_handle(handle, r)));
+            }
+            from_value(&mut p.interp, &r, 0).map(|n| n.to_json())
+        })
+        .map_err(|e| e.to_string())
     })())
 }
