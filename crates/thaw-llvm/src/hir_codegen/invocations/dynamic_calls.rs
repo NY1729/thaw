@@ -30,8 +30,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [receiver, key] = args else {
             return Err("getDynamicProperty expects a receiver and property key".into());
         };
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         // A getter may enter native callbacks and graph capture on this first
         // property read, so publish the host operations before evaluating it.
         self.compile_register_js_callback_host_operations()?;
@@ -419,8 +418,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [value] = args else {
             return Err("retainDynamicJson expects exactly one argument".into());
         };
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let compiling_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
         self.compiling_quickjs_dynamic_arguments = true;
         // A caller may reach this intrinsic with a bare native object
@@ -447,18 +445,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         let json = self.compile_check_json_stringify_error(json)?;
-        let result = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_js_retain_graph_result").unwrap(),
-                &[json.into()],
-                "retain_dynamic_json_result",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .unwrap()
-            .into_struct_value();
+        let result = self.js_retain_graph(json, "retain_dynamic_json_result")?;
         let retained = self
             .builder
             .build_extract_value(result, 0, "retained_dynamic_handle")
@@ -495,8 +482,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if !matches!(&source_type, HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)) {
             return Err(format!("retainDynamicNative does not support {source_type:?}"));
         }
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         self.tracks_owned_json_roots = true;
         let native = self.compile_expr(source)?;
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -547,11 +533,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.get_function("thaw_json_destroy").unwrap(), &[projected.into()],
             "destroy_native_projection_tree",
         ).map_err(|error| error.to_string())?;
-        let result = self.builder.build_call(
-            self.module.get_function("thaw_js_retain_graph_result").unwrap(),
-            &[wire.into()], "native_projection_graph_result",
-        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-            .ok_or("native projection graph decoder returned no result")?.into_struct_value();
+        let result = self.js_retain_graph(wire, "native_projection_graph_result")?;
         let retained = self.builder.build_extract_value(result, 0, "native_projection_handle")
             .map_err(|error| error.to_string())?;
         let error = self.builder.build_extract_value(result, 1, "native_projection_error")
