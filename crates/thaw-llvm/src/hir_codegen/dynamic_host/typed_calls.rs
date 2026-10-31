@@ -29,11 +29,30 @@ fn thaw_js_date_type(ty: &HirType) -> bool {
 /// synchronously (no Promise), optionally absent.
 pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
     match ty {
-        HirType::Function(params, ret) => {
-            params.iter().all(thaw_js_plain_type) && thaw_js_plain_type(ret)
+        HirType::Optional(inner) => {
+            matches!(inner.as_ref(), HirType::Function(..) | HirType::CallableFunction(..))
+                && thaw_js_callback_type(inner)
         }
-        HirType::Optional(inner) => matches!(inner.as_ref(), HirType::Function(..)) && thaw_js_callback_type(inner),
-        _ => false,
+        _ => thaw_js_callback_abi(ty).is_some_and(|(params, ret, _)| {
+            params.iter().all(thaw_js_plain_type) && thaw_js_plain_type(&ret)
+        }),
+    }
+}
+
+/// The physical callback ABI of a function type: its parameters (a rest parameter is one trailing
+/// array), the result and the index of that rest array.
+fn thaw_js_callback_abi(ty: &HirType) -> Option<(Vec<HirType>, HirType, Option<usize>)> {
+    match ty {
+        HirType::Function(params, ret) => Some((params.clone(), ret.as_ref().clone(), None)),
+        HirType::CallableFunction(params, _, rest, ret) => {
+            let mut abi = params.clone();
+            let rest_start = rest.as_ref().map(|_| abi.len());
+            if let Some(rest) = rest {
+                abi.push(HirType::Array(rest.clone()));
+            }
+            Some((abi, ret.as_ref().clone(), rest_start))
+        }
+        _ => None,
     }
 }
 
@@ -1862,8 +1881,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let handle_param = |ty: &HirType| *ty == HirType::JsValue;
         let ret_handle = signature.ret == HirType::JsValue;
         let supported = (is_new || is_static || is_method)
-            && (ret_handle || (!is_new && thaw_js_plain_type(&signature.ret)))
-            && signature.params.iter().skip(usize::from(is_method)).all(|ty| thaw_js_plain_type(ty) || handle_param(ty))
+            && (ret_handle || ((!is_new || is_value) && thaw_js_plain_type(&signature.ret)))
+            && signature.params.iter().skip(usize::from(is_method)).all(|ty| thaw_js_plain_type(ty) || handle_param(ty) || thaw_js_callback_type(ty))
             && (!is_method || signature.params.first().is_some_and(handle_param))
             && args.len() == signature.params.len();
         if !supported {
@@ -1871,8 +1890,8 @@ impl<'ctx> HirCompiler<'ctx> {
             // plain functions), so an unsupported one is a build error the CLI answers by rebuilding
             // the program on QuickJS.
             return Err(format!(
-                "thaw-js: class operation `{}` has a signature that cannot cross the thaw-js boundary",
-                signature.symbol
+                "thaw-js: class operation `{}` has a signature that cannot cross the thaw-js boundary ({:?} -> {:?})",
+                signature.symbol, signature.params, signature.ret
             ));
         }
         let (receiver_expr, rest) = if is_method { (Some(&args[0]), &args[1..]) } else { (None, args) };
@@ -1892,6 +1911,11 @@ impl<'ctx> HirCompiler<'ctx> {
             let value = self.compile_expr(arg);
             self.thaw_js_call_arguments = false;
             let value = value?;
+            if thaw_js_callback_type(ty) {
+                self.compile_thaw_js_callback_argument(array, value, ty)
+                    .map_err(|error| format!("thaw-js class callback argument {}: {error}", index + 1))?;
+                continue;
+            }
             if handle_param(ty) {
                 let marker = self.compile_thaw_js_handle_marker(value.into_int_value())?;
                 self.compile_json_array_push_owned(array, marker)?;
@@ -1969,7 +1993,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Optional(inner) => (true, inner.as_ref()),
             other => (false, other),
         };
-        let HirType::Function(params, ret) = function_type else {
+        let Some((params, ret, rest_start)) = thaw_js_callback_abi(function_type) else {
             return Err("not a function type".into());
         };
         let (closure, present) = if optional {
@@ -1998,7 +2022,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
             self.builder.position_at_end(register);
         }
-        let marker = self.compile_thaw_js_callback_marker(closure, params, ret)?;
+        let marker = self.compile_thaw_js_callback_marker(closure, &params, &ret, rest_start)?;
         self.compile_json_array_push_owned(array, marker)?;
         self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
         self.builder.position_at_end(done);
@@ -2011,15 +2035,23 @@ impl<'ctx> HirCompiler<'ctx> {
         closure: PointerValue<'ctx>,
         params: &[HirType],
         ret: &HirType,
+        rest_start: Option<usize>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_thaw_js = true;
         // JSON text both ways (`graph_wire` off): thaw-js has no live-handle graph protocol.
         let (adapter, context, _) =
-            self.compile_value_callback_from_closure(closure, params, ret, false, None, false, false, false)?;
+            self.compile_value_callback_from_closure(closure, params, ret, false, rest_start, false, false, false)?;
         let i64_type = self.context.i64_type();
+        // The alias-resolved closure is the callback's identity: `off(listener)` after `on(listener)` finds it.
+        let identity = self.resolve_closure_alias(closure)?;
+        self.builder.build_call(
+            self.module.get_function("thaw_tjs_callback_identity").unwrap(),
+            &[identity.into()],
+            "thaw_js_callback_identity",
+        ).map_err(|error| error.to_string())?;
         let id = self.builder.build_call(
             self.module.get_function("thaw_tjs_register_callback").unwrap(),
-            &[adapter.into(), context.into(), i64_type.const_int(params.len() as u64, false).into()],
+            &[adapter.into(), context.into(), i64_type.const_int(if rest_start.is_some() { i64::MAX as u64 } else { params.len() as u64 }, false).into()],
             "thaw_js_callback_id",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("thaw_tjs_register_callback returned no value")?.into_int_value();
@@ -2056,7 +2088,7 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(None);
         }
         let closure = self.compile_expr(closure_expr)?.into_pointer_value();
-        let marker = self.compile_thaw_js_callback_marker(closure, params, ret)?;
+        let marker = self.compile_thaw_js_callback_marker(closure, params, ret, None)?;
         self.tracks_owned_json_roots = true;
         self.mark_fresh_owned_json_result(marker)?;
         Ok(Some(marker))

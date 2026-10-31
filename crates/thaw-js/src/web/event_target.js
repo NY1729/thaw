@@ -40,6 +40,11 @@
     };
     Object.defineProperty(globalThis.Event.prototype, Symbol.toStringTag, { value: 'Event', configurable: true });
   }
+  if (typeof globalThis.CustomEvent !== 'function') {
+    globalThis.CustomEvent = class CustomEvent extends globalThis.Event {
+      constructor(type, options = {}) { super(type, options); this.detail = options.detail === undefined ? null : options.detail; }
+    };
+  }
   if (typeof globalThis.EventTarget !== 'function') {
     const mapGet = Map.prototype.get;
     const mapSet = Map.prototype.set;
