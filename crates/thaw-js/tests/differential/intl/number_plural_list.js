@@ -1,0 +1,13 @@
+console.log(new Intl.NumberFormat('en-US').format(1234567.891));
+console.log(new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(1234.5));
+console.log(new Intl.NumberFormat('en-US', { style: 'percent' }).format(0.256));
+console.log(new Intl.NumberFormat('en', { notation: 'compact' }).format(1234567));
+console.log(new Intl.PluralRules('en').select(1), new Intl.PluralRules('en').select(2));
+console.log(new Intl.PluralRules('en', { type: 'ordinal' }).select(22));
+console.log(new Intl.ListFormat('en', { type: 'conjunction' }).format(['a', 'b', 'c']));
+console.log(new Intl.ListFormat('de', { type: 'disjunction' }).format(['x', 'y']));
+console.log(new Intl.RelativeTimeFormat('en', { numeric: 'auto' }).format(-1, 'day'));
+console.log(new Intl.RelativeTimeFormat('fr').format(3, 'hour'));
+console.log(['z', 'a', 'ä'].sort(new Intl.Collator('de').compare).join(','));
+console.log(['a10', 'a2'].sort(new Intl.Collator('en', { numeric: true }).compare).join(','));
+console.log([...new Intl.Segmenter('en', { granularity: 'word' }).segment('Hello, world')].map(s => s.segment).join('|'));

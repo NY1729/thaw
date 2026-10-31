@@ -207,11 +207,24 @@ struct Walker {
     probed: HashSet<String>,
     /// `globalThis.X` members tested only for presence
     probed_members: HashSet<String>,
+    probed_methods: HashSet<String>,
 }
 
 impl Walker {
     /// `globalThis.X` tested for truthiness / `typeof` is a feature probe, not a use.
     fn probe_member(&mut self, e: &a::Expr) {
+        // `if (x.m) x.m()` / `x?.m ? x.m(..) : ..`: a method call guarded by a truthiness test of the same name
+        let tested = match e {
+            a::Expr::Member(m) => Some(m),
+            a::Expr::OptChain(o) => match &*o.base {
+                a::OptChainBase::Member(m) => Some(m),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(a::MemberProp::Ident(p)) = tested.map(|m| &m.prop) {
+            self.probed_methods.insert(p.sym.to_string());
+        }
         if let a::Expr::Member(m) = e {
             if let (a::Expr::Ident(o), a::MemberProp::Ident(p)) = (&*m.obj, &m.prop) {
                 if &*o.sym == "globalThis" {
@@ -560,7 +573,11 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
         }
         for m in &w.called {
             // `util.styleText` calls `stream.hasColors()` only after `typeof stream.hasColors === 'function'`
-            if !known_methods.contains(m) && !defined.contains(m) && m != "hasColors" {
+            if !known_methods.contains(m)
+                && !defined.contains(m)
+                && !w.probed_methods.contains(m)
+                && m != "hasColors"
+            {
                 add(&mut report, format!("method:{m}"), 1, key);
             }
         }
