@@ -317,19 +317,20 @@
     if (!info.valid) throw new Error('Invalid or unsupported key (only RSA/EC/Ed25519 PEM or DER keys are supported)');
     return { pem: info.pem, info };
   };
+  const hashFinalized = () => { const e = new Error('Digest already called'); e.code = 'ERR_CRYPTO_HASH_FINALIZED'; return e; };
   class Hash {
     constructor(algorithm) { this.algorithm = normalizeDigestAlgorithm(algorithm); this._chunks = []; this._digested = false; }
     update(data, encoding) {
-      if (this._digested) throw new Error('Digest already called');
+      if (this._digested) throw hashFinalized();
       this._chunks.push(Buffer.from(data, encoding)); return this;
     }
     digest(encoding) {
-      if (this._digested) throw new Error('Digest already called');
+      if (this._digested) throw hashFinalized();
       this._digested = true;
       const value = Buffer.from(__thaw_crypto_hash_hex(this.algorithm, Buffer.concat(this._chunks).toString('hex')), 'hex');
       return encoding === undefined ? value : value.toString(encoding);
     }
-    copy() { if (this._digested) throw new Error('Digest already called'); const copied = new Hash(this.algorithm); copied._chunks = this._chunks.map(chunk => Buffer.from(chunk)); return copied; }
+    copy() { if (this._digested) throw hashFinalized(); const copied = new Hash(this.algorithm); copied._chunks = this._chunks.map(chunk => Buffer.from(chunk)); return copied; }
   }
   class Hmac extends Hash {
     constructor(algorithm, key) {
@@ -337,13 +338,13 @@
       this._key = Buffer.from(key instanceof KeyObject ? key.export() : key);
     }
     digest(encoding) {
-      if (this._digested) throw new Error('Digest already called');
+      if (this._digested) throw hashFinalized();
       this._digested = true;
       const value = Buffer.from(__thaw_crypto_hmac_hex(this.algorithm, this._key.toString('hex'), Buffer.concat(this._chunks).toString('hex')), 'hex');
       return encoding === undefined ? value : value.toString(encoding);
     }
     copy() {
-      if (this._digested) throw new Error('Digest already called');
+      if (this._digested) throw hashFinalized();
       const copied = new Hmac(this.algorithm, this._key);
       copied._chunks = this._chunks.map(chunk => Buffer.from(chunk));
       return copied;
