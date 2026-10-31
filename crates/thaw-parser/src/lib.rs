@@ -104,7 +104,56 @@ pub fn parse_declarations_with_source_map_named(
     parse_typescript_source(source, filename, true, false)
 }
 
+/// Parsed declaration files by (name, text), so each `.d.ts` is parsed once per build instead of
+/// once per bridge pass. Callers get a clone, so they stay free to mutate their copy.
+type DeclarationCache = Vec<(FileName, String, Module, Lrc<SourceMap>)>;
+
+thread_local! {
+    static DECLARATION_CACHE: std::cell::RefCell<(usize, DeclarationCache)> = const { std::cell::RefCell::new((0, Vec::new())) };
+}
+
+/// Cache budget in source bytes; the cache is dropped wholesale when exceeded.
+const DECLARATION_CACHE_BYTES: usize = 64 << 20;
+
 fn parse_typescript_source(
+    source: &str,
+    filename: FileName,
+    declarations: bool,
+    shared: bool,
+) -> Result<(Module, Lrc<SourceMap>), String> {
+    if !declarations || shared {
+        return parse_typescript_uncached(source, filename, declarations, shared);
+    }
+    let hit = DECLARATION_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .1
+            .iter()
+            .find(|(name, text, ..)| *name == filename && text == source)
+            .map(|(_, _, module, cm)| (module.clone(), cm.clone()))
+    });
+    if let Some(hit) = hit {
+        return Ok(hit);
+    }
+    let parsed = parse_typescript_uncached(source, filename.clone(), declarations, shared)?;
+    DECLARATION_CACHE.with(|cache| {
+        let (bytes, entries) = &mut *cache.borrow_mut();
+        if *bytes + source.len() > DECLARATION_CACHE_BYTES {
+            entries.clear();
+            *bytes = 0;
+        }
+        *bytes += source.len();
+        entries.push((
+            filename,
+            source.to_string(),
+            parsed.0.clone(),
+            parsed.1.clone(),
+        ));
+    });
+    Ok(parsed)
+}
+
+fn parse_typescript_uncached(
     source: &str,
     filename: FileName,
     declarations: bool,
@@ -228,6 +277,26 @@ mod tests {
     use super::*;
     use swc_common::Spanned;
     use swc_ecma_ast::{Decl, ModuleItem, Stmt};
+
+    #[test]
+    fn declaration_parse_cache_returns_independent_equal_modules() {
+        let source = "export declare function f(x: number): number;";
+        let name = FileName::Custom("cached.d.ts".into());
+        let (mut first, _) =
+            parse_declarations_with_source_map_named(source, name.clone()).unwrap();
+        let (second, _) = parse_declarations_with_source_map_named(source, name.clone()).unwrap();
+        assert_eq!(first.body.len(), 1);
+        assert_eq!(first, second);
+        first.body.clear();
+        let (third, _) = parse_declarations_with_source_map_named(source, name).unwrap();
+        assert_eq!(third, second);
+        let (other, _) = parse_declarations_with_source_map_named(
+            "export declare const y: string;",
+            FileName::Custom("cached.d.ts".into()),
+        )
+        .unwrap();
+        assert_ne!(other, second);
+    }
 
     #[test]
     fn named_parsers_record_source_map_filename() {
