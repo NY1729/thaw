@@ -1480,12 +1480,15 @@ fn quickjs_callback_export_args() -> [&'static str; 4] {
 }
 
 fn lld_available() -> bool {
-    Command::new("ld.lld")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("ld.lld")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
 }
 
 fn preferred_linker_arg(static_link: bool, lld_available: bool) -> Option<&'static str> {
