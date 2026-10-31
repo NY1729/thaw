@@ -96,7 +96,16 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             collect_closure_captures_expr(value, names);
         }
         HirExpr::Call(callee, args) => {
-            collect_closure_captures_expr(callee, names);
+            match callee.as_ref() {
+                // Codegen compiles this lambda in place, so it creates no closure and its
+                // captured locals need no shared (arena) storage.
+                HirExpr::Lambda(_, _, _, body)
+                    if !DEEP.with(std::cell::Cell::get) && is_inlinable_iife(callee, args) =>
+                {
+                    collect_closure_captures_expr(body, names);
+                }
+                _ => collect_closure_captures_expr(callee, names),
+            }
             for arg in args {
                 collect_closure_captures_expr(arg, names);
             }
@@ -366,6 +375,13 @@ fn is_plain_value_expr(expr: &HirExpr) -> bool {
         | HirExpr::NullishValue(inner, _) => is_plain_value_expr(inner),
         HirExpr::TypedIndex(array, index, _) => {
             is_plain_value_expr(array) && is_plain_value_expr(index)
+        }
+        // Compound field/element writes (`b[i].vx -= e`) bind their receiver in an IIFE.
+        HirExpr::PropAssign(object, _, _, value) => {
+            is_plain_value_expr(object) && is_plain_value_expr(value)
+        }
+        HirExpr::IndexAssign(array, index, value) => {
+            is_plain_value_expr(array) && is_plain_value_expr(index) && is_plain_value_expr(value)
         }
         HirExpr::Call(callee, args) => {
             let callee_ok = match callee.as_ref() {
