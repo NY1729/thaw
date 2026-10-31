@@ -49,9 +49,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             )
                             .map_err(|error| error.to_string())?;
                         let class = class.split('\u{1f}').next().unwrap();
-                        let class = self
-                            .builder
-                            .build_global_string_ptr(class, "native_argument_class")
+                        let class = self.intern_string(class, "native_argument_class")
                             .map_err(|error| error.to_string())?;
                         let branded = self
                             .builder
@@ -211,8 +209,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
         }
         let marker = self
-            .builder
-            .build_global_string_ptr(&fields[0].0, "decoded_date_identity")
+            .intern_string(&fields[0].0, "decoded_date_identity")
             .map_err(|error| error.to_string())?;
         self.builder
             .build_call(
@@ -287,9 +284,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 continue;
             }
-            let key = self
-                .builder
-                .build_global_string_ptr(name, "dynamic_result_key")
+            let key = self.intern_string(name, "dynamic_result_key")
                 .map_err(|error| error.to_string())?;
             let field_json = self
                 .builder

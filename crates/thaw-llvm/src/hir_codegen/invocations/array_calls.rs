@@ -955,7 +955,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     arguments.push(self.context.i8_type().const_int(kind, false).into());
                     arguments.push(self.context.i8_type().const_int(tag, false).into());
                     let tags = if let Some(tags) = tags {
-                        self.builder.build_global_string_ptr(&tags, "array_join_union_tags")
+                        self.intern_string(&tags, "array_join_union_tags")
                             .map_err(|error| error.to_string())?.as_pointer_value()
                     } else {
                         self.context.ptr_type(AddressSpace::default()).const_null()
