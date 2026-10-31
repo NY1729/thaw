@@ -319,13 +319,6 @@ impl Visit for Walker {
             // method names listed in string tables (`['year', 'month'].forEach(k => proto[k] = ...)`)
             a::Lit::Str(l) => {
                 if let Some(v) = l.value.as_str() {
-                    // generated source text with a `with (..)` block: `new Function` parses strict code only
-                    if v.match_indices("with").any(|(i, _)| {
-                        !v[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '$')
-                            && v[i + 4..].trim_start_matches(' ').starts_with('(')
-                    }) {
-                        self.feature("dynamic-with-code");
-                    }
                     if !v.is_empty()
                         && v.len() <= 40
                         && v.chars()
