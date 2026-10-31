@@ -1838,8 +1838,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .into_pointer_value()
                 }
                 6 => {
-                    self.uses_quickjs = true;
-                    self.uses_quickjs_handles = true;
+                    self.js_mark_handles_used();
                     let entry = entry_fn
                         .get_first_basic_block()
                         .ok_or("receiver function has no entry block")?;
@@ -1914,8 +1913,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_int_to_ptr(word, pointer, "receiver_json_existing")
                     .map_err(|error| error.to_string())?,
                 8 => {
-                    self.uses_quickjs = true;
-                    self.uses_quickjs_handles = true;
+                    self.js_mark_handles_used();
                     self.compile_register_js_callback_host_operations()?;
                     let value = self
                         .builder
@@ -1934,8 +1932,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .into_pointer_value()
                 }
                 9 => {
-                    self.uses_quickjs = true;
-                    self.uses_quickjs_handles = true;
+                    self.js_mark_handles_used();
                     self.begin_fresh_event_key_argument_scope();
                     let owner = self
                         .builder
