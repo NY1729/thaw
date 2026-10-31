@@ -630,7 +630,11 @@ fn next_timer_delay() -> Option<Duration> {
 /// their own polling with this function without a multi-threaded executor.
 #[no_mangle]
 pub extern "C" fn thaw_runtime_poll_one() -> u8 {
-    report_pending_rejection_handled();
+    // Node emits `rejectionHandled` after the microtask queue drains, so the late
+    // handler's own continuation runs first.
+    if READY_CONTINUATIONS.with(|ready| ready.borrow().is_empty()) {
+        report_pending_rejection_handled();
+    }
     promote_due_timers();
     let io_events = poll_fd_waits(Some(Duration::ZERO));
     let next = READY_CONTINUATIONS.with(|ready| ready.borrow_mut().pop_front());

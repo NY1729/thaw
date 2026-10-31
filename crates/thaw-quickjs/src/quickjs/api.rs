@@ -827,6 +827,15 @@ pub extern "C" fn thaw_js_emit_unhandled_rejection_result(
     let raw = unsafe { thaw_arena::NativeStr::from_ptr(message) }
         .to_string_lossy()
         .into_owned();
+    // An untagged reason is a rejected string, not an Error: listeners see it as-is.
+    if !raw.starts_with('\u{1}') {
+        let reason = json_escape_string(&raw);
+        return with_active_or_context(|ctx| {
+            process_emit_result(&ctx, ctx.eval::<bool, _>(format!(
+                "typeof process !== 'undefined' && process.emit('unhandledRejection', {reason}, undefined)"
+            )))
+        });
+    }
     let (name, message) = tagged_error_parts(&raw);
     let name = json_escape_string(name);
     let message = json_escape_string(message);

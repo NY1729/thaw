@@ -41,6 +41,9 @@ unsafe extern "C" {
     fn thaw_json_object_set_string(object: *mut u8, key: *const c_char, value: *const c_char);
     fn thaw_json_undefined() -> *mut u8;
     fn thaw_json_object_set_json_owned(object: *mut u8, key: *const c_char, value: *mut u8);
+    fn thaw_json_object_set_json(object: *mut u8, key: *const c_char, value: *mut u8);
+    fn thaw_json_object_set_number(object: *mut u8, key: *const c_char, value: f64);
+    fn thaw_json_typed_decode_scope_own(value: *mut u8);
 }
 
 fn groups_json_pointer(groups: Vec<(String, Option<Vec<u16>>)>) -> *mut u8 {
@@ -511,6 +514,34 @@ pub unsafe extern "C" fn thaw_regex_exec_input(matches: *const u8) -> *const c_c
     input
         .and_then(|input| arena_wtf8(&input))
         .map_or(std::ptr::null(), |pointer| pointer.cast())
+}
+
+#[no_mangle]
+/// `console.log` support: wraps the marshalled items `json` of a regex result `matches`
+/// as `{ __thaw_array_items__, index, input, groups }` so the inspector prints the extra
+/// properties like Node. Any other array gets `json` back unchanged.
+///
+/// # Safety
+/// `matches` must be null or an array handle; `json` a live Json value.
+pub unsafe extern "C" fn thaw_regex_console_wrap(matches: *const u8, json: *mut u8) -> *mut u8 {
+    let Some((index, input, groups)) = REGEX_META.with(|stored| {
+        stored.borrow().get(&(matches as usize)).map(|meta| (meta.index, meta.input.clone(), meta.groups))
+    }) else { return json };
+    let object = unsafe { thaw_json_object_new() };
+    let input = thaw_arena::arena_string(&input);
+    if object.is_null() || input.is_null() { return json; }
+    unsafe {
+        thaw_json_typed_decode_scope_own(object);
+        thaw_json_object_set_json(object, c"__thaw_array_items__".as_ptr(), json);
+        thaw_json_object_set_number(object, c"index".as_ptr(), index);
+        thaw_json_object_set_string(object, c"input".as_ptr(), input);
+        if groups.is_null() {
+            thaw_json_object_set_json_owned(object, c"groups".as_ptr(), thaw_json_undefined());
+        } else {
+            thaw_json_object_set_json(object, c"groups".as_ptr(), groups);
+        }
+    }
+    object
 }
 
 #[no_mangle]
