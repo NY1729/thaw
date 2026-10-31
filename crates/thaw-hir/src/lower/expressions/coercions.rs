@@ -1701,6 +1701,12 @@ impl<'a> FnLowerer<'a> {
             }
             HirType::Array(element) => {
                 let builtin = match element.as_ref() {
+                    HirType::BigInt => {
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_bigint_array_join".into())),
+                            vec![value, HirExpr::Lit(HirLit::Str(",".into()))],
+                        ));
+                    }
                     HirType::F64 => "__thaw_number_array_to_string",
                     HirType::Str => "__thaw_string_array_to_string",
                     HirType::Bool => "__thaw_bool_array_to_string",
@@ -3464,6 +3470,9 @@ impl<'a> FnLowerer<'a> {
                 &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)],
             );
         }
+        if let Some(exact) = self.bigint_number_comparison(BinOp::EqEqEq, &lhs, &rhs)? {
+            return Ok(exact);
+        }
         lhs = self.coerce_primitive_to_number(self.bigint_to_number(lhs)?)?;
         rhs = self.coerce_primitive_to_number(self.bigint_to_number(rhs)?)?;
         Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)))
@@ -4453,6 +4462,9 @@ impl<'a> FnLowerer<'a> {
                 &[(left_name, lhs_type, lhs), (right_name, rhs_type, rhs)],
             );
         }
+        if let Some(exact) = self.bigint_number_comparison(op, &lhs, &rhs)? {
+            return Ok(exact);
+        }
         let lhs = self.bigint_to_number(lhs)?;
         let rhs = self.bigint_to_number(rhs)?;
         Ok(HirExpr::BinOp(
@@ -4460,6 +4472,27 @@ impl<'a> FnLowerer<'a> {
             Box::new(self.coerce_primitive_to_number(lhs)?),
             Box::new(self.coerce_primitive_to_number(rhs)?),
         ))
+    }
+
+    /// Exact `bigint <op> number` (no rounding of the bigint to a double): the runtime orders the
+    /// two as `-1/0/1` (`NaN` when the number is `NaN`, so every comparison is false) and the
+    /// operator is applied to that order against zero. `None` unless exactly one side is a `bigint`
+    /// and the other a plain `number`.
+    fn bigint_number_comparison(&self, op: BinOp, lhs: &HirExpr, rhs: &HirExpr) -> Result<Option<HirExpr>, String> {
+        let (lhs_type, rhs_type) = (self.infer_expr_type(lhs)?, self.infer_expr_type(rhs)?);
+        let (big, number, big_on_left) = match (lhs_type, rhs_type) {
+            (HirType::BigInt, HirType::F64) => (lhs, rhs, true),
+            (HirType::F64, HirType::BigInt) => (rhs, lhs, false),
+            _ => return Ok(None),
+        };
+        let order = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bigint_cmp_number".to_string())),
+            vec![big.clone(), number.clone()],
+        );
+        let zero = HirExpr::Lit(HirLit::F64(0.0));
+        // `order` is big-versus-number, so a number on the left mirrors the operands.
+        let (a, b) = if big_on_left { (order, zero) } else { (zero, order) };
+        Ok(Some(HirExpr::BinOp(op, Box::new(a), Box::new(b))))
     }
 
     /// A native `bigint` compared with a `number` (`1n < 2`, `3n == 3`) is compared as a
@@ -4644,6 +4677,42 @@ impl<'a> FnLowerer<'a> {
                 )?)
             }
             (other, HirType::Optional(payload)) if payload.as_ref() == other => {
+                return self.lower_optional_undefined_equality(rhs, lhs);
+            }
+            // `bigint | null` / `bigint | null | undefined` against a `bigint`: absent is never
+            // equal, a present payload compares by value.
+            (HirType::Nullable(payload) | HirType::Nullish(payload), other)
+                if payload.as_ref() == other && *other == HirType::BigInt =>
+            {
+                let kind = if matches!(lhs_type, HirType::Nullable(_)) {
+                    AbsenceKind::Nullable
+                } else {
+                    AbsenceKind::Nullish
+                };
+                let left_name = format!("__thaw_absence_equality_left_{}", self.next_binding);
+                self.next_binding += 1;
+                let right_name = format!("__thaw_absence_equality_right_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(left_name.clone(), lhs_type.clone());
+                self.scope.insert(right_name.clone(), rhs_type.clone());
+                let left = HirExpr::Var(left_name.clone());
+                let result = HirExpr::Block(vec![HirStmt::If(
+                    self.absence_is_none(kind, left.clone(), other.clone()),
+                    vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],
+                    vec![HirStmt::Return(Some(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(self.absence_value(kind, left, other.clone())),
+                        Box::new(HirExpr::Var(right_name.clone())),
+                    )))],
+                )]);
+                Some(self.wrap_call_argument_bindings(
+                    result,
+                    &[(left_name, lhs_type.clone(), lhs), (right_name, rhs_type.clone(), rhs)],
+                )?)
+            }
+            (other, HirType::Nullable(payload) | HirType::Nullish(payload))
+                if payload.as_ref() == other && *other == HirType::BigInt =>
+            {
                 return self.lower_optional_undefined_equality(rhs, lhs);
             }
             (HirType::Optional(left), HirType::Optional(right)) if left == right => {

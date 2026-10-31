@@ -63,6 +63,7 @@ impl<'ctx> HirCompiler<'ctx> {
             || name.starts_with("__thaw_bool_array_")
             || name.starts_with("__thaw_object_array_")
             || name.starts_with("__thaw_any_array_")
+            || name.starts_with("__thaw_bigint_array_")
             || name.starts_with("__thaw_pointer_array_");
         let generic_array_call = matches!(
             name,
@@ -898,6 +899,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_number_array_join"
+            | "__thaw_bigint_array_join"
             | "__thaw_string_array_join"
             | "__thaw_bool_array_join"
             | "__thaw_object_array_join"
@@ -1676,6 +1678,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into());
             }
             "__thaw_number_array_sort"
+            | "__thaw_bigint_array_sort"
             | "__thaw_string_array_sort"
             | "__thaw_bool_array_sort"
             | "__thaw_object_array_sort" => {
@@ -1727,6 +1730,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 return Ok(handle.into());
             }
             "__thaw_number_array_to_sorted"
+            | "__thaw_bigint_array_to_sorted"
             | "__thaw_string_array_to_sorted"
             | "__thaw_bool_array_to_sorted"
             | "__thaw_object_array_to_sorted" => {
@@ -1862,7 +1866,10 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_string_array_last_index_of"
             | "__thaw_bool_array_last_index_of"
             | "__thaw_object_array_last_index_of"
-            | "__thaw_any_array_last_index_of" => {
+            | "__thaw_any_array_last_index_of"
+            | "__thaw_bigint_array_index_of"
+            | "__thaw_bigint_array_includes"
+            | "__thaw_bigint_array_last_index_of" => {
                 let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
                 if args.len() != 3 {
                     return Err("array search expects three operands".to_string());
