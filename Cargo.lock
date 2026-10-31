@@ -3212,6 +3212,7 @@ name = "thaw-js"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "libc",
  "md-5",
  "num-bigint",
  "num-traits",

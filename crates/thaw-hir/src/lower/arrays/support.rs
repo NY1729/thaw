@@ -784,9 +784,10 @@ impl<'a> FnLowerer<'a> {
                     assign(order, in_run),
                     assign(stop, HirExpr::Conditional(
                         Box::new(eq(variable(desc), number(1.0))),
+                        // V8 maps a NaN comparator result to +0, so `order >= 0` is `!(order < 0)`.
                         Box::new(HirExpr::Conditional(
-                            Box::new(ge(variable(order), number(0.0))),
-                            Box::new(number(1.0)), Box::new(number(0.0)), HirType::F64,
+                            Box::new(lt(variable(order), number(0.0))),
+                            Box::new(number(0.0)), Box::new(number(1.0)), HirType::F64,
                         )),
                         Box::new(HirExpr::Conditional(
                             Box::new(lt(variable(order), number(0.0))),

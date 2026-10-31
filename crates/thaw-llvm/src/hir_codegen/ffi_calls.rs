@@ -1317,7 +1317,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_conditional_branch(valid, valid_bb, error_bb)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(error_bb);
-        let error = self.builder.build_global_string_ptr(
+        let error = self.intern_string(
             "\u{1}RangeError\u{1}FFI variadic integer out of range",
             "ffi_vararg_range_message",
         ).map_err(|error| error.to_string())?;

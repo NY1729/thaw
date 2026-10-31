@@ -23,9 +23,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// variable is `undefined` (tag false); the payload is a valid empty C string
     /// so Str consumers that do not check the tag still see a safe pointer.
     fn compile_env_var(&mut self, name: &str) -> Result<BasicValueEnum<'ctx>, String> {
-        let name_global = self
-            .builder
-            .build_global_string_ptr(name, "envname")
+        let name_global = self.intern_string(name, "envname")
             .map_err(|e| e.to_string())?;
         let getenv_fn = self.module.get_function("getenv").unwrap();
         let call = self
@@ -56,9 +54,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
 
         self.builder.position_at_end(null_bb);
-        let empty = self
-            .builder
-            .build_global_string_ptr("", "envempty")
+        let empty = self.intern_string("", "envempty")
             .map_err(|e| e.to_string())?;
         self.builder
             .build_unconditional_branch(merge_bb)
