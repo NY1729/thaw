@@ -1913,13 +1913,19 @@ fn callback_value(it: &mut Interp, id: usize) -> Value {
 }
 
 /// Rebuild a thrown error from the compiled side's `\u{1}Name\u{1}message` framing.
-fn tagged_error(it: &mut Interp, tagged: &str) -> Ctl {
+pub(crate) fn tagged_error(it: &mut Interp, tagged: &str) -> Ctl {
     let tagged = tagged.strip_prefix('\u{2}').unwrap_or(tagged);
     let (name, message) = match tagged
         .strip_prefix('\u{1}')
         .and_then(|t| t.split_once('\u{1}'))
     {
-        Some((name, message)) => (name, message.split('\u{5}').next().unwrap_or("")),
+        Some((name, message)) => (
+            name,
+            message
+                .split(|c| ('\u{2}'..='\u{5}').contains(&c))
+                .next()
+                .unwrap_or(""),
+        ),
         None => ("Error", tagged),
     };
     let global = it.global.clone();
@@ -1929,7 +1935,20 @@ fn tagged_error(it: &mut Interp, tagged: &str) -> Ctl {
         .or_else(|| it.lookup(&global, "Error"))
         .unwrap_or(Value::Undefined);
     match it.construct(&ctor, &[Value::str(message)]) {
-        Ok(err) => Ctl::Throw(err),
+        Ok(err) => {
+            // the `\u{5}<json>` bag of the error's own properties (`isAxiosError`, `response`, ...)
+            if let Some((_, bag)) = tagged.split_once('\u{5}') {
+                if let Ok(Native::Object(fields)) = crate::json::parse_native(bag) {
+                    for (k, v) in fields {
+                        if k != "name" && k != "message" && k != "stack" {
+                            let v = to_value(it, &v);
+                            let _ = it.set(&err, &k, v);
+                        }
+                    }
+                }
+            }
+            Ctl::Throw(err)
+        }
         Err(c) => c,
     }
 }
@@ -2195,7 +2214,7 @@ pub unsafe extern "C" fn thaw_tjs_frame_error(error: *mut c_char) -> *mut c_char
 
 /// The wire framing of a thrown `Error`-like object (`message` is a string): `\u{1}name\u{1}message`,
 /// then `\u{3}code` and `\u{5}{own properties as JSON}` like the QuickJS bridge.
-fn frame_error(it: &mut Interp, v: &Value) -> Option<(String, String)> {
+pub(crate) fn frame_error(it: &mut Interp, v: &Value) -> Option<(String, String)> {
     if !matches!(v, Value::Object(_)) || v.is_callable() {
         return None;
     }
@@ -2211,22 +2230,16 @@ fn frame_error(it: &mut Interp, v: &Value) -> Option<(String, String)> {
         framed.push('\u{3}');
         framed.push_str(&code);
     }
-    let mut props = Vec::new();
-    for key in it.own_keys(v) {
-        if matches!(&*key, "name" | "message" | "stack") {
-            continue;
+    // The QuickJS bridge's property bag: strings, numbers, booleans, null and objects of the error (own and
+    // inherited enumerable), serialized with the realm's JSON.stringify so nested objects (axios `response`) survive.
+    let g = Value::Object(it.global_object.clone());
+    if let Ok(helper) = it.get(&g, "__thaw_error_properties_json") {
+        if let Ok(Value::Str(json)) = it.call(&helper, &g, std::slice::from_ref(v)) {
+            if !json.is_empty() && &*json != "{}" {
+                framed.push('\u{5}');
+                framed.push_str(&json);
+            }
         }
-        let Ok(value) = it.get(v, &key) else { continue };
-        if value.is_callable() {
-            continue;
-        }
-        if let Ok(native) = from_value(it, &value, 0) {
-            props.push((key.to_string(), native));
-        }
-    }
-    if !props.is_empty() {
-        framed.push('\u{5}');
-        framed.push_str(&Native::Object(props).to_json());
     }
     let text = it.to_str(v);
     let display = if text.starts_with(&name) {
