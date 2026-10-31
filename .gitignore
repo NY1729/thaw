@@ -11,3 +11,6 @@
 # working notes, not part of the repository
 /docs/
 /.superpowers/
+
+# Node --trace-events output
+node_trace.*.log
