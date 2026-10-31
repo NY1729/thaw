@@ -6,9 +6,8 @@ impl<'ctx> HirCompiler<'ctx> {
         backend_symbol: &str,
         source_name: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        if backend_symbol == "thaw_js_call_handle_graph_result"
-            && self.js_engine() == JsEngine::ThawJs
-        {
+        if backend_symbol.starts_with("thaw_js_") && self.js_engine() == JsEngine::ThawJs {
+            // Symbols without a `thaw_tjs_*` twin are caught after the renames (`js_unported_symbols_used`).
             self.js_mark_handles_used();
         } else if backend_symbol.starts_with("thaw_js_") {
             self.uses_quickjs = true;
