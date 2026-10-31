@@ -700,7 +700,7 @@ impl<'a> FnLowerer<'a> {
                             let value = self.lower_expr(&call.args[0].expr)?;
                             if matches!(self.infer_expr_type(&value)?, HirType::JsValue | HirType::Json | HirType::Dynamic) {
                                 let mut forwarded = call.clone();
-                                forwarded.args[0].expr = Box::new(Expr::Arrow(member_forwarder(callback, 2)));
+                                *forwarded.args[0].expr = Expr::Arrow(member_forwarder(callback, 2));
                                 return self.lower_native_array_transform_method(member, property, &forwarded);
                             }
                         }
