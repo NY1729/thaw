@@ -324,6 +324,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into_pointer_value();
                 return Ok(result.into());
             }
+            "__thaw_regex_check" => {
+                let [source, flags] = args else {
+                    return Err("RegExp check expects two operands".into());
+                };
+                let source = self.compile_expr(source)?;
+                let flags = self.compile_expr(flags)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_regex_check").unwrap(),
+                        &[source.into(), flags.into()],
+                        "regex_check",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("RegExp check returned no value".into());
+            }
             "__thaw_regex_exec_groups" => {
                 let [matches] = args else {
                     return Err("RegExp groups expects one operand".into());

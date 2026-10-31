@@ -1853,6 +1853,14 @@ impl<'a> FnLowerer<'a> {
         }
 
         let callee = self.lower_expr(&call.callee)?;
+        // `anyFn?.()`: a nullish `any` callee yields undefined instead of calling handle 0.
+        if matches!(call.callee.as_ref(), Expr::Ident(_)) && self.infer_expr_type(&callee)? == HirType::Json {
+            let invoked = self.lower_call(&CallExpr::from(call.clone()))?;
+            let invoked = self.coerce_to_declared(&HirType::Json, invoked)?;
+            let undefined = self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Undefined))?;
+            let is_nullish = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_nullish".into())), vec![callee]);
+            return Ok(HirExpr::Conditional(Box::new(is_nullish), Box::new(undefined), Box::new(invoked), HirType::Json));
+        }
         self.lower_optional_call_target(callee, call, None)
     }
 

@@ -136,15 +136,36 @@ impl<'a> FnLowerer<'a> {
         let name = format!("__thaw_array_ctor_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(name.clone(), array_type.clone());
+        let length_name = format!("__thaw_array_ctor_len_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(length_name.clone(), HirType::F64);
+        let len = || HirExpr::Var(length_name.clone());
+        let invalid = || HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+            "\u{1}RangeError\u{1}Invalid array length".into(),
+        )));
         let body = HirExpr::Block(vec![
+            HirStmt::If(
+                HirExpr::BinOp(BinOp::Lt, Box::new(len()), Box::new(HirExpr::Lit(HirLit::F64(0.0)))),
+                vec![invalid()], Vec::new(),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(BinOp::GtEq, Box::new(len()), Box::new(HirExpr::Lit(HirLit::F64(4294967296.0)))),
+                vec![invalid()], Vec::new(),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(BinOp::EqEqEq, Box::new(len()), Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_math_trunc".into())), vec![len()],
+                ))),
+                Vec::new(), vec![invalid()],
+            ),
             HirStmt::Expr(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_array_resize".into())),
-                vec![HirExpr::Var(name.clone()), length],
+                vec![HirExpr::Var(name.clone()), len()],
             )),
             HirStmt::Return(Some(HirExpr::Var(name.clone()))),
         ]);
         let empty = HirExpr::ArrayAlloc(Box::new(HirExpr::Lit(HirLit::F64(0.0))), element);
-        self.wrap_call_argument_bindings(body, &[(name, array_type, empty)])
+        self.wrap_call_argument_bindings(body, &[(name, array_type, empty), (length_name, HirType::F64, length)])
     }
 
     /// `new Array(n).fill(v)` with no type argument: the element type is `v`'s.
