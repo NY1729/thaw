@@ -925,6 +925,29 @@ fn global_construct_and_call_handles() {
     assert!(r.error.is_null() && r.value > 0);
 }
 
+#[test]
+fn user_dynamic_code_runs_in_a_bare_realm() {
+    use crate::host::*;
+    use std::ffi::{CStr, CString};
+    let q = |s: &str| CString::new(s).unwrap();
+    let made = thaw_tjs_new_function(q(r#"["a","b","return a * b"]"#).as_ptr());
+    assert!(made.error.is_null() && made.value > 0);
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"v":6},{"v":7}]}]}"#);
+    let product = thaw_tjs_call_handle_graph_result(made.value, args.as_ptr());
+    assert!(product.error.is_null());
+    // SAFETY: a non-null result is a NUL-terminated wire.
+    let wire = unsafe { CStr::from_ptr(product.value) }.to_str().unwrap();
+    assert!(wire.contains("42"), "{wire}");
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"v":"1 + 2"}]}]}"#);
+    let evaluated = thaw_tjs_call_graph_result(q("eval").as_ptr(), args.as_ptr());
+    assert!(evaluated.error.is_null());
+    // SAFETY: as above.
+    let wire = unsafe { CStr::from_ptr(evaluated.value) }.to_str().unwrap();
+    assert!(wire.contains('3'), "{wire}");
+    let bad = thaw_tjs_new_function(q(r#"["return ("]"#).as_ptr());
+    assert!(!bad.error.is_null());
+}
+
 // ----- WeakMap / WeakSet / WeakRef / FinalizationRegistry (expected text recorded from Node 22) -----
 
 #[test]
@@ -1678,4 +1701,103 @@ fn exact_calls_await_returned_promises_only_when_resolving() {
     let rejected = call("laterThrow", true);
     assert_eq!(rejected.value, 0);
     assert!(rejected.exception_handle > 0 && rejected.exception_object_like == 1);
+}
+
+#[test]
+fn node_builtin_script_is_scanned_and_run_as_a_one_module_bundle() {
+    let script = "module.exports = { twice: function (n) { return n * 2; } };";
+    assert!(crate::scan::scan_bundle(script).is_err()); // a plain script is not a registry bundle
+    let wrapped = crate::scan::script_as_bundle(script);
+    assert!(crate::scan::scan_bundle(&wrapped).unwrap().is_clean());
+    let mut p = crate::host::Package::load(&wrapped).expect("loads");
+    assert_eq!(
+        p.call("twice", &[crate::host::Native::Number(21.0)]).ok(),
+        Some(crate::host::Native::Number(42.0))
+    );
+    // a registry bundle passes through unchanged
+    let registry = "module.exports = (function(require){ var __thaw_bundle_entry_key = \"a\"; var __thaw_bundle_factories = { \"a\": function(module){ module.exports = 1; } }; var __thaw_bundle_require_maps = { \"a\": {} }; })(globalThis.require);";
+    assert_eq!(crate::scan::script_as_bundle(registry), registry);
+}
+
+#[test]
+fn error_subclasses_inherit_from_error_and_native_error_tokens_keep_their_message() {
+    let src =
+        "console.log(Object.getPrototypeOf(TypeError) === Error, Error.isPrototypeOf(RangeError));";
+    assert_eq!(one(src), "true true");
+    let mut it = crate::Interp::new();
+    let ctl = crate::host::tagged_error(&mut it, "\u{1}RangeError\u{1}\u{1e}E1:3:-:abc");
+    let crate::Ctl::Throw(error) = ctl else {
+        panic!("expected a throw")
+    };
+    let got = it.get(&error, "message").unwrap();
+    assert_eq!(&*it.to_str(&got), "abc");
+    let got = it.get(&error, "name").unwrap();
+    assert_eq!(&*it.to_str(&got), "RangeError");
+}
+
+#[test]
+fn os_network_interfaces_are_grouped_by_name_with_real_addresses() {
+    let src = "var all = JSON.parse(__thaw_os_network_interfaces()); var names = Object.keys(all);\
+               console.log(names.length > 0, names.every(function (n) { return all[n].every(function (a) { return typeof a.address === 'string' && (a.family === 'IPv4' || a.family === 'IPv6') && typeof a.internal === 'boolean'; }); }));";
+    assert_eq!(one(src), "true true");
+}
+
+#[test]
+fn registering_the_same_closure_identity_twice_returns_one_callback_id() {
+    use crate::host::{thaw_tjs_callback_identity, thaw_tjs_register_callback};
+    let identity = 0x1000 as *const std::ffi::c_void;
+    thaw_tjs_callback_identity(identity);
+    let first = thaw_tjs_register_callback(sum_adapter as *const _, 0x10 as *const _, 3);
+    // a different wrapper (adapter and context) of the same closure
+    thaw_tjs_callback_identity(identity);
+    let second = thaw_tjs_register_callback(throwing_adapter as *const _, 0x20 as *const _, 3);
+    assert_eq!(first, second);
+    thaw_tjs_callback_identity(0x2000 as *const _);
+    assert_ne!(
+        first,
+        thaw_tjs_register_callback(sum_adapter as *const _, 0x30 as *const _, 3)
+    );
+}
+
+#[test]
+fn a_regexp_marker_argument_becomes_a_real_regexp() {
+    use crate::host::Native;
+    let mut it = crate::Interp::new();
+    let marker = Native::Object(vec![(
+        "__thaw_regexp__".into(),
+        Native::Object(vec![
+            ("source".into(), Native::Str("b+".into())),
+            ("flags".into(), Native::Str("i".into())),
+        ]),
+    )]);
+    let value = crate::host::to_value(&mut it, &marker);
+    let got = it.get(&value, "source").unwrap();
+    assert_eq!(&*it.to_str(&got), "b+");
+    let got = it.get(&value, "flags").unwrap();
+    assert_eq!(&*it.to_str(&got), "i");
+}
+
+#[test]
+fn async_generator_return_runs_finally() {
+    let mut it = Interp::new();
+    it.run(
+        "async function* g(){ try{ yield 1; yield 2; } finally { console.log('cleanup'); } }\n\
+         const it = g(); it.next().then(() => it.return()).then(r => console.log(JSON.stringify(r)));",
+    )
+    .ok()
+    .unwrap();
+    it.run_event_loop().ok().unwrap();
+    assert_eq!(it.out, vec!["cleanup", "{\"done\":true}"]);
+}
+
+#[test]
+fn get_prototype_of_runs_the_proxy_trap() {
+    assert_eq!(
+        one("try { Object.getPrototypeOf(new Proxy({}, { getPrototypeOf() { throw new Error('trap'); } })); console.log('accepted'); } catch (e) { console.log(e.message); }"),
+        "trap"
+    );
+    assert_eq!(
+        one("console.log(Object.getPrototypeOf(new Proxy({}, {})) === Object.prototype, Reflect.getPrototypeOf(new Proxy({}, { getPrototypeOf() { return null; } })))"),
+        "true null"
+    );
 }

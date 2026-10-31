@@ -1044,6 +1044,7 @@ impl<'a> FnLowerer<'a> {
                         | "File"
                         | "FormData"
                         | "Event"
+                        | "CustomEvent"
                         | "EventTarget"
                         | "MessageEvent"
                         | "MessageChannel"
@@ -5966,6 +5967,7 @@ impl<'a> FnLowerer<'a> {
                             | "File"
                             | "FormData"
                             | "Event"
+                            | "CustomEvent"
                             | "EventTarget"
                             | "MessageEvent"
                             | "MessageChannel"
@@ -6790,6 +6792,35 @@ pub(in crate::lower) fn console_forwarder(method: &str, arity: usize, any: bool)
                 spread: None,
                 expr: Box::new(Expr::Ident(Ident::new_no_ctxt(name(index).into(), DUMMY_SP))),
             })
+            .collect(),
+        type_args: None,
+    });
+    ArrowExpr {
+        span: DUMMY_SP,
+        ctxt: SyntaxContext::empty(),
+        params,
+        body: Box::new(ArrowFunctionBody::Expr(Box::new(call))),
+        is_async: false,
+        is_generator: false,
+        type_params: None,
+        return_type: None,
+    }
+}
+
+/// `(a0, .., an) => <member>(a0, .., an)` for a method value used as a callback.
+pub(in crate::lower) fn member_forwarder(member: &swc_ecma_ast::MemberExpr, arity: usize) -> swc_ecma_ast::ArrowExpr {
+    use swc_common::{SyntaxContext, DUMMY_SP};
+    use swc_ecma_ast::*;
+    let name = |index: usize| format!("__thaw_member_arg{index}");
+    let params = (0..arity)
+        .map(|index| Pat::Ident(BindingIdent { id: Ident::new_no_ctxt(name(index).into(), DUMMY_SP), type_ann: None }))
+        .collect();
+    let call = Expr::Call(CallExpr {
+        span: DUMMY_SP,
+        ctxt: SyntaxContext::empty(),
+        callee: Callee::Expr(Box::new(Expr::Member(member.clone()))),
+        args: (0..arity)
+            .map(|index| ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(Ident::new_no_ctxt(name(index).into(), DUMMY_SP))) })
             .collect(),
         type_args: None,
     });

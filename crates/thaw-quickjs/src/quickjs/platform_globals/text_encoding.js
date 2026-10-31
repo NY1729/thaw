@@ -120,7 +120,7 @@
         : ['latin1', 'iso-8859-1', 'iso8859-1', 'l1', 'ascii', 'us-ascii', 'windows-1252', 'cp1252', 'x-cp1252'].includes(normalized) ? 'windows-1252'
         : null;
       if (encoding === null) {
-        throw new RangeError(`unsupported encoding: ${label}`);
+        { const error = new RangeError(`The "${label}" encoding is not supported`); error.code = 'ERR_ENCODING_NOT_SUPPORTED'; throw error; }
       }
       this.fatal = Boolean(options.fatal);
       this.ignoreBOM = Boolean(options.ignoreBOM);
@@ -145,7 +145,7 @@
       let output = '';
       let index = 0;
       const invalid = () => {
-        if (this.fatal) throw new TypeError('invalid UTF-8 data');
+        if (this.fatal) { const error = new TypeError(`The encoded data was not valid for encoding ${this.encoding}`); error.code = 'ERR_ENCODING_INVALID_ENCODED_DATA'; throw error; }
         output += replacement;
       };
       if (this.encoding === 'windows-1252') {

@@ -819,6 +819,10 @@ fn build_with_native_mode_routed(
                 || source_uses_quickjs(&user_source)
                 || created_require_live_result
                 || shim_source.contains("__thaw_typed_js_"),
+            // Cleared again below when thaw-js serves the program's own dynamic code.
+            "quickjs_without_user_source": shim_source.contains("loadScript(")
+                || created_require_live_result
+                || shim_source.contains("__thaw_typed_js_"),
             "quickjs_reasons": quickjs_reasons,
             // Packages whose bundles run on the experimental thaw-js runtime instead of QuickJS.
             "thaw_js_routed": thaw_js_routed_packages(&shim_source),
@@ -963,7 +967,10 @@ fn build_with_native_mode_routed(
             manifest,
         );
     };
-    thaw_hir::set_thaw_js_routed(thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty());
+    let thaw_js_route = thaw_js_routing
+        && (!thaw_js_routed_packages(&shim_source).is_empty()
+            || (thaw_js_user_dynamic_enabled() && source_uses_quickjs(&user_source)));
+    thaw_hir::set_thaw_js_routed(thaw_js_route);
     let mut program = thaw_hir::lower_module(&module)?;
     for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
         let param_count = program
@@ -1001,8 +1008,7 @@ fn build_with_native_mode_routed(
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
     compiler.set_codegen_opt(codegen_opt_level()?);
     compiler.set_commonjs_entry(module_graph::entry_is_commonjs(input, &user_source)?);
-    compiler
-        .set_thaw_js_routed(thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty());
+    compiler.set_thaw_js_routed(thaw_js_route);
     if let Some(lib) = lib_mode {
         compiler.set_library_mode(lib.exports.clone());
     }
@@ -1021,6 +1027,12 @@ fn build_with_native_mode_routed(
         }
         if uses_quickjs {
             return Err(THAW_JS_MIXED.to_string());
+        }
+    }
+    if let Some(object) = manifest.as_object_mut() {
+        let other = object.remove("quickjs_without_user_source") == Some(true.into());
+        if thaw_js_route && compiler.uses_thaw_js() && !uses_quickjs && !other {
+            object.insert("quickjs".into(), false.into());
         }
     }
     runtime_features.extend(module_graph::runtime_features(input, &user_source)?);
