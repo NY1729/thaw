@@ -41,9 +41,9 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
         // already lazily create `_events`).
         "events" => Some(
             "var errorMonitor = Symbol.for('events.errorMonitor');\n\
-             function EventEmitter() {\n\
-             \x20\x20if (!(this instanceof EventEmitter)) return new EventEmitter();\n\
-             \x20\x20this._events = Object.create(null); this._maxListeners = undefined;\n\
+             function EventEmitter(options) {\n\
+             \x20\x20if (!(this instanceof EventEmitter)) return new EventEmitter(options);\n\
+             \x20\x20this._events = Object.create(null); this._maxListeners = undefined; if (options && options.captureRejections) Object.defineProperty(this, '_captureRejections', { value: true, writable: true, configurable: true });\n\
              }\n\
              function addEventListener(emitter, event, listener, prepend, once) {\n\
              \x20\x20if (typeof listener !== 'function') throw new TypeError('listener must be a function');\n\
@@ -70,7 +70,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20var args = Array.prototype.slice.call(arguments, 1);\n\
              \x20\x20list.slice().forEach(function(entry) {\n\
              \x20\x20\x20\x20if (entry.once) { if (entry.fired) return; entry.fired = true; removeEntry(this, name, entry); }\n\
-             \x20\x20\x20\x20entry.listener.apply(this, args);\n\
+             \x20\x20\x20\x20var result = entry.listener.apply(this, args); if (this._captureRejections && result && typeof result.then === 'function') { var emitter = this; result.then(undefined, function(error) { var handler = emitter[Symbol.for('nodejs.rejection')]; if (typeof handler === 'function') handler.apply(emitter, [error, name].concat(args)); else { emitter._captureRejections = false; try { emitter.emit('error', error); } finally { emitter._captureRejections = true; } } }); }\n\
              \x20\x20}, this);\n\
              \x20\x20return true;\n\
              };\n\

@@ -5753,6 +5753,7 @@ impl<'a> FnLowerer<'a> {
                                 )]));
                             }
                             Expr::Array(array) => {
+                                let mut seen: Vec<String> = Vec::new();
                                 let mut locales = Vec::with_capacity(array.elems.len());
                                 for element in &array.elems {
                                     let Some(element) = element else {
@@ -5766,7 +5767,11 @@ impl<'a> FnLowerer<'a> {
                                 "`Intl.getCanonicalLocales` requires string-literal locales".into(),
                                         );
                                     };
-                                    locales.push(canonical(&value.value.to_string_lossy()));
+                                    let tag = canonicalize_locale(&value.value.to_string_lossy());
+                                    if !seen.contains(&tag) {
+                                        seen.push(tag.clone());
+                                        locales.push(HirExpr::Lit(HirLit::Str(tag)));
+                                    }
                                 }
                                 return Ok(HirExpr::ArrayLit(locales));
                             }

@@ -41,6 +41,9 @@
     second: { long: ['second', 'seconds'], short: ['sec', 'sec'], narrow: ['s', 's'] },
     millisecond: { long: ['millisecond', 'milliseconds'], short: ['ms', 'ms'], narrow: ['ms', 'ms'] },
   };
+  // English unit patterns (`{0}` = the formatted number) for every sanctioned unit plus a few common
+  // compounds, generated from real Node (ICU/CLDR en); used when the baked locale data has no unit entry.
+  const INTL_EN_UNIT_PATTERNS = {"acre":{"short":["{0} ac"],"long":["{0} acre","{0} acres"],"narrow":["{0}ac"]},"bit":{"short":["{0} bit"],"long":["{0} bit","{0} bits"],"narrow":["{0}bit"]},"byte":{"short":["{0} byte"],"long":["{0} byte","{0} bytes"],"narrow":["{0}B"]},"celsius":{"short":["{0}°C"],"long":["{0} degree Celsius","{0} degrees Celsius"],"narrow":["{0}°C"]},"centimeter":{"short":["{0} cm"],"long":["{0} centimeter","{0} centimeters"],"narrow":["{0}cm"]},"day":{"short":["{0} day","{0} days"],"long":["{0} day","{0} days"],"narrow":["{0}d"]},"degree":{"short":["{0} deg"],"long":["{0} degree","{0} degrees"],"narrow":["{0}°"]},"fahrenheit":{"short":["{0}°F"],"long":["{0} degree Fahrenheit","{0} degrees Fahrenheit"],"narrow":["{0}°"]},"fluid-ounce":{"short":["{0} fl oz"],"long":["{0} fluid ounce","{0} fluid ounces"],"narrow":["{0}fl oz"]},"foot":{"short":["{0} ft"],"long":["{0} foot","{0} feet"],"narrow":["{0}′"]},"gallon":{"short":["{0} gal"],"long":["{0} gallon","{0} gallons"],"narrow":["{0}gal"]},"gigabit":{"short":["{0} Gb"],"long":["{0} gigabit","{0} gigabits"],"narrow":["{0}Gb"]},"gigabyte":{"short":["{0} GB"],"long":["{0} gigabyte","{0} gigabytes"],"narrow":["{0}GB"]},"gram":{"short":["{0} g"],"long":["{0} gram","{0} grams"],"narrow":["{0}g"]},"hectare":{"short":["{0} ha"],"long":["{0} hectare","{0} hectares"],"narrow":["{0}ha"]},"hour":{"short":["{0} hr"],"long":["{0} hour","{0} hours"],"narrow":["{0}h"]},"inch":{"short":["{0} in"],"long":["{0} inch","{0} inches"],"narrow":["{0}″"]},"kilobit":{"short":["{0} kb"],"long":["{0} kilobit","{0} kilobits"],"narrow":["{0}kb"]},"kilobyte":{"short":["{0} kB"],"long":["{0} kilobyte","{0} kilobytes"],"narrow":["{0}kB"]},"kilogram":{"short":["{0} kg"],"long":["{0} kilogram","{0} kilograms"],"narrow":["{0}kg"]},"kilometer":{"short":["{0} km"],"long":["{0} kilometer","{0} kilometers"],"narrow":["{0}km"]},"liter":{"short":["{0} L"],"long":["{0} liter","{0} liters"],"narrow":["{0}L"]},"megabit":{"short":["{0} Mb"],"long":["{0} megabit","{0} megabits"],"narrow":["{0}Mb"]},"megabyte":{"short":["{0} MB"],"long":["{0} megabyte","{0} megabytes"],"narrow":["{0}MB"]},"meter":{"short":["{0} m"],"long":["{0} meter","{0} meters"],"narrow":["{0}m"]},"microsecond":{"short":["{0} μs"],"long":["{0} microsecond","{0} microseconds"],"narrow":["{0}μs"]},"mile":{"short":["{0} mi"],"long":["{0} mile","{0} miles"],"narrow":["{0}mi"]},"mile-scandinavian":{"short":["{0} smi"],"long":["{0} mile-scandinavian","{0} miles-scandinavian"],"narrow":["{0}smi"]},"milliliter":{"short":["{0} mL"],"long":["{0} milliliter","{0} milliliters"],"narrow":["{0}mL"]},"millimeter":{"short":["{0} mm"],"long":["{0} millimeter","{0} millimeters"],"narrow":["{0}mm"]},"millisecond":{"short":["{0} ms"],"long":["{0} millisecond","{0} milliseconds"],"narrow":["{0}ms"]},"minute":{"short":["{0} min"],"long":["{0} minute","{0} minutes"],"narrow":["{0}m"]},"month":{"short":["{0} mth","{0} mths"],"long":["{0} month","{0} months"],"narrow":["{0}m"]},"ounce":{"short":["{0} oz"],"long":["{0} ounce","{0} ounces"],"narrow":["{0}oz"]},"percent":{"short":["{0}%"],"long":["{0} percent"],"narrow":["{0}%"]},"petabyte":{"short":["{0} PB"],"long":["{0} petabyte","{0} petabytes"],"narrow":["{0}PB"]},"pound":{"short":["{0} lb"],"long":["{0} pound","{0} pounds"],"narrow":["{0}#"]},"second":{"short":["{0} sec"],"long":["{0} second","{0} seconds"],"narrow":["{0}s"]},"stone":{"short":["{0} st"],"long":["{0} stone","{0} stones"],"narrow":["{0}st"]},"terabit":{"short":["{0} Tb"],"long":["{0} terabit","{0} terabits"],"narrow":["{0}Tb"]},"terabyte":{"short":["{0} TB"],"long":["{0} terabyte","{0} terabytes"],"narrow":["{0}TB"]},"week":{"short":["{0} wk","{0} wks"],"long":["{0} week","{0} weeks"],"narrow":["{0}w"]},"yard":{"short":["{0} yd"],"long":["{0} yard","{0} yards"],"narrow":["{0}yd"]},"year":{"short":["{0} yr","{0} yrs"],"long":["{0} year","{0} years"],"narrow":["{0}y"]},"kilometer-per-hour":{"short":["{0} km/h"],"long":["{0} kilometer per hour","{0} kilometers per hour"],"narrow":["{0}km/h"]},"mile-per-hour":{"short":["{0} mph"],"long":["{0} mile per hour","{0} miles per hour"],"narrow":["{0}mph"]},"meter-per-second":{"short":["{0} m/s"],"long":["{0} meter per second","{0} meters per second"],"narrow":["{0}m/s"]},"mile-per-gallon":{"short":["{0} mpg"],"long":["{0} mile per gallon","{0} miles per gallon"],"narrow":["{0}mpg"]},"liter-per-kilometer":{"short":["{0} L/km"],"long":["{0} liter per kilometer","{0} liters per kilometer"],"narrow":["{0}L/km"]},"kilobyte-per-second":{"short":["{0} kB/s"],"long":["{0} kilobyte per second","{0} kilobytes per second"],"narrow":["{0}kB/s"]},"megabyte-per-second":{"short":["{0} MB/s"],"long":["{0} megabyte per second","{0} megabytes per second"],"narrow":["{0}MB/s"]},"gigabyte-per-second":{"short":["{0} GB/s"],"long":["{0} gigabyte per second","{0} gigabytes per second"],"narrow":["{0}GB/s"]},"megabit-per-second":{"short":["{0} Mb/s"],"long":["{0} megabit per second","{0} megabits per second"],"narrow":["{0}Mb/s"]}};
   const INTL_SANCTIONED_UNITS = new Set([
     'acre', 'bit', 'byte', 'celsius', 'centimeter', 'day', 'degree', 'fahrenheit',
     'fluid-ounce', 'foot', 'gallon', 'gigabit', 'gigabyte', 'gram', 'hectare', 'hour',
@@ -1507,6 +1510,12 @@
         const text = `${this._currency} ${value}`;
         return accounting ? `(${text})` : text;
       }
+      const unitPattern = this._style === 'unit' ? INTL_EN_UNIT_PATTERNS[this._unit] : undefined;
+      if (unitPattern && /^en(-|$)/.test(this.locale)) {
+        const patternForms = unitPattern[this._unitDisplay] || unitPattern.short;
+        return patternForms[Math.abs(number) === 1 ? 0 : patternForms.length - 1]
+          .replace('{0}', `${sign}${this._renderDigits(digits, groupDigits)}`);
+      }
       if (this._style === 'unit' && typeof __thaw_intl_unit_format === 'function') {
         const result = digits.length > 32000 && typeof __thaw_intl_unit_format_large === 'function'
           ? __thaw_intl_unit_format_large(this.locale, this._styleRepresentative(signedDigits),
@@ -1533,6 +1542,7 @@
     }
 
     _renderDigits(text, grouping) {
+      if (text === 'Infinity') return '\u221e';
       if (!this._useRealLocaleData) {
         return grouping ? text.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : text;
       }
@@ -1774,7 +1784,7 @@
       if (!Number.isFinite(number) && exact === null) {
         const type = Number.isNaN(number) ? 'nan' : 'infinity';
         const sign = this._signFor(number, exact);
-        const marker = type === 'nan' ? 'NaN' : 'Infinity';
+        const marker = type === 'nan' ? 'NaN' : '\u221e';
         const index = full.indexOf(marker);
         if (index < 0) return [{ type, value: full }];
         const prefix = full.slice(0, index);
@@ -2383,6 +2393,21 @@
       return __thaw_intl_relative_time_format(this.locale, resolvedUnit, this._style, this._numeric, number);
     }
 
+    formatToParts(value, unit) {
+      const text = this.format(value, unit);
+      const resolvedUnit = INTL_RELATIVE_TIME_UNITS[unit];
+      const number = Math.abs(Number(value));
+      const parts = new NumberFormat(this.locale).formatToParts(number);
+      const numberText = parts.map(part => part.value).join('');
+      const at = text.indexOf(numberText);
+      if (at < 0) return [{ type: 'literal', value: text }];
+      const result = [];
+      if (at > 0) result.push({ type: 'literal', value: text.slice(0, at) });
+      for (const part of parts) result.push({ type: part.type, value: part.value, unit: resolvedUnit });
+      if (at + numberText.length < text.length) result.push({ type: 'literal', value: text.slice(at + numberText.length) });
+      return result;
+    }
+
     resolvedOptions() {
       const resolved = typeof __thaw_intl_datetime_resolved_options === 'function'
         ? JSON.parse(__thaw_intl_datetime_resolved_options(this.locale)) : null;
@@ -2612,4 +2637,40 @@
     { DateTimeFormat, NumberFormat, ListFormat, DisplayNames, DurationFormat },
     globalThis.Intl,
   );
+
+  // ECMA-402 `Intl.getCanonicalLocales` / `<Ctor>.supportedLocalesOf`.
+  const intlLocaleList = locales => {
+    if (locales === undefined) return [];
+    if (locales === null) throw new TypeError('Cannot convert undefined or null to object');
+    const list = typeof locales === 'string' || INTL_LOCALE_TAGS.has(locales) ? [locales] : Object(locales);
+    const out = [];
+    for (let index = 0, length = list.length >>> 0; index < length; index++) {
+      if (!(index in list)) continue;
+      const candidate = list[index];
+      if (typeof candidate !== 'string' && (candidate === null || typeof candidate !== 'object')) {
+        throw new TypeError('Incorrect locale information provided');
+      }
+      const tag = INTL_LOCALE_TAGS.has(candidate) ? INTL_LOCALE_TAGS.get(candidate) : `${candidate}`;
+      let canonical = tag;
+      if (typeof __thaw_intl_locale_parse === 'function') {
+        const parsed = JSON.parse(__thaw_intl_locale_parse(tag));
+        if (!parsed.valid) throw new RangeError(`Incorrect locale information provided`);
+        canonical = parsed.tag;
+      }
+      if (out.indexOf(canonical) < 0) out.push(canonical);
+    }
+    return out;
+  };
+  const intlSupported = locales => intlLocaleList(locales).filter(tag => {
+    if (typeof __thaw_intl_locale_resolve !== 'function') return tag === 'en-US' || tag === 'en';
+    const resolved = JSON.parse(__thaw_intl_locale_resolve(tag));
+    return resolved.valid && resolved.language === tag.split('-')[0];
+  });
+  Object.defineProperty(globalThis.Intl, 'getCanonicalLocales', { value: intlLocaleList, writable: true, configurable: true });
+  for (const name of ['Collator', 'DateTimeFormat', 'DisplayNames', 'DurationFormat', 'ListFormat', 'NumberFormat', 'PluralRules', 'RelativeTimeFormat', 'Segmenter']) {
+    const ctor = globalThis.Intl[name];
+    if (typeof ctor === 'function' && !ctor.supportedLocalesOf) {
+      Object.defineProperty(ctor, 'supportedLocalesOf', { value: function supportedLocalesOf(locales) { return intlSupported(locales); }, writable: true, configurable: true });
+    }
+  }
 })();
