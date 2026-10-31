@@ -357,6 +357,14 @@ fn thaw_js_package_eligible(
                     return reject(format!("`{}` returns a class instance", function.name));
                 }
             }
+            // A Date-carrying parameter alias the classifier cannot resolve (date-fns `DateArg<Date> & {}`) is an
+            // opaque JsValue; the typed thaw-js call has no Date wire node yet, so the build would only fail
+            // at run time (designs/quickjs-removal/slice5-intl.md).
+            if let Some((name, _)) = function.params.iter().find(|(_, ty)| {
+                matches!(ty, thaw_bridge::DtsType::Unsupported(r) if r.starts_with("unsupported type") && r.contains("Date"))
+            }) {
+                return reject(format!("`{}`: parameter `{name}` has an unresolved Date alias type", function.name));
+            }
             if target.starts_with("__thaw_typed_jit_") {
                 return true;
             }

@@ -34,6 +34,8 @@ mod eventloop;
 mod extras;
 mod generators;
 pub mod host;
+#[cfg(feature = "intl")]
+mod intl;
 mod json;
 mod numfmt;
 mod proxy;
@@ -688,6 +690,14 @@ impl Interp {
         web_streams::install(&mut it);
         web_crypto::install(&mut it);
         it.install_url();
+        #[cfg(feature = "intl")]
+        {
+            // timers are scheduled against `rt.now`, which only the event loop advances: do not let the
+            // polyfill's evaluation time make a timer created by the program overdue at the first turn
+            let started = std::time::Instant::now();
+            it.install_intl();
+            it.skip_timer_clock(started.elapsed().as_secs_f64() * 1000.0);
+        }
         it.run(extras::EXTRAS_LATE)
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
         it.name_builtins();
@@ -802,6 +812,23 @@ impl Interp {
                 objs.push(o.clone());
                 if let Some((Slot::Data(Value::Object(p)), _)) = find_own(o, "prototype") {
                     objs.push(p);
+                }
+                // namespace members such as `Intl.DateTimeFormat.prototype`
+                let members: Vec<Value> = o
+                    .props
+                    .borrow()
+                    .iter()
+                    .filter_map(|p| match &p.slot {
+                        Slot::Data(Value::Object(m)) => Some(Value::Object(m.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                for m in members {
+                    if let Value::Object(m) = m {
+                        if let Some((Slot::Data(Value::Object(p)), _)) = find_own(&m, "prototype") {
+                            objs.push(p);
+                        }
+                    }
                 }
             }
         }
