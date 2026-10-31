@@ -26,6 +26,7 @@ use thaw_parser::ast as a;
 mod bigint;
 mod buffer;
 mod builtins;
+mod child;
 mod classes;
 mod collections;
 mod date;
