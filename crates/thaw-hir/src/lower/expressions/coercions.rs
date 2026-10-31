@@ -1243,6 +1243,24 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    /// `RegExp.prototype.toString()`: `"/" + source + "/" + flags`.
+    pub(in crate::lower) fn regex_to_string_expr(&mut self, receiver: HirExpr) -> Result<HirExpr, String> {
+        let receiver_type = regex_object_type();
+        let receiver_name = format!("__thaw_regex_to_string_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+        let bound = HirExpr::Var(receiver_name.clone());
+        let field = |name: &str| HirExpr::PropAccess(
+            Box::new(bound.clone()), receiver_type.clone(), name.to_string(),
+        );
+        let concat = |a: HirExpr, b: HirExpr| HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_string_concat".into())), vec![a, b],
+        );
+        let slash = || HirExpr::Lit(HirLit::Str("/".to_string()));
+        let result = concat(concat(concat(slash(), field("source")), slash()), field("flags"));
+        self.wrap_call_argument_bindings(result, &[(receiver_name, receiver_type, receiver)])
+    }
+
     fn coerce_primitive_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
         // A `Buffer` stringifies as its UTF-8 decoding (`Buffer.prototype.toString`).
         if self.infer_expr_type_inner(&value)? == HirType::Bytes {
@@ -1456,6 +1474,9 @@ impl<'a> FnLowerer<'a> {
                             "timestamp".to_string(),
                         )],
                     ));
+                }
+                if HirType::Object(fields.clone()) == regex_object_type() {
+                    return self.regex_to_string_expr(value);
                 }
                 if let Some(result) =
                     self.invoke_object_to_primitive(value.clone(), &fields, "string")?
@@ -2073,6 +2094,14 @@ impl<'a> FnLowerer<'a> {
         if native_base_type(&rhs_type).is_some_and(|base| *base == lhs_type) {
             let rhs = self.project_native_base(rhs)?;
             return self.lower_strict_equality(lhs, rhs);
+        }
+        // A dictionary shares the Json representation; `undefined` is the Json sentinel
+        // (e.g. a regex result's `.groups` without named groups).
+        if matches!(lhs_type, HirType::Dictionary(_)) && matches!(rhs_type, HirType::Undefined | HirType::Null) {
+            return self.lower_strict_equality(HirExpr::TypedClosure(HirType::Json, Box::new(lhs)), rhs);
+        }
+        if matches!(rhs_type, HirType::Dictionary(_)) && matches!(lhs_type, HirType::Undefined | HirType::Null) {
+            return self.lower_strict_equality(lhs, HirExpr::TypedClosure(HirType::Json, Box::new(rhs)));
         }
         let source_lhs_type = lhs_type.clone();
         let source_rhs_type = rhs_type.clone();
@@ -3183,6 +3212,47 @@ impl<'a> FnLowerer<'a> {
                 self.lower_logical_expr(primitive_pairs.expect("pairs"), numeric_equal, true)?;
             let equal = self.lower_logical_expr(strict, both_nullish, false)?;
             let equal = self.lower_logical_expr(equal, mixed, false)?;
+            // An object/array against a primitive: ToPrimitive (its string form) first, then
+            // the string or numeric comparison (`[] == 0`, `[0] == "0"`).
+            let mut object_pairs = equal;
+            for (object, other) in [(&left, &right), (&right, &left)] {
+                let non_null_object = {
+                    let not_nullish = HirExpr::Conditional(
+                        Box::new(nullish(object)),
+                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                        HirType::Bool,
+                    );
+                    self.lower_logical_expr(is_kind(object, "object"), not_nullish, true)?
+                };
+                let object_text = HirExpr::JsonAsString(Box::new(object.clone()));
+                let string_case = self.lower_logical_expr(
+                    non_null_object.clone(),
+                    is_kind(other, "string"),
+                    true,
+                )?;
+                let string_equal = HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(object_text.clone()),
+                    Box::new(HirExpr::JsonAsString(Box::new(other.clone()))),
+                );
+                let string_hit = self.lower_logical_expr(string_case, string_equal, true)?;
+                let numeric_kind = self.lower_logical_expr(
+                    is_kind(other, "number"),
+                    is_kind(other, "boolean"),
+                    false,
+                )?;
+                let number_case = self.lower_logical_expr(non_null_object, numeric_kind, true)?;
+                let number_equal = HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(self.coerce_primitive_to_number(object_text)?),
+                    Box::new(self.coerce_primitive_to_number(other.clone())?),
+                );
+                let number_hit = self.lower_logical_expr(number_case, number_equal, true)?;
+                let hit = self.lower_logical_expr(string_hit, number_hit, false)?;
+                object_pairs = self.lower_logical_expr(object_pairs, hit, false)?;
+            }
+            let equal = object_pairs;
             return self.wrap_call_argument_bindings(
                 equal,
                 &[
@@ -3583,6 +3653,24 @@ impl<'a> FnLowerer<'a> {
                     "number",
                 )? {
                     return Ok(HirExpr::JsonAsNumber(Box::new(result)));
+                }
+                // `OrdinaryToPrimitive` with hint "number": a user `valueOf` runs first.
+                let object_type = HirType::Object(fields.clone());
+                if class_name_from_type(&object_type)
+                    .is_some_and(|class| self.signatures.contains_key(&class_method_symbol(class, "valueOf")))
+                {
+                    if let Some(result) = self.invoke_class_ordinary_to_primitive(
+                        value.clone(), &object_type, "number",
+                    )? {
+                        return Ok(HirExpr::JsonAsNumber(Box::new(result)));
+                    }
+                }
+                if fields.iter().any(|(name, ty)| name == "valueOf" && matches!(ty, HirType::Function(_, ret) if matches!(**ret, HirType::F64 | HirType::Json))) {
+                    if let Some(result) = self.invoke_object_conversion_method(
+                        value.clone(), &fields, "valueOf".to_string(), None,
+                    )? {
+                        return Ok(HirExpr::JsonAsNumber(Box::new(result)));
+                    }
                 }
                 let string = self.coerce_primitive_to_string(value)?;
                 Ok(HirExpr::Call(

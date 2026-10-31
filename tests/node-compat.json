@@ -3974,24 +3974,36 @@
       "source": "function main(): void {\n  setTimeout(() => {\n    console.log(\"timer\");\n    setImmediate(() => console.log(\"imm1\"));\n    setTimeout(() => console.log(\"timeout0\"), 0);\n    setImmediate(() => console.log(\"imm2\"));\n  }, 1);\n}\n"
     },
     {
-      "name": "nd4 async function returning a timer promise waits for it",
+      "name": "nd5w regex match results print index input groups",
       "expect": "matched",
-      "source": "async function sleep(ms: number) { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function sleepTyped(ms: number): Promise<void> { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function f(n: number) { await sleep(n); return n * 2; }\nfunction other(): Promise<number> { return new Promise<number>(r => setTimeout(() => r(7), 20)); }\nasync function adopt() { return other(); }\nclass C { async m() { return sleep(20); } async n(): Promise<void> { return sleepTyped(20); } }\nasync function main(): Promise<void> {\n  const t = Date.now();\n  await sleep(40);\n  console.log(Date.now() - t >= 35);\n  await sleepTyped(40);\n  console.log(Date.now() - t >= 75);\n  console.log(await Promise.race([f(30), f(5)]));\n  console.log(await adopt());\n  const c = new C();\n  const u = Date.now();\n  await c.m();\n  await c.n();\n  console.log(Date.now() - u >= 35);\n}\n"
+      "source": "function main(): void { console.log(\"a1\".match(/(\\d)(?:x)?(y)?/)); const m = /(\\d)/.exec(\"ab3\"); console.log(m); console.log(\"abc\".match(/x/), \"a1b22\".match(/\\d+/g)); }"
     },
     {
-      "name": "nd4 Array.from of a typed array map or slice result",
+      "name": "nd5w symbol keys in Reflect.ownKeys and getOwnPropertySymbols",
       "expect": "matched",
-      "source": "function main(): void {\n  const u = new Uint8Array([1, 2, 3]);\n  console.log(Array.from(u.map(x => x * 2)));\n  const s = u.slice(1);\n  console.log(Array.from(s), Array.from(u.subarray(1)));\n  const m = u.map(x => x + 1);\n  console.log(Array.from(m), Array.from(u));\n}\n"
+      "source": "function main(): void { const sym = Symbol(\"k\"); const o = { [sym]: 1, b: 2, 2: \"x\", 1: \"y\", a: 3, [Symbol.for(\"g\")]: 4 }; console.log(Reflect.ownKeys(o), Object.getOwnPropertySymbols(o).length, Object.keys(o)); }"
     },
     {
-      "name": "nd4 Date string conversion of an invalid or valid date",
+      "name": "nd5w flat of entries-like tuple arrays",
       "expect": "matched",
-      "source": "function main(): void {\n  const d = new Date(NaN);\n  console.log(String(d), `${d}`, \"x\" + d, d.toString(), d.getTime(), JSON.stringify(d));\n  const v = new Date(0);\n  console.log(String(v) === v.toString(), `${v}` === v.toString(), (\"\" + v) === v.toString());\n}\n"
+      "source": "function main(): void { console.log(Object.entries({ a: 1 }).flat(), [[1, 2], [3]].flat()); const t: [string, number][] = [[\"a\", 1], [\"b\", 2]]; console.log(t.flat(), t.flat().length); }"
     },
     {
-      "name": "nd4 frozen object write names property and receiver",
+      "name": "nd5w Number of an object literal uses its valueOf",
       "expect": "matched",
-      "source": "function main(): void {\n  const o: any = Object.freeze({ x: 1 });\n  try { o.x = 2; } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  console.log(o.x);\n}\n",
+      "source": "function main(): void { console.log(Number({ valueOf() { return 7; } }), +{ valueOf() { return 8; } }); const o = { valueOf() { return 9; } }; console.log(Number(o)); }"
+    },
+    {
+      "name": "nd5w unhandledRejection receives the rejected non-Error value",
+      "expect": "matched",
+      "source": "function main(): void { process.on(\"unhandledRejection\", (r: any) => { console.log(\"UR:\", r instanceof Error ? \"Error \" + r.message : r, typeof r); }); Promise.reject(\"late\"); Promise.reject(new Error(\"boom\")); setTimeout(() => {}, 20); }"
+    },
+    {
+      "name": "nd5w rejectionHandled fires after the late handler runs",
+      "expect": "matched",
+      "source": "function main(): void { process.on(\"unhandledRejection\", (r: any) => { console.log(\"UR:\", r); }); process.on(\"rejectionHandled\", () => console.log(\"RH\")); const p = Promise.reject(\"late\"); setTimeout(() => p.catch(() => console.log(\"caught late\")), 5); setTimeout(() => {}, 20); }"
+    },
+    {
       "name": "nd9 printing a class field of object-literal type does not overflow the compiler",
       "expect": "matched",
       "source": "class QB { parts: { n: number } = { n: 1 }; }\nfunction main(): void { const q = new QB(); console.log(q.parts); console.log(q); }\n"
@@ -4007,9 +4019,6 @@
       "source": "interface Cfg { host?: string; list?: string[] }\nfunction conn({ host = \"localhost\", list = [] }: Cfg = {}) { return `${host} n=${list.length}`; }\nfunction main(): void { console.log(conn(), conn({ list: [\"a\"] })); }\n"
     },
     {
-      "name": "nd9 Uint8Array sort with a comparator",
-      "expect": "matched",
-      "source": "function main(): void { const u = new Uint8Array([3, 1, 2]); console.log(u.sort((a, b) => b - a)); console.log(new Uint8Array([3, 1, 2]).toSorted((a, b) => a - b)); }\n",
       "name": "nd7 crypto hkdfSync getCiphers getHashes",
       "expect": "matched",
       "source": "import * as crypto from \"node:crypto\";\nfunction main(): void {\n  const hex = (x: Uint8Array | ArrayBuffer): string => Array.from(new Uint8Array(x as any)).map((b) => b.toString(16).padStart(2, \"0\")).join(\"\");\n  console.log(hex(crypto.hkdfSync(\"sha256\", \"key\", \"salt\", \"info\", 16) as any));\n  console.log(hex(crypto.hkdfSync(\"sha512\", Buffer.from(\"k\"), \"\", \"\", 70) as any));\n  console.log(crypto.getCiphers().includes(\"aes-256-cbc\"), crypto.getCiphers().length > 50);\n  console.log(crypto.getHashes().includes(\"sha256\"), crypto.getHashes().includes(\"sha3-256\"), crypto.getHashes().length);\n}\n"
@@ -4055,9 +4064,6 @@
       "source": "import * as util from \"node:util\";\nfunction main(): void {\n  console.log(util.inspect([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], { maxArrayLength: 3 }));\n  console.log(util.inspect({ b: 1, a: 2 }, { sorted: true }));\n  console.log(util.inspect(\"x\".repeat(30), { maxStringLength: 5 }));\n  console.log(util.inspect(123456789.123, { numericSeparator: true }));\n  console.log(util.inspect({ a: 1, b: { c: \"s\" } }, { colors: true }));\n  console.log(util.inspect(\"a'b\"), util.inspect(\"a\\\"b'c\"), util.inspect(\"a\\nb\"));\n  console.log(util.inspect({ \"a-b\": 1, ok: [1, [2, [3, [4]]]] }));\n  console.log(util.inspect.defaultOptions.depth, typeof util.inspect.custom);\n}\n"
     },
     {
-      "name": "nd7 error codes for URL TextDecoder StringDecoder",
-      "expect": "matched",
-      "source": "import { StringDecoder } from \"node:string_decoder\";\nfunction main(): void {\n  try { new URL(\"nope\"); } catch (e: any) { console.log(e.name, e.code, e.message, e.input); }\n  try { new TextDecoder(\"zz\"); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  try { new TextDecoder(\"utf-8\", { fatal: true }).decode(new Uint8Array([0xff])); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  try { new StringDecoder(\"bogus\"); } catch (e: any) { console.log(e.name, e.code, e.message); }\n}\n",
       "name": "nd5e fs errors carry node errno, message, syscall and path",
       "expect": "matched",
       "source": "import fs from \"node:fs\";\nfunction t(f: () => void): void {\n  try { f(); } catch (e: any) { console.log(Object.keys(e), e.errno, e.code, e.syscall, e.path, e.dest, e.message); }\n}\nfunction main(): void {\n  t(() => { fs.readFileSync(\"/nonexistent/x\"); });\n  t(() => { fs.readdirSync(\"/etc/hostname\"); });\n  t(() => { fs.rmdirSync(\"/nonexistent\"); });\n  t(() => { fs.readFileSync(\"/etc\"); });\n  t(() => { fs.renameSync(\"/nonexistent/a\", \"/nonexistent/b\"); });\n  t(() => { fs.statSync(\"/nonexistent\"); });\n  const st = fs.statSync(\"/etc/hostname\");\n  console.log(Object.keys(st).slice(0, 10));\n}\n"
@@ -4087,8 +4093,80 @@
       "expect": "matched",
       "source": "function main(): void {\n  const o = { get x() { return 1; }, set y(v: number) {} };\n  console.log(Object.getOwnPropertyDescriptor(o, \"x\")!.get, Object.getOwnPropertyDescriptor(o, \"y\")!.set);\n  console.log(Object.getOwnPropertyDescriptor(o, \"x\"));\n}\n"
     },
-    {"name": "nd3 unannotated class method return satisfies interface contract", "expect": "matched", "source": "interface Shape { area(): number } class Circle implements Shape { r: number; constructor(r: number) { this.r = r; } area() { return 3 * this.r; } } class Sq { area() { return 4; } } function main(): void { const s: Shape = new Circle(2); const t: Shape = new Sq(); console.log(s.area(), t.area()); }" },
-    {"name": "nd3 fs.existsSync with a computed path", "expect": "matched", "source": "import * as fs from \"node:fs\"; import * as path from \"node:path\"; function main(): void { const f = path.join(\"/etc\", \"hostname\"); console.log(fs.existsSync(f), fs.existsSync(path.join(\"/nonexistent\", \"zz\"))); }"},
-    {"name": "nd3 self-referential object type alias with optional field", "expect": "matched", "source": "type Tree = { v: number; l?: Tree; r?: Tree }; function ins(t: Tree | undefined, v: number): Tree { if (!t) return { v }; if (v < t.v) t.l = ins(t.l, v); else t.r = ins(t.r, v); return t; } function* walk(t?: Tree): Generator<number> { if (!t) return; yield* walk(t.l); yield t.v; yield* walk(t.r); } function main(): void { let t: Tree | undefined; for (const v of [5, 2, 8, 1]) t = ins(t, v); console.log([...walk(t)], t); }"}
+    {
+      "name": "nd3 unannotated class method return satisfies interface contract",
+      "expect": "matched",
+      "source": "interface Shape { area(): number } class Circle implements Shape { r: number; constructor(r: number) { this.r = r; } area() { return 3 * this.r; } } class Sq { area() { return 4; } } function main(): void { const s: Shape = new Circle(2); const t: Shape = new Sq(); console.log(s.area(), t.area()); }"
+    },
+    {
+      "name": "nd3 fs.existsSync with a computed path",
+      "expect": "matched",
+      "source": "import * as fs from \"node:fs\"; import * as path from \"node:path\"; function main(): void { const f = path.join(\"/etc\", \"hostname\"); console.log(fs.existsSync(f), fs.existsSync(path.join(\"/nonexistent\", \"zz\"))); }"
+    },
+    {
+      "name": "nd3 self-referential object type alias with optional field",
+      "expect": "matched",
+      "source": "type Tree = { v: number; l?: Tree; r?: Tree }; function ins(t: Tree | undefined, v: number): Tree { if (!t) return { v }; if (v < t.v) t.l = ins(t.l, v); else t.r = ins(t.r, v); return t; } function* walk(t?: Tree): Generator<number> { if (!t) return; yield* walk(t.l); yield t.v; yield* walk(t.r); } function main(): void { let t: Tree | undefined; for (const v of [5, 2, 8, 1]) t = ins(t, v); console.log([...walk(t)], t); }"
+    },
+    {
+      "name": "nd6 any undefined callee throws TypeError and optional call is undefined",
+      "expect": "matched",
+      "source": "function main(): void {\n  const f: any = undefined;\n  console.log(f?.(), 1);\n  try { f(); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  console.log(f?.call(null));\n  const g: any = null;\n  console.log(g?.(2));\n  try { g(); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n}\n"
+    },
+    {
+      "name": "nd6 regex exec groups without named groups is undefined",
+      "expect": "matched",
+      "source": "function main(): void {\n  const m = /(a)(b)?/.exec(\"ac\")!;\n  console.log(m.groups);\n  console.log(m.groups === undefined);\n  console.log(m.groups?.x);\n  const n = /(?<x>a)/.exec(\"ac\")!;\n  console.log(n.groups!.x);\n  console.log(\"ab\".match(/a/)!.groups);\n}\n"
+    },
+    {
+      "name": "nd6 map and set keep reference identity of stored containers",
+      "expect": "matched",
+      "source": "function main(): void {\n  const m = new Map<string, any>();\n  m.set(\"m\", m);\n  console.log(m.get(\"m\") === m);\n  const s = new Set<any>();\n  s.add(s);\n  console.log(s.has(s));\n  const arr: any[] = [];\n  const m2 = new Map<string, any>();\n  m2.set(\"a\", arr);\n  arr.push(1);\n  console.log(m2.get(\"a\") === arr, m2.get(\"a\").length);\n}\n"
+    },
+    {
+      "name": "nd6 loose equality of any array against primitives",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a: any[] = [[], [0], 0, \"\", \"0\", [1, 2], {}];\n  console.log(a[0] == a[2], a[1] == a[2], a[0] == a[3], a[1] == a[4], a[5] == \"1,2\", a[6] == \"[object Object]\", a[0] == a[1]);\n  const n: any[] = [null, 0, undefined];\n  console.log(n[0] == n[1], n[0] == n[2]);\n}\n"
+    },
+    {
+      "name": "nd6 Object.prototype.toString tags for errors and weak containers",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Object.prototype.toString.call(new Error(\"x\")), Object.prototype.toString.call(new TypeError()), Object.prototype.toString.call(\"s\"));\n  console.log(Object.prototype.toString.call(new WeakRef({ a: 1 })), Object.prototype.toString.call(new FinalizationRegistry(() => {})));\n}\n"
+    },
+    {
+      "name": "nd6 regex string conversion and canonical flags",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(String(/a\\nb/g), `${/a/g}`);\n  console.log(new RegExp(\"a\", \"yg\").flags, /a/gimsuyd.flags, new RegExp(\"a\").flags);\n}\n"
+    },
+    {
+      "name": "nd6 constructor and builtin errors use the right classes",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { const r = new RegExp(\"(\"); console.log(\"no throw\", r.source); } catch (e) { console.log((e as Error).name); }\n  try { const r = new RegExp(\"a\", \"gg\"); console.log(\"no throw\", r.flags); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { new Array(-1); console.log(\"no throw\"); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { new Date(NaN).toISOString(); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { \"a\".repeat(-1); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { \"a\".repeat(Infinity); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { \"a\".replaceAll(/a/, \"b\"); } catch (e) { console.log((e as Error).name); }\n}\n"
+    },
+    {
+      "name": "nd6 console.log of a class and a builtin constructor",
+      "expect": "matched",
+      "source": "class A { static x = 1; y = 2; z() { return 1; } }\nfunction main(): void {\n  console.log(A);\n  console.log(Number);\n  console.log(String, Boolean);\n}\n"
+    },
+    {
+      "name": "nd6 labeled try finally break in an arrow with a later return",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log((() => { l: try { return 1; } finally { break l; } return 3; })());\n  const f = (): number => { l: try { return 1; } finally { break l; } return 3; };\n  console.log(f());\n  console.log((() => { try { return 1; } finally { return 2; } })());\n}\n"
+    },
+    {
+      "name": "nd4 async function returning a timer promise waits for it",
+      "expect": "matched",
+      "source": "async function sleep(ms: number) { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function sleepTyped(ms: number): Promise<void> { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function f(n: number) { await sleep(n); return n * 2; }\nfunction other(): Promise<number> { return new Promise<number>(r => setTimeout(() => r(7), 20)); }\nasync function adopt() { return other(); }\nclass C { async m() { return sleep(20); } async n(): Promise<void> { return sleepTyped(20); } }\nasync function main(): Promise<void> {\n  const t = Date.now();\n  await sleep(40);\n  console.log(Date.now() - t >= 35);\n  await sleepTyped(40);\n  console.log(Date.now() - t >= 75);\n  console.log(await Promise.race([f(30), f(5)]));\n  console.log(await adopt());\n  const c = new C();\n  const u = Date.now();\n  await c.m();\n  await c.n();\n  console.log(Date.now() - u >= 35);\n}\n"
+    },
+    {
+      "name": "nd4 Array.from of a typed array map or slice result",
+      "expect": "matched",
+      "source": "function main(): void {\n  const u = new Uint8Array([1, 2, 3]);\n  console.log(Array.from(u.map(x => x * 2)));\n  const s = u.slice(1);\n  console.log(Array.from(s), Array.from(u.subarray(1)));\n  const m = u.map(x => x + 1);\n  console.log(Array.from(m), Array.from(u));\n}\n"
+    },
+    {
+      "name": "nd4 Date string conversion of an invalid or valid date",
+      "expect": "matched",
+      "source": "function main(): void {\n  const d = new Date(NaN);\n  console.log(String(d), `${d}`, \"x\" + d, d.toString(), d.getTime(), JSON.stringify(d));\n  const v = new Date(0);\n  console.log(String(v) === v.toString(), `${v}` === v.toString(), (\"\" + v) === v.toString());\n}\n"
+    }
   ]
 }
