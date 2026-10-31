@@ -3972,6 +3972,26 @@
       "name": "native setImmediate from a timer callback runs before the next timer",
       "expect": "matched",
       "source": "function main(): void {\n  setTimeout(() => {\n    console.log(\"timer\");\n    setImmediate(() => console.log(\"imm1\"));\n    setTimeout(() => console.log(\"timeout0\"), 0);\n    setImmediate(() => console.log(\"imm2\"));\n  }, 1);\n}\n"
+    },
+    {
+      "name": "nd9 printing a class field of object-literal type does not overflow the compiler",
+      "expect": "matched",
+      "source": "class QB { parts: { n: number } = { n: 1 }; }\nfunction main(): void { const q = new QB(); console.log(q.parts); console.log(q); }\n"
+    },
+    {
+      "name": "nd9 generic async retry with a Promise<T> callback",
+      "expect": "matched",
+      "source": "async function retry<T>(fn: (i: number) => Promise<T>): Promise<T> { return await fn(1); }\nasync function f(n: number): Promise<string> { return \"ok\" + n; }\nasync function main(): Promise<void> { console.log(await retry(f)); }\n"
+    },
+    {
+      "name": "nd9 destructured parameter default empty array over optional array field",
+      "expect": "matched",
+      "source": "interface Cfg { host?: string; list?: string[] }\nfunction conn({ host = \"localhost\", list = [] }: Cfg = {}) { return `${host} n=${list.length}`; }\nfunction main(): void { console.log(conn(), conn({ list: [\"a\"] })); }\n"
+    },
+    {
+      "name": "nd9 Uint8Array sort with a comparator",
+      "expect": "matched",
+      "source": "function main(): void { const u = new Uint8Array([3, 1, 2]); console.log(u.sort((a, b) => b - a)); console.log(new Uint8Array([3, 1, 2]).toSorted((a, b) => a - b)); }\n"
     }
   ]
 }
