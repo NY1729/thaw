@@ -3660,7 +3660,7 @@
                        globalThis.process.env || {})),
     platform: globalThis.process.platform || hostInfo.platform || 'linux',
     arch: globalThis.process.arch || hostInfo.arch || '',
-    version: globalThis.process.version || 'v22.0.0',
+    version: globalThis.process.version || 'v22.23.1',
     execPath: globalThis.process.execPath || JSON.parse(globalThis.__thaw_host_argv_json || '["node"]')[0],
     argv0: globalThis.process.argv0 || JSON.parse(globalThis.__thaw_host_argv_json || '["node"]')[0],
     execArgv: globalThis.process.execArgv || JSON.parse(globalThis.__thaw_host_exec_argv_json || '[]'),

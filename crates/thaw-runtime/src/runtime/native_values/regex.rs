@@ -41,11 +41,15 @@ unsafe extern "C" {
     fn thaw_json_object_set_string(object: *mut u8, key: *const c_char, value: *const c_char);
     fn thaw_json_undefined() -> *mut u8;
     fn thaw_json_object_set_json_owned(object: *mut u8, key: *const c_char, value: *mut u8);
+    fn thaw_json_object_set_json(object: *mut u8, key: *const c_char, value: *mut u8);
+    fn thaw_json_object_set_number(object: *mut u8, key: *const c_char, value: f64);
+    fn thaw_json_typed_decode_scope_own(value: *mut u8);
 }
 
 fn groups_json_pointer(groups: Vec<(String, Option<Vec<u16>>)>) -> *mut u8 {
     if groups.is_empty() {
-        return std::ptr::null_mut();
+        // `groups` is a Json-compatible dictionary: absent reads as `undefined`.
+        return unsafe { thaw_json_undefined() };
     }
     let object = unsafe { thaw_json_object_new() };
     if object.is_null() {
@@ -427,6 +431,31 @@ pub unsafe extern "C" fn thaw_regex_exec(source: *const c_char, flags: *const c_
 }
 
 #[no_mangle]
+/// `new RegExp(source, flags)` validation. Returns the flags in canonical order, or
+/// `"\u{1}F"` for invalid flags / `"\u{1}P"` for a pattern that does not compile.
+///
+/// # Safety
+/// Both arguments must be live native strings or NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_regex_check(source: *const c_char, flags: *const c_char) -> *mut c_char {
+    let reply = |text: &str| thaw_arena::arena_string(text.as_bytes());
+    if source.is_null() || flags.is_null() { return reply("\u{1}P"); }
+    const ORDER: &str = "dgimsuvy";
+    let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
+    let mut seen = [false; 8];
+    for c in flags.chars() {
+        match ORDER.find(c) {
+            Some(i) if !seen[i] => seen[i] = true,
+            _ => return reply("\u{1}F"),
+        }
+    }
+    if seen[5] && seen[6] { return reply("\u{1}F"); }
+    let canonical: String = ORDER.chars().zip(seen).filter(|(_, on)| *on).map(|(c, _)| c).collect();
+    let units = unsafe { regex_units(source) };
+    if with_compiled_regex(&units, &canonical, |_| ()).is_none() { return reply("\u{1}P"); }
+    reply(&canonical)
+}
+
+#[no_mangle]
 /// Returns the named capture object associated with a successful
 /// `thaw_regex_exec` result, or null for an unrelated array.
 ///
@@ -434,13 +463,13 @@ pub unsafe extern "C" fn thaw_regex_exec(source: *const c_char, flags: *const c_
 /// `matches` must be null or an array handle returned by Thaw.
 pub unsafe extern "C" fn thaw_regex_exec_groups(matches: *const u8) -> *mut u8 {
     if matches.is_null() {
-        return std::ptr::null_mut();
+        return unsafe { thaw_json_undefined() };
     }
     REGEX_META.with(|stored| {
         stored
             .borrow()
             .get(&(matches as usize))
-            .map_or(std::ptr::null_mut(), |meta| meta.groups)
+            .map_or_else(|| unsafe { thaw_json_undefined() }, |meta| meta.groups)
     })
 }
 
@@ -485,6 +514,34 @@ pub unsafe extern "C" fn thaw_regex_exec_input(matches: *const u8) -> *const c_c
     input
         .and_then(|input| arena_wtf8(&input))
         .map_or(std::ptr::null(), |pointer| pointer.cast())
+}
+
+#[no_mangle]
+/// `console.log` support: wraps the marshalled items `json` of a regex result `matches`
+/// as `{ __thaw_array_items__, index, input, groups }` so the inspector prints the extra
+/// properties like Node. Any other array gets `json` back unchanged.
+///
+/// # Safety
+/// `matches` must be null or an array handle; `json` a live Json value.
+pub unsafe extern "C" fn thaw_regex_console_wrap(matches: *const u8, json: *mut u8) -> *mut u8 {
+    let Some((index, input, groups)) = REGEX_META.with(|stored| {
+        stored.borrow().get(&(matches as usize)).map(|meta| (meta.index, meta.input.clone(), meta.groups))
+    }) else { return json };
+    let object = unsafe { thaw_json_object_new() };
+    let input = thaw_arena::arena_string(&input);
+    if object.is_null() || input.is_null() { return json; }
+    unsafe {
+        thaw_json_typed_decode_scope_own(object);
+        thaw_json_object_set_json(object, c"__thaw_array_items__".as_ptr(), json);
+        thaw_json_object_set_number(object, c"index".as_ptr(), index);
+        thaw_json_object_set_string(object, c"input".as_ptr(), input);
+        if groups.is_null() {
+            thaw_json_object_set_json_owned(object, c"groups".as_ptr(), thaw_json_undefined());
+        } else {
+            thaw_json_object_set_json(object, c"groups".as_ptr(), groups);
+        }
+    }
+    object
 }
 
 #[no_mangle]

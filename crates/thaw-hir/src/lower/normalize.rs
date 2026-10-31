@@ -1111,25 +1111,33 @@ fn constructor_class(
 /// `while (true)`. Breaks inside nested loops or switches target those
 /// constructs instead; a labeled break may leave the outer loop.
 fn ast_loop_body_may_break(statement: &swc_ecma_ast::Stmt, nested: usize) -> bool {
+    ast_break_escapes(statement, nested, None)
+}
+
+/// `own` is a label whose `break` stays inside the statement being asked about.
+fn ast_break_escapes(statement: &swc_ecma_ast::Stmt, nested: usize, own: Option<&str>) -> bool {
     use swc_ecma_ast::Stmt;
     match statement {
-        Stmt::Break(value) => value.label.is_some() || nested == 0,
-        Stmt::Block(block) => block.stmts.iter().any(|stmt| ast_loop_body_may_break(stmt, nested)),
-        Stmt::If(branch) => ast_loop_body_may_break(&branch.cons, nested)
-            || branch.alt.as_ref().is_some_and(|alt| ast_loop_body_may_break(alt, nested)),
+        Stmt::Break(value) => match &value.label {
+            Some(label) => own != Some(label.sym.as_ref()),
+            None => nested == 0,
+        },
+        Stmt::Block(block) => block.stmts.iter().any(|stmt| ast_break_escapes(stmt, nested, own)),
+        Stmt::If(branch) => ast_break_escapes(&branch.cons, nested, own)
+            || branch.alt.as_ref().is_some_and(|alt| ast_break_escapes(alt, nested, own)),
         Stmt::Switch(switch) => switch.cases.iter().any(|case| case.cons.iter()
-            .any(|stmt| ast_loop_body_may_break(stmt, nested + 1))),
-        Stmt::While(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
-        Stmt::DoWhile(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
-        Stmt::For(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
-        Stmt::ForIn(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
-        Stmt::ForOf(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
-        Stmt::Try(try_stmt) => try_stmt.block.stmts.iter().any(|stmt| ast_loop_body_may_break(stmt, nested))
+            .any(|stmt| ast_break_escapes(stmt, nested + 1, own))),
+        Stmt::While(loop_stmt) => ast_break_escapes(&loop_stmt.body, nested + 1, own),
+        Stmt::DoWhile(loop_stmt) => ast_break_escapes(&loop_stmt.body, nested + 1, own),
+        Stmt::For(loop_stmt) => ast_break_escapes(&loop_stmt.body, nested + 1, own),
+        Stmt::ForIn(loop_stmt) => ast_break_escapes(&loop_stmt.body, nested + 1, own),
+        Stmt::ForOf(loop_stmt) => ast_break_escapes(&loop_stmt.body, nested + 1, own),
+        Stmt::Try(try_stmt) => try_stmt.block.stmts.iter().any(|stmt| ast_break_escapes(stmt, nested, own))
             || try_stmt.handler.as_ref().is_some_and(|handler| handler.body.stmts.iter()
-                .any(|stmt| ast_loop_body_may_break(stmt, nested)))
+                .any(|stmt| ast_break_escapes(stmt, nested, own)))
             || try_stmt.finalizer.as_ref().is_some_and(|finalizer| finalizer.stmts.iter()
-                .any(|stmt| ast_loop_body_may_break(stmt, nested))),
-        Stmt::Labeled(labeled) => ast_loop_body_may_break(&labeled.body, nested),
+                .any(|stmt| ast_break_escapes(stmt, nested, own))),
+        Stmt::Labeled(labeled) => ast_break_escapes(&labeled.body, nested, own),
         _ => false,
     }
 }
@@ -1179,7 +1187,11 @@ fn ast_block_terminates(statements: &[swc_ecma_ast::Stmt]) -> bool {
     for statement in statements {
         // A break before an apparent later return reaches the enclosing
         // switch/loop instead; that later return cannot prove termination.
-        if ast_loop_body_may_break(statement, 0) {
+        let own = match statement {
+            swc_ecma_ast::Stmt::Labeled(labeled) => Some(labeled.label.sym.as_ref()),
+            _ => None,
+        };
+        if ast_break_escapes(statement, 0, own) {
             return false;
         }
         if ast_statement_terminates(statement) {

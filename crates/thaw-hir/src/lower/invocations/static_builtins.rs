@@ -1672,17 +1672,28 @@ impl<'a> FnLowerer<'a> {
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
-                        let symbols = match self.infer_expr_type(target)? {
+                        let target_type = self.infer_expr_type(target)?;
+                        if matches!(target_type, HirType::Json | HirType::Dictionary(_)) {
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_own_symbols".to_string())),
+                                vec![target.clone()],
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        let symbols = match target_type {
                             HirType::Object(fields) => fields
                                 .into_iter()
-                                .filter_map(|(name, _)| {
-                        name.strip_prefix("\u{1f}@@")
-                            .map(|symbol| HirExpr::Lit(HirLit::Str(format!("\u{1f}@@{symbol}"))))
-                                })
+                                .filter(|(name, _)| is_symbol_key_wire(name))
+                                .map(|(name, _)| HirExpr::Lit(HirLit::Str(name)))
                                 .collect(),
                             _ => Vec::new(),
                         };
-            return self.wrap_call_argument_bindings(HirExpr::ArrayLit(symbols), &bindings);
+                        // Symbols print and compare through their wire text, in a `Json` array.
+                        let symbols = self.coerce_to_declared(
+                            &HirType::Array(Box::new(HirType::Json)),
+                            HirExpr::ArrayLit(symbols),
+                        )?;
+            return self.wrap_call_argument_bindings(symbols, &bindings);
                     }
                     if (object.sym == *"Object" || object.sym == *"Reflect")
                         && property.sym == *"defineProperty"
@@ -4701,6 +4712,14 @@ impl<'a> FnLowerer<'a> {
                             ));
                         };
                         let mut names = ecmascript_field_order(fields);
+                        // Symbol keys list after the string keys (only `Reflect.ownKeys` shows them).
+                        let symbol_keys = object.sym == *"Reflect" && property.sym == *"ownKeys"
+                            && names.iter().any(|&index| is_symbol_key_wire(&fields[index].0));
+                        if symbol_keys {
+                            names.sort_by_key(|&index| is_symbol_key_wire(&fields[index].0));
+                        } else {
+                            names.retain(|&index| !is_symbol_key_wire(&fields[index].0));
+                        }
                         let hidden_extra = Self::error_record_hidden_fields(fields);
                         let default_name = Self::error_family_default_name(fields);
                         let name_index = default_name.as_ref().and_then(|_| {
@@ -4793,6 +4812,12 @@ impl<'a> FnLowerer<'a> {
                             Box::new(result),
                             HirType::Array(Box::new(HirType::Str)),
                         );
+                        let result = if symbol_keys {
+                            // A mixed string/Symbol key list is a `Json` array.
+                            self.coerce_to_declared(&HirType::Array(Box::new(HirType::Json)), result)?
+                        } else {
+                            result
+                        };
                         bindings.push((name, ty, value));
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
