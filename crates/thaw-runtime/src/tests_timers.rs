@@ -19,7 +19,7 @@ fn drain_timers_for(ms: u64) {
 #[test]
 fn native_timers_run_by_due_time_then_creation_and_immediates_after_timers_phase() {
     TIMER_LOG.with(|log| log.borrow_mut().clear());
-    thaw_timer_set(TIMER_TIMEOUT, 6.0, log_timer, 1 as *mut u8);
+    thaw_timer_set(TIMER_TIMEOUT, 6.0, log_timer, std::ptr::dangling_mut::<u8>());
     thaw_timer_set(TIMER_TIMEOUT, 0.0, log_timer, 2 as *mut u8);
     thaw_timer_set(TIMER_TIMEOUT, 1.0, log_timer, 3 as *mut u8);
     thaw_timer_set(TIMER_IMMEDIATE, 0.0, log_timer, 4 as *mut u8);

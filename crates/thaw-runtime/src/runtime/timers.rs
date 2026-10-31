@@ -45,7 +45,7 @@ fn timer_now_ms() -> f64 {
 }
 
 fn timer_delay_ms(delay: f64) -> f64 {
-    if delay >= 1.0 && delay <= TIMER_MAX_MS {
+    if (1.0..=TIMER_MAX_MS).contains(&delay) {
         delay
     } else {
         1.0
