@@ -2099,8 +2099,8 @@ fn generate_registry_shims_pass(
                         .map(|value| (value.name.clone(), value)),
                 )
                 .chain(nested_values.iter().map(|(path, value)| (path.clone(), value)))
-                // A thaw-js package has no live value exports (the program mentions none).
-                .filter(|_| !thaw_js_package)
+                // A thaw-js package serves only the value exports the program names, as handles.
+                .filter(|(export_name, _)| !thaw_js_package || thaw_js_value_export_needs_handle(pkg, user_source, export_name))
                 .filter_map(|(export_name, value)| {
                     let dynamic;
                     let ty = match &value.ty {
@@ -2124,13 +2124,24 @@ fn generate_registry_shims_pass(
                         sanitize_identifier(&pkg.name),
                         class_identifier(&value.name)
                     );
-                    let runtime_getter = format!("{}::$value${}", pkg.name, value.name);
+                    // thaw-js serves a value export as a handle (`$value$` class operation)
+                    if thaw_js_package && rendered != "JsValue" {
+                        return None;
+                    }
+                    let runtime_getter = if thaw_js_package {
+                        format!("$value${}::{}$arity0", pkg.name, value.name)
+                    } else {
+                        format!("{}::$value${}", pkg.name, value.name)
+                    };
                     let encoded = runtime_getter
                         .as_bytes()
                         .iter()
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>();
-                    let typed_getter = format!("__thaw_typed_js_{encoded}");
+                    let typed_getter = format!(
+                        "__thaw_typed_{}_{encoded}",
+                        if thaw_js_package { "tjs" } else { "js" }
+                    );
                     shim.push_str(&format!(
                         "declare function {typed_getter}(): {rendered};\nlet {local}: {rendered} = {typed_getter}();\n"
                     ));
@@ -2277,27 +2288,17 @@ fn generate_registry_shims_pass(
                     && std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1")
                     && !thaw_js_routed.contains(&pkg.name)
                 {
-                    if let Some((name, ..)) = value_exports
-                        .iter()
-                        .find(|(name, ..)| thaw_js_blocking_value_export(pkg, user_source, name))
-                    {
-                        eprintln!(
-                            "thaw-js routing: package `{}` stays on QuickJS: value export `{name}`",
-                            pkg.name
-                        );
-                    }
                     if let Some((path, _)) = nested_namespace_aliases
                         .iter()
-                        .find(|(path, _)| user_source.contains(path.as_str()))
+                        .find(|(path, _)| thaw_js_blocking_nested_alias(pkg, user_source, path))
                     {
                         eprintln!("thaw-js routing: package `{}` stays on QuickJS: nested namespace member `{path}`", pkg.name);
                     }
                 }
                 if thaw_js_routing
-                    && !value_exports.iter().any(|(name, ..)| thaw_js_blocking_value_export(pkg, user_source, name))
                     // (The aliases only capture dotted runtime paths for the QuickJS loader; a program that
-                    // never names one does not need them.)
-                    && nested_namespace_aliases.iter().all(|(path, _)| !user_source.contains(path.as_str()))
+                    // never names one, or names a non-class member, does not need them.)
+                    && nested_namespace_aliases.iter().all(|(path, _)| !thaw_js_blocking_nested_alias(pkg, user_source, path))
                     && thaw_js_package_eligible(
                         pkg,
                         bundle_js,

@@ -898,6 +898,33 @@ fn class_instances_live_behind_handles_and_can_be_passed_back() {
     assert_eq!(crate::host::thaw_tjs_release_handle(id), 0);
 }
 
+#[test]
+fn global_construct_and_call_handles() {
+    use crate::host::*;
+    use std::ffi::CString;
+    let (name, source) = (
+        CString::new("g").unwrap(),
+        CString::new(
+            CLASS_BUNDLE
+                .replace("\"k/", "\"g/")
+                .replace("k/index", "g/index"),
+        )
+        .unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let q = |s: &str| CString::new(s).unwrap();
+    let ctor = thaw_tjs_get_global(q("g::Box").as_ptr());
+    assert!(ctor > 0);
+    assert!(thaw_tjs_get_global(q("Math.max").as_ptr()) > 0);
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"v":5}]}]}"#);
+    let made = thaw_tjs_construct_handle_graph_args_result(ctor as u64, args.as_ptr());
+    assert!(made.error.is_null() && made.value > 0);
+    let max = thaw_tjs_get_global(q("Math.max").as_ptr());
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"v":3},{"v":9}]}]}"#);
+    let r = thaw_tjs_call_handle_handle_graph_args_result(max as u64, args.as_ptr(), false);
+    assert!(r.error.is_null() && r.value > 0);
+}
+
 // ----- WeakMap / WeakSet / WeakRef / FinalizationRegistry (expected text recorded from Node 22) -----
 
 #[test]
@@ -1119,4 +1146,114 @@ fn handle_intrinsics_read_properties_call_methods_and_capture_graphs() {
         .error
         .is_null());
     assert_eq!(thaw_tjs_exception_native_token(id), 0);
+}
+
+// ----- slice 4: mixed bundles, host os/tty/fs pieces, web streams -----
+
+#[test]
+fn mixed_bundle_runs_native_modules_with_origin_reads_and_opaque_edges() {
+    use crate::host::{Native, Package};
+    let payload = r#"{"main":"m/u.js","modules":[{"key":"m/u.js","source":"import { origin as __thaw_esm_origin_0 } from \"__thaw_private_origin_spec/m/u.js\";\nimport \"node:os\";\nexport function shout(s) { return s.toUpperCase() + __thaw_esm_origin_0.readDefault(\"node:os\").EOL; }\nexport default 7;","imports":{"__thaw_private_origin_spec/m/u.js":"__thaw_private_origin_key/m/u.js","node:os":"__thaw_private_opaque_edge/m/u.js/0"}}],"opaqueEdges":[{"key":"__thaw_private_opaque_edge/m/u.js/0","importer":"m/u.js","specifier":"node:os","target":"node:os","factory":"node:os","asynchronous":false}]}"#;
+    let mut literal = String::new();
+    crate::builtins::json_quote(payload, &mut literal);
+    let bundle = format!(
+        r#"module.exports = (function(require) {{
+var __thaw_bundle_factories = {{
+"m/index.js": function(module, exports, require) {{ var u = require("./u.js"); exports.up = function (s) {{ return u.shout(s); }}; exports.seven = u.default; }},
+"node:os": function(module, exports, require) {{ module.exports = {{ EOL: "!" }}; module.exports.default = module.exports; module.exports.__esModule = true; }},
+"m/u.js": function() {{ throw new TypeError('Native ESM must be loaded by its registered entry'); }},
+}};
+var __thaw_bundle_require_maps = {{ "m/index.js": {{"./u.js": "m/u.js"}}, "node:os": {{}}, "m/u.js": {{}}, }};
+var __thaw_bundle_entry_key = "m/index.js";
+var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal});
+}})(globalThis.require);"#
+    );
+    assert!(crate::scan::scan_bundle(&bundle).unwrap().is_clean());
+    let mut p = Package::load(&bundle).expect("loads");
+    assert_eq!(
+        p.call("up", &[Native::Str("ab".into())]).unwrap(),
+        Native::Str("AB!".into())
+    );
+    assert_eq!(p.get("seven").unwrap(), Native::Number(7.0));
+}
+
+#[test]
+fn os_tty_process_and_fs_host_functions() {
+    assert_eq!(
+        one("var i = JSON.parse(__thaw_os_identity()); var o = JSON.parse(__thaw_os_info());
+             console.log(i.platform, typeof i.userInfo.uid, o.cpus.length > 0, o.totalmem > 0, o.availableParallelism >= 1,
+               JSON.parse(__thaw_os_get_priority(0)).ok, JSON.parse(__thaw_os_get_priority(-5)).code,
+               __thaw_process_is_tty(-1))"),
+        "linux number true true true true ESRCH false"
+    );
+    let dir = std::env::temp_dir().join(format!("thaw-js-sysio-{}", std::process::id()));
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let src = format!(
+        "var d = '{d}'; var f = (op, p, v, r) => JSON.parse(__thaw_fs(op, p, v || '', !!r));
+         console.log(f('mkdir', d + '/a/b', '', true).ok, f('exists', d + '/a/b').exists);
+         console.log(f('write', d + '/a/b/x.txt', '68690a').ok, f('read', d + '/a/b/x.txt').data);
+         var s = f('stat', d + '/a/b/x.txt'); console.log(s.file, s.directory, s.length, typeof s.exact.ino);
+         console.log(f('readdir', d + '/a/b', 'typed').entries.map(e => e.stat.file).join());
+         var o = f('fd_open', d + '/a/b/x.txt', 'r,438'); var rd = f('fd_read_all', String(o.fd));
+         console.log(rd.data, f('fd_close', String(o.fd)).ok, f('fd_close', String(o.fd)).code);
+         console.log(f('read', d + '/nope').code, f('chown', d, '').code);
+         console.log(f('rmdir', d, '', true).ok, f('exists', d).exists);"
+    );
+    assert_eq!(
+        run(&src).join("|"),
+        "true true|true 68690a|true false 3 string|true|68690a true EBADF|ENOENT ENOSYS|true false"
+    );
+}
+
+#[test]
+fn web_streams_read_write_and_iterate() {
+    let (out, _) = main_run(
+        "var chunks = [];
+         var rs = new ReadableStream({ start(c) { c.enqueue('a'); c.enqueue('b'); c.close(); } });
+         (async () => {
+           for await (const v of rs) chunks.push(v);
+           const ws = new WritableStream({ write(v) { chunks.push(v + '!'); }, close() { chunks.push('closed'); } });
+           const w = ws.getWriter(); await w.write('x'); await w.close();
+           const src = new ReadableStream({ pull(c) { c.enqueue(1); c.close(); } });
+           const r = src.getReader(); const first = await r.read(); const second = await r.read();
+           chunks.push(first.value, first.done, second.done, src.locked);
+           console.log(chunks.join());
+         })();",
+    );
+    assert_eq!(out.join("|"), "a,b,x!,closed,1,false,true,true");
+}
+
+#[test]
+fn scan_accepts_global_presence_probes_and_the_globalthis_polyfill() {
+    let src = "module.exports = (function(require) {
+var __thaw_bundle_factories = {
+\"p/index.js\": function(module, exports, require) {
+  exports.a = globalThis.Deno ? 1 : 2;
+  exports.b = typeof globalThis.Bun === 'undefined';
+  exports.c = globalThis.Zed && 1;
+  exports.poly = function () {
+    if (typeof globalThis === 'object') return;
+    __magic__.globalThis = __magic__;
+  };
+},
+};
+var __thaw_bundle_require_maps = { \"p/index.js\": {}, };
+var __thaw_bundle_entry_key = \"p/index.js\";
+})(globalThis.require);";
+    let report = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    let called = src.replace(
+        "exports.c = globalThis.Zed && 1;",
+        "exports.c = globalThis.Zed();",
+    );
+    assert!(!crate::scan::scan_bundle(&called).unwrap().is_clean());
+    // generated `with (..)` source cannot be parsed by `new Function` here
+    let with_code = src.replace(
+        "exports.a = ",
+        "exports.w = '  with (locals || {}) {'; exports.a = ",
+    );
+    assert!(crate::scan::scan_bundle(&with_code)
+        .unwrap()
+        .blockers
+        .contains_key("dynamic-with-code"));
 }

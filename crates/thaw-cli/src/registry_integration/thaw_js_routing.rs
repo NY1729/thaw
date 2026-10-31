@@ -12,7 +12,10 @@ fn thaw_js_mentions(user_source: &str, name: &str) -> bool {
     let name = name.rsplit('.').next().unwrap_or(name);
     let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
     user_source.match_indices(name).any(|(start, _)| {
-        !user_source[..start].chars().next_back().is_some_and(is_word)
+        !user_source[..start]
+            .chars()
+            .next_back()
+            .is_some_and(is_word)
             && !user_source[start + name.len()..]
                 .chars()
                 .next()
@@ -20,11 +23,11 @@ fn thaw_js_mentions(user_source: &str, name: &str) -> bool {
     })
 }
 
-/// Whether the program uses the package's value export `name` in a way thaw-js cannot serve: any
-/// value but a class (a class is reached through thaw-js handles, see `thaw_js_package_eligible`) and
+/// Whether the program uses the package's value export `name` as a value: any value but a class and
 /// anything but a namespace object whose only uses are calls of the package's own functions
-/// (`validator.isEmail(..)`, which the shim resolves to the typed functions) and its import.
-fn thaw_js_blocking_value_export(pkg: &ResolvedPackage, user_source: &str, name: &str) -> bool {
+/// (`validator.isEmail(..)`, which the shim resolves to the typed functions) and its import. Such a
+/// value is served to the program as a thaw-js handle (`$value$` class operation).
+fn thaw_js_value_export_needs_handle(pkg: &ResolvedPackage, user_source: &str, name: &str) -> bool {
     if !thaw_js_mentions(user_source, name) || pkg.classes.iter().any(|class| class.name == name) {
         return false;
     }
@@ -66,6 +69,13 @@ fn thaw_js_blocking_value_export(pkg: &ResolvedPackage, user_source: &str, name:
         }
     }
     false
+}
+
+/// Whether the program names the nested-namespace class `path` (`kdf.OpenSSL`), which only the QuickJS
+/// loader can capture at its dotted runtime path. A function or value member (`marked.parse`,
+/// `chalk.red`) is served through its package's value export handle or typed function instead.
+fn thaw_js_blocking_nested_alias(pkg: &ResolvedPackage, user_source: &str, path: &str) -> bool {
+    user_source.contains(path) && pkg.classes.iter().any(|class| class.name == path)
 }
 
 /// A thaw-js package returns plain data, so a bare alias' opaque `JsValue` result becomes `Json`.
@@ -214,6 +224,46 @@ fn thaw_js_class_declaration(line: &str, package: &str, class: &str) -> bool {
     key.starts_with('$') && key.split('$').nth(2) == Some(&format!("{package}::{class}"))
 }
 
+/// The member (`$method$pkg::Class$member$overload0$arity3`, `$staticmethod$...`) a class operation line
+/// calls; `None` for a constructor or any other operation.
+fn thaw_js_class_member(line: &str) -> Option<String> {
+    let symbol = line
+        .strip_prefix("declare function __thaw_typed_js_")
+        .or_else(|| line.strip_prefix("declare function __thaw_typed_tjs_"))?
+        .split(['(', '<'])
+        .next()?;
+    let hex = symbol.split("__").next()?;
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let key = String::from_utf8(bytes).ok()?;
+    let mut parts = key.strip_prefix('$')?.split('$');
+    let kind = parts.next()?;
+    if !kind.starts_with("method") && !kind.starts_with("staticmethod") {
+        return None;
+    }
+    parts.nth(1).map(str::to_string)
+}
+
+/// Whether `name` (a function export) is used other than as `name.member` or in an `import` line: those
+/// uses go through the package's value export, not through a call of `name` itself.
+fn thaw_js_uses_function(user_source: &str, name: &str) -> bool {
+    let name = name.rsplit('.').next().unwrap_or(name);
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    user_source.match_indices(name).any(|(start, _)| {
+        let end = start + name.len();
+        let line_start = user_source[..start].rfind('\n').map_or(0, |i| i + 1);
+        !user_source[..start]
+            .chars()
+            .next_back()
+            .is_some_and(is_word)
+            && !user_source[end..].chars().next().is_some_and(is_word)
+            && !user_source[line_start..].trim_start().starts_with("import")
+            && !user_source[end..].starts_with('.')
+    })
+}
+
 /// The function name encoded in a `__thaw_typed_js_<hex>[__suffix...]` symbol.
 fn thaw_js_declared_function(line: &str, package: &str) -> Option<String> {
     let symbol = line
@@ -268,6 +318,9 @@ fn thaw_js_package_eligible(
         for line in segment.lines() {
             if thaw_js_class_declaration(line, &pkg.name, &class.name)
                 && !thaw_js_declaration_plain(line)
+                // a method operation is only emitted where the program calls it, and the thaw-js backend
+                // fails the build (which retries on QuickJS) for a signature it cannot serve
+                && thaw_js_class_member(line).is_none()
             {
                 return reject(format!("class `{}`: {line}", class.name));
             }
@@ -289,7 +342,7 @@ fn thaw_js_package_eligible(
     }
     pkg.functions
         .iter()
-        .filter(|function| mentions(&function.name))
+        .filter(|function| thaw_js_uses_function(user_source, &function.name))
         .all(|function| {
             let Some(target) = typed_targets.get(&(pkg.name.clone(), function.name.clone())) else {
                 return reject(format!("`{}` has no typed target", function.name));
@@ -350,4 +403,31 @@ fn thaw_js_mentions_matches_whole_identifiers_only() {
     assert!(thaw_js_mentions("bcrypt.hash(a)", "hash"));
     assert!(thaw_js_mentions("import { $x } from 'p'", "$x"));
     assert!(thaw_js_mentions("ns.sub.hash(1)", "a.b.hash"));
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_function_use_ignores_imports_and_member_access() {
+    let source = "import { marked } from \"marked\";\nconsole.log(marked.parse(\"x\"));\n";
+    assert!(!thaw_js_uses_function(source, "marked"));
+    assert!(thaw_js_uses_function(source, "parse"));
+    assert!(thaw_js_uses_function("const s = marked(\"x\");", "marked"));
+    assert!(!thaw_js_uses_function(
+        "const s = markedAll(\"x\");",
+        "marked"
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_class_member_names_the_method_of_a_class_operation() {
+    // "$method$p::C$argument$overload0$arity3"
+    let key = "$method$p::C$argument$overload0$arity3";
+    let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
+    let line = format!("declare function __thaw_typed_js_{hex}(receiver: JsValue): JsValue;");
+    assert_eq!(thaw_js_class_member(&line).as_deref(), Some("argument"));
+    let key = "$new$p::C$arity0";
+    let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
+    let line = format!("declare function __thaw_typed_js_{hex}(): JsValue;");
+    assert_eq!(thaw_js_class_member(&line), None);
 }

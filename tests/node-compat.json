@@ -3814,6 +3814,11 @@
       "source": "function* early() { try { yield 1; yield 2; } finally { console.log(\"closed\"); } }\nfunction main(): void {\n  const e: any = early();\n  for (const v of e) { console.log(v); break; }\n  console.log(e.next());\n}"
     },
     {
+      "name": "function identity: method refs, array search, Map/Set/Weak keys",
+      "expect": "matched",
+      "source": "class K { v: number = 1; m(): number { return this.v; } static s(): number { return 2; } }\nfunction f(x: number): number { return x; }\nfunction g(): void {}\nfunction mk(): () => number { return () => 1; }\nfunction main(): void {\n  const k = new K();\n  console.log(k.m === k.m, K.s === K.s, k.m === new K().m);\n  const bound = k.m.bind(k);\n  console.log(bound === k.m, bound === bound, mk() === mk());\n  const a: () => number = k.m;\n  const b: () => number = k.m;\n  console.log(a === b);\n  const l = [g, g2];\n  console.log(l.indexOf(g), l.includes(g), l.includes(g2), l.lastIndexOf(g2));\n  const l2: Array<(x: number) => number> = [f];\n  l2.splice(l2.indexOf(f), 1);\n  console.log(l2.length, l2.indexOf((x: number) => x));\n  const s = new Set<() => void>();\n  s.add(g); s.add(g);\n  const lam = (): void => {};\n  s.add(lam);\n  console.log(s.size, s.has(g), s.has(lam), s.has(() => {}));\n  s.delete(g);\n  console.log(s.size, s.has(g));\n  const m = new Map<() => number, string>();\n  const c1 = mk(), c2 = mk();\n  m.set(c1, \"a\"); m.set(c2, \"b\"); m.set(c1, \"c\");\n  console.log(m.size, m.get(c1), m.get(c2));\n  const mm = new Map<(x: number) => number, string>();\n  mm.set(f, \"f\");\n  console.log(mm.get(f), mm.has(f), mm.has((x: number) => x));\n  const ms = new Map<() => number, string>();\n  ms.set(k.m, \"meth\");\n  console.log(ms.get(k.m));\n  const w = new WeakSet<() => void>();\n  w.add(g);\n  console.log(w.has(g), w.has(lam));\n  const wm = new WeakMap<() => void, number>();\n  wm.set(g, 5);\n  console.log(wm.get(g), wm.has(lam));\n  const sf = new Set<Function>();\n  sf.add(g);\n  console.log(sf.size, sf.has(g));\n}\nfunction g2(): void {}\n"
+    },
+    {
       "name": "object create typed view own vs inherited keys",
       "expect": "matched",
       "source": "function main(): void {\n  const proto = { f() { return 1; }, a: 1 };\n  const o = Object.create(proto) as { a: number; f(): number; b?: number };\n  o.b = 2;\n  console.log(JSON.stringify(o), o.a, o.f(), Object.keys(o), o.hasOwnProperty(\"a\"), o.hasOwnProperty(\"b\"));\n}"
@@ -3832,6 +3837,11 @@
       "name": "object create this method on typed view",
       "expect": "matched",
       "source": "function main(): void {\n  const proto = { greet() { return \"hi \" + this.name; }, name: \"base\" };\n  const o = Object.create(proto) as { name: string; greet(): string };\n  console.log(o.greet(), JSON.stringify(o));\n  o.name = \"own\";\n  console.log(o.greet(), JSON.stringify(o));\n}"
+    },
+    {
+      "name": "sort comparator NaN result and random stable sorts",
+      "expect": "matched",
+      "source": "let seed = 12345;\nfunction rnd(m: number): number { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % m; }\nfunction main(): void {\n  console.log([5, 1, NaN, 4, 2].sort((x, y) => x - y).join(\",\"));\n  console.log([3, NaN, 1].toSorted((x, y) => x - y).join(\",\"));\n  let h1 = 0, h2 = 0, h3 = 0;\n  for (let n = 1; n <= 300; n++) {\n    const objs: { k: number; i: number }[] = [];\n    const nums: number[] = [];\n    for (let i = 0; i < n; i++) { const v = rnd(n < 20 ? 5 : 40); objs.push({ k: v, i }); nums.push(v * 3 - 20); }\n    const so = objs.sort((a, b) => a.k - b.k);\n    for (let i = 0; i < n; i++) h1 = (h1 * 31 + so[i].k * 1000 + so[i].i) % 1000000007;\n    const sn = nums.toSorted((a, b) => a - b);\n    for (let i = 0; i < n; i++) h2 = (h2 * 31 + sn[i] + 100) % 1000000007;\n    const strs = nums.map((v) => \"s\" + (v % 7));\n    const ss = strs.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));\n    for (let i = 0; i < n; i++) h3 = (h3 * 31 + ss[i].charCodeAt(1)) % 1000000007;\n  }\n  console.log(h1, h2, h3);\n}\n"
     }
   ]
 }
