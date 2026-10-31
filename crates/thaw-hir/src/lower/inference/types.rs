@@ -2289,6 +2289,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, last_index, "RegExp.exec lastIndex")?;
                         return Ok(HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))));
                     }
+                    "__thaw_regex_check" => {
+                        let [source, flags] = args.as_slice() else {
+                            return Err("RegExp check expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Str, source, "RegExp check source")?;
+                        self.expect_type(&HirType::Str, flags, "RegExp check flags")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_regex_exec_groups" => {
                         let [matches] = args.as_slice() else {
                             return Err("RegExp groups expects one operand".into());
