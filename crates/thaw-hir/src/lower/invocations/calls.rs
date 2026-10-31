@@ -911,6 +911,22 @@ impl<'a> FnLowerer<'a> {
         let expected_return_hint = self.expected_return_hint.take();
         let expected_source_return_hint = self.expected_source_return_hint.take();
         if matches!(&call.callee, Callee::Expr(callee)
+            if matches!(callee.as_ref(), Expr::Ident(name) if name.sym == "@@thaw_tdz_throw"))
+        {
+            let [fallback, message] = call.args.as_slice() else {
+                return Err("internal TDZ throw needs a fallback and a message".into());
+            };
+            let fallback = self.lower_expr(&fallback.expr)?;
+            let message = self.lower_expr(&message.expr)?;
+            return Ok(HirExpr::ThrowValue(
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_error_frame".into())),
+                    vec![HirExpr::Lit(HirLit::Str("ReferenceError".into())), message],
+                )),
+                Box::new(fallback),
+            ));
+        }
+        if matches!(&call.callee, Callee::Expr(callee)
             if matches!(callee.as_ref(), Expr::Ident(name) if name.sym == "@@thaw_class_key_reference_error"))
         {
             let [message] = call.args.as_slice() else {

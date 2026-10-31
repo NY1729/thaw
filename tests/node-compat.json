@@ -3799,6 +3799,46 @@
       "source": "import { EventEmitter } from \"node:events\"; function main(): void { const e = new EventEmitter(); e.on(\"a\", (x: number, y?: string) => console.log(\"a\", x, y)); e.emit(\"a\", 1); e.emit(\"a\", 1, \"s\", \"extra\"); e.once(\"b\", (x: number) => console.log(\"b\", x)); e.emit(\"b\", 7); e.emit(\"b\", 8); console.log(e.listenerCount(\"b\"), e.eventNames()); }"
     },
     {
+      "name": "var hoisting: read before declaration and redeclare",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(a, b);\n  var a = 1, b = 2;\n  var a = 3;\n  console.log(a, b);\n  var plain = 7;\n  console.log(plain);\n}"
+    },
+    {
+      "name": "var hoisting: closure capture, branch var read outside, typeof",
+      "expect": "matched",
+      "source": "function f(): void {\n  const g = () => k;\n  var k = 4;\n  console.log(g());\n}\nfunction h(n: number): number {\n  for (let i = 0; i < 2; i++) { if (i === 1) { var last = i + n; } }\n  return last === undefined ? -1 : last;\n}\nfunction w(flag: boolean): string {\n  console.log(typeof q);\n  if (flag) { var q = \"set\"; }\n  return String(q);\n}\nfunction main(): void {\n  f();\n  console.log(h(5), w(true), w(false));\n}"
+    },
+    {
+      "name": "let/const straight-line TDZ ReferenceError",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { console.log(x); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  let x = 5;\n  console.log(x);\n  try { console.log(c + 1); } catch (e) { console.log((e as Error).message); }\n  const c = 2;\n  console.log(c);\n}"
+    },
+    {
+      "name": "closure TDZ: function and arrow read before let",
+      "expect": "matched",
+      "source": "function main(): void {\n  const g = () => k;\n  let k = 3;\n  console.log(g());\n  function early(): number { return z + 1; }\n  try { early(); } catch (e) { console.log((e as Error).message); }\n  let z = 1;\n  console.log(early());\n}"
+    },
+    {
+      "name": "typeof before let throws ReferenceError",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { console.log(typeof w); } catch (e) { console.log((e as Error).name); }\n  let w = 1;\n  console.log(typeof w);\n}"
+    },
+    {
+      "name": "var in for head read after loop",
+      "expect": "matched",
+      "source": "function main(): void {\n  for (var i = 0; i < 3; i++) {}\n  console.log(i);\n}"
+    },
+    {
+      "name": "module level var hoisting, let TDZ and closure TDZ",
+      "expect": "matched",
+      "source": "function main(): void {}\nconsole.log(typeof h);\nvar h = 3;\nconsole.log(h);\ntry { console.log(x); } catch (e) { console.log((e as Error).name, (e as Error).message); }\nlet x = 5;\nconsole.log(x);\nfunction f(): number {\n  try { return y + 1; } catch (e) { console.log((e as Error).message); return -1; }\n}\nconsole.log(f());\nlet y = 2;\nconsole.log(f());\nfunction useLater(): number { return z; }\nlet z = 7;\nconsole.log(useLater());\nconst w = () => q;\nlet q = 1;\nconsole.log(w());"
+    },
+    {
+      "name": "module level new before class declaration throws ReferenceError",
+      "expect": "matched",
+      "source": "function main(): void {}\ntry { const a = new D(); console.log(a.v); } catch (e) { console.log((e as Error).name, (e as Error).message); }\nclass D { v = 1; }\nconsole.log(new D().v);"
+    },
+    {
       "name": "function identity: method refs, array search, Map/Set/Weak keys",
       "expect": "matched",
       "source": "class K { v: number = 1; m(): number { return this.v; } static s(): number { return 2; } }\nfunction f(x: number): number { return x; }\nfunction g(): void {}\nfunction mk(): () => number { return () => 1; }\nfunction main(): void {\n  const k = new K();\n  console.log(k.m === k.m, K.s === K.s, k.m === new K().m);\n  const bound = k.m.bind(k);\n  console.log(bound === k.m, bound === bound, mk() === mk());\n  const a: () => number = k.m;\n  const b: () => number = k.m;\n  console.log(a === b);\n  const l = [g, g2];\n  console.log(l.indexOf(g), l.includes(g), l.includes(g2), l.lastIndexOf(g2));\n  const l2: Array<(x: number) => number> = [f];\n  l2.splice(l2.indexOf(f), 1);\n  console.log(l2.length, l2.indexOf((x: number) => x));\n  const s = new Set<() => void>();\n  s.add(g); s.add(g);\n  const lam = (): void => {};\n  s.add(lam);\n  console.log(s.size, s.has(g), s.has(lam), s.has(() => {}));\n  s.delete(g);\n  console.log(s.size, s.has(g));\n  const m = new Map<() => number, string>();\n  const c1 = mk(), c2 = mk();\n  m.set(c1, \"a\"); m.set(c2, \"b\"); m.set(c1, \"c\");\n  console.log(m.size, m.get(c1), m.get(c2));\n  const mm = new Map<(x: number) => number, string>();\n  mm.set(f, \"f\");\n  console.log(mm.get(f), mm.has(f), mm.has((x: number) => x));\n  const ms = new Map<() => number, string>();\n  ms.set(k.m, \"meth\");\n  console.log(ms.get(k.m));\n  const w = new WeakSet<() => void>();\n  w.add(g);\n  console.log(w.has(g), w.has(lam));\n  const wm = new WeakMap<() => void, number>();\n  wm.set(g, 5);\n  console.log(wm.get(g), wm.has(lam));\n  const sf = new Set<Function>();\n  sf.add(g);\n  console.log(sf.size, sf.has(g));\n}\nfunction g2(): void {}\n"
