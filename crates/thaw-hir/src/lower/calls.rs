@@ -666,6 +666,20 @@ impl<'a> FnLowerer<'a> {
         }
         let value = self.lower_expr(&argument.expr)?;
         let ty = self.infer_expr_type(&value)?;
+        // WeakRef is modeled as an array and FinalizationRegistry as a plain object;
+        // ponytail: only the direct `new X(..)` form is recognized, not a variable holding one.
+        let mut inner = argument.expr.as_ref();
+        while let Expr::Paren(paren) = inner { inner = paren.expr.as_ref(); }
+        if let Expr::New(new_expr) = inner {
+            if let Some(class) = new_expr.callee.as_ident().filter(|c| matches!(c.sym.as_ref(), "WeakRef" | "FinalizationRegistry")) {
+                let name = format!("__thaw_object_tag_native_{}", self.next_binding);
+                self.next_binding += 1;
+                return self.wrap_call_argument_bindings(
+                    HirExpr::Lit(HirLit::Str(format!("[object {}]", class.sym))),
+                    &[(name, ty, value)],
+                ).map(Some);
+            }
+        }
         self.object_prototype_to_string_tag(value, &ty).map(Some)
     }
 
@@ -759,7 +773,24 @@ impl<'a> FnLowerer<'a> {
             );
             return self.wrap_call_argument_bindings(result, &[(name, ty.clone(), value)]);
         }
+        // `new Error()` is a framed string at runtime; only a framed one is an Error.
+        if matches!(ty, HirType::Str) {
+            let name = format!("__thaw_object_tag_text_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            let result = HirExpr::Conditional(
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_error_is_instance".into())),
+                    vec![HirExpr::Var(name.clone()), HirExpr::Lit(HirLit::Str("Error".into()))],
+                )),
+                Box::new(HirExpr::Lit(HirLit::Str("[object Error]".into()))),
+                Box::new(HirExpr::Lit(HirLit::Str("[object String]".into()))),
+                HirType::Str,
+            );
+            return self.wrap_call_argument_bindings(result, &[(name, ty.clone(), value)]);
+        }
         let static_tag = match ty {
+            _ if object_type_is_error_family(ty) => "Error",
             HirType::Undefined => "Undefined",
             HirType::Null => "Null",
             HirType::Array(_) | HirType::Tuple(_) => "Array",
