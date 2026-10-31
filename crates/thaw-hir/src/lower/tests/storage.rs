@@ -1580,3 +1580,14 @@ fn jit_storage_preflight_follows_exposure_through_source_calls() {
         .unwrap()
         .is_empty());
 }
+
+#[test]
+fn storage_object_create_prototype_literal_is_dynamic() {
+    for source in [
+        "const proto = { a: 1 }; const o = Object.create(proto) as { a: number; b?: number }; o.b = 2;",
+        "const proto = { a: 1 }; const o = (Object.create(proto) as any); o.b = 2;",
+        "interface V { a: number } const proto: V = { a: 1 }; const o: V = Object.create(proto);",
+    ] {
+        assert_eq!(storage_allocations(source), vec![true], "{source}");
+    }
+}

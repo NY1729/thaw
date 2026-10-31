@@ -517,9 +517,14 @@ fn fs_readdir_entries(path: &std::path::Path, typed: bool, recursive: bool) -> i
         // An entry removed between the listing and its lstat is skipped (Node lists from d_type and
         // never fails on a concurrent unlink); only the requested directory itself may be missing.
         let gone = |error: &io::Error| error.kind() == io::ErrorKind::NotFound;
+        // libuv's scandir sorts each directory by name (byte order), and so does Node's readdir.
+        let mut listed = Vec::new();
         for entry in std::fs::read_dir(directory)? {
             let entry = match entry { Ok(entry) => entry, Err(error) if gone(&error) => continue, Err(error) => return Err(error) };
-            let name_bytes = fs_name_bytes(&entry.file_name());
+            listed.push((fs_name_bytes(&entry.file_name()), entry));
+        }
+        listed.sort_by(|left, right| left.0.cmp(&right.0));
+        for (name_bytes, entry) in listed {
             let mut relative_bytes = prefix.to_vec();
             if !relative_bytes.is_empty() { relative_bytes.push(b'/'); }
             relative_bytes.extend_from_slice(&name_bytes);
