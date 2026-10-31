@@ -2525,6 +2525,16 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Var(key_name.clone()),
             ],
         );
+        // An `undefined` dictionary (a regex result's `groups` without named groups) has no keys.
+        let has_own = HirExpr::Conditional(
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                vec![HirExpr::TypedClosure(HirType::Json, Box::new(HirExpr::Var(object_name.clone())))],
+            )),
+            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+            Box::new(has_own),
+            HirType::Bool,
+        );
         let body = match element {
             // A stored `undefined` (e.g. an unmatched named regex group) is the
             // absent state of an `Optional`, same as a missing key.
