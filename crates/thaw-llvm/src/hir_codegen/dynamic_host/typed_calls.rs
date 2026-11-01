@@ -39,17 +39,6 @@ pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
     }
 }
 
-/// An inline `function (this: T) {}` callback argument: it reads the call-time receiver.
-fn thaw_js_callback_reads_this(arg: &HirExpr) -> bool {
-    let mut inner = arg;
-    while let HirExpr::TypedClosure(_, body) = inner {
-        inner = body;
-    }
-    matches!(inner, HirExpr::NonArrowFunction(function)
-        if matches!(function.as_ref(), HirExpr::Lambda(_, params, _, _)
-            if matches!(params.first(), Some(HirParam { ty: HirType::NonArrowReceiver(_), .. }))))
-}
-
 /// The physical callback ABI of a function type: its parameters (a rest parameter is one trailing
 /// array), the result and the index of that rest array.
 fn thaw_js_callback_abi(ty: &HirType) -> Option<(Vec<HirType>, HirType, Option<usize>)> {
@@ -1726,6 +1715,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
+            if thaw_js_callback_type(ty) && self.callback_expr_reads_receiver(arg) {
+                self.compile_thaw_js_receiver_callback_argument(array, arg)
+                    .map_err(|error| format!("thaw-js callback argument {}: {error}", index + 1))?;
+                continue;
+            }
             self.thaw_js_call_arguments = true;
             let value = self.compile_expr(arg);
             self.thaw_js_call_arguments = false;
@@ -1738,10 +1732,6 @@ impl<'ctx> HirCompiler<'ctx> {
                 ));
             }
             if thaw_js_callback_type(ty) {
-                // ponytail: thaw-js does not deliver the call-time receiver to a native callback yet.
-                if thaw_js_callback_reads_this(arg) {
-                    self.uses_quickjs = true;
-                }
                 self.compile_thaw_js_callback_argument(array, value, ty)
                     .map_err(|error| format!("thaw-js callback argument {}: {error}", index + 1))?;
                 continue;
@@ -1922,15 +1912,16 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         for (index, (arg, ty)) in rest.iter().zip(signature.params.iter().skip(usize::from(is_method))).enumerate() {
+            if thaw_js_callback_type(ty) && self.callback_expr_reads_receiver(arg) {
+                self.compile_thaw_js_receiver_callback_argument(array, arg)
+                    .map_err(|error| format!("thaw-js class callback argument {}: {error}", index + 1))?;
+                continue;
+            }
             self.thaw_js_call_arguments = true;
             let value = self.compile_expr(arg);
             self.thaw_js_call_arguments = false;
             let value = value?;
             if thaw_js_callback_type(ty) {
-                // ponytail: thaw-js does not deliver the call-time receiver to a native callback yet.
-                if thaw_js_callback_reads_this(arg) {
-                    self.uses_quickjs = true;
-                }
                 self.compile_thaw_js_callback_argument(array, value, ty)
                     .map_err(|error| format!("thaw-js class callback argument {}: {error}", index + 1))?;
                 continue;
@@ -2046,6 +2037,20 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
         self.builder.position_at_end(done);
         Ok(())
+    }
+
+    /// A callback that reads the call-time receiver: registered through the graph path (its `this`
+    /// arrives with each call) and passed as a `{"__thaw_tjs_handle__": id}` function handle.
+    fn compile_thaw_js_receiver_callback_argument(
+        &mut self,
+        array: BasicValueEnum<'ctx>,
+        arg: &HirExpr,
+    ) -> Result<(), String> {
+        self.thaw_js_call_arguments = true;
+        let handle = self.compile_register_native_callback(std::slice::from_ref(arg), false);
+        self.thaw_js_call_arguments = false;
+        let marker = self.compile_thaw_js_handle_marker(handle?.into_int_value())?;
+        self.compile_json_array_push_owned(array, marker)
     }
 
     /// Registers the closure with thaw-js and returns the `{"__thaw_tjs_cb__": id}` marker Json.
