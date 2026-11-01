@@ -2647,6 +2647,10 @@ fn generate_registry_shims_pass(
         }
         external_exports.insert(pkg.name.clone(), package_exports);
     }
+    // A bare overload rewrite of a compiler-intercepted global (`setTimeout` from `node:timers/promises`) would
+    // capture every callback-style call to it.
+    fallback_function_overload_rewrites.retain(|rewrite| !thaw_bridge::shadows_a_thaw_literal_identifier(&rewrite.0));
+
     Ok((
         (
             shim,

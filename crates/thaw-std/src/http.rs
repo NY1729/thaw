@@ -218,6 +218,42 @@ fn status_reason(status: u16) -> &'static str {
     }
 }
 
+/// RFC 9110 `Date` value (`Sun, 06 Nov 1994 08:49:37 GMT`) for the current time.
+fn http_date() -> String {
+    http_date_at(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs()) as i64,
+    )
+}
+
+fn http_date_at(secs: i64) -> String {
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil-from-days (Howard Hinnant).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!(
+        "{}, {day:02} {} {year} {:02}:{:02}:{:02} GMT",
+        WEEKDAYS[days.rem_euclid(7) as usize],
+        MONTHS[(month - 1) as usize],
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
+}
+
+/// Node's header order: caller headers, `Date`, `Connection`, `Keep-Alive`, then the body framing.
 fn render_head(
     status: u16,
     headers: &[(String, String)],
@@ -231,20 +267,48 @@ fn render_head(
         head.push_str(&value.replace(['\r', '\n'], ""));
         head.push_str("\r\n");
     }
-    head.push_str(framing);
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("Date"))
+    {
+        head.push_str(&format!("Date: {}\r\n", http_date()));
+    }
     head.push_str(if keep_alive {
-        "Connection: keep-alive\r\n\r\n"
+        "Connection: keep-alive\r\nKeep-Alive: timeout=5\r\n"
     } else {
-        "Connection: close\r\n\r\n"
+        "Connection: close\r\n"
     });
+    head.push_str(framing);
+    head.push_str("\r\n");
     head
 }
 
+fn is_transfer_encoding(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Transfer-Encoding")
+}
+
 fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
-    response_spec
-        .headers
-        .retain(|(name, _)| !name.eq_ignore_ascii_case("Content-Length"));
-    let framing = format!("Content-Length: {}\r\n", response_spec.body.len());
+    // A caller-set `Transfer-Encoding: chunked` means the body is chunk-framed, not length-framed.
+    let chunked = response_spec.headers.iter().any(|(name, value)| {
+        is_transfer_encoding(name) && value.to_ascii_lowercase().contains("chunked")
+    });
+    response_spec.headers.retain(|(name, _)| {
+        !(name.eq_ignore_ascii_case("Content-Length") || chunked && is_transfer_encoding(name))
+    });
+    let (framing, body) = if chunked {
+        let mut body = if response_spec.body.is_empty() {
+            Vec::new()
+        } else {
+            frame_chunk(&response_spec.body)
+        };
+        body.extend_from_slice(CHUNKED_TERMINATOR);
+        ("Transfer-Encoding: chunked\r\n".to_string(), body)
+    } else {
+        (
+            format!("Content-Length: {}\r\n", response_spec.body.len()),
+            response_spec.body,
+        )
+    };
     let mut response = render_head(
         response_spec.status,
         &response_spec.headers,
@@ -252,18 +316,20 @@ fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8>
         keep_alive,
     )
     .into_bytes();
-    response.extend(response_spec.body);
+    response.extend(body);
     response
 }
 
 /// The status line + headers for a response whose body is streamed as it
 /// is produced: `Transfer-Encoding: chunked` since the total length
 /// isn't known when the head goes out. Any caller-set `Content-Length`
-/// is dropped (it would contradict the chunked framing).
+/// or `Transfer-Encoding` is dropped (it would contradict or duplicate the chunked framing).
 fn render_streaming_head(status: u16, headers: &[(String, String)], keep_alive: bool) -> Vec<u8> {
     let headers: Vec<(String, String)> = headers
         .iter()
-        .filter(|(name, _)| !name.eq_ignore_ascii_case("Content-Length"))
+        .filter(|(name, _)| {
+            !name.eq_ignore_ascii_case("Content-Length") && !is_transfer_encoding(name)
+        })
         .cloned()
         .collect();
     render_head(
@@ -320,6 +386,8 @@ struct ResponseState {
     /// simply hasn't returned yet, or an `async` one currently suspended
     /// on an `await` -- and there is no response to send.
     ended: bool,
+    /// A `write(...)` was buffered in the synchronous burst: Node would already have sent a chunked head.
+    wrote: bool,
 }
 
 #[repr(C)]
@@ -520,6 +588,7 @@ impl RequestContext {
                 headers: Vec::new(),
                 body: Vec::new(),
                 ended: false,
+                wrote: false,
             },
             response: ServerResponse {
                 status_code: 200.0,
@@ -874,6 +943,7 @@ unsafe extern "C" fn response_write_bytes(environment: *const c_void, chunk: *co
     if stream_should_engage(context) {
         stream_write(context, &bytes);
     } else {
+        context.state.wrote = true;
         context.state.body.extend(bytes);
     }
     true
@@ -1098,7 +1168,8 @@ unsafe extern "C" fn response_write(environment: *const c_void, chunk: *const c_
         // Still in the handler's synchronous burst (or a one-shot helper
         // with no event loop): buffer, and let the `Content-Length` path
         // send the whole thing -- nothing has observed a partial
-        // response, so this is indistinguishable from streaming.
+        // response, so only the headers differ: `finish_response` frames it chunked.
+        context.state.wrote = true;
         context.state.body.extend(bytes);
     }
     true
@@ -1262,9 +1333,13 @@ fn finish_response(context: &mut RequestContext) {
     }
     let connection = unsafe { &mut *context.connection };
     connection.awaiting_handler = false;
+    let mut headers = std::mem::take(&mut context.state.headers);
+    if context.state.wrote && !headers.iter().any(|(name, _)| is_transfer_encoding(name)) {
+        headers.push(("Transfer-Encoding".into(), "chunked".into()));
+    }
     let spec = ResponseSpec {
         status: normalize_status(context.response.status_code),
-        headers: std::mem::take(&mut context.state.headers),
+        headers,
         body: std::mem::take(&mut context.state.body),
     };
     connection.response = render_response(spec, connection.keep_alive);
@@ -1453,9 +1528,16 @@ fn run_server_callback(
         }
     }
     if context.state.ended || connection.is_null() {
+        let mut headers = std::mem::take(&mut context.state.headers);
+        if context.state.wrote
+            && !connection.is_null()
+            && !headers.iter().any(|(name, _)| is_transfer_encoding(name))
+        {
+            headers.push(("Transfer-Encoding".into(), "chunked".into()));
+        }
         CallbackOutcome::Ready(ResponseSpec {
             status: normalize_status(context.response.status_code),
-            headers: std::mem::take(&mut context.state.headers),
+            headers,
             body: std::mem::take(&mut context.state.body),
         })
     } else {
@@ -4055,6 +4137,44 @@ mod tests {
         assert_eq!(connection.watcher, 0);
     }
 
+    /// Drops the (time-dependent) `Date:` header line from a rendered head.
+    fn without_date(bytes: &[u8]) -> Vec<u8> {
+        let text = String::from_utf8_lossy(bytes);
+        text.split_inclusive("\r\n")
+            .filter(|line| !line.starts_with("Date: "))
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    #[test]
+    fn dates_and_caller_chunked_bodies_follow_node() {
+        assert_eq!(http_date_at(784_111_777), "Sun, 06 Nov 1994 08:49:37 GMT");
+        assert_eq!(http_date_at(0), "Thu, 01 Jan 1970 00:00:00 GMT");
+        assert_eq!(http_date_at(951_782_400), "Tue, 29 Feb 2000 00:00:00 GMT");
+        let response = render_response(
+            ResponseSpec {
+                status: 200,
+                headers: vec![("Transfer-Encoding".into(), "chunked".into())],
+                body: b"x".to_vec(),
+            },
+            true,
+        );
+        let text = String::from_utf8(response).unwrap();
+        assert!(text.contains("Keep-Alive: timeout=5\r\n"), "{text}");
+        assert!(
+            text.ends_with("Transfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n"),
+            "{text}"
+        );
+        assert!(!text.contains("Content-Length"), "{text}");
+        let streamed = String::from_utf8(render_streaming_head(
+            200,
+            &[("transfer-encoding".into(), "chunked".into())],
+            false,
+        ))
+        .unwrap();
+        assert_eq!(streamed.matches("ransfer-").count(), 1, "{streamed}");
+    }
+
     #[test]
     fn buffered_response_uses_one_computed_content_length() {
         let response = render_response(
@@ -4069,7 +4189,7 @@ mod tests {
             },
             true,
         );
-        assert_eq!(response, "HTTP/1.1 200 OK\r\nX-Trace: kept\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\né".as_bytes());
+        assert_eq!(without_date(&response), "HTTP/1.1 200 OK\r\nX-Trace: kept\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nContent-Length: 2\r\n\r\né".as_bytes());
 
         let response = render_response(
             ResponseSpec {
@@ -4080,8 +4200,8 @@ mod tests {
             false,
         );
         assert_eq!(
-            response,
-            b"HTTP/1.1 200 OK\r\nX-Trace: kept\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+            without_date(&response),
+            b"HTTP/1.1 200 OK\r\nX-Trace: kept\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
         );
     }
 
@@ -4112,9 +4232,9 @@ mod tests {
             },
             false,
         );
-        assert_eq!(buffered, b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        assert_eq!(without_date(&buffered), b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
         let streamed = render_streaming_head(200, &context.state.headers, false);
-        assert_eq!(streamed, b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+        assert_eq!(without_date(&streamed), b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n");
         context.headers_sent = true;
         assert!(!set("X-TRACE", "too late"));
         assert_eq!(context.state.headers.len(), 2);

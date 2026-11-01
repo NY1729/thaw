@@ -4449,6 +4449,11 @@ impl<'a> FnLowerer<'a> {
                         // conversions that path uses, rather than requiring
                         // a typed array up front.
                         let mut spread_source_type = self.infer_expr_type(&value)?;
+                        // A live JavaScript iterable (`Headers`, `URLSearchParams`, ...) is drained by the `any` path.
+                        if spread_source_type == HirType::JsValue {
+                            value = self.coerce_to_declared(&HirType::Json, value)?;
+                            spread_source_type = HirType::Json;
+                        }
                         if let HirType::Union(members) = &spread_source_type {
                             if members
                                 .iter()

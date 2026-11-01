@@ -210,6 +210,13 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
+        // A closure inside any other initializer may name the global (`const t = setInterval(() => clearInterval(t))`):
+        // it runs after the store, so bind the declared type up front too.
+        let prebound = function_init || !self.scope.contains_key(name);
+        if prebound && !function_init {
+            self.scope.insert(name.clone(), expected.clone());
+            self.bindings.entry(name.clone()).or_default().push(name.clone());
+        }
         let lowered = if let Some(lowered) = self.lower_contextual_function_initializer(init, expected) {
             lowered
         } else if *expected == HirType::Json {
@@ -220,7 +227,7 @@ impl<'a> FnLowerer<'a> {
         if let Some(stack) = internal_name.and_then(|internal| self.bindings.get_mut(&internal)) {
             stack.pop();
         }
-        Ok((lowered?, function_init))
+        Ok((lowered?, prebound))
     }
 
     /// The type of a non-generic, non-async-generator function expression whose every

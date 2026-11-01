@@ -3667,9 +3667,7 @@
     argv0: globalThis.process.argv0 || JSON.parse(globalThis.__thaw_host_argv_json || '["node"]')[0],
     execArgv: globalThis.process.execArgv || JSON.parse(globalThis.__thaw_host_exec_argv_json || '[]'),
     config: globalThis.process.config || { variables: {} },
-    // versions.node stays '' on purpose: esbuild (and similar) read it to pick the worker_threads sync path,
-    // which needs file-path Workers Thaw does not have. process.version covers the semver feature gates.
-    versions: Object.assign({ node: '', modules: '', uv: '' },
+    versions: Object.assign({ node: (globalThis.process.version || 'v22.23.1').slice(1), v8: '12.4.254.21-node.33', modules: '', uv: '' },
                             globalThis.process.versions || {}),
     stdin: globalThis.process.stdin || stdin,
     stdout: globalThis.process.stdout || processStream(1, processRawWrite),
@@ -3722,12 +3720,16 @@
     removeListener: processOff,
     emit: processEmit,
     listenerCount: event => (processListeners.get(String(event)) || []).length,
-    emitWarning: (warning, options) => {
+    emitWarning: (warning, type, code) => {
+      // Node signature: (warning, type[, code]) or (warning, { type, code, detail }); delivery is deferred to nextTick.
+      const options = type !== null && typeof type === 'object' ? type : { type, code };
       const value = warning instanceof Error ? warning : new Error(String(warning));
-      value.name = options && options.type ? String(options.type) : 'Warning';
-      if (options && options.code) value.code = String(options.code);
-      if (!processEmit('warning', value) && globalThis.console
-          && typeof globalThis.console.warn === 'function') globalThis.console.warn(value);
+      if (options.type) value.name = String(options.type); else if (!(warning instanceof Error)) value.name = 'Warning';
+      if (options.code) value.code = String(options.code);
+      nextTick(() => {
+        if (!processEmit('warning', value) && globalThis.console
+            && typeof globalThis.console.warn === 'function') globalThis.console.warn(value);
+      });
     },
     exitCode: globalThis.process.exitCode,
     title: globalThis.process.title || 'thaw',

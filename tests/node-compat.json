@@ -4282,6 +4282,81 @@
       "name": "nd4 Date string conversion of an invalid or valid date",
       "expect": "matched",
       "source": "function main(): void {\n  const d = new Date(NaN);\n  console.log(String(d), `${d}`, \"x\" + d, d.toString(), d.getTime(), JSON.stringify(d));\n  const v = new Date(0);\n  console.log(String(v) === v.toString(), `${v}` === v.toString(), (\"\" + v) === v.toString());\n}\n"
+    },
+    {
+      "name": "r2c module const timer clears itself",
+      "expect": "matched",
+      "source": "const t = setInterval(() => { console.log(\"iv\"); clearInterval(t); }, 1);\nfunction main(): void {}"
+    },
+    {
+      "name": "r2c AsyncLocalStorage run returns async result in Promise.all",
+      "expect": "matched",
+      "source": "import { AsyncLocalStorage } from \"node:async_hooks\";\nconst als = new AsyncLocalStorage<{ id: number }>();\nasync function inner(n: number) { await new Promise((r) => setTimeout(r, 1)); return n * 10; }\nasync function run() {\n  const rs = await Promise.all([als.run({ id: 1 }, inner, 1), als.run({ id: 2 }, inner, 2)]);\n  console.log(rs, als.getStore()?.id, als.run({ id: 3 }, () => als.getStore()?.id), als.exit(() => als.getStore()));\n}\nfunction main(): void { run(); }"
+    },
+    {
+      "name": "r2c promisified callback then timers/promises await",
+      "expect": "matched",
+      "source": "import * as util from \"node:util\";\nimport { setTimeout as st } from \"node:timers/promises\";\nfunction cb(a: number, f: (e: Error | null, r?: number) => void) { setImmediate(() => f(null, a * 2)); }\nconst p = util.promisify(cb);\nasync function run() {\n  console.log(await p(2));\n  console.log(await st(1, \"v\"));\n  setTimeout(() => console.log(\"global timer still works\"), 1);\n}\nfunction main(): void { run(); }"
+    },
+    {
+      "name": "r2c crypto.subtle.digest resolves to an ArrayBuffer",
+      "expect": "matched",
+      "source": "async function run() {\n  const d = await crypto.subtle.digest(\"SHA-256\", new TextEncoder().encode(\"abc\"));\n  console.log(Buffer.from(d).toString(\"hex\"), d.byteLength);\n  const s = await crypto.subtle.digest({ name: \"SHA-1\" }, new Uint8Array([97, 98, 99]));\n  console.log(Buffer.from(s).toString(\"hex\"));\n}\nfunction main(): void { run(); }"
+    },
+    {
+      "name": "r2c for await over http request body",
+      "expect": "matched",
+      "source": "import * as http from \"node:http\";\nconst srv = http.createServer(async (req, res) => {\n  const chunks: Buffer[] = [];\n  for await (const c of req) chunks.push(c as Buffer);\n  res.end(Buffer.concat(chunks));\n});\nfunction main(): void {\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const r = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`, { method: \"POST\", body: \"payload\" });\n    console.log(await r.text());\n    const g = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`);\n    console.log(JSON.stringify(await g.text()));\n    srv.close();\n  });\n}"
+    },
+    {
+      "name": "r2c EventEmitter max listeners warning and emitWarning type code on nextTick",
+      "expect": "matched",
+      "source": "import { EventEmitter } from \"node:events\";\nprocess.on(\"warning\", (w: any) => { if (w.name !== \"ExperimentalWarning\") console.log(\"warning:\", w.name, w.code, w.count, w.type); });\nfunction main(): void {\n  const e = new EventEmitter();\n  e.setMaxListeners(1);\n  e.on(\"x\", () => {}); e.on(\"x\", () => {}); e.on(\"x\", () => {});\n  process.emitWarning(\"dep\", \"DeprecationWarning\", \"DEP0XXX\");\n  process.emitWarning(\"plain\");\n  console.log(\"sync done\");\n}"
+    },
+    {
+      "name": "r2c Atomics.wait on the main thread",
+      "expect": "matched",
+      "source": "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  console.log(Atomics.wait(ia, 0, 1, 0));\n  console.log(Atomics.wait(ia, 0, 0, 0));\n  console.log(Atomics.wait(ia, 0, 0, 5));\n}"
+    },
+    {
+      "name": "r2c http chunked response framing headers",
+      "expect": "matched",
+      "source": "import * as http from \"node:http\";\nconst srv = http.createServer((req, res) => {\n  if (req.url === \"/stream\") { res.writeHead(200, { \"Content-Type\": \"text/plain\" }); res.write(\"a\"); res.write(\"b\"); res.end(\"c\"); return; }\n  res.writeHead(200, { \"Transfer-Encoding\": \"chunked\" }); res.end(\"x\");\n});\nfunction main(): void {\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const base = `http://127.0.0.1:${(srv.address() as any).port}`;\n    const a = await fetch(base + \"/\");\n    console.log(a.headers.get(\"transfer-encoding\"), a.headers.get(\"content-length\"), a.headers.has(\"date\"), await a.text());\n    const b = await fetch(base + \"/stream\");\n    console.log(b.headers.get(\"transfer-encoding\"), b.headers.get(\"content-length\"), b.headers.has(\"date\"), await b.text());\n    srv.close();\n  });\n}"
+    },
+    {
+      "name": "r2c Response static members spread of Headers and res.end without arguments",
+      "expect": "matched",
+      "source": "import * as http from \"node:http\";\nconst srv = http.createServer((req, res) => { res.statusCode = 404; res.end(); });\nfunction main(): void {\n  const a = Response.json({ a: 1 });\n  console.log(a.headers.get(\"content-type\"), a.status);\n  const b = Response.redirect(\"http://a.test/\", 301);\n  console.log(b.status, b.headers.get(\"location\"));\n  console.log(Response.error().type);\n  const h = new Headers({ a: \"1\", b: \"2\" });\n  console.log([...h]);\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const c = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`);\n    console.log(c.status, c.ok);\n    srv.close();\n  });\n}"
+    },
+    {
+      "name": "r2c process.versions node and v8",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(process.versions.node.split(\".\")[0], typeof process.versions.v8, process.versions.node === process.version.slice(1));\n}"
+    },
+    {
+      "name": "r2c node:buffer File export dns.promises and import.meta.resolve",
+      "expect": "matched",
+      "source": "import { File } from \"node:buffer\";\nimport * as dns from \"node:dns\";\nfunction main(): void {\n  const f = new File([\"xyz\"], \"n.txt\", { lastModified: 5 });\n  console.log(f.name, f.size, f.lastModified);\n  dns.promises.lookup(\"127.0.0.1\").then((r: any) => console.log(r));\n  console.log(typeof import.meta.resolve);\n}"
+    },
+    {
+      "name": "r2c self-signed certificate passed as ca connects over tls",
+      "expect": "matched",
+      "source": "import * as tls from \"node:tls\";\nimport * as fs from \"node:fs\"; import * as os from \"node:os\"; import * as path from \"node:path\";\nimport { execFileSync } from \"node:child_process\";\nconst d = fs.mkdtempSync(path.join(os.tmpdir(), \"r2c-tls-\"));\nexecFileSync(\"openssl\", [\"req\", \"-x509\", \"-newkey\", \"rsa:2048\", \"-nodes\", \"-keyout\", d + \"/k.pem\", \"-out\", d + \"/c.pem\", \"-subj\", \"/CN=localhost\", \"-days\", \"1\"], { stdio: \"ignore\" });\nconst cert = fs.readFileSync(d + \"/c.pem\");\nconst srv = tls.createServer({ key: fs.readFileSync(d + \"/k.pem\"), cert }, (s) => { s.on(\"data\", (x) => s.end(\"echo:\" + x)); });\nfunction main(): void {\n  srv.listen(0, \"127.0.0.1\", () => {\n    const c = tls.connect({ port: (srv.address() as any).port, host: \"127.0.0.1\", ca: cert, servername: \"localhost\" }, () => {\n      console.log(c.authorized, c.encrypted);\n      c.write(\"hi\");\n    });\n    c.setEncoding(\"utf8\"); c.on(\"data\", (x) => console.log(x)); c.on(\"close\", () => { srv.close(); fs.rmSync(d, { recursive: true }); });\n  });\n}"
+    },
+    {
+      "name": "r2c util.inspect line breaking compact and breakLength options",
+      "expect": "matched",
+      "source": "import * as util from \"node:util\";\nfunction main(): void {\n  const o = { alpha: \"aaaaaaaaaaaaaaaaaaaa\", beta: \"bbbbbbbbbbbbbbbbbbbb\", gamma: \"cccccccccccccccccccc\", delta: [1, 2, 3] };\n  console.log(util.inspect(o));\n  console.log(util.inspect(o, { breakLength: Infinity }));\n  console.log(util.inspect({ a: 1, b: { c: 2 } }, { compact: false }));\n  console.log(util.inspect({ a: 1, b: { c: 2 } }, { compact: true }));\n  console.log(util.inspect({ aaaaaaaaaa: 1, bbbbbbbbbb: 2, cccccccccc: 3 }, { breakLength: 20 }));\n  console.log(util.inspect({ a: { b: { c: {} } } }, { compact: 1 }));\n  console.log(util.inspect([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]));\n  console.log(util.inspect({ list: [\"alpha\", \"beta\", \"gamma\", \"delta\", \"epsilon\", \"zeta\", \"eta\", \"theta\"], m: new Map([[1, { a: 1 }]]), s: new Set([1, 2]) }));\n  console.log(util.inspect([[]], { depth: 0 }), util.inspect({ x: {} }, { depth: 0 }));\n}"
+    },
+    {
+      "name": "r2c Object call boxes a primitive and optional chain on live undefined",
+      "expect": "matched",
+      "source": "import { AsyncLocalStorage } from \"node:async_hooks\";\nconst als = new AsyncLocalStorage<{ id: number }>();\nfunction main(): void {\n  const a = Object(1); const b = Object(\"s\"); const o = { x: 1 };\n  console.log(typeof a, typeof b, Object(o) === o, typeof Object(null));\n  console.log(als.getStore()?.id, als.run({ id: 4 }, () => als.getStore()?.id));\n}"
+    },
+    {
+      "name": "r2c node:timers/promises import leaves the global timers alone",
+      "expect": "matched",
+      "source": "import * as tp from \"node:timers/promises\";\nfunction main(): void {\n  console.log(\"start\", typeof tp.setTimeout);\n  setTimeout(() => { console.log(\"timeout\"); setImmediate(() => console.log(\"immediate\")); }, 1);\n}"
     }
   ]
 }
