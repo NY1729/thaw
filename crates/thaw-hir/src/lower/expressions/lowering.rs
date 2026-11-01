@@ -2028,6 +2028,33 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 if bin.op == BinaryOp::InstanceOf {
+                    // `static [Symbol.hasInstance](v)` decides the answer (`x instanceof (C as any)` too).
+                    let mut operand = peel_parens(bin.right.as_ref());
+                    while let Some((inner, _)) = split_type_assertion(operand) {
+                        operand = peel_parens(inner);
+                    }
+                    if let Expr::Ident(class) = operand {
+                        let symbol = class_static_method_symbol(
+                            class.sym.as_ref(),
+                            &well_known_symbol_key("hasInstance"),
+                        );
+                        if self.is_unshadowed_class_identifier(class.sym.as_ref())
+                            && self.signatures.contains_key(&symbol)
+                        {
+                            return self.lower_call(&CallExpr {
+                                span: bin.span,
+                                ctxt: Default::default(),
+                                callee: Callee::Expr(Box::new(Expr::Ident(
+                                    swc_ecma_ast::Ident::new_no_ctxt(symbol.into(), bin.span),
+                                ))),
+                                args: vec![swc_ecma_ast::ExprOrSpread {
+                                    spread: None,
+                                    expr: bin.left.clone(),
+                                }],
+                                type_args: None,
+                            });
+                        }
+                    }
                     // A variable holding a constructor value (`const k: any = C`) is a
                     // dynamic right operand, not a class name.
                     let dynamic_class_variable = matches!(bin.right.as_ref(), Expr::Ident(name)
@@ -5003,6 +5030,14 @@ impl<'a> FnLowerer<'a> {
                         }
                         let source = self.lower_expr(&args[0].expr)?;
                         let source = self.coerce_primitive_to_string(source)?;
+                        // ponytail: only a literal pattern gets `.source` escaping (`/` outside a
+                        // class, line terminators); a computed pattern keeps its raw text.
+                        let source = match source {
+                            HirExpr::Lit(HirLit::Str(text)) => {
+                                HirExpr::Lit(HirLit::Str(escape_regex_source(&text)))
+                            }
+                            other => other,
+                        };
                         let flags = if let Some(argument) = args.get(1) {
                             let flags = self.lower_expr(&argument.expr)?;
                             self.coerce_primitive_to_string(flags)?
@@ -7014,4 +7049,48 @@ fn native_builtin_instanceof_json_sentinel(class: &str) -> Option<&'static str> 
         "Set" => "__thaw_set_values__",
         _ => return None,
     })
+}
+
+/// V8's `EscapeRegExpSource`: `/` outside a character class becomes `\/`, line terminators
+/// become their escapes; existing escapes are kept as written.
+fn escape_regex_source(source: &str) -> String {
+    if source.is_empty() {
+        return "(?:)".into();
+    }
+    let mut out = String::with_capacity(source.len());
+    let (mut in_class, mut escaped) = (false, false);
+    for c in source.chars() {
+        if escaped {
+            escaped = false;
+            match c {
+                '\n' => out.push('n'),
+                '\r' => out.push('r'),
+                '\u{2028}' => out.push_str("u2028"),
+                '\u{2029}' => out.push_str("u2029"),
+                _ => out.push(c),
+            }
+            continue;
+        }
+        match c {
+            '\\' => {
+                escaped = true;
+                out.push(c);
+            }
+            '[' => {
+                in_class = true;
+                out.push(c);
+            }
+            ']' => {
+                in_class = false;
+                out.push(c);
+            }
+            '/' if !in_class => out.push_str("\\/"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            _ => out.push(c),
+        }
+    }
+    out
 }

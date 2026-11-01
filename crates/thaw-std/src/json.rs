@@ -9024,6 +9024,20 @@ pub unsafe extern "C" fn thaw_json_own_keys(value: *const Value) -> *mut u8 {
 /// `value` must be null or point to a valid JSON `Value`.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_json_own_symbols(value: *const Value) -> *mut u8 {
+    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        // A live object: its own keys (mode 1) list Symbols as their wire text.
+        return alloc_pointer_array(
+            host_enumerate_values(lease, 1)
+                .into_iter()
+                .filter(|key| match key {
+                    Value::String(text) => is_symbol_key_wire(text.as_bytes()),
+                    Value::Wtf8(bytes) => is_symbol_key_wire(bytes),
+                    _ => false,
+                })
+                .map(|key| Box::into_raw(Box::new(key)).cast())
+                .collect(),
+        );
+    }
     let symbols = match unsafe { value.as_ref() } {
         Some(value @ Value::Object(_)) => enumerable_entries(value)
             .into_iter()

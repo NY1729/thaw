@@ -3018,7 +3018,12 @@ impl<'a> FnLowerer<'a> {
             if property.sym.as_ref() == "length"
                 && !self.scope.contains_key(&name)
             {
-                if let Some(length) = self.signatures.get(&name).and_then(|signature| signature.source_length) {
+                if let Some(length) = self
+                    .signatures
+                    .get(&name)
+                    .or_else(|| self.signatures.get(&class_constructor_symbol(&name)))
+                    .and_then(|signature| signature.source_length)
+                {
                     return Ok(HirExpr::Lit(HirLit::F64(length as f64)));
                 }
             }
@@ -3030,7 +3035,10 @@ impl<'a> FnLowerer<'a> {
         if let Some(symbol) = self
             .builtin_symbol_member_name(&Expr::Member(member.clone()))
         {
-            return Ok(HirExpr::Lit(HirLit::Str(well_known_symbol_key(symbol))));
+            return Ok(HirExpr::TypedClosure(
+                HirType::Symbol,
+                Box::new(HirExpr::Lit(HirLit::Str(well_known_symbol_key(symbol)))),
+            ));
         }
         // `obj[Symbol.toStringTag]` -- a compile-time tag per receiver type.
         if let MemberProp::Computed(computed) = &member.prop {
