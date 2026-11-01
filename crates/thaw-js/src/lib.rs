@@ -50,6 +50,8 @@ mod url;
 mod vm;
 #[path = "web/abort.rs"]
 mod web_abort;
+#[path = "web/async_hooks.rs"]
+mod web_async_hooks;
 #[path = "web/blob.rs"]
 mod web_blob;
 #[path = "web/crypto.rs"]
@@ -738,6 +740,7 @@ impl Interp {
         web_blob::install(&mut it);
         web_fetch::install(&mut it);
         web_streams::install(&mut it);
+        web_async_hooks::install(&mut it);
         web_wasm::install(&mut it);
         web_crypto::install(&mut it);
         it.install_url();
