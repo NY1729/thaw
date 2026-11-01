@@ -4536,7 +4536,7 @@
     {
       "name": "r4a instanceof Object Function and wrappers",
       "expect": "matched",
-      "source": "function main(): void { const v: unknown = new Map(); console.log(v instanceof Object, v instanceof Function, v instanceof Promise); const f = () => 1; console.log(f instanceof Function, f instanceof Object); const s: any = \"x\"; console.log(s instanceof String, 5 instanceof Number); }"
+      "source": "function main(): void { const m: Map<string, number> = new Map(); console.log(m instanceof Object, m instanceof Function, m instanceof Promise); const f: () => number = () => 1; console.log(f instanceof Function, f instanceof Object); const s: any = \"x\"; console.log(s instanceof String, 5 instanceof Number); }"
     },
     {
       "name": "r4a await readdir then sort on any array",
