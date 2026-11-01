@@ -3035,10 +3035,7 @@ impl<'a> FnLowerer<'a> {
         if let Some(symbol) = self
             .builtin_symbol_member_name(&Expr::Member(member.clone()))
         {
-            return Ok(HirExpr::TypedClosure(
-                HirType::Symbol,
-                Box::new(HirExpr::Lit(HirLit::Str(well_known_symbol_key(symbol)))),
-            ));
+            return Ok(HirExpr::Lit(HirLit::Str(well_known_symbol_key(symbol))));
         }
         // `obj[Symbol.toStringTag]` -- a compile-time tag per receiver type.
         if let MemberProp::Computed(computed) = &member.prop {
