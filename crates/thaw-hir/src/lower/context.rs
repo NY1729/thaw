@@ -94,6 +94,8 @@ struct FnLowerer<'a> {
     enum_values: &'a EnumValues,
     enum_reverse_values: &'a EnumReverseValues,
     ret_type: HirType,
+    /// The function being lowered is `async` (its `ret_type` is the unwrapped result).
+    async_return: bool,
     call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
     generic_call_returns: HashMap<Symbol, HirType>,
     generic_arrows: HashMap<Symbol, swc_ecma_ast::ArrowExpr>,

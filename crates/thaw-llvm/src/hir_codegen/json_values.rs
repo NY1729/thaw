@@ -267,6 +267,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let owned = matches!(object, HirExpr::Var(name) if name.starts_with("__thaw_json_wrap_obj_"));
         let object = self.compile_expr(object)?;
+        let key_expr = key;
         let key = self.compile_expr(key)?;
         let result = self.compile_expr(value)?;
         if !owned {
@@ -277,7 +278,11 @@ impl<'ctx> HirCompiler<'ctx> {
             // literal still under construction (never observable/frozen
             // yet) -- only a write through an existing binding needs the
             // freeze/seal guard.
-            self.compile_guard_json_write(object, key.into_pointer_value())?;
+            let name = match key_expr {
+                HirExpr::Lit(HirLit::Str(name)) => Some(name.as_str()),
+                _ => None,
+            };
+            self.compile_guard_json_write(object, key.into_pointer_value(), name)?;
         }
         self.compile_json_object_set_native_with_undefined(
             object,
@@ -303,6 +308,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         object: BasicValueEnum<'ctx>,
         key: PointerValue<'ctx>,
+        key_name: Option<&str>,
     ) -> Result<(), String> {
         if !object.is_pointer_value() {
             return Ok(());
@@ -392,7 +398,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(frozen_blocked);
-        self.compile_throw_type_error("Cannot assign to read only property of object")?;
+        match key_name {
+            Some(name) => self.compile_throw_type_error(&format!(
+                "Cannot assign to read only property '{name}' of object '#<Object>'"
+            ))?,
+            None => self.compile_throw_type_error("Cannot assign to read only property of object")?,
+        }
 
         self.builder.position_at_end(extension_blocked);
         self.compile_throw_type_error("Cannot add property, object is not extensible")?;
@@ -529,7 +540,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("thaw_number_to_string returned no value")?;
         let value = self.compile_expr(value)?;
         self.compile_guard_json_non_nullish(object, "Cannot set properties of null or undefined")?;
-        self.compile_guard_json_write(object, key.into_pointer_value())?;
+        self.compile_guard_json_write(object, key.into_pointer_value(), None)?;
         let result = self.builder
             .build_call(
                 self.module.get_function("thaw_json_index_set").unwrap(),

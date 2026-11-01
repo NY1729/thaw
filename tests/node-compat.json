@@ -4267,6 +4267,21 @@
       "name": "nd5a timers as values and global alias",
       "expect": "matched",
       "source": "function main(): void {\n  const t = setTimeout;\n  t(() => console.log(\"t\"), 1);\n  const si = setImmediate;\n  si(() => console.log(\"si\"));\n  console.log(global === globalThis);\n}\n"
+    },
+    {
+      "name": "nd4 async function returning a timer promise waits for it",
+      "expect": "matched",
+      "source": "async function sleep(ms: number) { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function sleepTyped(ms: number): Promise<void> { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function f(n: number) { await sleep(n); return n * 2; }\nfunction other(): Promise<number> { return new Promise<number>(r => setTimeout(() => r(7), 20)); }\nasync function adopt() { return other(); }\nclass C { async m() { return sleep(20); } async n(): Promise<void> { return sleepTyped(20); } }\nasync function main(): Promise<void> {\n  const t = Date.now();\n  await sleep(40);\n  console.log(Date.now() - t >= 35);\n  await sleepTyped(40);\n  console.log(Date.now() - t >= 75);\n  console.log(await Promise.race([f(30), f(5)]));\n  console.log(await adopt());\n  const c = new C();\n  const u = Date.now();\n  await c.m();\n  await c.n();\n  console.log(Date.now() - u >= 35);\n}\n"
+    },
+    {
+      "name": "nd4 Array.from of a typed array map or slice result",
+      "expect": "matched",
+      "source": "function main(): void {\n  const u = new Uint8Array([1, 2, 3]);\n  console.log(Array.from(u.map(x => x * 2)));\n  const s = u.slice(1);\n  console.log(Array.from(s), Array.from(u.subarray(1)));\n  const m = u.map(x => x + 1);\n  console.log(Array.from(m), Array.from(u));\n}\n"
+    },
+    {
+      "name": "nd4 Date string conversion of an invalid or valid date",
+      "expect": "matched",
+      "source": "function main(): void {\n  const d = new Date(NaN);\n  console.log(String(d), `${d}`, \"x\" + d, d.toString(), d.getTime(), JSON.stringify(d));\n  const v = new Date(0);\n  console.log(String(v) === v.toString(), `${v}` === v.toString(), (\"\" + v) === v.toString());\n}\n"
     }
   ]
 }

@@ -1461,6 +1461,20 @@ impl<'a> FnLowerer<'a> {
                 )
             }
             HirType::Object(fields) => {
+                // The private Date layout stringifies as `Date.prototype.toString`.
+                if HirType::Object(fields.clone()) == date_object_type() {
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_date_to_string".to_string())),
+                        vec![HirExpr::PropAccess(
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_date_assert_native_identity".into())),
+                                vec![value],
+                            )),
+                            HirType::Object(fields),
+                            "timestamp".to_string(),
+                        )],
+                    ));
+                }
                 if HirType::Object(fields.clone()) == regex_object_type() {
                     return self.regex_to_string_expr(value);
                 }
@@ -3883,6 +3897,10 @@ impl<'a> FnLowerer<'a> {
         };
         if let Some(result) = self.object_default_to_primitive(value.clone(), fields, &ty)? {
             return Ok((result, HirType::Json));
+        }
+        // A Date's default hint is "string" (`Date.prototype[Symbol.toPrimitive]`).
+        if ty == date_object_type() {
+            return Ok((self.coerce_primitive_to_string(value)?, HirType::Str));
         }
         // An Error-family record has no `valueOf`: `OrdinaryToPrimitive` falls to its `toString`.
         if object_type_is_error_family(&ty) {
