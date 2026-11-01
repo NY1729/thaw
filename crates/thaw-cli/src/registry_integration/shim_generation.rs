@@ -417,6 +417,14 @@ fn generate_registry_shims_pass(
                 canonical = serde_json::to_string(builtin).unwrap(),
             ));
         }
+        // `createRequire` in thaw-js needs `node:path` as a factory inside the node:module realm (see
+        // thaw-js install_module_loader); the QuickJS bundle is unchanged
+        if name == "node:module" {
+            thaw_js_bundles.insert(
+                name.clone(),
+                thaw_registry::builtin_bundle_with("node:module", &["path"])?,
+            );
+        }
         let explicit_type_exports =
             thaw_bridge::exported_type_names_named(&package.dts_source, &dts_filename);
         let value_exports =

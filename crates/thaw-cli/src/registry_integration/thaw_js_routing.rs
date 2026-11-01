@@ -309,6 +309,7 @@ fn thaw_js_declared_function(line: &str, package: &str) -> Option<String> {
 /// until its own cases pass: plan Q2 flips builtin modules one at a time.
 const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:events",
+    "node:module",
     "node:path",
     "node:path/posix",
     "node:path/win32",
