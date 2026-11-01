@@ -189,10 +189,12 @@ pub(crate) fn install(it: &mut Interp) {
         };
         // stack limits and depth follow the calling thread
         realm.interp.restore(it.snapshot());
+        realm.interp.vm_sandbox = sandbox.clone();
         let r = match &sandbox {
             Some(sb) => run_in_sandbox(it, &mut realm, sb, &code),
             None => realm.interp.run_sloppy(&code),
         };
+        realm.interp.vm_sandbox = None;
         if let Some(slot) = it.vm.get_mut(&id) {
             slot.realm = Some(realm);
             slot.busy = false;
