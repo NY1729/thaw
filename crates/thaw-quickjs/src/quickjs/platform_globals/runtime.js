@@ -633,6 +633,8 @@
       }
       // 28: an Error's own extra properties as JSON (`code`, ...), for its native framed text.
       case 28: return globalThis.__thaw_error_properties_json(value);
+      // 29: a typed array / DataView / ArrayBuffer / RegExp, which structuredClone must keep whole.
+      case 29: return (thawGraphIsView(value) || thawGraphArrayBuffer(value) || thawGraphKind(thawGraphRegExpSource, value)) ? '1' : '0';
       case 22:
         return thawDateApply(thawHostIsPrototypeOf, thawHostErrorPrototype, [value]) ? '1' : '0';
       default: throw new thawGraphTypeError('Invalid native host query');

@@ -2692,8 +2692,9 @@ impl<'a> FnLowerer<'a> {
         if callee_name == "structuredClone" {
             let (arguments, bindings) =
                 self.lower_native_spread_values(&call.args, "structuredClone")?;
-            let [value] = arguments.as_slice() else {
-                return Err("`structuredClone` expects exactly one argument".into());
+            // ponytail: the `{ transfer }` options argument is accepted and ignored (nothing is detached).
+            let ([value] | [value, _]) = arguments.as_slice() else {
+                return Err("`structuredClone` expects a value and optional options".into());
             };
             let value = value.clone();
             let value_type = self.infer_expr_type(&value)?;
