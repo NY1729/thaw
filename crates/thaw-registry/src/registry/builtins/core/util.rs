@@ -42,10 +42,12 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20}\n\
              \x20\x20\x20\x20return null;\n\
              \x20\x20}\n\
+             \x20\x20function isEmptyContainer(input) { if (Object.keys(input).length !== 0 || Object.getOwnPropertySymbols(input).length !== 0) return false; return Array.isArray(input) ? input.length === 0 : input instanceof Map || input instanceof Set ? input.size === 0 : true; }\n\
+             \x20\x20function indented(value, remaining) { indentationLvl += 2; try { return render(value, remaining); } finally { indentationLvl -= 2; } }\n\
              \x20\x20function renderProperty(owner, key, remaining) {\n\
              \x20\x20\x20\x20var descriptor = Object.getOwnPropertyDescriptor(owner, key);\n\
              \x20\x20\x20\x20if (!descriptor) return '';\n\
-             \x20\x20\x20\x20if (Object.prototype.hasOwnProperty.call(descriptor, 'value')) return render(descriptor.value, remaining);\n\
+             \x20\x20\x20\x20if (Object.prototype.hasOwnProperty.call(descriptor, 'value')) return indented(descriptor.value, remaining);\n\
              \x20\x20\x20\x20var getter = descriptor.get, setter = descriptor.set, evaluate = getter && (options.getters === true || options.getters === 'get' && !setter || options.getters === 'set' && setter);\n\
              \x20\x20\x20\x20if (evaluate) {\n\
              \x20\x20\x20\x20\x20\x20var got; try { got = getter.call(owner); } catch (_) { return paint('[Inspection threw]', 'special'); }\n\
@@ -66,7 +68,59 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20});\n\
              \x20\x20\x20\x20return out;\n\
              \x20\x20}\n\
-             \x20\x20function wrap(prefix, open, items, close) { return items.length ? (prefix ? prefix + ' ' : '') + open + ' ' + items.join(', ') + ' ' + close : (prefix ? prefix + ' ' : '') + open + close; }\n\
+               var indentationLvl = 0, currentDepth = 0;\n\
+               function isBelowBreakLength(output, start, base) {\n\
+                 var total = output.length + start;\n\
+                 if (total + output.length > options.breakLength) return false;\n\
+                 for (var i = 0; i < output.length; i++) { total += output[i].length; if (total > options.breakLength) return false; }\n\
+                 return base === '' || base.indexOf('\\n') < 0;\n\
+               }\n\
+               function groupArrayElements(output, value) {\n\
+                 var totalLength = 0, maxLength = 0, i = 0, outputLength = output.length;\n\
+                 if (options.maxArrayLength < output.length) outputLength--;\n\
+                 var separatorSpace = 2, dataLen = new Array(outputLength);\n\
+                 for (; i < outputLength; i++) { var len = options.colors ? output[i].replace(/\\u001b\\[\\d\\d?m/g, '').length : output[i].length; dataLen[i] = len; totalLength += len + separatorSpace; if (maxLength < len) maxLength = len; }\n\
+                 var actualMax = maxLength + separatorSpace;\n\
+                 if (actualMax * 3 + indentationLvl < options.breakLength && (totalLength / actualMax > 5 || maxLength <= 6)) {\n\
+                   var averageBias = Math.sqrt(actualMax - totalLength / output.length), biasedMax = Math.max(actualMax - 3 - averageBias, 1);\n\
+                   var columns = Math.min(Math.round(Math.sqrt(2.5 * biasedMax * outputLength) / biasedMax), Math.floor((options.breakLength - indentationLvl) / actualMax), options.compact * 4, 15);\n\
+                   if (columns <= 1) return output;\n\
+                   var tmp = [], maxLineLength = [];\n\
+                   for (var c = 0; c < columns; c++) { var lineLength = 0; for (var j = c; j < output.length; j += columns) { if (dataLen[j] > lineLength) lineLength = dataLen[j]; } maxLineLength.push(lineLength + separatorSpace); }\n\
+                   var padStart = true;\n\
+                   if (value !== undefined) { for (var k = 0; k < output.length; k++) { if (typeof value[k] !== 'number' && typeof value[k] !== 'bigint') { padStart = false; break; } } }\n\
+                   for (var row = 0; row < outputLength; row += columns) {\n\
+                     var max = Math.min(row + columns, outputLength), str = '', col = row;\n\
+                     for (; col < max - 1; col++) { var padding = maxLineLength[col - row] + output[col].length - dataLen[col], cell = output[col] + ', '; str += padStart ? cell.padStart(padding, ' ') : cell.padEnd(padding, ' '); }\n\
+                     if (padStart) str += output[col].padStart(maxLineLength[col - row] + output[col].length - dataLen[col] - separatorSpace, ' '); else str += output[col];\n\
+                     tmp.push(str);\n\
+                   }\n\
+                   if (options.maxArrayLength < output.length) tmp.push(output[outputLength]);\n\
+                   output = tmp;\n\
+                 }\n\
+                 return output;\n\
+               }\n\
+               function wrap(prefix, open, items, close, level, arrayValue) {\n\
+                 var brace0 = (prefix ? prefix + ' ' : '') + open;\n\
+                 if (!items.length) return brace0 + close;\n\
+                 var compact = options.compact;\n\
+                 if (compact !== true) {\n\
+                   if (typeof compact === 'number' && compact >= 1) {\n\
+                     var entries = items.length, grouped = items;\n\
+                     if (arrayValue !== undefined && entries > 6) grouped = groupArrayElements(grouped, arrayValue);\n\
+                     if (currentDepth - level < compact && entries === grouped.length) {\n\
+                       var start = grouped.length + indentationLvl + brace0.length + 10;\n\
+                       if (isBelowBreakLength(grouped, start, '')) { var joined = grouped.join(', '); if (joined.indexOf('\\n') < 0) return brace0 + ' ' + joined + ' ' + close; }\n\
+                     }\n\
+                     items = grouped;\n\
+                   }\n\
+                   var indentation = '\\n' + ' '.repeat(indentationLvl);\n\
+                   return brace0 + indentation + '  ' + items.join(',' + indentation + '  ') + indentation + close;\n\
+                 }\n\
+                 if (isBelowBreakLength(items, 0, '')) return brace0 + ' ' + items.join(', ') + ' ' + close;\n\
+                 var pad = ' '.repeat(indentationLvl);\n\
+                 return brace0 + (brace0.length === 1 ? ' ' : '\\n' + pad + '  ') + items.join(',\\n' + pad + '  ') + ' ' + close;\n\
+               }\n\
              \x20\x20function render(input, remaining) {\n\
              \x20\x20\x20\x20if (input !== null && (typeof input === 'object' || typeof input === 'function') && options.customInspect !== false) {\n\
              \x20\x20\x20\x20\x20\x20var custom = input[inspectCustom];\n\
@@ -96,9 +150,10 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20if (input instanceof Date) return paint(isNaN(input.getTime()) ? 'Invalid Date' : input.toISOString(), 'date');\n\
              \x20\x20\x20\x20if (input instanceof RegExp) return paint(String(input), 'regexp');\n\
              \x20\x20\x20\x20if (ArrayBuffer.isView(input) && !(input instanceof DataView)) { if (typeof Buffer !== 'undefined' && Buffer.isBuffer(input)) { var hex = []; for (var b = 0; b < input.length && b < 50; b++) hex.push((input[b] < 16 ? '0' : '') + input[b].toString(16)); return '<Buffer' + (hex.length ? ' ' + hex.join(' ') : '') + (input.length > 50 ? ' ... ' + (input.length - 50) + ' more byte' + (input.length - 50 > 1 ? 's' : '') : '') + '>'; } var typedItems = [], typedMax = Math.min(input.length, options.maxArrayLength); for (var t = 0; t < typedMax; t++) typedItems.push(render(input[t], remaining - 1)); if (input.length > typedMax) typedItems.push('... ' + (input.length - typedMax) + ' more item' + (input.length - typedMax > 1 ? 's' : '')); if (options.showHidden) typedItems.push('[BYTES_PER_ELEMENT]: ' + input.BYTES_PER_ELEMENT, '[length]: ' + input.length, '[byteLength]: ' + input.byteLength, '[byteOffset]: ' + input.byteOffset, '[buffer]: ' + render(input.buffer, remaining - 1)); return input[Symbol.toStringTag] + '(' + input.length + ') ' + (typedItems.length ? '[ ' + typedItems.join(', ') + ' ]' : '[]'); }\n\
-             \x20\x20\x20\x20if (remaining < 0) { var shortName = constructorName(input); return paint('[' + (Array.isArray(input) ? 'Array' : input instanceof Map ? 'Map' : input instanceof Set ? 'Set' : shortName || 'Object') + ']', 'special'); }\n\
+             \x20\x20\x20\x20if (remaining < 0 && !(Array.isArray(input) ? input.length === 0 && Object.keys(input).length === 0 : Object.getPrototypeOf(input) === Object.prototype && Object.keys(input).length === 0 && Object.getOwnPropertySymbols(input).length === 0)) { var shortName = constructorName(input); return paint('[' + (Array.isArray(input) ? 'Array' : input instanceof Map ? 'Map' : input instanceof Set ? 'Set' : shortName || 'Object') + ']', 'special'); }\n\
              \x20\x20\x20\x20if (seen.indexOf(input) >= 0) { if (!refs.has(input)) refs.set(input, refs.size + 1); return paint('[Circular *' + refs.get(input) + ']', 'special'); }\n\
              \x20\x20\x20\x20seen.push(input);\n\
+             \x20\x20\x20\x20if (!isEmptyContainer(input)) currentDepth = seen.length - 1;\n\
              \x20\x20\x20\x20try {\n\
              \x20\x20\x20\x20\x20\x20var name = constructorName(input), nullProto = Object.getPrototypeOf(input) === null, result;\n\
              \x20\x20\x20\x20\x20\x20if (Array.isArray(input)) {\n\
@@ -112,15 +167,15 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20\x20\x20\x20\x20if (index < length) { var more = length - index; items.push('... ' + more + ' more item' + (more > 1 ? 's' : '')); }\n\
              \x20\x20\x20\x20\x20\x20\x20\x20items = items.concat(entriesOf(input, remaining - 1, true));\n\
              \x20\x20\x20\x20\x20\x20\x20\x20if (options.showHidden) items.push('[length]: ' + length);\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap(name && name !== 'Array' ? name + '(' + length + ')' : '', '[', items, ']');\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap(name && name !== 'Array' ? name + '(' + length + ')' : '', '[', items, ']', seen.length - 1, input);\n\
              \x20\x20\x20\x20\x20\x20} else if (input instanceof Map) {\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap('Map(' + input.size + ')', '{', Array.from(input).map(function(entry) { return render(entry[0], remaining - 1) + ' => ' + render(entry[1], remaining - 1); }).concat(entriesOf(input, remaining - 1, false)), '}');\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap('Map(' + input.size + ')', '{', Array.from(input).map(function(entry) { return indented(entry[0], remaining - 1) + ' => ' + indented(entry[1], remaining - 1); }).concat(entriesOf(input, remaining - 1, false)), '}', seen.length - 1);\n\
              \x20\x20\x20\x20\x20\x20} else if (input instanceof Set) {\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap('Set(' + input.size + ')', '{', Array.from(input).map(function(item) { return render(item, remaining - 1); }).concat(entriesOf(input, remaining - 1, false)), '}');\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap('Set(' + input.size + ')', '{', Array.from(input).map(function(item) { return indented(item, remaining - 1); }).concat(entriesOf(input, remaining - 1, false)), '}', seen.length - 1);\n\
              \x20\x20\x20\x20\x20\x20} else {\n\
              \x20\x20\x20\x20\x20\x20\x20\x20var tagName = input[Symbol.toStringTag], label = nullProto ? '[Object: null prototype]' : name && name !== 'Object' ? name : '';\n\
              \x20\x20\x20\x20\x20\x20\x20\x20if (typeof tagName === 'string' && tagName !== '' && tagName !== name && !(options.showHidden ? Object.prototype.hasOwnProperty : Object.prototype.propertyIsEnumerable).call(input, Symbol.toStringTag)) label = (label || 'Object') + ' [' + tagName + ']';\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap(label, '{', entriesOf(input, remaining - 1, false), '}');\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20result = wrap(label, '{', entriesOf(input, remaining - 1, false), '}', seen.length - 1);\n\
              \x20\x20\x20\x20\x20\x20}\n\
              \x20\x20\x20\x20\x20\x20if (refs.has(input)) result = '<ref *' + refs.get(input) + '> ' + result;\n\
              \x20\x20\x20\x20\x20\x20return result;\n\

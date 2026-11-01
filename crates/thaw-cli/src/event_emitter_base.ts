@@ -8,12 +8,22 @@ class EventEmitterEntry {
 class EventEmitter {
   _events: Map<string, EventEmitterEntry[]> = new Map();
   _maxListeners: number = 10;
+  _warned: string[] = [];
   _add(event: string, listener: (...args: any[]) => void, prepend: boolean, once: boolean): EventEmitter {
     if (typeof listener !== "function") throw new TypeError('The "listener" argument must be of type function. Received ' + (listener === undefined ? "undefined" : typeof listener));
     if (this._events.has("newListener")) this.emit("newListener", event, listener);
     if (!this._events.has(event)) { const fresh: EventEmitterEntry[] = []; this._events.set(event, fresh); }
     const list = this._events.get(event)!;
     if (prepend) list.unshift(new EventEmitterEntry(listener, once)); else list.push(new EventEmitterEntry(listener, once));
+    if (this._maxListeners > 0 && list.length > this._maxListeners && this._warned.indexOf(event) < 0) {
+      this._warned.push(event);
+      const warning: any = new Error("Possible EventEmitter memory leak detected. " + list.length + " " + event + " listeners added to [" + (this as any).constructor.name + "]. MaxListeners is " + this._maxListeners + ". Use emitter.setMaxListeners() to increase limit");
+      warning.name = "MaxListenersExceededWarning";
+      warning.emitter = this;
+      warning.type = event;
+      warning.count = list.length;
+      (process as any).emitWarning(warning);
+    }
     return this;
   }
   on(event: string, listener: (...args: any[]) => void): EventEmitter { return this._add(event, listener, false, false); }

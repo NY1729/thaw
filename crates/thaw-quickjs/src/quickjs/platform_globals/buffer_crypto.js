@@ -770,12 +770,14 @@
       return outputEncoding === 'buffer' ? value : value.toString(outputEncoding);
     }
   };
+  // A Buffer's backing store is not a genuine ArrayBuffer here; copy into one.
+  const toArrayBuffer = bytes => { const copy = new Uint8Array(bytes.length); copy.set(bytes); return copy.buffer; };
   const subtle = {
     digest(algorithm, data) {
       const name = typeof algorithm === 'string' ? algorithm : algorithm.name;
       const value = cryptoModule.createHash(name).update(Buffer.from(data.buffer || data,
         data.byteOffset || 0, data.byteLength)).digest();
-      return Promise.resolve(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+      return Promise.resolve(toArrayBuffer(value));
     },
     importKey(format, keyData, algorithm, extractable, usages) {
       if (format !== 'raw') return Promise.reject(new TypeError(`Unsupported key format: ${format}`));
@@ -792,7 +794,7 @@
       const digest = typeof hash === 'string' ? hash : hash && hash.name;
       if (String(name).toUpperCase() !== 'HMAC' || !key.__thawRaw) return Promise.reject(new TypeError('Unsupported signing key'));
       const value = Buffer.from(__thaw_crypto_hmac_hex(normalizeHashAlgorithm(digest), key.__thawRaw.toString('hex'), Buffer.from(data.buffer || data, data.byteOffset || 0, data.byteLength).toString('hex')), 'hex');
-      return Promise.resolve(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+      return Promise.resolve(toArrayBuffer(value));
     },
     deriveBits(algorithm, key, length) {
       const name = typeof algorithm === 'string' ? algorithm : algorithm.name;
@@ -806,7 +808,7 @@
         const bytes = checkedPbkdf2Number(bits / 8, 0, 'length');
         const salt = Buffer.from(algorithm.salt.buffer || algorithm.salt, algorithm.salt.byteOffset || 0, algorithm.salt.byteLength);
         const value = Buffer.from(__thaw_crypto_pbkdf2_hex(normalizeHashAlgorithm(digest), key.__thawRaw.toString('hex'), salt.toString('hex'), iterations, bytes), 'hex');
-        return Promise.resolve(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+        return Promise.resolve(toArrayBuffer(value));
       } catch (error) { return Promise.reject(error); }
     }
   };

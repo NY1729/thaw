@@ -3015,7 +3015,8 @@ fn process_exposes_time_cwd_and_event_helpers() {
         );
     assert_eq!(
         call("processHelpers", "[]"),
-        r#"["/tmp",true,"ThawWarning:THAW001:careful",0,true,2,true,true,true,0,0,"thaw",0,1,2,"function"]"#
+        // Node delivers warnings on nextTick: none has fired yet and the once-listener is still registered.
+        r#"["/tmp",true,"",1,true,2,true,true,true,0,0,"thaw",0,1,2,"function"]"#
     );
 }
 

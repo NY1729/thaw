@@ -101,3 +101,23 @@ if (typeof Atomics === 'object' && typeof Atomics.waitAsync !== 'function') {
     return nativeCount + notified;
   };
 }
+
+// quickjs-ng refuses Atomics.wait on the main thread; Node allows it. Fall back to polling the cell until it changes or the timeout expires.
+if (typeof Atomics === 'object' && typeof Atomics.wait === 'function') {
+  const nativeWait = Atomics.wait;
+  Atomics.wait = function (typedArray, index, value, timeout) {
+    try {
+      return nativeWait.call(Atomics, typedArray, index, value, timeout);
+    } catch (error) {
+      if (!(error instanceof TypeError) || !/cannot block/.test(String(error.message))) throw error;
+    }
+    const limit = timeout === undefined ? Infinity : Math.max(0, Number(timeout));
+    const expected = typedArray instanceof BigInt64Array ? BigInt(value) : Number(value) | 0;
+    if (Atomics.load(typedArray, index) !== expected) return 'not-equal';
+    const end = Date.now() + limit;
+    while (Date.now() < end) {
+      if (Atomics.load(typedArray, index) !== expected) return 'ok';
+    }
+    return 'timed-out';
+  };
+}
