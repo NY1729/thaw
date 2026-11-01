@@ -4657,6 +4657,11 @@
       "name": "r5c Buffer toJSON is a plain object with the Node encoding",
       "expect": "matched",
       "source": "function main(): void {\n    const b = Buffer.from(\"ab\");\n    console.log(JSON.stringify(b.toJSON()));\n    console.log(Buffer.from(\"héllo\").toJSON().data.length);\n}"
+    },
+    {
+      "name": "tj11 module create require path basename",
+      "expect": "matched",
+      "source": "import { createRequire } from 'node:module'; function main(): void { const require = createRequire('/tmp/example/main.js'); console.log(require('node:path').basename('/a/b.txt')); }"
     }
   ]
 }

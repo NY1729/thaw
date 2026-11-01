@@ -175,10 +175,22 @@ fn add_builtin_module(
 }
 
 fn bundle_builtin_module(name: &str) -> Result<String, String> {
+    bundle_builtin_module_with(name, &[])
+}
+
+/// As `bundle_builtin_module`, also folding in the `extras` builtins as factories (thaw-js's `node:module`
+/// needs `node:path` inside its own realm for `createRequire`).
+pub(crate) fn bundle_builtin_module_with(name: &str, extras: &[&str]) -> Result<String, String> {
     let main_key = format!("node:{name}");
     let mut visited = Vec::new();
     let mut modules = Vec::new();
     add_builtin_module(name, main_key.clone(), &mut visited, &mut modules);
+    for extra in extras {
+        if builtin_module_source(extra).is_none() {
+            return Err(format!("node:{extra} is not a bundled builtin"));
+        }
+        add_builtin_module(extra, format!("node:{extra}"), &mut visited, &mut modules);
+    }
     prepare_async_modules(&mut modules, &mut SourceCache::default())?;
     Ok(render_bundle(&main_key, &modules))
 }

@@ -213,6 +213,12 @@ pub fn bare_node_builtin_specifier(specifier: &str) -> Option<String> {
         .then(|| format!("node:{specifier}"))
 }
 
+/// The thaw-js bundle text of builtin `specifier` plus `extras` (builtin names, no `node:`) as factories.
+pub fn builtin_bundle_with(specifier: &str, extras: &[&str]) -> Result<String, String> {
+    let name = specifier.strip_prefix("node:").unwrap_or(specifier);
+    bundle_builtin_module_with(name, extras)
+}
+
 /// Resolves the deliberately small built-in surface exposed to user imports.
 /// The implementation is the same CommonJS polyfill already used while
 /// bundling npm dependencies, paired with a Thaw-friendly declaration whose

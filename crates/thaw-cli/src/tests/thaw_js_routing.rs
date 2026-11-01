@@ -352,6 +352,7 @@ fn thaw_js_path_flavours_are_registry_bundles_exporting_the_selected_flavour() {
 fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
     for module in [
         "node:events",
+        "node:module",
         "node:path",
         "node:assert",
         "node:os",
@@ -371,6 +372,16 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
     ] {
         assert!(!THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
+}
+
+#[test]
+fn node_module_thaw_js_bundle_scans_clean_with_path_inside() {
+    // the registry bundle must be what thaw-js's install_module_loader parses (BUILTIN_NAMES_MARK)
+    let bundle = thaw_registry::builtin_bundle_with("node:module", &["path"]).unwrap();
+    assert!(bundle.contains("var __thaw_bundle_builtin_names = Object.freeze("));
+    let report = thaw_js::scan::scan_bundle(&bundle).unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    assert_eq!(report.entry, "node:module");
 }
 
 #[test]

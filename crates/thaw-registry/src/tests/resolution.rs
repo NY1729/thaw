@@ -5907,3 +5907,12 @@ fn collect_relative_files_bounds_directory_depth() {
     assert!(collect_relative_files(&dir, &dir, &mut files).is_err());
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn builtin_bundle_with_folds_extra_builtins_into_the_node_module_bundle() {
+    let bundle = builtin_bundle_with("node:module", &["path"]).unwrap();
+    assert!(bundle.contains("\"node:module\":"));
+    assert!(bundle.contains("\"node:path\":"));
+    assert!(bundle.contains("__thaw_bundle_entry_key = \"node:module\""));
+    assert!(builtin_bundle_with("node:module", &["no-such-builtin"]).is_err());
+}
