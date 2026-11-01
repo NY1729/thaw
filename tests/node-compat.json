@@ -4662,6 +4662,11 @@
       "name": "r5d Buffer toJSON prints as plain object, Buffers in containers print as Buffer",
       "expect": "matched",
       "source": "function main(): void {\n    const b = Buffer.from(\"ab\");\n    console.log(b.toJSON(), { type: \"Buffer\", data: [97, 98] });\n    console.log({ b }, [b], { list: [b], n: 1 });\n}"
+    },
+    {
+      "name": "r5e Buffer in a variable nested in Map/Array, ternary Buffer vs any, reviver Buffer",
+      "expect": "matched",
+      "source": "function main(): void {\n  const m = new Map<string, Buffer>();\n  m.set(\"a\", Buffer.from(\"ab\"));\n  console.log(m);\n  const a: Buffer[] = [Buffer.from(\"ab\")];\n  console.log(a);\n  const k = (v: any): any => v === 1 ? Buffer.from(\"ab\") : v;\n  const b = k(1);\n  console.log(Buffer.isBuffer(b), b.length);\n  const r = JSON.parse('{\"x\":{\"type\":\"Buffer\",\"data\":[97,98]}}', (key: string, v: any) => v && v.type === \"Buffer\" ? Buffer.from(v.data) : v);\n  console.log(Buffer.isBuffer(r.x), r.x.length, r.x.toString());\n}"
     }
   ]
 }

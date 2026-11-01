@@ -4424,6 +4424,16 @@ impl<'a> FnLowerer<'a> {
                     alternate_optional.as_ref(),
                 )?;
                 self.restore_narrowings(saved_narrowings);
+                // A `Buffer` arm joined with a `Json` arm is branded as `Json` first; the erasure
+                // below would otherwise turn the buffer into a number array.
+                {
+                    let (c, a) = (self.infer_expr_type_inner(&consequent)?, self.infer_expr_type_inner(&alternate)?);
+                    if c == HirType::Bytes && a == HirType::Json {
+                        consequent = self.coerce_to_declared(&HirType::Json, consequent)?;
+                    } else if a == HirType::Bytes && c == HirType::Json {
+                        alternate = self.coerce_to_declared(&HirType::Json, alternate)?;
+                    }
+                }
                 // `Bytes` survives only when both arms are the same buffer type; a mix keeps the
                 // top-level erased types as before.
                 let (consequent_type, alternate_type) = {
