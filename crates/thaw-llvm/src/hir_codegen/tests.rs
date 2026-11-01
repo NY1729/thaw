@@ -835,3 +835,4 @@ include!("tests/fx10_types_contracts.rs");
 include!("tests/round3_diff_contracts.rs");
 include!("tests/fx11_diff_contracts.rs");
 include!("tests/fx9_bytes_contracts.rs");
+include!("tests/fx12_b19_contracts.rs");
