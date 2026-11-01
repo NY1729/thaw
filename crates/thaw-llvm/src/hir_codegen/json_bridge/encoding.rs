@@ -2009,7 +2009,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 "destroy_bytes_data",
             )
             .map_err(|error| error.to_string())?;
-        Ok(object)
+        let branded = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_brand_wrapper").unwrap(),
+                &[object.into()],
+                "brand_bytes_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_brand_wrapper returned no value")?;
+        Ok(branded)
     }
 
     fn compile_native_array_to_json_with_undefined(
