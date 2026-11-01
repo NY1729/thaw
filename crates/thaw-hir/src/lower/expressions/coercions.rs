@@ -3601,7 +3601,7 @@ impl<'a> FnLowerer<'a> {
         match self.infer_expr_type(&value)? {
             HirType::BigInt if for_add => Ok(HirExpr::ThrowValue(
                 Box::new(HirExpr::Lit(HirLit::Str(
-                    "\u{1}TypeError\u{1}Cannot mix BigInt and other types".into(),
+                    "\u{1}TypeError\u{1}Cannot mix BigInt and other types, use explicit conversions".into(),
                 ))),
                 Box::new(HirExpr::Lit(HirLit::F64(0.0))),
             )),
@@ -4229,7 +4229,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(either_bigint),
                 Box::new(HirExpr::ThrowValue(
                     Box::new(HirExpr::Lit(HirLit::Str(
-                        "\u{1}TypeError\u{1}Cannot mix BigInt and other types".into(),
+                        "\u{1}TypeError\u{1}Cannot mix BigInt and other types, use explicit conversions".into(),
                     ))),
                     Box::new(Self::unreachable_value(&HirType::Json)?),
                 )),

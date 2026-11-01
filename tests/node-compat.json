@@ -4517,6 +4517,31 @@
       "name": "r2c node:timers/promises import leaves the global timers alone",
       "expect": "matched",
       "source": "import * as tp from \"node:timers/promises\";\nfunction main(): void {\n  console.log(\"start\", typeof tp.setTimeout);\n  setTimeout(() => { console.log(\"timeout\"); setImmediate(() => console.log(\"immediate\")); }, 1);\n}"
+    },
+    {
+      "name": "r4a sort result reverse",
+      "expect": "matched",
+      "source": "function main(): void { console.log([3, 1, 2].sort().reverse().join(\",\")); console.log([\"b\", \"a\"].sort().reverse().join(\",\")); console.log([3, 1, 2].toSorted().reverse().join(\",\")); }"
+    },
+    {
+      "name": "r4a any operands subtract and Date arithmetic",
+      "expect": "matched",
+      "source": "function sub(a: any, b: any) { return a - b; } function main(): void { console.log(sub(5, 2), sub(\"5\", 2)); const a = new Date(1000); const b = new Date(0); console.log((a as any) - (b as any)); console.log((new Date(1000) as any) * 2, (new Date(1000) as any) - 1); }"
+    },
+    {
+      "name": "r4a BigInt mixed with number throws TypeError",
+      "expect": "matched",
+      "source": "function main(): void { try { console.log((1n as any) + 1); } catch (e: any) { console.log(e.name + \": \" + e.message); } try { console.log(1n + (1 as any)); } catch (e: any) { console.log(e.name + \": \" + e.message); } }"
+    },
+    {
+      "name": "r4a instanceof Object Function and wrappers",
+      "expect": "matched",
+      "source": "function main(): void { const v: unknown = new Map(); console.log(v instanceof Object, v instanceof Function, v instanceof Promise); const f = () => 1; console.log(f instanceof Function, f instanceof Object); const s: any = \"x\"; console.log(s instanceof String, 5 instanceof Number); }"
+    },
+    {
+      "name": "r4a await readdir then sort on any array",
+      "expect": "matched",
+      "source": "import fs from \"node:fs\"; async function listed(): Promise<void> { console.log((await fs.promises.readdir(\"/\")).sort().length > 0); } function main(): void { const x = Array.from([1, 2], (v: any) => v); const y = new Array(3).fill(0); console.log(x.join(\",\"), y.join(\",\")); listed(); }"
     }
   ]
 }
