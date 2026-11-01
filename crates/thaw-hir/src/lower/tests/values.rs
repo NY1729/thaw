@@ -3918,3 +3918,29 @@ fn value_of_on_an_any_receiver_is_a_dynamic_method_call() {
     let source = format!("{:?}", program.functions);
     assert!(source.contains("valueOf"), "{source}");
 }
+
+/// `RegExp("a/b").source` escapes a slash outside a class and line terminators, like V8.
+#[test]
+fn regex_constructor_source_is_escaped_like_v8() {
+    assert_eq!(escape_regex_source("a/b"), "a\\/b");
+    assert_eq!(escape_regex_source("[/]"), "[/]");
+    assert_eq!(escape_regex_source("a\\/b"), "a\\/b");
+    assert_eq!(escape_regex_source("\n"), "\\n");
+    assert_eq!(escape_regex_source(""), "(?:)");
+}
+
+/// An array pattern over a generator steps it with a `break`ing loop instead of indexing.
+#[test]
+fn array_destructuring_a_generator_lowers_to_a_prefix_loop() {
+    let program = lower(
+        r#"
+            function* g(): Generator<number> { yield 1; yield 2; yield 3; }
+            function main(): void {
+                const [a, b] = g();
+                console.log(a, b);
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    assert!(source.contains("__thaw_iter_items_"), "{source}");
+}

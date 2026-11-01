@@ -1106,6 +1106,11 @@ impl<'a> FnLowerer<'a> {
         let Some(class) = class_name_from_type(class_type) else {
             return Ok(result);
         };
+        // ponytail: a static `[Symbol.species]` getter is assumed to return `Array` (plain result);
+        // one returning another subclass is not constructed.
+        if self.signatures.contains_key(&class_getter_symbol(class, &well_known_symbol_key("species"), true)) {
+            return Ok(result);
+        }
         let constructor = class_constructor_symbol(class);
         let Some(signature) = self.signatures.get(&constructor) else {
             return Ok(result);
