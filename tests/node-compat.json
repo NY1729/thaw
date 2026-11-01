@@ -4602,6 +4602,11 @@
       "name": "r4b assert deepStrictEqual shows Map Set and Date",
       "expect": "matched",
       "source": "import assert from \"node:assert\";\nfunction main(): void {\n  try { assert.deepStrictEqual(new Map([[1, 2]]), new Map([[1, 3]])); } catch (e: any) { console.log(e.message); }\n  try { assert.deepStrictEqual(new Set([1]), new Set([2])); } catch (e: any) { console.log(e.message); }\n  try { assert.deepStrictEqual(new Date(0), new Date(1)); } catch (e: any) { console.log(e.message); }\n}"
+    },
+    {
+      "name": "r4c Buffer toLocaleString decodes utf8 and array toLocaleString formats numbers",
+      "expect": "matched",
+      "source": "function main(): void {\n    console.log(Buffer.from(\"héllo\").toLocaleString());\n    console.log([1234.5, 6].toLocaleString(\"en-US\"));\n}"
     }
   ]
 }
