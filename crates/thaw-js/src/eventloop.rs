@@ -35,6 +35,7 @@ struct Reaction {
     on_ful: Value,
     on_rej: Value,
     result: Option<Obj>,
+    frame: Option<Value>,
 }
 
 enum Job {
@@ -62,6 +63,7 @@ struct Timer {
     args: Vec<Value>,
     obj: Obj,
     refd: bool,
+    frame: Option<Value>,
 }
 
 struct Imm {
@@ -70,6 +72,7 @@ struct Imm {
     args: Vec<Value>,
     obj: Obj,
     refd: bool,
+    frame: Option<Value>,
 }
 
 // ----- coroutines -----
@@ -117,9 +120,11 @@ pub(crate) struct Co {
 
 #[derive(Default)]
 pub(crate) struct Rt {
-    micro: VecDeque<Job>,
-    ticks: VecDeque<(Value, Vec<Value>)>,
+    micro: VecDeque<(Option<Value>, Job)>,
+    ticks: VecDeque<(Option<Value>, Value, Vec<Value>)>,
     unhandled: Vec<Obj>,
+    /// The AsyncLocalStorage frame (an opaque JS value; None = undefined) in effect right now.
+    pub(crate) actx: Option<Value>,
     pub(crate) cur_co: Vec<Rc<CoCtx>>,
     timers: Vec<Timer>,
     immediates: Vec<Imm>,
@@ -243,12 +248,15 @@ impl Interp {
             self.rt.unhandled.push(p.clone());
         }
         for r in reactions {
-            self.rt.micro.push_back(Job::React {
-                handler: if ok { r.on_ful } else { r.on_rej },
-                arg: val.clone(),
-                ok,
-                result: r.result,
-            });
+            self.rt.micro.push_back((
+                r.frame,
+                Job::React {
+                    handler: if ok { r.on_ful } else { r.on_rej },
+                    arg: val.clone(),
+                    ok,
+                    result: r.result,
+                },
+            ));
         }
     }
 
@@ -276,11 +284,14 @@ impl Interp {
                 Err(e) => return Err(e),
             };
             if then.is_callable() {
-                self.rt.micro.push_back(Job::Thenable {
-                    promise: p.clone(),
-                    thenable: v,
-                    then,
-                });
+                self.rt.micro.push_back((
+                    self.rt.actx.clone(),
+                    Job::Thenable {
+                        promise: p.clone(),
+                        thenable: v,
+                        then,
+                    },
+                ));
                 return Ok(());
             }
         }
@@ -319,6 +330,7 @@ impl Interp {
                         on_ful,
                         on_rej,
                         result,
+                        frame: self.rt.actx.clone(),
                     });
                     return;
                 }
@@ -326,12 +338,15 @@ impl Interp {
                 PState::Rejected(v) => (false, v.clone()),
             }
         };
-        self.rt.micro.push_back(Job::React {
-            handler: if ok { on_ful } else { on_rej },
-            arg: val,
-            ok,
-            result,
-        });
+        self.rt.micro.push_back((
+            self.rt.actx.clone(),
+            Job::React {
+                handler: if ok { on_ful } else { on_rej },
+                arg: val,
+                ok,
+                result,
+            },
+        ));
     }
 
     /// `PromiseResolve(%Promise%, v)`.
@@ -344,6 +359,18 @@ impl Interp {
         let p = self.new_promise();
         self.resolve_promise(&p, v)?;
         Ok(p)
+    }
+
+    /// Run `f` with `frame` as the current async-context frame; the previous frame is restored afterwards.
+    pub(crate) fn in_frame<T>(
+        &mut self,
+        frame: Option<Value>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let prev = std::mem::replace(&mut self.rt.actx, frame);
+        let r = f(self);
+        self.rt.actx = prev;
+        r
     }
 
     fn run_job(&mut self, job: Job) -> R<()> {
@@ -420,13 +447,13 @@ impl Interp {
     pub fn run_jobs(&mut self) -> R<()> {
         loop {
             loop {
-                while let Some((f, a)) = self.rt.ticks.pop_front() {
-                    if let Err(e) = self.call(&f, &Value::Undefined, &a) {
+                while let Some((fr, f, a)) = self.rt.ticks.pop_front() {
+                    if let Err(e) = self.in_frame(fr, |it| it.call(&f, &Value::Undefined, &a)) {
                         self.uncaught(e)?;
                     }
                 }
-                while let Some(j) = self.rt.micro.pop_front() {
-                    self.run_job(j)?;
+                while let Some((fr, j)) = self.rt.micro.pop_front() {
+                    self.in_frame(fr, |it| it.run_job(j))?;
                 }
                 if self.rt.ticks.is_empty() && self.rt.micro.is_empty() {
                     break;
@@ -653,6 +680,7 @@ impl Interp {
             args: args.get(2..).unwrap_or(&[]).to_vec(),
             obj: obj.clone(),
             refd: true,
+            frame: self.rt.actx.clone(),
         });
         Ok(Value::Object(obj))
     }
@@ -729,7 +757,7 @@ impl Interp {
                 })
                 .map(|(i, _)| i);
             let Some(i) = next else { return Ok(()) };
-            let (id, cb, args, obj, repeat, delay) = {
+            let (id, cb, args, obj, repeat, delay, frame) = {
                 let t = &mut self.rt.timers[i];
                 let r = (
                     t.id,
@@ -738,6 +766,7 @@ impl Interp {
                     t.obj.clone(),
                     t.repeat,
                     t.delay,
+                    t.frame.clone(),
                 );
                 if t.repeat {
                     t.expiry = f64::INFINITY; // parked while its callback runs
@@ -746,7 +775,7 @@ impl Interp {
                 }
                 r
             };
-            if let Err(e) = self.call(&cb, &Value::Object(obj), &args) {
+            if let Err(e) = self.in_frame(frame, |it| it.call(&cb, &Value::Object(obj), &args)) {
                 self.uncaught(e)?;
             }
             if repeat {
@@ -768,7 +797,9 @@ impl Interp {
             if self.rt.cleared.contains(&im.id) {
                 continue;
             }
-            if let Err(e) = self.call(&im.cb, &Value::Object(im.obj.clone()), &im.args) {
+            if let Err(e) = self.in_frame(im.frame.clone(), |it| {
+                it.call(&im.cb, &Value::Object(im.obj.clone()), &im.args)
+            }) {
                 self.uncaught(e)?;
             }
             self.run_jobs()?;
@@ -1141,6 +1172,7 @@ impl Interp {
                 args: a.get(1..).unwrap_or(&[]).to_vec(),
                 obj: obj.clone(),
                 refd: true,
+                frame: it.rt.actx.clone(),
             });
             Ok(Value::Object(obj))
         });
@@ -1156,10 +1188,29 @@ impl Interp {
         let f = self.native(|it, _, a| {
             let cb = arg(a, 0);
             it.need_callback(&cb)?;
-            it.rt.micro.push_back(Job::Call(cb, Vec::new()));
+            it.rt
+                .micro
+                .push_back((it.rt.actx.clone(), Job::Call(cb, Vec::new())));
             Ok(Value::Undefined)
         });
         g.declare("queueMicrotask", f, true);
+
+        let get = self.native(|it, _, _| Ok(it.rt.actx.clone().unwrap_or(Value::Undefined)));
+        let swap = self.native(|it, _, a| {
+            let next = match arg(a, 0) {
+                Value::Undefined => None,
+                v => Some(v),
+            };
+            Ok(std::mem::replace(&mut it.rt.actx, next).unwrap_or(Value::Undefined))
+        });
+        let bridge = new_obj(None, Kind::Plain);
+        put(&bridge, "get", get);
+        put(&bridge, "swap", swap);
+        g.declare(
+            "__thaw_async_context_bootstrap",
+            Value::Object(bridge),
+            true,
+        );
 
         self.install_process();
     }
@@ -1242,7 +1293,7 @@ impl Interp {
             it.need_callback(&cb)?;
             it.rt
                 .ticks
-                .push_back((cb, a.get(1..).unwrap_or(&[]).to_vec()));
+                .push_back((it.rt.actx.clone(), cb, a.get(1..).unwrap_or(&[]).to_vec()));
             Ok(Value::Undefined)
         });
         self.set_native(&p, "exit", |it, _, a| {
