@@ -2839,6 +2839,22 @@ impl<'a> FnLowerer<'a> {
                                 Some(argument) => argument.clone(),
                                 None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
                             };
+                            // A buffer / typed array / ArrayBuffer measures its own bytes.
+                            let text_type = self.infer_expr_type(&text)?;
+                            if matches!(&text_type, HirType::Array(element) if **element == HirType::F64) {
+                                return self.wrap_call_argument_bindings(
+                                    HirExpr::ArrayLen(Box::new(text)),
+                                    &bindings,
+                                );
+                            }
+                            if text_type == HirType::JsValue {
+                                let length = self.lower_dynamic_value_property_read(
+                                    text,
+                                    HirExpr::Lit(HirLit::Str("byteLength".to_string())),
+                                )?;
+                                let length = self.coerce_to_declared(&HirType::F64, length)?;
+                                return self.wrap_call_argument_bindings(length, &bindings);
+                            }
                             return self.wrap_call_argument_bindings(
                                 HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_bytes_byte_length".to_string())),
@@ -2923,6 +2939,7 @@ impl<'a> FnLowerer<'a> {
                                 _ => return Err("`Buffer.alloc` expects a size".into()),
                             };
                             let size = self.coerce_primitive_to_number(size.clone())?;
+                            let size = if property.sym == *"alloc" { self.checked_buffer_size(size)? } else { size };
                             let Some(fill) = fill else {
                                 return self.wrap_call_argument_bindings(
                                     HirExpr::Call(
@@ -2976,6 +2993,13 @@ impl<'a> FnLowerer<'a> {
                             .ok_or("`Buffer.from` expects a value")?
                             .clone();
                         let source_type = self.infer_expr_type(&source)?;
+                        if source_type == HirType::JsValue {
+                            return Err("`Buffer.from` of a typed array / ArrayBuffer held as a live JavaScript value is not supported yet; \
+                                copy it into a `number[]` or `Buffer` first".into());
+                        }
+                        if let Some(invalid) = self.buffer_from_invalid_argument(source.clone(), &source_type)? {
+                            return self.wrap_call_argument_bindings(invalid, &bindings);
+                        }
                         // A string / number list held in a dynamic-storage slot (captured by a
                         // closure handed to a JS callback) reads as `Json`: pick by its shape.
                         if source_type == HirType::Json {
@@ -2997,7 +3021,23 @@ impl<'a> FnLowerer<'a> {
                             let body = HirExpr::Conditional(
                                 Box::new(call("__thaw_json_is_array", vec![HirExpr::Var(name.clone())])),
                                 Box::new(call("__thaw_bytes_from_array", vec![numbers])),
-                                Box::new(call("__thaw_bytes_from_string", vec![text, encoding])),
+                                Box::new({
+                                    let is_string = self.add_operand_has_primitive_type(
+                                        HirExpr::Var(name.clone()), &HirType::Json, "string");
+                                    let invalid = Self::node_error_throw(
+                                        "TypeError",
+                                        "ERR_INVALID_ARG_TYPE",
+                                        "The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object.",
+                                        None,
+                                    );
+                                    let invalid = self.block_as_expr(HirExpr::Block(vec![invalid]), HirType::Bytes);
+                                    HirExpr::Conditional(
+                                        Box::new(is_string),
+                                        Box::new(call("__thaw_bytes_from_string", vec![text, encoding])),
+                                        Box::new(invalid),
+                                        HirType::Bytes,
+                                    )
+                                }),
                                 HirType::Bytes,
                             );
                             let mut bindings = bindings;

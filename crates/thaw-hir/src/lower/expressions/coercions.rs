@@ -4541,6 +4541,23 @@ impl<'a> FnLowerer<'a> {
                 vec![lhs, rhs],
             ));
         }
+        // A live host value (`a.name` of a host object in a sort comparator) is read as `Json`
+        // first so the string/number runtime dispatch below applies to it too.
+        if (lhs_type == HirType::JsValue || rhs_type == HirType::JsValue)
+            && matches!(lhs_type, HirType::JsValue | HirType::Json | HirType::Str)
+            && matches!(rhs_type, HirType::JsValue | HirType::Json | HirType::Str)
+        {
+            let lhs = if lhs_type == HirType::JsValue { self.coerce_to_declared(&HirType::Json, lhs)? } else { lhs };
+            let rhs = if rhs_type == HirType::JsValue { self.coerce_to_declared(&HirType::Json, rhs)? } else { rhs };
+            if self.infer_expr_type(&lhs)? != HirType::JsValue && self.infer_expr_type(&rhs)? != HirType::JsValue {
+                return self.lower_relational(lhs, rhs, op);
+            }
+            return Ok(HirExpr::BinOp(
+                op,
+                Box::new(self.coerce_primitive_to_number(lhs)?),
+                Box::new(self.coerce_primitive_to_number(rhs)?),
+            ));
+        }
         // Dynamic operands compare as strings when both runtime values are
         // strings (code-unit order) and numerically otherwise.
         let string_or_json = |ty: &HirType| matches!(ty, HirType::Str | HirType::Json);

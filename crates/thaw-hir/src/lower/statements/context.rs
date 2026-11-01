@@ -94,6 +94,7 @@ impl<'a> FnLowerer<'a> {
             used_hir_bindings: HashSet::new(),
             sparse_arrays: HashSet::new(),
             fresh_object_bindings: HashSet::new(),
+            index_read_bindings: HashSet::new(),
             alias_native_arrays: false,
             projecting_class_methods: Vec::new(),
             dynamic_callback_parameter: None,

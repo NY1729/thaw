@@ -3156,3 +3156,23 @@ fn external_javascript_class_bases_get_a_named_diagnostic() {
     let error = lower_module(&module).unwrap_err();
     assert!(error.contains("external JavaScript class `Transform`"), "{error}");
 }
+
+#[test]
+fn lays_out_parameter_properties_before_field_initializers() {
+    let program = lower(
+        r#"class Node2 {
+            next: Node2 | null = null;
+            constructor(public val: string) {}
+        }
+        function main(): void { const n = new Node2("a"); console.log(n.val); }"#,
+    );
+    let fields = program.functions.iter().flat_map(|function| function.body.iter()).find_map(|statement| {
+        match statement {
+            HirStmt::Let(_, HirType::Object(fields), _)
+                if fields.first().is_some_and(|(name, _)| name.starts_with("__thaw_class_identity_")) => Some(fields.clone()),
+            _ => None,
+        }
+    }).expect("instance binding");
+    let names: Vec<&str> = fields.iter().skip(1).map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["val", "next"]);
+}
