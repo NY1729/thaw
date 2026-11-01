@@ -1099,6 +1099,11 @@ fn register_js_job_hooks() {
 fn register_js_job_hooks() {}
 
 fn ensure_context() {
+    // Re-entrant callers (a native callback running inside `with_context`) already hold a shared
+    // borrow; the context exists, so skip the `borrow_mut` that would panic.
+    if JS.with(|cell| cell.try_borrow().is_ok_and(|slot| slot.is_some())) {
+        return;
+    }
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
         slot.get_or_insert_with(|| {
@@ -3396,7 +3401,37 @@ fn native_graph_releases_pending() -> bool {
             .unwrap_or(true)
 }
 
+thread_local! {
+    /// The `Ctx` of the outermost `with_context` call still on this thread's stack (null when none).
+    static CURRENT_CTX: Cell<*const Ctx<'static>> = const { Cell::new(std::ptr::null()) };
+}
+
 fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
+    // Re-entrant call (a native callback running inside JS asks for the engine again): the context
+    // is already borrowed and locked, so hand the active `Ctx` straight to `f`.
+    let active = CURRENT_CTX.with(Cell::get);
+    if !active.is_null() {
+        // SAFETY: set below by the outer call, whose `Ctx` outlives this nested call on the stack.
+        return f(unsafe { (*active).clone() });
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CURRENT_CTX.with(|current| current.set(std::ptr::null()));
+        }
+    }
+    let f = move |ctx: Ctx<'_>| {
+        let _reset = Reset;
+        let held = ctx.clone();
+        // SAFETY: only dereferenced while this frame (and `held`) is alive; `Reset` clears it first.
+        CURRENT_CTX.with(|current| current.set(unsafe {
+            std::mem::transmute::<*const Ctx<'_>, *const Ctx<'static>>(&held)
+        }));
+        let result = f(ctx);
+        CURRENT_CTX.with(|current| current.set(std::ptr::null()));
+        drop(held);
+        result
+    };
     let outer = ENGINE_ENTRY_DEPTH.with(|depth| depth.get() == 0);
     {
         let _initialization_entry = EngineEntryGuard::enter();

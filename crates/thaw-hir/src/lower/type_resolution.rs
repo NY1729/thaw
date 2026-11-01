@@ -200,8 +200,17 @@ fn lower_non_arrow_receiver_type(
 /// A runtime-keyed dictionary type. Array values are held as `Json`: a native array read out of
 /// a dictionary is a copy, so `d.k.push(x)` or `const g = d[k]; g.push(x)` would be lost, while
 /// a `Json` array read shares the stored allocation.
+/// A fixed property is compatible with an index signature whose value type is wider
+/// (`[k: string]: number | undefined` with `fixed: number`); the dictionary covers it.
+fn index_value_admits(element: &HirType, field: &HirType) -> bool {
+    element == field
+        || matches!(element, HirType::Optional(inner) if inner.as_ref() == field)
+        || matches!(element, HirType::Union(members) if members.contains(field))
+}
+
 fn dictionary_hir_type(value: HirType) -> HirType {
-    HirType::Dictionary(Box::new(if matches!(value, HirType::Array(_)) { HirType::Json } else { value }))
+    // Array and union values have no typed dictionary read; they are dynamic values.
+    HirType::Dictionary(Box::new(if matches!(value, HirType::Array(_) | HirType::Union(_) | HirType::Dictionary(_)) { HirType::Json } else { value }))
 }
 
 fn lower_ts_type(
@@ -579,6 +588,10 @@ fn lower_ts_type(
                 }
                 if name == "Date" {
                     return Ok(date_object_type());
+                }
+                // `exec()`/`match()` results: capture groups may be absent.
+                if matches!(name, "RegExpExecArray" | "RegExpMatchArray") && !interfaces.contains_key(name) {
+                    return Ok(HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))));
                 }
                 if let Some(resolved) = interfaces.get(name) {
                     return Ok(resolved.clone());
@@ -1195,7 +1208,7 @@ fn resolve_generic_interface(
         }
         if dictionary
             .as_ref()
-            .is_some_and(|element| element != &field_ty)
+            .is_some_and(|element| !index_value_admits(element, &field_ty))
         {
             return Err(format!(
                 "interface `{name}` property `{field_name}` does not match its index value type"

@@ -1317,8 +1317,10 @@ impl<'a> FnLowerer<'a> {
                             return Ok(looped);
                         }
                     }
-                    let (arguments, spread_bindings) =
-                        self.lower_native_spread_array_values(&call.args, &format!("Array.{label}"))?;
+                    let (arguments, spread_bindings) = self.lower_native_spread_array_values_for(
+                        &call.args, &format!("Array.{label}"),
+                        (element_types.len() == 1).then(|| &element_types[0]),
+                    )?;
                     // `coerce_to_declared`, not the stricter `expect_type`
                     // this replaced: a `Json`/`JsValue` value pushed into a
                     // *typed* array (real trigger: a for-of loop element

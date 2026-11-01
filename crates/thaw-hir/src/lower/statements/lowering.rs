@@ -3326,7 +3326,14 @@ impl<'a> FnLowerer<'a> {
                 self.source_break_depths.pop();
                 self.loop_depth -= 1;
                 self.bindings = saved;
-                self.scope = saved_scope;
+                // Block-scoped locals of the case bodies keep their (unique) scope entries so
+                // the enclosing function's return-type inference can still type `return x`.
+                let inner_scope = std::mem::replace(&mut self.scope, saved_scope);
+                if lowered.is_ok() {
+                    for (name, ty) in inner_scope {
+                        self.scope.entry(name).or_insert(ty);
+                    }
+                }
                 lowered
             }
 
