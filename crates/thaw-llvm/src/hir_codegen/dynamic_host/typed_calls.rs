@@ -39,6 +39,17 @@ pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
     }
 }
 
+/// An inline `function (this: T) {}` callback argument: it reads the call-time receiver.
+fn thaw_js_callback_reads_this(arg: &HirExpr) -> bool {
+    let mut inner = arg;
+    while let HirExpr::TypedClosure(_, body) = inner {
+        inner = body;
+    }
+    matches!(inner, HirExpr::NonArrowFunction(function)
+        if matches!(function.as_ref(), HirExpr::Lambda(_, params, _, _)
+            if matches!(params.first(), Some(HirParam { ty: HirType::NonArrowReceiver(_), .. }))))
+}
+
 /// The physical callback ABI of a function type: its parameters (a rest parameter is one trailing
 /// array), the result and the index of that rest array.
 fn thaw_js_callback_abi(ty: &HirType) -> Option<(Vec<HirType>, HirType, Option<usize>)> {
@@ -1727,6 +1738,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 ));
             }
             if thaw_js_callback_type(ty) {
+                // ponytail: thaw-js does not deliver the call-time receiver to a native callback yet.
+                if thaw_js_callback_reads_this(arg) {
+                    self.uses_quickjs = true;
+                }
                 self.compile_thaw_js_callback_argument(array, value, ty)
                     .map_err(|error| format!("thaw-js callback argument {}: {error}", index + 1))?;
                 continue;
@@ -1912,6 +1927,10 @@ impl<'ctx> HirCompiler<'ctx> {
             self.thaw_js_call_arguments = false;
             let value = value?;
             if thaw_js_callback_type(ty) {
+                // ponytail: thaw-js does not deliver the call-time receiver to a native callback yet.
+                if thaw_js_callback_reads_this(arg) {
+                    self.uses_quickjs = true;
+                }
                 self.compile_thaw_js_callback_argument(array, value, ty)
                     .map_err(|error| format!("thaw-js class callback argument {}: {error}", index + 1))?;
                 continue;
