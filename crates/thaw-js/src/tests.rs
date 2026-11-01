@@ -2178,6 +2178,46 @@ fn vm_global_this_reads_and_writes_sandbox() {
 }
 
 #[test]
+fn vm_timeout_interrupts_runaway_scripts() {
+    let t = std::time::Instant::now();
+    let src = include_str!("../../thaw-registry/src/registry/builtins/system/vm_context.js").to_string() + "
+      const c = createContext({});
+      try { runInContext('while (true) {}', c, { timeout: 30 }); } catch (e) { console.log(e.code, e.message); }
+      console.log(runInContext('1 + 1', c));
+      try { runInNewContext('for (;;) {}', {}, { timeout: 20 }); } catch (e) { console.log(e.code, e instanceof Error); }
+      try { runInNewContext('nope + 1'); } catch (e) { console.log(e.name, e.message, e instanceof ReferenceError); }
+      try { runInContext('do {} while (true)', c, { timeout: 15 }); } catch (e) { console.log(e.code, e.message); }
+      const sb = createContext({});
+      try { runInContext('try { while(true){} } catch (e) { caught = true }', sb, { timeout: 25 }); } catch (e) { console.log(e.code, sb.caught); }
+      try { runInThisContext('while(true){}', { timeout: 30 }); } catch (e) { console.log(e.code, e.message); }
+      console.log(runInContext('let n = 0; for (let i = 0; i < 1000; i++) n += i; n', sb, { timeout: 1000 }), runInThisContext('1+2'));";
+    assert_eq!(
+        one(&src),
+        "ERR_SCRIPT_EXECUTION_TIMEOUT Script execution timed out after 30ms|2|ERR_SCRIPT_EXECUTION_TIMEOUT false|ReferenceError nope is not defined false|ERR_SCRIPT_EXECUTION_TIMEOUT Script execution timed out after 15ms|ERR_SCRIPT_EXECUTION_TIMEOUT undefined|ERR_SCRIPT_EXECUTION_TIMEOUT Script execution timed out after 30ms|499500 3"
+    );
+    assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
+}
+
+#[test]
+fn vm_eval_syntax_errors_and_script_emulation() {
+    let src = include_str!("../../thaw-registry/src/registry/builtins/system/vm_context.js").to_string() + "
+      const t = (f) => { try { return f(); } catch (e) { return 'ERR:' + e.name; } };
+      function Script(code) { const s = String(code); __thaw_vm_eval(s, 'f', true); this.s = s; }
+      Script.prototype.runInContext = function (c) { return runInContext(this.s, c); };
+      Script.prototype.runInThisContext = function () { return runInThisContext(this.s); };
+      console.log(t(() => { new Script('return 1'); return 'compiled'; }), t(() => new Script('var = ;')));
+      const c2 = createContext({}); const s = new Script('n = (typeof n === \"number\" ? n : 0) + 1'); s.runInContext(c2); s.runInContext(c2);
+      console.log(c2.n, isContext(c2), isContext({}), new Script('1 + 1').runInThisContext());
+      const ctx = createContext({ zz: 5 });
+      console.log(runInContext('(function (a) {\\nreturn zz + a\\n})', ctx)(1), Function.apply(null, ['a', 'b'].concat('return a + b'))(2, 3), Function('__thaw_extensions', 'with (__thaw_extensions[0]) { return function () {\\nreturn q\\n}; }')([{ q: 7 }])());
+      console.log(t(() => runInContext('let a = ;', createContext({}))), t(() => runInThisContext('let a = ;')), t(() => runInNewContext('return 1')), typeof __thaw_vm_eval('1', 'f', true), __thaw_vm_eval('1+1', 'f', false));";
+    assert_eq!(
+        one(&src),
+        "ERR:SyntaxError ERR:SyntaxError|2 true false 2|6 5 7|ERR:SyntaxError ERR:SyntaxError ERR:SyntaxError undefined 2"
+    );
+}
+
+#[test]
 fn node_module_bundle_gets_create_require_and_builtin_names() {
     use crate::host::{Native, Package};
     let bundle = r#"module.exports = (function(require) {
