@@ -1438,7 +1438,21 @@ impl VisitMut for RenameReferences<'_> {
                 }
             }
         }
-        expr.visit_mut_children_with(self);
+        // `import.meta.resolve(...)` keeps its callee until the call is folded below; only a failed fold
+        // lets the callee become the value-position function.
+        let resolve_call = matches!(&*expr, Expr::Call(call) if matches!(&call.callee, Callee::Expr(callee)
+            if matches!(callee.as_ref(), Expr::Member(member)
+                if matches!(member.obj.as_ref(), Expr::MetaProp(meta)
+                    if meta.kind == thaw_parser::ast::MetaPropKind::ImportMeta)
+                && matches!(&member.prop, thaw_parser::ast::MemberProp::Ident(property)
+                    if property.sym == *"resolve"))));
+        if resolve_call {
+            if let Expr::Call(call) = expr {
+                call.args.visit_mut_with(self);
+            }
+        } else {
+            expr.visit_mut_children_with(self);
+        }
         if let Expr::Call(call) = expr {
             if matches!(call.callee, Callee::Import(_)) {
                 if let Some(specifier) = call.args.first().and_then(|argument| {
@@ -1494,6 +1508,12 @@ impl VisitMut for RenameReferences<'_> {
                     }
                 }
             }
+        }
+        if resolve_call {
+            if let Expr::Call(call) = expr {
+                call.callee.visit_mut_with(self);
+            }
+            return;
         }
         if let Expr::Ident(ident) = expr {
             self.rename_ident(ident);

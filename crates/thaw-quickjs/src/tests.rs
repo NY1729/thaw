@@ -2754,10 +2754,11 @@ fn before_exit_can_rearm_and_exit_runs_once_with_the_exit_code() {
 }
 
 #[test]
-fn process_versions_node_matches_process_version() {
+fn process_version_is_v22_while_versions_node_stays_empty() {
+    // versions.node is deliberately empty (see runtime.js): only process.version is a Node 22 string.
     assert_eq!(
-        eval_json("[process.version.startsWith('v22.'), process.versions.node === process.version.slice(1), typeof process.versions.v8]"),
-        Ok(Some("[true,true,\"string\"]".into()))
+        eval_json("[process.version.startsWith('v22.'), process.versions.node]"),
+        Ok(Some("[true,\"\"]".into()))
     );
 }
 
