@@ -2218,6 +2218,10 @@ impl<'ctx> HirCompiler<'ctx> {
                             self.builder
                                 .build_return(None)
                                 .map_err(|error| error.to_string())?;
+                        } else if ends_with_exhaustive_switch(stmts, ret) {
+                            self.builder
+                                .build_unreachable()
+                                .map_err(|error| error.to_string())?;
                         } else {
                             return Err(format!(
                                 "lambda `{name}` does not return a value on all paths"
