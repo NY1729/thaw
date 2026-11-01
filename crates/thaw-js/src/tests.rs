@@ -2091,3 +2091,55 @@ fn als_resource_bind_and_disable() {
         "undefined R B|function|now:undefined|later:undefined"
     );
 }
+
+#[test]
+fn vm_run_ids_are_unique_across_realms() {
+    let mut a = Interp::new();
+    let mut b = Interp::new();
+    let fa = a
+        .run("(function(){ return function(){ return 'A'; }; })")
+        .unwrap();
+    let fb = b
+        .run("(function(){ return function(){ return 'B'; }; })")
+        .unwrap();
+    let _ = b.call(&fb, &Value::Undefined, &[]).unwrap();
+    let ia = b.call(&fa, &Value::Undefined, &[]).unwrap();
+    let ra = b.call(&ia, &Value::Undefined, &[]).unwrap();
+    assert_eq!(b.to_str(&ra).to_string(), "A");
+}
+
+#[test]
+fn vm_create_and_free_contexts() {
+    assert_eq!(
+        one("const a = __thaw_vm_create(), b = __thaw_vm_create(); console.log(typeof a, a !== b); __thaw_vm_free(a); __thaw_vm_free(a);"),
+        "number true"
+    );
+}
+
+#[test]
+fn vm_many_contexts_are_cheap_enough() {
+    let t = std::time::Instant::now();
+    one("for (let i = 0; i < 40; i++) { const id = __thaw_vm_create(); __thaw_vm_run(id, '1', 'f', 0, undefined, undefined); __thaw_vm_free(id); }");
+    assert!(t.elapsed().as_secs() < 60, "{:?}", t.elapsed());
+}
+
+#[test]
+fn vm_run_in_sub_realm_isolates_intrinsics_and_persists_declarations() {
+    let src = "const id = __thaw_vm_create();
+      __thaw_vm_run(id, 'var x = 10; let y = 20; const z = 30; function g() { return x + y + z; }', 'f', 0, undefined, undefined);
+      const r = __thaw_vm_run(id, 'g() + typeof y + typeof process + typeof require', 'f', 0, undefined, undefined);
+      __thaw_vm_run(id, 'Object.prototype.leak = 1', 'f', 0, undefined, undefined);
+      const arr = __thaw_vm_run(id, '[1, 2]', 'f', 0, undefined, undefined);
+      let err; try { __thaw_vm_run(id, 'nope + 1', 'f', 0, undefined, undefined); } catch (e) { err = e; }
+      console.log(r, typeof ({}).leak, __thaw_vm_run(id, 'typeof Object.prototype.leak', 'f', 0), arr instanceof Array, Array.isArray(arr), err.name, err instanceof ReferenceError, __thaw_vm_run(-1, '1 + 1', 'f', 0));";
+    assert_eq!(
+        one(src),
+        "60numberundefinedundefined undefined number false true ReferenceError false 2"
+    );
+}
+
+#[test]
+fn vm_realm_has_only_ecma_globals() {
+    assert_eq!(one("const id = __thaw_vm_create(); console.log(__thaw_vm_run(id, 'JSON.stringify([Math.max(1,3), typeof Promise, typeof console, typeof WebAssembly, typeof setTimeout, typeof process, this === globalThis])', 'f', 0, undefined, undefined));"),
+        "[3,\"function\",\"object\",\"object\",\"undefined\",\"undefined\",true]");
+}
