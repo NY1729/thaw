@@ -1801,3 +1801,69 @@ fn get_prototype_of_runs_the_proxy_trap() {
         "true null"
     );
 }
+
+#[test]
+fn timer_handle_ref_methods_scan_clean_and_run() {
+    let timers = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.t = function () { var t = setTimeout(function () {}, 1); t.unref(); return t.hasRef(); };",
+    );
+    let clean = crate::scan::scan_bundle(&timers).ok().unwrap();
+    assert!(clean.is_clean(), "{:?}", clean.blockers);
+    assert_eq!(
+        one("const t = setTimeout(() => console.log('never'), 50); console.log(t.unref() === t, t.hasRef());"),
+        "true false"
+    );
+}
+
+#[test]
+fn webassembly_stub_is_typeof_safe_and_scan_blocks_real_use() {
+    assert_eq!(
+        one("console.log(typeof WebAssembly, typeof WebAssembly.compile)"),
+        "object function"
+    );
+    let probe = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.has = function () { return typeof WebAssembly !== 'undefined'; };",
+    );
+    assert!(crate::scan::scan_bundle(&probe).ok().unwrap().is_clean());
+    let use_it = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.run = function (x) { return WebAssembly.instantiate(x); };",
+    );
+    let blocked = crate::scan::scan_bundle(&use_it).ok().unwrap();
+    assert!(
+        blocked.blockers.contains_key("global:WebAssembly"),
+        "{:?}",
+        blocked.blockers
+    );
+}
+
+#[test]
+fn dns_host_resolves_localhost_and_scan_accepts_it() {
+    let lookup = one("const r = JSON.parse(__thaw_dns_lookup('localhost')); console.log(r.ok, r.addresses.length > 0);");
+    assert_eq!(lookup, "true true");
+    let dns = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.lookup = function (h) { return __thaw_dns_lookup_start(h); }; exports.servers = function () { return __thaw_dns_default_servers(); }; exports.query = function (n) { return __thaw_dns_query_start(n, 'A', '[]', 100, 1); };",
+    );
+    assert!(crate::scan::scan_bundle(&dns).ok().unwrap().is_clean());
+}
+
+#[test]
+fn message_channel_delivers_a_structured_clone_and_rejects_functions() {
+    let mut it = Interp::new();
+    it.run(
+        "const ch = new MessageChannel(); ch.port1.onmessage = (e) => { console.log(JSON.stringify(e.data)); ch.port1.close(); }; \
+         ch.port2.postMessage({ a: [1, 2] }); try { ch.port2.postMessage(() => 1); } catch (e) { console.log(e.name); }",
+    )
+    .ok()
+    .unwrap();
+    it.run_event_loop().ok().unwrap();
+    assert_eq!(it.out, vec!["DataCloneError", "{\"a\":[1,2]}"]);
+    let probe = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.port = function (v) { return globalThis.__thaw_is_message_port(v); };",
+    );
+    assert!(crate::scan::scan_bundle(&probe).ok().unwrap().is_clean());
+}
