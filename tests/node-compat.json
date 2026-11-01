@@ -4627,6 +4627,11 @@
       "name": "r4a await readdir then sort on any array",
       "expect": "matched",
       "source": "import fs from \"node:fs\"; async function listed(): Promise<void> { console.log((await fs.promises.readdir(\"/\")).sort().length > 0); } function main(): void { const x = Array.from([1, 2], (v: any) => v); const y = new Array(3).fill(0); console.log(x.join(\",\"), y.join(\",\")); listed(); }"
+    },
+    {
+      "name": "r5a arguments alongside a rest parameter",
+      "expect": "matched",
+      "source": "function f(a: any, ...r: any[]) { return arguments.length; } function g(...r: any[]) { return arguments[1]; } function main(): void { console.log(f(1, 2, 3), f(), f(1)); console.log(g(\"x\", \"y\")); }"
     }
   ]
 }
