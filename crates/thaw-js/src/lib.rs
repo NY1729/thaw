@@ -47,6 +47,7 @@ mod sysio;
 mod tls;
 mod typed;
 mod url;
+mod vm;
 #[path = "web/abort.rs"]
 mod web_abort;
 #[path = "web/blob.rs"]
@@ -469,6 +470,13 @@ thread_local! {
     static THIS_NAME: Rc<str> = "this".into();
 }
 
+/// Process-wide run counter: every realm draws from it, so `(run_id, span)` cache keys never collide.
+static RUN_IDS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub(crate) fn next_run_id() -> u32 {
+    RUN_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
 fn unsupported<T>(what: &str) -> R<T> {
     Err(Ctl::Unsupported(what.to_string()))
 }
@@ -616,6 +624,9 @@ pub struct Interp {
     /// Lines written by `console.error` / `console.warn`.
     pub err: Vec<String>,
     pub(crate) rt: eventloop::Rt,
+    /// `node:vm` contexts by id (vm.rs).
+    pub(crate) vm: HashMap<u32, vm::VmSlot>,
+    pub(crate) vm_next: u32,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -686,6 +697,8 @@ impl Interp {
             out: Vec::new(),
             err: Vec::new(),
             rt: Default::default(),
+            vm: HashMap::new(),
+            vm_next: 0,
         };
         it.install_builtins();
         it.install_collections();
@@ -713,6 +726,7 @@ impl Interp {
         it.install_sysio();
         net::install(&mut it);
         dns::install(&mut it);
+        vm::install(&mut it);
         zlib::install(&mut it);
         tls::install(&mut it);
         it.install_fs_host();
@@ -1446,6 +1460,21 @@ impl Interp {
         this: &Value,
         args: &[Value],
     ) -> R<Value> {
+        // the body's spans belong to the script it was parsed from, which may be another realm's
+        let caller_run = std::mem::replace(&mut self.run_id, def.src.0);
+        let r = self.call_closure_body(f, def, scope, this, args);
+        self.run_id = caller_run;
+        r
+    }
+
+    fn call_closure_body(
+        &mut self,
+        f: &Value,
+        def: &Rc<FuncDef>,
+        scope: &Rc<Scope>,
+        this: &Value,
+        args: &[Value],
+    ) -> R<Value> {
         let new_target = self.rt.pending_nt.take();
         let frame = Scope::new(Some(scope.clone()));
         if def.strict {
@@ -1820,7 +1849,7 @@ impl Interp {
 
     fn run_parsed(&mut self, source: &str, parsed: Result<a::Module, String>) -> R<Value> {
         let module = parsed.map_err(|e| Ctl::Throw(Value::str(&e)))?;
-        self.run_id += 1;
+        self.run_id = next_run_id();
         self.sources.insert(self.run_id, Rc::from(source));
         let mut stmts = Vec::new();
         for item in module.body {
