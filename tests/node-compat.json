@@ -4629,6 +4629,21 @@
       "source": "import fs from \"node:fs\"; async function listed(): Promise<void> { console.log((await fs.promises.readdir(\"/\")).sort().length > 0); } function main(): void { const x = Array.from([1, 2], (v: any) => v); const y = new Array(3).fill(0); console.log(x.join(\",\"), y.join(\",\")); listed(); }"
     },
     {
+      "name": "tj3 events listener this is the emitter",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events';\nfunction main(): void {\n  const e = new EventEmitter();\n  e.on('x', function (this: EventEmitter, v: number): void { console.log(this === e, v); });\n  e.emit('x', 3);\n}"
+    },
+    {
+      "name": "r4c Buffer toLocaleString decodes utf8 and array toLocaleString formats numbers",
+      "expect": "matched",
+      "source": "function main(): void {\n    console.log(Buffer.from(\"héllo\").toLocaleString());\n    console.log([1234.5, 6].toLocaleString(\"en-US\"));\n}"
+    },
+    {
+      "name": "r5a arguments alongside a rest parameter",
+      "expect": "matched",
+      "source": "function f(a: any, ...r: any[]) { return arguments.length; } function g(...r: any[]) { return arguments[1]; } function main(): void { console.log(f(1, 2, 3), f(), f(1)); console.log(g(\"x\", \"y\")); }"
+    },
+    {
       "name": "r5b typeof realm globals, namespace inspect, cleared timer hasRef",
       "expect": "matched",
       "source": "import { EventEmitter } from \"node:events\"; function main(): void { console.log(typeof process.binding, typeof navigator, typeof fetch, typeof FinalizationRegistry, typeof escape, typeof NopeNope); console.log(Math, JSON, Reflect, Intl, [Math]); console.log(Object.keys(Intl).length, typeof EventEmitter.captureRejections); const t = setTimeout(() => {}, 1); clearTimeout(t); console.log(t.hasRef()); }"
