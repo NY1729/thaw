@@ -4517,6 +4517,16 @@
       "name": "r2c node:timers/promises import leaves the global timers alone",
       "expect": "matched",
       "source": "import * as tp from \"node:timers/promises\";\nfunction main(): void {\n  console.log(\"start\", typeof tp.setTimeout);\n  setTimeout(() => { console.log(\"timeout\"); setImmediate(() => console.log(\"immediate\")); }, 1);\n}"
+    },
+    {
+      "name": "tj2 constants named flags",
+      "expect": "matched",
+      "source": "import { F_OK, R_OK, O_RDONLY, O_RDWR } from 'node:constants';\nfunction main(): void {\n  console.log(F_OK, R_OK, O_RDONLY, O_RDWR > 0);\n}"
+    },
+    {
+      "name": "tj2 url file round trip and search params",
+      "expect": "matched",
+      "source": "import { fileURLToPath, pathToFileURL, URL } from 'node:url';\nfunction main(): void {\n  const back = fileURLToPath(pathToFileURL('/tmp/x y'));\n  const u = new URL('https://e.com/p?a=1');\n  u.searchParams.set('b', '2');\n  console.log(back, u.href);\n}"
     }
   ]
 }
