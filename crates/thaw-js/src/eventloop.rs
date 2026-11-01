@@ -831,6 +831,10 @@ impl Interp {
                 self.run_immediates()?;
                 continue;
             }
+            // a timer just settled the promise: do not sleep toward the next unrelated timer
+            if self.promise_state(v).is_some() {
+                continue;
+            }
             if let Some(next) = self
                 .rt
                 .timers

@@ -242,18 +242,8 @@ impl Package {
         let r = match args {
             Some(args) => {
                 let r = it.call(&f, &this, args).map_err(|c| classify(it, c))?;
-                // an async export: run the event loop and unwrap the settled promise
-                if it.is_promise(&r) {
-                    it.mark_handled(&r);
-                    it.run_event_loop().map_err(|c| classify(it, c))?;
-                    match it.promise_state(&r) {
-                        Some(Ok(v)) => v,
-                        Some(Err(e)) => return Err(classify(it, Ctl::Throw(e))),
-                        None => return Err(HostError::Thrown("promise never settled".into())),
-                    }
-                } else {
-                    r
-                }
+                // an async export: await only until its promise settles, not until the loop is idle
+                awaited(it, r)?
             }
             None => f,
         };
@@ -447,12 +437,14 @@ fn parse_class_symbol(symbol: &str) -> Option<(&str, &str, &str, Option<&str>)> 
     Some((kind, package, class_path, member))
 }
 
+/// `flags`: bit 0 asks for a handle id, bit 1 awaits a returned Promise (its settled value is the result).
 fn class_call(
     symbol: &str,
     args_json: &str,
     receiver: i64,
-    want_handle: bool,
+    flags: u8,
 ) -> Result<String, HostError> {
+    let (want_handle, await_promise) = (flags & 1 != 0, flags & 2 != 0);
     let (kind, package, class_path, member) = parse_class_symbol(symbol)
         .ok_or_else(|| HostError::Bundle(format!("malformed class symbol `{symbol}`")))?;
     let op = match kind {
@@ -519,6 +511,11 @@ fn class_call(
             }
         };
         let it = &mut p.interp;
+        let result = if await_promise {
+            awaited(it, result)?
+        } else {
+            result
+        };
         if want_handle {
             return Ok(store_handle(package_handle, result).to_string());
         }
@@ -528,13 +525,13 @@ fn class_call(
 
 /// Run a class operation (see `parse_class_symbol`): construct (`receiver` 0), call a method on an
 /// instance handle, or call a static method. The result is JSON text, or a decimal handle id when
-/// `want_handle` is set (the class instance stays in the thaw-js heap).
+/// bit 0 of `flags` is set (the class instance stays in the thaw-js heap); bit 1 awaits a Promise result.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_class_call(
     symbol: *const c_char,
     args_json: *const c_char,
     receiver: i64,
-    want_handle: u8,
+    flags: u8,
 ) -> ThawResult {
     text_result((|| {
         let (Some(symbol), Some(args)) = (cstr(symbol), cstr(args_json)) else {
@@ -543,7 +540,7 @@ pub extern "C" fn thaw_tjs_class_call(
         if let Some(message) = symbol.strip_prefix('\u{1}') {
             return Err(message.to_string());
         }
-        class_call(&symbol, &args, receiver, want_handle != 0).map_err(|e| e.to_string())
+        class_call(&symbol, &args, receiver, flags).map_err(|e| e.to_string())
     })())
 }
 
