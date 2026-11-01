@@ -2684,4 +2684,7 @@
       Object.defineProperty(ctor, 'supportedLocalesOf', { value: function supportedLocalesOf(locales) { return intlSupported(locales); }, writable: true, configurable: true });
     }
   }
+  // Node: `Intl` is a namespace object with no enumerable keys and `[object Intl]` tag.
+  for (const k of Object.keys(globalThis.Intl)) Object.defineProperty(globalThis.Intl, k, { enumerable: false });
+  Object.defineProperty(globalThis.Intl, Symbol.toStringTag, { value: 'Intl', configurable: true });
 })();
