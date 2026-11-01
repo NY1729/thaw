@@ -338,6 +338,8 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = lift_local_classes(&normalized);
     let normalized = lift_local_type_declarations(&normalized);
     let normalized = normalize_top_level_class_expressions(&normalized)?;
+    let normalized = rename_named_function_expression_self_references(&normalized);
+    let normalized = hoist_class_expressions(&normalized);
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
     let normalized = normalize_constructor_functions(&normalized)?;

@@ -1316,7 +1316,15 @@ impl Visit for StorageGraph {
                         }
                         if !self.is_fresh_static_builtin(member) {
                             self.link(span, member.obj.span());
-                            for argument in &call.args { self.contain(member.obj.span(), argument.expr.span()); }
+                            // `Array.from(src, mapper)`: the mapper is called, not stored in the result, so an
+                            // `any`-annotated mapper parameter must not make the `{ length }` source dynamic.
+                            let array_from = matches!((member.obj.as_ref(), &member.prop),
+                                (Expr::Ident(object), swc_ecma_ast::MemberProp::Ident(method))
+                                    if object.sym == "Array" && method.sym == "from" && self.lookup("Array").is_none());
+                            for argument in &call.args {
+                                if array_from && matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) { continue; }
+                                self.contain(member.obj.span(), argument.expr.span());
+                            }
                         }
                     }
                 }

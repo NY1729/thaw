@@ -4520,7 +4520,7 @@ impl<'a> FnLowerer<'a> {
                 // mirror (`expr_hir_type`) cannot see through every call/builtin result.
                 other if !matches!(&other, HirExpr::Var(_) | HirExpr::Lit(_))
                     && !matches!(&other, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name.starts_with("__thaw_console_")))
-                    && matches!(self.infer_expr_type_inner(&other), Ok(HirType::Array(_) | HirType::Object(_) | HirType::Tuple(_) | HirType::Map(..) | HirType::Set(_) | HirType::Dictionary(_))) => {
+                    && matches!(self.infer_expr_type_inner(&other), Ok(HirType::Array(_) | HirType::Object(_) | HirType::Tuple(_) | HirType::Map(..) | HirType::Set(_) | HirType::Dictionary(_) | HirType::Promise(_))) => {
                     let ty = self.infer_expr_type_inner(&other)?;
                     Ok(HirExpr::Call(Box::new(HirExpr::Var("__thaw_console_typed".into())),
                         vec![HirExpr::TypedClosure(ty, Box::new(other))]))
