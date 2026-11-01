@@ -10,6 +10,88 @@ use thaw_parser::ast::{
 type SourceTransform<'a> = dyn Fn(&str, &Path, bool) -> Result<String, String> + 'a;
 pub(crate) const EXTERNAL_MODULE_OFFSET: usize = 1_000_000;
 
+/// `import fs from "node:fs"; const { existsSync, join: j } = fs;` becomes
+/// `const existsSync = fs.existsSync, j = fs.join;` (source text, before the registry
+/// rewrites, so the member reads are resolved like hand-written ones). A builtin's module
+/// object is not a value. `node:path` is skipped: its members are variadic JS shims that
+/// silently misbehave when aliased (`const j = path.join; j("a", "b")` returns "."). Patterns with defaults, rest or nested patterns are left alone.
+fn destructure_builtin_module_objects(source: &str) -> String {
+    use thaw_parser::ast::{ObjectPatProp, PropName, VarDeclarator};
+    if !source.contains("node:") {
+        return source.to_string();
+    }
+    let Ok((module, map)) = thaw_parser::parse_typescript_with_source_map(source) else {
+        return source.to_string();
+    };
+    let mut names = HashSet::new();
+    for item in &module.body {
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
+            if import
+                .src
+                .value
+                .as_str()
+                .is_some_and(|src| src.starts_with("node:") && !src.starts_with("node:path"))
+            {
+                for specifier in &import.specifiers {
+                    match specifier {
+                        ImportSpecifier::Default(s) => names.insert(s.local.sym.to_string()),
+                        ImportSpecifier::Namespace(s) => names.insert(s.local.sym.to_string()),
+                        ImportSpecifier::Named(_) => false,
+                    };
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        return source.to_string();
+    }
+    struct Find<'a>(
+        &'a HashSet<String>,
+        Vec<(u32, u32, String)>,
+        &'a dyn Fn(thaw_parser::common::BytePos) -> u32,
+    );
+    impl Visit for Find<'_> {
+        fn visit_var_declarator(&mut self, declarator: &VarDeclarator) {
+            declarator.visit_children_with(self);
+            let (Pat::Object(object), Some(init)) = (&declarator.name, declarator.init.as_deref())
+            else {
+                return;
+            };
+            let Expr::Ident(namespace) = init else { return };
+            if !self.0.contains(namespace.sym.as_ref()) {
+                return;
+            }
+            let mut reads = Vec::new();
+            for property in &object.props {
+                match property {
+                    ObjectPatProp::Assign(p) if p.value.is_none() => {
+                        reads.push(format!("{0} = {1}.{0}", p.key.id.sym, namespace.sym))
+                    }
+                    ObjectPatProp::KeyValue(p) => match (&p.key, p.value.as_ref()) {
+                        (PropName::Ident(key), Pat::Ident(local)) => {
+                            reads.push(format!("{} = {}.{}", local.id.sym, namespace.sym, key.sym))
+                        }
+                        _ => return,
+                    },
+                    _ => return,
+                }
+            }
+            let (lo, hi) = ((self.2)(declarator.span.lo), (self.2)(declarator.span.hi));
+            self.1.push((lo, hi, reads.join(", ")));
+        }
+    }
+    let offset = |pos: thaw_parser::common::BytePos| map.lookup_byte_offset(pos).pos.0;
+    let mut find = Find(&names, Vec::new(), &offset);
+    module.visit_with(&mut find);
+    let mut edits = find.1;
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.0));
+    let mut out = source.to_string();
+    for (lo, hi, text) in edits {
+        out.replace_range(lo as usize..hi as usize, &text);
+    }
+    out
+}
+
 #[derive(Debug)]
 struct LoadedModule {
     path: PathBuf,
@@ -885,6 +967,7 @@ fn load_module(
         None => std::fs::read_to_string(&path)
             .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?,
     };
+    let source = destructure_builtin_module_objects(&source);
     let source = match transform {
         Some(transform) => transform(&source, &path, source_override.is_some())
             .map_err(|error| format!("failed to transform `{}`: {error}", path.display()))?,

@@ -4244,6 +4244,31 @@
       "source": "function main(): void {\n  const deps: Record<string, string[]> = { a: [\"b\"], b: [] };\n  const seen = new Set<string>();\n  const order: string[] = [];\n  const visit = (n: string) => {\n    if (seen.has(n)) return;\n    seen.add(n);\n    for (const d of deps[n] ?? []) visit(d);\n    order.push(n);\n  };\n  Object.keys(deps).forEach(visit);\n  console.log(order);\n  const hist = [\"a\", \"b\", \"a\"];\n  const counts = hist.reduce((a, s) => { a[s] = (a[s] ?? 0) + 1; return a; }, {} as Record<string, number>);\n  console.log(counts);\n}\n"
     },
     {
+      "name": "nd5a default import of a node builtin destructured",
+      "expect": "matched",
+      "source": "import fs from \"node:fs\";\nimport os from \"node:os\";\nfunction main(): void {\n  const { existsSync } = fs;\n  const { EOL: eol } = os;\n  console.log(existsSync(\"/\"), JSON.stringify(eol));\n}\n"
+    },
+    {
+      "name": "nd5a RegExp and Intl constructors called without new",
+      "expect": "matched",
+      "source": "function main(): void {\n  const r = RegExp(\"a+\", \"g\");\n  console.log(r.test(\"caat\"), \"aa\".replace(r, \"x\"));\n  const f = Intl.DateTimeFormat(\"en-US\", { timeZone: \"UTC\" });\n  console.log(f.format(new Date(0)));\n  console.log(Intl.NumberFormat(\"en-US\").format(1234.5));\n}\n"
+    },
+    {
+      "name": "nd5a Buffer isEncoding compare swap and URL canParse",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Buffer.isEncoding(\"utf8\"), Buffer.isEncoding(\"HEX\"), Buffer.isEncoding(\"nope\"));\n  console.log(Buffer.compare(Buffer.from(\"a\"), Buffer.from(\"b\")), Buffer.compare(Buffer.from(\"b\"), Buffer.from(\"a\")), Buffer.compare(Buffer.from(\"a\"), Buffer.from(\"a\")));\n  const b = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);\n  console.log(b.swap16().toString(\"hex\"));\n  console.log(b.swap32().toString(\"hex\"));\n  console.log(b.swap64().toString(\"hex\"));\n  console.log(URL.canParse(\"http://x.com\"), URL.canParse(\"nope\"));\n}\n"
+    },
+    {
+      "name": "nd5a http response writeHead",
+      "expect": "matched",
+      "source": "import http from \"node:http\";\nfunction main(): void {\n  const s = http.createServer((req, res) => {\n    res.writeHead(201, { \"Content-Type\": \"text/plain\", \"X-N\": 5 });\n    res.end(\"hi\");\n  });\n  s.listen(0, () => {\n    const port = (s.address() as any).port;\n    http.get({ port }, (res) => {\n      let d = \"\";\n      res.on(\"data\", (c) => (d += c));\n      res.on(\"end\", () => {\n        console.log(res.statusCode, res.headers[\"content-type\"], res.headers[\"x-n\"], d);\n        s.close();\n      });\n    });\n  });\n}\n"
+    },
+    {
+      "name": "nd5a timers as values and global alias",
+      "expect": "matched",
+      "source": "function main(): void {\n  const t = setTimeout;\n  t(() => console.log(\"t\"), 1);\n  const si = setImmediate;\n  si(() => console.log(\"si\"));\n  console.log(global === globalThis);\n}\n"
+    },
+    {
       "name": "nd4 async function returning a timer promise waits for it",
       "expect": "matched",
       "source": "async function sleep(ms: number) { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function sleepTyped(ms: number): Promise<void> { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function f(n: number) { await sleep(n); return n * 2; }\nfunction other(): Promise<number> { return new Promise<number>(r => setTimeout(() => r(7), 20)); }\nasync function adopt() { return other(); }\nclass C { async m() { return sleep(20); } async n(): Promise<void> { return sleepTyped(20); } }\nasync function main(): Promise<void> {\n  const t = Date.now();\n  await sleep(40);\n  console.log(Date.now() - t >= 35);\n  await sleepTyped(40);\n  console.log(Date.now() - t >= 75);\n  console.log(await Promise.race([f(30), f(5)]));\n  console.log(await adopt());\n  const c = new C();\n  const u = Date.now();\n  await c.m();\n  await c.n();\n  console.log(Date.now() - u >= 35);\n}\n"
