@@ -358,12 +358,12 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:util",
         "node:constants",
         "node:url",
+        "node:fs",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
     // modules whose cases do not match Node on thaw-js yet stay on QuickJS
     for module in [
-        "node:fs",
         "node:stream",
         "node:crypto",
         "node:net",
