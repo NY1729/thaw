@@ -3,9 +3,16 @@ function quote(text) { var q = text.indexOf("'") < 0 ? "'" : text.indexOf('"') <
 function isObj(value) { return value !== null && typeof value === 'object'; }
 function fmt(value, pad, seen) {
 if (typeof value === 'string') return quote(value);
-if (!isObj(value) || value instanceof Date || value instanceof RegExp || value instanceof Error || value instanceof Map || value instanceof Set || ArrayBuffer.isView(value)) { try { return require(['node', 'util'].join(':')).inspect(value); } catch (_) { return String(value); } }
+// Date, Map and Set are printed inline: the dynamic inspect require below is unavailable in the AOT bundle.
+if (value instanceof Date) return isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+if (!isObj(value) || value instanceof RegExp || value instanceof Error || ArrayBuffer.isView(value)) { try { return require(['node', 'util'].join(':')).inspect(value); } catch (_) { return String(value); } }
 seen = seen || []; if (seen.indexOf(value) >= 0) return '[Circular]'; seen = seen.concat([value]);
 var inner = pad + '  ', isArray = Array.isArray(value);
+if (value instanceof Map || value instanceof Set) {
+var entries = []; value.forEach(function(item, key) { entries.push(inner + (value instanceof Map ? fmt(key, inner, seen) + ' => ' + fmt(item, inner, seen) : fmt(key, inner, seen))); });
+var head = (value instanceof Map ? 'Map(' : 'Set(') + value.size + ') ';
+return entries.length ? head + '{\n' + entries.join(',\n') + '\n' + pad + '}' : head + '{}';
+}
 var parts = isArray ? Array.prototype.map.call(value, function(item) { return inner + fmt(item, inner, seen); }) : Object.keys(value).sort().map(function(key) { return inner + (/^[A-Za-z_$][\w$]*$/.test(key) ? key : quote(key)) + ': ' + fmt(value[key], inner, seen); });
 var open = isArray ? '[' : '{', close = isArray ? ']' : '}';
 return parts.length ? open + '\n' + parts.join(',\n') + '\n' + pad + close : open + close;
