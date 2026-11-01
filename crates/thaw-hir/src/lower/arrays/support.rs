@@ -1118,28 +1118,34 @@ impl<'a> FnLowerer<'a> {
     fn builtin_conversion_callback(&self, expr: &Expr) -> Option<Expr> {
         match expr {
             Expr::Ident(ident)
-                if matches!(ident.sym.as_ref(), "Boolean" | "Number" | "String")
+                if matches!(ident.sym.as_ref(), "Boolean" | "Number" | "String" | "parseFloat" | "parseInt")
                     && !self.scope.contains_key(ident.sym.as_ref())
                     && !self.signatures.contains_key(ident.sym.as_ref()) =>
             {
                 let span = ident.span;
                 let param = swc_ecma_ast::Ident::new_no_ctxt("x".into(), span);
+                // `map(parseInt)` passes the index as the radix.
+                let radix = (ident.sym.as_ref() == "parseInt")
+                    .then(|| swc_ecma_ast::Ident::new_no_ctxt("i".into(), span));
+                let binding = |id: swc_ecma_ast::Ident| Pat::Ident(swc_ecma_ast::BindingIdent { id, type_ann: None });
                 Some(Expr::Arrow(swc_ecma_ast::ArrowExpr {
                     span,
                     ctxt: Default::default(),
-                    params: vec![Pat::Ident(swc_ecma_ast::BindingIdent {
-                        id: param.clone(),
-                        type_ann: None,
-                    })],
+                    params: std::iter::once(binding(param.clone()))
+                        .chain(radix.clone().map(binding))
+                        .collect(),
                     body: Box::new(swc_ecma_ast::ArrowFunctionBody::Expr(Box::new(Expr::Call(
                         CallExpr {
                             span,
                             ctxt: Default::default(),
                             callee: Callee::Expr(Box::new(expr.clone())),
-                            args: vec![swc_ecma_ast::ExprOrSpread {
-                                spread: None,
-                                expr: Box::new(Expr::Ident(param)),
-                            }],
+                            args: std::iter::once(param)
+                                .chain(radix)
+                                .map(|id| swc_ecma_ast::ExprOrSpread {
+                                    spread: None,
+                                    expr: Box::new(Expr::Ident(id)),
+                                })
+                                .collect(),
                             type_args: None,
                         },
                     )))),
