@@ -1863,16 +1863,53 @@ impl Interp {
         }
         let global = self.global.clone();
         hoist_vars(&stmts, &global);
+        self.run_stmts(&stmts, &global)
+    }
+
+    /// Hoists the functions of `stmts` into `scope`, then runs them; the value is that of the last
+    /// expression statement.
+    fn run_stmts(&mut self, stmts: &[a::Stmt], scope: &Rc<Scope>) -> R<Value> {
+        self.hoist_functions(stmts, scope)?;
         let mut last = Value::Undefined;
-        self.hoist_functions(&stmts, &global)?;
-        for s in &stmts {
+        for s in stmts {
             if let a::Stmt::Expr(e) = s {
-                last = self.eval(&e.expr, &global)?;
+                last = self.eval(&e.expr, scope)?;
             } else {
-                self.exec(s, &global)?;
+                self.exec(s, scope)?;
             }
         }
         Ok(last)
+    }
+
+    /// A `node:vm` script run in a context whose scope chain is `scope -> with(sandbox) -> global`
+    /// (see vm.rs). Vars and functions are hoisted into `scope`, except names `sandbox` already has,
+    /// so those stay bound to the sandbox property. Returns the value and the hoisted names.
+    pub(crate) fn run_vm_script(
+        &mut self,
+        source: &str,
+        scope: &Rc<Scope>,
+        sandbox: &Obj,
+    ) -> (R<Value>, Vec<Rc<str>>) {
+        let module = match thaw_parser::parse_javascript_script(source) {
+            Ok(m) => m,
+            Err(e) => return (Err(Ctl::Throw(Value::str(&e))), Vec::new()),
+        };
+        self.run_id = next_run_id();
+        self.sources.insert(self.run_id, Rc::from(source));
+        let mut stmts = Vec::new();
+        for item in module.body {
+            match item {
+                a::ModuleItem::Stmt(s) => stmts.push(s),
+                a::ModuleItem::ModuleDecl(_) => return (unsupported("esm-syntax"), Vec::new()),
+            }
+        }
+        let names = hoisted_names(&stmts);
+        for name in &names {
+            if find_in_chain(sandbox, name).is_none() {
+                scope.declare_if_absent(name);
+            }
+        }
+        (self.run_stmts(&stmts, scope), names)
     }
 
     /// Compile a function literal (`function (a, b) { ... }` expression source) in the global scope.

@@ -2145,6 +2145,25 @@ fn vm_realm_has_only_ecma_globals() {
 }
 
 #[test]
+fn vm_sandbox_mirroring_matches_node() {
+    let src = include_str!("../../thaw-registry/src/registry/builtins/system/vm_context.js").to_string() + "
+      const ctx = createContext({ a: 1, out: [] });
+      runInContext('var x = 10; let y = 20; const z = 30; function g() { return x + y + z; } out.push(g())', ctx);
+      console.log(runInContext('g() + a + typeof y', ctx), ctx.x, typeof ctx.y, typeof ctx.g, JSON.stringify(ctx.out));
+      console.log(runInNewContext('value * 2', { value: 21 }), runInNewContext('typeof process + typeof require'));
+      runInNewContext('Object.prototype.leak = 1'); console.log(typeof ({}).leak, runInNewContext('typeof Object.prototype.leak'));
+      const c2 = createContext({}); runInContext('n = (typeof n === \"number\" ? n : 0) + 1', c2); runInContext('n = (typeof n === \"number\" ? n : 0) + 1', c2); console.log(c2.n);
+      const c3 = createContext({ a: 1 }); runInContext('a = 5; var v = 1; let l = 2; w = 3', c3); console.log(c3.a, c3.v, c3.l, c3.w, runInContext('l', c3));
+      const c4 = createContext({ k: 1 }); runInContext('var k = 7; function f() { return k }', c4); c4.k = 9; console.log(c4.k, runInContext('f()', c4));
+      const c6 = createContext({}); runInContext('var cnt = 0; function inc() { return ++cnt }', c6); runInContext('inc(); inc()', c6); console.log(c6.cnt, runInContext('cnt', c6)); c6.cnt = 10; console.log(runInContext('inc()', c6), c6.cnt);
+      let e; try { runInContext('var ev = 1; throw new Error(\"boom\")', c6); } catch (x) { e = x } console.log(e.message, c6.ev, e instanceof Error);";
+    assert_eq!(
+        one(&src),
+        "61number 10 undefined function [60]|42 undefinedundefined|undefined undefined|2|5 1 undefined 3 2|9 9|2 2|11 11|boom 1 false"
+    );
+}
+
+#[test]
 fn node_module_bundle_gets_create_require_and_builtin_names() {
     use crate::host::{Native, Package};
     let bundle = r#"module.exports = (function(require) {
