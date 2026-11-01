@@ -2914,6 +2914,10 @@ impl<'a> FnLowerer<'a> {
                 if let Some(result) = self.lower_bigint_arithmetic(&lhs, &rhs, bin.op)? {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
+                let is_numeric_operand = |ty: &HirType| {
+                    matches!(ty, HirType::F64 | HirType::Json | HirType::JsValue)
+                        || *ty == date_object_type()
+                };
                 let value = match bin.op {
                     BinaryOp::In => {
                         let mut right_type = self.infer_expr_type(&rhs)?;
@@ -3423,6 +3427,42 @@ impl<'a> FnLowerer<'a> {
                                     HirType::JsValue | HirType::Json
                                 )) =>
                     {
+                        HirExpr::BinOp(
+                            lower_bin_op(other)?,
+                            Box::new(self.coerce_primitive_to_number(lhs)?),
+                            Box::new(self.coerce_primitive_to_number(rhs)?),
+                        )
+                    }
+                    _
+                        if matches!(
+                            (self.infer_expr_type(&lhs)?, self.infer_expr_type(&rhs)?),
+                            (HirType::BigInt, HirType::F64) | (HirType::F64, HirType::BigInt)
+                        ) =>
+                    {
+                        // Static BigInt mixed with a number throws the JS TypeError at run time.
+                        HirExpr::EvalThen(
+                            Box::new(lhs),
+                            Box::new(HirExpr::EvalThen(
+                                Box::new(rhs),
+                                Box::new(HirExpr::ThrowValue(
+                                    Box::new(HirExpr::Lit(HirLit::Str(
+                                        "\u{1}TypeError\u{1}Cannot mix BigInt and other types, use explicit conversions"
+                                            .into(),
+                                    ))),
+                                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                )),
+                            )),
+                        )
+                    }
+                    other
+                        if other != BinaryOp::Add
+                            && is_numeric_operand(&self.infer_expr_type(&lhs)?)
+                            && is_numeric_operand(&self.infer_expr_type(&rhs)?)
+                            && !(self.infer_expr_type(&lhs)? == HirType::F64
+                                && self.infer_expr_type(&rhs)? == HirType::F64) =>
+                    {
+                        // Dynamic and Date operands (`a - b` on `any`, `date - date`)
+                        // coerce to numbers, like the mixed F64 arm above.
                         HirExpr::BinOp(
                             lower_bin_op(other)?,
                             Box::new(self.coerce_primitive_to_number(lhs)?),
@@ -7105,30 +7145,74 @@ fn native_builtin_instanceof_static_match(class: &str, ty: &HirType) -> Option<b
     if native_base_type(ty).is_some() && matches!(class, "Map" | "Set" | "Array" | "Date" | "RegExp") {
         return None;
     }
-    Some(match class {
-        "Date" => *ty == date_object_type(),
-        "RegExp" => *ty == regex_object_type(),
-        "Map" => matches!(ty, HirType::Map(_, _)),
-        "Set" => matches!(ty, HirType::Set(_)),
-        "WeakMap" => matches!(ty, HirType::WeakMap(_, _)),
-        "WeakSet" => matches!(ty, HirType::WeakSet(_)),
-        // A TS tuple (`[number, string]`) is a real `Array` at runtime
-        // too -- matches `Array.isArray`'s own identical match arm
-        // (`static_builtins.rs`).
-        "Array" => matches!(ty, HirType::Array(_) | HirType::Tuple(_)),
-        "Promise" => matches!(ty, HirType::Promise(_)),
-        // A genuine match (`ty` here is `value_type`, the *normalized*
-        // type -- `Bytes` always reads as `Array(F64)` by this point)
-        // was already handled by a dedicated early check using
-        // `infer_expr_type_inner` instead, right after `value_type` is
-        // first computed -- this residual entry only exists so
-        // `"anything else" instanceof Uint8Array` (a plain `number[]`,
-        // a string, ...) still reads as the correct `false` instead of
-        // hitting "not a known class", now that `Uint8Array` needs to
-        // be recognized as a known class at all.
-        "Uint8Array" => false,
-        _ => return None,
-    })
+    // Statically known object-or-primitive types for the global constructors below. Dynamic,
+    // union and optional types stay `None` so the existing fallbacks keep ownership.
+    let is_callable = matches!(
+        ty,
+        HirType::Function(..)
+            | HirType::FunctionWithThis(..)
+            | HirType::CallableFunction(..)
+            | HirType::OverloadedFunction(..)
+    );
+    let is_object = is_callable
+        || matches!(
+            ty,
+            HirType::Object(_)
+                | HirType::Array(_)
+                | HirType::Tuple(_)
+                | HirType::Map(_, _)
+                | HirType::Set(_)
+                | HirType::WeakMap(_, _)
+                | HirType::WeakSet(_)
+                | HirType::Promise(_)
+                | HirType::Bytes
+                | HirType::Dictionary(_)
+        );
+    let is_primitive = matches!(
+        ty,
+        HirType::F64
+            | HirType::I64
+            | HirType::BigInt
+            | HirType::Bool
+            | HirType::Undefined
+            | HirType::Null
+            | HirType::Void
+            | HirType::Str
+            | HirType::StrLiteral(_)
+            | HirType::Symbol
+    );
+    let known = (is_object || is_primitive).then_some(is_object);
+    match class {
+        "Object" => known,
+        "Function" => known.map(|_| is_callable),
+        // No boxed wrappers exist: a primitive or an object is never an instance of these,
+        // dynamic values included.
+        "String" | "Number" | "Boolean" | "BigInt" | "Symbol" => Some(false),
+        _ => Some(match class {
+            "Date" => *ty == date_object_type(),
+            "RegExp" => *ty == regex_object_type(),
+            "Map" => matches!(ty, HirType::Map(_, _)),
+            "Set" => matches!(ty, HirType::Set(_)),
+            "WeakMap" => matches!(ty, HirType::WeakMap(_, _)),
+            "WeakSet" => matches!(ty, HirType::WeakSet(_)),
+            // A TS tuple (`[number, string]`) is a real `Array` at runtime
+            // too -- matches `Array.isArray`'s own identical match arm
+            // (`static_builtins.rs`).
+            "Array" => matches!(ty, HirType::Array(_) | HirType::Tuple(_)),
+            "Promise" => matches!(ty, HirType::Promise(_)),
+            // A genuine match (`ty` here is `value_type`, the *normalized*
+            // type -- `Bytes` always reads as `Array(F64)` by this point)
+            // was already handled by a dedicated early check using
+            // `infer_expr_type_inner` instead, right after `value_type` is
+            // first computed -- this residual entry only exists so
+            // `"anything else" instanceof Uint8Array` (a plain `number[]`,
+            // a string, ...) still reads as the correct `false` instead of
+            // hitting "not a known class", now that `Uint8Array` needs to
+            // be recognized as a known class at all.
+            "Uint8Array" => false,
+            _ => return None,
+        }),
+    }
 }
 
 /// The sentinel key `coerce_to_declared`'s `Json`-target branch
