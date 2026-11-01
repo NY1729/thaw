@@ -1429,7 +1429,11 @@ impl<'a> FnLowerer<'a> {
                 && matches!(&ty, HirType::Array(_) | HirType::Json);
             let destructurable_string = ty == HirType::Str
                 && matches!(&decl.name, Pat::Array(_) | Pat::Object(_));
+            let destructurable_iterable =
+                matches!(&decl.name, Pat::Array(_))
+                    && (ty == HirType::JsValue || iterable_element_type(&ty).is_some());
             if !matches!(ty, HirType::Object(_) | HirType::Tuple(_))
+                && !destructurable_iterable
                 && !destructurable_string
                 && !destructurable_union
                 && !destructurable_dictionary
