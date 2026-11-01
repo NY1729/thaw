@@ -525,6 +525,16 @@ impl<'ctx> HirCompiler<'ctx> {
                             | "__thaw_array_slice"
                             | "__thaw_array_to_reversed"
                             | "__thaw_array_splice"
+                            | "__thaw_number_array_sort"
+                            | "__thaw_bigint_array_sort"
+                            | "__thaw_string_array_sort"
+                            | "__thaw_bool_array_sort"
+                            | "__thaw_object_array_sort"
+                            | "__thaw_number_array_to_sorted"
+                            | "__thaw_bigint_array_to_sorted"
+                            | "__thaw_string_array_to_sorted"
+                            | "__thaw_bool_array_to_sorted"
+                            | "__thaw_object_array_to_sorted"
                     ) {
                         return arguments
                             .first()
