@@ -163,6 +163,50 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err("native `.toJSON()` expects no arguments".into());
                     }
+                    if self.receiver_is_bytes(&member.obj) {
+                        // Lowered as the literal `{ type: "Buffer", data: Array.from(recv) }`
+                        // that Node returns; the receiver appears once, so it is evaluated once.
+                        let span = swc_common::DUMMY_SP;
+                        let ident = |name: &str| {
+                            swc_ecma_ast::Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.into(), span))
+                        };
+                        let array_from = swc_ecma_ast::Expr::Call(swc_ecma_ast::CallExpr {
+                            span,
+                            ctxt: Default::default(),
+                            callee: swc_ecma_ast::Callee::Expr(Box::new(swc_ecma_ast::Expr::Member(
+                                swc_ecma_ast::MemberExpr {
+                                    span,
+                                    obj: Box::new(ident("Array")),
+                                    prop: swc_ecma_ast::MemberProp::Ident(
+                                        swc_ecma_ast::IdentName::new("from".into(), span),
+                                    ),
+                                },
+                            ))),
+                            args: vec![swc_ecma_ast::ExprOrSpread {
+                                spread: None,
+                                expr: member.obj.clone(),
+                            }],
+                            type_args: None,
+                        });
+                        let key = |name: &str| {
+                            swc_ecma_ast::PropName::Ident(swc_ecma_ast::IdentName::new(name.into(), span))
+                        };
+                        let props = vec![
+                            swc_ecma_ast::PropOrSpread::Prop(Box::new(swc_ecma_ast::Prop::KeyValue(
+                                swc_ecma_ast::KeyValueProp {
+                                    key: key("type"),
+                                    value: Box::new(swc_ecma_ast::Expr::Lit(swc_ecma_ast::Lit::Str(
+                                        swc_ecma_ast::Str { span, value: "Buffer".into(), raw: None },
+                                    ))),
+                                },
+                            ))),
+                            swc_ecma_ast::PropOrSpread::Prop(Box::new(swc_ecma_ast::Prop::KeyValue(
+                                swc_ecma_ast::KeyValueProp { key: key("data"), value: Box::new(array_from) },
+                            ))),
+                        ];
+                        let literal = swc_ecma_ast::Expr::Object(swc_ecma_ast::ObjectLit { span, props });
+                        return self.lower_expr_with_expected_type(&literal, Some(&HirType::Json));
+                    }
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let date_type = date_object_type();
                     self.expect_type(&date_type, &receiver, "Date.toJSON receiver")?;
