@@ -952,7 +952,8 @@ impl<'a> FnLowerer<'a> {
                     // A plain value settles as fulfilled; wrap it so the wrapper awaits a Promise.
                     let plain = !matches!(probe_type, HirType::Promise(_)) && !is_async_call;
                     let input = element.expr.as_ref().clone();
-                    inputs.push((if plain { settled_ast::promise_resolve(input) } else { input }, void));
+                    let inline = is_untyped_promise_reject(&element.expr);
+                    inputs.push((if plain { settled_ast::promise_resolve(input) } else { input }, void, inline));
                 }
                 if !keep_native_record {
                     return self.lower_expr(&settled_ast::settle_all_literal(inputs));
@@ -1062,7 +1063,7 @@ impl<'a> FnLowerer<'a> {
                     if element.spread.is_some() {
                         return Err("spread elements are not supported in `Promise.race`".into());
                     }
-                    let value = self.lower_expr(&element.expr)?;
+                    let value = self.lower_promise_input(&element.expr)?;
                     let resolved = match self.infer_expr_type(&value)? {
                         HirType::Promise(inner) => *inner,
                         returned
@@ -1138,7 +1139,7 @@ impl<'a> FnLowerer<'a> {
                     if element.spread.is_some() {
                         return Err("spread elements are not supported in `Promise.any`".into());
                     }
-                    let value = self.lower_expr(&element.expr)?;
+                    let value = self.lower_promise_input(&element.expr)?;
                     let resolved = match self.infer_expr_type(&value)? {
                         HirType::Promise(inner) => *inner,
                         returned
@@ -1363,10 +1364,44 @@ mod settled_ast {
         })
     }
 
-    /// `(async () => settle(INPUT))()`
-    pub(super) fn settle_now(input: Expr, void: bool) -> Expr {
+    /// `(async () => settle(INPUT))()`: keeps a rejection's original value (a primitive or
+    /// object passed to `Promise.reject`), at the price of settling this input inline.
+    fn settle_iife(input: Expr, void: bool) -> Expr {
         let arrow = settle_arrow(input, Vec::new(), void);
         call(Expr::Paren(ParenExpr { span: DUMMY_SP, expr: Box::new(Expr::Arrow(arrow)) }), Vec::new())
+    }
+
+    fn handler(param: &str, props: Vec<PropOrSpread>, takes_param: bool) -> Expr {
+        Expr::Arrow(ArrowExpr {
+            span: DUMMY_SP,
+            ctxt: SyntaxContext::empty(),
+            params: if takes_param { vec![binding(param, true)] } else { Vec::new() },
+            body: Box::new(ArrowFunctionBody::Expr(Box::new(Expr::Paren(ParenExpr {
+                span: DUMMY_SP,
+                expr: Box::new(Expr::Object(ObjectLit { span: DUMMY_SP, props })),
+            })))),
+            is_async: false,
+            is_generator: false,
+            type_params: None,
+            return_type: Some(any_ann()),
+        })
+    }
+
+    /// `INPUT.then(value => ({status: 'fulfilled', value}), reason => ({status: 'rejected', reason}))`
+    /// -- unlike an immediately invoked async wrapper, every input settles
+    /// concurrently on the event loop.
+    pub(super) fn settle_now(input: Expr, void: bool) -> Expr {
+        let fulfilled = if void {
+            handler("value", vec![status("fulfilled"), key_value("value", Expr::Ident(ident("undefined")))], false)
+        } else {
+            handler("value", vec![status("fulfilled"), key_value("value", Expr::Ident(ident("value")))], true)
+        };
+        let rejected = handler(
+            "reason",
+            vec![status("rejected"), key_value("reason", Expr::Ident(ident("reason")))],
+            true,
+        );
+        call(member(input, "then"), vec![fulfilled, rejected])
     }
 
     /// `Promise.resolve(INPUT)`: a plain value settles as fulfilled.
@@ -1385,10 +1420,13 @@ mod settled_ast {
     }
 
     /// `Promise.all([settle(INPUT), ...])`
-    pub(super) fn settle_all_literal(inputs: Vec<(Expr, bool)>) -> Expr {
+    pub(super) fn settle_all_literal(inputs: Vec<(Expr, bool, bool)>) -> Expr {
         let elems = inputs
             .into_iter()
-            .map(|(input, void)| Some(ExprOrSpread { spread: None, expr: Box::new(settle_now(input, void)) }))
+            .map(|(input, void, inline)| {
+                let settled = if inline { settle_iife(input, void) } else { settle_now(input, void) };
+                Some(ExprOrSpread { spread: None, expr: Box::new(settled) })
+            })
             .collect();
         call(
             member(Expr::Ident(ident("Promise")), "all"),

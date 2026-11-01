@@ -814,6 +814,29 @@ impl<'a> FnLowerer<'a> {
                 ));
             }
         }
+        // TypeScript types a regex `split` element, a `Record<string, string>` read and a
+        // named regex group as `string`, but a missing entry is `undefined` here.
+        // ponytail: an absent entry reads as the text "undefined" in a `string` slot
+        // (output-identical for printing/concatenation; `if (s)` differs); add a real
+        // `string | undefined` slot representation if that matters.
+        if *declared == HirType::Str {
+            if let Ok(HirType::Optional(payload)) = self.infer_expr_type(&value) {
+                if *payload == HirType::Str {
+                    let name = format!("__thaw_opt_str_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let optional = HirType::Optional(payload.clone());
+                    self.scope.insert(name.clone(), optional.clone());
+                    let var = HirExpr::Var(name.clone());
+                    let result = HirExpr::Conditional(
+                        Box::new(HirExpr::OptionalIsNone(Box::new(var.clone()), HirType::Str)),
+                        Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
+                        Box::new(HirExpr::OptionalValue(Box::new(var), HirType::Str)),
+                        HirType::Str,
+                    );
+                    return self.wrap_call_argument_bindings(result, &[(name, optional, value)]);
+                }
+            }
+        }
         if let Some(adapted) = self.adapt_callback_to_json_rest(declared, &value)? {
             return Ok(adapted);
         }

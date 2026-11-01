@@ -237,6 +237,21 @@ impl FnLowerer<'_> {
             .iter()
             .map(|arg| self.infer_expr_type_inner(arg))
             .collect::<Result<Vec<_>, _>>()?;
+        // An object literal passed for a `Record<string, T>` parameter specializes (and is
+        // coerced) as the dictionary the definition declares.
+        let mut param_types = param_types;
+        for (index, param_type) in param_types.iter_mut().enumerate() {
+            let Some(pattern @ GenericTypePattern::Dictionary(_)) =
+                generic_pattern_for_physical_argument(signature, index)
+            else {
+                continue;
+            };
+            if matches!(param_type, HirType::Object(_)) {
+                let declared = instantiate_generic_pattern(pattern, &substitution)?;
+                args[index] = self.coerce_to_declared(&declared, args[index].clone())?;
+                *param_type = declared;
+            }
+        }
         let has_generic_optional = signature.generic_param_optional.iter().any(|optional| *optional);
         let specialization_params = if has_generic_optional {
             signature.generic_param_patterns.iter().enumerate()

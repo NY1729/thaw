@@ -5223,6 +5223,22 @@ impl<'a> FnLowerer<'a> {
                             let mut entries = self.lower_expr(&argument.expr)?;
                             entries = self.native_collection_entries(entries)?;
                             let actual_type = self.infer_expr_type(&entries)?;
+                            // `[[1, 2], [3, 4]]` infers `number[][]`; a literal of
+                            // two-element literals is really an array of pairs.
+                            let mut explicit_types = explicit_types;
+                            if let (None, Expr::Array(outer), HirType::Array(row)) =
+                                (&explicit_types, argument.expr.as_ref(), &actual_type)
+                            {
+                                if let HirType::Array(item) = row.as_ref() {
+                                    let all_pairs = outer.elems.iter().all(|element| {
+                                        matches!(element, Some(e) if e.spread.is_none()
+                                            && matches!(e.expr.as_ref(), Expr::Array(inner) if inner.elems.len() == 2))
+                                    });
+                                    if all_pairs && !is_weak {
+                                        explicit_types = Some((item.as_ref().clone(), item.as_ref().clone()));
+                                    }
+                                }
+                            }
                             if !is_weak {
                                 if let HirType::Union(members) = &actual_type {
                                     if members
@@ -5464,7 +5480,19 @@ impl<'a> FnLowerer<'a> {
                         };
                         let mut iterable = self.lower_expr(&argument.expr)?;
                         iterable = self.native_collection_entries(iterable)?;
-                        let actual_type = self.infer_expr_type(&iterable)?;
+                        let mut actual_type = self.infer_expr_type(&iterable)?;
+                        // A string is iterable by code point: `new Set("abc")` is `new Set([..."abc"])`.
+                        if actual_type == HirType::Str && !is_weak {
+                            let spread = Expr::Array(swc_ecma_ast::ArrayLit {
+                                span: swc_common::DUMMY_SP,
+                                elems: vec![Some(swc_ecma_ast::ExprOrSpread {
+                                    spread: Some(swc_common::DUMMY_SP),
+                                    expr: argument.expr.clone(),
+                                })],
+                            });
+                            iterable = self.lower_expr(&spread)?;
+                            actual_type = self.infer_expr_type(&iterable)?;
+                        }
                         if !is_weak {
                             if let HirType::Union(members) = &actual_type {
                                 if members
