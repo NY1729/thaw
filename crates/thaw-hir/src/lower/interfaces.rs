@@ -48,6 +48,36 @@ fn resolve_interfaces(
                     generic.plain_interfaces.insert(name, iface.as_ref());
                 }
             }
+            Decl::Class(class) if class.class.type_params.is_none() => {
+                let mut fields = Vec::new();
+                for member in &class.class.body {
+                    match member {
+                        ClassMember::ClassProp(property) if !property.is_static => {
+                            if let (PropName::Ident(key), Some(annotation)) =
+                                (&property.key, &property.type_ann)
+                            {
+                                fields.push((key.sym.to_string(), annotation.type_ann.as_ref()));
+                            }
+                        }
+                        ClassMember::Constructor(constructor) => {
+                            for parameter in &constructor.params {
+                                if let ParamOrTsParamProp::TsParamProp(property) = parameter {
+                                    if let TsParamPropParam::Ident(binding) = &property.param {
+                                        if let Some(annotation) = &binding.type_ann {
+                                            fields.push((
+                                                binding.id.sym.to_string(),
+                                                annotation.type_ann.as_ref(),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                generic.classes.insert(class.ident.sym.to_string(), fields);
+            }
             Decl::TsTypeAlias(alias) => {
                 let name = alias.id.sym.to_string();
                 if matches!(

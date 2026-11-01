@@ -44,6 +44,9 @@ fn replace_metadata<T>(metadata: &mut HashMap<Symbol, T>, name: &str, value: Opt
 struct GenericInterfaces<'a> {
     interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
     plain_interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
+    /// Annotated instance fields (and constructor parameter properties) of each
+    /// non-generic class, so `p.items[i]` on a class value narrows like an interface's.
+    classes: HashMap<Symbol, Vec<(Symbol, &'a TsType)>>,
     aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
     plain_aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
     function_aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
@@ -544,6 +547,18 @@ fn object_array_property_discriminants(
                     .get(&name)
                     .or_else(|| generic.plain_interfaces.get(&name))
                 else {
+                    if let Some(fields) = generic.classes.get(&name) {
+                        for (field, annotation) in fields {
+                            prefix.push(field.clone());
+                            let discriminants = array_element_union_discriminants(annotation, generic);
+                            if discriminants.is_empty() {
+                                collect(annotation, generic, prefix, visiting, result);
+                            } else {
+                                result.insert(prefix.clone(), discriminants);
+                            }
+                            prefix.pop();
+                        }
+                    }
                     visiting.remove(&name);
                     return;
                 };

@@ -4282,6 +4282,56 @@
       "name": "nd4 Date string conversion of an invalid or valid date",
       "expect": "matched",
       "source": "function main(): void {\n  const d = new Date(NaN);\n  console.log(String(d), `${d}`, \"x\" + d, d.toString(), d.getTime(), JSON.stringify(d));\n  const v = new Date(0);\n  console.log(String(v) === v.toString(), `${v}` === v.toString(), (\"\" + v) === v.toString());\n}\n"
+    },
+    {
+      "name": "r2d await in a later operand of a timer-suspending call",
+      "expect": "matched",
+      "source": "async function f(): Promise<number> {\n  await new Promise<void>((r) => setTimeout(r, 2));\n  return 3;\n}\nasync function run(): Promise<void> {\n  console.log(\"final\", await f());\n  console.log(\"k\" + (await f()));\n  const x = 10;\n  console.log(x + (await f()), 1 + (await f()) * 2);\n  const o = { a: 1, b: await f() };\n  console.log(o);\n  console.log([1, await f()]);\n}\nfunction main(): void {\n  run();\n}\n"
+    },
+    {
+      "name": "r2d Promise.allSettled settles concurrently with an unrelated pending timer",
+      "expect": "matched",
+      "source": "function sleep(ms: number): Promise<void> {\n  return new Promise<void>((r) => setTimeout(r, ms));\n}\nasync function worker(n: string, ms: number): Promise<string> {\n  await sleep(ms);\n  return n;\n}\nasync function fail(ms: number): Promise<string> {\n  await sleep(ms);\n  throw new Error(\"bad\");\n}\nasync function run(): Promise<void> {\n  worker(\"slow\", 400);\n  const t = Date.now();\n  const r = await Promise.allSettled([worker(\"a\", 30), worker(\"b\", 5), fail(10)]);\n  console.log(Date.now() - t < 200);\n  console.log(r.map((x) => x.status));\n  console.log(r[0], r[1]);\n  console.log((r[2] as PromiseRejectedResult).reason.message);\n}\nfunction main(): void {\n  run();\n}\n"
+    },
+    {
+      "name": "r2d discriminated union narrowing on an indexed class field",
+      "expect": "matched",
+      "source": "type Tok = { t: \"num\"; v: number } | { t: \"end\" };\nclass P {\n  toks: Tok[];\n  constructor(toks: Tok[]) {\n    this.toks = toks;\n  }\n  at(i: number): number {\n    const t = this.toks[i];\n    if (t.t === \"num\") return t.v;\n    return -1;\n  }\n}\nfunction viaParam(p: P): number {\n  const t = p.toks[0];\n  if (t.t === \"num\") return t.v;\n  return 0;\n}\nfunction main(): void {\n  const p = new P([{ t: \"num\", v: 4 }, { t: \"end\" }]);\n  console.log(p.at(0), p.at(1), viaParam(p));\n}\n"
+    },
+    {
+      "name": "r2d regex split elements and Record/group reads typed as string",
+      "expect": "matched",
+      "source": "function main(): void {\n  let line = \"\";\n  for (const w of \"a b  c\".split(/\\s+/)) {\n    line = w;\n  }\n  console.log(line);\n  const parts = \"a1b\".split(/\\d/);\n  const first: string = parts[0];\n  console.log(first);\n  const m = /^(?<name>[a-z]+)=(?<v>\\d+)$/.exec(\"ab=12\");\n  if (m?.groups) {\n    const o: Record<string, string> = {};\n    o[m.groups.name] = m.groups.v;\n    console.log(o);\n  }\n  const e = { \"&\": \"&amp;\", \"<\": \"&lt;\" } as Record<string, string>;\n  console.log(\"a&<\".replace(/[&<]/g, (c) => e[c]));\n  const c = \"&\";\n  const x: string = e[c] as string;\n  console.log(x);\n}\n"
+    },
+    {
+      "name": "r2d Map constructor from numeric pair literals",
+      "expect": "matched",
+      "source": "function main(): void {\n  const m = new Map([[1, 2], [3, 4]]);\n  console.log(m, m.get(3));\n  const n = new Map<number, number>([[5, 6]]);\n  console.log(n.size, [...m.keys()]);\n}\n"
+    },
+    {
+      "name": "r2d unit celsius and fahrenheit in a non-English locale",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(new Intl.NumberFormat(\"de-DE\", { style: \"unit\", unit: \"celsius\" }).format(21.5));\n  console.log(new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"celsius\" }).format(21.5));\n}\n"
+    },
+    {
+      "name": "r2d generic function with a Record parameter and an object literal argument",
+      "expect": "matched",
+      "source": "function count<T extends object>(t: T, s: Record<string, string>): number {\n  return Object.keys(s).length + Object.keys(t).length;\n}\nfunction main(): void {\n  console.log(count({ a: 1 }, { name: \"string\", id: \"number\" }));\n}\n"
+    },
+    {
+      "name": "r2d Promise.race and Promise.any accept non-Promise elements",
+      "expect": "matched",
+      "source": "function main(): void {\n  Promise.race([Promise.resolve(1), 2]).then((v) => console.log(v));\n  Promise.any([Promise.reject(new Error(\"x\")), 5]).then((v) => console.log(v));\n}\n"
+    },
+    {
+      "name": "r2d new Promise that only rejects needs no type argument",
+      "expect": "matched",
+      "source": "function main(): void {\n  new Promise((_, rej) => rej(new Error(\"boom\"))).catch((e) => console.log((e as Error).message));\n}\n"
+    },
+    {
+      "name": "r2d Set built from a string iterates its characters",
+      "expect": "matched",
+      "source": "function main(): void {\n  const s = new Set(\"mississippi\");\n  console.log(s.size, [...s].join(\"\"));\n}\n"
     }
   ]
 }
