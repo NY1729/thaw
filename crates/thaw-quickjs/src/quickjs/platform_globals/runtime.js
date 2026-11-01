@@ -3018,7 +3018,8 @@
   const timerHandle = (id, record, api) => Object.setPrototypeOf({
     ref() { const timer = timers.get(id); if (timer && !timer.clock) timer.refed = true; return this; },
     unref() { const timer = timers.get(id); if (timer && !timer.clock) timer.refed = false; return this; },
-    hasRef() { const timer = timers.get(id); return Boolean(timer && (timer.clock || timer.refed)); },
+    // A cleared timer keeps its ref state (Node), so read the record when it left the map.
+    hasRef() { const timer = timers.get(id) || (record && record.cancelled ? record : null); return Boolean(timer && (timer.clock || timer.refed)); },
     // A one-shot timer that already fired can be re-armed; a cleared one cannot.
     refresh() {
       let timer = timers.get(id);
@@ -3715,6 +3716,7 @@
     release: { name: 'node' },
     pid: globalThis.process.pid || processSyscall('getpid'),
     ppid: globalThis.process.ppid || processSyscall('getppid'),
+    binding: name => { throw new Error('No such module: ' + name); },
     features: globalThis.process.features || { inspector: false, debug: false, uv: true, ipv6: true, tls_alpn: true, tls_sni: true, tls_ocsp: true, tls: true },
     on: (event, listener) => processOn(event, listener),
     once: (event, listener) => processOn(event, listener, true),

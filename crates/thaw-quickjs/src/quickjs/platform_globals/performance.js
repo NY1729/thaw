@@ -188,6 +188,14 @@
       globalThis.performance.timeOrigin = performanceTimeOrigin;
     }
   }
+  // Node's navigator (Node 21+): plain data props are enough for `typeof` and property reads.
+  if (typeof globalThis.navigator === 'undefined') {
+    class Navigator {}
+    globalThis.Navigator = Navigator;
+    globalThis.navigator = Object.assign(new Navigator(), {
+      hardwareConcurrency: 1, language: 'en-US', languages: ['en-US'],
+      platform: 'Linux x86_64', userAgent: 'Node.js/22' });
+  }
   const performanceEntries = [];
   const performanceObservers = new Set();
   class PerformanceEntry {

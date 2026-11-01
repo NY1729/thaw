@@ -5468,9 +5468,19 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
     }
     // `Object.create(null)`: `String(value)` throws, and Node prints it with a marker prefix.
     let null_proto = !array && host_query(lease, 26).as_deref() == Some("1");
+    // Standard namespace objects print as `Object [Math] {}` (Node), not their `String()` tag.
+    let mut namespace_ctor = None;
     if !array && !null_proto {
         let text = host_inspect_text(lease, false);
-        if !matches!(&text, Node::Raw(value) if value == "[object Object]") {
+        let namespace = match &text {
+            Node::Raw(value) => ["Math", "JSON", "Reflect", "Atomics", "Intl"]
+                .into_iter()
+                .find(|tag| *value == format!("[object {tag}]")),
+            _ => None,
+        };
+        if let Some(tag) = namespace {
+            namespace_ctor = Some(format!("Object [{tag}]"));
+        } else if !matches!(&text, Node::Raw(value) if value == "[object Object]") {
             return text;
         }
     }
@@ -5501,10 +5511,11 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 .into_iter()
                 .partition(|(key, _)| key.first() != Some(&1));
             entries.extend(symbols);
-            let ctor = match host_query(lease, 23) {
-                _ if null_proto => Ctor::NullProto,
-                Some(name) if !name.is_empty() => Ctor::Named(name),
-                _ => Ctor::Plain,
+            let ctor = match (namespace_ctor, host_query(lease, 23)) {
+                (Some(name), _) => Ctor::Named(name),
+                (None, _) if null_proto => Ctor::NullProto,
+                (None, Some(name)) if !name.is_empty() => Ctor::Named(name),
+                (None, _) => Ctor::Plain,
             };
             Node::Object { id, ctor, entries }
         }

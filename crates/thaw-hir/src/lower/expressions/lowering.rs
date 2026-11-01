@@ -3568,6 +3568,14 @@ impl<'a> FnLowerer<'a> {
                         if self.generic_callable_template(&name).is_some() {
                             return Ok(HirExpr::Lit(HirLit::Str("function".into())));
                         }
+                        // `fetch` is a compiled native call, not a realm value: `typeof fetch`
+                        // is "function" without a runtime stub (package code feature-detects it).
+                        if identifier.sym.as_ref() == "fetch"
+                            && !self.scope.contains_key("fetch")
+                            && !self.signatures.contains_key("fetch")
+                        {
+                            return Ok(HirExpr::Lit(HirLit::Str("function".into())));
+                        }
                     }
                 }
                 // Implicit-return normalization inserts a dummy-span `void 0`
@@ -3810,10 +3818,34 @@ impl<'a> FnLowerer<'a> {
                     None => self.lower_expr(&unary.arg)?,
                 };
                 // `typeof undeclared` is "undefined" (no ReferenceError).
+                // An undeclared name that the compiled scope does not know is a realm global
+                // (`typeof FinalizationRegistry`): read it as `typeof globalThis.<name>`, which
+                // yields "undefined" when the realm has no such property.
                 if unary.op == UnaryOp::TypeOf
                     && matches!(&value, HirExpr::Var(_))
                     && matches!(self.infer_expr_type(&value), Err(e) if e.starts_with("unknown variable"))
                 {
+                    if let Expr::Ident(identifier) = unary.arg.as_ref() {
+                        if identifier.sym.as_ref() != "globalThis" {
+                            let span = identifier.span;
+                            let global = Expr::Member(swc_ecma_ast::MemberExpr {
+                                span,
+                                obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                                    "globalThis".into(),
+                                    span,
+                                ))),
+                                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                                    identifier.sym.clone(),
+                                    span,
+                                )),
+                            });
+                            return self.lower_expr(&Expr::Unary(swc_ecma_ast::UnaryExpr {
+                                span: unary.span,
+                                op: UnaryOp::TypeOf,
+                                arg: Box::new(global),
+                            }));
+                        }
+                    }
                     return Ok(HirExpr::Lit(HirLit::Str("undefined".into())));
                 }
                 let value = if matches!(

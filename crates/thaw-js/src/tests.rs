@@ -1980,3 +1980,50 @@ fn message_channel_delivers_a_structured_clone_and_rejects_functions() {
     );
     assert!(crate::scan::scan_bundle(&probe).ok().unwrap().is_clean());
 }
+
+#[test]
+fn async_context_bridge_get_swap_roundtrip() {
+    assert_eq!(
+        one("const b = __thaw_async_context_bootstrap; console.log(b.get(), b.swap('A'), b.get(), b.swap(undefined), b.get())"),
+        "undefined undefined A A undefined"
+    );
+}
+
+#[test]
+fn async_context_follows_promise_reactions_and_await() {
+    let src = "const b = __thaw_async_context_bootstrap, log = [];
+      b.swap('A');
+      Promise.resolve().then(() => log.push('then:' + b.get()));
+      queueMicrotask(() => log.push('micro:' + b.get()));
+      (async () => { await null; log.push('await:' + b.get()); await new Promise((r) => r()); log.push('await2:' + b.get()); })();
+      b.swap('B');
+      Promise.resolve().then(() => log.push('thenB:' + b.get()));
+      b.swap(undefined);
+      Promise.resolve().then(() => log.push('thenU:' + b.get()));
+      new Promise((r) => setTimeout(r, 1)).then(() => log.push('late:' + b.get()));
+      setTimeout(() => console.log(log.sort().join(',')), 20);";
+    assert_eq!(
+        run_loop(src),
+        "await2:A,await:A,late:undefined,micro:A,then:A,thenB:B,thenU:undefined"
+    );
+}
+
+#[test]
+fn async_context_follows_next_tick() {
+    assert_eq!(
+        run_loop("const b = __thaw_async_context_bootstrap; b.swap('T'); process.nextTick(() => console.log('t:' + b.get())); b.swap(undefined); process.nextTick(() => console.log('u:' + b.get()));"),
+        "t:T|u:undefined"
+    );
+}
+
+#[test]
+fn async_context_follows_timers_and_immediates() {
+    // Completion is counted, not timed: a wall-clock timeout can fire before the immediate on a slow build.
+    let src = "const b = __thaw_async_context_bootstrap, l = [];
+      b.swap('T'); setTimeout(() => { l.push('to:' + b.get()); done(); }, 1);
+      let n = 0; const iv = setInterval(() => { l.push('iv:' + b.get()); if (++n === 2) clearInterval(iv); done(); }, 1);
+      b.swap('I'); setImmediate(() => { l.push('im:' + b.get()); done(); });
+      b.swap(undefined); const after = b.get();
+      function done() { if (l.length === 4) console.log(l.sort().join(',') + ' after:' + after); }";
+    assert_eq!(run_loop(src), "im:I,iv:T,iv:T,to:T after:undefined");
+}

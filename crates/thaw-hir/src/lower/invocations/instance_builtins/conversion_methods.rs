@@ -327,8 +327,11 @@ impl<'a> FnLowerer<'a> {
                     }
                     // A number or Date array formats each element with the same
                     // arguments, then joins with ",": `arr.map(x => x.toLocaleString(..)).join(",")`.
+                    // `infer_expr_type` normalizes `Bytes` to `Array(F64)`, so a
+                    // Buffer must be excluded here (it falls through to the utf8 decode).
+                    let is_bytes = self.infer_expr_type_inner(&receiver)? == HirType::Bytes;
                     if let HirType::Array(element) = &receiver_type {
-                        if matches!(element.as_ref(), HirType::F64) || **element == date_object_type() {
+                        if !is_bytes && (matches!(element.as_ref(), HirType::F64) || **element == date_object_type()) {
                             use swc_common::DUMMY_SP;
                             use swc_ecma_ast::*;
                             let name = format!("__thaw_locale_array_{}", self.next_binding);
