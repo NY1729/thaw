@@ -454,7 +454,19 @@ impl<'a> FnLowerer<'a> {
                     | "findLast" | "findLastIndex" | "flat" | "flatMap" | "toSorted" | "toReversed"
                     | "toSpliced" | "with" | "forEach" | "slice" | "concat" | "at"
             ))
-            || !self.json_receiver_candidate(&member.obj)
+        {
+            return Ok(None);
+        }
+        // Array-only names are not also string/Map/Set methods, so an awaited or call-returned
+        // Json array (`(await fs.promises.readdir(d)).sort()`) may take this path even though the
+        // syntactic check misses it. A receiver whose type is already known is left alone.
+        let array_only = matches!(
+            name,
+            "sort" | "reverse" | "fill" | "copyWithin" | "flat" | "flatMap" | "toSorted" | "toReversed"
+                | "toSpliced" | "with" | "findLast" | "findLastIndex"
+        );
+        if !self.json_receiver_candidate(&member.obj)
+            && (!array_only || self.peek_type_without_lowering(&member.obj).is_some())
         {
             return Ok(None);
         }
