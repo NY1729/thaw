@@ -4517,6 +4517,31 @@
       "name": "r2c node:timers/promises import leaves the global timers alone",
       "expect": "matched",
       "source": "import * as tp from \"node:timers/promises\";\nfunction main(): void {\n  console.log(\"start\", typeof tp.setTimeout);\n  setTimeout(() => { console.log(\"timeout\"); setImmediate(() => console.log(\"immediate\")); }, 1);\n}"
+    },
+    {
+      "name": "r3a typeof undeclared and runtime globals",
+      "expect": "matched",
+      "source": "function main(): void { console.log(typeof window, typeof undeclaredName, typeof Buffer, typeof performance.now(), typeof clearImmediate); }"
+    },
+    {
+      "name": "r3a BigInt64Array construction",
+      "expect": "matched",
+      "source": "function main(): void { const a = new BigInt64Array(2); const b = new BigUint64Array(3); console.log(a.length, b.length); }"
+    },
+    {
+      "name": "r3a class expressions in value position",
+      "expect": "matched",
+      "source": "function main(): void { const a = new (class Foo { x = 3; get(): number { return this.x; } })(); console.log(a.get(), typeof class {}); function mk() { return class { v = 1; }; } const C = mk(); console.log(new C().v); }"
+    },
+    {
+      "name": "r3a named function expression recursion",
+      "expect": "matched",
+      "source": "const f = function fact(n: number): number { return n <= 1 ? 1 : n * fact(n - 1); }; function main(): void { console.log(f(5)); }"
+    },
+    {
+      "name": "r3a new on a destructured builtin class",
+      "expect": "matched",
+      "source": "import __d1 from \"node:stream\"; const { Writable } = __d1; function main(): void { const w = new Writable({ write(c: any, e: any, cb: any) { cb(); } }); console.log(typeof w.write); }"
     }
   ]
 }
