@@ -837,3 +837,4 @@ include!("tests/fx11_diff_contracts.rs");
 include!("tests/fx9_bytes_contracts.rs");
 include!("tests/fx12_b19_contracts.rs");
 include!("tests/fx14_buffer_data_contracts.rs");
+include!("tests/fx13_buffer_brand_contracts.rs");
