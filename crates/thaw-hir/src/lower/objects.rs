@@ -4178,6 +4178,12 @@ impl<'a> FnLowerer<'a> {
             }
             _ => (object, object_type),
         };
+        // A live JavaScript value short-circuits the same way: read it through its dynamic form.
+        let (object, object_type) = if object_type == HirType::JsValue {
+            (self.coerce_to_declared(&HirType::Json, object)?, HirType::Json)
+        } else {
+            (object, object_type)
+        };
         // A dynamic `any` value (`Json`) short-circuits to `undefined` for
         // a nullish receiver -- read the key directly, without the
         // TypeError guard the non-optional `Json` read now applies.

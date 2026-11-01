@@ -1438,7 +1438,21 @@ impl VisitMut for RenameReferences<'_> {
                 }
             }
         }
-        expr.visit_mut_children_with(self);
+        // `import.meta.resolve(...)` keeps its callee until the call is folded below; only a failed fold
+        // lets the callee become the value-position function.
+        let resolve_call = matches!(&*expr, Expr::Call(call) if matches!(&call.callee, Callee::Expr(callee)
+            if matches!(callee.as_ref(), Expr::Member(member)
+                if matches!(member.obj.as_ref(), Expr::MetaProp(meta)
+                    if meta.kind == thaw_parser::ast::MetaPropKind::ImportMeta)
+                && matches!(&member.prop, thaw_parser::ast::MemberProp::Ident(property)
+                    if property.sym == *"resolve"))));
+        if resolve_call {
+            if let Expr::Call(call) = expr {
+                call.args.visit_mut_with(self);
+            }
+        } else {
+            expr.visit_mut_children_with(self);
+        }
         if let Expr::Call(call) = expr {
             if matches!(call.callee, Callee::Import(_)) {
                 if let Some(specifier) = call.args.first().and_then(|argument| {
@@ -1494,6 +1508,12 @@ impl VisitMut for RenameReferences<'_> {
                     }
                 }
             }
+        }
+        if resolve_call {
+            if let Expr::Call(call) = expr {
+                call.callee.visit_mut_with(self);
+            }
+            return;
         }
         if let Expr::Ident(ident) = expr {
             self.rename_ident(ident);
@@ -1573,6 +1593,23 @@ impl VisitMut for RenameReferences<'_> {
                 .unwrap_or_else(|| Path::new("/"))
                 .to_string_lossy()
                 .into_owned(),
+            // `import.meta.resolve` read as a value (a call with a constant specifier is folded earlier).
+            "resolve" => {
+                let source = format!(
+                    "(({}) => {});",
+                    "specifier: string",
+                    format_args!("new URL(specifier, {:?}).href", self.import_meta_url)
+                );
+                if let Ok(module) = thaw_parser::parse_typescript(&source) {
+                    if let Some(thaw_parser::ast::ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(
+                        statement,
+                    ))) = module.body.first()
+                    {
+                        *expr = *statement.expr.clone();
+                    }
+                }
+                return;
+            }
             _ => return,
         };
         *expr = Expr::Lit(thaw_parser::ast::Lit::Str(thaw_parser::ast::Str {

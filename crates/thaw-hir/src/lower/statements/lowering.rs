@@ -2097,6 +2097,28 @@ impl<'a> FnLowerer<'a> {
             }
 
             Stmt::ForOf(for_of) => {
+                // `for await (const chunk of req)` over a native `http.IncomingMessage`: its body is read
+                // synchronously (`bodyBytes()`), so iterate the one-chunk (or empty) array of it.
+                if let (true, Expr::Ident(request)) = (for_of.is_await, for_of.right.as_ref()) {
+                    if matches!(self.peek_type_without_lowering(&for_of.right), Some(HirType::Object(fields))
+                        if ["bodyBytes", "bodyHex", "getHeader"].iter().all(|name| fields.iter().any(|(field, _)| field == name)))
+                    {
+                        let name = request.sym.to_string();
+                        let snippet = format!(
+                            "const __thaw_chunks = [{name}.bodyBytes()].filter((chunk) => chunk.length > 0);"
+                        );
+                        if let Ok(module) = thaw_parser::parse_typescript(&snippet) {
+                            if let Some(ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration)))) = module.body.first() {
+                                if let Some(init) = declaration.decls.first().and_then(|d| d.init.clone()) {
+                                    let mut rewritten = for_of.clone();
+                                    rewritten.is_await = false;
+                                    rewritten.right = init;
+                                    return self.lower_stmt_seq(&Stmt::ForOf(rewritten));
+                                }
+                            }
+                        }
+                    }
+                }
                 // A `Json` iterable may be a plain array or a live JS object that
                 // implements `[Symbol.iterator]()`; only the runtime knows which.
                 // Evaluate the iterable once and lower the loop for both cases, picking
