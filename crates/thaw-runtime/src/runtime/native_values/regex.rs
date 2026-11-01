@@ -44,6 +44,8 @@ unsafe extern "C" {
     fn thaw_json_object_set_json(object: *mut u8, key: *const c_char, value: *mut u8);
     fn thaw_json_object_set_number(object: *mut u8, key: *const c_char, value: f64);
     fn thaw_json_typed_decode_scope_own(value: *mut u8);
+    fn thaw_json_null() -> *mut u8;
+    fn thaw_json_set_prototype(object: *mut u8, prototype: *mut u8) -> *mut u8;
 }
 
 fn groups_json_pointer(groups: Vec<(String, Option<Vec<u16>>)>) -> *mut u8 {
@@ -66,6 +68,9 @@ fn groups_json_pointer(groups: Vec<(String, Option<Vec<u16>>)>) -> *mut u8 {
             unsafe { thaw_json_object_set_json_owned(object, name, thaw_json_undefined()) };
         }
     }
+    // `match.groups` has a null prototype.
+    thread_local! { static NULL: *mut u8 = unsafe { thaw_json_null() }; }
+    unsafe { thaw_json_set_prototype(object, NULL.with(|null| *null)) };
     object
 }
 

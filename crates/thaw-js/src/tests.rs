@@ -926,6 +926,45 @@ fn global_construct_and_call_handles() {
 }
 
 #[test]
+fn with_this_call_and_event_key_handle_match_the_quickjs_contract() {
+    use crate::host::*;
+    use std::ffi::{CStr, CString};
+    let q = |s: &str| CString::new(s).unwrap();
+    // `function () { return this.k + arguments[0]; }` called with the leading array element as receiver.
+    let made = thaw_tjs_new_function(q(r#"["return this.k + arguments[0]"]"#).as_ptr());
+    assert!(made.error.is_null() && made.value > 0);
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"r":1},{"v":2}]},{"o":[["k",{"v":40}]]}]}"#);
+    let r = thaw_tjs_call_handle_with_this_graph_wire_result(made.value, args.as_ptr());
+    assert!(r.error.is_null());
+    // SAFETY: a non-null result is a NUL-terminated wire.
+    let wire = unsafe { CStr::from_ptr(r.value) }.to_str().unwrap();
+    assert!(wire.contains("42"), "{wire}");
+    let empty = q(r#"{"root":{"r":0},"nodes":[{"a":[]}]}"#);
+    assert!(
+        !thaw_tjs_call_handle_with_this_graph_wire_result(made.value, empty.as_ptr())
+            .error
+            .is_null()
+    );
+
+    let key = thaw_tjs_event_key_handle_result(q(r#"["evt"]"#).as_ptr(), 0);
+    assert!(key.error.is_null() && key.value > 0);
+    // SAFETY: a NUL-terminated string owned by the handle table.
+    let text = unsafe { CStr::from_ptr(thaw_tjs_handle_to_string(key.value)) }
+        .to_str()
+        .unwrap();
+    assert_eq!(text, "evt");
+    assert!(thaw_tjs_event_key_handle_result(q(r#"[null]"#).as_ptr(), 0)
+        .error
+        .is_null());
+    assert!(!thaw_tjs_event_key_handle_result(q(r#"[1]"#).as_ptr(), 0)
+        .error
+        .is_null());
+    assert!(!thaw_tjs_event_key_handle_result(q(r#"["s"]"#).as_ptr(), 1)
+        .error
+        .is_null());
+}
+
+#[test]
 fn user_dynamic_code_runs_in_a_bare_realm() {
     use crate::host::*;
     use std::ffi::{CStr, CString};
@@ -1800,4 +1839,70 @@ fn get_prototype_of_runs_the_proxy_trap() {
         one("console.log(Object.getPrototypeOf(new Proxy({}, {})) === Object.prototype, Reflect.getPrototypeOf(new Proxy({}, { getPrototypeOf() { return null; } })))"),
         "true null"
     );
+}
+
+#[test]
+fn timer_handle_ref_methods_scan_clean_and_run() {
+    let timers = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.t = function () { var t = setTimeout(function () {}, 1); t.unref(); return t.hasRef(); };",
+    );
+    let clean = crate::scan::scan_bundle(&timers).ok().unwrap();
+    assert!(clean.is_clean(), "{:?}", clean.blockers);
+    assert_eq!(
+        one("const t = setTimeout(() => console.log('never'), 50); console.log(t.unref() === t, t.hasRef());"),
+        "true false"
+    );
+}
+
+#[test]
+fn webassembly_stub_is_typeof_safe_and_scan_blocks_real_use() {
+    assert_eq!(
+        one("console.log(typeof WebAssembly, typeof WebAssembly.compile)"),
+        "object function"
+    );
+    let probe = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.has = function () { return typeof WebAssembly !== 'undefined'; };",
+    );
+    assert!(crate::scan::scan_bundle(&probe).ok().unwrap().is_clean());
+    let use_it = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.run = function (x) { return WebAssembly.instantiate(x); };",
+    );
+    let blocked = crate::scan::scan_bundle(&use_it).ok().unwrap();
+    assert!(
+        blocked.blockers.contains_key("global:WebAssembly"),
+        "{:?}",
+        blocked.blockers
+    );
+}
+
+#[test]
+fn dns_host_resolves_localhost_and_scan_accepts_it() {
+    let lookup = one("const r = JSON.parse(__thaw_dns_lookup('localhost')); console.log(r.ok, r.addresses.length > 0);");
+    assert_eq!(lookup, "true true");
+    let dns = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.lookup = function (h) { return __thaw_dns_lookup_start(h); }; exports.servers = function () { return __thaw_dns_default_servers(); }; exports.query = function (n) { return __thaw_dns_query_start(n, 'A', '[]', 100, 1); };",
+    );
+    assert!(crate::scan::scan_bundle(&dns).ok().unwrap().is_clean());
+}
+
+#[test]
+fn message_channel_delivers_a_structured_clone_and_rejects_functions() {
+    let mut it = Interp::new();
+    it.run(
+        "const ch = new MessageChannel(); ch.port1.onmessage = (e) => { console.log(JSON.stringify(e.data)); ch.port1.close(); }; \
+         ch.port2.postMessage({ a: [1, 2] }); try { ch.port2.postMessage(() => 1); } catch (e) { console.log(e.name); }",
+    )
+    .ok()
+    .unwrap();
+    it.run_event_loop().ok().unwrap();
+    assert_eq!(it.out, vec!["DataCloneError", "{\"a\":[1,2]}"]);
+    let probe = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.port = function (v) { return globalThis.__thaw_is_message_port(v); };",
+    );
+    assert!(crate::scan::scan_bundle(&probe).ok().unwrap().is_clean());
 }

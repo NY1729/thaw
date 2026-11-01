@@ -1728,15 +1728,37 @@ pub extern "C" fn thaw_tjs_call_handle_graph_result(
     handle: u64,
     args_json: *const c_char,
 ) -> ThawResult {
+    call_handle_graph(handle, args_json, false)
+}
+
+/// As [`thaw_tjs_call_handle_graph_result`], the first element of the argument array being the receiver
+/// (`this`) of the call (a native callback invoked as a method).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_call_handle_with_this_graph_wire_result(
+    handle: u64,
+    args_json: *const c_char,
+) -> ThawResult {
+    call_handle_graph(handle, args_json, true)
+}
+
+fn call_handle_graph(handle: u64, args_json: *const c_char, with_this: bool) -> ThawResult {
     graph_result((|| {
         let args_json = cstr(args_json).ok_or("invalid arguments")?;
         let (_, args) = decode_wire(&args_json)?;
         on_handle(handle, |p, owner, f| {
             let it = &mut p.interp;
-            let args = it.array_items(&args);
-            let result = it
-                .call(&f, &Value::Undefined, &args)
-                .map_err(|c| classify(it, c))?;
+            let mut args = it.array_items(&args);
+            let this = if with_this {
+                if args.is_empty() {
+                    return Err(HostError::Bundle(
+                        "JS callback receiver payload is empty".into(),
+                    ));
+                }
+                args.remove(0)
+            } else {
+                Value::Undefined
+            };
+            let result = it.call(&f, &this, &args).map_err(|c| classify(it, c))?;
             let result = awaited(it, result)?;
             let mut out = WireOut {
                 owner,
@@ -1751,6 +1773,35 @@ pub extern "C" fn thaw_tjs_call_handle_graph_result(
             let root = out.token(it, &result)?;
             Ok(out.finish(root))
         })
+    })())
+}
+
+/// A native string (or `null`) as a thaw-js handle: the counterpart of QuickJS's
+/// `thaw_js_event_key_handle_result`. `value_json` is a one-element JSON array; `is_symbol` marks a
+/// native Symbol token, which the thaw-js wire cannot carry yet.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_event_key_handle_result(
+    value_json: *const c_char,
+    is_symbol: u8,
+) -> HandleResult {
+    handle_result((|| {
+        if is_symbol > 1 {
+            return Err("invalid native scalar kind".to_string());
+        }
+        if is_symbol == 1 {
+            return Err("native Symbol keys are not supported by the thaw-js runtime".to_string());
+        }
+        let wire = cstr(value_json).ok_or("invalid native scalar wire")?;
+        let Native::Array(items) = Native::from_json(&wire).map_err(|e| e.to_string())? else {
+            return Err("native scalar wire value must be an array".to_string());
+        };
+        let value = match items.as_slice() {
+            [Native::Str(s)] => Value::str(s),
+            [Native::Null] => Value::Null,
+            [_] => return Err("native scalar wire element must be a string or null".to_string()),
+            _ => return Err("native scalar wire array must contain one string".to_string()),
+        };
+        Ok(store_handle(default_realm(), value))
     })())
 }
 
