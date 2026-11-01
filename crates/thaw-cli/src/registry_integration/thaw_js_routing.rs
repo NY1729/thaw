@@ -319,6 +319,8 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:constants",
     "node:url",
     "node:fs",
+    "node:timers/promises",
+    "node:fs/promises",
 ];
 
 /// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
