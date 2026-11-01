@@ -528,7 +528,7 @@ impl Interp {
         args: &[Value],
         promise: Obj,
         gen: Option<Obj>,
-    ) -> R<(Rc<Co>, (usize, usize, usize))> {
+    ) -> R<(Rc<Co>, (usize, usize, usize, u32))> {
         let (to_co, from_host) = channel();
         let (to_host, from_co) = channel();
         let done_tx = to_host.clone();
@@ -576,16 +576,16 @@ impl Interp {
     }
 
     /// Per-thread evaluator state that must follow the thread across coroutine switches.
-    pub(crate) fn snapshot(&self) -> (usize, usize, usize) {
-        (self.depth, self.stack_limit, self.max_depth)
+    pub(crate) fn snapshot(&self) -> (usize, usize, usize, u32) {
+        (self.depth, self.stack_limit, self.max_depth, self.run_id)
     }
 
-    pub(crate) fn restore(&mut self, s: (usize, usize, usize)) {
-        (self.depth, self.stack_limit, self.max_depth) = s;
+    pub(crate) fn restore(&mut self, s: (usize, usize, usize, u32)) {
+        (self.depth, self.stack_limit, self.max_depth, self.run_id) = s;
     }
 
     /// Block until the coroutine yields or finishes, then act on what it did.
-    pub(crate) fn co_wait(&mut self, co: &Rc<Co>, snap: (usize, usize, usize)) -> R<()> {
+    pub(crate) fn co_wait(&mut self, co: &Rc<Co>, snap: (usize, usize, usize, u32)) -> R<()> {
         let y = co.from_co.recv();
         self.restore(snap);
         self.rt.cur_co.pop();

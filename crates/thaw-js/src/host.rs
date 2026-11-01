@@ -151,7 +151,7 @@ impl Package {
         if stack_bytes != 0 {
             interp.configure_stack(stack_bytes);
         }
-        interp.run_id += 1; // factory spans come from this one parse
+        interp.run_id = crate::next_run_id(); // factory spans come from this one parse
         interp
             .sources
             .insert(interp.run_id, std::rc::Rc::from(parts.source.as_str()));
