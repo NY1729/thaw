@@ -4284,6 +4284,61 @@
       "source": "function main(): void {\n  const d = new Date(NaN);\n  console.log(String(d), `${d}`, \"x\" + d, d.toString(), d.getTime(), JSON.stringify(d));\n  const v = new Date(0);\n  console.log(String(v) === v.toString(), `${v}` === v.toString(), (\"\" + v) === v.toString());\n}\n"
     },
     {
+      "name": "r2b array destructuring from a custom iterable closes it",
+      "expect": "matched",
+      "source": "function main(): void { const it = { [Symbol.iterator]() { let i = 5; return { next() { return i < 8 ? { value: i++, done: false } : { value: undefined, done: true }; }, return() { console.log('closed'); return { done: true }; } }; } }; const [p, q] = it as Iterable<number>; console.log(p, q); const [r, s, t, u] = it as Iterable<number>; console.log(r, s, t, u); const [, , ...rest] = it as Iterable<number>; console.log(rest); }"
+    },
+    {
+      "name": "r2b array destructuring from a generator stops early",
+      "expect": "matched",
+      "source": "function* g(): Generator<number> { let i = 0; try { while (true) yield i++; } finally { console.log('fin'); } } function main(): void { const [a, b] = g(); console.log(a, b); }"
+    },
+    {
+      "name": "r2b static Symbol.hasInstance drives instanceof",
+      "expect": "matched",
+      "source": "class Even { static [Symbol.hasInstance](n: any) { return n % 2 === 0; } } function main(): void { console.log(2 instanceof (Even as any), 3 instanceof (Even as any)); }"
+    },
+    {
+      "name": "r2b Symbol.species getter returning Array on a subclass map",
+      "expect": "matched",
+      "source": "class MyA extends Array<number> { static get [Symbol.species]() { return Array; } } function main(): void { const m = new MyA(1, 2, 3); console.log(m.map(x => x) instanceof MyA, m instanceof MyA); }"
+    },
+    {
+      "name": "r2b getOwnPropertySymbols on an any-typed object literal",
+      "expect": "matched",
+      "source": "function main(): void { const s = Symbol('s'); const w: any = { [s]: 1, x: 2 }; console.log(Object.getOwnPropertySymbols(w).length, Object.keys(w)); const w2: any = {}; w2[s] = 3; console.log(Object.getOwnPropertySymbols(w2).length); }"
+    },
+    {
+      "name": "r2b well-known symbols print and describe like Node",
+      "expect": "matched",
+      "source": "function main(): void { console.log(String(Symbol.iterator), Symbol.asyncIterator.toString(), Symbol.hasInstance.description, Symbol.iterator); }"
+    },
+    {
+      "name": "r2b iterator objects carry their toStringTag",
+      "expect": "matched",
+      "source": "function* gen(): Generator<number> { yield 1; } function main(): void { console.log(Object.prototype.toString.call([1, 2].entries()), Object.prototype.toString.call(new Map<number, number>().keys()), Object.prototype.toString.call(new Set<number>().values()), Object.prototype.toString.call(gen()), Object.prototype.toString.call('a1'.matchAll(/\\d/g))); }"
+    },
+    {
+      "name": "r2b RegExp constructor source escapes slash and line terminators",
+      "expect": "matched",
+      "source": "function main(): void { console.log(RegExp('a/b').source, new RegExp('a/b').source, JSON.stringify(new RegExp('\\n').source), new RegExp('[/]').source, new RegExp('').source); }"
+    },
+    {
+      "name": "r2b class length counts constructor parameters before a default",
+      "expect": "matched",
+      "source": "class Q { constructor(a: number, b: string) {} } class R { constructor(a: number, b = 2, c?: string) {} } class S {} function main(): void { console.log(Q.length, R.length, S.length); }"
+    },
+    {
+      "name": "r2b map(parseInt) passes the index as radix",
+      "expect": "matched",
+      "source": "function main(): void { console.log(['1', '2', '3'].map(parseInt), ['1.5', '2'].map(parseFloat), Number.parseFloat('1.5')); }"
+    },
+    {
+      "name": "r2b Object.keys(globalThis) does not list console",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Object.keys(globalThis).includes('console')); }"
+    },
+    {
       "name": "r2a hole array join",
       "expect": "matched",
       "source": "function main(): void { const a = new Array(3); console.log(a.length, a.join(\"-\")); console.log(new Array(2).join()); }"
