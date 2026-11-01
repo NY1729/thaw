@@ -4632,6 +4632,11 @@
       "name": "tj3 events listener this is the emitter",
       "expect": "matched",
       "source": "import { EventEmitter } from 'node:events';\nfunction main(): void {\n  const e = new EventEmitter();\n  e.on('x', function (this: EventEmitter, v: number): void { console.log(this === e, v); });\n  e.emit('x', 3);\n}"
+    },
+    {
+      "name": "tj6 fs promises awaited write read rm",
+      "expect": "matched",
+      "source": "import { writeFile, readFile, rm } from 'node:fs/promises';\nasync function main(): Promise<void> {\n  const p: string = 'tj6-fsp.txt';\n  await writeFile(p, 'hi');\n  console.log(await readFile(p, 'utf8'));\n  await rm(p);\n  console.log('done');\n}"
     }
   ]
 }
