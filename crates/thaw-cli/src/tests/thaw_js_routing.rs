@@ -356,6 +356,8 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:assert",
         "node:os",
         "node:util",
+        "node:constants",
+        "node:url",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
