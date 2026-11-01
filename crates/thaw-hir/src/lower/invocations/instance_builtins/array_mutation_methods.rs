@@ -1565,6 +1565,19 @@ impl<'a> FnLowerer<'a> {
                                     ),
                                     &slot_type,
                                 )?;
+                                // A hole (`new Array(3)`) has no readable slot: it joins as "".
+                                let element_str = HirExpr::Conditional(
+                                    Box::new(HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                                        vec![
+                                            HirExpr::Var(receiver_name.clone()),
+                                            HirExpr::Var(index_name.clone()),
+                                        ],
+                                    )),
+                                    Box::new(element_str),
+                                    Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
+                                    HirType::Str,
+                                );
                                 let concat = |lhs: HirExpr, rhs: HirExpr| {
                                     HirExpr::Call(
                                         Box::new(HirExpr::Var("__thaw_string_concat".to_string())),

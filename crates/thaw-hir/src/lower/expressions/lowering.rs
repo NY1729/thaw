@@ -2921,6 +2921,8 @@ impl<'a> FnLowerer<'a> {
                             }
                         }
                         if matches!(right_type, HirType::JsValue | HirType::Dynamic) {
+                            // The host lookup takes a text key; an `any`/number key is stringified.
+                            lhs = self.coerce_primitive_to_string(lhs)?;
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("hasDynamicProperty".into())),
                                 vec![rhs, lhs],
@@ -3695,6 +3697,41 @@ impl<'a> FnLowerer<'a> {
                             HirType::Bool,
                         );
                         return self.wrap_call_argument_bindings(result, &[(name, object_type, object)]);
+                    }
+                    // `delete o.b` of an optional field of a typed object: the slot becomes absent
+                    // (`o.b = undefined`), and the expression is `true`.
+                    if let (HirType::Object(fields), MemberProp::Ident(property)) =
+                        (&object_type, &member.prop)
+                    {
+                        if fields.iter().any(|(name, ty)| {
+                            property.sym == *name && matches!(ty, HirType::Optional(_))
+                        }) {
+                            let absent = Expr::Unary(swc_ecma_ast::UnaryExpr {
+                                span: swc_common::DUMMY_SP,
+                                op: UnaryOp::Void,
+                                arg: Box::new(Expr::Lit(Lit::Num(swc_ecma_ast::Number {
+                                    span: swc_common::DUMMY_SP,
+                                    value: 0.0,
+                                    raw: None,
+                                }))),
+                            });
+                            let clear = Expr::Assign(swc_ecma_ast::AssignExpr {
+                                span: member.span,
+                                op: swc_ecma_ast::AssignOp::Assign,
+                                left: swc_ecma_ast::AssignTarget::Simple(
+                                    swc_ecma_ast::SimpleAssignTarget::Member(member.clone()),
+                                ),
+                                right: Box::new(absent),
+                            });
+                            let done = Expr::Lit(Lit::Bool(swc_ecma_ast::Bool {
+                                span: member.span,
+                                value: true,
+                            }));
+                            return self.lower_expr(&Expr::Seq(swc_ecma_ast::SeqExpr {
+                                span: member.span,
+                                exprs: vec![Box::new(clear), Box::new(done)],
+                            }));
+                        }
                     }
                     if !matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
                         return Err(format!(
