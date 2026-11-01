@@ -37,36 +37,7 @@ fn normalize_top_level_class_expressions(module: &Module) -> Result<Module, Stri
                             && matches!(&property.key, swc_ecma_ast::PropName::Ident(key) if key.sym == *"name"))
                 });
                 if internal.sym != binding.id.sym && !has_name {
-                    class.body.push(swc_ecma_ast::ClassMember::ClassProp(swc_ecma_ast::ClassProp {
-                        span: swc_common::DUMMY_SP,
-                        key: swc_ecma_ast::PropName::Ident(swc_ecma_ast::IdentName::new(
-                            "name".into(),
-                            swc_common::DUMMY_SP,
-                        )),
-                        value: Some(Box::new(Expr::Lit(Lit::Str(swc_ecma_ast::Str {
-                            span: swc_common::DUMMY_SP,
-                            value: internal.sym.as_ref().into(),
-                            raw: None,
-                        })))),
-                        type_ann: Some(Box::new(swc_ecma_ast::TsTypeAnn {
-                            span: swc_common::DUMMY_SP,
-                            type_ann: Box::new(swc_ecma_ast::TsType::TsKeywordType(
-                                swc_ecma_ast::TsKeywordType {
-                                    span: swc_common::DUMMY_SP,
-                                    kind: swc_ecma_ast::TsKeywordTypeKind::TsStringKeyword,
-                                },
-                            )),
-                        })),
-                        is_static: true,
-                        decorators: Vec::new(),
-                        accessibility: None,
-                        is_abstract: false,
-                        is_optional: false,
-                        is_override: false,
-                        readonly: false,
-                        declare: false,
-                        definite: false,
-                    }));
+                    class.body.push(static_name_member(internal.sym.as_ref()));
                 }
             }
             body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Class(ClassDecl {
@@ -80,6 +51,87 @@ fn normalize_top_level_class_expressions(module: &Module) -> Result<Module, Stri
         body,
         ..module.clone()
     })
+}
+
+fn static_name_member(name: &str) -> swc_ecma_ast::ClassMember {
+    swc_ecma_ast::ClassMember::ClassProp(swc_ecma_ast::ClassProp {
+        span: swc_common::DUMMY_SP,
+        key: swc_ecma_ast::PropName::Ident(swc_ecma_ast::IdentName::new(
+            "name".into(),
+            swc_common::DUMMY_SP,
+        )),
+        value: Some(Box::new(Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+            span: swc_common::DUMMY_SP,
+            value: name.into(),
+            raw: None,
+        })))),
+        type_ann: Some(Box::new(swc_ecma_ast::TsTypeAnn {
+            span: swc_common::DUMMY_SP,
+            type_ann: Box::new(swc_ecma_ast::TsType::TsKeywordType(swc_ecma_ast::TsKeywordType {
+                span: swc_common::DUMMY_SP,
+                kind: swc_ecma_ast::TsKeywordTypeKind::TsStringKeyword,
+            })),
+        })),
+        is_static: true,
+        decorators: Vec::new(),
+        accessibility: None,
+        is_abstract: false,
+        is_optional: false,
+        is_override: false,
+        readonly: false,
+        declare: false,
+        definite: false,
+    })
+}
+
+/// A class expression left in value position (`new (class {})()`, `typeof class {}`, an
+/// argument) becomes a hoisted top-level declaration under a synthetic name, keeping the
+/// original name as a static `name` member. Captured locals are not supported (as before).
+fn hoist_class_expressions(module: &Module) -> Module {
+    struct Hoist {
+        next: usize,
+        hoisted: Vec<ModuleItem>,
+    }
+    impl VisitMut for Hoist {
+        fn visit_mut_expr(&mut self, expression: &mut Expr) {
+            expression.visit_mut_children_with(self);
+            let Expr::Class(class_expr) = expression else { return };
+            let synthetic = format!("__thaw_class_expr_{}", self.next);
+            self.next += 1;
+            let mut class = class_expr.class.as_ref().clone();
+            let original = class_expr.ident.as_ref().map_or("", |ident| ident.sym.as_ref()).to_string();
+            if !original.is_empty() {
+                class.visit_mut_with(&mut ClassSelfReferenceRenamer {
+                    from: &original,
+                    to: &synthetic,
+                    shadowed: Vec::new(),
+                });
+            }
+            let has_name = class.body.iter().any(|member| {
+                matches!(member, swc_ecma_ast::ClassMember::ClassProp(property)
+                    if property.is_static
+                        && matches!(&property.key, swc_ecma_ast::PropName::Ident(key) if key.sym == *"name"))
+            });
+            if !has_name {
+                class.body.push(static_name_member(&original));
+            }
+            let ident = swc_ecma_ast::Ident::new_no_ctxt(synthetic.as_str().into(), swc_common::DUMMY_SP);
+            self.hoisted.push(ModuleItem::Stmt(Stmt::Decl(Decl::Class(ClassDecl {
+                ident: ident.clone(),
+                declare: false,
+                class: Box::new(class),
+            }))));
+            *expression = Expr::Ident(ident);
+        }
+    }
+    let mut hoist = Hoist { next: 0, hoisted: Vec::new() };
+    let mut body = Vec::with_capacity(module.body.len());
+    for mut item in module.body.iter().cloned() {
+        item.visit_mut_with(&mut hoist);
+        body.append(&mut hoist.hoisted);
+        body.push(item);
+    }
+    Module { body, ..module.clone() }
 }
 
 struct ClassSelfReferenceRenamer<'a> {
@@ -680,5 +732,39 @@ fn normalize_private_class_members(module: &Module) -> Module {
             .class
             .visit_mut_children_with(&mut PrivateMemberNormalizer { owner: &owner, shadowed: Vec::new() });
     }
+    module
+}
+
+/// `const f = function fact(n) { return fact(n - 1) }`: the expression's own name is only
+/// visible inside it; bind the recursion to the declared binding instead.
+fn rename_named_function_expression_self_references(module: &Module) -> Module {
+    struct Rename;
+    // Only module-level declarators: nested ones are lowered by the local path, which needs the
+    // expression's own name to stay in place (see `named_function_is_recursive`).
+    impl VisitMut for Rename {
+        fn visit_mut_function(&mut self, _: &mut swc_ecma_ast::Function) {}
+        fn visit_mut_arrow_expr(&mut self, _: &mut swc_ecma_ast::ArrowExpr) {}
+        fn visit_mut_class(&mut self, _: &mut swc_ecma_ast::Class) {}
+        fn visit_mut_block_stmt(&mut self, _: &mut swc_ecma_ast::BlockStmt) {}
+        fn visit_mut_var_declarator(&mut self, declarator: &mut swc_ecma_ast::VarDeclarator) {
+            let (Pat::Ident(binding), Some(init)) = (&declarator.name, declarator.init.as_deref_mut())
+            else {
+                return;
+            };
+            let Expr::Fn(function) = init else { return };
+            let Some(internal) = function.ident.clone() else { return };
+            // Generic expressions keep their own (specialized) name.
+            if internal.sym == binding.id.sym || function.function.type_params.is_some() {
+                return;
+            }
+            function.function.visit_mut_with(&mut ClassSelfReferenceRenamer {
+                from: internal.sym.as_ref(),
+                to: binding.id.sym.as_ref(),
+                shadowed: Vec::new(),
+            });
+        }
+    }
+    let mut module = module.clone();
+    module.visit_mut_with(&mut Rename);
     module
 }

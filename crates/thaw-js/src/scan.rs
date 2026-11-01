@@ -639,6 +639,11 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
             // UMD wrappers fall back to `self` only when `globalThis` is missing
             let umd_self =
                 r == "self" && (w.refs.contains("globalThis") || w.probed.contains("globalThis"));
+            // the WebAssembly stub is not a wasm runtime: a real use (`WebAssembly.Module`, `.compile`) stays on QuickJS
+            if r == "WebAssembly" && !w.declared.contains(r) {
+                add(&mut report, format!("global:{r}"), 1, key);
+                continue;
+            }
             if !w.declared.contains(r)
                 && !umd_self
                 && !globals.contains(r)
