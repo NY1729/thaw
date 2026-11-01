@@ -572,6 +572,7 @@ fn lower_class_methods(
             declared_ret.clone(),
             None,
         );
+        lowerer.async_return = method.function.is_async && !method.function.is_generator;
         seed_global_scope(&mut lowerer, global_types, immutable_globals);
         lowerer.remember_source_return(method.function.span);
         for (pattern, parameter) in method.function.params.iter().map(|parameter| &parameter.pat).zip(params.iter().skip(receiver_offset)) {
@@ -859,6 +860,7 @@ fn lower_fn_decl(
         declared_ret.clone(),
         call_constraints,
     );
+    lowerer.async_return = func.is_async && !func.is_generator;
     seed_global_scope(&mut lowerer, global_types, immutable_globals);
     if let Some(this_type) = this_type {
         lowerer.scope.insert("__thaw_this".into(), this_type);

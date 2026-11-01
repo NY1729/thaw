@@ -4149,6 +4149,21 @@ impl<'a> FnLowerer<'a> {
                             // A dynamic `any` value (e.g. `arguments`) used as an array source.
                             HirType::Json => {
                                 let array_type = HirType::Array(Box::new(HirType::Json));
+                                // Collect through the iterator protocol (as `[...source]`) so a
+                                // dynamic typed array (`u8.map(f)`) keeps its elements; decoding
+                                // it straight into an array drops them.
+                                let source = if has_spread {
+                                    source
+                                } else {
+                                    let spread = Expr::Array(swc_ecma_ast::ArrayLit {
+                                        span: swc_common::DUMMY_SP,
+                                        elems: vec![Some(swc_ecma_ast::ExprOrSpread {
+                                            spread: Some(swc_common::DUMMY_SP),
+                                            expr: call.args[0].expr.clone(),
+                                        })],
+                                    });
+                                    self.lower_expr(&spread)?
+                                };
                                 let source = self.coerce_to_declared(&array_type, source)?;
                                 (source, array_type, HirType::Json)
                             }

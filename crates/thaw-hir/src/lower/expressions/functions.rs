@@ -476,6 +476,7 @@ impl<'a> FnLowerer<'a> {
         let saved_conservative_sparse_arrays = self.conservative_sparse_arrays.clone();
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
+        let saved_async_return = self.async_return;
         let result = self.with_function_control_flow(|lowerer| {
             lowerer.remember_source_return(arrow.span);
             let mut params = Vec::with_capacity(source_params.len() + usize::from(receiver.is_some()));
@@ -557,6 +558,7 @@ impl<'a> FnLowerer<'a> {
             // below when this arrow is a plain (non-async) callback with
             // no declared return annotation.
             let arrow_return_hint = lowerer.expected_arrow_return_hint.take();
+            lowerer.async_return = arrow.is_async;
             lowerer.ret_type = declared_async_result
                 .clone()
                 .or_else(|| declared_return.clone())
@@ -780,6 +782,7 @@ impl<'a> FnLowerer<'a> {
         self.conservative_sparse_arrays = saved_conservative_sparse_arrays;
         self.sparse_array_functions = saved_sparse_array_functions;
         self.ret_type = saved_return;
+        self.async_return = saved_async_return;
         self.class_static_context = saved_class_static_context;
         self.class_context = saved_class_context;
         self.unbound_this_context = saved_unbound_this_context;
@@ -817,6 +820,7 @@ impl<'a> FnLowerer<'a> {
         let saved_conservative_sparse_arrays = self.conservative_sparse_arrays.clone();
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
+        let saved_async_return = self.async_return;
         let saved_generator_yields = self.generator_yields.clone();
         let saved_generator_finalizers = self.generator_finalizers.clone();
         let saved_class_static_context = self.class_static_context;
@@ -849,6 +853,7 @@ impl<'a> FnLowerer<'a> {
                 }
                 params.push(HirParam { name, ty: param.ty });
             }
+            lowerer.async_return = false;
             lowerer.ret_type = declared_return.clone();
             lower_function_statements(
                 lowerer,
@@ -895,6 +900,7 @@ impl<'a> FnLowerer<'a> {
         self.conservative_sparse_arrays = saved_conservative_sparse_arrays;
         self.sparse_array_functions = saved_sparse_array_functions;
         self.ret_type = saved_return;
+        self.async_return = saved_async_return;
         self.generator_yields = saved_generator_yields;
         self.generator_finalizers = saved_generator_finalizers;
         self.class_static_context = saved_class_static_context;
@@ -1441,6 +1447,7 @@ impl<'a> FnLowerer<'a> {
         let saved_conservative_sparse_arrays = self.conservative_sparse_arrays.clone();
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
+        let saved_async_return = self.async_return;
         let result = self.with_function_control_flow(|lowerer| {
             lowerer.remember_source_return(arrow.span);
             if lowerer.source_ret_type.is_none() {
@@ -1586,6 +1593,7 @@ impl<'a> FnLowerer<'a> {
             for (pattern, name, ty) in destructuring {
                 lowerer.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
             }
+            lowerer.async_return = arrow.is_async;
             lowerer.ret_type = expected_return.cloned().unwrap_or(HirType::Dynamic);
             let (body, inferred) = match arrow.body.as_ref() {
                 ArrowFunctionBody::Expr(expr) => {
@@ -1715,6 +1723,7 @@ impl<'a> FnLowerer<'a> {
         self.conservative_sparse_arrays = saved_conservative_sparse_arrays;
         self.sparse_array_functions = saved_sparse_array_functions;
         self.ret_type = saved_return;
+        self.async_return = saved_async_return;
         self.class_static_context = saved_class_static_context;
         self.class_context = saved_class_context;
         self.unbound_this_context = saved_unbound_this_context;
