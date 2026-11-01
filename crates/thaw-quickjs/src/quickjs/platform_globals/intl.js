@@ -478,6 +478,11 @@
             : localeTag)
         : 'en-US';
       this._timeZone = opts.timeZone ? String(opts.timeZone) : 'UTC';
+      if (!opts.timeZone && typeof __thaw_intl_default_time_zone === 'function') {
+        // The default zone follows the process (`TZ`), like Node; an unrecognised value keeps UTC.
+        const local = __thaw_intl_default_time_zone();
+        if (intlZonedParts(local, Date.now()).valid) this._timeZone = local;
+      }
       this.format = this.format.bind(this);
       // Eager validation -- real Intl throws a `RangeError` for an
       // unrecognized `timeZone` at construction time, which is exactly
@@ -1531,6 +1536,12 @@
       if (this._style === 'percent') return `${signed}%`;
       if (this._style === 'currency') return `${this._currency} ${signed}`;
       if (this._style !== 'unit') return signed;
+      // Symbolic temperature units read the same in every locale's short form.
+      if (this._unit === 'celsius' || this._unit === 'fahrenheit') {
+        const symbol = this._unit === 'celsius' ? '\u00b0C' : '\u00b0F';
+        if (/^(ja|zh|ko)(-|$)/.test(this.locale) || this._unitDisplay === 'narrow') return `${signed}${symbol}`;
+        return `${signed}${/^fr(-|$)/.test(this.locale) ? '\u202f' : ' '}${symbol}`;
+      }
       const fallback = INTL_UNITS[this._unit];
       if (!fallback) return `${signed} ${this._unit.replaceAll('-', ' ')}`;
       const forms = fallback[this._unitDisplay] || fallback.short;

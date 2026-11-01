@@ -393,7 +393,9 @@ impl<'ctx> HirCompiler<'ctx> {
             })
             .unwrap();
         for argument in args {
-            let argument = self.compile_expr(argument)?.into_float_value();
+            let BasicValueEnum::FloatValue(argument) = self.compile_expr(argument)? else {
+                return Err("Math.max/Math.min arguments must be numbers (a BigInt cannot be converted to a number)".into());
+            };
             result = self
                 .builder
                 .build_call(intrinsic, &[result.into(), argument.into()], "math_extreme")
@@ -410,7 +412,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let mut result = self.context.f64_type().const_zero();
         let hypot = self.module.get_function("hypot").unwrap();
         for argument in args {
-            let argument = self.compile_expr(argument)?.into_float_value();
+            let BasicValueEnum::FloatValue(argument) = self.compile_expr(argument)? else {
+                return Err("Math.hypot arguments must be numbers (a BigInt cannot be converted to a number)".into());
+            };
             result = self
                 .builder
                 .build_call(hypot, &[result.into(), argument.into()], "math_hypot")

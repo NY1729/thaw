@@ -184,4 +184,152 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
+
+    /// `console.log("k", 1 + await f())` lowers the left operand through an
+    /// argument-binding wrapper `(lambda)(args)` around the awaiting body, which
+    /// hides the await from the one-await-per-segment extraction. Turn each
+    /// wrapper that (transitively) awaits into plain `let` statements so the
+    /// extraction sees the await directly.
+    fn hoist_await_binding_wrappers(&self, body: &[HirStmt]) -> Vec<HirStmt> {
+        let frame_names = self
+            .frame_async_functions
+            .keys()
+            .chain(self.promise_returning_functions.iter())
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let mut out = Vec::with_capacity(body.len());
+        for stmt in body {
+            // A statement-level call whose binding wrapper has a statement body
+            // (`console.log(await a(), await b())`): splice it into plain statements.
+            if let HirStmt::Expr(HirExpr::Call(callee, args)) = stmt {
+                if let HirExpr::Lambda(_, params, _, block) = callee.as_ref() {
+                    if let HirExpr::Block(inner) = block.as_ref() {
+                        if params.len() == args.len()
+                            && (args.iter().any(|arg| self.expr_awaits_frame_source(arg, &frame_names))
+                                || inner.iter().any(|stmt| self.stmt_awaits_frame_source(stmt, &frame_names)))
+                            && !inner.iter().any(|stmt| matches!(stmt, HirStmt::Return(_)))
+                        {
+                            let mut spliced = Vec::new();
+                            for (param, arg) in params.iter().zip(args) {
+                                spliced.push(HirStmt::Let(param.name.clone(), param.ty.clone(), arg.clone()));
+                            }
+                            spliced.extend(inner.iter().cloned());
+                            out.extend(self.hoist_await_binding_wrappers(&spliced));
+                            continue;
+                        }
+                    }
+                }
+            }
+            let mut stmt = stmt.clone();
+            let mut pre = Vec::new();
+            match &mut stmt {
+                HirStmt::Expr(e) | HirStmt::Return(Some(e)) | HirStmt::Let(_, _, e) | HirStmt::Throw(e) => {
+                    self.unwrap_await_wrappers(e, &frame_names, &mut pre);
+                }
+                HirStmt::If(cond, then_body, else_body) => {
+                    self.unwrap_await_wrappers(cond, &frame_names, &mut pre);
+                    *then_body = self.hoist_await_binding_wrappers(then_body);
+                    *else_body = self.hoist_await_binding_wrappers(else_body);
+                }
+                HirStmt::While(_, inner) | HirStmt::Finally(inner, _) => {
+                    *inner = self.hoist_await_binding_wrappers(inner);
+                }
+                HirStmt::Try(inner, _, catch_body, _) => {
+                    *inner = self.hoist_await_binding_wrappers(inner);
+                    *catch_body = self.hoist_await_binding_wrappers(catch_body);
+                }
+                _ => {}
+            }
+            out.extend(pre);
+            out.push(stmt);
+        }
+        out
+    }
+
+    fn unwrap_await_wrappers(
+        &self,
+        expr: &mut HirExpr,
+        frame_names: &std::collections::HashSet<String>,
+        pre: &mut Vec<HirStmt>,
+    ) {
+        while let HirExpr::Call(callee, args) = expr {
+            let HirExpr::Lambda(_, params, _, body) = callee.as_ref() else { break };
+            if params.len() != args.len()
+                || matches!(body.as_ref(), HirExpr::Block(_))
+                || !(self.expr_awaits_frame_source(body, frame_names)
+                    || args.iter().any(|arg| self.expr_awaits_frame_source(arg, frame_names)))
+            {
+                break;
+            }
+            let params = params.clone();
+            let body = body.as_ref().clone();
+            for (param, mut arg) in params.into_iter().zip(std::mem::take(args)) {
+                self.unwrap_await_wrappers(&mut arg, frame_names, pre);
+                pre.push(HirStmt::Let(param.name, param.ty, arg));
+            }
+            *expr = body;
+        }
+        match expr {
+            HirExpr::BinOp(_, a, b)
+            | HirExpr::EvalThen(a, b)
+            | HirExpr::Index(a, b)
+            | HirExpr::TypedIndex(a, b, _)
+            | HirExpr::DynamicPropAccess(a, b, _, _) => {
+                self.unwrap_ordered(&mut [a.as_mut(), b.as_mut()], frame_names, pre);
+            }
+            HirExpr::Call(callee, args) => {
+                let mut items = vec![callee.as_mut()];
+                items.extend(args.iter_mut());
+                self.unwrap_ordered(&mut items, frame_names, pre);
+            }
+            HirExpr::FfiCall(_, args)
+            | HirExpr::DynamicCall(_, args)
+            | HirExpr::ArrayLit(args)
+            | HirExpr::ArrayConcat(args, _) => {
+                let mut items = args.iter_mut().collect::<Vec<_>>();
+                self.unwrap_ordered(&mut items, frame_names, pre);
+            }
+            HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) => {
+                for (_, value) in fields {
+                    self.unwrap_await_wrappers(value, frame_names, pre);
+                }
+            }
+            HirExpr::Assign(_, value) | HirExpr::PropAccess(value, _, _) | HirExpr::TypedClosure(_, value) => {
+                self.unwrap_await_wrappers(value, frame_names, pre);
+            }
+            _ => {}
+        }
+    }
+
+    /// Unwraps each operand in evaluation order. When a later operand hoists statements ahead
+    /// of the expression, earlier side-effecting operands are bound first so they still run
+    /// before the await.
+    fn unwrap_ordered(
+        &self,
+        items: &mut [&mut HirExpr],
+        frame_names: &std::collections::HashSet<String>,
+        pre: &mut Vec<HirStmt>,
+    ) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        for i in 0..items.len() {
+            let start = pre.len();
+            self.unwrap_await_wrappers(items[i], frame_names, pre);
+            if pre.len() == start {
+                continue;
+            }
+            let mut at = start;
+            for earlier in items[..i].iter_mut() {
+                if matches!(earlier, HirExpr::Lit(_) | HirExpr::Var(_)) {
+                    continue;
+                }
+                let Some(ty) = self.expr_hir_type(earlier).filter(|ty| *ty != HirType::Void) else {
+                    continue;
+                };
+                let name = format!("__thaw_ord_{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+                let value = std::mem::replace(&mut **earlier, HirExpr::Var(name.clone()));
+                pre.insert(at, HirStmt::Let(name, ty, value));
+                at += 1;
+            }
+        }
+    }
 }

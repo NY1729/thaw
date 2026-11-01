@@ -987,6 +987,17 @@ impl<'a> FnLowerer<'a> {
         } else {
             self.infer_promise_constructor_type(&executor.expr, explicit.as_ref())
         };
+        // `new Promise((_, reject) => ...)` never resolves: TypeScript types it `Promise<unknown>`.
+        let explicit = match (&explicit, &inferred_resolve) {
+            (None, Err(error))
+                if error.starts_with(
+                    "cannot infer Promise type because the executor has no resolvable",
+                ) =>
+            {
+                Some(HirType::Json)
+            }
+            _ => explicit,
+        };
         if let Err(error) = &inferred_resolve {
             if explicit.is_none()
                 || !error.starts_with(
