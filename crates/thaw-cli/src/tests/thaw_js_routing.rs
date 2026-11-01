@@ -374,6 +374,14 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
 }
 
 #[test]
+fn thaw_js_builtin_modules_include_promise_variants() {
+    // every mini-manifest node-compat case of these modules matches Node under THAW_JS_RUNTIME=1 (tj9)
+    for module in ["node:timers/promises", "node:fs/promises"] {
+        assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
+    }
+}
+
+#[test]
 fn thaw_js_bundle_form_wraps_plain_scripts_and_keeps_registered_forms() {
     let mut forms = std::collections::HashMap::new();
     forms.insert("node:x".to_string(), "registered".to_string());
