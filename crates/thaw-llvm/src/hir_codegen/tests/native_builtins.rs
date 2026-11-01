@@ -8122,8 +8122,9 @@ fn compiles_dynamic_object_from_entries() {
     );
 }
 
-/// `Object.create` (an empty dictionary), `Object.getPrototypeOf`
-/// (approximated as `null`), and `Object.prototype.propertyIsEnumerable`.
+/// `Object.create` (an empty dictionary), `Object.getPrototypeOf` (a plain
+/// object's prototype is `Object.prototype`, not `null`), and
+/// `Object.prototype.propertyIsEnumerable`.
 #[test]
 fn compiles_object_create_prototype_and_property_is_enumerable() {
     let source = r#"
@@ -8145,7 +8146,7 @@ fn compiles_object_create_prototype_and_property_is_enumerable() {
     "#;
     assert_eq!(
         compile_and_run(source, "object_create_prototype_enumerable"),
-        "{\"a\":1,\"b\":2}\n2\nobject\ntrue\ntrue\nfalse\ntrue\nfalse\n"
+        "{\"a\":1,\"b\":2}\n2\nobject\nfalse\ntrue\nfalse\ntrue\nfalse\n"
     );
 }
 
