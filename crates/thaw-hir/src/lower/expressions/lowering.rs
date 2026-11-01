@@ -1572,6 +1572,15 @@ impl<'a> FnLowerer<'a> {
                 {
                     return Ok(literal);
                 }
+                // `{} as Record<string, V>`: an empty dictionary, not an empty fixed object.
+                if matches!(assertion.expr.as_ref(), Expr::Object(literal) if literal.props.is_empty()) {
+                    if let Ok(dictionary @ HirType::Dictionary(_)) =
+                        lower_ts_type(&assertion.type_ann, self.interfaces, self.generic_interfaces)
+                    {
+                        let value = self.lower_expr(&assertion.expr)?;
+                        return self.coerce_to_declared(&dictionary, value);
+                    }
+                }
                 self.lower_expr(&assertion.expr)
             }
             Expr::TsTypeAssertion(assertion) => {
@@ -3447,6 +3456,10 @@ impl<'a> FnLowerer<'a> {
 
             Expr::Unary(unary) => {
                 if unary.op == UnaryOp::TypeOf {
+                    // Well-known symbols are strings internally; `typeof` still reports "symbol".
+                    if well_known_symbol_from_expr(&unary.arg).is_some() && !self.scope.contains_key("Symbol") {
+                        return Ok(HirExpr::Lit(HirLit::Str("symbol".into())));
+                    }
                     if let Expr::Ident(identifier) = unary.arg.as_ref() {
                         let name = self.resolve_binding(identifier.sym.as_ref());
                         if self.deferred_generic_binds.contains_key(&name) {
@@ -4275,6 +4288,12 @@ impl<'a> FnLowerer<'a> {
                         (HirType::Null, HirType::Optional(payload))
                         | (HirType::Optional(payload), HirType::Null) => {
                             HirType::Nullish(payload.clone())
+                        }
+                        // `c ? s[i] : a + b`: an index read joined with its own payload.
+                        (HirType::Optional(inner), payload) | (payload, HirType::Optional(inner))
+                            if inner.as_ref() == payload =>
+                        {
+                            HirType::Optional(inner.clone())
                         }
                         (HirType::Undefined, payload) | (payload, HirType::Undefined) => {
                             HirType::Optional(Box::new(payload.clone()))

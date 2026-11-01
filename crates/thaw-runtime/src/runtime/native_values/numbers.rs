@@ -617,6 +617,15 @@ fn javascript_parse_int(text: &str, radix: f64) -> f64 {
         let value = power_of_two_radix_number(&text[..end], radix.trailing_zeros() as usize);
         return if negative { -value } else { value };
     }
+    if radix == 10 {
+        // Correctly rounded, like `Number(digits)` (accumulating loses the last ulps).
+        let end = text.bytes().take_while(u8::is_ascii_digit).count();
+        if end == 0 {
+            return f64::NAN;
+        }
+        let value: f64 = text[..end].parse().unwrap_or(f64::NAN);
+        return if negative { -value } else { value };
+    }
     let mut value = 0.0;
     let mut digits = 0;
     for character in text.chars() {

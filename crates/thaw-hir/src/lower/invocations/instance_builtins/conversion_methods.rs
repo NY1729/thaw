@@ -310,7 +310,14 @@ impl<'a> FnLowerer<'a> {
                             property.sym
                         ));
                     }
-                    if receiver_type == HirType::F64 {
+                    if matches!(receiver_type, HirType::F64 | HirType::BigInt) {
+                        // ponytail: a BigInt formats through f64, so digits beyond 2^53 round.
+                        let receiver = if receiver_type == HirType::BigInt {
+                            let text = self.coerce_primitive_to_string(receiver)?;
+                            self.coerce_primitive_to_number(text)?
+                        } else {
+                            receiver
+                        };
                         let (locales, options) =
                             self.lower_intl_arguments(&call.args, INTL_NUMBER_OPTIONS, ".toLocaleString()")?;
                         return Ok(HirExpr::Call(
