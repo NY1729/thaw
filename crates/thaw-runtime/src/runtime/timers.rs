@@ -104,7 +104,8 @@ pub extern "C" fn thaw_timer_unref(id: u64) {
 
 #[no_mangle]
 pub extern "C" fn thaw_timer_has_ref(id: u64) -> u8 {
-    with_timer(id, |timer| u8::from(timer.refed)).unwrap_or(0)
+    // Node keeps reporting ref'd for a cleared or fired timer.
+    with_timer(id, |timer| u8::from(timer.refed)).unwrap_or(1)
 }
 
 /// `timeout.refresh()`: restart the countdown from now (a fired one-shot timer stays gone).
