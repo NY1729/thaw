@@ -1743,6 +1743,80 @@ fn exact_calls_await_returned_promises_only_when_resolving() {
 }
 
 #[test]
+fn class_method_promise_results_are_awaited_when_the_flag_is_set() {
+    use std::ffi::{CStr, CString};
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "tj/index.js": function(module, exports, require) {
+  setTimeout(function () {}, 60000);
+  function Svc() {}
+  Svc.prototype.run = async function (n) { await new Promise(function (r) { setTimeout(r, 1); }); return n * 2; };
+  Svc.prototype.fail = async function () { throw new TypeError('nope'); };
+  exports.Svc = Svc;
+}, };
+var __thaw_bundle_require_maps = { "tj/index.js": {}, };
+var __thaw_bundle_entry_key = "tj/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("tj").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(
+        crate::host::thaw_tjs_register(name.as_ptr(), source.as_ptr()),
+        1
+    );
+    // flags: bit 0 = handle id result, bit 1 = await a Promise result
+    let call = |symbol: &str, args: &str, receiver: i64, flags: u8| -> Result<String, String> {
+        let (symbol, args) = (CString::new(symbol).unwrap(), CString::new(args).unwrap());
+        let result =
+            crate::host::thaw_tjs_class_call(symbol.as_ptr(), args.as_ptr(), receiver, flags);
+        // SAFETY: both strings come from `thaw_tjs_class_call` and are freed exactly once.
+        unsafe {
+            if result.value.is_null() {
+                let error = CStr::from_ptr(result.error).to_str().unwrap().to_string();
+                crate::host::thaw_tjs_free(result.error);
+                Err(error)
+            } else {
+                let value = CStr::from_ptr(result.value).to_str().unwrap().to_string();
+                crate::host::thaw_tjs_free(result.value);
+                Ok(value)
+            }
+        }
+    };
+    let id: i64 = call("$new$tj::Svc$arity0", "[]", 0, 1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        call("$method$tj::Svc$run$overload0$arity1", "[21]", id, 2),
+        Ok("42".into())
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(call("$method$tj::Svc$fail$overload0$arity0", "[]", id, 2)
+        .unwrap_err()
+        .contains("nope"));
+}
+
+#[test]
+fn typed_call_awaits_its_own_promise_without_draining_the_idle_loop() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    // A pending 60 s timer must not delay the call: only the awaited promise's 1 ms timer runs.
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "aw/index.js": function(module, exports, require) {
+  setTimeout(function () {}, 60000);
+  exports.f = async function (n) { await new Promise(function (r) { setTimeout(r, 1); }); return n + 1; };
+  exports.bad = async function () { throw new TypeError('nope'); };
+}, };
+var __thaw_bundle_require_maps = { "aw/index.js": {}, };
+var __thaw_bundle_entry_key = "aw/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("aw").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let started = std::time::Instant::now();
+    assert_eq!(typed_call("aw::f", "[2]"), Ok("3".into()));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(typed_call("aw::bad", "[]").unwrap_err().contains("nope"));
+}
+
+#[test]
 fn node_builtin_script_is_scanned_and_run_as_a_one_module_bundle() {
     let script = "module.exports = { twice: function (n) { return n * 2; } };";
     assert!(crate::scan::scan_bundle(script).is_err()); // a plain script is not a registry bundle
@@ -1905,4 +1979,115 @@ fn message_channel_delivers_a_structured_clone_and_rejects_functions() {
         "exports.VERSION = '1.0'; exports.port = function (v) { return globalThis.__thaw_is_message_port(v); };",
     );
     assert!(crate::scan::scan_bundle(&probe).ok().unwrap().is_clean());
+}
+
+#[test]
+fn async_context_bridge_get_swap_roundtrip() {
+    assert_eq!(
+        one("const b = __thaw_async_context_bootstrap; console.log(b.get(), b.swap('A'), b.get(), b.swap(undefined), b.get())"),
+        "undefined undefined A A undefined"
+    );
+}
+
+#[test]
+fn async_context_follows_promise_reactions_and_await() {
+    let src = "const b = __thaw_async_context_bootstrap, log = [];
+      b.swap('A');
+      Promise.resolve().then(() => log.push('then:' + b.get()));
+      queueMicrotask(() => log.push('micro:' + b.get()));
+      (async () => { await null; log.push('await:' + b.get()); await new Promise((r) => r()); log.push('await2:' + b.get()); })();
+      b.swap('B');
+      Promise.resolve().then(() => log.push('thenB:' + b.get()));
+      b.swap(undefined);
+      Promise.resolve().then(() => log.push('thenU:' + b.get()));
+      new Promise((r) => setTimeout(r, 1)).then(() => log.push('late:' + b.get()));
+      setTimeout(() => console.log(log.sort().join(',')), 20);";
+    assert_eq!(
+        run_loop(src),
+        "await2:A,await:A,late:undefined,micro:A,then:A,thenB:B,thenU:undefined"
+    );
+}
+
+#[test]
+fn async_context_follows_next_tick() {
+    assert_eq!(
+        run_loop("const b = __thaw_async_context_bootstrap; b.swap('T'); process.nextTick(() => console.log('t:' + b.get())); b.swap(undefined); process.nextTick(() => console.log('u:' + b.get()));"),
+        "t:T|u:undefined"
+    );
+}
+
+#[test]
+fn async_context_follows_timers_and_immediates() {
+    // Completion is counted, not timed: a wall-clock timeout can fire before the immediate on a slow build.
+    let src = "const b = __thaw_async_context_bootstrap, l = [];
+      b.swap('T'); setTimeout(() => { l.push('to:' + b.get()); done(); }, 1);
+      let n = 0; const iv = setInterval(() => { l.push('iv:' + b.get()); if (++n === 2) clearInterval(iv); done(); }, 1);
+      b.swap('I'); setImmediate(() => { l.push('im:' + b.get()); done(); });
+      b.swap(undefined); const after = b.get();
+      function done() { if (l.length === 4) console.log(l.sort().join(',') + ' after:' + after); }";
+    assert_eq!(run_loop(src), "im:I,iv:T,iv:T,to:T after:undefined");
+}
+
+#[test]
+fn async_hooks_exports_are_scan_clean_and_present() {
+    assert_eq!(
+        one("const h = __thaw_async_hooks_exports; console.log(typeof h.AsyncLocalStorage, typeof h.AsyncResource, typeof h.createHook, h.executionAsyncId())"),
+        "function function function 1"
+    );
+    let probe = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.h = globalThis.__thaw_async_hooks_exports;",
+    );
+    assert!(crate::scan::scan_bundle(&probe).ok().unwrap().is_clean());
+}
+
+#[test]
+fn als_propagates_through_every_async_boundary() {
+    // Completion is counted, not timed: a wall-clock dump timer can fire before the immediate on a slow build.
+    // Sorted: Node's timeout/immediate and tick/microtask order differ by CJS/ESM and timing.
+    let src = "const { AsyncLocalStorage } = __thaw_async_hooks_exports; const als = new AsyncLocalStorage(); const log = [];
+      function done() { if (log.length === 8) console.log(log.slice().sort().join(',')); }
+      als.run('A', () => { log.push('sync:' + als.getStore());
+        setTimeout(() => { log.push('timeout:' + als.getStore()); done(); }, 1);
+        setImmediate(() => { log.push('immediate:' + als.getStore()); done(); });
+        process.nextTick(() => { log.push('tick:' + als.getStore()); done(); });
+        queueMicrotask(() => { log.push('micro:' + als.getStore()); done(); });
+        Promise.resolve().then(() => { log.push('then:' + als.getStore()); done(); });
+        (async () => { await new Promise((r) => setTimeout(r, 2)); log.push('await:' + als.getStore()); done(); })(); });
+      log.push('outer:' + als.getStore()); done();";
+    assert_eq!(
+        run_loop(src),
+        "await:A,immediate:A,micro:A,outer:undefined,sync:A,then:A,tick:A,timeout:A"
+    );
+}
+
+#[test]
+fn als_follows_awaits_enter_with_exit_and_nesting() {
+    let src = "const { AsyncLocalStorage } = __thaw_async_hooks_exports; const als = new AsyncLocalStorage(); const out = [];
+      async function work(n) { await null; out.push('w' + n + ':' + als.getStore()); await new Promise((r) => setTimeout(r, 1)); out.push('x' + n + ':' + als.getStore()); }
+      (async () => {
+        await Promise.all([als.run(1, work, 1), als.run(2, work, 2)]);
+        als.enterWith(7); out.push('enter:' + als.getStore());
+        out.push('exit:' + als.exit(() => String(als.getStore()))); out.push('after:' + als.getStore());
+        setTimeout(() => { out.push('t:' + als.getStore()); console.log(out.join(',')); }, 1);
+        als.run(9, () => { out.push('nested:' + als.getStore()); });
+      })();";
+    assert_eq!(
+        run_loop(src),
+        "w1:1,w2:2,x1:1,x2:2,enter:7,exit:undefined,after:7,nested:9,t:7"
+    );
+}
+
+#[test]
+fn als_resource_bind_and_disable() {
+    let src = "const { AsyncLocalStorage, AsyncResource, createHook } = __thaw_async_hooks_exports; const als = new AsyncLocalStorage(); let r;
+      als.run('R', () => { r = new AsyncResource('X'); }); const fn = als.run('B', () => AsyncResource.bind(() => als.getStore()));
+      console.log(als.getStore(), r.runInAsyncScope(() => als.getStore()), fn());
+      const h = createHook({ init() {} }).enable(); console.log(typeof h.disable); h.disable();
+      als.run('A', () => setTimeout(() => console.log('later:' + als.getStore()), 1));
+      als.disable(); console.log('now:' + als.getStore());";
+    assert_eq!(
+        run_loop(src),
+        "undefined R B|function|now:undefined|later:undefined"
+    );
 }
