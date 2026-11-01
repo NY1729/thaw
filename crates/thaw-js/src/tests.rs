@@ -926,6 +926,45 @@ fn global_construct_and_call_handles() {
 }
 
 #[test]
+fn with_this_call_and_event_key_handle_match_the_quickjs_contract() {
+    use crate::host::*;
+    use std::ffi::{CStr, CString};
+    let q = |s: &str| CString::new(s).unwrap();
+    // `function () { return this.k + arguments[0]; }` called with the leading array element as receiver.
+    let made = thaw_tjs_new_function(q(r#"["return this.k + arguments[0]"]"#).as_ptr());
+    assert!(made.error.is_null() && made.value > 0);
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"r":1},{"v":2}]},{"o":[["k",{"v":40}]]}]}"#);
+    let r = thaw_tjs_call_handle_with_this_graph_wire_result(made.value, args.as_ptr());
+    assert!(r.error.is_null());
+    // SAFETY: a non-null result is a NUL-terminated wire.
+    let wire = unsafe { CStr::from_ptr(r.value) }.to_str().unwrap();
+    assert!(wire.contains("42"), "{wire}");
+    let empty = q(r#"{"root":{"r":0},"nodes":[{"a":[]}]}"#);
+    assert!(
+        !thaw_tjs_call_handle_with_this_graph_wire_result(made.value, empty.as_ptr())
+            .error
+            .is_null()
+    );
+
+    let key = thaw_tjs_event_key_handle_result(q(r#"["evt"]"#).as_ptr(), 0);
+    assert!(key.error.is_null() && key.value > 0);
+    // SAFETY: a NUL-terminated string owned by the handle table.
+    let text = unsafe { CStr::from_ptr(thaw_tjs_handle_to_string(key.value)) }
+        .to_str()
+        .unwrap();
+    assert_eq!(text, "evt");
+    assert!(thaw_tjs_event_key_handle_result(q(r#"[null]"#).as_ptr(), 0)
+        .error
+        .is_null());
+    assert!(!thaw_tjs_event_key_handle_result(q(r#"[1]"#).as_ptr(), 0)
+        .error
+        .is_null());
+    assert!(!thaw_tjs_event_key_handle_result(q(r#"["s"]"#).as_ptr(), 1)
+        .error
+        .is_null());
+}
+
+#[test]
 fn user_dynamic_code_runs_in_a_bare_realm() {
     use crate::host::*;
     use std::ffi::{CStr, CString};
