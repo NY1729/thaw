@@ -322,9 +322,8 @@ fn promise_race_accepts_empty_and_rejects_mixed_and_non_promise_inputs() {
         "async function main(): Promise<void> { await Promise.race([1]); }",
     )
     .unwrap();
-    assert!(lower_module(&plain)
-        .unwrap_err()
-        .contains("Promise.race element 0 must be a Promise"));
+    // A plain value is a fulfilled input in Node (`Promise.race([1])` resolves to 1).
+    assert!(lower_module(&plain).is_ok());
 }
 
 #[test]
@@ -353,9 +352,8 @@ fn promise_any_accepts_empty_and_rejects_mixed_and_non_promise_inputs() {
         "async function main(): Promise<void> { await Promise.any([1]); }",
     )
     .unwrap();
-    assert!(lower_module(&plain)
-        .unwrap_err()
-        .contains("Promise.any element 0 must be a Promise"));
+    // A plain value is a fulfilled input in Node (`Promise.any([1])` resolves to 1).
+    assert!(lower_module(&plain).is_ok());
 }
 
 #[test]
