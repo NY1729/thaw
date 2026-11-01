@@ -2023,7 +2023,24 @@ impl<'ctx> HirCompiler<'ctx> {
         )
     }
 
-    fn compile_register_native_callback(
+    /// A callback expression that reads the call-time receiver: an inline `function (this: T) {}`
+    /// (its type is the visible signature, but the lambda takes the receiver first) or a value typed
+    /// `FunctionWithThis`. Such a callback is entered like a `FunctionWithThis` value.
+    pub(super) fn callback_expr_reads_receiver(&self, closure_expr: &HirExpr) -> bool {
+        let mut inner = closure_expr;
+        while let HirExpr::TypedClosure(_, body) = inner {
+            inner = body;
+        }
+        let inline_receiver = matches!(inner, HirExpr::NonArrowFunction(function)
+            if matches!(function.as_ref(), HirExpr::Lambda(_, params, _, _)
+                if matches!(params.first(), Some(HirParam { ty: HirType::NonArrowReceiver(_), .. }))));
+        inline_receiver || matches!(
+            self.expr_hir_type(closure_expr),
+            Some(HirType::FunctionWithThis(_, _))
+        )
+    }
+
+    pub(super) fn compile_register_native_callback(
         &mut self,
         args: &[HirExpr],
         graph_mode: bool,
@@ -2032,16 +2049,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [closure_expr] = args else {
             return Err("registerNativeCallback expects exactly one argument".into());
         };
-        // An inline `function (this: T) {}` argument: its type is the visible signature, but the
-        // lambda takes the receiver first, so it is entered like a `FunctionWithThis` value (the
-        // host call's `this` becomes the receiver).
-        let inline_receiver = matches!(closure_expr, HirExpr::NonArrowFunction(inner)
-            if matches!(inner.as_ref(), HirExpr::Lambda(_, params, _, _)
-                if matches!(params.first(), Some(HirParam { ty: HirType::NonArrowReceiver(_), .. }))));
-        let callback_has_this = inline_receiver || matches!(
-            self.expr_hir_type(closure_expr),
-            Some(HirType::FunctionWithThis(_, _))
-        );
+        let callback_has_this = self.callback_expr_reads_receiver(closure_expr);
         let callback_type = match self.expr_hir_type(closure_expr) {
             Some(HirType::FunctionWithThis(_, visible)) => Some(*visible),
             other => other,
@@ -2293,6 +2301,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 .filter(|(index, param)| *index < 32 && **param == HirType::Str)
                 .map(|(index, _)| 1u64 << (32 + index))
                 .sum::<u64>();
+        // thaw-js: the alias-resolved closure is the callback's identity, so registering the same
+        // closure again (`on` then `off`) yields the same JS function. Announced to the next register call.
+        let identity = if self.js_engine() == JsEngine::ThawJs && !method_mode {
+            Some(self.resolve_closure_alias(closure)?)
+        } else {
+            None
+        };
         let (adapter, closure, finish) =
             self.compile_value_callback_from_closure(closure, params, ret, true, None, graph_mode, graph_mode, method_mode)?;
         let jsvalue_param_mask = self
@@ -2328,6 +2343,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 &operations, "register_json_host_operations",
             ).map_err(|error| error.to_string())?;
             self.compile_register_js_error_factory()?;
+        }
+        if let Some(identity) = identity {
+            self.builder.build_call(
+                self.module.get_function("thaw_tjs_callback_identity").unwrap(),
+                &[identity.into()],
+                "native_callback_identity",
+            ).map_err(|error| error.to_string())?;
         }
         let result = self
             .builder

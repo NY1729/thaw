@@ -4562,6 +4562,11 @@
       "name": "r3b inline promise chain prints its state",
       "expect": "matched",
       "source": "function main(): void {\n  console.log(Promise.resolve(2).then((v) => v), Promise.reject(1).catch(() => {}), Promise.resolve(3));\n  const t = setTimeout(() => {}, 5);\n  clearTimeout(t);\n  console.log(t.hasRef());\n}"
+    },
+    {
+      "name": "tj3 events listener this is the emitter",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events';\nfunction main(): void {\n  const e = new EventEmitter();\n  e.on('x', function (this: EventEmitter, v: number): void { console.log(this === e, v); });\n  e.emit('x', 3);\n}"
     }
   ]
 }
