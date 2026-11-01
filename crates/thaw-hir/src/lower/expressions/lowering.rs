@@ -786,6 +786,9 @@ impl<'a> FnLowerer<'a> {
                 _ => {}
             }
         }
+        if let Some(lowered) = self.lower_well_known_symbol_use(expr)? {
+            return Ok(lowered);
+        }
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),
             Expr::Lit(Lit::BigInt(n)) => Ok(HirExpr::Lit(HirLit::BigInt(n.value.to_string()))),
@@ -7093,4 +7096,77 @@ fn escape_regex_source(source: &str) -> String {
         }
     }
     out
+}
+
+impl<'a> FnLowerer<'a> {
+    /// `Symbol.iterator` lowers to a plain string key everywhere; where it is printed, stringified
+    /// or described (`console.*(wk)`, `String(wk)`, `wk.toString()`, `wk.description`) it is rebound
+    /// to a Symbol-typed temporary first so those use the Symbol rendering.
+    fn lower_well_known_symbol_use(&mut self, expr: &Expr) -> Result<Option<HirExpr>, String> {
+        let wk = |this: &Self, e: &Expr| this.builtin_symbol_member_name(peel_parens(e));
+        let mut rewritten = expr.clone();
+        let mut found: Option<&'static str> = None;
+        let temp = format!("__thaw_wk_symbol_{}", self.next_binding);
+        let replacement = || Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(temp.as_str().into(), swc_common::DUMMY_SP));
+        match &mut rewritten {
+            Expr::Member(member)
+                if matches!(&member.prop, MemberProp::Ident(p) if p.sym == *"description") =>
+            {
+                if let Some(name) = wk(self, &member.obj) {
+                    found = Some(name);
+                    *member.obj = replacement();
+                }
+            }
+            Expr::Call(call) => {
+                if let Callee::Expr(callee) = &mut call.callee {
+                    match callee.as_mut() {
+                        Expr::Member(member) => {
+                            let console = matches!(member.obj.as_ref(), Expr::Ident(o) if o.sym == *"console");
+                            if matches!(&member.prop, MemberProp::Ident(p) if p.sym == *"toString") {
+                                if let Some(name) = wk(self, &member.obj) {
+                                    found = Some(name);
+                                    *member.obj = replacement();
+                                }
+                            } else if console {
+                                for argument in &mut call.args {
+                                    if argument.spread.is_none() && found.is_none() {
+                                        if let Some(name) = wk(self, &argument.expr) {
+                                            found = Some(name);
+                                            *argument.expr = replacement();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Expr::Ident(name) if name.sym == *"String" && !self.scope.contains_key("String") => {
+                            if let [argument] = call.args.as_mut_slice() {
+                                if argument.spread.is_none() {
+                                    if let Some(name) = wk(self, &argument.expr) {
+                                        found = Some(name);
+                                        *argument.expr = replacement();
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        let Some(symbol) = found else {
+            return Ok(None);
+        };
+        // One well-known symbol is rebound per pass; the rewritten call re-enters for the next.
+        self.next_binding += 1;
+        let value = HirExpr::TypedClosure(
+            HirType::Symbol,
+            Box::new(HirExpr::Lit(HirLit::Str(well_known_symbol_key(symbol)))),
+        );
+        self.scope.insert(temp.clone(), HirType::Symbol);
+        self.bindings.entry(temp.clone()).or_default().push(temp.clone());
+        let result = self.lower_expr(&rewritten)?;
+        self.wrap_call_argument_bindings(result, &[(temp, HirType::Symbol, value)])
+            .map(Some)
+    }
 }
