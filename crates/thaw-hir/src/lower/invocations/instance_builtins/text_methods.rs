@@ -1,4 +1,13 @@
 impl<'a> FnLowerer<'a> {
+    /// A text method's receiver; an `any`-typed read (`(e as Error).stack!`) is taken as its string.
+    fn lower_text_receiver(&mut self, object: &Expr, name: &str) -> Result<HirExpr, String> {
+        let receiver = self.lower_required_member_receiver(object, name)?;
+        if self.infer_expr_type(&receiver)? == HirType::Json {
+            return Ok(HirExpr::JsonAsString(Box::new(receiver)));
+        }
+        Ok(receiver)
+    }
+
     fn lower_split_limit(&mut self, argument: Option<&HirExpr>) -> Result<HirExpr, String> {
         let Some(argument) = argument else {
             return Ok(HirExpr::Lit(HirLit::F64(-1.0)));
@@ -51,7 +60,7 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
                 if property.sym == *"charAt" {
-                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+                    let receiver = self.lower_text_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "charAt receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.charAt")?;
@@ -153,7 +162,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"charCodeAt" {
-                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+                    let receiver = self.lower_text_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "charCodeAt receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.charCodeAt")?;
@@ -187,7 +196,7 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 if property.sym == *"localeCompare" {
-                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+                    let receiver = self.lower_text_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "localeCompare receiver")?;
                     if call.args.is_empty() || call.args.len() > 3 || call.args[0].spread.is_some() {
                         return Err("native `.localeCompare()` expects a string and optional locales and options".into());
@@ -219,7 +228,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"normalize" {
-                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+                    let receiver = self.lower_text_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "normalize receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.normalize")?;
@@ -301,7 +310,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"split" {
-                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+                    let receiver = self.lower_text_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "split receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.split")?;

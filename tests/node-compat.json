@@ -4282,6 +4282,66 @@
       "name": "nd4 Date string conversion of an invalid or valid date",
       "expect": "matched",
       "source": "function main(): void {\n  const d = new Date(NaN);\n  console.log(String(d), `${d}`, \"x\" + d, d.toString(), d.getTime(), JSON.stringify(d));\n  const v = new Date(0);\n  console.log(String(v) === v.toString(), `${v}` === v.toString(), (\"\" + v) === v.toString());\n}\n"
+    },
+    {
+      "name": "r2a hole array join",
+      "expect": "matched",
+      "source": "function main(): void { const a = new Array(3); console.log(a.length, a.join(\"-\")); console.log(new Array(2).join()); }"
+    },
+    {
+      "name": "r2a async generator return with annotation",
+      "expect": "matched",
+      "source": "async function* g(): AsyncGenerator<number, number, unknown> { try { yield 1; yield 2; return 5; } finally { console.log(\"fin\"); } } function main(): void { (async () => { const it = g(); await it.next(); console.log(await it.return(9)); console.log(await it.next()); })(); }"
+    },
+    {
+      "name": "r2a exhaustive switch without default",
+      "expect": "matched",
+      "source": "type Sh = { k: \"a\"; r: number } | { k: \"b\"; w: number; h: number }; function area(s: Sh): number { switch (s.k) { case \"a\": return s.r * 2; case \"b\": return s.w * s.h; } } const label = (s: Sh): string => { switch (s.k) { case \"a\": return \"circle\"; case \"b\": return \"rect\"; } }; function main(): void { console.log(area({ k: \"a\", r: 3 }), area({ k: \"b\", w: 2, h: 5 }), label({ k: \"b\", w: 1, h: 1 })); }"
+    },
+    {
+      "name": "r2a method call on undefined as any",
+      "expect": "matched",
+      "source": "function main(): void { try { (undefined as any).foo(); } catch (e) { console.log((e as Error).message); } try { (null as any).bar(1); } catch (e) { console.log((e as Error).message); } }"
+    },
+    {
+      "name": "r2a proxy has trap in operator on any target",
+      "expect": "matched",
+      "source": "function main(): void { const p = new Proxy({ a: 1 } as any, { has(t, k) { return k in t; } }); console.log(\"a\" in p, \"b\" in p); }"
+    },
+    {
+      "name": "r2a abstract class used as a value",
+      "expect": "matched",
+      "source": "abstract class Shape { abstract area(): number; describe(): string { return \"\" + this.area(); } } class Sq extends Shape { area(): number { return 3; } } function main(): void { console.log(new Sq().describe()); const S: any = Shape; try { new S(); } catch (e) { console.log(\"threw\"); } }"
+    },
+    {
+      "name": "r2a JSON.stringify replacer function untyped params",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify({ a: 1, b: \"x\" }, (k, v) => typeof v === \"number\" ? v + 1 : v)); }"
+    },
+    {
+      "name": "r2a error stack split inline",
+      "expect": "matched",
+      "source": "function main(): void { try { throw new Error(\"a b\"); } catch (e) { console.log((e as Error).stack!.split(\"\\n\")[0]); console.log((e as Error).message.split(\" \")[1]); } }"
+    },
+    {
+      "name": "r2a function name and length",
+      "expect": "matched",
+      "source": "function add(a: number, b = 2) { return a + b; } const arrow = (x: number) => x; function main(): void { console.log(add.name, add.length, arrow.name, arrow.length); }"
+    },
+    {
+      "name": "r2a object valueOf in arithmetic",
+      "expect": "matched",
+      "source": "function main(): void { const o = { v: 1, valueOf() { return 7; } }; console.log(o + 1, o > 6); const t = { toString() { return \"T\"; } }; console.log(`${t}`, t + \"!\"); }"
+    },
+    {
+      "name": "r2a delete optional property of typed object",
+      "expect": "matched",
+      "source": "interface O { a: number; b?: number } function main(): void { const o: O = { a: 1, b: 2 }; console.log(delete o.b, o, o.b); }"
+    },
+    {
+      "name": "r2a destructure Set and object rest on any",
+      "expect": "matched",
+      "source": "function main(): void { const [a, b] = new Set([1, 2]); console.log(a, b); const { x = 10, ...rest } = { y: 2, z: 3 } as any; console.log(x, rest); }"
     }
   ]
 }
