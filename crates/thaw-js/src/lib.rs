@@ -30,6 +30,7 @@ mod child;
 mod classes;
 mod collections;
 mod date;
+mod dns;
 mod esm;
 mod eventloop;
 mod extras;
@@ -58,10 +59,14 @@ mod web_dom_exception;
 mod web_event_target;
 #[path = "web/fetch.rs"]
 mod web_fetch;
+#[path = "web/messaging.rs"]
+mod web_messaging;
 #[path = "web/streams.rs"]
 mod web_streams;
 #[path = "web/text_codec.rs"]
 mod web_text_codec;
+#[path = "web/wasm.rs"]
+mod web_wasm;
 mod zlib;
 
 /// Feature names (as reported by [`scan`] and [`Ctl::Unsupported`]) the evaluator runs.
@@ -707,16 +712,19 @@ impl Interp {
         it.install_buffer();
         it.install_sysio();
         net::install(&mut it);
+        dns::install(&mut it);
         zlib::install(&mut it);
         tls::install(&mut it);
         it.install_fs_host();
         web_dom_exception::install(&mut it);
         web_text_codec::install(&mut it);
         web_event_target::install(&mut it);
+        web_messaging::install(&mut it);
         web_abort::install(&mut it);
         web_blob::install(&mut it);
         web_fetch::install(&mut it);
         web_streams::install(&mut it);
+        web_wasm::install(&mut it);
         web_crypto::install(&mut it);
         it.install_url();
         #[cfg(feature = "intl")]
@@ -880,9 +888,13 @@ impl Interp {
                 "require",
                 "enqueue",
                 "releaseLock",
+                "ref",
+                "unref",
+                "hasRef",
+                "refresh",
             ]
             .map(String::from),
-        ); // iterator protocol / `module.require` (user-defined) / stream controller and reader methods
+        ); // iterator protocol / `module.require` (user-defined) / stream controller and reader methods / timer handles
         names
     }
 
