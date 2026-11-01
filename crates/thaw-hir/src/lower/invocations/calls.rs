@@ -4518,7 +4518,11 @@ impl<'a> FnLowerer<'a> {
                 }
                 // Any other computed value: carry HIR's inferred type to codegen, whose own type
                 // mirror (`expr_hir_type`) cannot see through every call/builtin result.
-                other if !matches!(&other, HirExpr::Var(_) | HirExpr::Lit(_))
+                // A variable is tagged only when its declared type nests a `Buffer`: its binding is
+                // erased program-wide, so codegen would otherwise print the bytes as numbers.
+                other if (!matches!(&other, HirExpr::Var(_) | HirExpr::Lit(_))
+                    || (matches!(&other, HirExpr::Var(_))
+                        && self.infer_expr_type_inner(&other).is_ok_and(|ty| type_contains_bytes(&ty))))
                     && !matches!(&other, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name.starts_with("__thaw_console_")))
                     && matches!(self.infer_expr_type_inner(&other), Ok(HirType::Array(_) | HirType::Object(_) | HirType::Tuple(_) | HirType::Map(..) | HirType::Set(_) | HirType::Dictionary(_) | HirType::Promise(_))) => {
                     let ty = self.infer_expr_type_inner(&other)?;
