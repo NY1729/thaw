@@ -830,3 +830,4 @@ include!("tests/thaw_js_builtin_contracts.rs");
 include!("tests/fx7_types_contracts.rs");
 include!("tests/fx8_array_contracts.rs");
 include!("tests/round3_diff_contracts.rs");
+include!("tests/fx11_diff_contracts.rs");

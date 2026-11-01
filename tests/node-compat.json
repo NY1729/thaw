@@ -4627,6 +4627,11 @@
       "name": "r4a await readdir then sort on any array",
       "expect": "matched",
       "source": "import fs from \"node:fs\"; async function listed(): Promise<void> { console.log((await fs.promises.readdir(\"/\")).sort().length > 0); } function main(): void { const x = Array.from([1, 2], (v: any) => v); const y = new Array(3).fill(0); console.log(x.join(\",\"), y.join(\",\")); listed(); }"
+    },
+    {
+      "name": "r5b typeof realm globals, namespace inspect, cleared timer hasRef",
+      "expect": "matched",
+      "source": "import { EventEmitter } from \"node:events\"; function main(): void { console.log(typeof process.binding, typeof navigator, typeof fetch, typeof FinalizationRegistry, typeof escape, typeof NopeNope); console.log(Math, JSON, Reflect, Intl, [Math]); console.log(Object.keys(Intl).length, typeof EventEmitter.captureRejections); const t = setTimeout(() => {}, 1); clearTimeout(t); console.log(t.hasRef()); }"
     }
   ]
 }
