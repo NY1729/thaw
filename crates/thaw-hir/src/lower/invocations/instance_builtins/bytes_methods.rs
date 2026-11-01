@@ -9,6 +9,95 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    /// A lambda-wrapped statement block (captures inferred from the scope), so a statement
+    /// sequence with a `throw` can sit in expression position.
+    fn block_as_expr(&mut self, body: HirExpr, ret: HirType) -> HirExpr {
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(&body, &mut referenced);
+        let captures = referenced
+            .into_iter()
+            .filter_map(|name| self.scope.get(&name).cloned().map(|ty| HirParam { name, ty }))
+            .collect();
+        HirExpr::Call(
+            Box::new(HirExpr::Lambda(captures, Vec::new(), ret, Box::new(body))),
+            Vec::new(),
+        )
+    }
+
+    /// `throw new <kind>(<prefix><detail>)` with a Node `code`, as a statement.
+    fn node_error_throw(kind: &str, code: &str, prefix: &str, detail: Option<HirExpr>) -> HirStmt {
+        let head = HirExpr::Lit(HirLit::Str(format!("\u{1}{kind}\u{1}{prefix}")));
+        let tail = HirExpr::Lit(HirLit::Str(format!("\u{5}{{\"code\":\"{code}\"}}")));
+        let concat = |a: HirExpr, b: HirExpr| {
+            HirExpr::Call(Box::new(HirExpr::Var("__thaw_string_concat".to_string())), vec![a, b])
+        };
+        let message = match detail {
+            Some(detail) => concat(concat(head, detail), tail),
+            None => concat(head, tail),
+        };
+        HirStmt::Throw(message)
+    }
+
+    /// `Buffer.alloc`-style size validation (`ERR_OUT_OF_RANGE` unless `0 <= size <= 2^53 - 1`).
+    fn checked_buffer_size(&mut self, size: HirExpr) -> Result<HirExpr, String> {
+        if matches!(&size, HirExpr::Lit(HirLit::F64(n)) if (0.0..=9007199254740991.0).contains(n)) {
+            return Ok(size);
+        }
+        let name = format!("__thaw_buffer_size_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::F64);
+        let var = HirExpr::Var(name.clone());
+        let fail = |this: &mut Self| -> Result<HirStmt, String> {
+            let shown = this.coerce_primitive_to_string(HirExpr::Var(name.clone()))?;
+            Ok(Self::node_error_throw(
+                "RangeError",
+                "ERR_OUT_OF_RANGE",
+                "The value of \"size\" is out of range. It must be >= 0 && <= 9007199254740991. Received ",
+                Some(shown),
+            ))
+        };
+        let lit = |n: f64| Box::new(HirExpr::Lit(HirLit::F64(n)));
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(name.clone(), HirType::F64, size),
+            HirStmt::If(HirExpr::BinOp(BinOp::Lt, Box::new(var.clone()), lit(0.0)), vec![fail(self)?], Vec::new()),
+            HirStmt::If(HirExpr::BinOp(BinOp::Gt, Box::new(var.clone()), lit(9007199254740991.0)), vec![fail(self)?], Vec::new()),
+            HirStmt::If(
+                HirExpr::BinOp(BinOp::EqEqEq, Box::new(var.clone()), Box::new(var.clone())),
+                Vec::new(),
+                vec![fail(self)?],
+            ),
+            HirStmt::Return(Some(var)),
+        ]);
+        Ok(self.block_as_expr(body, HirType::F64))
+    }
+
+    /// `Buffer.from(x)` for an `x` that is none of string / array / buffer: `ERR_INVALID_ARG_TYPE`.
+    fn buffer_from_invalid_argument(&mut self, source: HirExpr, source_type: &HirType) -> Result<Option<HirExpr>, String> {
+        const MESSAGE: &str = "The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object. Received ";
+        let (received, detail) = match source_type {
+            HirType::F64 | HirType::I64 => ("type number (", Some(self.coerce_primitive_to_string(source.clone())?)),
+            HirType::Bool => ("type boolean (", Some(self.coerce_primitive_to_string(source.clone())?)),
+            HirType::Null => ("null", None),
+            HirType::Undefined => ("undefined", None),
+            HirType::Object(fields) if fields.is_empty() => ("an instance of Object", None),
+            _ => return Ok(None),
+        };
+        let mut stmts = Vec::new();
+        let wrapped = detail.map(|d| {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                vec![d, HirExpr::Lit(HirLit::Str(")".into()))],
+            )
+        });
+        let prefix = format!("{MESSAGE}{received}");
+        stmts.push(Self::node_error_throw("TypeError", "ERR_INVALID_ARG_TYPE", &prefix, wrapped));
+        let evaluated = HirExpr::EvalThen(
+            Box::new(source),
+            Box::new(self.block_as_expr(HirExpr::Block(stmts), HirType::Bytes)),
+        );
+        Ok(Some(evaluated))
+    }
+
     /// `project_native_base` for a spread source, also widening a `Buffer`. A separate,
     /// never-inlined function so `lower_expr` (deeply recursive) keeps its stack frame.
     #[inline(never)]
@@ -415,6 +504,11 @@ impl<'a> FnLowerer<'a> {
         let (arguments, mut bindings) =
             self.lower_native_spread_values(&call.args, &format!("Buffer.{}", property.sym))?;
         let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
+        // The offset is optional and defaults to 0.
+        let mut arguments = arguments;
+        if arguments.len() == usize::from(write) {
+            arguments.push(HirExpr::Lit(HirLit::F64(0.0)));
+        }
         let kind = if float {
             2.0
         } else if signed {
@@ -857,6 +951,10 @@ impl<'a> FnLowerer<'a> {
         let (arguments, mut bindings) =
             self.lower_native_spread_values(&call.args, &format!("Buffer.{}", property.sym))?;
         let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
+        let mut arguments = arguments;
+        if arguments.len() == usize::from(write) {
+            arguments.push(HirExpr::Lit(HirLit::F64(0.0)));
+        }
         let le_lit = HirExpr::Lit(HirLit::F64(if big_endian { 0.0 } else { 1.0 }));
         let result = if write {
             let [value, offset] = arguments.as_slice() else {

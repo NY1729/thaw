@@ -110,6 +110,14 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_json_clone".to_string())),
                 vec![value],
             )),
+            // A live host value (`RegExp`, typed array, host object): clone it through its dynamic form.
+            HirType::JsValue => {
+                let dynamic = self.coerce_to_declared(&HirType::Json, value)?;
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_clone".to_string())),
+                    vec![dynamic],
+                ))
+            }
             HirType::Map(key_type, val_type) => self.lower_structured_clone_map(
                 value,
                 key_type.as_ref().clone(),
