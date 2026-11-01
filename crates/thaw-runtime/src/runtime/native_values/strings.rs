@@ -1203,9 +1203,12 @@ pub unsafe extern "C" fn thaw_symbol_to_string(symbol: *const c_char) -> *const 
         return std::ptr::null();
     }
     let symbol = unsafe { wtf8_bytes(symbol) };
-    let description = symbol.splitn(2, |&byte| byte == b':').nth(1).unwrap_or_default();
+    let description = match symbol.strip_prefix(b"\x1f@@") {
+        Some(name) => [b"Symbol.".as_slice(), name].concat(),
+        None => symbol.splitn(2, |&byte| byte == b':').nth(1).unwrap_or_default().to_vec(),
+    };
     let mut output = b"Symbol(".to_vec();
-    output.extend_from_slice(description);
+    output.extend_from_slice(&description);
     output.push(b')');
     arena_wtf8(&output).map_or(std::ptr::null(), |value| value.cast())
 }
@@ -1280,6 +1283,10 @@ pub unsafe extern "C" fn thaw_symbol_description(symbol: *const c_char) -> *cons
         return std::ptr::null();
     }
     let symbol = unsafe { wtf8_bytes(symbol) };
+    if let Some(name) = symbol.strip_prefix(b"\x1f@@") {
+        return arena_wtf8(&[b"Symbol.".as_slice(), name].concat())
+            .map_or(std::ptr::null(), |value| value.cast());
+    }
     let Some(description) = symbol.splitn(2, |&byte| byte == b':').nth(1) else {
         return std::ptr::null();
     };
