@@ -51,6 +51,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20var name = typeof event === 'symbol' ? event : String(event); if (emitter._events.newListener && emitter._events.newListener.length) emitter.emit('newListener', name, listener); var list = emitter._events[name] || (emitter._events[name] = []);\n\
              \x20\x20var entry = { listener: listener, once: Boolean(once) };\n\
              \x20\x20if (prepend) list.unshift(entry); else list.push(entry);\n\
+             \x20\x20var max = emitter._maxListeners === undefined ? EventEmitter.defaultMaxListeners : emitter._maxListeners; if (max > 0 && list.length > max && !list.warned) { list.warned = true; var warning = new Error('Possible EventEmitter memory leak detected. ' + list.length + ' ' + String(name) + ' listeners added to ' + (emitter.constructor && emitter.constructor.name ? '[' + emitter.constructor.name + ']' : 'EventEmitter') + '. MaxListeners is ' + max + '. Use emitter.setMaxListeners() to increase limit'); warning.name = 'MaxListenersExceededWarning'; warning.emitter = emitter; warning.type = name; warning.count = list.length; if (typeof process !== 'undefined' && process.emitWarning) process.emitWarning(warning); }\n\
              \x20\x20return emitter;\n\
              };\n\
              EventEmitter.prototype.addListener = EventEmitter.prototype.on = function(event, listener) { return addEventListener(this, event, listener, false, false); };\n\

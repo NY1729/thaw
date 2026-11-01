@@ -322,6 +322,24 @@ struct RecordingServerVerifier {
     algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
 }
 
+/// Whether `leaf` is, key for key, one of the configured trust anchors and currently valid.
+#[cfg(feature = "tls")]
+fn leaf_is_trusted_anchor(roots: &RootCertStore, leaf: &CertificateDer<'_>, now: UnixTime) -> bool {
+    let Ok((_, certificate)) = x509_parser::parse_x509_certificate(leaf.as_ref()) else {
+        return false;
+    };
+    let validity = certificate.validity();
+    let seconds = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
+    if seconds < validity.not_before.timestamp() || seconds > validity.not_after.timestamp() {
+        return false;
+    }
+    let spki = certificate.public_key().raw;
+    roots.roots.iter().any(|anchor| {
+        let key: &[u8] = anchor.subject_public_key_info.as_ref();
+        !key.is_empty() && spki.ends_with(key)
+    })
+}
+
 /// Node reports `socket.authorizationError` as the OpenSSL X509 verify code, not rustls's message.
 #[cfg(feature = "tls")]
 fn node_authorization_error(error: &RustlsError) -> String {
@@ -362,13 +380,17 @@ impl rustls::client::danger::ServerCertVerifier for RecordingServerVerifier {
     ) -> Result<rustls::client::danger::ServerCertVerified, RustlsError> {
         let validation = (|| {
             let parsed = rustls::server::ParsedCertificate::try_from(end_entity)?;
-            rustls::client::verify_server_cert_signed_by_trust_anchor(
-                &parsed,
-                &self.roots,
-                intermediates,
-                now,
-                self.algorithms.all,
-            )?;
+            // A leaf that is itself a configured trust anchor (self-signed `ca: cert`) is trusted, as OpenSSL does;
+            // webpki would reject it with `CaUsedAsEndEntity` when the certificate carries CA:TRUE.
+            if !leaf_is_trusted_anchor(&self.roots, end_entity, now) {
+                rustls::client::verify_server_cert_signed_by_trust_anchor(
+                    &parsed,
+                    &self.roots,
+                    intermediates,
+                    now,
+                    self.algorithms.all,
+                )?;
+            }
             if !self.defer_name {
                 rustls::client::verify_server_name(&parsed, server_name)?;
             }

@@ -414,6 +414,67 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
+        // Native `http.ServerResponse` (`end`/`write` take a string): route `res.end()`, a byte-buffer chunk and
+        // an `(text, encoding)` pair to the matching native entry point.
+        if let Callee::Expr(callee) = &call.callee {
+            if let Expr::Member(member) = callee.as_ref() {
+                if let (Expr::Ident(_), MemberProp::Ident(method)) = (member.obj.as_ref(), &member.prop) {
+                    let method_name = method.sym.as_ref();
+                    if matches!(method_name, "end" | "write")
+                        && matches!(self.peek_type_without_lowering(&member.obj), Some(HirType::Object(fields))
+                            if ["endBytes", "endEncoded", "writeBytes"].iter().all(|name| fields.iter().any(|(field, _)| field == name)))
+                        && call.args.iter().all(|argument| argument.spread.is_none())
+                    {
+                        let rename = |name: &str| {
+                            let mut routed = call.clone();
+                            if let Callee::Expr(callee) = &mut routed.callee {
+                                if let Expr::Member(member) = callee.as_mut() {
+                                    member.prop = MemberProp::Ident(swc_ecma_ast::IdentName::new(name.into(), method.span));
+                                }
+                            }
+                            routed
+                        };
+                        let first_type = match call.args.first() {
+                            Some(argument) => match self.peek_type_without_lowering(&argument.expr) {
+                                Some(ty) => Some(ty),
+                                None => {
+                                    let saved_next = self.next_binding;
+                                    let lowered = self.lower_expr(&argument.expr).ok().and_then(|value| self.infer_expr_type(&value).ok());
+                                    self.next_binding = saved_next;
+                                    lowered
+                                }
+                            },
+                            None => None,
+                        };
+                        let routed = match (method_name, call.args.len(), first_type) {
+                            ("end", 0, _) => {
+                                let mut routed = call.clone();
+                                routed.args.push(swc_ecma_ast::ExprOrSpread {
+                                    spread: None,
+                                    expr: Box::new(Expr::Lit(swc_ecma_ast::Lit::Str(swc_ecma_ast::Str {
+                                        span: swc_common::DUMMY_SP,
+                                        value: "".into(),
+                                        raw: None,
+                                    }))),
+                                });
+                                Some(routed)
+                            }
+                            ("end", 1, Some(HirType::Bytes)) => Some(rename("endBytes")),
+                            ("write", 1, Some(HirType::Bytes)) => Some(rename("writeBytes")),
+                            ("end", 1, Some(HirType::Array(element))) if *element == HirType::F64 => Some(rename("endBytes")),
+                            ("write", 1, Some(HirType::Array(element))) if *element == HirType::F64 => Some(rename("writeBytes")),
+                            ("end", 2, Some(HirType::Str)) if self.peek_type_without_lowering(&call.args[1].expr) == Some(HirType::Str) => {
+                                Some(rename("endEncoded"))
+                            }
+                            _ => None,
+                        };
+                        if let Some(routed) = routed {
+                            return self.lower_call(&routed);
+                        }
+                    }
+                }
+            }
+        }
         if let Callee::Expr(callee) = &call.callee {
             if matches!(callee.as_ref(), Expr::Ident(class) if class.sym == *"Array")
                 && !self.scope.contains_key("Array")
@@ -426,6 +487,69 @@ impl<'a> FnLowerer<'a> {
         }
         if let Some(snippet) = self.try_lower_snippet_builtin(call)? {
             return Ok(snippet);
+        }
+        // `Object(value)`: the realm's `Object` call (boxes a primitive), through `(globalThis as any).Object`.
+        if let Callee::Expr(callee) = &call.callee {
+            if matches!(callee.as_ref(), Expr::Ident(name) if name.sym == *"Object")
+                && !self.scope.contains_key("Object")
+                && !self.signatures.contains_key("Object")
+                && call.args.len() == 1
+                && call.args[0].spread.is_none()
+            {
+                let span = swc_common::DUMMY_SP;
+                let mut routed = call.clone();
+                routed.callee = Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                    span,
+                    obj: Box::new(Expr::Paren(swc_ecma_ast::ParenExpr {
+                        span,
+                        expr: Box::new(Expr::TsAs(swc_ecma_ast::TsAsExpr {
+                            span,
+                            expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt("globalThis".into(), span))),
+                            type_ann: Box::new(swc_ecma_ast::TsType::TsKeywordType(swc_ecma_ast::TsKeywordType {
+                                span,
+                                kind: swc_ecma_ast::TsKeywordTypeKind::TsAnyKeyword,
+                            })),
+                        })),
+                    })),
+                    prop: MemberProp::Ident(IdentName::new("Object".into(), span)),
+                })));
+                return self.lower_call(&routed);
+            }
+        }
+        // `Response.json/redirect/error(...)`: the realm's static members, through `(globalThis as any).Response`.
+        if let Callee::Expr(callee) = &call.callee {
+            if let Expr::Member(member) = callee.as_ref() {
+                if let (Expr::Ident(object), MemberProp::Ident(method)) = (member.obj.as_ref(), &member.prop) {
+                    if object.sym == *"Response"
+                        && matches!(method.sym.as_ref(), "json" | "redirect" | "error")
+                        && !self.scope.contains_key("Response")
+                        && !self.signatures.contains_key("Response")
+                    {
+                        let span = swc_common::DUMMY_SP;
+                        let mut routed = call.clone();
+                        routed.callee = Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                            span,
+                            obj: Box::new(Expr::Paren(swc_ecma_ast::ParenExpr {
+                                span,
+                                expr: Box::new(Expr::TsAs(swc_ecma_ast::TsAsExpr {
+                                    span,
+                                    expr: Box::new(Expr::Member(MemberExpr {
+                                        span,
+                                        obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt("globalThis".into(), span))),
+                                        prop: MemberProp::Ident(IdentName::new("Response".into(), span)),
+                                    })),
+                                    type_ann: Box::new(swc_ecma_ast::TsType::TsKeywordType(swc_ecma_ast::TsKeywordType {
+                                        span,
+                                        kind: swc_ecma_ast::TsKeywordTypeKind::TsAnyKeyword,
+                                    })),
+                                })),
+                            })),
+                            prop: member.prop.clone(),
+                        })));
+                        return self.lower_call(&routed);
+                    }
+                }
+            }
         }
         // `RegExp(..)` / `Intl.DateTimeFormat(..)` construct like their `new` forms.
         if let Callee::Expr(callee) = &call.callee {

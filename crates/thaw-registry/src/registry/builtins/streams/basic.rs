@@ -5,7 +5,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              function isUtf8(value) { try { new TextDecoder('utf-8', { fatal: true }).decode(value); return true; } catch (_) { return false; } }\n\
              function isAscii(value) { var bytes; if (value instanceof ArrayBuffer) bytes = new Uint8Array(value); else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength); else { var typeError = new TypeError('The input argument must be an instance of ArrayBuffer, Buffer or TypedArray'); typeError.code = 'ERR_INVALID_ARG_TYPE'; throw typeError; } return bytes.every(function(byte) { return byte <= 127; }); }\n\
              function transcode(value, fromEncoding, toEncoding) { return globalThis.Buffer.from(globalThis.Buffer.from(value).toString(fromEncoding), toEncoding); }\n\
-             module.exports = { Buffer: globalThis.Buffer, SlowBuffer: globalThis.SlowBuffer, byteLength: byteLength, isUtf8: isUtf8, isAscii: isAscii, transcode: transcode, atob: globalThis.atob, btoa: globalThis.btoa, Blob: globalThis.Blob, constants: { MAX_LENGTH: 4294967296, MAX_STRING_LENGTH: 536870888 } };\n\
+             module.exports = { Buffer: globalThis.Buffer, SlowBuffer: globalThis.SlowBuffer, byteLength: byteLength, isUtf8: isUtf8, isAscii: isAscii, transcode: transcode, atob: globalThis.atob, btoa: globalThis.btoa, Blob: globalThis.Blob, File: globalThis.File, constants: { MAX_LENGTH: 4294967296, MAX_STRING_LENGTH: 536870888 } };\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),

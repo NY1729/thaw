@@ -2754,11 +2754,10 @@ fn before_exit_can_rearm_and_exit_runs_once_with_the_exit_code() {
 }
 
 #[test]
-fn process_version_is_v22_while_versions_node_stays_empty() {
-    // versions.node is deliberately empty (see runtime.js): only process.version is a Node 22 string.
+fn process_versions_node_matches_process_version() {
     assert_eq!(
-        eval_json("[process.version.startsWith('v22.'), process.versions.node]"),
-        Ok(Some("[true,\"\"]".into()))
+        eval_json("[process.version.startsWith('v22.'), process.versions.node === process.version.slice(1), typeof process.versions.v8]"),
+        Ok(Some("[true,true,\"string\"]".into()))
     );
 }
 
@@ -3015,7 +3014,8 @@ fn process_exposes_time_cwd_and_event_helpers() {
         );
     assert_eq!(
         call("processHelpers", "[]"),
-        r#"["/tmp",true,"ThawWarning:THAW001:careful",0,true,2,true,true,true,0,0,"thaw",0,1,2,"function"]"#
+        // Node delivers warnings on nextTick: none has fired yet and the once-listener is still registered.
+        r#"["/tmp",true,"",1,true,2,true,true,true,0,0,"thaw",0,1,2,"function"]"#
     );
 }
 

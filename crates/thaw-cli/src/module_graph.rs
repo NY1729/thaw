@@ -1573,6 +1573,23 @@ impl VisitMut for RenameReferences<'_> {
                 .unwrap_or_else(|| Path::new("/"))
                 .to_string_lossy()
                 .into_owned(),
+            // `import.meta.resolve` read as a value (a call with a constant specifier is folded earlier).
+            "resolve" => {
+                let source = format!(
+                    "(({}) => {});",
+                    "specifier: string",
+                    format_args!("new URL(specifier, {:?}).href", self.import_meta_url)
+                );
+                if let Ok(module) = thaw_parser::parse_typescript(&source) {
+                    if let Some(thaw_parser::ast::ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(
+                        statement,
+                    ))) = module.body.first()
+                    {
+                        *expr = *statement.expr.clone();
+                    }
+                }
+                return;
+            }
             _ => return,
         };
         *expr = Expr::Lit(thaw_parser::ast::Lit::Str(thaw_parser::ast::Str {

@@ -40,6 +40,14 @@ fn timer_callback_may_capture_its_own_handle() {
 }
 
 #[test]
+fn module_level_timer_callback_may_name_its_own_global() {
+    lower(
+        r#"const handle = setInterval(() => clearInterval(handle), 1);
+        function main(): void {}"#,
+    );
+}
+
+#[test]
 fn discarded_promise_is_tracked_for_unhandled_rejection() {
     let program = lower(
         r#"async function main(): Promise<void> {

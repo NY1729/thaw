@@ -34,7 +34,20 @@
 /// (`pkg_undefined`) is unaffected, since it can never collide with a
 /// bare literal reference.
 pub fn shadows_a_thaw_literal_identifier(name: &str) -> bool {
-    matches!(name, "undefined" | "NaN" | "Infinity")
+    // The timer names are compiler-intercepted globals: a bare `setImmediate` function from
+    // `node:timers/promises` would capture every callback-style timer call in the program.
+    matches!(
+        name,
+        "undefined"
+            | "NaN"
+            | "Infinity"
+            | "setTimeout"
+            | "setInterval"
+            | "setImmediate"
+            | "clearTimeout"
+            | "clearInterval"
+            | "clearImmediate"
+    )
 }
 
 /// A real JS/TS reserved word: syntactically invalid as a bare

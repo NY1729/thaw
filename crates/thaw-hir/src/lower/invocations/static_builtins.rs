@@ -3031,6 +3031,41 @@ impl<'a> FnLowerer<'a> {
                                         None,
                                     );
                                     let invalid = self.block_as_expr(HirExpr::Block(vec![invalid]), HirType::Bytes);
+                                    // A live typed array / ArrayBuffer crossed as `any` is only a handle
+                                    // placeholder: recover it and copy its bytes.
+                                    let live = self.coerce_to_declared(&HirType::JsValue, HirExpr::Var(name.clone()))?;
+                                    let live = self.coerce_to_declared(&HirType::Array(Box::new(HirType::F64)), live)?;
+                                    // Only a handle with a `byteLength` (ArrayBuffer / view) is byte data.
+                                    let has_byte_length = HirExpr::Conditional(
+                                        Box::new(call(
+                                            "__thaw_json_is_undefined",
+                                            vec![HirExpr::JsonGet(
+                                                Box::new(HirExpr::Var(name.clone())),
+                                                "byteLength".to_string(),
+                                            )],
+                                        )),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                        HirType::Bool,
+                                    );
+                                    let is_live_bytes = HirExpr::Conditional(
+                                        Box::new(call(
+                                            "__thaw_json_has_wrapper_key",
+                                            vec![
+                                                HirExpr::Var(name.clone()),
+                                                HirExpr::Lit(HirLit::Str("__thaw_js_handle_id__".to_string())),
+                                            ],
+                                        )),
+                                        Box::new(has_byte_length),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                        HirType::Bool,
+                                    );
+                                    let invalid = HirExpr::Conditional(
+                                        Box::new(is_live_bytes),
+                                        Box::new(call("__thaw_bytes_from_array", vec![live])),
+                                        Box::new(invalid),
+                                        HirType::Bytes,
+                                    );
                                     HirExpr::Conditional(
                                         Box::new(is_string),
                                         Box::new(call("__thaw_bytes_from_string", vec![text, encoding])),
