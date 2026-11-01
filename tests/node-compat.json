@@ -4519,6 +4519,31 @@
       "source": "import * as tp from \"node:timers/promises\";\nfunction main(): void {\n  console.log(\"start\", typeof tp.setTimeout);\n  setTimeout(() => { console.log(\"timeout\"); setImmediate(() => console.log(\"immediate\")); }, 1);\n}"
     },
     {
+      "name": "tj2 constants named flags",
+      "expect": "matched",
+      "source": "import { F_OK, R_OK, O_RDONLY, O_RDWR } from 'node:constants';\nfunction main(): void {\n  console.log(F_OK, R_OK, O_RDONLY, O_RDWR > 0);\n}"
+    },
+    {
+      "name": "tj2 url file round trip and search params",
+      "expect": "matched",
+      "source": "import { fileURLToPath, pathToFileURL, URL } from 'node:url';\nfunction main(): void {\n  const back = fileURLToPath(pathToFileURL('/tmp/x y'));\n  const u = new URL('https://e.com/p?a=1');\n  u.searchParams.set('b', '2');\n  console.log(back, u.href);\n}"
+    },
+    {
+      "name": "tj1 util promisify callback chains two awaits",
+      "expect": "matched",
+      "source": "import { promisify } from 'node:util'; function add(left: number, right: number, callback: (error: unknown, value: number) => void): void { callback(null, left + right); } async function main(): Promise<void> { const sum = promisify(add); console.log(await sum(1, 2), await sum(10, 20)); }"
+    },
+    {
+      "name": "tj1 events listener this is the emitter and once removes it",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; function main(): void { const e = new EventEmitter(); e.on('a', function (this: any, n: number) { console.log(this === e, n); }); e.once('b', function (this: any) { console.log(this === e); }); e.emit('a', 1); e.emit('b'); console.log(e.emit('b'), e.listenerCount('a')); }"
+    },
+    {
+      "name": "tj1 events string and symbol-free keys round trip",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; function main(): void { const e = new EventEmitter(); const seen: string[] = []; e.on('x', (v: string) => { seen.push(v); }); e.on('y', (v: string) => { seen.push(v + '!'); }); e.emit('x', 'one'); e.emit('y', 'two'); console.log(seen.join(','), e.eventNames().join('|')); }"
+    },
+    {
       "name": "r4a sort result reverse",
       "expect": "matched",
       "source": "function main(): void { console.log([3, 1, 2].sort().reverse().join(\",\")); console.log([\"b\", \"a\"].sort().reverse().join(\",\")); console.log([3, 1, 2].toSorted().reverse().join(\",\")); }"
