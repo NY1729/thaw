@@ -135,6 +135,28 @@ fn run_in_sandbox(it: &mut Interp, realm: &mut VmRealm, sb: &Obj, code: &str) ->
     r.and_then(|v| synced.map(|()| v))
 }
 
+/// A `SyntaxError` in this realm if `code` does not parse. Parses a second time when it runs; fine
+/// for vm-sized scripts. ponytail: the parser's own message is dropped, add it when a test needs it.
+fn syntax_check(it: &mut Interp, code: &str) -> R<()> {
+    match thaw_parser::parse_javascript_script(code) {
+        Ok(_) => Ok(()),
+        Err(_) => it.throw_error("SyntaxError", "Invalid or unexpected token"),
+    }
+}
+
+/// Starts the timeout of a run (`0` is none); `disarm` ends it.
+fn arm(ip: &mut Interp, ms: u64) {
+    ip.deadline =
+        (ms > 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+    ip.dl_ms = ms;
+    ip.dl_hit = false;
+}
+
+fn disarm(ip: &mut Interp) {
+    ip.deadline = None;
+    ip.dl_hit = false;
+}
+
 pub(crate) fn install(it: &mut Interp) {
     let g = it.global.clone();
     let create = it.native(|it, _, _| {
@@ -160,9 +182,14 @@ pub(crate) fn install(it: &mut Interp) {
     let run = it.native(|it, _, a| {
         let id = it.num(&arg(a, 0)) as i64;
         let code = it.to_str(&arg(a, 1)).to_string();
+        let ms = it.num(&arg(a, 3)) as u64;
         if id < 0 {
             // runInThisContext: indirect-eval semantics in this realm
-            return it.run_sloppy(&code);
+            syntax_check(it, &code)?;
+            arm(it, ms);
+            let r = it.run_sloppy(&code);
+            disarm(it);
+            return r;
         }
         let sandbox = match arg(a, 4) {
             Value::Object(sb) => Some(sb),
@@ -190,10 +217,12 @@ pub(crate) fn install(it: &mut Interp) {
         // stack limits and depth follow the calling thread
         realm.interp.restore(it.snapshot());
         realm.interp.vm_sandbox = sandbox.clone();
+        arm(&mut realm.interp, ms);
         let r = match &sandbox {
             Some(sb) => run_in_sandbox(it, &mut realm, sb, &code),
             None => realm.interp.run_sloppy(&code),
         };
+        disarm(&mut realm.interp);
         realm.interp.vm_sandbox = None;
         if let Some(slot) = it.vm.get_mut(&id) {
             slot.realm = Some(realm);
@@ -202,4 +231,16 @@ pub(crate) fn install(it: &mut Interp) {
         r
     });
     g.declare("__thaw_vm_run", run, true);
+    // (source, filename, syntaxOnly): `new vm.Script` checks the syntax with `syntaxOnly`; the
+    // filename is unused, as in `__thaw_vm_run`
+    let eval = it.native(|it, _, a| {
+        let src = it.to_str(&arg(a, 0)).to_string();
+        syntax_check(it, &src)?;
+        if arg(a, 2).truthy() {
+            Ok(Value::Undefined)
+        } else {
+            it.run_sloppy(&src)
+        }
+    });
+    g.declare("__thaw_vm_eval", eval, true);
 }

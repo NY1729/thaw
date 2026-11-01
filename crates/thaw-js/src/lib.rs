@@ -631,6 +631,12 @@ pub struct Interp {
     pub(crate) vm_next: u32,
     /// The sandbox of the `node:vm` run in progress, so `globalThis.x` / `this.x` reach it (vm.rs).
     pub(crate) vm_sandbox: Option<Obj>,
+    /// When a `node:vm` run with a timeout must stop (vm.rs `arm`), and the timeout in ms.
+    pub(crate) deadline: Option<std::time::Instant>,
+    pub(crate) dl_ms: u64,
+    /// The deadline has passed: sticky, so later checks and `catch` keep seeing the timeout.
+    pub(crate) dl_hit: bool,
+    pub(crate) dl_tick: u32,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -704,6 +710,10 @@ impl Interp {
             vm: HashMap::new(),
             vm_next: 0,
             vm_sandbox: None,
+            deadline: None,
+            dl_ms: 0,
+            dl_hit: false,
+            dl_tick: 0,
         };
         it.install_builtins();
         it.install_collections();
@@ -768,6 +778,34 @@ impl Interp {
         let here = &marker as *const u8 as usize;
         self.stack_limit = here.saturating_sub(bytes.saturating_sub(bytes / 8 + (4 << 20)));
         self.max_depth = 200_000;
+    }
+
+    /// Errors with `ERR_SCRIPT_EXECUTION_TIMEOUT` once the `node:vm` deadline has passed. Clock reads
+    /// are sampled every 1024 checks.
+    #[inline]
+    pub(crate) fn check_deadline(&mut self) -> R<()> {
+        let Some(d) = self.deadline else {
+            return Ok(());
+        };
+        self.dl_tick = self.dl_tick.wrapping_add(1);
+        if !self.dl_hit && self.dl_tick & 1023 != 0 {
+            return Ok(());
+        }
+        if !self.dl_hit && std::time::Instant::now() < d {
+            return Ok(());
+        }
+        self.dl_hit = true;
+        // building the Error calls `call`, which would come back here: take the deadline meanwhile
+        self.deadline = None;
+        let r = self.throw_error::<()>(
+            "Error",
+            &format!("Script execution timed out after {}ms", self.dl_ms),
+        );
+        self.deadline = Some(d);
+        if let Err(Ctl::Throw(Value::Object(o))) = &r {
+            put(o, "code", Value::str("ERR_SCRIPT_EXECUTION_TIMEOUT"));
+        }
+        r
     }
 
     pub(crate) fn too_deep(&self) -> bool {
@@ -1429,6 +1467,7 @@ impl Interp {
         if self.too_deep() {
             return self.throw_error("RangeError", "Maximum call stack size exceeded");
         }
+        self.check_deadline()?;
         self.depth += 1;
         let result = match callee {
             Callee::Native(n) => {
@@ -1906,7 +1945,12 @@ impl Interp {
     ) -> (R<Value>, Vec<Rc<str>>) {
         let module = match thaw_parser::parse_javascript_script(source) {
             Ok(m) => m,
-            Err(e) => return (Err(Ctl::Throw(Value::str(&e))), Vec::new()),
+            Err(_) => {
+                return (
+                    self.throw_error("SyntaxError", "Invalid or unexpected token"),
+                    Vec::new(),
+                )
+            }
         };
         self.run_id = next_run_id();
         self.sources.insert(self.run_id, Rc::from(source));
@@ -2147,7 +2191,8 @@ impl Interp {
             }
             a::Stmt::Try(t) => {
                 let mut result = self.exec_block(&t.block.stmts, scope);
-                if let (Err(Ctl::Throw(v)), Some(h)) = (&result, &t.handler) {
+                // a `node:vm` timeout cannot be caught by the script
+                if let (Err(Ctl::Throw(v)), Some(h), false) = (&result, &t.handler, self.dl_hit) {
                     let catch_scope = Scope::new(Some(scope.clone()));
                     if let Some(p) = &h.param {
                         self.bind_pattern(p, v.clone(), &catch_scope, true)?;
@@ -2207,6 +2252,7 @@ impl Interp {
         match s {
             a::Stmt::While(w) => {
                 while self.eval(&w.test, scope)?.truthy() {
+                    self.check_deadline()?;
                     if step(self.exec(&w.body, scope))? {
                         break;
                     }
@@ -2215,6 +2261,7 @@ impl Interp {
             }
             a::Stmt::DoWhile(w) => {
                 loop {
+                    self.check_deadline()?;
                     if step(self.exec(&w.body, scope))? || !self.eval(&w.test, scope)?.truthy() {
                         break;
                     }
@@ -2254,6 +2301,7 @@ impl Interp {
                     None => {}
                 }
                 loop {
+                    self.check_deadline()?;
                     if let Some(t) = &f.test {
                         if !self.eval(t, &cur)?.truthy() {
                             break;
@@ -2278,6 +2326,7 @@ impl Interp {
                 if f.is_await {
                     if let Some((iterator, next)) = self.get_async_iterator(&iterable)? {
                         loop {
+                            self.check_deadline()?;
                             let result = self.call(&next, &iterator, &[])?;
                             let result = self.await_value(result)?;
                             if !matches!(result, Value::Object(_)) {
@@ -2314,6 +2363,7 @@ impl Interp {
                 }
                 if let Some(items) = self.iter_items(&iterable) {
                     for item in items {
+                        self.check_deadline()?;
                         let item = if f.is_await {
                             self.await_value(item)?
                         } else {
@@ -2332,6 +2382,7 @@ impl Interp {
                     return unsupported("iterator-protocol");
                 };
                 loop {
+                    self.check_deadline()?;
                     let result = self.call(&next, &iterator, &[])?;
                     if !matches!(result, Value::Object(_)) {
                         return self.throw_error("TypeError", "Iterator result is not an object");
@@ -2380,6 +2431,7 @@ impl Interp {
                     }
                 }
                 for key in keys {
+                    self.check_deadline()?;
                     let iter = Scope::new(Some(scope.clone()));
                     self.bind_for_head(&f.left, Value::Str(key), &iter)?;
                     if step(self.exec(&f.body, &iter))? {
