@@ -739,9 +739,14 @@ fn normalize_private_class_members(module: &Module) -> Module {
 /// visible inside it; bind the recursion to the declared binding instead.
 fn rename_named_function_expression_self_references(module: &Module) -> Module {
     struct Rename;
+    // Only module-level declarators: nested ones are lowered by the local path, which needs the
+    // expression's own name to stay in place (see `named_function_is_recursive`).
     impl VisitMut for Rename {
+        fn visit_mut_function(&mut self, _: &mut swc_ecma_ast::Function) {}
+        fn visit_mut_arrow_expr(&mut self, _: &mut swc_ecma_ast::ArrowExpr) {}
+        fn visit_mut_class(&mut self, _: &mut swc_ecma_ast::Class) {}
+        fn visit_mut_block_stmt(&mut self, _: &mut swc_ecma_ast::BlockStmt) {}
         fn visit_mut_var_declarator(&mut self, declarator: &mut swc_ecma_ast::VarDeclarator) {
-            declarator.visit_mut_children_with(self);
             let (Pat::Ident(binding), Some(init)) = (&declarator.name, declarator.init.as_deref_mut())
             else {
                 return;
