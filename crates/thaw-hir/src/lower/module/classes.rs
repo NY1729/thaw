@@ -219,6 +219,7 @@ fn collect_native_classes<'a>(
             HirType::Bool,
         )];
         fields.extend(inherited_fields);
+        let own_start = fields.len();
         let maybe_uninit = maybe_uninit_fields_with(&declaration.class, &|field| bare_field_observed(name, field));
         // Abstract fields are laid out after the concrete ones: the abstract
         // base is never instantiated, and a subclass overriding them keeps
@@ -358,6 +359,7 @@ fn collect_native_classes<'a>(
                 fields.push((field_name, field_type));
             }
         }
+        let param_props_start = fields.len();
         for property in declaration
             .class
             .body
@@ -392,6 +394,8 @@ fn collect_native_classes<'a>(
             }
             fields.push((field_name, ty));
         }
+        // Node (type stripping) declares parameter properties before the class's own fields.
+        fields[own_start..].rotate_left(param_props_start - own_start);
         for implementation in &declaration.class.implements {
             let Expr::Ident(target) = implementation.expr.as_ref() else {
                 return Err(format!(
@@ -481,10 +485,15 @@ fn collect_native_classes<'a>(
                     },
                     _ => required_type.clone(),
                 };
+                // A method may declare fewer parameters than the member; an unannotated return is
+                // inferred later, so only the parameters are compared then.
                 let params_only_match = unannotated_return
                     && matches!((&actual_type, required_type),
-                        (HirType::Function(actual, _), HirType::Function(required, _)) if actual == required);
-                if &actual_type != required_type && !params_only_match {
+                        (HirType::Function(actual, _), HirType::Function(required, _)) if required.starts_with(actual));
+                let fewer_parameters = matches!((&actual_type, required_type),
+                    (HirType::Function(actual_params, actual_ret), HirType::Function(required_params, required_ret))
+                        if required_params.starts_with(actual_params) && actual_ret == required_ret);
+                if &actual_type != required_type && !params_only_match && !fewer_parameters {
                     return Err(format!(
                         "class `{name}` field `{field}` has type {actual_type:?}, but `{}` requires {required_type:?}",
                         target.sym
@@ -499,12 +508,6 @@ fn collect_native_classes<'a>(
             .body
             .iter()
             .filter_map(|member| match member {
-                ClassMember::ClassProp(property) if !property.is_static && !property.is_abstract => {
-                    class_property_name(&property.key).ok()
-                }
-                _ => None,
-            })
-            .chain(declaration.class.body.iter().filter_map(|member| match member {
                 ClassMember::Constructor(constructor) if constructor.body.is_some() => Some(&constructor.params),
                 _ => None,
             }).flatten().filter_map(|parameter| match parameter {
@@ -512,6 +515,12 @@ fn collect_native_classes<'a>(
                     parameter_property_binding(property).ok().map(|binding| binding.id.sym.to_string())
                 }
                 ParamOrTsParamProp::Param(_) => None,
+            })
+            .chain(declaration.class.body.iter().filter_map(|member| match member {
+                ClassMember::ClassProp(property) if !property.is_static && !property.is_abstract => {
+                    class_property_name(&property.key).ok()
+                }
+                _ => None,
             }))
             .collect();
         let mut defined = match declaration.class.super_class.as_deref() {
