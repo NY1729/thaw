@@ -3667,7 +3667,9 @@
     argv0: globalThis.process.argv0 || JSON.parse(globalThis.__thaw_host_argv_json || '["node"]')[0],
     execArgv: globalThis.process.execArgv || JSON.parse(globalThis.__thaw_host_exec_argv_json || '[]'),
     config: globalThis.process.config || { variables: {} },
-    versions: Object.assign({ node: (globalThis.process.version || 'v22.23.1').slice(1), v8: '12.4.254.21-node.33', modules: '', uv: '' },
+    // versions.node stays '' on purpose: esbuild (and similar) read it to pick the worker_threads sync path,
+    // which needs file-path Workers Thaw does not have. process.version covers the semver feature gates.
+    versions: Object.assign({ node: '', v8: '12.4.254.21-node.33', modules: '', uv: '' },
                             globalThis.process.versions || {}),
     stdin: globalThis.process.stdin || stdin,
     stdout: globalThis.process.stdout || processStream(1, processRawWrite),
