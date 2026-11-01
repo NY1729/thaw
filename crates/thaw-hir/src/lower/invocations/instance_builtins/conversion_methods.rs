@@ -325,6 +325,78 @@ impl<'a> FnLowerer<'a> {
                             vec![receiver, locales, options],
                         ));
                     }
+                    // A number or Date array formats each element with the same
+                    // arguments, then joins with ",": `arr.map(x => x.toLocaleString(..)).join(",")`.
+                    if let HirType::Array(element) = &receiver_type {
+                        if matches!(element.as_ref(), HirType::F64) || **element == date_object_type() {
+                            use swc_common::DUMMY_SP;
+                            use swc_ecma_ast::*;
+                            let name = format!("__thaw_locale_array_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), receiver_type.clone());
+                            let item = "__thaw_locale_item";
+                            let member = |obj: Expr, prop: &str| {
+                                Expr::Member(MemberExpr {
+                                    span: DUMMY_SP,
+                                    obj: Box::new(obj),
+                                    prop: MemberProp::Ident(IdentName::new(prop.into(), DUMMY_SP)),
+                                })
+                            };
+                            let argument = |expr: Expr| ExprOrSpread {
+                                spread: None,
+                                expr: Box::new(expr),
+                            };
+                            let format_item = Expr::Call(CallExpr {
+                                span: DUMMY_SP,
+                                ctxt: Default::default(),
+                                callee: Callee::Expr(Box::new(member(
+                                    Expr::Ident(Ident::new_no_ctxt(item.into(), DUMMY_SP)),
+                                    "toLocaleString",
+                                ))),
+                                args: call.args.clone(),
+                                type_args: None,
+                            });
+                            let format_arrow = Expr::Arrow(ArrowExpr {
+                                span: DUMMY_SP,
+                                ctxt: Default::default(),
+                                params: vec![Pat::Ident(BindingIdent {
+                                    id: Ident::new_no_ctxt(item.into(), DUMMY_SP),
+                                    type_ann: None,
+                                })],
+                                body: Box::new(ArrowFunctionBody::Expr(Box::new(format_item))),
+                                is_async: false,
+                                is_generator: false,
+                                type_params: None,
+                                return_type: None,
+                            });
+                            let mapped = Expr::Call(CallExpr {
+                                span: DUMMY_SP,
+                                ctxt: Default::default(),
+                                callee: Callee::Expr(Box::new(member(
+                                    Expr::Ident(Ident::new_no_ctxt(name.clone().into(), DUMMY_SP)),
+                                    "map",
+                                ))),
+                                args: vec![argument(format_arrow)],
+                                type_args: None,
+                            });
+                            let joined = Expr::Call(CallExpr {
+                                span: DUMMY_SP,
+                                ctxt: Default::default(),
+                                callee: Callee::Expr(Box::new(member(mapped, "join"))),
+                                args: vec![argument(Expr::Lit(Lit::Str(Str {
+                                    span: DUMMY_SP,
+                                    value: ",".into(),
+                                    raw: None,
+                                })))],
+                                type_args: None,
+                            });
+                            let lowered = self.lower_expr(&joined)?;
+                            return self.wrap_call_argument_bindings(
+                                lowered,
+                                &[(name, receiver_type.clone(), receiver)],
+                            );
+                        }
+                    }
                     // String/Number/Boolean/Array: approximate locale
                     // formatting with the locale-independent string form (no
                     // thousands separators or locale digits).
