@@ -2162,3 +2162,17 @@ fn vm_sandbox_mirroring_matches_node() {
         "61number 10 undefined function [60]|42 undefinedundefined|undefined undefined|2|5 1 undefined 3 2|9 9|2 2|11 11|boom 1 false"
     );
 }
+
+#[test]
+fn vm_global_this_reads_and_writes_sandbox() {
+    let src = include_str!("../../thaw-registry/src/registry/builtins/system/vm_context.js").to_string() + "
+      const sb = { value: 1 }; runInNewContext('globalThis.value = 5; var seen = value; this.zz = value + 1', sb); console.log(sb.value, sb.seen, sb.zz);
+      console.log(runInNewContext('globalThis.value + this.value', { value: 3 }));
+      const s2 = { arr: [1, 2], fn: (n) => n + 1 };
+      const r = runInNewContext('globalThis.q = fn(arr.length); [typeof console, typeof setTimeout, typeof JSON, typeof Promise, [] instanceof Array, q]', s2);
+      console.log(JSON.stringify(r), s2.q, r instanceof Array, Array.isArray(r), runInNewContext('this === globalThis'));";
+    assert_eq!(
+        one(&src),
+        "5 5 6|6|[\"object\",\"undefined\",\"object\",\"function\",true,3] 3 false true true"
+    );
+}
