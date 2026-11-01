@@ -945,7 +945,12 @@ impl<'a> FnLowerer<'a> {
             return Err("only `new Promise<T>(...)` is supported".into());
         };
         if callee.sym != *"Promise" {
-            return Err("only `new Promise<T>(...)` is supported".into());
+            let name = self.resolve_binding(callee.sym.as_ref());
+            return Err(format!(
+                "only `new Promise<T>(...)` is supported (`new {}`: callee type {:?})",
+                callee.sym,
+                self.scope.get(&name)
+            ));
         }
         let args = new_expr.args.as_deref().unwrap_or_default();
         let [executor] = args else {
