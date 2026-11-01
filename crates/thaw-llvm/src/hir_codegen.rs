@@ -2621,6 +2621,10 @@ impl<'ctx> HirCompiler<'ctx> {
             if func.ret == HirType::Void {
                 self.emit_stack_promise_cleanup()?;
                 self.builder.build_return(None).map_err(|e| e.to_string())?;
+            } else if ends_with_exhaustive_switch(&func.body, &func.ret) {
+                self.builder
+                    .build_unreachable()
+                    .map_err(|e| e.to_string())?;
             } else {
                 return Err(format!(
                     "function `{}` does not return a value on all paths",
@@ -2631,6 +2635,24 @@ impl<'ctx> HirCompiler<'ctx> {
 
         Ok(())
     }
+}
+
+/// A value-returning body whose tail is a `default`-less switch with every case exiting: TS
+/// accepted the missing return only because the cases cover the discriminant union.
+fn ends_with_exhaustive_switch(body: &[HirStmt], ret: &HirType) -> bool {
+    let plain = matches!(
+        ret,
+        HirType::F64
+            | HirType::Str
+            | HirType::Bool
+            | HirType::BigInt
+            | HirType::Array(_)
+            | HirType::Tuple(_)
+            | HirType::Object(_)
+    );
+    plain
+        && matches!(body.last(), Some(HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), inner))
+            if matches!(inner.get(1), Some(HirStmt::Let(name, ..)) if name.starts_with("__thaw_switch_selected_")))
 }
 
 include!("hir_codegen/async_frames/planning/plan.rs");

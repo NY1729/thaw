@@ -3250,8 +3250,21 @@ impl<'a> FnLowerer<'a> {
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"JSON" && property.sym == *"stringify" {
-                        let (arguments, mut bindings) =
-                            self.lower_native_spread_values(&call.args, "JSON.stringify")?;
+                        // A replacer function's unannotated `(key, value)` are contextually `any`.
+                        let replacer_fn = call.args.get(1).is_some_and(|argument| {
+                            argument.spread.is_none()
+                                && matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_))
+                        });
+                        let (arguments, mut bindings) = if replacer_fn {
+                            self.lower_native_spread_values_with_expected(
+                                &call.args,
+                                "JSON.stringify",
+                                &[HirType::Json, HirType::Json],
+                                None,
+                            )?
+                        } else {
+                            self.lower_native_spread_values(&call.args, "JSON.stringify")?
+                        };
                         if !(1..=3).contains(&arguments.len()) {
                             return Err("`JSON.stringify` expects one to three arguments".into());
                         }

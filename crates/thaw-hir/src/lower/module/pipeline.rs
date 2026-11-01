@@ -1955,7 +1955,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             != derived_signature.params[receiver_count..]
                             // An unannotated override's return type is inferred later.
                             || (base_signature.ret != derived_signature.ret
-                                && !hir_type_contains_dynamic(&derived_signature.ret))
+                                && !hir_type_contains_dynamic(&derived_signature.ret)
+                                // A class value escaping into `any` widens the override's result.
+                                && derived_signature.ret != HirType::Json)
                             || base_signature.is_async != derived_signature.is_async
                             || base_signature.native_rest != derived_signature.native_rest
                         {
