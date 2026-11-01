@@ -3499,6 +3499,40 @@ impl<'a> FnLowerer<'a> {
                 &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)],
             );
         }
+        // `Array == primitive/dynamic`: the array converts through its
+        // `join(",")` text first (`[1,2] == "1,2"`, `[1] == 1`), then the
+        // ordinary string or numeric comparison applies.
+        let is_array = |ty: &HirType| matches!(ty, HirType::Array(_) | HirType::Tuple(_));
+        let is_comparable =
+            |ty: &HirType| is_primitive(ty) || matches!(ty, HirType::Json | HirType::JsValue);
+        if (is_array(&lhs_type) && is_comparable(&rhs_type))
+            || (is_comparable(&lhs_type) && is_array(&rhs_type))
+        {
+            let lhs_name = format!("__thaw_loose_array_left_{}", self.next_binding);
+            self.next_binding += 1;
+            let rhs_name = format!("__thaw_loose_array_right_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(lhs_name.clone(), lhs_type.clone());
+            self.scope.insert(rhs_name.clone(), rhs_type.clone());
+            let array_left = is_array(&lhs_type);
+            let array_name = if array_left { &lhs_name } else { &rhs_name };
+            let array_text = self.coerce_primitive_to_string(HirExpr::Var(array_name.clone()))?;
+            let text_name = format!("__thaw_loose_array_text_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(text_name.clone(), HirType::Str);
+            let text = HirExpr::Var(text_name.clone());
+            let compared = if array_left {
+                self.lower_loose_equality_base(text, HirExpr::Var(rhs_name.clone()))?
+            } else {
+                self.lower_loose_equality_base(HirExpr::Var(lhs_name.clone()), text)?
+            };
+            let compared =
+                self.wrap_call_argument_bindings(compared, &[(text_name, HirType::Str, array_text)])?;
+            return self.wrap_call_argument_bindings(
+                compared,
+                &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)],
+            );
+        }
         // A live host handle (or Json) against a primitive: `==` must apply
         // ToPrimitive with hint "default", which only the realm's own `==`
         // does; numeric coercion below would use the "number" hint.

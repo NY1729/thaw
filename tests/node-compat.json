@@ -4544,6 +4544,66 @@
       "source": "import { EventEmitter } from 'node:events'; function main(): void { const e = new EventEmitter(); const seen: string[] = []; e.on('x', (v: string) => { seen.push(v); }); e.on('y', (v: string) => { seen.push(v + '!'); }); e.emit('x', 'one'); e.emit('y', 'two'); console.log(seen.join(','), e.eventNames().join('|')); }"
     },
     {
+      "name": "r3b Array.from length source with any-annotated mapper and large array printing",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = Array.from({ length: 101 }, (_: unknown, i: number) => i);\n  console.log(a.length, a);\n  const b = Array.from({ length: 30 }, (_: any, i: number) => i * 1000);\n  console.log(b);\n}"
+    },
+    {
+      "name": "r3b getPrototypeOf of built-in containers is the shared prototype",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Reflect.getPrototypeOf([]) === Array.prototype, Object.getPrototypeOf({}) === Object.prototype);\n  console.log(Object.getPrototypeOf(new Map()) === Map.prototype, Object.getPrototypeOf(new Set()) === Set.prototype);\n}"
+    },
+    {
+      "name": "r3b null-prototype groupBy result and regex groups",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Object.groupBy([1, 2, 3, 4], (x: number) => (x % 2 ? \"odd\" : \"even\")));\n  const m = /(?<y>\\d{4})-(?<m>\\d\\d)/.exec(\"on 2020-05 ok\")!;\n  console.log(m);\n  console.log(m.groups, \"x\".match(/(?<n>y)?/)!.groups);\n}"
+    },
+    {
+      "name": "r3b inline promise chain prints its state",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Promise.resolve(2).then((v) => v), Promise.reject(1).catch(() => {}), Promise.resolve(3));\n  const t = setTimeout(() => {}, 5);\n  clearTimeout(t);\n  console.log(t.hasRef());\n}"
+    },
+    {
+      "name": "r3a typeof undeclared and runtime globals",
+      "expect": "matched",
+      "source": "function main(): void { console.log(typeof window, typeof undeclaredName, typeof Buffer, typeof performance.now(), typeof clearImmediate); }"
+    },
+    {
+      "name": "r3a BigInt64Array construction",
+      "expect": "matched",
+      "source": "function main(): void { const a = new BigInt64Array(2); const b = new BigUint64Array(3); console.log(a.length, b.length); }"
+    },
+    {
+      "name": "r3a class expressions in value position",
+      "expect": "matched",
+      "source": "function main(): void { const a = new (class Foo { x = 3; get(): number { return this.x; } })(); console.log(a.get(), typeof class {}); function mk() { return class { v = 1; }; } const C = mk(); console.log(new C().v); }"
+    },
+    {
+      "name": "r3a named function expression recursion",
+      "expect": "matched",
+      "source": "const f = function fact(n: number): number { return n <= 1 ? 1 : n * fact(n - 1); }; function main(): void { console.log(f(5)); }"
+    },
+    {
+      "name": "r3a new on a destructured builtin class",
+      "expect": "matched",
+      "source": "import __d1 from \"node:stream\"; const { Writable } = __d1; function main(): void { const w = new Writable({ write(c: any, e: any, cb: any) { cb(); } }); console.log(typeof w.write); }"
+    },
+    {
+      "name": "r4b array loose equality compares join text",
+      "expect": "matched",
+      "source": "function main(): void {\n    const s: any = \"1,2\";\n    const a = [1, 2];\n    const b: any = [1, 2];\n    console.log(a == s, s == a, b == s, [1, 2] == \"1,2\", [\"a\"] == (\"a\" as any), [1, [2, 3]] == (\"1,2,3\" as any), [1] == (1 as any));\n    console.log([] == false, [1] == true, [0] == \"\", [1, 2] != \"1,2\", [5] == 5);\n}"
+    },
+    {
+      "name": "r4b array toLocaleString formats number and Date elements",
+      "expect": "matched",
+      "source": "function main(): void {\n    console.log([1234.5, 6].toLocaleString(\"de-DE\", { maximumFractionDigits: 1 }));\n    console.log([new Date(0)].toLocaleString(\"en-US\", { timeZone: \"UTC\" }));\n    console.log([1234.5, 6].toLocaleString(\"en-US\", { maximumFractionDigits: 0 }));\n}"
+    },
+    {
+      "name": "r4b assert deepStrictEqual shows Map Set and Date",
+      "expect": "matched",
+      "source": "import assert from \"node:assert\";\nfunction main(): void {\n  try { assert.deepStrictEqual(new Map([[1, 2]]), new Map([[1, 3]])); } catch (e: any) { console.log(e.message); }\n  try { assert.deepStrictEqual(new Set([1]), new Set([2])); } catch (e: any) { console.log(e.message); }\n  try { assert.deepStrictEqual(new Date(0), new Date(1)); } catch (e: any) { console.log(e.message); }\n}"
+    },
+    {
       "name": "r4a sort result reverse",
       "expect": "matched",
       "source": "function main(): void { console.log([3, 1, 2].sort().reverse().join(\",\")); console.log([\"b\", \"a\"].sort().reverse().join(\",\")); console.log([3, 1, 2].toSorted().reverse().join(\",\")); }"
