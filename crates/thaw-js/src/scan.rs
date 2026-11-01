@@ -576,6 +576,12 @@ fn tolerated(feature: &str, key: &str) -> bool {
         || (feature == "method:onSocket" && key.ends_with("agent-base/dist/src/index.js"))
 }
 
+/// Globals host.rs installs for the `node:module` entry (`globalThis.<name>` assignments in its prelude).
+pub(crate) const MODULE_LOADER_GLOBALS: [&str; 2] = [
+    "__thaw_bundle_builtin_names",
+    "__thaw_bundle_create_require",
+];
+
 /// Scan a registry bundle.
 pub fn scan_bundle(source: &str) -> Result<Report, String> {
     let parts = parse_bundle(source)?;
@@ -587,11 +593,16 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
     };
     let interp = crate::Interp::new();
     // `File` exists only so `x instanceof File` is false for non-files; any other use is unsupported.
-    let globals: HashSet<String> = interp
+    let mut globals: HashSet<String> = interp
         .global_names()
         .into_iter()
         .filter(|n| n != "File")
         .collect();
+    // the loader globals host.rs installs for node:module (see install_module_loader)
+    let module_loader = parts.entry == "node:module";
+    if module_loader {
+        globals.extend(MODULE_LOADER_GLOBALS.iter().map(|g| g.to_string()));
+    }
     let known_methods: HashSet<String> = interp.known_method_names().into_iter().collect();
     let params = [
         "module",
@@ -672,6 +683,7 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
                 && !interp.builtin_member_exists(g, p)
                 // the package creates its own `globalThis.x` slot (`globalThis.x ??= {}`)
                 && !(g == "globalThis" && (defined.contains(p) || w.probed_members.contains(p)))
+                && !(module_loader && g == "globalThis" && p == "__thaw_bundle_create_require")
             {
                 add(&mut report, format!("builtin:{g}.{p}"), 1, key);
             }

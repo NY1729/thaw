@@ -2216,3 +2216,61 @@ fn vm_eval_syntax_errors_and_script_emulation() {
         "ERR:SyntaxError ERR:SyntaxError|2 true false 2|6 5 7|ERR:SyntaxError ERR:SyntaxError ERR:SyntaxError undefined 2"
     );
 }
+
+#[test]
+fn node_module_bundle_gets_create_require_and_builtin_names() {
+    use crate::host::{Native, Package};
+    let bundle = r#"module.exports = (function(require) {
+var __thaw_bundle_builtin_names = Object.freeze(["fs","module","path"]);
+var __thaw_bundle_factories = {
+"node:module": function(module, exports, require) {
+  var set = new Set(__thaw_bundle_builtin_names.slice());
+  function isBuiltin(n) { return set.has(String(n).replace(/^node:/, '')); }
+  function apply1(fn, a) { return fn(a); }
+  function base() { var r = __thaw_bundle_create_require('/tmp/example/main.js'); return apply1(r('node:path').basename, '/a/b.txt'); }
+  function res() { var r = __thaw_bundle_create_require('/tmp/example/main.js'); return [r.resolve('node:path'), r.resolve('path'), r('path') === r('node:path')].join(); }
+  function bad() { try { __thaw_bundle_create_require('/x')('nope-xyz'); } catch (e) { return e.code; } return 'none'; }
+  module.exports = { isBuiltin: isBuiltin, base: base, res: res, bad: bad };
+},
+"node:path": function(module, exports) { function basename(p) { return p.split('/').pop(); } module.exports = { basename: basename }; },
+"p/index.js": function(module, exports) { module.exports = { probe: function () { return typeof __thaw_bundle_create_require; } }; },
+};
+var __thaw_bundle_require_maps = { "node:module": {}, "node:path": {}, "p/index.js": {}, };
+var __thaw_bundle_entry_key = "node:module";
+})(globalThis.require);"#;
+    assert!(crate::scan::scan_bundle(bundle).unwrap().is_clean());
+    let mut p = Package::load(bundle).expect("loads");
+    assert_eq!(p.call("base", &[]).unwrap(), Native::Str("b.txt".into()));
+    assert_eq!(
+        p.call("res", &[]).unwrap(),
+        Native::Str("node:path,path,true".into())
+    );
+    assert_eq!(
+        p.call("bad", &[]).unwrap(),
+        Native::Str("MODULE_NOT_FOUND".into())
+    );
+    assert_eq!(
+        p.call("isBuiltin", &[Native::Str("node:fs".into())])
+            .unwrap(),
+        Native::Bool(true)
+    );
+    assert_eq!(
+        p.call("isBuiltin", &[Native::Str("fs".into())]).unwrap(),
+        Native::Bool(true)
+    );
+    assert_eq!(
+        p.call("isBuiltin", &[Native::Str("not-a-module".into())])
+            .unwrap(),
+        Native::Bool(false)
+    );
+    // other entries get no loader globals
+    let other = bundle.replace(
+        r#"var __thaw_bundle_entry_key = "node:module";"#,
+        r#"var __thaw_bundle_entry_key = "p/index.js";"#,
+    );
+    let mut q = Package::load(&other).expect("loads");
+    assert_eq!(
+        q.call("probe", &[]).unwrap(),
+        Native::Str("undefined".into())
+    );
+}

@@ -779,8 +779,10 @@ fn build_with_native_mode_routed(
                     .into(),
             );
         }
+        // thaw-js serves `node:module` (its createRequire keeps result handles), so no QuickJS forcing there
         let created_require_live_result =
-            module_graph::uses_created_require_live_result(input, &user_source)?;
+            module_graph::uses_created_require_live_result(input, &user_source)?
+                && !(thaw_js_routing && thaw_js_routed_packages(&shim_source).iter().any(|p| p == "node:module"));
         let mut quickjs_reasons = quickjs_fallback_reasons(
             input,
             &user_source,
