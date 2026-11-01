@@ -3018,7 +3018,12 @@ impl<'a> FnLowerer<'a> {
             if property.sym.as_ref() == "length"
                 && !self.scope.contains_key(&name)
             {
-                if let Some(length) = self.signatures.get(&name).and_then(|signature| signature.source_length) {
+                if let Some(length) = self
+                    .signatures
+                    .get(&name)
+                    .or_else(|| self.signatures.get(&class_constructor_symbol(&name)))
+                    .and_then(|signature| signature.source_length)
+                {
                     return Ok(HirExpr::Lit(HirLit::F64(length as f64)));
                 }
             }

@@ -1473,7 +1473,23 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         uses_this: false,
                         is_extern: false,
                         source_range: (class_decl.class.span.lo.0, class_decl.class.span.hi.0),
-                        source_length: None,
+                        source_length: Some(
+                            constructors
+                                .first()
+                                .map(|constructor| {
+                                    constructor
+                                        .params
+                                        .iter()
+                                        .take_while(|parameter| {
+                                            !matches!(
+                                                class_constructor_param_pattern(parameter),
+                                                Pat::Assign(_) | Pat::Rest(_)
+                                            )
+                                        })
+                                        .count()
+                                })
+                                .unwrap_or(0),
+                        ),
                         accessor_owner: None,
                         generic_type_params: Vec::new(),
                         generic_type_constraints: Vec::new(),

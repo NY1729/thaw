@@ -1,4 +1,38 @@
 impl<'a> FnLowerer<'a> {
+    /// Collects the first `n` items an array pattern reads from an iterable (all for a
+    /// rest element) with a `for...of` that `break`s, so `return()` runs like in JS.
+    fn collect_iterable_prefix(
+        &mut self,
+        pattern: &swc_ecma_ast::ArrayPat,
+        value: HirExpr,
+        ty: &HirType,
+        element: &HirType,
+        statements: &mut Vec<HirStmt>,
+    ) -> Result<HirExpr, String> {
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let (source, items) = (format!("__thaw_iter_src_{id}"), format!("__thaw_iter_items_{id}"));
+        let array_type = HirType::Array(Box::new(element.clone()));
+        for (name, ty) in [(&source, ty), (&items, &array_type)] {
+            self.scope.insert(name.clone(), ty.clone());
+            self.bindings.entry(name.clone()).or_default().push(name.clone());
+        }
+        statements.push(HirStmt::Let(source.clone(), ty.clone(), value));
+        statements.push(HirStmt::Let(items.clone(), array_type.clone(), HirExpr::ArrayLit(Vec::new())));
+        let limit = if pattern.elems.iter().any(|e| matches!(e, Some(Pat::Rest(_)))) {
+            String::new()
+        } else {
+            format!("if ({items}.length >= {}) break;", pattern.elems.len())
+        };
+        let guard = if pattern.elems.is_empty() { "break;" } else { "" };
+        let text = format!("for (const __e of {source}) {{ {guard} {items}.push(__e); {limit} }}");
+        let module = thaw_parser::parse_typescript(&text)?;
+        let Some(swc_ecma_ast::ModuleItem::Stmt(looped)) = module.body.into_iter().next() else {
+            return Err("iterable destructuring loop did not parse".into());
+        };
+        statements.extend(self.lower_stmt_seq(&looped)?);
+        Ok(HirExpr::Var(items))
+    }
     /// A `= default` on a destructured field: an empty array literal takes the field's array
     /// type (`{ list = [] }` over `list?: string[]` is a `string[]`, not `number[]`).
     fn lower_field_default(&mut self, default: &Expr, field_type: &HirType) -> Result<HirExpr, String> {
@@ -121,6 +155,45 @@ impl<'a> FnLowerer<'a> {
             let entries_type = self.infer_expr_type(&entries)?;
             return self.lower_binding_pattern_impl(pattern, entries, &entries_type, statements, immutable);
         }
+        if let Pat::Array(array_pattern) = pattern {
+            // A dynamic value may be a live iterable instead of an array: collect its prefix
+            // into a Json array, then destructure that like any other Json array.
+            if matches!(ty, HirType::Json | HirType::JsValue)
+                && !matches!(&value, HirExpr::Var(name) if name.starts_with("__thaw_iter_norm_"))
+            {
+                let value = self.bind_destructure_source_once(value, ty, statements);
+                let json = if *ty == HirType::JsValue {
+                    self.coerce_to_declared(&HirType::Json, value)?
+                } else {
+                    value
+                };
+                let source = format!("__thaw_iter_norm_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(source.clone(), HirType::Json);
+                statements.push(HirStmt::Let(source.clone(), HirType::Json, json));
+                let mut collect = Vec::new();
+                let items = self.collect_iterable_prefix(
+                    array_pattern, HirExpr::Var(source.clone()), &HirType::Json, &HirType::Json, &mut collect)?;
+                collect.push(HirStmt::Return(Some(
+                    self.coerce_to_declared(&HirType::Json, items)?,
+                )));
+                let normalized = HirExpr::Conditional(
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_is_live_iterable".into())),
+                        vec![HirExpr::Var(source.clone())],
+                    )),
+                    Box::new(HirExpr::Block(collect)),
+                    Box::new(HirExpr::Var(source)),
+                    HirType::Json,
+                );
+                let norm = format!("__thaw_iter_norm_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(norm.clone(), HirType::Json);
+                statements.push(HirStmt::Let(norm.clone(), HirType::Json, normalized));
+                return self.lower_binding_pattern_impl(
+                    pattern, HirExpr::Var(norm), &HirType::Json, statements, immutable);
+            }
+        }
         // `const [a, b] = buffer`: the elements are read from a widened copy.
         let value = if matches!(pattern, Pat::Array(_)) { self.bytes_to_f64_array(value)? } else { value };
         let value = if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
@@ -128,6 +201,17 @@ impl<'a> FnLowerer<'a> {
         } else {
             value
         };
+        // `const [a, b] = iterable|generator`: step the iterator only as far as the
+        // pattern needs (closing it afterwards), then destructure the collected prefix.
+        if let Pat::Array(array_pattern) = pattern {
+            if let Some(element) = iterable_element_type(ty) {
+                let collected =
+                    self.collect_iterable_prefix(array_pattern, value, ty, &element, statements)?;
+                let collected_type = HirType::Array(Box::new(element));
+                return self.lower_binding_pattern_impl(
+                    pattern, collected, &collected_type, statements, immutable);
+            }
+        }
         if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
             if let HirType::Optional(payload) = ty {
                 let discriminants = match &value {
@@ -1788,4 +1872,47 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+}
+
+/// The item type an array pattern can pull from a generator producer or an object
+/// implementing `[Symbol.iterator]`.
+fn iterable_element_type(ty: &HirType) -> Option<HirType> {
+    match ty {
+        HirType::Function(_, result) if is_generator_producer_type(ty) => match result.as_ref() {
+            HirType::Array(item) => Some(item.as_ref().clone()),
+            _ => None,
+        },
+        HirType::Object(fields) => {
+            let HirType::Function(_, iterator) =
+                fields.iter().find(|(name, _)| name == "__thaw_symbol_iterator").map(|(_, ty)| ty)?
+            else {
+                return None;
+            };
+            let HirType::Object(iterator) = iterator.as_ref() else { return None };
+            let HirType::Function(_, step) = iterator.iter().find(|(name, _)| name == "next").map(|(_, ty)| ty)? else {
+                return None;
+            };
+            // The `next()` result is one `{ value, done }` shape or a union of them.
+            let members = match step.as_ref() {
+                HirType::Union(members) if !members.is_empty() => members.clone(),
+                other => vec![other.clone()],
+            };
+            let mut values: Vec<HirType> = Vec::new();
+            for member in &members {
+                let HirType::Object(step) = member else { return None };
+                if step.iter().find(|(name, _)| name == "done").map(|(_, ty)| ty) != Some(&HirType::Bool) {
+                    return None;
+                }
+                let value = step.iter().find(|(name, _)| name == "value").map(|(_, ty)| ty.clone())?;
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+            }
+            Some(match values.as_slice() {
+                [single] => single.clone(),
+                _ => HirType::Union(values),
+            })
+        }
+        _ => None,
+    }
 }
