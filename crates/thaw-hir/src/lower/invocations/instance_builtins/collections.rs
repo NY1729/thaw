@@ -733,7 +733,14 @@ impl<'a> FnLowerer<'a> {
                 result_name.clone(),
                 result_type,
                 if object_result {
-                    HirExpr::JsonObjectLit(Vec::new(), bucket_type.clone())
+                    // `Object.groupBy` returns a null-prototype object.
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_set_prototype".to_string())),
+                        vec![
+                            HirExpr::JsonObjectLit(Vec::new(), bucket_type.clone()),
+                            self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Null))?,
+                        ],
+                    )
                 } else {
                     HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_map_new".to_string())),

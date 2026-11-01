@@ -5773,7 +5773,11 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                     .into_iter()
                     .partition(|(key, _)| key.first() != Some(&1));
                 entries.extend(symbols);
+                let null_proto = object_identity_key(value).is_some_and(|key| {
+                    PROTOTYPES.with(|table| matches!(table.borrow().get(&key), Some(Value::Null)))
+                });
                 let ctor = match class {
+                    _ if null_proto && class.is_none() => Ctor::NullProto,
                     // module-scoped classes are mangled `__thawmod<N>_Name`
                     Some(name) if name != "Object" => {
                         let plain = match name.strip_prefix("__thawmod") {
