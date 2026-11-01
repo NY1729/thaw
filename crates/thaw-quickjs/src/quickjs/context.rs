@@ -2534,6 +2534,21 @@ fn ensure_context() {
                 )
                 .expect("failed to create JavaScript Intl DateTimeFormat option resolver");
                 #[cfg(feature = "intl")]
+                let intl_default_time_zone_function = Function::new(ctx.clone(), || {
+                    std::env::var("TZ")
+                        .ok()
+                        .map(|name| name.trim_start_matches(':').to_string())
+                        .filter(|name| !name.is_empty())
+                        .or_else(|| {
+                            std::fs::read_link("/etc/localtime").ok().and_then(|target| {
+                                let target = target.to_string_lossy().into_owned();
+                                target.split_once("zoneinfo/").map(|(_, name)| name.to_string())
+                            })
+                        })
+                        .unwrap_or_else(|| "UTC".to_string())
+                })
+                .expect("failed to create JavaScript Intl default time zone reader");
+                #[cfg(feature = "intl")]
                 let intl_locale_maximize_function =
                     Function::new(ctx.clone(), |tag: String| intl_locale_maximize_json(&tag))
                         .expect("failed to create JavaScript Intl locale maximizer");
@@ -2899,6 +2914,10 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_datetime_resolved_options", intl_datetime_resolved_options_function)
                     .expect("failed to install JavaScript Intl DateTimeFormat option resolver");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_default_time_zone", intl_default_time_zone_function)
+                    .expect("failed to install Intl default time zone");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_locale_maximize", intl_locale_maximize_function)

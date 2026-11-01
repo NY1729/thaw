@@ -483,6 +483,18 @@ impl<'a> FnLowerer<'a> {
             Expr::Await(awaited) => {
                 self.expression_object_array_property_discriminants(&awaited.arg)
             }
+            Expr::This(_) => {
+                let class = self.class_context.as_ref().filter(|_| !self.class_static_context)?;
+                let reference = TsType::TsTypeRef(swc_ecma_ast::TsTypeRef {
+                    span: swc_common::DUMMY_SP,
+                    type_name: swc_ecma_ast::TsEntityName::Ident(
+                        swc_ecma_ast::Ident::new_no_ctxt(class.as_str().into(), swc_common::DUMMY_SP),
+                    ),
+                    type_params: None,
+                });
+                let metadata = object_array_property_discriminants(&reference, self.generic_interfaces);
+                (!metadata.is_empty()).then_some(metadata)
+            }
             Expr::OptChain(chain) => self.expression_object_array_property_discriminants(
                 &ordinary_optional_chain_expression(chain),
             ),
