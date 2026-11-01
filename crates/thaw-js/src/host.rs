@@ -2504,10 +2504,12 @@ pub extern "C" fn thaw_tjs_register_native_callback_graph(
     finish: *const c_void,
     has_rest: u8,
 ) -> HandleResult {
+    // The compiler announces the closure identity right before this call (see `thaw_tjs_callback_identity`).
+    let identity = PENDING_IDENTITY.with(|p| p.replace(0));
     let id = register_callback(
         adapter,
         context,
-        0,
+        identity,
         param_count as usize,
         true,
         finish as usize,

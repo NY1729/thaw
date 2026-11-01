@@ -1387,8 +1387,26 @@ fn add_arguments_rest(function: &mut swc_ecma_ast::Function) {
 /// is itself named `arguments` or isn't a simple identifier.
 fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Vec<Stmt>> {
     use swc_ecma_ast::*;
+    // A function's own trailing rest parameter (`...r`) holds the surplus arguments, so it
+    // is spread in place of the synthesized `__thaw_arguments_rest`.
+    let (fixed, own_rest) = match function.params.split_last() {
+        Some((last, leading)) if matches!(last.pat, Pat::Rest(_)) => (leading, Some(&last.pat)),
+        _ => (&function.params[..], None),
+    };
+    let rest_name = match own_rest {
+        Some(Pat::Rest(RestPat { arg, .. })) => {
+            let Pat::Ident(binding) = arg.as_ref() else {
+                return None;
+            };
+            if binding.id.sym == *"arguments" {
+                return None;
+            }
+            binding.id.sym.to_string()
+        }
+        _ => "__thaw_arguments_rest".to_string(),
+    };
     let mut elements = Vec::new();
-    for parameter in &function.params {
+    for parameter in fixed {
         let Pat::Ident(binding) = &parameter.pat else {
             return None;
         };
@@ -1402,10 +1420,7 @@ fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Vec<Stmt>> {
     }
     elements.push(Some(ExprOrSpread {
         spread: Some(swc_common::DUMMY_SP),
-        expr: Box::new(Expr::Ident(Ident::new_no_ctxt(
-            "__thaw_arguments_rest".into(),
-            swc_common::DUMMY_SP,
-        ))),
+        expr: Box::new(Expr::Ident(Ident::new_no_ctxt(rest_name.as_str().into(), swc_common::DUMMY_SP))),
     }));
     let any = || TsType::TsKeywordType(TsKeywordType {
         span: swc_common::DUMMY_SP,
@@ -1465,7 +1480,7 @@ fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Vec<Stmt>> {
         BinaryOp::LogicalAnd,
         bin(
             BinaryOp::LogicalAnd,
-            bin(BinaryOp::EqEqEq, member(ident("__thaw_arguments_rest"), "length"), number(0.0)),
+            bin(BinaryOp::EqEqEq, member(ident(&rest_name), "length"), number(0.0)),
             bin(BinaryOp::Gt, length(), number(0.0)),
         ),
         bin(BinaryOp::EqEqEq, last, ident("undefined")),
