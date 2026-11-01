@@ -2488,6 +2488,21 @@ impl<'a> FnLowerer<'a> {
         self.typed_dictionary_read(object, key, &optional).map(Some)
     }
 
+    /// A dictionary read whose value is later observed as `undefined` (`typeof v`, `!v`,
+    /// `v === undefined`) keeps a missing key absent instead of decoding it to ""/NaN/false.
+    fn dictionary_read_observing_absence(
+        &mut self,
+        span: swc_common::Span,
+        object: HirExpr,
+        key: HirExpr,
+        element: &HirType,
+    ) -> Result<HirExpr, String> {
+        if is_observed_member(span) && matches!(element, HirType::F64 | HirType::Str | HirType::Bool) {
+            return self.typed_dictionary_read(object, key, &HirType::Optional(Box::new(element.clone())));
+        }
+        self.typed_dictionary_read(object, key, element)
+    }
+
     pub(super) fn typed_dictionary_read(
         &mut self,
         object: HirExpr,
@@ -3470,7 +3485,7 @@ impl<'a> FnLowerer<'a> {
                     HirType::Dictionary(element) => {
                         let key = self.lower_expr(&computed.expr)?;
                         let key = self.coerce_primitive_to_string(key)?;
-                        self.typed_dictionary_read(obj, key, element.as_ref())
+                        self.dictionary_read_observing_absence(member.span, obj, key, element.as_ref())
                     }
                     HirType::Json => {
                         let key = self.lower_expr(&computed.expr)?;
@@ -4046,7 +4061,8 @@ impl<'a> FnLowerer<'a> {
                             &[(receiver, HirType::Json, obj)],
                         )
                     }
-                    HirType::Dictionary(element) => self.typed_dictionary_read(
+                    HirType::Dictionary(element) => self.dictionary_read_observing_absence(
+                        member.span,
                         obj,
                         HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
                         element.as_ref(),

@@ -429,6 +429,10 @@ impl<'a> FnLowerer<'a> {
                     };
                     let value = match zero {
                         Some(lit) => Ok(HirExpr::Lit(lit)),
+                        // `let m: T | null;` has no `undefined` encoding; start it as `null`.
+                        None if matches!(ty, HirType::Nullable(_)) => {
+                            self.coerce_to_declared(&ty, HirExpr::Lit(HirLit::Null))
+                        }
                         None => self.coerce_to_declared(&ty, HirExpr::Lit(HirLit::Undefined)),
                     }
                     .map_err(|error| {
@@ -1183,6 +1187,13 @@ impl<'a> FnLowerer<'a> {
                     self.bind_decl_local(&name, storage_type.clone(), var_decl.kind == VarDeclKind::Const)
                 };
                 if let Some(source) = source_annotation.or(source_hint) { self.source_scope.insert(hir_name.clone(), source); }
+                if binding.type_ann.is_none() && matches!(storage_type, HirType::Optional(_)) {
+                    let mut read = init;
+                    while let Expr::Paren(paren) = read { read = &paren.expr; }
+                    if matches!(read, Expr::Member(member) if matches!(member.prop, MemberProp::Computed(_))) {
+                        self.index_read_bindings.insert(hir_name.clone());
+                    }
+                }
                 if let Some(value) = static_string {
                     self.static_string_bindings.insert(hir_name.clone(), value);
                 }

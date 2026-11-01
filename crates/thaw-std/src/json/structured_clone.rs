@@ -363,11 +363,10 @@ fn classify_host_for_clone(lease: &Rc<HostLease>, _mode: CloneMode) -> Result<Ho
             text
         };
         let message = format!("{text} could not be cloned.");
-        set_host_error(
-            thaw_arena::error_wire::encode_tagged(b"DataCloneError", message.as_bytes(), None)
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or(message),
-        );
+        // Same legacy tagged text the compiled `structuredClone(fn)` throw uses, carrying `code` 25.
+        set_host_error(format!(
+            "\u{1}DataCloneError\u{1}{message}\u{5}{{\"code\":25}}"
+        ));
         return Err(());
     }
     if kind != "object" {
@@ -400,6 +399,17 @@ fn classify_host_for_clone(lease: &Rc<HostLease>, _mode: CloneMode) -> Result<Ho
         return Err(());
     }
     if is_non_plain != "0" {
+        return Ok(HostCloneKind::Shared);
+    }
+    // ponytail: typed arrays, ArrayBuffers and RegExps stay the same live host object (their flags
+    // and element type survive; mutating the clone is visible through the original).
+    let Some(is_exotic) = host_query(lease, 29) else {
+        return Err(());
+    };
+    if host_operation_failed() {
+        return Err(());
+    }
+    if is_exotic == "1" {
         return Ok(HostCloneKind::Shared);
     }
 
@@ -498,7 +508,7 @@ mod tests {
             (752, 0) => b"function",
             (752, 2) => b"function f() {}",
             (_, 0) => b"object",
-            (_, 7 | 12) => b"0",
+            (_, 7 | 12 | 29) => b"0",
             (750, 24) => b"map",
             (751, 24) => b"set",
             (_, 24) => b"",
@@ -582,7 +592,7 @@ mod tests {
     extern "C" fn failure_clone_query(handle: u64, operation: u8) -> HostTextResult {
         let value: &[u8] = match (handle, operation) {
             (_, 0) => b"object",
-            (_, 7 | 12 | 4) => b"0",
+            (_, 7 | 12 | 4 | 29) => b"0",
             (_, 24) => b"",
             (728, 3) => br#""first""#,
             (729, 3) => br#""boom""#,
