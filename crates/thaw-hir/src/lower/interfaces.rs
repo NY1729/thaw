@@ -553,7 +553,7 @@ fn resolve_interface(
         }
         if dictionary
             .as_ref()
-            .is_some_and(|element| element != &field_ty)
+            .is_some_and(|element| !index_value_admits(element, &field_ty))
         {
             return Err(format!(
                 "interface `{name}` property `{field_name}` does not match its index value type"

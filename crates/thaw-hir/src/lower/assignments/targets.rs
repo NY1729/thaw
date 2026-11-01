@@ -42,6 +42,11 @@ impl<'a> FnLowerer<'a> {
             HirType::Dictionary(element) => {
                 let key = self.lower_expr(&computed.expr)?;
                 let key = self.coerce_primitive_to_string(key)?;
+                // A `T | undefined` dictionary stores its present entries as plain `T`.
+                let element = match element.as_ref() {
+                    HirType::Optional(inner) if matches!(inner.as_ref(), HirType::F64 | HirType::Str | HirType::Bool) => inner.clone(),
+                    _ => element.clone(),
+                };
                 if !matches!(
                     element.as_ref(),
                     HirType::F64 | HirType::Str | HirType::Bool | HirType::Json
@@ -135,6 +140,18 @@ impl<'a> FnLowerer<'a> {
                         object,
                         Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
                         *element.clone(),
+                    ))
+                }
+                // A `T | undefined` dictionary stores its present entries as plain `T`.
+                HirType::Dictionary(element)
+                    if matches!(element.as_ref(), HirType::Optional(inner)
+                        if matches!(inner.as_ref(), HirType::F64 | HirType::Str | HirType::Bool)) =>
+                {
+                    let HirType::Optional(inner) = element.as_ref() else { unreachable!() };
+                    Ok(Target::Dictionary(
+                        object,
+                        Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                        inner.as_ref().clone(),
                     ))
                 }
                 HirType::Json => Ok(Target::Dictionary(

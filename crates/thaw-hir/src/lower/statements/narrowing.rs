@@ -533,7 +533,7 @@ impl<'a> FnLowerer<'a> {
             let Expr::New(construction) = init else { continue };
             let Some(arguments) = construction.args.as_deref() else { continue };
             if arguments.len() != 1
-                || !construction.callee.as_ident().is_some_and(|class| class.sym == "Uint8Array")
+                || construction.callee.as_ident().is_none_or(|class| class.sym != "Uint8Array")
             {
                 continue;
             }
