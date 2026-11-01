@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 
 const TIMEOUT_MAX: f64 = 2147483647.0;
 const CO_STACK: usize = 64 << 20;
+/// Per-thread evaluator state (depth, stack_limit, max_depth, run_id) carried across coroutine switches.
+type CoSnapshot = (usize, usize, usize, u32);
 
 pub(crate) enum PState {
     Pending,
@@ -528,7 +530,7 @@ impl Interp {
         args: &[Value],
         promise: Obj,
         gen: Option<Obj>,
-    ) -> R<(Rc<Co>, (usize, usize, usize, u32))> {
+    ) -> R<(Rc<Co>, CoSnapshot)> {
         let (to_co, from_host) = channel();
         let (to_host, from_co) = channel();
         let done_tx = to_host.clone();
@@ -576,16 +578,16 @@ impl Interp {
     }
 
     /// Per-thread evaluator state that must follow the thread across coroutine switches.
-    pub(crate) fn snapshot(&self) -> (usize, usize, usize, u32) {
+    pub(crate) fn snapshot(&self) -> CoSnapshot {
         (self.depth, self.stack_limit, self.max_depth, self.run_id)
     }
 
-    pub(crate) fn restore(&mut self, s: (usize, usize, usize, u32)) {
+    pub(crate) fn restore(&mut self, s: CoSnapshot) {
         (self.depth, self.stack_limit, self.max_depth, self.run_id) = s;
     }
 
     /// Block until the coroutine yields or finishes, then act on what it did.
-    pub(crate) fn co_wait(&mut self, co: &Rc<Co>, snap: (usize, usize, usize, u32)) -> R<()> {
+    pub(crate) fn co_wait(&mut self, co: &Rc<Co>, snap: CoSnapshot) -> R<()> {
         let y = co.from_co.recv();
         self.restore(snap);
         self.rt.cur_co.pop();
