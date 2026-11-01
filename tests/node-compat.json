@@ -4517,6 +4517,26 @@
       "name": "r2c node:timers/promises import leaves the global timers alone",
       "expect": "matched",
       "source": "import * as tp from \"node:timers/promises\";\nfunction main(): void {\n  console.log(\"start\", typeof tp.setTimeout);\n  setTimeout(() => { console.log(\"timeout\"); setImmediate(() => console.log(\"immediate\")); }, 1);\n}"
+    },
+    {
+      "name": "r3b Array.from length source with any-annotated mapper and large array printing",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = Array.from({ length: 101 }, (_: unknown, i: number) => i);\n  console.log(a.length, a);\n  const b = Array.from({ length: 30 }, (_: any, i: number) => i * 1000);\n  console.log(b);\n}"
+    },
+    {
+      "name": "r3b getPrototypeOf of built-in containers is the shared prototype",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Reflect.getPrototypeOf([]) === Array.prototype, Object.getPrototypeOf({}) === Object.prototype);\n  console.log(Object.getPrototypeOf(new Map()) === Map.prototype, Object.getPrototypeOf(new Set()) === Set.prototype);\n}"
+    },
+    {
+      "name": "r3b null-prototype groupBy result and regex groups",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Object.groupBy([1, 2, 3, 4], (x: number) => (x % 2 ? \"odd\" : \"even\")));\n  const m = /(?<y>\\d{4})-(?<m>\\d\\d)/.exec(\"on 2020-05 ok\")!;\n  console.log(m);\n  console.log(m.groups, \"x\".match(/(?<n>y)?/)!.groups);\n}"
+    },
+    {
+      "name": "r3b inline promise chain prints its state",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Promise.resolve(2).then((v) => v), Promise.reject(1).catch(() => {}), Promise.resolve(3));\n  const t = setTimeout(() => {}, 5);\n  clearTimeout(t);\n  console.log(t.hasRef());\n}"
     }
   ]
 }
