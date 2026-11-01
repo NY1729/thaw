@@ -160,6 +160,7 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(None);
         }
         let normalized_body = self.flatten_async_finally_only_tries(&func.body)?;
+        let normalized_body = self.hoist_await_binding_wrappers(&normalized_body);
         {
             let mut types = self.planning_var_types.borrow_mut();
             types.clear();

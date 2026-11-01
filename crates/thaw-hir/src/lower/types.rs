@@ -1428,6 +1428,13 @@ fn match_generic_pattern(
         (GenericTypePattern::Dictionary(expected), HirType::Dictionary(actual)) => {
             match_generic_pattern(expected, actual, inferred)
         }
+        // An object literal argument for a `Record<string, T>` parameter.
+        (GenericTypePattern::Dictionary(expected), HirType::Object(fields)) => {
+            for (_, actual) in fields {
+                match_generic_pattern(expected, actual, inferred)?;
+            }
+            Ok(())
+        }
         (GenericTypePattern::Object(expected), HirType::Object(value)) => {
             for (expected_name, expected_ty) in expected {
                 let (_, actual_ty) = value
