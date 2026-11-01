@@ -3591,6 +3591,13 @@ impl<'a> FnLowerer<'a> {
                             other => Err(format!("string index key must be a number or string, got {other:?}")),
                         }
                     }
+                    // Only a lowered array pattern indexes a Set/Map (`const [a, b] = new Set(..)`):
+                    // it reads the entries snapshot, as the local destructuring path does.
+                    HirType::Set(_) | HirType::Map(..) => {
+                        let entries = self.native_collection_entries(obj)?;
+                        let index = self.lower_expr(&computed.expr)?;
+                        Ok(HirExpr::Index(Box::new(entries), Box::new(index)))
+                    }
                     other => Err(format!("cannot index into a value of type {other:?}")),
                 }
             }
@@ -4084,6 +4091,33 @@ impl<'a> FnLowerer<'a> {
                             obj,
                             HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
                         )
+                    }
+                    // `fn.length` / `fn.name` of a declared function or arrow: the arity before
+                    // the first defaulted parameter, and the identifier it was written as.
+                    // ponytail: a TS `b?` parameter is masked like a default, so `.length` stops at it.
+                    HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _)
+                        if prop.sym == *"length" =>
+                    {
+                        let mask = match &obj_ty {
+                            HirType::CallableFunction(_, mask, _, _) => Some(mask),
+                            _ => None,
+                        };
+                        let arity = (0..params.len())
+                            .take_while(|index| mask.is_none_or(|mask| !mask.contains(*index)))
+                            .count();
+                        Ok(HirExpr::Lit(HirLit::F64(arity as f64)))
+                    }
+                    HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)
+                        if prop.sym == *"name" && matches!(member.obj.as_ref(), Expr::Ident(_)) =>
+                    {
+                        let Expr::Ident(ident) = member.obj.as_ref() else { unreachable!() };
+                        // Module flattening renames bindings to `__thawmod<N>_<name>`.
+                        let name = ident.sym.as_ref();
+                        let name = match name.strip_prefix("__thawmod").and_then(|rest| rest.split_once('_')) {
+                            Some((digits, original)) if digits.bytes().all(|byte| byte.is_ascii_digit()) => original,
+                            _ => name,
+                        };
+                        Ok(HirExpr::Lit(HirLit::Str(name.to_string())))
                     }
                     other => Err(format!(
                         "unsupported property access `.{}` on a value of type {other:?}",
@@ -7261,6 +7295,14 @@ impl<'a> FnLowerer<'a> {
         }
         if let Some(result) = self.invoke_class_to_primitive(value.clone(), object_type, "default")? {
             return Ok(Some(result));
+        }
+        // An object literal's own `valueOf`, then `toString` (OrdinaryToPrimitive, "default").
+        for method in ["valueOf", "toString"] {
+            if let Some(result) =
+                self.invoke_object_conversion_method(value.clone(), fields, method.to_string(), None)?
+            {
+                return Ok(Some(result));
+            }
         }
         self.invoke_class_ordinary_to_primitive(value, object_type, "default")
     }

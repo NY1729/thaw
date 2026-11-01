@@ -1948,9 +1948,10 @@ fn function_length_rest_only_is_zero() {
 }
 
 #[test]
-fn function_length_alias_still_rejected() {
-    let result = lower_function_length_program(
+fn function_length_through_alias_matches_node() {
+    let debug = lower_function_length_program(
         "function f(a: number, b: number) {} const g = f; function main(): void { console.log(g.length); }",
-    );
-    assert!(result.is_err(), "alias `.length` must stay rejected");
+    )
+    .expect("aliased function length lowers");
+    assert!(debug.contains("F64(2.0)"), "{debug}");
 }
