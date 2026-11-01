@@ -629,6 +629,8 @@ pub struct Interp {
     /// `node:vm` contexts by id (vm.rs).
     pub(crate) vm: HashMap<u32, vm::VmSlot>,
     pub(crate) vm_next: u32,
+    /// The sandbox of the `node:vm` run in progress, so `globalThis.x` / `this.x` reach it (vm.rs).
+    pub(crate) vm_sandbox: Option<Obj>,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -701,6 +703,7 @@ impl Interp {
             rt: Default::default(),
             vm: HashMap::new(),
             vm_next: 0,
+            vm_sandbox: None,
         };
         it.install_builtins();
         it.install_collections();
@@ -1241,6 +1244,11 @@ impl Interp {
                     if let Some(v) = self.lookup(&self.global.clone(), key) {
                         return Ok(v);
                     }
+                    if let Some(sb) = &self.vm_sandbox {
+                        if let Some(Slot::Data(v)) = find_in_chain(sb, key) {
+                            return Ok(v);
+                        }
+                    }
                 }
                 if let Some(v) = self.proxy_get(o, key, target)? {
                     return Ok(v);
@@ -1334,6 +1342,12 @@ impl Interp {
             return Ok(());
         }
         if matches!(&*o.kind.borrow(), Kind::Global) {
+            if let Some(sb) = &self.vm_sandbox {
+                if find_in_chain(sb, key).is_some() {
+                    put(sb, key, value);
+                    return Ok(());
+                }
+            }
             return self.assign_var(&self.global.clone(), key, value);
         }
         if let Kind::Array(items) = &mut *o.kind.borrow_mut() {

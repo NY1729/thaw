@@ -2164,6 +2164,20 @@ fn vm_sandbox_mirroring_matches_node() {
 }
 
 #[test]
+fn vm_global_this_reads_and_writes_sandbox() {
+    let src = include_str!("../../thaw-registry/src/registry/builtins/system/vm_context.js").to_string() + "
+      const sb = { value: 1 }; runInNewContext('globalThis.value = 5; var seen = value; this.zz = value + 1', sb); console.log(sb.value, sb.seen, sb.zz);
+      console.log(runInNewContext('globalThis.value + this.value', { value: 3 }));
+      const s2 = { arr: [1, 2], fn: (n) => n + 1 };
+      const r = runInNewContext('globalThis.q = fn(arr.length); [typeof console, typeof setTimeout, typeof JSON, typeof Promise, [] instanceof Array, q]', s2);
+      console.log(JSON.stringify(r), s2.q, r instanceof Array, Array.isArray(r), runInNewContext('this === globalThis'));";
+    assert_eq!(
+        one(&src),
+        "5 5 6|6|[\"object\",\"undefined\",\"object\",\"function\",true,3] 3 false true true"
+    );
+}
+
+#[test]
 fn node_module_bundle_gets_create_require_and_builtin_names() {
     use crate::host::{Native, Package};
     let bundle = r#"module.exports = (function(require) {
