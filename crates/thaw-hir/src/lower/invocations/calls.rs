@@ -1856,7 +1856,13 @@ impl<'a> FnLowerer<'a> {
             }
             let source = self.lower_expr(&call.args[0].expr)?;
             let source_type = self.infer_expr_type(&source)?;
-            if let HirType::Dictionary(element) = &source_type {
+            // A bare `any` source is a dynamic object, copied like a `Json`-valued dictionary.
+            let rest_element = match &source_type {
+                HirType::Dictionary(element) => Some(element.as_ref().clone()),
+                HirType::Json => Some(HirType::Json),
+                _ => None,
+            };
+            if let Some(element) = rest_element {
                 let omitted = call.args[1..]
                     .iter()
                     .map(|argument| {
@@ -1867,7 +1873,7 @@ impl<'a> FnLowerer<'a> {
                 let copy = HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_json_object_assign".into())),
                     vec![
-                        HirExpr::JsonObjectLit(Vec::new(), element.as_ref().clone()),
+                        HirExpr::JsonObjectLit(Vec::new(), element),
                         source,
                     ],
                 );

@@ -518,6 +518,21 @@ impl<'a> FnLowerer<'a> {
             } else {
                 self.coerce_to_declared(&HirType::JsValue, receiver)?
             }
+        } else if let ty @ (HirType::Undefined | HirType::Null) = self.infer_expr_type(&receiver)? {
+            // `(undefined as any).m()`: the call is a TypeError before any argument is read.
+            let what = if ty == HirType::Null { "null" } else { "undefined" };
+            let absent = self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Undefined))?;
+            let thrown = HirExpr::ThrowValue(
+                Box::new(HirExpr::Lit(HirLit::Str(format!(
+                    "\u{1}TypeError\u{1}Cannot read properties of {what} (reading '{property}')"
+                )))),
+                Box::new(absent),
+            );
+            return if expected == Some(&HirType::JsValue) {
+                self.coerce_to_declared(&HirType::JsValue, thrown)
+            } else {
+                Ok(thrown)
+            };
         } else {
             receiver
         };
