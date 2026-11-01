@@ -1040,6 +1040,12 @@ impl<'a> FnLowerer<'a> {
                         // `new`/call positions are intercepted earlier.
                         | "structuredClone"
                         | "queueMicrotask"
+                        | "Buffer"
+                        | "performance"
+                        | "fetch"
+                        | "navigator"
+                        | "WebAssembly"
+                        | "clearImmediate"
                         | "URL"
                         | "URLSearchParams"
                         | "Headers"
@@ -3803,6 +3809,13 @@ impl<'a> FnLowerer<'a> {
                     Some(read) => read,
                     None => self.lower_expr(&unary.arg)?,
                 };
+                // `typeof undeclared` is "undefined" (no ReferenceError).
+                if unary.op == UnaryOp::TypeOf
+                    && matches!(&value, HirExpr::Var(_))
+                    && matches!(self.infer_expr_type(&value), Err(e) if e.starts_with("unknown variable"))
+                {
+                    return Ok(HirExpr::Lit(HirLit::Str("undefined".into())));
+                }
                 let value = if matches!(
                     unary.op,
                     UnaryOp::TypeOf | UnaryOp::Bang | UnaryOp::Plus | UnaryOp::Minus
@@ -5065,6 +5078,8 @@ impl<'a> FnLowerer<'a> {
                             | "Float16Array"
                             | "Float32Array"
                             | "Float64Array"
+                            | "BigInt64Array"
+                            | "BigUint64Array"
                             | "ArrayBuffer"
                             | "SharedArrayBuffer"
                             | "DataView"
@@ -6297,7 +6312,13 @@ impl<'a> FnLowerer<'a> {
                             && !self.signatures.contains_key(&name);
                         realm_wrapper
                             || self.scope.get(&name).is_some_and(|ty| {
-                                matches!(ty, HirType::JsValue | HirType::Dynamic | HirType::Json)
+                                matches!(
+                                    ty,
+                                    HirType::JsValue
+                                        | HirType::Dynamic
+                                        | HirType::Json
+                                        | HirType::CallableFunction(..)
+                                )
                             })
                     }
                     _ => true,
@@ -6308,6 +6329,13 @@ impl<'a> FnLowerer<'a> {
                         Some(&HirType::JsValue),
                     )?;
                     let callee_type = self.infer_expr_type(&callee)?;
+                    // `new (fn as any)()`: a plain function value is also a
+                    // realm constructor once marshalled to a live handle.
+                    let (callee, callee_type) = if matches!(callee_type, HirType::Function(..) | HirType::CallableFunction(..)) {
+                        (self.coerce_to_declared(&HirType::JsValue, callee)?, HirType::JsValue)
+                    } else {
+                        (callee, callee_type)
+                    };
                     if matches!(callee_type, HirType::JsValue | HirType::Dynamic | HirType::Json) {
                         // The runtime construct call takes a live handle; a
                         // `Json`-held callable (`const p: any = fn`) must be
