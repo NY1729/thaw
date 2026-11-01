@@ -4647,6 +4647,11 @@
       "name": "r5b typeof realm globals, namespace inspect, cleared timer hasRef",
       "expect": "matched",
       "source": "import { EventEmitter } from \"node:events\"; function main(): void { console.log(typeof process.binding, typeof navigator, typeof fetch, typeof FinalizationRegistry, typeof escape, typeof NopeNope); console.log(Math, JSON, Reflect, Intl, [Math]); console.log(Object.keys(Intl).length, typeof EventEmitter.captureRejections); const t = setTimeout(() => {}, 1); clearTimeout(t); console.log(t.hasRef()); }"
+    },
+    {
+      "name": "tj6 fs promises awaited write read rm",
+      "expect": "matched",
+      "source": "import { writeFile, readFile, rm } from 'node:fs/promises';\nasync function main(): Promise<void> {\n  const p: string = 'tj6-fsp.txt';\n  await writeFile(p, 'hi');\n  console.log(await readFile(p, 'utf8'));\n  await rm(p);\n  console.log('done');\n}"
     }
   ]
 }

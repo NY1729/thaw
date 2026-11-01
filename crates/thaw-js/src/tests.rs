@@ -1743,6 +1743,80 @@ fn exact_calls_await_returned_promises_only_when_resolving() {
 }
 
 #[test]
+fn class_method_promise_results_are_awaited_when_the_flag_is_set() {
+    use std::ffi::{CStr, CString};
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "tj/index.js": function(module, exports, require) {
+  setTimeout(function () {}, 60000);
+  function Svc() {}
+  Svc.prototype.run = async function (n) { await new Promise(function (r) { setTimeout(r, 1); }); return n * 2; };
+  Svc.prototype.fail = async function () { throw new TypeError('nope'); };
+  exports.Svc = Svc;
+}, };
+var __thaw_bundle_require_maps = { "tj/index.js": {}, };
+var __thaw_bundle_entry_key = "tj/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("tj").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(
+        crate::host::thaw_tjs_register(name.as_ptr(), source.as_ptr()),
+        1
+    );
+    // flags: bit 0 = handle id result, bit 1 = await a Promise result
+    let call = |symbol: &str, args: &str, receiver: i64, flags: u8| -> Result<String, String> {
+        let (symbol, args) = (CString::new(symbol).unwrap(), CString::new(args).unwrap());
+        let result =
+            crate::host::thaw_tjs_class_call(symbol.as_ptr(), args.as_ptr(), receiver, flags);
+        // SAFETY: both strings come from `thaw_tjs_class_call` and are freed exactly once.
+        unsafe {
+            if result.value.is_null() {
+                let error = CStr::from_ptr(result.error).to_str().unwrap().to_string();
+                crate::host::thaw_tjs_free(result.error);
+                Err(error)
+            } else {
+                let value = CStr::from_ptr(result.value).to_str().unwrap().to_string();
+                crate::host::thaw_tjs_free(result.value);
+                Ok(value)
+            }
+        }
+    };
+    let id: i64 = call("$new$tj::Svc$arity0", "[]", 0, 1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        call("$method$tj::Svc$run$overload0$arity1", "[21]", id, 2),
+        Ok("42".into())
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(call("$method$tj::Svc$fail$overload0$arity0", "[]", id, 2)
+        .unwrap_err()
+        .contains("nope"));
+}
+
+#[test]
+fn typed_call_awaits_its_own_promise_without_draining_the_idle_loop() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    // A pending 60 s timer must not delay the call: only the awaited promise's 1 ms timer runs.
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "aw/index.js": function(module, exports, require) {
+  setTimeout(function () {}, 60000);
+  exports.f = async function (n) { await new Promise(function (r) { setTimeout(r, 1); }); return n + 1; };
+  exports.bad = async function () { throw new TypeError('nope'); };
+}, };
+var __thaw_bundle_require_maps = { "aw/index.js": {}, };
+var __thaw_bundle_entry_key = "aw/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("aw").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let started = std::time::Instant::now();
+    assert_eq!(typed_call("aw::f", "[2]"), Ok("3".into()));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(typed_call("aw::bad", "[]").unwrap_err().contains("nope"));
+}
+
+#[test]
 fn node_builtin_script_is_scanned_and_run_as_a_one_module_bundle() {
     let script = "module.exports = { twice: function (n) { return n * 2; } };";
     assert!(crate::scan::scan_bundle(script).is_err()); // a plain script is not a registry bundle
