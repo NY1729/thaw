@@ -499,6 +499,34 @@ fn dns_default_servers() -> String {
         .to_string()
 }
 
+pub(crate) fn install(it: &mut Interp) {
+    let g = it.global.clone();
+    macro_rules! def {
+        ($name:expr, $f:expr) => {{
+            let f = it.native($f);
+            g.declare($name, f, true);
+        }};
+    }
+    def!("__thaw_dns_lookup", |it, _, a| Ok(Value::str(
+        &dns_lookup_json(s(it, a, 0))
+    )));
+    def!("__thaw_dns_lookup_start", |it, _, a| Ok(Value::Number(
+        f64::from(dns_lookup_start(s(it, a, 0)))
+    )));
+    def!("__thaw_dns_query_start", |it, _, a| Ok(Value::Number(
+        f64::from(dns_query_start(
+            s(it, a, 0),
+            s(it, a, 1),
+            s(it, a, 2),
+            n(it, a, 3),
+            n(it, a, 4),
+        ))
+    )));
+    def!("__thaw_dns_default_servers", |_, _, _| Ok(Value::str(
+        &dns_default_servers()
+    )));
+}
+
 #[cfg(test)]
 mod dns_client_tests {
     use super::*;
@@ -597,32 +625,4 @@ mod dns_client_tests {
             serde_json::json!({ "ok": false, "code": "EBADNAME" }).to_string()
         );
     }
-}
-
-pub(crate) fn install(it: &mut Interp) {
-    let g = it.global.clone();
-    macro_rules! def {
-        ($name:expr, $f:expr) => {{
-            let f = it.native($f);
-            g.declare($name, f, true);
-        }};
-    }
-    def!("__thaw_dns_lookup", |it, _, a| Ok(Value::str(
-        &dns_lookup_json(s(it, a, 0))
-    )));
-    def!("__thaw_dns_lookup_start", |it, _, a| Ok(Value::Number(
-        f64::from(dns_lookup_start(s(it, a, 0)))
-    )));
-    def!("__thaw_dns_query_start", |it, _, a| Ok(Value::Number(
-        f64::from(dns_query_start(
-            s(it, a, 0),
-            s(it, a, 1),
-            s(it, a, 2),
-            n(it, a, 3),
-            n(it, a, 4),
-        ))
-    )));
-    def!("__thaw_dns_default_servers", |_, _, _| Ok(Value::str(
-        &dns_default_servers()
-    )));
 }
