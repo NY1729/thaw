@@ -275,22 +275,19 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirExpr::Index(a, b)
             | HirExpr::TypedIndex(a, b, _)
             | HirExpr::DynamicPropAccess(a, b, _, _) => {
-                self.unwrap_await_wrappers(a, frame_names, pre);
-                self.unwrap_await_wrappers(b, frame_names, pre);
+                self.unwrap_ordered(&mut [a.as_mut(), b.as_mut()], frame_names, pre);
             }
             HirExpr::Call(callee, args) => {
-                self.unwrap_await_wrappers(callee, frame_names, pre);
-                for arg in args {
-                    self.unwrap_await_wrappers(arg, frame_names, pre);
-                }
+                let mut items = vec![callee.as_mut()];
+                items.extend(args.iter_mut());
+                self.unwrap_ordered(&mut items, frame_names, pre);
             }
             HirExpr::FfiCall(_, args)
             | HirExpr::DynamicCall(_, args)
             | HirExpr::ArrayLit(args)
             | HirExpr::ArrayConcat(args, _) => {
-                for arg in args {
-                    self.unwrap_await_wrappers(arg, frame_names, pre);
-                }
+                let mut items = args.iter_mut().collect::<Vec<_>>();
+                self.unwrap_ordered(&mut items, frame_names, pre);
             }
             HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) => {
                 for (_, value) in fields {
@@ -301,6 +298,38 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.unwrap_await_wrappers(value, frame_names, pre);
             }
             _ => {}
+        }
+    }
+
+    /// Unwraps each operand in evaluation order. When a later operand hoists statements ahead
+    /// of the expression, earlier side-effecting operands are bound first so they still run
+    /// before the await.
+    fn unwrap_ordered(
+        &self,
+        items: &mut [&mut HirExpr],
+        frame_names: &std::collections::HashSet<String>,
+        pre: &mut Vec<HirStmt>,
+    ) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        for i in 0..items.len() {
+            let start = pre.len();
+            self.unwrap_await_wrappers(items[i], frame_names, pre);
+            if pre.len() == start {
+                continue;
+            }
+            let mut at = start;
+            for earlier in items[..i].iter_mut() {
+                if matches!(earlier, HirExpr::Lit(_) | HirExpr::Var(_)) {
+                    continue;
+                }
+                let Some(ty) = self.expr_hir_type(earlier).filter(|ty| *ty != HirType::Void) else {
+                    continue;
+                };
+                let name = format!("__thaw_ord_{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+                let value = std::mem::replace(&mut **earlier, HirExpr::Var(name.clone()));
+                pre.insert(at, HirStmt::Let(name, ty, value));
+                at += 1;
+            }
         }
     }
 }
