@@ -121,3 +121,7 @@ if (typeof Atomics === 'object' && typeof Atomics.wait === 'function') {
     return 'timed-out';
   };
 }
+// Node: the Atomics namespace methods are non-enumerable (`console.log(Atomics)` is `Object [Atomics] {}`).
+if (typeof Atomics === 'object') {
+  for (const k of Object.keys(Atomics)) Object.defineProperty(Atomics, k, { enumerable: false });
+}

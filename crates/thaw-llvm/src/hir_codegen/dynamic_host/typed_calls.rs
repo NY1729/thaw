@@ -18,6 +18,15 @@ pub(crate) fn thaw_js_plain_type(ty: &HirType) -> bool {
     }
 }
 
+/// The type a thaw-js call yields once awaited: `Promise<T>` is awaited on the JS side and returned as
+/// a resolved native Promise of `T`, so only `T` has to cross the boundary.
+fn thaw_js_awaited_type(ty: &HirType) -> &HirType {
+    match ty {
+        HirType::Promise(inner) => inner,
+        _ => ty,
+    }
+}
+
 /// The native `Date` object type (authenticated identity marker + `timestamp`).
 fn thaw_js_date_type(ty: &HirType) -> bool {
     matches!(ty, HirType::Object(fields) if matches!(fields.as_slice(),
@@ -1692,13 +1701,16 @@ impl<'ctx> HirCompiler<'ctx> {
             return self.compile_typed_thaw_js_class_call(signature, args);
         }
         self.uses_thaw_js = true;
+        let awaited = thaw_js_awaited_type(&signature.ret);
         if let Some(bad) = signature
             .params
             .iter()
             .find(|ty| !thaw_js_param_type(ty))
             .or_else(|| {
-                (!thaw_js_plain_type(&signature.ret) && signature.ret != HirType::JsValue)
-                    .then_some(&signature.ret)
+                // a `Promise<Date>` would decode as a plain object: only plain `Promise<T>` routes
+                let unroutable = (!thaw_js_plain_type(awaited) && signature.ret != HirType::JsValue)
+                    || (awaited != &signature.ret && thaw_js_date_type(awaited));
+                unroutable.then_some(&signature.ret)
             })
         {
             self.compile_thaw_js_unsupported_stub(&format!(
@@ -1748,7 +1760,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // `\u{3}` for a `Date` result as its `{"__thaw_tjs_date__": ms}` wire node.
         let symbol = if signature.ret == HirType::JsValue {
             format!("\u{2}{}", signature.symbol)
-        } else if thaw_js_date_type(&signature.ret) {
+        } else if thaw_js_date_type(awaited) {
             format!("\u{3}{}", signature.symbol)
         } else {
             signature.symbol.clone()
@@ -1789,7 +1801,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_native_date_from_timestamp(fields, ms);
             }
         }
-        if signature.ret == HirType::Json {
+        if *awaited == HirType::Json {
             // A class instance or function result comes back as a handle marker: adopt it as a host lease.
             self.uses_thaw_js_handles = true;
             json = self
@@ -1885,8 +1897,13 @@ impl<'ctx> HirCompiler<'ctx> {
         let is_method = symbol.starts_with("$method$") || symbol.starts_with("$methodvoid$");
         let handle_param = |ty: &HirType| *ty == HirType::JsValue;
         let ret_handle = signature.ret == HirType::JsValue;
+        let is_promise = matches!(signature.ret, HirType::Promise(_));
+        let awaited = thaw_js_awaited_type(&signature.ret);
         let supported = (is_new || is_static || is_method)
-            && (ret_handle || ((!is_new || is_value) && thaw_js_plain_type(&signature.ret)))
+            && (ret_handle
+                || ((!is_new || is_value)
+                    && thaw_js_plain_type(awaited)
+                    && !(is_promise && thaw_js_date_type(awaited))))
             && signature.params.iter().skip(usize::from(is_method)).all(|ty| thaw_js_plain_type(ty) || handle_param(ty) || thaw_js_callback_type(ty))
             && (!is_method || signature.params.first().is_some_and(handle_param))
             && args.len() == signature.params.len();
@@ -1943,7 +1960,11 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let name = self.intern_string(symbol, "thaw_js_class_symbol")
             .map_err(|error| error.to_string())?;
-        let want_handle = self.context.i8_type().const_int(u64::from(ret_handle), false);
+        // bit 0: the result is a handle id; bit 1: await a returned Promise (see `class_call`)
+        let want_handle = self
+            .context
+            .i8_type()
+            .const_int(u64::from(ret_handle) | (u64::from(is_promise) << 1), false);
         let json = self.compile_json_backend_values_with_extra(
             name.as_pointer_value().into(),
             array,
