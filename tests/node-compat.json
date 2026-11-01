@@ -4637,6 +4637,11 @@
       "name": "r4c Buffer toLocaleString decodes utf8 and array toLocaleString formats numbers",
       "expect": "matched",
       "source": "function main(): void {\n    console.log(Buffer.from(\"héllo\").toLocaleString());\n    console.log([1234.5, 6].toLocaleString(\"en-US\"));\n}"
+    },
+    {
+      "name": "r5a arguments alongside a rest parameter",
+      "expect": "matched",
+      "source": "function f(a: any, ...r: any[]) { return arguments.length; } function g(...r: any[]) { return arguments[1]; } function main(): void { console.log(f(1, 2, 3), f(), f(1)); console.log(g(\"x\", \"y\")); }"
     }
   ]
 }
