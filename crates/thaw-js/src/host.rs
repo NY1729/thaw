@@ -127,6 +127,52 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     it.get(&module, "exports")
 }
 
+/// Bundle text that starts the builtin-name JSON array (`render.rs` writes it verbatim).
+const BUILTIN_NAMES_MARK: &str = "var __thaw_bundle_builtin_names = Object.freeze(";
+
+/// `node:module` needs the loader globals the registry renders in the bundle IIFE (which thaw-js never
+/// runs): `createRequire` reads `__thaw_bundle_create_require`, `isBuiltin` reads the names list.
+/// Only that entry gets them, so no other package sees new globals.
+fn install_module_loader(it: &mut Interp, loader: &Rc<Loader>, bundle_js: &str) -> R<()> {
+    let names = bundle_js
+        .find(BUILTIN_NAMES_MARK)
+        .and_then(|at| {
+            let rest = &bundle_js[at + BUILTIN_NAMES_MARK.len()..];
+            rest.find(");").map(|end| rest[..end].to_string())
+        })
+        .ok_or_else(|| Ctl::Throw(Value::str("bundle has no __thaw_bundle_builtin_names")))?;
+    let keys = serde_json::to_string(&loader.factories.keys().collect::<Vec<_>>())
+        .expect("string keys serialize");
+    let l = loader.clone();
+    let load = it.native(move |it, _, args| {
+        let key = it.to_str(&crate::arg(args, 0));
+        load_module(&l, it, &key)
+    });
+    // ponytail: only stateless builtins are served through created requires (a separate realm would split
+    // identity); any other spec is a MODULE_NOT_FOUND
+    let prelude = format!(
+        r#"function (load) {{
+          var names = Object.freeze({names}), keys = {keys};
+          function nameOf(spec) {{ spec = String(spec); return spec.indexOf('node:') === 0 ? spec.slice(5) : spec; }}
+          function missing(spec) {{ var e = new Error("Cannot find module '" + spec + "'"); e.code = 'MODULE_NOT_FOUND'; return e; }}
+          globalThis.__thaw_bundle_builtin_names = names;
+          globalThis.__thaw_bundle_create_require = function (base) {{
+            var created = function (spec) {{
+              var n = nameOf(spec);
+              if (names.indexOf(n) < 0 || keys.indexOf('node:' + n) < 0) throw missing(spec);
+              return load('node:' + n);
+            }};
+            created.resolve = function (spec) {{ if (names.indexOf(nameOf(spec)) < 0) throw missing(spec); return String(spec); }};
+            created.cache = {{}};
+            return created;
+          }};
+        }}"#
+    );
+    let install = it.eval_function(&prelude)?;
+    it.call(&install, &Value::Undefined, &[load])?;
+    Ok(())
+}
+
 /// A loaded package: one interpreter, the bundle's modules, and its entry exports.
 pub struct Package {
     /// Boxed: async functions hold its address while suspended.
@@ -169,6 +215,10 @@ impl Package {
             factories,
             cache: RefCell::new(HashMap::new()),
         });
+        if entry == "node:module" {
+            install_module_loader(&mut interp, &loader, bundle_js)
+                .map_err(|c| classify(&mut interp, c))?;
+        }
         let exports =
             load_module(&loader, &mut interp, &entry).map_err(|c| classify(&mut interp, c))?;
         Ok(Package { interp, exports })
