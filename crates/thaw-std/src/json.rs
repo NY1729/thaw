@@ -5609,7 +5609,7 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
     if let Value::Host(lease) = value {
         return host_inspect_node(lease, stack);
     }
-    if thaw_json_is_buffer_shape(value as *const Value) == 1 {
+    if is_branded_wrapper(value) && thaw_json_is_buffer_shape(value as *const Value) == 1 {
         let bytes = value
             .as_object()
             .and_then(|fields| fields.get(b"data".as_slice()))
