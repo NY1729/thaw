@@ -1578,6 +1578,25 @@ impl<'a> FnLowerer<'a> {
                                 return self.wrap_call_argument_bindings(prototype, &bindings);
                             }
                         }
+                        // Built-in containers share their realm's prototype object, so
+                        // `Object.getPrototypeOf([]) === Array.prototype` holds.
+                        let builtin = match &argument_type {
+                            HirType::Array(_) | HirType::Tuple(_) => Some("Array"),
+                            HirType::Map(..) => Some("Map"),
+                            HirType::Set(_) => Some("Set"),
+                            HirType::Object(_) => Some("Object"),
+                            _ => None,
+                        };
+                        if let Some(builtin) = builtin.filter(|name| !self.scope.contains_key(*name)) {
+                            let span = swc_common::DUMMY_SP;
+                            let prototype = Expr::Member(MemberExpr {
+                                span,
+                                obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(builtin.into(), span))),
+                                prop: MemberProp::Ident(IdentName::new("prototype".into(), span)),
+                            });
+                            let prototype = self.lower_expr(&prototype)?;
+                            return self.wrap_call_argument_bindings(prototype, &bindings);
+                        }
                         // Approx: thaw models no prototype chain for any
                         // other fixed-layout native object, so report `null`.
             return self.wrap_call_argument_bindings(HirExpr::Lit(HirLit::Null), &bindings);
