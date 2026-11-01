@@ -1654,7 +1654,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         if matches!(
                             self.infer_expr_type(target)?,
-                            HirType::JsValue | HirType::Json
+                            HirType::JsValue
                         ) {
                 let call_arguments = self
                     .coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![target.clone()]))?;
