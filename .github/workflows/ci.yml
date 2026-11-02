@@ -492,8 +492,9 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     runs-on: ubuntu-latest
-    # Observed shards take 15-39 minutes. A single lost shard ran 53 minutes
-    # with no log before this cap existed.
+    # Observed shards took 15-39 minutes under the old index-modulo split. The
+    # split is now weighted by .github/npm-shard-weights.txt (expected ~18 min
+    # max). A single lost shard ran 53 minutes with no log before this cap existed.
     timeout-minutes: 75
     env:
       CARGO_BUILD_JOBS: "4"
@@ -589,18 +590,29 @@ jobs:
             echo 'No registry tests were listed' >&2
             exit 1
           fi
-          mine=()
-          if (( SHARD == 0 )); then
-            # The heavy keep-alive test goes first so it overlaps a light test.
-            mine+=(tests::node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled)
+          # Duration-weighted assignment: every shard computes the same greedy
+          # longest-first split, so no list has to be kept in sync by hand.
+          tests+=(tests::node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled)
+          declare -A weight
+          while read -r sec name; do weight[$name]=$sec; done < .github/npm-shard-weights.txt
+          shards=4   # must equal the matrix length
+          if (( SHARD >= shards )); then
+            echo "Shard $SHARD is outside the $shards-shard split; update the matrix and shards together" >&2
+            exit 1
           fi
-          index=0
-          for test in "${tests[@]}"; do
-            if [[ "$test" != *postgres* ]] && (( index % 4 == SHARD )); then
-              mine+=("$test")
-            fi
-            index=$((index + 1))
-          done
+          loads=(); for ((i = 0; i < shards; i++)); do loads+=(0); done
+          mine=()
+          while read -r wt t; do
+            best=0
+            for ((i = 1; i < shards; i++)); do
+              if (( loads[i] < loads[best] )); then best=$i; fi
+            done
+            loads[best]=$(( loads[best] + wt ))
+            if (( best == SHARD )); then mine+=("$t"); fi
+          done < <(for t in "${tests[@]}"; do
+                     [[ "$t" == *postgres* ]] && continue
+                     echo "${weight[$t]:-5} $t"
+                   done | LC_ALL=C sort -k1,1nr -k2,2)
           if (( ${#mine[@]} == 0 )); then
             echo "Shard $SHARD has no tests" >&2
             exit 1
