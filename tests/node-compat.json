@@ -4747,6 +4747,16 @@
       "name": "round8 for...of over mixed closures with a throwing one caught in the body",
       "expect": "matched",
       "source": "function main(): void { for (const f of [() => { throw new Error(\"one\"); }, () => 2]) { try { console.log(f()); } catch (e) { console.log(\"caught\", (e as Error).message); } } }"
+    },
+    {
+      "name": "round9 object literal with null and undefined fields",
+      "expect": "matched",
+      "source": "function main(): void { console.log({ n: null, u: undefined }); }"
+    },
+    {
+      "name": "round9 JSON array assigned to undefined[] keeps its length",
+      "expect": "matched",
+      "source": "function main(): void { const j: any = JSON.parse('[1,2]'); const a: undefined[] = j; console.log(a.length); }"
     }
   ]
 }
