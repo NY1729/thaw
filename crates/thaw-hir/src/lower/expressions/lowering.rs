@@ -3823,10 +3823,12 @@ impl<'a> FnLowerer<'a> {
                 // yields "undefined" when the realm has no such property.
                 if unary.op == UnaryOp::TypeOf
                     && matches!(&value, HirExpr::Var(_))
-                    && matches!(self.infer_expr_type(&value), Err(e) if e.starts_with("unknown variable"))
+                    && matches!(self.infer_expr_type(&value), Err(e) if e.starts_with("unknown variable") || e.contains("(CommonJS) is not supported"))
                 {
                     if let Expr::Ident(identifier) = unary.arg.as_ref() {
-                        if identifier.sym.as_ref() != "globalThis" {
+                        // CommonJS names have no ES binding: `typeof require` is "undefined" below
+                        // without the `globalThis` rewrite, whose lowering re-raises the hint.
+                        if !matches!(identifier.sym.as_ref(), "globalThis" | "require" | "module" | "exports") {
                             let span = identifier.span;
                             let global = Expr::Member(swc_ecma_ast::MemberExpr {
                                 span,

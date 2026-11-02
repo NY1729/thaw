@@ -14,6 +14,24 @@ include!("js_infer_report.rs");
 const USAGE: &str = "usage: thaw <script.ts> [arguments...]\n       thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <file.ts> [arguments...]\n       thaw run <package-script> [--prefix <directory>]\n       thaw x <package>[@<version>] [--] [arguments...]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--no-install] [--icu4c] [--fast-compile] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw completeness [--json] [--with-node]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
 
 fn main() {
+    // The compiler recurses deeply on large sources; the 8 MB main-thread stack overflows, so run
+    // on a thread with a 512 MB (lazily committed) stack. Falls back to the main thread if the
+    // spawn is refused. A panic exits 101, as an unwinding `main` does.
+    match std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(512 << 20)
+        .spawn(real_main)
+    {
+        Ok(handle) => {
+            if handle.join().is_err() {
+                std::process::exit(101);
+            }
+        }
+        Err(_) => real_main(),
+    }
+}
+
+fn real_main() {
     let args: Vec<String> = std::env::args().collect();
 
     match args.get(1).map(String::as_str) {
