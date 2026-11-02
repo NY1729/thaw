@@ -1867,7 +1867,7 @@ unsafe extern "C" fn mask_adapter(
     }
     MASK_SEEN.with(|s| s.borrow_mut().push((text, shown)));
     let ptr = thaw_arena::owned_string(
-        "{\"root\":{\"u\":1},\"nodes\":[],\"leases\":[],\"napiLeases\":[]}".to_string(),
+        "{\"root\":{\"u\":1},\"nodes\":[],\"leases\":[],\"napiLeases\":[]}",
     );
     assert!(unsafe { thaw_arena::register_owned_graph_wire(ptr) });
     ptr
@@ -1906,7 +1906,7 @@ fn graph_mask_passes_primitive_jsvalue_arguments_as_handles() {
     let source = std::ffi::CString::new(MASK_BUNDLE).unwrap();
     assert_eq!(thaw_tjs_register(c"mk".as_ptr(), source.as_ptr()), 1);
     // bit 0: the callback's first declared parameter is a JsValue
-    let callback = mask_callback(1) as u64;
+    let callback = mask_callback(1);
     for (arg, shown) in [
         (r#"{"v":null}"#, "null"),
         (r#"{"u":1}"#, "undefined"),
@@ -1930,7 +1930,7 @@ fn graph_mask_zero_keeps_primitive_arguments_inline() {
     use crate::host::*;
     let source = std::ffi::CString::new(MASK_BUNDLE).unwrap();
     assert_eq!(thaw_tjs_register(c"mk".as_ptr(), source.as_ptr()), 1);
-    let callback = mask_callback(0) as u64;
+    let callback = mask_callback(0);
     call_mask_callback(callback, r#"{"a":[{"v":null}]}"#);
     let seen = seen_calls();
     assert_eq!(
@@ -1956,7 +1956,7 @@ fn graph_mask_frames_error_arguments_at_str_positions() {
     assert!(error.error.is_null() && error.value > 0);
     thaw_tjs_retain_handle(error.value as i64);
     // bit 32: the callback's first declared parameter is a `Str` (an Error arrives framed)
-    let callback = mask_callback(1 << 32) as u64;
+    let callback = mask_callback(1 << 32);
     call_mask_callback(
         callback,
         &format!(r#"{{"a":[{{"r":1}}]}},{{"hdl":{}}}"#, error.value),
