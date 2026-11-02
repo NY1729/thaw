@@ -1,4 +1,4 @@
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn rollback_provisional_js_symbol_pin(
     env: NapiEnv, owner_id: u64, id: u64, value: NapiValue,
     generation: Option<u64>,
@@ -35,13 +35,13 @@ pub unsafe extern "C" fn napi_create_reference(
         return record_status(env, NAPI_INVALID_ARG);
     }
     let generation = env_ref.value_generations.get(&(value as usize)).copied();
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     let js_symbol = match value_ref(value) {
         Ok(Value::Symbol { id, .. }) if env_ref.js_origin_symbol_ids.contains(id) =>
             Some((*id, env_ref.graph_owner_id)),
         _ => None,
     };
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if initial_count > 0 {
         if let Some((id, owner_id)) = js_symbol {
             if thaw_quickjs::thaw_js_napi_symbol_set_pin(owner_id, id, 1) == 0 {
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn napi_create_reference(
         }
     }
     let Ok(env_ref) = env_mut(env) else {
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         if initial_count > 0 {
             if let Some((id, owner_id)) = js_symbol {
                 rollback_provisional_js_symbol_pin(env, owner_id, id, value,
@@ -62,14 +62,14 @@ pub unsafe extern "C" fn napi_create_reference(
     if !value_belongs_to_environment(env, value)
         || env_ref.value_generations.get(&(value as usize)).copied() != generation
         || {
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             { js_symbol.is_some_and(|(id, owner_id)|
                 env_ref.graph_owner_id != owner_id
                     || env_ref.symbols.get(&id) != Some(&value)) }
-            #[cfg(not(feature = "quickjs"))]
+            #[cfg(not(feature = "js-engine"))]
             { false }
         } {
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         if initial_count > 0 {
             if let Some((id, owner_id)) = js_symbol {
                 rollback_provisional_js_symbol_pin(env, owner_id, id, value,
@@ -79,7 +79,7 @@ pub unsafe extern "C" fn napi_create_reference(
         return record_status(env, NAPI_INVALID_ARG);
     }
     *out = alloc_reference(env_ref, value, initial_count);
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if initial_count > 0 && js_symbol.is_some() {
         if let Some((id, _)) = js_symbol {
             if let Ok(owner) = env_mut(env) { owner.js_pinned_symbol_ids.insert(id); }
@@ -89,7 +89,7 @@ pub unsafe extern "C" fn napi_create_reference(
     NAPI_OK
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn release_pending_napi_handle_if_unreferenced(env: NapiEnv, value: NapiValue) {
     let released = env_mut(env).is_ok_and(|env| {
         let still_referenced = env.references.iter().any(|reference| {
@@ -114,12 +114,12 @@ pub unsafe extern "C" fn napi_delete_reference(
     let Ok(reference) = reference_mut(env, reference) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     let value = reference.value;
     reference.deleted = true;
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     sync_js_origin_symbol_pins(env);
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     release_pending_napi_handle_if_unreferenced(env, value);
     sweep_pending_scope_values(env);
     NAPI_OK
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn napi_get_reference_value(
     };
     let mut value = current.value;
     let count = current.count;
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if count == 0 && !value.is_null() {
         let query = env_mut(env).ok().and_then(|owner| {
             let Value::Symbol { id, .. } = value_ref(value).ok()? else { return None; };
@@ -191,9 +191,9 @@ pub unsafe extern "C" fn napi_reference_ref(
     let Some(count) = old_count.checked_add(1) else {
         return record_status(env, NAPI_GENERIC_FAILURE);
     };
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     let mut provisional_pin = None;
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if old_count == 0 {
         let pin = env_mut(env).ok().and_then(|owner| {
             let Value::Symbol { id, .. } = value_ref(value).ok()? else { return None; };
@@ -212,7 +212,7 @@ pub unsafe extern "C" fn napi_reference_ref(
         }
     }
     let Ok(current) = reference_mut(env, reference) else {
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         if let Some((owner_id, id)) = provisional_pin {
             rollback_provisional_js_symbol_pin(env, owner_id, id, value,
                 generation);
@@ -223,14 +223,14 @@ pub unsafe extern "C" fn napi_reference_ref(
         || env_mut(env).ok().and_then(|owner|
             owner.value_generations.get(&(value as usize)).copied()) != generation
         || {
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             { provisional_pin.is_some_and(|(owner_id, id)| env.as_ref().is_none_or(|owner|
                 owner.graph_owner_id != owner_id
                     || owner.symbols.get(&id) != Some(&value))) }
-            #[cfg(not(feature = "quickjs"))]
+            #[cfg(not(feature = "js-engine"))]
             { false }
         } {
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         if let Some((owner_id, id)) = provisional_pin {
             rollback_provisional_js_symbol_pin(env, owner_id, id, value,
                 generation);
@@ -238,11 +238,11 @@ pub unsafe extern "C" fn napi_reference_ref(
         return record_status(env, NAPI_GENERIC_FAILURE);
     }
     current.count = count;
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some((_, id)) = provisional_pin {
         if let Some(owner) = env.as_mut() { owner.js_pinned_symbol_ids.insert(id); }
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     sync_js_origin_symbol_pins(env);
     if !result.is_null() {
         *result = count;
@@ -264,15 +264,15 @@ pub unsafe extern "C" fn napi_reference_unref(
         return record_status(env, NAPI_GENERIC_FAILURE);
     }
     reference.count -= 1;
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     let value = reference.value;
     let remaining = reference.count;
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     sync_js_origin_symbol_pins(env);
     if !result.is_null() {
         *result = remaining;
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if remaining == 0 {
         release_pending_napi_handle_if_unreferenced(env, value);
     }
@@ -309,7 +309,7 @@ pub unsafe extern "C" fn napi_call_function(
     {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(function) {
         // The foreign call may reenter this Env and invalidate the caller's
         // callback-info argv storage. Snapshot handles before crossing it.

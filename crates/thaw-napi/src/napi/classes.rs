@@ -37,7 +37,7 @@ pub unsafe extern "C" fn napi_define_properties(
         let Ok(key) = key else {
             return record_status(env, NAPI_INVALID_ARG);
         };
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         if let Some(handle) = qjs_handle(object) {
             let attributes = descriptor.attributes & NAPI_DEFAULT_PROPERTY_ATTRIBUTES;
             let status = if descriptor.method.is_some() || descriptor.getter.is_some()
@@ -122,9 +122,9 @@ pub unsafe extern "C" fn napi_define_properties(
                 // kind, change its enumerable bit, or replace either native
                 // callback. An identical definition is a no-op.
                 let same = old_accessor.as_ref().is_some_and(|old| {
-                    #[cfg(feature = "quickjs")]
+                    #[cfg(feature = "js-engine")]
                     let native_only = old.js_owner.is_none();
-                    #[cfg(not(feature = "quickjs"))]
+                    #[cfg(not(feature = "js-engine"))]
                     let native_only = true;
                     old.getter.map(|callback| callback as usize)
                         == descriptor.getter.map(|callback| callback as usize)
@@ -170,7 +170,7 @@ pub unsafe extern "C" fn napi_define_properties(
                         setter_data: descriptor.data,
                         getter_reflection: None,
                         setter_reflection: None,
-                        #[cfg(feature = "quickjs")]
+                        #[cfg(feature = "js-engine")]
                         js_owner: None,
                     },
                 );
@@ -680,11 +680,11 @@ unsafe fn napi_new_instance_with_target(
             || !matches!(value_ref(fallback_prototype), Ok(value) if is_object_value(value))) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if !value_belongs_to_environment(env, constructor) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(constructor) {
         let args = if argc == 0 { Vec::new() }
             else { std::slice::from_raw_parts(argv, argc).to_vec() };
@@ -794,11 +794,11 @@ pub unsafe extern "C" fn napi_instanceof(
     {
         return NAPI_INVALID_ARG;
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let (Some(object), Some(constructor)) = (qjs_handle(object), qjs_handle(constructor)) {
         return qjs_instanceof_handles(env, object, constructor, result);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if qjs_handle(object).is_some() || qjs_handle(constructor).is_some() {
         if !matches!(value_ref(constructor), Ok(Value::QuickJsHandle { .. } | Value::Function(_))) {
             return record_status(env, NAPI_FUNCTION_EXPECTED);
@@ -854,7 +854,7 @@ pub unsafe extern "C" fn napi_get_prototype(
     if result.is_null() || !value_belongs_to_environment(env, object) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         if matches!(value_ref(object), Ok(Value::QuickJsHandle { object_like: false, .. })) {
             return record_status(env, NAPI_OBJECT_EXPECTED);
@@ -888,7 +888,7 @@ pub unsafe extern "C" fn node_api_set_prototype(
     if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, prototype) {
         return NAPI_INVALID_ARG;
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         if matches!(value_ref(object), Ok(Value::QuickJsHandle { object_like: false, .. })) {
             return record_status(env, NAPI_OBJECT_EXPECTED);
@@ -952,11 +952,11 @@ pub unsafe extern "C" fn napi_strict_equals(
     if !value_belongs_to_environment(env, left) || !value_belongs_to_environment(env, right) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let (Some(left), Some(right)) = (qjs_handle(left), qjs_handle(right)) {
         return qjs_strict_equals(env, left, right, result);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(left) {
         if matches!(value_ref(right), Ok(Value::Symbol { .. })) {
             return qjs_strict_equals_native_symbol(env, handle, right, result);
@@ -966,7 +966,7 @@ pub unsafe extern "C" fn napi_strict_equals(
             return qjs_strict_equals_scalar(env, handle, right, result);
         }
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(right) {
         if matches!(value_ref(left), Ok(Value::Symbol { .. })) {
             return qjs_strict_equals_native_symbol(env, handle, left, result);

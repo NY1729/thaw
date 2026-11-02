@@ -12,7 +12,7 @@ pub unsafe extern "C" fn napi_set_named_property(
         return record_status(env, NAPI_INVALID_ARG);
     };
     let name = PropertyKey::String(name);
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_set_property(env, handle, &name, value, false);
     }
@@ -95,7 +95,7 @@ pub unsafe extern "C" fn napi_get_named_property(
         return record_status(env, NAPI_INVALID_ARG);
     };
     let name = PropertyKey::String(name);
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_get_property(env, handle, &name, out);
     }
@@ -134,7 +134,7 @@ unsafe fn property_key(env: NapiEnv, handle: NapiValue) -> Result<PropertyKey, N
             .map(|units| PropertyKey::Utf16(units.clone()))
             .unwrap_or_else(|| PropertyKey::String(value.clone()))),
         Ok(Value::Symbol { id, .. }) => Ok(PropertyKey::Symbol(*id)),
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         Ok(Value::QuickJsHandle { handle: source, .. }) => {
             // The engine owns the exact UTF-16 units and Symbol identity.
             // Probe before allocating native metadata, with the owner pinned
@@ -215,7 +215,7 @@ unsafe fn set_property_key(
     value: NapiValue,
     receiver: NapiValue,
 ) -> NapiStatus {
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         // This target already has its own JS [[Set]] implementation. The
         // writable-data receiver shortcut below is only for native targets.
@@ -268,7 +268,7 @@ unsafe fn set_property_key(
         if property_owner.is_some() && !writable {
             return record_status(env, NAPI_GENERIC_FAILURE);
         }
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         if let Some(handle) = qjs_handle(receiver) {
             return qjs_set_property(env, handle, &key, value, true);
         }
@@ -348,7 +348,7 @@ unsafe fn get_property_key(
     out: *mut NapiValue,
     receiver: NapiValue,
 ) -> NapiStatus {
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_get_property(env, handle, key, out);
     }
@@ -400,7 +400,7 @@ pub unsafe extern "C" fn napi_set_property(
     {
         return NAPI_INVALID_ARG;
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let (Some(handle), Some(key_handle)) = (qjs_handle(object), qjs_handle(key)) {
         return qjs_set_property_live_key(env, handle, key_handle, value, false);
     }
@@ -425,7 +425,7 @@ pub unsafe extern "C" fn napi_get_property(
     {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let (Some(handle), Some(key_handle)) = (qjs_handle(object), qjs_handle(key)) {
         return qjs_get_property_live_key(env, handle, key_handle, out);
     }
@@ -450,7 +450,7 @@ pub unsafe extern "C" fn napi_has_property(
     {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let (Some(handle), Some(key_handle)) = (qjs_handle(object), qjs_handle(key)) {
         return qjs_property_predicate_live_key(env, handle, key_handle, 0, out);
     }
@@ -458,7 +458,7 @@ pub unsafe extern "C" fn napi_has_property(
         Ok(key) => key,
         Err(status) => return status,
     };
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_property_predicate(env, handle, &key, 0, out);
     }
@@ -483,7 +483,7 @@ pub unsafe extern "C" fn napi_has_own_property(
     {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let (Some(handle), Some(key_handle)) = (qjs_handle(object), qjs_handle(key)) {
         return qjs_property_predicate_live_key(env, handle, key_handle, 1, out);
     }
@@ -491,7 +491,7 @@ pub unsafe extern "C" fn napi_has_own_property(
         Ok(key) => key,
         Err(status) => return status,
     };
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_property_predicate(env, handle, &key, 1, out);
     }
@@ -516,7 +516,7 @@ pub unsafe extern "C" fn napi_delete_property(
     if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, key) {
         return NAPI_INVALID_ARG;
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let (Some(handle), Some(key_handle)) = (qjs_handle(object), qjs_handle(key)) {
         return qjs_property_predicate_live_key(env, handle, key_handle, 2, out);
     }
@@ -524,7 +524,7 @@ pub unsafe extern "C" fn napi_delete_property(
         Ok(key) => key,
         Err(status) => return status,
     };
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_property_predicate(env, handle, &key, 2, out);
     }
@@ -584,7 +584,7 @@ pub unsafe extern "C" fn napi_has_named_property(
         return record_status(env, NAPI_INVALID_ARG);
     };
     let name = PropertyKey::String(name);
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_property_predicate(env, handle, &name, 0, result);
     }
