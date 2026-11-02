@@ -4774,6 +4774,11 @@
       "source": "function main(): void { const a = [1,2]; console.log([].constructor === Array, a.constructor === Array, [].constructor !== Array); }"
     },
     {
+      "name": "round10 typed array keeps non-index own properties in console.log",
+      "expect": "matched",
+      "source": "function main(): void { const u = new Uint8Array(4); u[5] = 1; u[-1] = 2; (u as any).x = 3; console.log(u); }"
+    },
+    {
       "name": "round10 generator object and array iterator print as Node inspects them",
       "expect": "matched",
       "source": "function* g(): Generator<number> { yield 1; } function main(): void { console.log(g(), [1].values()); }"
