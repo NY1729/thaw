@@ -6,6 +6,40 @@ fn thaw_js_routing_enabled() -> bool {
     std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1")
 }
 
+thread_local! {
+    /// Why thaw-js refused a package in the current build (`(package, why)`), for `thaw inspect`.
+    static THAW_JS_BLOCKERS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Starts a fresh blocker list for a build (a build's routing attempts all record into it).
+fn clear_thaw_js_blockers() {
+    THAW_JS_BLOCKERS.with(|blockers| blockers.borrow_mut().clear());
+}
+
+fn record_thaw_js_blocker(package: &str, why: &str) {
+    THAW_JS_BLOCKERS.with(|blockers| {
+        let entry = (package.to_string(), why.to_string());
+        let mut blockers = blockers.borrow_mut();
+        if !blockers.contains(&entry) {
+            blockers.push(entry);
+        }
+    });
+}
+
+/// The manifest's `thaw_js_blockers` value: `[{"package", "why"}]`.
+fn thaw_js_blockers_manifest() -> serde_json::Value {
+    THAW_JS_BLOCKERS.with(|blockers| {
+        serde_json::Value::Array(
+            blockers
+                .borrow()
+                .iter()
+                .map(|(package, why)| serde_json::json!({ "package": package, "why": why }))
+                .collect(),
+        )
+    })
+}
+
 /// `THAW_JS_USER_DYNAMIC=1` (with `THAW_JS_RUNTIME=1`) also serves the program's own dynamic code
 /// (`new Function`, `eval`) on thaw-js. Opt-in until the dynamic-storage cases it cannot yet run
 /// (see the QuickJS-removal readiness audit, class 3) match Node.
@@ -387,6 +421,7 @@ fn thaw_js_package_eligible(
     let mentions = |name: &str| thaw_js_mentions(user_source, name);
     let debug = std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1");
     let reject = |why: String| {
+        record_thaw_js_blocker(&pkg.name, &why);
         if debug {
             eprintln!(
                 "thaw-js routing: package `{}` stays on QuickJS: {why}",
