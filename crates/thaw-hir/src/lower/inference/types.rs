@@ -391,7 +391,7 @@ impl<'a> FnLowerer<'a> {
                 .scope
                 .get(name)
                 .cloned()
-                .ok_or_else(|| format!("unknown variable `{name}`")),
+                .ok_or_else(|| commonjs_global_error(name).unwrap_or_else(|| format!("unknown variable `{name}`"))),
             HirExpr::NonArrowThis { access: NonArrowThisAccess::Value, .. } => Ok(HirType::Json),
             HirExpr::NonArrowThis { declared, .. } => Ok(declared.clone()),
             HirExpr::NonArrowReceiverPack { declared, .. } => Ok(HirType::NonArrowReceiver(Box::new(declared.clone()))),
@@ -3238,7 +3238,7 @@ impl<'a> FnLowerer<'a> {
                             Ok(sig.ret.clone())
                         }
                     }
-                    None => Err(format!("call to unknown function `{name}`")),
+                    None => Err(commonjs_global_error(name).unwrap_or_else(|| format!("call to unknown function `{name}`"))),
                 }
             }
             HirExpr::FunctionCallWithThis(_, _, _, _, ret) => Ok(ret.clone()),
@@ -3504,4 +3504,11 @@ fn class_identity_subtype(expected: &HirType, actual: &HirType) -> bool {
         }
         _ => false,
     }
+}
+
+/// `require`/`module`/`exports` are CommonJS globals; an ES module has no
+/// binding for them, so say that instead of the generic unknown-name error.
+fn commonjs_global_error(name: &str) -> Option<String> {
+    matches!(name, "require" | "module" | "exports")
+        .then(|| format!("`{name}` (CommonJS) is not supported; use ES `import`"))
 }

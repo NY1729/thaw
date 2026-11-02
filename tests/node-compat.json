@@ -4702,6 +4702,21 @@
       "name": "r7b callback storage: mutating and pure-reading any callbacks on arrays",
       "expect": "matched",
       "source": "function main(): void {\n  const objs = [{ v: 3 }, { v: 1 }, { v: 2 }];\n  const first = objs[0];\n  objs.sort((x: any, y: any) => { x.seen = 1; y.seen = 1; return x.v - y.v; });\n  console.log(objs.map((o: any) => o.v).join(\",\"), (first as any).seen);\n  const o2 = [{ v: 3 }, { v: 1 }];\n  const keep = o2[0];\n  o2.forEach((o: any) => { o.v = o.v * 10; });\n  console.log(keep.v, o2[1].v);\n  const m = [{ v: 5 }, { v: 4 }];\n  const k = m[0];\n  const r = m.filter((o: any) => { o.v++; return o.v > 5; });\n  console.log(k.v, m[1].v, r.length);\n  const nums = [3, 1, 2];\n  nums.sort((x: any, y: any) => y - x);\n  console.log(nums.join(\",\"), nums.some((x: any) => x > 2), nums.every((x: any) => x > 0), nums.find((x: any) => x < 3), nums.filter((x: any) => x % 2 == 1).join(\",\"));\n}"
+    },
+    {
+      "name": "r6a bytes member read on call receiver",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Buffer.from(\"xy\").byteLength);\n  console.log(Buffer.alloc(3).buffer.byteLength > 0);\n  console.log(new ArrayBuffer(8).slice(2).byteLength);\n  console.log(new DataView(new ArrayBuffer(4)).byteLength);\n}"
+    },
+    {
+      "name": "r6a node buffer constants and kMaxLength exports",
+      "expect": "matched",
+      "source": "import b from \"node:buffer\";\nfunction main(): void {\n  console.log(typeof b.constants, b.constants.MAX_LENGTH > 0, typeof b.kMaxLength, typeof b.INSPECT_MAX_BYTES);\n}"
+    },
+    {
+      "name": "r6a default-imported node assert called directly",
+      "expect": "matched",
+      "source": "import assert from \"node:assert\";\nfunction main(): void {\n  try { assert(null); } catch (e: any) { console.log(e.name); }\n  assert(1);\n  console.log(\"ok\");\n}"
     }
   ]
 }

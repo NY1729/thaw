@@ -1438,6 +1438,29 @@ impl VisitMut for RenameReferences<'_> {
                 }
             }
         }
+        // A default-imported `node:assert` is the namespace itself, so a direct
+        // call `assert(x)` means `assert.ok(x)`. Only the namespace table tells
+        // these apart: it carries both `ok` and `AssertionError`.
+        let assert_call = match &*expr {
+            Expr::Call(call) => match &call.callee {
+                Callee::Expr(callee) => match callee.as_ref() {
+                    Expr::Ident(alias) if !self.shadowed.contains(alias.sym.as_ref()) => self
+                        .namespaces
+                        .get(alias.sym.as_ref())
+                        .filter(|exports| exports.contains_key("AssertionError"))
+                        .and_then(|exports| exports.get("ok"))
+                        .map(|ok| (alias.span, ok.clone())),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        };
+        if let (Some((span, ok)), Expr::Call(call)) = (assert_call, &mut *expr) {
+            call.callee = Callee::Expr(Box::new(Expr::Ident(
+                thaw_parser::ast::Ident::new_no_ctxt(ok.into(), span),
+            )));
+        }
         // `import.meta.resolve(...)` keeps its callee until the call is folded below; only a failed fold
         // lets the callee become the value-position function.
         let resolve_call = matches!(&*expr, Expr::Call(call) if matches!(&call.callee, Callee::Expr(callee)

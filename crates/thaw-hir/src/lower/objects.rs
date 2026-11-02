@@ -3296,7 +3296,14 @@ impl<'a> FnLowerer<'a> {
                 let receiver_type = self.infer_expr_type(&receiver)?;
                 let name = format!("__thaw_member_receiver_{}", self.next_binding);
                 self.next_binding += 1;
-                self.scope.insert(name.clone(), receiver_type.clone());
+                // Keep the byte identity in the scope entry: `infer_expr_type`
+                // normalises Bytes to Array(F64), and the Bytes read arm must
+                // still see the temp as Bytes (`Buffer.from("x").byteLength`).
+                let scope_type = match self.infer_expr_type_inner(&receiver) {
+                    Ok(HirType::Bytes) => HirType::Bytes,
+                    _ => receiver_type.clone(),
+                };
+                self.scope.insert(name.clone(), scope_type);
                 let mut rebound = member.clone();
                 *rebound.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
                     name.clone().into(),
