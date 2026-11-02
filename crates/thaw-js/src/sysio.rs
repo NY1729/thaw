@@ -474,7 +474,8 @@ impl Interp {
 // ----- `globalThis.__thaw_fs(operation, path, value, recursive)` -----
 // The synchronous subset of the QuickJS host's filesystem bridge that the registry's `node:fs`
 // shim needs for whole-file reads/writes, directory listing and stat. Descriptor operations
-// (string-flag `fd_open` and read/write/stat) and chown/lchown answer ENOSYS.
+// (string-flag `fd_open`, read/write/stat/sync/truncate/tell/chmod/utimes/statfs) and chown/lchown
+// answer ENOSYS where not ported.
 // ponytail: add the rest when a package needs them; chown/lchown stay ENOSYS until the pinned test
 // `os_tty_process_and_fs_host_functions` is updated (it asserts ENOSYS for chown).
 
@@ -656,7 +657,7 @@ thread_local! {
 }
 
 /// `fd_open` (string flags: `r`, `w`, `a+`, `wx`, ...) and the `fd_*` operations on the files it opened.
-// ponytail: numeric (`#bits`) open flags, fd_stat-family and fd_chmod/utimes/truncate/sync are not ported
+// ponytail: numeric (`#bits`) open flags and fd_chown are not ported (chown stays ENOSYS, see below)
 fn fd_op(op: &str, p: &std::path::Path, path: &str, value: &str) -> std::io::Result<String> {
     use std::io::{Read, Seek, SeekFrom};
     let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, m.to_string());
@@ -762,6 +763,45 @@ fn fd_op(op: &str, p: &std::path::Path, path: &str, value: &str) -> std::io::Res
                 Ok(format!("{{\"ok\":true,\"length\":{n}}}"))
             }
             "fd_stat" => file.metadata().map(|m| stat_json(&m)),
+            "fd_sync" => file.sync_all().map(|()| "{\"ok\":true}".into()),
+            "fd_datasync" => file.sync_data().map(|()| "{\"ok\":true}".into()),
+            "fd_truncate" => value
+                .parse::<u64>()
+                .map_err(|_| bad("invalid truncate length"))
+                .and_then(|len| file.set_len(len))
+                .map(|()| "{\"ok\":true}".into()),
+            "fd_tell" => file
+                .stream_position()
+                .map(|position| format!("{{\"ok\":true,\"position\":{position}}}")),
+            #[cfg(unix)]
+            "fd_chmod" => fs_parse_mode(value)
+                .and_then(|mode| {
+                    use std::os::unix::fs::PermissionsExt;
+                    file.set_permissions(std::fs::Permissions::from_mode(mode))
+                })
+                .map(|()| "{\"ok\":true}".into()),
+            #[cfg(unix)]
+            "fd_utimes" => {
+                use std::os::fd::AsRawFd;
+                let mut values = value.split(',');
+                let times = [fs_timespec(values.next())?, fs_timespec(values.next())?];
+                if unsafe { libc::futimens(file.as_raw_fd(), times.as_ptr()) } == 0 {
+                    Ok("{\"ok\":true}".into())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            }
+            #[cfg(unix)]
+            "fd_statfs" => {
+                use std::os::fd::AsRawFd;
+                let fd = file.as_raw_fd();
+                let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+                if unsafe { libc::fstatvfs(fd, st.as_mut_ptr()) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let st = unsafe { st.assume_init() };
+                fs_fstatfs_type(fd).map(|fs_type| fs_statfs_record(&st, fs_type))
+            }
             _ => Err(std::io::Error::from_raw_os_error(libc::ENOSYS)),
         }
     })
@@ -857,15 +897,8 @@ fn fs_statfs_type(_: &std::ffi::CString) -> std::io::Result<u64> {
 }
 
 #[cfg(unix)]
-fn fs_statfs(p: &std::path::Path) -> std::io::Result<String> {
-    let c = fs_c_path(p)?;
-    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    if unsafe { libc::statvfs(c.as_ptr(), st.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let st = unsafe { st.assume_init() };
-    let fs_type = fs_statfs_type(&c)?;
-    Ok(serde_json::json!({
+fn fs_statfs_record(st: &libc::statvfs, fs_type: u64) -> String {
+    serde_json::json!({
         "ok": true, "type": fs_type, "bsize": st.f_bsize, "blocks": st.f_blocks,
         "bfree": st.f_bfree, "bavail": st.f_bavail, "files": st.f_files, "ffree": st.f_ffree,
         "exact": {
@@ -874,7 +907,46 @@ fn fs_statfs(p: &std::path::Path) -> std::io::Result<String> {
             "files": st.f_files.to_string(), "ffree": st.f_ffree.to_string(),
         },
     })
-    .to_string())
+    .to_string()
+}
+
+#[cfg(unix)]
+fn fs_statfs(p: &std::path::Path) -> std::io::Result<String> {
+    let c = fs_c_path(p)?;
+    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(c.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let st = unsafe { st.assume_init() };
+    Ok(fs_statfs_record(&st, fs_statfs_type(&c)?))
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "aix"
+))]
+fn fs_fstatfs_type(fd: std::os::fd::RawFd) -> std::io::Result<u64> {
+    let mut st = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(fd, st.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { st.assume_init() }.f_type as u64)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "aix"
+)))]
+fn fs_fstatfs_type(_: std::os::fd::RawFd) -> std::io::Result<u64> {
+    Ok(0)
 }
 
 // ---- mkdtemp ----
