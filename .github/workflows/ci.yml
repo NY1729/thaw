@@ -575,27 +575,48 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           # Each test gets its own 20-minute cap (the job cap bounds the whole
-          # shard). Output is also kept in the diagnostics folder, so a lost
-          # or killed shard still leaves its log behind.
+          # shard). Two tests run at a time (xargs -P2). Each test writes its
+          # own log under diagnostics, and the combined output is kept in
+          # test-output.log, so a lost or killed shard still leaves its logs.
           set -o pipefail
+          mkdir -p "$RUNNER_TEMP/diagnostics"
           listing=$(cargo test -p thaw-cli registry_add -- --list) || exit 1
           mapfile -t tests < <(sed -n 's/: test$//p' <<< "$listing")
           if (( ${#tests[@]} == 0 )); then
             echo 'No registry tests were listed' >&2
             exit 1
           fi
+          mine=()
+          if (( SHARD == 0 )); then
+            # The heavy keep-alive test goes first so it overlaps a light test.
+            mine+=(tests::node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled)
+          fi
           index=0
           for test in "${tests[@]}"; do
             if [[ "$test" != *postgres* ]] && (( index % 4 == SHARD )); then
-              timeout --kill-after=30s 20m cargo test -p thaw-cli "$test" -- --exact --test-threads=1 --nocapture 2>&1 |
-                tee -a "$RUNNER_TEMP/diagnostics/test-output.log"
+              mine+=("$test")
             fi
             index=$((index + 1))
           done
-          if (( SHARD == 0 )); then
-            timeout --kill-after=30s 20m cargo test -p thaw-cli tests::node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled -- --exact --nocapture 2>&1 |
-              tee -a "$RUNNER_TEMP/diagnostics/test-output.log"
+          if (( ${#mine[@]} == 0 )); then
+            echo "Shard $SHARD has no tests" >&2
+            exit 1
           fi
+          # Prebuild once so the two workers do not race on the cargo build.
+          cargo test -p thaw-cli --no-run
+          run_one() {
+            local t="$1" log rc
+            log="$RUNNER_TEMP/diagnostics/test-$$-${t//::/_}.log"
+            set +e
+            timeout --kill-after=30s 20m cargo test -p thaw-cli "$t" -- --exact --test-threads=1 --nocapture > "$log" 2>&1
+            rc=$?
+            set -e
+            { echo "::group::$t (rc=$rc)"; cat "$log"; echo "::endgroup::"; } | tee -a "$RUNNER_TEMP/diagnostics/test-output.log"
+            return "$rc"
+          }
+          export -f run_one
+          # xargs exits 123 if any invocation failed; every test still runs.
+          printf '%s\n' "${mine[@]}" | xargs -P2 -I{} bash -c 'run_one "$1"' _ {}
       - name: Collect diagnostics
         if: always()
         run: |
