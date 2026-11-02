@@ -670,13 +670,27 @@ impl<'a> FnLowerer<'a> {
             return Ok(Some(HirExpr::Lit(HirLit::Str("[object global]".into()))));
         }
         let value = self.lower_expr(&argument.expr)?;
-        let ty = self.infer_expr_type(&value)?;
+        // Raw type: `infer_expr_type` would erase a native byte store to `Array(F64)` ("Array" tag).
+        let ty = self.infer_expr_type_inner(&value)?;
         // WeakRef is modeled as an array and FinalizationRegistry as a plain object;
         // ponytail: only the direct `new X(..)` form is recognized, not a variable holding one.
         let mut inner = argument.expr.as_ref();
         while let Expr::Paren(paren) = inner { inner = paren.expr.as_ref(); }
+        if let Expr::Ident(name) = inner {
+            // A generator function value is a function whose result is the producer type.
+            if matches!(&ty, HirType::Function(_, ret) if is_generator_producer_type(ret))
+                && self.signatures.contains_key(&self.resolve_binding(name.sym.as_ref()))
+            {
+                let name = format!("__thaw_object_tag_generator_fn_{}", self.next_binding);
+                self.next_binding += 1;
+                return self.wrap_call_argument_bindings(
+                    HirExpr::Lit(HirLit::Str("[object GeneratorFunction]".into())),
+                    &[(name, ty, value)],
+                ).map(Some);
+            }
+        }
         if let Expr::New(new_expr) = inner {
-            if let Some(class) = new_expr.callee.as_ident().filter(|c| matches!(c.sym.as_ref(), "WeakRef" | "FinalizationRegistry")) {
+            if let Some(class) = new_expr.callee.as_ident().filter(|c| matches!(c.sym.as_ref(), "WeakRef" | "FinalizationRegistry" | "Uint8Array")) {
                 let name = format!("__thaw_object_tag_native_{}", self.next_binding);
                 self.next_binding += 1;
                 return self.wrap_call_argument_bindings(

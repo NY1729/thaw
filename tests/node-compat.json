@@ -71,6 +71,11 @@
       "source": "import { EventEmitter } from 'node:events'; function main(): void { const events = new EventEmitter(); events.once('value', (left: number, right: string): void => console.log(left, right)); events.emit('value', 42, 'ok'); }"
     },
     {
+      "name": "toString tags for iterators, typed arrays and WeakRef",
+      "expect": "matched",
+      "source": "function main(): void { const xs: number[] = [1, 2]; const m = new Map<string, number>(); console.log(Object.prototype.toString.call(xs.values()), Object.prototype.toString.call(m.entries()), Object.prototype.toString.call(new Uint8Array(1)), Object.prototype.toString.call(new WeakRef<object>({ a: 1 }))); }"
+    },
+    {
       "name": "buffer hex round trip",
       "expect": "matched",
       "source": "import { Buffer } from 'node:buffer'; function main(): void { console.log(Buffer.from('雪').toString('hex'), Buffer.from('e99baa', 'hex').toString()); }"
