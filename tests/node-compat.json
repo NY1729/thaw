@@ -4672,6 +4672,31 @@
       "name": "tj11 module create require path basename",
       "expect": "matched",
       "source": "import { createRequire } from 'node:module'; function main(): void { const require = createRequire('/tmp/example/main.js'); console.log(require('node:path').basename('/a/b.txt')); }"
+    },
+    {
+      "name": "r6b top-level string append stays linear and keeps aliases",
+      "expect": "matched",
+      "source": "let s = \"\";\nfor (let i = 0; i < 100000; i++) { s += \"x\"; }\nconst t = s;\ns += \"y\";\nconst summary = s.length + \" \" + t.length + \" \" + (t === s.slice(0, -1));\nfunction main(): void {\n  console.log(summary);\n}\n"
+    },
+    {
+      "name": "r6b top-level string global read by a function keeps snapshots",
+      "expect": "matched",
+      "source": "function main(): void {\n  let g = \"\";\n  const seen: string[] = [];\n  function peek(): string { return g; }\n  for (let i = 0; i < 4; i++) { g += \"x\"; seen.push(peek()); }\n  console.log(seen.join(\",\"), g);\n}\n"
+    },
+    {
+      "name": "r6b realm timer and global function names and lengths",
+      "expect": "matched",
+      "source": "function main(): void {\n  const g: any = globalThis;\n  console.log([\"queueMicrotask\", \"structuredClone\", \"atob\", \"btoa\", \"setTimeout\", \"setInterval\", \"setImmediate\", \"clearTimeout\", \"clearInterval\", \"clearImmediate\"].map((k) => k + \":\" + g[k].name + \"/\" + g[k].length).join(\" \"));\n  console.log(process.emitWarning.length, queueMicrotask.name);\n}\n"
+    },
+    {
+      "name": "r6b computed-key object methods named after their keys",
+      "expect": "matched",
+      "source": "function main(): void {\n  const k = \"dyn\";\n  const o = { [k + \"1\"]: 1, [`t${2}`]: 2, f() { return this; } };\n  console.log(o, o.f() === o);\n  console.log({ [k]() { return 1; }, y: 2 });\n}\n"
+    },
+    {
+      "name": "r6b URL and URLSearchParams console inspect",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(new URL(\"https://user:pw@example.com:8080/p/a/t/h?query=string&a=1&a=2#hash\"));\n  console.log(new URLSearchParams(\"a=1&b=2\"), new URLSearchParams(\"\"));\n}\n"
     }
   ]
 }
