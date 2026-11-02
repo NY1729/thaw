@@ -3503,6 +3503,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
     }
 }
 
+#[cfg(all(test, unix))]
+mod fs_tests;
 #[cfg(test)]
 mod net_tests;
 #[cfg(test)]
