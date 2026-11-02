@@ -47,6 +47,25 @@ fn thaw_js_user_dynamic_enabled() -> bool {
     std::env::var("THAW_JS_USER_DYNAMIC").as_deref() == Ok("1")
 }
 
+/// A routed program whose own source needs the dynamic host, built without `THAW_JS_USER_DYNAMIC=1`,
+/// links QuickJS; record that so `thaw inspect` says why.
+fn record_thaw_js_user_dynamic_blocker(user_source: &str, routing: bool, user_dynamic: bool) {
+    if routing && !user_dynamic && source_uses_quickjs(user_source) {
+        record_thaw_js_blocker(
+            "<program>",
+            "program source uses dynamic code (new Function/eval): needs THAW_JS_USER_DYNAMIC=1",
+        );
+    }
+}
+
+/// A routed build that failed and was rebuilt on QuickJS (`<build>`: no single package).
+fn record_thaw_js_fallback_blocker(error: &str) {
+    record_thaw_js_blocker(
+        "<build>",
+        &format!("routed build fell back to QuickJS: {error}"),
+    );
+}
+
 /// Whether the program text names `name` (the last segment of a dotted path) as a whole
 /// identifier (`hash` is not mentioned by `hashSync`).
 fn thaw_js_mentions(user_source: &str, name: &str) -> bool {
