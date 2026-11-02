@@ -3028,6 +3028,41 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
+        // `C.m.length` / `new C().m.length` for a class method: the source
+        // arity, which the typed method value (no optional mask) would lose.
+        // A receiver with effects (`new C()`) is still evaluated first.
+        if let (MemberProp::Ident(property), Expr::Member(method)) = (&member.prop, member.obj.as_ref()) {
+            if property.sym.as_ref() == "length" {
+                if let Some(name) = member_property_name(&method.prop) {
+                    let static_class = match method.obj.as_ref() {
+                        Expr::Ident(class) if self.is_unshadowed_class_identifier(class.sym.as_ref()) => {
+                            Some(class.sym.to_string())
+                        }
+                        _ => None,
+                    };
+                    let symbol = match static_class {
+                        Some(class) => Some(class_static_method_symbol(&class, &name)),
+                        None => self.native_class_expression_type(&method.obj).and_then(|receiver| {
+                            if Self::class_receiver_has_own_field(&receiver, &name) {
+                                return None;
+                            }
+                            class_name_from_type(&receiver).map(|class| class_method_symbol(class, &name))
+                        }),
+                    };
+                    if let Some(length) = symbol
+                        .and_then(|symbol| self.signatures.get(&symbol))
+                        .and_then(|signature| signature.source_length)
+                    {
+                        let length = HirExpr::Lit(HirLit::F64(length as f64));
+                        if matches!(method.obj.as_ref(), Expr::Ident(_) | Expr::This(_)) {
+                            return Ok(length);
+                        }
+                        let receiver = self.lower_expr(&method.obj)?;
+                        return Ok(HirExpr::EvalThen(Box::new(receiver), Box::new(length)));
+                    }
+                }
+            }
+        }
         // `Symbol.<wellKnown>` as a value -- lowered to a distinctive
         // sentinel string a computed access/call can dispatch on. These are
         // not registered symbols (`Symbol.for`), so no runtime symbol is
