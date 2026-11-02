@@ -4722,6 +4722,11 @@
       "name": "r8a typeof CommonJS globals is undefined in an ES module",
       "expect": "matched",
       "source": "export const x = 1;\nfunction main(): void { console.log(typeof require, typeof module, typeof exports, typeof Nope); }"
+    },
+    {
+      "name": "r9b bare return in a class constructor keeps the instance",
+      "expect": "matched",
+      "source": "class A { x = 1; constructor(f: boolean) { if (f) return; this.x = 2; } }\nclass P { y = 3; constructor(f: boolean) { if (f) { return; } this.y = 4; } }\nclass Dd extends P { z = 9; constructor(f: boolean) { super(f); if (f) return; this.z = 10; } }\nfunction main(): void { console.log(JSON.stringify(new A(true)), JSON.stringify(new A(false))); console.log(JSON.stringify(new Dd(true)), JSON.stringify(new Dd(false))); }"
     }
   ]
 }
