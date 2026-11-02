@@ -2254,7 +2254,7 @@ pub extern "C" fn thaw_js_handle_is_plain_data(handle: u64) -> u8 {
     .unwrap_or(0)
 }
 
-/// `console.log` of a typed array (not `Buffer`/`DataView`): `{"n":name,"v":[text, ..]}`
+/// `console.log` of a typed array (not `Buffer`/`DataView`): `{"n":name,"v":[text, ..],"e":[[key,tag,text], ..]}`
 /// for the std inspector (`thaw_console_typed_or`), or null for any other value.
 #[no_mangle]
 pub extern "C" fn thaw_js_handle_typed_array_probe(handle: u64) -> *const c_char {
@@ -2264,8 +2264,12 @@ pub extern "C" fn thaw_js_handle_typed_array_probe(handle: u64) -> *const c_char
             .eval(
                 "(v) => { if (typeof v !== 'object' || v === null || !ArrayBuffer.isView(v) || v instanceof DataView \
                  || (typeof Buffer !== 'undefined' && Buffer.isBuffer(v))) return null; \
+                 const e = Object.keys(v).filter((k) => String(Number(k)) !== k).map((k) => { const x = v[k]; \
+                 const t = typeof x; return t === 'string' ? [k, 's', x] : t === 'number' ? [k, 'n', Object.is(x, -0) ? '-0' : String(x)] \
+                 : t === 'bigint' ? [k, 'g', String(x)] : t === 'boolean' ? [k, 'b', String(x)] : t === 'undefined' ? [k, 'u', ''] \
+                 : x === null ? [k, 'l', ''] : null; }).filter((entry) => entry !== null); \
                  return JSON.stringify({ n: v[Symbol.toStringTag], \
-                 v: Array.from(v, (x) => typeof x === 'bigint' ? x + 'n' : Object.is(x, -0) ? '-0' : String(x)) }); }",
+                 v: Array.from(v, (x) => typeof x === 'bigint' ? x + 'n' : Object.is(x, -0) ? '-0' : String(x)), e }); }",
             )
             .map_err(|error| error.to_string())?;
         Ok(probe
