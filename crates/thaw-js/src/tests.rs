@@ -638,6 +638,60 @@ var __thaw_bundle_entry_key = "fr/index.js";
     );
 }
 
+thread_local! {
+    /// The argument JSON of the last `capture_adapter` call.
+    static CAPTURED_ARGS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Records its argument JSON, so a test can see what compiled code is handed.
+unsafe extern "C" fn capture_adapter(
+    _context: *const std::ffi::c_void,
+    args: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let text = unsafe { std::ffi::CStr::from_ptr(args) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    CAPTURED_ARGS.with(|c| *c.borrow_mut() = text);
+    thaw_arena::owned_string("null")
+}
+
+#[test]
+fn an_error_handed_back_to_a_compiled_callback_keeps_its_frame() {
+    use crate::host::{thaw_tjs_register_callback, Native, Package};
+    let capture = thaw_tjs_register_callback(capture_adapter as *const _, std::ptr::null(), 1);
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "rt/index.js": function(module, exports, require) {
+  exports.pass = function (cb, e) { cb(e); return 1; };
+}, };
+var __thaw_bundle_require_maps = { "rt/index.js": {}, };
+var __thaw_bundle_entry_key = "rt/index.js";
+})(globalThis.require);"#;
+    let mut p = Package::load(bundle).expect("loads");
+    // a compiled Error (framed string) emitted through JS and handed back to a compiled callback:
+    // the callback gets the same frame, which the compiled side revives as an Error again
+    let frame = "\u{1}RangeError\u{1}boom";
+    assert_eq!(
+        p.call(
+            "pass",
+            &[callback_marker(capture), Native::Str(frame.into())]
+        )
+        .ok(),
+        Some(Native::Number(1.0))
+    );
+    let got = CAPTURED_ARGS.with(|c| c.borrow().clone());
+    assert_eq!(
+        Native::from_json(&got).unwrap(),
+        Native::Array(vec![Native::Str(frame.into())])
+    );
+    // a plain object with a `message` is not an Error: it crosses as an object
+    let plain = Native::Object(vec![("message".into(), Native::Str("boom".into()))]);
+    p.call("pass", &[callback_marker(capture), plain.clone()])
+        .ok();
+    let got = CAPTURED_ARGS.with(|c| c.borrow().clone());
+    assert_eq!(Native::from_json(&got).unwrap(), Native::Array(vec![plain]));
+}
+
 // ----- compiled callbacks (`thaw_tjs_register_callback`) -----
 
 /// A stand-in for a generated `(context, args_json) -> result_json` adapter: sums the numbers.

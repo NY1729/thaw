@@ -3123,6 +3123,14 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
                         .collect::<Result<_, _>>()?,
                 ));
             }
+            // an Error object crosses as its framed string, the form a compiled Error takes, so compiled
+            // code revives it as an Error again (a plain object with a `message` stays an object)
+            if matches!(&*o.kind.borrow(), Kind::Plain) && crate::builtins::is_error_instance(it, o)
+            {
+                if let Some((_, framed)) = frame_error(it, v) {
+                    return Ok(Native::Str(framed));
+                }
+            }
             // a Date crosses as its time value
             if matches!(&*o.kind.borrow(), Kind::Plain) && it.date_target(v) {
                 let ms = it.date_time(v).map_err(|c| classify(it, c))?;

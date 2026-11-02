@@ -2229,7 +2229,7 @@ pub(crate) fn collate(a: &str, b: &str) -> std::cmp::Ordering {
         .then_with(|| case(a).cmp(&case(b)))
 }
 
-fn is_error_instance(it: &mut Interp, o: &Obj) -> bool {
+pub(crate) fn is_error_instance(it: &mut Interp, o: &Obj) -> bool {
     let Some(ctor) = it.lookup(&it.global.clone(), "Error") else {
         return false;
     };
