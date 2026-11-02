@@ -593,6 +593,51 @@ fn typed_abi_reports_js_exceptions_and_unroutable_calls_as_errors() {
     );
 }
 
+#[test]
+fn compiled_error_frames_cross_into_thaw_js_as_error_objects() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "fr/index.js": function(module, exports, require) {
+  exports.t = function (e) { return (e instanceof Error) + "|" + e.name + "|" + e.message + "|" + e.code; };
+  exports.kind = function (e) { return typeof e; };
+  exports.rethrow = function (e) { if (e instanceof Error) throw e; return "kept"; };
+}, };
+var __thaw_bundle_require_maps = { "fr/index.js": {}, };
+var __thaw_bundle_entry_key = "fr/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("fr").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    // legacy `\u{1}Name\u{1}message` framing
+    assert_eq!(
+        typed_call("fr::t", r#"["\u0001Error\u0001boom"]"#),
+        Ok(r#""true|Error|boom|undefined""#.into())
+    );
+    // `\u{3}code` suffix becomes `.code`
+    assert_eq!(
+        typed_call("fr::t", r#"["\u0001Error\u0001boom\u0003E42"]"#),
+        Ok(r#""true|Error|boom|E42""#.into())
+    );
+    // tagged `E1` frame (`\u{1e}E1:<units>:-:<message>`)
+    assert_eq!(
+        typed_call("fr::t", r#"["\u0001Error\u0001\u001eE1:4:-:boom"]"#),
+        Ok(r#""true|Error|boom|undefined""#.into())
+    );
+    // a framed error thrown by a handler is the same Error the compiled side sent (`emit('error', e)` rethrow)
+    assert!(typed_call("fr::rethrow", r#"["\u0001Error\u0001boom"]"#)
+        .unwrap_err()
+        .contains("boom"));
+    // plain strings stay strings: no leading U+0001, or a lone U+0001 with no closing frame delimiter
+    assert_eq!(
+        typed_call("fr::kind", r#"["a\u0001Error\u0001boom"]"#),
+        Ok(r#""string""#.into())
+    );
+    assert_eq!(
+        typed_call("fr::kind", r#"["\u0001x"]"#),
+        Ok(r#""string""#.into())
+    );
+}
+
 // ----- compiled callbacks (`thaw_tjs_register_callback`) -----
 
 /// A stand-in for a generated `(context, args_json) -> result_json` adapter: sums the numbers.

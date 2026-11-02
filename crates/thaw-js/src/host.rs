@@ -2607,27 +2607,34 @@ fn callback_value(it: &mut Interp, id: usize) -> Value {
 
 /// Rebuild a thrown error from the compiled side's `\u{1}Name\u{1}message` framing.
 pub(crate) fn tagged_error(it: &mut Interp, tagged: &str) -> Ctl {
+    match error_object(it, tagged) {
+        Ok(err) => Ctl::Throw(err),
+        Err(c) => c,
+    }
+}
+
+/// The error object for a framed error string (`\u{1}Name\u{1}message`, or the tagged `\u{1}Name\u{1}\u{1e}E1:..`
+/// form), with its `\u{3}code` and `\u{5}<json>` own properties; `Err` is what the construction raised.
+fn error_object(it: &mut Interp, tagged: &str) -> Result<Value, Ctl> {
     let tagged = tagged.strip_prefix('\u{2}').unwrap_or(tagged);
-    // a native error token (`\u{1}Name\u{1}\u{1e}E1:<units>:-:<message>`): the name and the message it frames
+    // a native error token (`\u{1}Name\u{1}\u{1e}E1:<units>:-:<message>`): the name, the message and the suffix it frames
     let framed = thaw_arena::error_wire::parse_tagged(tagged.as_bytes()).and_then(|f| {
         Some((
             std::str::from_utf8(f.chain).ok()?,
             std::str::from_utf8(f.display).ok()?,
+            std::str::from_utf8(f.suffix).ok()?,
         ))
     });
-    let (name, message) = match framed.or_else(|| {
-        tagged
-            .strip_prefix('\u{1}')
-            .and_then(|t| t.split_once('\u{1}'))
+    let (name, message, suffix) = match framed.or_else(|| {
+        let (name, rest) = tagged.strip_prefix('\u{1}')?.split_once('\u{1}')?;
+        // the message runs up to the first marker (`\u{2}`..=`\u{5}`); the rest is the suffix
+        let end = rest
+            .find(|c| ('\u{2}'..='\u{5}').contains(&c))
+            .unwrap_or(rest.len());
+        Some((name, &rest[..end], &rest[end..]))
     }) {
-        Some((name, message)) => (
-            name,
-            message
-                .split(|c| ('\u{2}'..='\u{5}').contains(&c))
-                .next()
-                .unwrap_or(""),
-        ),
-        None => ("Error", tagged),
+        Some(parts) => parts,
+        None => ("Error", tagged, ""),
     };
     let global = it.global.clone();
     let ctor = it
@@ -2635,23 +2642,42 @@ pub(crate) fn tagged_error(it: &mut Interp, tagged: &str) -> Ctl {
         .filter(|c| c.is_callable())
         .or_else(|| it.lookup(&global, "Error"))
         .unwrap_or(Value::Undefined);
-    match it.construct(&ctor, &[Value::str(message)]) {
-        Ok(err) => {
-            // the `\u{5}<json>` bag of the error's own properties (`isAxiosError`, `response`, ...)
-            if let Some((_, bag)) = tagged.split_once('\u{5}') {
-                if let Ok(Native::Object(fields)) = crate::json::parse_native(bag) {
-                    for (k, v) in fields {
-                        if k != "name" && k != "message" && k != "stack" {
-                            let v = to_value(it, &v);
-                            let _ = it.set(&err, &k, v);
-                        }
-                    }
+    let err = it.construct(&ctor, &[Value::str(message)])?;
+    if let Some(code) = suffix_segment(suffix, '\u{3}') {
+        let _ = it.set(&err, "code", Value::str(code));
+    }
+    // the `\u{5}<json>` bag of the error's own properties (`isAxiosError`, `response`, ...)
+    if let Some(bag) = suffix_segment(suffix, '\u{5}') {
+        if let Ok(Native::Object(fields)) = crate::json::parse_native(bag) {
+            for (k, v) in fields {
+                if k != "name" && k != "message" && k != "stack" {
+                    let v = to_value(it, &v);
+                    let _ = it.set(&err, &k, v);
                 }
             }
-            Ctl::Throw(err)
         }
-        Err(c) => c,
     }
+    Ok(err)
+}
+
+/// The text after `marker` in a framed error suffix, up to the next marker (`\u{2}`..=`\u{6}`).
+fn suffix_segment(suffix: &str, marker: char) -> Option<&str> {
+    let (_, rest) = suffix.split_once(marker)?;
+    Some(
+        rest.split(|c| ('\u{2}'..='\u{6}').contains(&c))
+            .next()
+            .unwrap_or(""),
+    )
+}
+
+/// A compiled `Error` that crossed as its framed string (the test of json.rs `is_error_frame_text`): the
+/// Error object. Any other string, or a frame that does not parse, stays a string.
+fn framed_error(it: &mut Interp, s: &str) -> Option<Value> {
+    let bytes = s.as_bytes();
+    if bytes.first() != Some(&1) || !bytes[1..].contains(&1) {
+        return None;
+    }
+    error_object(it, s).ok()
 }
 
 fn throw_type_error<T>(it: &mut Interp, message: &str) -> R<T> {
@@ -2985,7 +3011,7 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
         Native::Null => Value::Null,
         Native::Bool(b) => Value::Bool(*b),
         Native::Number(x) => Value::Number(*x),
-        Native::Str(s) => Value::str(s),
+        Native::Str(s) => framed_error(it, s).unwrap_or_else(|| Value::str(s)),
         Native::Array(items) => {
             let v = items.iter().map(|i| to_value(it, i)).collect();
             it.array(v)
