@@ -1955,3 +1955,10 @@ fn function_length_through_alias_matches_node() {
     .expect("aliased function length lowers");
     assert!(debug.contains("F64(2.0)"), "{debug}");
 }
+
+#[test]
+fn commonjs_globals_get_an_es_import_hint() {
+    let module = thaw_parser::parse_typescript("function main(): void { const r = require; }").unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("`require` (CommonJS) is not supported; use ES `import`"), "{error}");
+}
