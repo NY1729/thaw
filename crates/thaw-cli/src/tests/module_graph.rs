@@ -1786,3 +1786,39 @@ fn entry_module_kind_follows_node_syntax_detection() {
     assert!(!kind("a.mts", "function main(): void {}"));
     assert!(kind("a.cts", "function main(): void {}"));
 }
+
+#[test]
+fn missing_member_of_builtin_namespace_is_named_but_synthetic_namespace_is_not_rejected() {
+    let dir = std::env::temp_dir().join(format!("thaw-missing-member-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let transform = |source: &str, _path: &std::path::Path, _is_override: bool| Ok(source.to_string());
+    let mut external_exports = std::collections::HashMap::new();
+    external_exports.insert(
+        "node:buffer".to_string(),
+        std::collections::HashMap::from([("Buffer".to_string(), "__buffer_Buffer".to_string())]),
+    );
+    external_exports.insert(
+        "some-pkg".to_string(),
+        std::collections::HashMap::from([("other".to_string(), "__pkg_other".to_string())]),
+    );
+    let builtin = "import b from \"node:buffer\"; console.log(b.nope);";
+    let error = module_graph::bundle_with_named_source_transform(
+        &entry, builtin, &external_exports, &Default::default(),
+        &Default::default(), &Default::default(), &Default::default(),
+        &Default::default(), &transform,
+    )
+    .err()
+    .expect("a missing member of a builtin namespace must be rejected");
+    assert!(error.contains("`b` has no export named `nope`"), "{error}");
+
+    let synthetic = "import * as __thaw_value_chalk from \"some-pkg\"; console.log(__thaw_value_chalk.nope);";
+    module_graph::bundle_with_named_source_transform(
+        &entry, synthetic, &external_exports, &Default::default(),
+        &Default::default(), &Default::default(), &Default::default(),
+        &Default::default(), &transform,
+    )
+    .expect("a non-builtin namespace member miss must not be rejected here");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
