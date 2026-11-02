@@ -1598,3 +1598,33 @@ fn storage_object_create_prototype_literal_is_dynamic() {
         assert_eq!(storage_allocations(source), vec![true], "{source}");
     }
 }
+
+#[test]
+fn storage_callback_that_only_reads_params_keeps_array_native() {
+    // Pure-reading comparators/predicates cannot observe or leak the receiver, so the receiver stays native.
+    assert_eq!(
+        storage_allocations(
+            r#"
+        function main(): void {
+            const nums: number[] = [3, 1, 2];
+            nums.sort((x: any, y: any) => y - x);
+            const pick = nums.find((x: any) => x > 1);
+            const odd = nums.filter((x: any) => x % 2 === 1);
+        }
+    "#
+        ),
+        vec![false]
+    );
+}
+
+#[test]
+fn storage_callback_that_mutates_or_leaks_params_keeps_array_dynamic() {
+    for source in [
+        "function main(): void { const o: any[] = [{ v: 1 }, { v: 2 }]; o.sort((x: any, y: any) => { x.seen = 1; return x.v - y.v; }); }",
+        "function main(): void { const o: any[] = [{ v: 1 }]; o.forEach((x: any) => { x.v++; }); }",
+        "function main(): void { const o: any[] = [{ v: 1 }]; const seen: any[] = []; o.filter((x: any) => { seen.push(x); return true; }); }",
+        "function main(): void { const o: any[] = [{ v: 1 }]; o.some((x: any) => { delete x.v; return false; }); }",
+    ] {
+        assert!(storage_allocations(source)[0], "{source}");
+    }
+}
