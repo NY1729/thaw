@@ -343,6 +343,7 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
     let normalized = normalize_constructor_functions(&normalized)?;
+    let normalized = resolve_class_value_aliases(&normalized);
     let normalized = specialize_new_target_functions(&normalized);
     let normalized = specialize_new_target_constructors(&normalized);
     let normalized = annotate_untyped_default_parameters(&normalized);
@@ -468,6 +469,175 @@ fn specialize_new_target_functions(module: &Module) -> Module {
         body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Fn(construct))));
     }
     Module { body, ..routed }
+}
+
+/// `const E = D` / `let E = D` where `D` is a class declared in this module: `new E(...)` becomes
+/// `new D(...)`, so it lowers as typed construction (the bare alias is an untyped value and its
+/// instance prints as `[object Object]`). Only when `E` is bound once in the whole module, never
+/// assigned, and `D` is bound once (the class itself), so the rename cannot cross a shadow.
+// ponytail: alias-only; a `cond ? D : D` callee stays untyped, needs a class-union type.
+fn resolve_class_value_aliases(module: &Module) -> Module {
+    use swc_ecma_ast::{
+        AssignExpr, AssignTarget, BindingIdent, ClassDecl, ClassExpr, Expr, FnDecl, FnExpr,
+        ForHead, Ident, ImportDefaultSpecifier, ImportNamedSpecifier, ImportStarAsSpecifier, Pat,
+        SimpleAssignTarget, UpdateExpr, VarDecl, VarDeclKind,
+    };
+    use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+
+    #[derive(Default)]
+    struct Bindings(HashMap<String, usize>);
+    impl Bindings {
+        fn bind(&mut self, name: &str) {
+            *self.0.entry(name.to_string()).or_default() += 1;
+        }
+    }
+    impl Visit for Bindings {
+        fn visit_binding_ident(&mut self, binding: &BindingIdent) {
+            self.bind(&binding.id.sym);
+        }
+        fn visit_fn_decl(&mut self, declaration: &FnDecl) {
+            self.bind(&declaration.ident.sym);
+            declaration.function.visit_with(self);
+        }
+        fn visit_class_decl(&mut self, declaration: &ClassDecl) {
+            self.bind(&declaration.ident.sym);
+            declaration.class.visit_with(self);
+        }
+        fn visit_fn_expr(&mut self, expression: &FnExpr) {
+            if let Some(ident) = &expression.ident {
+                self.bind(&ident.sym);
+            }
+            expression.function.visit_with(self);
+        }
+        fn visit_class_expr(&mut self, expression: &ClassExpr) {
+            if let Some(ident) = &expression.ident {
+                self.bind(&ident.sym);
+            }
+            expression.class.visit_with(self);
+        }
+        fn visit_import_named_specifier(&mut self, specifier: &ImportNamedSpecifier) {
+            self.bind(&specifier.local.sym);
+        }
+        fn visit_import_default_specifier(&mut self, specifier: &ImportDefaultSpecifier) {
+            self.bind(&specifier.local.sym);
+        }
+        fn visit_import_star_as_specifier(&mut self, specifier: &ImportStarAsSpecifier) {
+            self.bind(&specifier.local.sym);
+        }
+    }
+
+    // Names an assignment writes to. A member target assigns no name, so it is skipped.
+    #[derive(Default)]
+    struct Idents(Vec<String>);
+    impl Visit for Idents {
+        fn visit_ident(&mut self, ident: &Ident) {
+            self.0.push(ident.sym.to_string());
+        }
+    }
+    #[derive(Default)]
+    struct Assigned(HashSet<String>);
+    impl Assigned {
+        fn collect(&mut self, visit: impl FnOnce(&mut Idents)) {
+            let mut idents = Idents::default();
+            visit(&mut idents);
+            self.0.extend(idents.0);
+        }
+    }
+    impl Visit for Assigned {
+        fn visit_assign_expr(&mut self, assign: &AssignExpr) {
+            if !matches!(
+                &assign.left,
+                AssignTarget::Simple(SimpleAssignTarget::Member(_))
+            ) {
+                self.collect(|idents| assign.left.visit_with(idents));
+            }
+            assign.visit_children_with(self);
+        }
+        fn visit_update_expr(&mut self, update: &UpdateExpr) {
+            self.collect(|idents| update.arg.visit_with(idents));
+            update.visit_children_with(self);
+        }
+        fn visit_for_head(&mut self, head: &ForHead) {
+            if let ForHead::Pat(pattern) = head {
+                self.collect(|idents| pattern.visit_with(idents));
+            }
+            head.visit_children_with(self);
+        }
+    }
+
+    #[derive(Default)]
+    struct Declarations(Vec<(String, String)>);
+    impl Visit for Declarations {
+        fn visit_var_decl(&mut self, declaration: &VarDecl) {
+            if declaration.kind != VarDeclKind::Var {
+                for declarator in &declaration.decls {
+                    let (Pat::Ident(name), Some(init)) = (&declarator.name, &declarator.init)
+                    else {
+                        continue;
+                    };
+                    if let (None, Expr::Ident(target)) = (&name.type_ann, init.as_ref()) {
+                        self.0
+                            .push((name.id.sym.to_string(), target.sym.to_string()));
+                    }
+                }
+            }
+            declaration.visit_children_with(self);
+        }
+    }
+
+    let mut bindings = Bindings::default();
+    module.visit_with(&mut bindings);
+    let once = |name: &str| bindings.0.get(name) == Some(&1);
+    let mut classes = HashSet::new();
+    for item in &module.body {
+        let class = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))) => class,
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(swc_ecma_ast::ExportDecl {
+                decl: Decl::Class(class),
+                ..
+            })) => class,
+            _ => continue,
+        };
+        if once(&class.ident.sym) {
+            classes.insert(class.ident.sym.to_string());
+        }
+    }
+    let mut assigned = Assigned::default();
+    module.visit_with(&mut assigned);
+    let mut declarations = Declarations::default();
+    module.visit_with(&mut declarations);
+    let aliases: HashMap<String, String> = declarations
+        .0
+        .into_iter()
+        .filter(|(alias, target)| {
+            alias != target
+                && once(alias)
+                && classes.contains(target)
+                && !assigned.0.contains(alias)
+        })
+        .collect();
+    if aliases.is_empty() {
+        return module.clone();
+    }
+
+    struct Route<'a>(&'a HashMap<String, String>);
+    impl VisitMut for Route<'_> {
+        fn visit_mut_expr(&mut self, expression: &mut Expr) {
+            expression.visit_mut_children_with(self);
+            let Expr::New(construction) = expression else {
+                return;
+            };
+            let Expr::Ident(callee) = construction.callee.as_mut() else {
+                return;
+            };
+            if let Some(class) = self.0.get(callee.sym.as_ref()) {
+                callee.sym = class.as_str().into();
+            }
+        }
+    }
+    let mut routed = module.clone();
+    routed.visit_mut_with(&mut Route(&aliases));
+    routed
 }
 
 /// `new.target` inside a class constructor. The instance's nominal identity is registered before
