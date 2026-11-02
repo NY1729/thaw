@@ -782,6 +782,75 @@ impl<'a> FnLowerer<'a> {
             .map(Some)
     }
 
+    /// `for...of` over an array literal of callbacks that share parameters but not a result
+    /// type: each callback is wrapped to box its result as `Json`, then the literal is
+    /// coerced to the common `Array(element)` type.
+    pub(in crate::lower) fn coerce_literal_array_for_iteration(
+        &mut self,
+        element: &HirType,
+        values: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let HirExpr::ArrayLit(items) = values else {
+            return self.coerce_to_declared(&HirType::Array(Box::new(element.clone())), values);
+        };
+        let mut adapted = Vec::with_capacity(items.len());
+        for item in items {
+            let item = match self.adapt_callback_result_to_json(element, &item)? {
+                Some(wrapped) => wrapped,
+                None => item,
+            };
+            adapted.push(item);
+        }
+        self.coerce_to_declared(&HirType::Array(Box::new(element.clone())), HirExpr::ArrayLit(adapted))
+    }
+
+    fn adapt_callback_result_to_json(
+        &mut self,
+        declared: &HirType,
+        value: &HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let HirType::Function(declared_params, declared_ret) = declared else {
+            return Ok(None);
+        };
+        if declared_ret.as_ref() != &HirType::Json {
+            return Ok(None);
+        }
+        let Ok(HirType::Function(actual_params, actual_ret)) = self.infer_expr_type(value) else {
+            return Ok(None);
+        };
+        if actual_params != *declared_params || *actual_ret == HirType::Json {
+            return Ok(None);
+        }
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let callback_name = format!("__thaw_result_adapter_callback_{id}");
+        let callback_type = HirType::Function(actual_params.clone(), actual_ret.clone());
+        self.scope.insert(callback_name.clone(), callback_type.clone());
+        let params: Vec<HirParam> = declared_params.iter().enumerate()
+            .map(|(index, ty)| HirParam { name: format!("__thaw_result_adapter_arg_{id}_{index}"), ty: ty.clone() })
+            .collect();
+        let call = HirExpr::Call(
+            Box::new(HirExpr::Var(callback_name.clone())),
+            params.iter().map(|param| HirExpr::Var(param.name.clone())).collect(),
+        );
+        // A callback with no result (`() => { throw ... }`) yields `undefined` in the slot.
+        let body = if *actual_ret == HirType::Void {
+            let undefined = self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Undefined))?;
+            HirExpr::Block(vec![HirStmt::Expr(call), HirStmt::Return(Some(undefined))])
+        } else {
+            self.coerce_to_declared(&HirType::Json, call)?
+        };
+        let adapter = HirExpr::Lambda(
+            vec![HirParam { name: callback_name.clone(), ty: callback_type.clone() }],
+            params,
+            HirType::Json,
+            Box::new(body),
+        );
+        let closure = HirExpr::TypedClosure(declared.clone(), Box::new(adapter));
+        self.wrap_call_argument_bindings(closure, &[(callback_name, callback_type, value.clone())])
+            .map(Some)
+    }
+
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
         // A slot typed through a class back-edge coerces to the layout it names; a value that
         // already has that layout (modulo back-edges) needs no conversion.
