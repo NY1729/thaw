@@ -2609,3 +2609,71 @@ var __thaw_bundle_entry_key = "node:module";
         Native::Str("undefined".into())
     );
 }
+
+/// A primitive rejection packet: only its value tag and payload words are set (no object, native or
+/// aggregate identity). The owned result text is the `[native exception value]` placeholder.
+fn primitive_exception_packet(
+    tag: i64,
+    number: f64,
+    bigint: i64,
+    boolean: bool,
+    object: usize,
+) -> thaw_arena::exception::ExceptionPacket {
+    thaw_arena::exception::ExceptionPacket {
+        id: 0,
+        pending: 0,
+        native_text: 0,
+        native_error_identity: 0,
+        object,
+        native: 0,
+        aggregate: 0,
+        tag,
+        number: number.to_bits(),
+        bigint: bigint as u64,
+        boolean: u64::from(boolean),
+        _roots: Vec::new(),
+        _owned_bytes: Vec::new(),
+        _leases: Vec::new(),
+    }
+}
+
+/// Runs a callback result that carries `packet` through the host's result unwrapping.
+fn take_exception_packet(packet: thaw_arena::exception::ExceptionPacket) -> Ctl {
+    let pointer = thaw_arena::owned_string(b"\x02[native exception value]");
+    let (_, packet) = thaw_arena::exception::register_packet(packet).unwrap();
+    assert!(thaw_arena::bind_owned_exception(pointer, packet));
+    let mut it = Interp::new();
+    match crate::host::take_callback_result(&mut it, pointer) {
+        Err(ctl) => ctl,
+        Ok(text) => panic!("expected a throw, got {text:?}"),
+    }
+}
+
+#[test]
+fn exception_packet_primitive_number_zero_survives() {
+    // `throw 0`: the falsy reason must reach the JS side as the number 0, not an Error.
+    let ctl = take_exception_packet(primitive_exception_packet(1, 0.0, 0, false, 0));
+    assert!(matches!(ctl, Ctl::Throw(Value::Number(n)) if n == 0.0));
+}
+
+#[test]
+fn exception_packet_primitive_tags_keep_their_values() {
+    let bool_false = take_exception_packet(primitive_exception_packet(3, 0.0, 0, false, 0));
+    assert!(matches!(bool_false, Ctl::Throw(Value::Bool(false))));
+    let undef = take_exception_packet(primitive_exception_packet(5, 0.0, 0, false, 0));
+    assert!(matches!(undef, Ctl::Throw(Value::Undefined)));
+    let null = take_exception_packet(primitive_exception_packet(6, 0.0, 0, false, 0));
+    assert!(matches!(null, Ctl::Throw(Value::Null)));
+    let big = take_exception_packet(primitive_exception_packet(2, 0.0, -7, false, 0));
+    assert!(matches!(
+        big,
+        Ctl::Throw(Value::BigInt(b)) if *b == num_bigint::BigInt::from(-7)
+    ));
+}
+
+#[test]
+fn exception_packet_with_object_identity_stays_an_error() {
+    // An object-identity packet is not a primitive: it keeps the Error path (never the tag value).
+    let ctl = take_exception_packet(primitive_exception_packet(1, 0.0, 0, false, 8));
+    assert!(matches!(ctl, Ctl::Throw(Value::Object(_))));
+}

@@ -2711,8 +2711,30 @@ fn throw_type_error<T>(it: &mut Interp, message: &str) -> R<T> {
     it.throw_error("TypeError", message)
 }
 
+/// The exact value of a thrown or rejected primitive (`throw 0`, `throw false`, `reject(undefined)`).
+/// It has no object, native or aggregate identity, so its type is the packet's value tag. The tags
+/// are the compiled runtime's (`hir_codegen/statements.rs` unions 1 number, 2 bigint, 3 bool, 5
+/// undefined, 6 null) and match thaw-quickjs `reconstitute_exception_packet`. Tag 4 (text) is not
+/// mapped here: a string throw keeps the existing Error path.
+fn primitive_reason(packet: &thaw_arena::exception::ExceptionPacket) -> Option<Value> {
+    if packet.object != 0 || packet.native != 0 || packet.aggregate != 0 {
+        return None;
+    }
+    Some(match packet.tag {
+        1 => Value::Number(f64::from_bits(packet.number)),
+        2 => Value::BigInt(Rc::new(num_bigint::BigInt::from(packet.bigint as i64))),
+        3 => Value::Bool(packet.boolean != 0),
+        5 => Value::Undefined,
+        6 => Value::Null,
+        _ => return None,
+    })
+}
+
 /// Unwrap a callback result string: a thrown error (arena packet or `\u{2}` framing) becomes a JS throw.
-fn take_callback_result(it: &mut Interp, result: *mut c_char) -> Result<Option<String>, Ctl> {
+pub(crate) fn take_callback_result(
+    it: &mut Interp,
+    result: *mut c_char,
+) -> Result<Option<String>, Ctl> {
     let packet = thaw_arena::take_owned_exception(result);
     let out = if result.is_null() {
         String::new()
@@ -2725,6 +2747,9 @@ fn take_callback_result(it: &mut Interp, result: *mut c_char) -> Result<Option<S
     };
     if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
         eprintln!("thaw-js callback result: {out:?}");
+    }
+    if let Some(reason) = packet.as_deref().and_then(primitive_reason) {
+        return Err(Ctl::Throw(reason));
     }
     if packet.is_some() || out.starts_with('\u{2}') {
         return Err(tagged_error(it, &out));
