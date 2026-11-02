@@ -1962,3 +1962,14 @@ fn commonjs_globals_get_an_es_import_hint() {
     let error = lower_module(&module).unwrap_err();
     assert!(error.contains("`require` (CommonJS) is not supported; use ES `import`"), "{error}");
 }
+
+#[test]
+fn typeof_commonjs_globals_lower_to_undefined_like_esm() {
+    let module = thaw_parser::parse_typescript(
+        "function main(): void { console.log(typeof require, typeof module, typeof exports); }",
+    )
+    .unwrap();
+    if let Err(error) = lower_module(&module) {
+        panic!("{error}");
+    }
+}
