@@ -405,3 +405,26 @@ fn thaw_js_bundle_form_wraps_plain_scripts_and_keeps_registered_forms() {
     let wrapped = thaw_js_bundle_form(&forms, "node:y", "module.exports = 1;");
     assert!(thaw_js::scan::scan_bundle(&wrapped).unwrap().is_clean());
 }
+
+#[test]
+fn thaw_js_blockers_name_the_declaration_that_kept_the_package_on_quickjs() {
+    let (dir, registry, entry) = thaw_js_fixture(
+        "blockers",
+        "import { apply } from 'tjs-kit';\n\
+         function main(): void { console.log(apply([1, 2], (x: number): number => x * 2)); }\n",
+    );
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    // The callback parameter keeps `apply` (and so the package) on QuickJS; the existing keys stay.
+    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!([]));
+    let blockers = manifest["thaw_js_blockers"].as_array().unwrap();
+    assert!(
+        blockers.iter().any(|blocker| {
+            blocker["package"] == "tjs-kit"
+                && blocker["why"].as_str().is_some_and(|why| why.contains("apply"))
+        }),
+        "{manifest}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
