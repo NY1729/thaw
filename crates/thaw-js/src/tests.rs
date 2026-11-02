@@ -1415,6 +1415,42 @@ fn a_date_crosses_the_typed_abi_as_a_wire_node_both_ways() {
     );
 }
 
+const CONTEXTS: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"cx/index.js": function(module, exports, require) {
+  var seen = new WeakSet();
+  exports.create = function (o) { var c = o === undefined ? {} : o; seen.add(c); return c; };
+  exports.has = function (c) { return seen.has(c); };
+},
+};
+var __thaw_bundle_require_maps = { "cx/index.js": {}, };
+var __thaw_bundle_entry_key = "cx/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn a_returned_object_keeps_its_identity_only_behind_a_handle() {
+    use std::ffi::CString;
+    let bundle = CString::new(CONTEXTS).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"cx".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    // `\u{2}` = a JsValue result: the object stays in the thaw-js heap, the caller gets its handle id
+    let id: i64 = typed_call("\u{2}cx::create", "[{\"a\":1}]")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let marker = format!("[{{\"__thaw_tjs_handle__\":{id}}}]");
+    assert_eq!(typed_call("cx::has", &marker).unwrap(), "true");
+    // a plain-data (Json) result is a copy: the realm does not recognise it when it comes back
+    assert_eq!(
+        typed_call("cx::create", "[{\"a\":1}]").unwrap(),
+        "{\"a\":1}"
+    );
+    assert_eq!(typed_call("cx::has", "[{\"a\":1}]").unwrap(), "false");
+    assert_eq!(crate::host::thaw_tjs_release_handle(id), 1);
+}
+
 #[test]
 fn graph_wire_date_bigint_regexp_map_and_set_nodes_decode() {
     use crate::host::*;

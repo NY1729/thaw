@@ -99,6 +99,12 @@ fn thaw_js_retarget_alias(alias: String, thaw_js_package: bool) -> String {
     }
 }
 
+/// Builtins whose typed declarations keep an opaque `JsValue` on thaw-js: node:vm hands the same
+/// context object back in later calls, so a plain-data copy (`Json`) would lose its identity.
+fn thaw_js_keeps_js_value(package: &str) -> bool {
+    package == "node:vm"
+}
+
 /// Whether a generated `declare function __thaw_typed_js_*` line only mentions types that cross the
 /// thaw-js JSON boundary: `number`, `string`, `boolean`, `Json`, `void`, `null`, `undefined`, its own
 /// type parameters, unions/array/object-literal shapes of those, and an opaque `JsValue` (a type the
