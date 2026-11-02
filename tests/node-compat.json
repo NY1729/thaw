@@ -4676,22 +4676,22 @@
     {
       "name": "r6b top-level string append stays linear and keeps aliases",
       "expect": "matched",
-      "source": "let s = \"\";\nfor (let i = 0; i < 300000; i++) { s += \"x\"; }\nconst t = s;\ns += \"y\";\nconsole.log(s.length, t.length, t === s.slice(0, -1));\n"
+      "source": "function main(): void {\n  let s = \"\";\n  for (let i = 0; i < 300000; i++) { s += \"x\"; }\n  const t = s;\n  s += \"y\";\n  console.log(s.length, t.length, t === s.slice(0, -1));\n}\n"
     },
     {
       "name": "r6b top-level string global read by a function keeps snapshots",
       "expect": "matched",
-      "source": "let g = \"\";\nconst seen: string[] = [];\nfunction peek(): string { return g; }\nfor (let i = 0; i < 4; i++) { g += \"x\"; seen.push(peek()); }\nconsole.log(seen.join(\",\"), g);\n"
+      "source": "function main(): void {\n  let g = \"\";\n  const seen: string[] = [];\n  function peek(): string { return g; }\n  for (let i = 0; i < 4; i++) { g += \"x\"; seen.push(peek()); }\n  console.log(seen.join(\",\"), g);\n}\n"
     },
     {
       "name": "r6b realm timer and global function names and lengths",
       "expect": "matched",
-      "source": "const g: any = globalThis;\nconsole.log([\"queueMicrotask\", \"structuredClone\", \"atob\", \"btoa\", \"setTimeout\", \"setInterval\", \"setImmediate\", \"clearTimeout\", \"clearInterval\", \"clearImmediate\"].map((k) => k + \":\" + g[k].name + \"/\" + g[k].length).join(\" \"));\nconsole.log(process.emitWarning.length, queueMicrotask.name);\n"
+      "source": "function main(): void {\n  const g: any = globalThis;\n  console.log([\"queueMicrotask\", \"structuredClone\", \"atob\", \"btoa\", \"setTimeout\", \"setInterval\", \"setImmediate\", \"clearTimeout\", \"clearInterval\", \"clearImmediate\"].map((k) => k + \":\" + g[k].name + \"/\" + g[k].length).join(\" \"));\n  console.log(process.emitWarning.length, queueMicrotask.name);\n}\n"
     },
     {
       "name": "r6b computed-key object methods named after their keys",
       "expect": "matched",
-      "source": "const k = \"dyn\";\nconst o = { [k + \"1\"]: 1, [`t${2}`]: 2, f() { return this; } };\nconsole.log(o, o.f() === o);\nconsole.log({ [k]() { return 1; }, y: 2 });\n"
+      "source": "function main(): void {\n  const k = \"dyn\";\n  const o = { [k + \"1\"]: 1, [`t${2}`]: 2, f() { return this; } };\n  console.log(o, o.f() === o);\n  console.log({ [k]() { return 1; }, y: 2 });\n}\n"
     },
     {
       "name": "r6b URL and URLSearchParams console inspect",
