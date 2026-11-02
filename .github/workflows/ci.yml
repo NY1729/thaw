@@ -193,12 +193,11 @@ jobs:
           MANIFESTS: ${{ matrix.manifests }}
           GROUP: ${{ matrix.group }}
         run: |
-          cargo build -p thaw-cli
           if [[ "$GROUP" == others ]]; then
-            target/debug/thaw compat tests/typescript-compat.json
+            cargo run -p thaw-cli -- compat tests/typescript-compat.json
           fi
           for m in $MANIFESTS; do
-            target/debug/thaw node-compat "tests/$m.json"
+            cargo run -p thaw-cli -- node-compat "tests/$m.json"
           done
       - name: Collect diagnostics
         if: always()
