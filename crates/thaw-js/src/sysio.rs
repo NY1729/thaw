@@ -474,8 +474,9 @@ impl Interp {
 // ----- `globalThis.__thaw_fs(operation, path, value, recursive)` -----
 // The synchronous subset of the QuickJS host's filesystem bridge that the registry's `node:fs`
 // shim needs for whole-file reads/writes, directory listing and stat. Descriptor operations
-// (string-flag `fd_open` and read/write/stat), chown/utimes/statfs/link/cp and friends answer ENOSYS.
-// ponytail: add the remaining operations when a package needs them (fd_*, utimes, link, cp).
+// (string-flag `fd_open` and read/write/stat), chown/lchown, cp, mkdtemp and friends answer ENOSYS.
+// ponytail: add the rest when a package needs them; chown/lchown stay ENOSYS until the pinned test
+// `os_tty_process_and_fs_host_functions` is updated (it asserts ENOSYS for chown).
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -767,7 +768,117 @@ fn fd_op(op: &str, p: &std::path::Path, path: &str, value: &str) -> std::io::Res
 }
 
 #[cfg(unix)]
-fn host_fs(op: &str, path: &str, value: &str, recursive: bool) -> String {
+fn fs_invalid(message: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, message.to_string())
+}
+
+#[cfg(unix)]
+fn fs_c_path(p: &std::path::Path) -> std::io::Result<std::ffi::CString> {
+    std::ffi::CString::new(name_bytes(p.as_os_str()))
+        .map_err(|_| fs_invalid("path contains a NUL byte"))
+}
+
+#[cfg(unix)]
+fn fs_parse_mode(value: &str) -> std::io::Result<u32> {
+    match value.parse::<u32>() {
+        Ok(mode) if mode <= 0o7777 => Ok(mode),
+        _ => Err(fs_invalid("invalid file mode")),
+    }
+}
+
+#[cfg(unix)]
+fn fs_timespec(value: Option<&str>) -> std::io::Result<libc::timespec> {
+    let seconds = value
+        .ok_or_else(|| fs_invalid("missing timestamp"))?
+        .parse::<f64>()
+        .map_err(|_| fs_invalid("invalid timestamp"))?;
+    if !seconds.is_finite() {
+        return Err(fs_invalid("invalid timestamp"));
+    }
+    let mut sec = seconds.trunc() as i128;
+    let mut nsec = ((seconds - sec as f64) * 1_000_000_000.0).trunc() as i128;
+    if nsec < 0 {
+        sec -= 1;
+        nsec += 1_000_000_000;
+    } else if nsec >= 1_000_000_000 {
+        sec += 1;
+        nsec -= 1_000_000_000;
+    }
+    if sec < libc::time_t::MIN as i128
+        || sec > libc::time_t::MAX as i128
+        || !(0..1_000_000_000).contains(&nsec)
+    {
+        return Err(fs_invalid("timestamp out of range"));
+    }
+    Ok(libc::timespec {
+        tv_sec: sec as libc::time_t,
+        tv_nsec: nsec as libc::c_long,
+    })
+}
+
+#[cfg(unix)]
+fn fs_path_utimes(p: &std::path::Path, value: &str, flags: libc::c_int) -> std::io::Result<()> {
+    let mut values = value.split(',');
+    let times = [fs_timespec(values.next())?, fs_timespec(values.next())?];
+    let c = fs_c_path(p)?;
+    if unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), flags) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "aix"
+))]
+fn fs_statfs_type(c: &std::ffi::CString) -> std::io::Result<u64> {
+    let mut st = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(c.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { st.assume_init() }.f_type as u64)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "aix"
+)))]
+fn fs_statfs_type(_: &std::ffi::CString) -> std::io::Result<u64> {
+    Ok(0)
+}
+
+#[cfg(unix)]
+fn fs_statfs(p: &std::path::Path) -> std::io::Result<String> {
+    let c = fs_c_path(p)?;
+    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(c.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let st = unsafe { st.assume_init() };
+    let fs_type = fs_statfs_type(&c)?;
+    Ok(serde_json::json!({
+        "ok": true, "type": fs_type, "bsize": st.f_bsize, "blocks": st.f_blocks,
+        "bfree": st.f_bfree, "bavail": st.f_bavail, "files": st.f_files, "ffree": st.f_ffree,
+        "exact": {
+            "type": fs_type.to_string(), "bsize": st.f_bsize.to_string(), "blocks": st.f_blocks.to_string(),
+            "bfree": st.f_bfree.to_string(), "bavail": st.f_bavail.to_string(),
+            "files": st.f_files.to_string(), "ffree": st.f_ffree.to_string(),
+        },
+    })
+    .to_string())
+}
+
+#[cfg(unix)]
+pub(crate) fn host_fs(op: &str, path: &str, value: &str, recursive: bool) -> String {
     let (op, raw_value) = op
         .strip_suffix("_raw_value")
         .map_or((op, false), |b| (b, true));
@@ -855,6 +966,24 @@ fn host_fs(op: &str, path: &str, value: &str, recursive: bool) -> String {
                 hex(&name_bytes(r.as_os_str()))
             )
         }),
+        "chmod" => ok(fs_parse_mode(value).and_then(|mode| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode))
+        })),
+        "symlink" => ok(std::os::unix::fs::symlink(&p, &v)),
+        "link" => ok(std::fs::hard_link(&p, &v)),
+        "truncate" => ok(value
+            .parse::<u64>()
+            .map_err(|_| fs_invalid("invalid truncate length"))
+            .and_then(|len| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&p)
+                    .and_then(|f| f.set_len(len))
+            })),
+        "utimes" => ok(fs_path_utimes(&p, value, 0)),
+        "lutimes" => ok(fs_path_utimes(&p, value, libc::AT_SYMLINK_NOFOLLOW)),
+        "statfs" => fs_statfs(&p),
         _ => Err(std::io::Error::from_raw_os_error(libc::ENOSYS)),
     };
     result.unwrap_or_else(|e| fs_err(op, path, &e))
