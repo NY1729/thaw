@@ -1,5 +1,12 @@
   if (typeof globalThis.URLSearchParams !== 'function') {
     const encodeFormPart = value => encodeURIComponent(String(value)).replace(/[!'()~]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase()).replace(/%20/g, '+');
+    const inspectSymbol = Symbol.for('nodejs.util.inspect.custom');
+    // Quotes a string the way util.inspect does: single quotes unless the text has one.
+    const inspectQuote = value => {
+      const text = String(value);
+      const quote = text.indexOf("'") < 0 ? "'" : text.indexOf('"') < 0 ? '"' : text.indexOf('`') < 0 ? '`' : "'";
+      return quote + text.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').split(quote).join(quote === "'" ? "\\'" : quote) + quote;
+    };
     const decodeFormPart = value => {
       const source = new TextEncoder().encode(String(value).replace(/\+/g, ' '));
       const bytes = [];
@@ -93,11 +100,26 @@
           callback.call(thisArg, entry[1], entry[0], this);
         }
       }
+      [inspectSymbol](depth, options) {
+        const name = this.constructor.name;
+        const out = this.__thawEntries.map(entry => inspectQuote(entry[0]) + ' => ' + inspectQuote(entry[1]));
+        if (out.length === 0) return name + ' {}';
+        const width = out.reduce((total, text) => total + text.length + 2, -2);
+        if (width > ((options && options.breakLength) || 80)) return name + ' {\n  ' + out.join(',\n  ') + '\n}';
+        return name + ' { ' + out.join(', ') + ' }';
+      }
       toString() { return this.__thawEntries.map(entry => encodeFormPart(entry[0]) + '=' + encodeFormPart(entry[1])).join('&'); }
       [Symbol.iterator]() { return this.entries(); }
     };
   }
   if (typeof globalThis.URL !== 'function') {
+    const inspectSymbol = Symbol.for('nodejs.util.inspect.custom');
+    // Quotes a string the way util.inspect does: single quotes unless the text has one.
+    const inspectQuote = value => {
+      const text = String(value);
+      const quote = text.indexOf("'") < 0 ? "'" : text.indexOf('"') < 0 ? '"' : text.indexOf('`') < 0 ? '`' : "'";
+      return quote + text.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').split(quote).join(quote === "'" ? "\\'" : quote) + quote;
+    };
     const toUSV = value => {
       const source = String(value);
       let output = '';
@@ -171,6 +193,14 @@
         const parsed = parseURL(toUSV(value), '', false);
         if (parsed === null) throw invalidURLError(value);
         this.__thawCommit(parsed);
+      }
+      [inspectSymbol](depth, options) {
+        const rows = ['href', 'origin', 'protocol', 'username', 'password', 'host', 'hostname', 'port', 'pathname', 'search', 'searchParams', 'hash'];
+        const lines = rows.map(key => {
+          const value = key === 'searchParams' ? this.searchParams[inspectSymbol](depth, options) : inspectQuote(this[key]);
+          return '  ' + key + ': ' + String(value).split('\n').join('\n  ');
+        });
+        return 'URL {\n' + lines.join(',\n') + '\n}';
       }
       toString() { return this.href; }
       toJSON() { return this.href; }

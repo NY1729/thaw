@@ -20,6 +20,16 @@ const PLATFORM_GLOBALS: &str = concat!(
   var keep = { global: 1, clearImmediate: 1, setImmediate: 1, clearInterval: 1, clearTimeout: 1,
     setInterval: 1, setTimeout: 1, queueMicrotask: 1, structuredClone: 1, atob: 1, btoa: 1,
     performance: 1, fetch: 1, navigator: 1, crypto: 1 };
+  var shape = { clearImmediate: 1, setImmediate: 1, clearInterval: 1, clearTimeout: 1, setInterval: 2,
+    setTimeout: 2, queueMicrotask: 1, structuredClone: 2, atob: 1, btoa: 1 };
+  Object.keys(shape).forEach(function (key) {
+    var fn = globalThis[key];
+    if (typeof fn !== 'function') return;
+    try {
+      Object.defineProperty(fn, 'name', { value: key, configurable: true });
+      Object.defineProperty(fn, 'length', { value: shape[key], configurable: true });
+    } catch (e) {}
+  });
   Object.keys(globalThis).forEach(function (key) {
     var descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
     if (!keep[key] && descriptor && descriptor.configurable) {
