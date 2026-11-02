@@ -1192,14 +1192,15 @@ const THAW_JS_PACKAGE_MARK: &str = "tjs!";
 
 /// Retargets a QuickJS typed declaration to thaw-js: symbols get the `tjs` prefix and an opaque
 /// `JsValue` result (an `any`-typed return, never a class instance: the routing scan rules those
-/// out) becomes plain `Json`, since thaw-js returns plain data by value.
-fn thaw_js_retarget(symbol: String, declaration: String) -> (String, String) {
+/// out) becomes plain `Json`, since thaw-js returns plain data by value. Packages in
+/// `thaw_js_keeps_js_value` keep `JsValue`, so their objects stay live handles.
+fn thaw_js_retarget(symbol: String, declaration: String, keep_js_value: bool) -> (String, String) {
     (
         // (Generated wrapper names keep `__thaw_typed_wrapper_js_`: thaw-hir recognizes them by it.)
         symbol.replace("__thaw_typed_js_", "__thaw_typed_tjs_"),
         declaration
             .replace("__thaw_typed_js_", "__thaw_typed_tjs_")
-            .replace("JsValue", "Json"),
+            .replace("JsValue", if keep_js_value { "JsValue" } else { "Json" }),
     )
 }
 
@@ -1214,7 +1215,9 @@ fn typed_dynamic_declaration(
         Some(real) => typed_dynamic_declaration_for_quickjs(
             real, function, napi, observed_call_arities, overload_suffix,
         )
-        .map(|(symbol, declaration)| thaw_js_retarget(symbol, declaration)),
+        .map(|(symbol, declaration)| {
+            thaw_js_retarget(symbol, declaration, thaw_js_keeps_js_value(real))
+        }),
         None => typed_dynamic_declaration_for_quickjs(
             package, function, napi, observed_call_arities, overload_suffix,
         ),
