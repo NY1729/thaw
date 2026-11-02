@@ -1227,9 +1227,9 @@ fn build_with_native_mode_routed(
             // TLS/WASM/runtime sections alive and bloats dynamic symbol tables.
             linker.args(napi_export_args());
         }
-        if uses_quickjs {
+        if native_poll_exports_needed(uses_quickjs, compiler.uses_thaw_js()) {
             // Promise-valued native callbacks poll these through RTLD_DEFAULT
-            // while they reenter the active QuickJS context.
+            // while they reenter the active QuickJS or thaw-js context.
             linker.args(quickjs_callback_export_args());
         }
     }
@@ -1562,6 +1562,12 @@ fn quickjs_callback_export_args() -> [&'static str; 4] {
     ]
 }
 
+/// thaw-js native-promise bridging also looks these symbols up via RTLD_DEFAULT,
+/// so a thaw-js routed build needs the same dynamic exports as a QuickJS build.
+fn native_poll_exports_needed(uses_quickjs: bool, uses_thaw_js: bool) -> bool {
+    uses_quickjs || uses_thaw_js
+}
+
 fn lld_available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *AVAILABLE.get_or_init(|| {
@@ -1622,6 +1628,13 @@ fn quickjs_callbacks_export_only_their_runtime_poll_symbols() {
             "-Wl,--export-dynamic-symbol=thaw_promise_mark_handled",
         ]
     );
+}
+
+#[test]
+fn native_poll_exports_needed_for_quickjs_or_thaw_js() {
+    assert!(native_poll_exports_needed(true, false));
+    assert!(native_poll_exports_needed(false, true));
+    assert!(!native_poll_exports_needed(false, false));
 }
 
 #[test]
