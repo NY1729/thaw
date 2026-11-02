@@ -4717,6 +4717,11 @@
       "name": "r6a default-imported node assert called directly",
       "expect": "matched",
       "source": "import assert from \"node:assert\";\nfunction main(): void {\n  try { assert(null); } catch (e: any) { console.log(e.name); }\n  assert(1);\n  console.log(\"ok\");\n}"
+    },
+    {
+      "name": "r8a typeof CommonJS globals is undefined in an ES module",
+      "expect": "matched",
+      "source": "export const x = 1;\nfunction main(): void { console.log(typeof require, typeof module, typeof exports, typeof Nope); }"
     }
   ]
 }
