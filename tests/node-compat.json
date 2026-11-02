@@ -4737,6 +4737,11 @@
       "name": "r9c class alias resolves to the class for new",
       "expect": "matched",
       "source": "class D { q = 1 }\nconst E = D;\nfunction main(): void { const L = D; console.log(new E(), new L().q); }"
+    },
+    {
+      "name": "round8 for...of over mixed closures with a throwing one caught in the body",
+      "expect": "matched",
+      "source": "function main(): void { for (const f of [() => { throw new Error(\"one\"); }, () => 2]) { try { console.log(f()); } catch (e) { console.log(\"caught\", (e as Error).message); } } }"
     }
   ]
 }
