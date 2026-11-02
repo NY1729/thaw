@@ -4757,6 +4757,11 @@
       "name": "round9 JSON array assigned to undefined[] keeps its length",
       "expect": "matched",
       "source": "function main(): void { const j: any = JSON.parse('[1,2]'); const a: undefined[] = j; console.log(a.length); }"
+    },
+    {
+      "name": "round10 generator object and array iterator print as Node inspects them",
+      "expect": "matched",
+      "source": "function* g(): Generator<number> { yield 1; } function main(): void { console.log(g(), [1].values()); }"
     }
   ]
 }

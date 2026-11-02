@@ -848,3 +848,4 @@ include!("tests/fx23_class_alias_contracts.rs");
 include!("tests/tostring_tags_round8_contracts.rs");
 include!("tests/forof_tuple_round8.rs");
 include!("tests/undefined_json_array_round9.rs");
+include!("tests/iterator_inspect_round10.rs");
