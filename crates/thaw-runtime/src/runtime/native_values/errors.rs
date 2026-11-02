@@ -614,7 +614,8 @@ unsafe fn error_stack(message: *const c_char, frames: bool) -> *const c_char {
 /// Whether `message`'s tagged identity chain includes `class_name`. Untagged
 /// values are primitive throws, not Error instances. A multi-level chain
 /// (`Sub\u{1f}MyError\u{1f}Error`) matches any ancestor's name, not just the most-derived
-/// one.
+/// one. A chain ending in the `\u{18}` sentinel is an error of another realm (a
+/// node:vm context), which is not an instance of any local class, not even `Error`.
 ///
 /// # Safety
 /// Both pointers must be null or a valid, NUL-terminated C string.
@@ -632,6 +633,9 @@ pub unsafe extern "C" fn thaw_error_is_instance(
         return false;
     }
     let (chain, _) = split_error_tag(&text);
+    if error_ancestry(chain).any(|name| name == "\u{18}") {
+        return false;
+    }
     class_name == "Error" || error_ancestry(chain).any(|name| name == class_name)
 }
 
@@ -1766,6 +1770,16 @@ mod error_native_tests {
         assert!(call_is_instance(tagged, "MyError"));
         assert!(call_is_instance(tagged, "Error"));
         assert!(!call_is_instance(tagged, "TypeError"));
+    }
+
+    #[test]
+    fn a_foreign_realm_chain_is_named_but_never_an_instance() {
+        let tagged = "\u{1}\u{1e}TypeError\u{1f}\u{18}\u{1}x\u{3}C";
+        assert_eq!(call_name(tagged), "TypeError");
+        assert_eq!(call_message(tagged), "x");
+        assert!(!call_is_instance(tagged, "Error"));
+        assert!(!call_is_instance(tagged, "TypeError"));
+        assert!(call_is_instance("\u{1}TypeError\u{1}x", "Error"));
     }
 
     #[test]

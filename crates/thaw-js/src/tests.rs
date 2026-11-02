@@ -745,6 +745,32 @@ fn thrown_errors_are_framed_with_name_message_code_and_properties() {
 }
 
 #[test]
+fn vm_sub_realm_errors_are_framed_as_foreign() {
+    use crate::host::{HostError, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.sub = function () { var id = __thaw_vm_create(); __thaw_vm_run(id, 'var e = new TypeError(\"x\"); e.code = \"C\"; throw e', 'f', 0, undefined, undefined); };\nexports.here = function () { __thaw_vm_run(-1, 'throw new TypeError(\"y\")', 'f', 0, undefined, undefined); };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    match p.call("sub", &[]) {
+        Err(HostError::Thrown(display)) => {
+            assert_eq!(display, "TypeError: x");
+            assert_eq!(
+                frame_text(&display),
+                "\u{1}\u{1e}TypeError\u{1f}\u{18}\u{1}x\u{3}C\u{5}{\"code\":\"C\"}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    match p.call("here", &[]) {
+        Err(HostError::Thrown(display)) => {
+            assert_eq!(frame_text(&display), "\u{1}TypeError\u{1}y");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn a_package_can_be_called_again_from_its_own_callback() {
     use crate::host::{
         thaw_tjs_call_typed_result, thaw_tjs_free, thaw_tjs_register, thaw_tjs_register_callback,
