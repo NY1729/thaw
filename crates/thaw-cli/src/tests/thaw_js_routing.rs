@@ -360,6 +360,7 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:constants",
         "node:url",
         "node:fs",
+        "node:vm",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
