@@ -4747,6 +4747,11 @@
       "name": "round8 for...of over mixed closures with a throwing one caught in the body",
       "expect": "matched",
       "source": "function main(): void { for (const f of [() => { throw new Error(\"one\"); }, () => 2]) { try { console.log(f()); } catch (e) { console.log(\"caught\", (e as Error).message); } } }"
+    },
+    {
+      "name": "invalid date inspect",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Date(NaN); console.log(d, [d], { d }); }"
     }
   ]
 }
