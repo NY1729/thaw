@@ -2805,6 +2805,24 @@ fn ordered_json(value: &Value) -> Value {
             time,
         )]));
     }
+    // A branded Map/Set wrapper crosses as `{"__thaw_tjs_map__": [[k, v], ...]}` /
+    // `{"__thaw_tjs_set__": [v, ...]}` so thaw-js rebuilds a real `Map`/`Set`.
+    if DATE_WIRE.with(Cell::get) && is_branded_wrapper(value) {
+        if let Some(fields) = value.as_object() {
+            if let Some(entries) = fields.get(b"__thaw_map_entries__".as_slice()) {
+                return Value::shared_object(indexmap::IndexMap::from([(
+                    b"__thaw_tjs_map__".to_vec(),
+                    ordered_json(entries),
+                )]));
+            }
+            if let Some(values) = fields.get(b"__thaw_set_values__".as_slice()) {
+                return Value::shared_object(indexmap::IndexMap::from([(
+                    b"__thaw_tjs_set__".to_vec(),
+                    ordered_json(values),
+                )]));
+            }
+        }
+    }
     match value {
         Value::Object(fields) => Value::shared_object(
             ordered_object_fields_shared(fields)
@@ -13121,6 +13139,24 @@ mod tests {
         assert_eq!(
             read_c_string(thaw_json_stringify(root)),
             r#"{"when":{"timestamp":86400000},"plain":{"timestamp":0}}"#
+        );
+    }
+
+    #[test]
+    fn tjs_stringify_writes_map_and_set_wrappers_as_wire_nodes() {
+        let root = thaw_json_object_new();
+        let map = thaw_json_brand_wrapper(parse(r#"{"__thaw_map_entries__":[["a",1]]}"#));
+        thaw_json_object_set_json(root, CString::new("m").unwrap().as_ptr(), map);
+        let set = thaw_json_brand_wrapper(parse(r#"{"__thaw_set_values__":[2,3]}"#));
+        thaw_json_object_set_json(root, CString::new("s").unwrap().as_ptr(), set);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_tjs(root)),
+            r#"{"m":{"__thaw_tjs_map__":[["a",1]]},"s":{"__thaw_tjs_set__":[2,3]}}"#
+        );
+        // the ordinary stringifier keeps the sentinel shape
+        assert_eq!(
+            read_c_string(thaw_json_stringify(root)),
+            r#"{"m":{"__thaw_map_entries__":[["a",1]]},"s":{"__thaw_set_values__":[2,3]}}"#
         );
     }
 
