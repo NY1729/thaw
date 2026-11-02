@@ -428,6 +428,14 @@ fn thaw_js_path_bundle(root_bundle: &str, builtin: &str) -> String {
         )
 }
 
+/// A `createHook({ init(..) {..} })` callback written as an object-literal member reaches thaw-js as
+/// `{}`: the methods are dropped by the dynamic-object operations builder, so no hook ever fires.
+/// Until that is fixed, a program that names `createHook` keeps `node:async_hooks` on QuickJS.
+fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
+    (pkg_name == "node:async_hooks" && thaw_js_mentions(user_source, "createHook"))
+        .then_some("createHook callbacks in an object literal are not marshalled to thaw-js yet")
+}
+
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
 /// feature scan, the program touches no class of it (those are live JavaScript objects), and
 /// every function the program mentions is a typed call whose declaration only carries plain data.
@@ -456,6 +464,9 @@ fn thaw_js_package_eligible(
     }
     if pkg.name.starts_with("node:") && !THAW_JS_BUILTIN_MODULES.contains(&pkg.name.as_str()) {
         return reject("builtin module not validated on thaw-js".into());
+    }
+    if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
+        return reject(why.into());
     }
     // A class the program names is served through thaw-js handles (`new`, instance and static
     // methods); every operation the shim declares for it must be plain data or an instance handle.
@@ -547,6 +558,15 @@ fn thaw_js_mentions_matches_whole_identifiers_only() {
     assert!(thaw_js_mentions("bcrypt.hash(a)", "hash"));
     assert!(thaw_js_mentions("import { $x } from 'p'", "$x"));
     assert!(thaw_js_mentions("ns.sub.hash(1)", "a.b.hash"));
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_async_hooks_create_hook_keeps_the_module_on_quickjs() {
+    let import = "import { createHook } from \"node:async_hooks\";";
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", import).is_some());
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", "new AsyncLocalStorage();").is_none());
+    assert!(thaw_js_async_hooks_blocker("node:path", import).is_none());
 }
 
 #[cfg(test)]
