@@ -843,3 +843,4 @@ include!("tests/fx15_types_contracts.rs");
 include!("tests/fx18_callback_storage_contracts.rs");
 
 include!("tests/fx21_constructor_return_contracts.rs");
+include!("tests/fx20_method_length_contracts.rs");
