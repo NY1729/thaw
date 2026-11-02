@@ -4757,6 +4757,11 @@
       "name": "round9 JSON array assigned to undefined[] keeps its length",
       "expect": "matched",
       "source": "function main(): void { const j: any = JSON.parse('[1,2]'); const a: undefined[] = j; console.log(a.length); }"
+    },
+    {
+      "name": "invalid date inspect",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Date(NaN); console.log(d, [d], { d }); }"
     }
   ]
 }

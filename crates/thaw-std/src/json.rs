@@ -5760,8 +5760,9 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                     }
                 }
                 if class.as_deref() == Some("Date") {
-                    if let Some(timestamp) =
-                        fields.get(b"timestamp".as_slice()).and_then(Value::as_f64)
+                    if let Some(timestamp) = fields
+                        .get(b"timestamp".as_slice())
+                        .and_then(|value| value.as_f64().or_else(|| non_finite_number(value)))
                     {
                         if id != 0 {
                             stack.pop();
