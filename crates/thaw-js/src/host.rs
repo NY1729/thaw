@@ -361,6 +361,8 @@ const CALLBACK_KEY: &str = "__thaw_tjs_cb__";
 const TIMER_KEY: &str = "__thaw_tjs_timer__";
 const HANDLE_KEY: &str = "__thaw_tjs_handle__";
 const DATE_KEY: &str = "__thaw_tjs_date__";
+const MAP_KEY: &str = "__thaw_tjs_map__";
+const SET_KEY: &str = "__thaw_tjs_set__";
 const UNDEFINED_KEY: &str = "$__thaw_napi_undefined$";
 
 /// `(adapter, context)` of a compiled callback: `adapter(context, args_json) -> result_json`.
@@ -3021,6 +3023,14 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
         // `{"__thaw_tjs_date__": ms}`: a compiled `Date` (`null` for an Invalid Date).
         Native::Object(fields) if matches!(fields.as_slice(), [(k, _)] if k == DATE_KEY) => {
             new_date(it, &fields[0].1).unwrap_or(Value::Undefined)
+        }
+        // `{"__thaw_tjs_map__": [[k, v], ...]}` / `{"__thaw_tjs_set__": [v, ...]}`: a compiled
+        // `Map`/`Set` crossing as its entries, rebuilt as a real collection.
+        Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Array(_))] if k == MAP_KEY || k == SET_KEY) =>
+        {
+            let ctor = if fields[0].0 == MAP_KEY { "Map" } else { "Set" };
+            let entries = to_value(it, &fields[0].1);
+            construct_global(it, ctor, &[entries]).unwrap_or(Value::Undefined)
         }
         // `{"__thaw_regexp__": {source, flags, lastIndex}}`: a compiled `RegExp` crossing as plain data.
         Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Object(_))] if k == "__thaw_regexp__") =>
