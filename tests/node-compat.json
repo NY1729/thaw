@@ -4732,6 +4732,11 @@
       "name": "r9b bare return in a class constructor keeps the instance",
       "expect": "matched",
       "source": "class A { x = 1; constructor(f: boolean) { if (f) return; this.x = 2; } }\nclass P { y = 3; constructor(f: boolean) { if (f) { return; } this.y = 4; } }\nclass Dd extends P { z = 9; constructor(f: boolean) { super(f); if (f) return; this.z = 10; } }\nfunction main(): void { console.log(JSON.stringify(new A(true)), JSON.stringify(new A(false))); console.log(JSON.stringify(new Dd(true)), JSON.stringify(new Dd(false))); }"
+    },
+    {
+      "name": "r9c class alias resolves to the class for new",
+      "expect": "matched",
+      "source": "class D { q = 1 }\nconst E = D;\nfunction main(): void { const L = D; console.log(new E(), new L().q); }"
     }
   ]
 }
