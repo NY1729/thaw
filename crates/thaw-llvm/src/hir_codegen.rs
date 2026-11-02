@@ -467,6 +467,12 @@ pub struct HirCompiler<'ctx> {
     /// Names some closure in the program captures; `None` disables in-place
     /// string appends (unknown program).
     captured_names: Option<std::collections::BTreeSet<String>>,
+    /// Debug text of every function body. A top-level string global read here
+    /// is not zeroed by a loop's in-place append state (the body compiles
+    /// separately), so it must keep the plain path.
+    function_body_text: String,
+    /// Names captured by real (non-inlined) closures; see `function_body_text`.
+    real_closure_names: std::collections::BTreeSet<String>,
     /// Loop-local string variable cell -> its `[owned, len, cap]` append state.
     string_append_states: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
     async_frame_cells: HashSet<PointerValue<'ctx>>,
@@ -868,6 +874,8 @@ impl<'ctx> HirCompiler<'ctx> {
             arena_variables: HashSet::new(),
             pending_js_capture_claims: HashMap::new(),
             captured_names: None,
+            function_body_text: String::new(),
+            real_closure_names: std::collections::BTreeSet::new(),
             string_append_states: HashMap::new(),
             async_frame_cells: HashSet::new(),
             async_frame_slot_owners: HashMap::new(),
@@ -963,6 +971,15 @@ impl<'ctx> HirCompiler<'ctx> {
         for func in &program.functions {
             self.declare_function(func)?;
         }
+        self.real_closure_names = thaw_hir::closure_captured_names_by_real_closures(program)
+            .into_iter()
+            .map(|name| name.to_string())
+            .collect();
+        self.function_body_text = program
+            .functions
+            .iter()
+            .map(|function| format!("{:?}", function.body))
+            .collect();
         self.captured_names = Some(
             thaw_hir::closure_captured_names_deep(program)
                 .into_iter()
