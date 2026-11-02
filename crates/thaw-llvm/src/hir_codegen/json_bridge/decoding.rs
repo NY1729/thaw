@@ -1435,6 +1435,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Union(_) => {
                 self.compile_json_to_native(element_json, element)?
             }
+            // Same dummy-bool sentinels as the tuple decoder.
+            HirType::Null => self.context.bool_type().const_int(1, false).into(),
+            HirType::Undefined => self.context.bool_type().const_zero().into(),
             other => return Err(format!("unsupported JSON array element {other:?}")),
         };
         let offset = self
