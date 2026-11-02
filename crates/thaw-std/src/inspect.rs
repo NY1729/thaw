@@ -105,10 +105,12 @@ pub(crate) enum Node {
     /// The `/source/flags` text.
     RegExp(String),
     Buffer(Vec<u8>),
-    /// A typed array (`Uint8Array(3) [ 1, 2, 3 ]`) other than `Buffer`.
+    /// A typed array (`Uint8Array(3) [ 1, 2, 3 ]`) other than `Buffer`. `extra` are its
+    /// non-index own properties (`Uint8Array(3) [ 1, 2, 3, x: 3 ]`).
     Typed {
         name: String,
         items: Vec<Node>,
+        extra: Vec<(Vec<u16>, Node)>,
     },
     Function {
         name: String,
@@ -528,8 +530,8 @@ impl Ctx<'_> {
                 keys = extra;
                 ctx_style = style;
             }
-            Node::Typed { name, items } => {
-                if items.is_empty() {
+            Node::Typed { name, items, extra } => {
+                if items.is_empty() && extra.is_empty() {
                     return format!("{name}(0) []");
                 }
                 id = 0;
@@ -537,7 +539,7 @@ impl Ctx<'_> {
                 extras = Extras::ArrayExtras;
                 typed_items = items.iter().cloned().map(Some).collect();
                 kind = Kind::Array(&typed_items);
-                keys = &[];
+                keys = extra;
                 ctx_style = name.clone();
             }
             Node::Promise { state, value } => {
@@ -1511,6 +1513,7 @@ mod unit_tests {
         let typed = |name: &str, items: Vec<f64>| Node::Typed {
             name: name.into(),
             items: items.into_iter().map(Node::Number).collect(),
+            extra: Vec::new(),
         };
         assert_eq!(
             show(&typed("Uint8Array", vec![1.0, 2.0, 3.0])),
