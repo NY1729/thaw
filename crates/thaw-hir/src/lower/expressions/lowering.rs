@@ -2004,6 +2004,37 @@ impl<'a> FnLowerer<'a> {
                     bin.op,
                     BinaryOp::EqEq | BinaryOp::EqEqEq | BinaryOp::NotEq | BinaryOp::NotEqEq
                 ) {
+                    // `[].constructor === Array`: an array's constructor is the global `Array`.
+                    for (constructor, array) in [(&bin.left, &bin.right), (&bin.right, &bin.left)] {
+                        let (Expr::Member(member), Expr::Ident(array)) =
+                            (constructor.as_ref(), array.as_ref())
+                        else {
+                            continue;
+                        };
+                        if array.sym.as_ref() != "Array"
+                            || !matches!(&member.prop, MemberProp::Ident(p) if p.sym == *"constructor")
+                            || !self.is_unshadowed_class_identifier("Array")
+                            || self.signatures.contains_key(&class_constructor_symbol("Array"))
+                        {
+                            continue;
+                        }
+                        let instance = self.lower_expr(&member.obj)?;
+                        let ty = self.infer_expr_type(&instance)?;
+                        if !matches!(ty, HirType::Array(_) | HirType::Tuple(_)) {
+                            continue;
+                        }
+                        // The receiver still runs (`f().constructor === Array`); only the answer is fixed.
+                        let name = format!("__thaw_ctor_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), ty.clone());
+                        let same = HirExpr::Lit(HirLit::Bool(true));
+                        let result = if matches!(bin.op, BinaryOp::NotEq | BinaryOp::NotEqEq) {
+                            HirExpr::Lit(HirLit::Bool(false))
+                        } else {
+                            same
+                        };
+                        return self.wrap_call_argument_bindings(result, &[(name, ty, instance)]);
+                    }
                     for (constructor, class) in [(&bin.left, &bin.right), (&bin.right, &bin.left)] {
                         let (Expr::Member(inner), Expr::Ident(class)) =
                             (constructor.as_ref(), class.as_ref())
@@ -3920,6 +3951,8 @@ impl<'a> FnLowerer<'a> {
                                 | HirType::Str
                                 | HirType::StrLiteral(_)
                                 | HirType::Bool
+                                | HirType::Array(_)
+                                | HirType::Tuple(_)
                         ) {
                             self.coerce_primitive_to_number(value)?
                         } else if matches!(value_type, HirType::Json | HirType::JsValue) {
