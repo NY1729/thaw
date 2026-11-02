@@ -1792,6 +1792,7 @@ fn missing_member_of_builtin_namespace_is_named_but_synthetic_namespace_is_not_r
     let dir = std::env::temp_dir().join(format!("thaw-missing-member-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.ts");
+    std::fs::write(&entry, "export {};").unwrap();
     let transform = |source: &str, _path: &std::path::Path, _is_override: bool| Ok(source.to_string());
     let mut external_exports = std::collections::HashMap::new();
     external_exports.insert(
@@ -1808,8 +1809,7 @@ fn missing_member_of_builtin_namespace_is_named_but_synthetic_namespace_is_not_r
         &Default::default(), &Default::default(), &Default::default(),
         &Default::default(), &transform,
     )
-    .err()
-    .expect("a missing member of a builtin namespace must be rejected");
+    .expect_err("a missing member of a builtin namespace must be rejected");
     assert!(error.contains("`b` has no export named `nope`"), "{error}");
 
     let synthetic = "import * as __thaw_value_chalk from \"some-pkg\"; console.log(__thaw_value_chalk.nope);";
