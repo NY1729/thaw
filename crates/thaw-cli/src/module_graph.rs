@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -1129,6 +1130,10 @@ struct RenameReferences<'a> {
     external_resolutions: &'a HashMap<String, String>,
     shadowed: HashSet<String>,
     function_depth: usize,
+    /// `ns.member` reads whose namespace alias is known but has no such
+    /// export -- reported once the module is rewritten, instead of HIR's
+    /// bare `unknown variable `ns``.
+    missing_members: &'a RefCell<Vec<String>>,
 }
 
 impl RenameReferences<'_> {
@@ -1438,6 +1443,29 @@ impl VisitMut for RenameReferences<'_> {
                 }
             }
         }
+        // A default-imported `node:assert` is the namespace itself, so a direct
+        // call `assert(x)` means `assert.ok(x)`. Only the namespace table tells
+        // these apart: it carries both `ok` and `AssertionError`.
+        let assert_call = match &*expr {
+            Expr::Call(call) => match &call.callee {
+                Callee::Expr(callee) => match callee.as_ref() {
+                    Expr::Ident(alias) if !self.shadowed.contains(alias.sym.as_ref()) => self
+                        .namespaces
+                        .get(alias.sym.as_ref())
+                        .filter(|exports| exports.contains_key("AssertionError"))
+                        .and_then(|exports| exports.get("ok"))
+                        .map(|ok| (alias.span, ok.clone())),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        };
+        if let (Some((span, ok)), Expr::Call(call)) = (assert_call, &mut *expr) {
+            call.callee = Callee::Expr(Box::new(Expr::Ident(
+                thaw_parser::ast::Ident::new_no_ctxt(ok.into(), span),
+            )));
+        }
         // `import.meta.resolve(...)` keeps its callee until the call is folded below; only a failed fold
         // lets the callee become the value-position function.
         let resolve_call = matches!(&*expr, Expr::Call(call) if matches!(&call.callee, Callee::Expr(callee)
@@ -1565,6 +1593,25 @@ impl VisitMut for RenameReferences<'_> {
                         member.span,
                     ));
                     return;
+                }
+                // Known alias, no such export: HIR would only say `unknown
+                // variable`. Skip real bindings (`names`, external) and
+                // nested-namespace heads, which are not misses.
+                if let Some(exports) = self.namespaces.get(namespace.sym.as_ref()) {
+                    let ns = namespace.sym.as_ref();
+                    let prop = property.sym.as_ref();
+                    if !exports.contains_key(prop)
+                        && !self.names.contains_key(ns)
+                        && !self.external_bindings.contains(ns)
+                        && !self
+                            .nested_namespaces
+                            .get(ns)
+                            .is_some_and(|nested| nested.contains_key(prop))
+                    {
+                        self.missing_members
+                            .borrow_mut()
+                            .push(format!("`{ns}` has no export named `{prop}`"));
+                    }
                 }
             }
         }
@@ -2371,6 +2418,7 @@ pub(crate) fn bundle_with_named_source_transform(
         let is_entry = index == entry_index;
         let mut names = HashMap::new();
         let mut namespaces = HashMap::new();
+        let missing_members = RefCell::new(Vec::new());
         let mut nested_namespaces = HashMap::new();
         // Local binding names that come from an *external* (npm/registry)
         // import, as opposed to a local declaration or a relative-module
@@ -2633,6 +2681,7 @@ pub(crate) fn bundle_with_named_source_transform(
                         names: &names,
                         namespaces: &namespaces,
                         nested_namespaces: &nested_namespaces,
+                        missing_members: &missing_members,
                         dynamic_imports: &dynamic_import_exports,
                         external_bindings: &external_bindings,
                         import_meta_url: &import_meta_url,
@@ -2651,6 +2700,7 @@ pub(crate) fn bundle_with_named_source_transform(
                         names: &names,
                         namespaces: &namespaces,
                         nested_namespaces: &nested_namespaces,
+                        missing_members: &missing_members,
                         dynamic_imports: &dynamic_import_exports,
                         external_bindings: &external_bindings,
                         import_meta_url: &import_meta_url,
@@ -2783,6 +2833,7 @@ pub(crate) fn bundle_with_named_source_transform(
                                 names: &names,
                                 namespaces: &namespaces,
                                 nested_namespaces: &nested_namespaces,
+                                missing_members: &missing_members,
                                 dynamic_imports: &dynamic_import_exports,
                                 external_bindings: &external_bindings,
                                 import_meta_url: &import_meta_url,
@@ -2816,6 +2867,7 @@ pub(crate) fn bundle_with_named_source_transform(
                                 names: &names,
                                 namespaces: &namespaces,
                                 nested_namespaces: &nested_namespaces,
+                                missing_members: &missing_members,
                                 dynamic_imports: &dynamic_import_exports,
                                 external_bindings: &external_bindings,
                                 import_meta_url: &import_meta_url,
@@ -2850,6 +2902,7 @@ pub(crate) fn bundle_with_named_source_transform(
                                 names: &names,
                                 namespaces: &namespaces,
                                 nested_namespaces: &nested_namespaces,
+                                missing_members: &missing_members,
                                 dynamic_imports: &dynamic_import_exports,
                                 external_bindings: &external_bindings,
                                 import_meta_url: &import_meta_url,
@@ -2883,6 +2936,7 @@ pub(crate) fn bundle_with_named_source_transform(
                         names: &names,
                         namespaces: &namespaces,
                         nested_namespaces: &nested_namespaces,
+                        missing_members: &missing_members,
                         dynamic_imports: &dynamic_import_exports,
                         external_bindings: &external_bindings,
                         import_meta_url: &import_meta_url,
@@ -3001,6 +3055,9 @@ pub(crate) fn bundle_with_named_source_transform(
         )));
         let start = bundled_items.len();
         bundled_items.extend(items);
+        if let Some(message) = missing_members.borrow().first() {
+            return Err(message.clone());
+        }
         module_ranges.push((index, start, bundled_items.len()));
     }
 
@@ -3014,11 +3071,13 @@ pub(crate) fn bundle_with_named_source_transform(
         let empty_names = HashMap::new();
         let empty_namespaces = HashMap::new();
         let empty_nested = HashMap::new();
+        let empty_missing = RefCell::new(Vec::new());
         let empty_external = HashSet::new();
         let mut rewriter = RenameReferences {
             names: &empty_names,
             namespaces: &empty_namespaces,
             nested_namespaces: &empty_nested,
+            missing_members: &empty_missing,
             dynamic_imports: &targets,
             external_bindings: &empty_external,
             import_meta_url: "",

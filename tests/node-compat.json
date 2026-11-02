@@ -4672,6 +4672,21 @@
       "name": "tj11 module create require path basename",
       "expect": "matched",
       "source": "import { createRequire } from 'node:module'; function main(): void { const require = createRequire('/tmp/example/main.js'); console.log(require('node:path').basename('/a/b.txt')); }"
+    },
+    {
+      "name": "r6a bytes member read on call receiver",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(Buffer.from(\"xy\").byteLength);\n  console.log(Buffer.alloc(3).buffer.byteLength > 0);\n  console.log(new ArrayBuffer(8).slice(2).byteLength);\n  console.log(new DataView(new ArrayBuffer(4)).byteLength);\n}"
+    },
+    {
+      "name": "r6a node buffer constants and kMaxLength exports",
+      "expect": "matched",
+      "source": "import b from \"node:buffer\";\nfunction main(): void {\n  console.log(typeof b.constants, b.constants.MAX_LENGTH > 0, typeof b.kMaxLength, typeof b.INSPECT_MAX_BYTES);\n}"
+    },
+    {
+      "name": "r6a default-imported node assert called directly",
+      "expect": "matched",
+      "source": "import assert from \"node:assert\";\nfunction main(): void {\n  try { assert(null); } catch (e: any) { console.log(e.name); }\n  assert(1);\n  console.log(\"ok\");\n}"
     }
   ]
 }
