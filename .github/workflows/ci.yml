@@ -24,6 +24,10 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
       - name: Install Rust components
         run: rustup component add rustfmt clippy
       - name: Check formatting
@@ -130,6 +134,10 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
       - name: Start vmstat logger
         run: |
           mkdir -p "$RUNNER_TEMP/diagnostics"
@@ -247,6 +255,10 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
       - name: Start vmstat logger
         run: |
           mkdir -p "$RUNNER_TEMP/diagnostics"
@@ -362,6 +374,10 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
       - name: Start vmstat logger
         run: |
           mkdir -p "$RUNNER_TEMP/diagnostics"
@@ -483,6 +499,10 @@ jobs:
       THAW_SOAK_SECONDS: "30"
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
       - name: Start vmstat logger
         run: |
           mkdir -p "$RUNNER_TEMP/diagnostics"
@@ -616,6 +636,10 @@ jobs:
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
       - name: Start vmstat logger
         run: |
           mkdir -p "$RUNNER_TEMP/diagnostics"
