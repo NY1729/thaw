@@ -361,6 +361,7 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:url",
         "node:fs",
         "node:vm",
+        "node:async_hooks",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
