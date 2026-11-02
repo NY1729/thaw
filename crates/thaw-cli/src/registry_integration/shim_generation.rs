@@ -1572,7 +1572,10 @@ fn generate_registry_shims_pass(
                             jit_operation.is_some(),
                             napi,
                         ) {
-                            shim.push_str(&thaw_js_retarget_alias(alias, thaw_js_package));
+                            shim.push_str(&thaw_js_retarget_alias(
+                                alias,
+                                thaw_js_package && !thaw_js_keeps_js_value(&pkg.name),
+                            ));
                             bare_aliased.insert(function.name.clone());
                         }
                     }
@@ -1605,7 +1608,10 @@ fn generate_registry_shims_pass(
                             jit_operation.is_some(),
                             napi,
                         ) {
-                            shim.push_str(&thaw_js_retarget_alias(alias, thaw_js_package));
+                            shim.push_str(&thaw_js_retarget_alias(
+                                alias,
+                                thaw_js_package && !thaw_js_keeps_js_value(&pkg.name),
+                            ));
                             bare_aliased.insert(function.name.clone());
                         }
                     }
