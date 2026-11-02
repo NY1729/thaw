@@ -2930,7 +2930,29 @@ pub(crate) fn frame_error(it: &mut Interp, v: &Value) -> Option<(String, String)
         Value::Str(n) => n.to_string(),
         _ => "Error".to_string(),
     };
-    let mut framed = format!("\u{1}{name}\u{1}{message}");
+    // An error of another realm (a node:vm context) is not an instance of this realm's Error: its chain
+    // ends in the `\u{18}` sentinel, which `thaw_error_is_instance` never matches. Same-realm errors keep the
+    // legacy frame. A null-prototype object is its own root, so it is not foreign.
+    let foreign = {
+        let mut cur = match v {
+            Value::Object(o) => Some(o.clone()),
+            _ => None,
+        };
+        let mut root = None;
+        while let Some(o) = cur {
+            cur = o.proto.borrow().clone();
+            root = Some(o);
+        }
+        match (&root, v) {
+            (Some(r), Value::Object(o)) => !Rc::ptr_eq(r, &it.object_proto) && !Rc::ptr_eq(r, o),
+            _ => false,
+        }
+    };
+    let mut framed = if foreign {
+        format!("\u{1}\u{1e}{name}\u{1f}\u{18}\u{1}{message}")
+    } else {
+        format!("\u{1}{name}\u{1}{message}")
+    };
     if let Ok(Value::Str(code)) = it.get(v, "code") {
         framed.push('\u{3}');
         framed.push_str(&code);
