@@ -426,6 +426,40 @@ fn thaw_js_blockers_are_recorded_once_and_reported_as_package_and_why() {
 }
 
 #[test]
+fn thaw_js_user_dynamic_blocker_needs_routing_and_no_opt_in() {
+    let dynamic = "function main(): void { const f: any = new Function('return 1'); console.log(f()); }";
+    clear_thaw_js_blockers();
+    record_thaw_js_user_dynamic_blocker(dynamic, false, false);
+    record_thaw_js_user_dynamic_blocker(dynamic, true, true);
+    record_thaw_js_user_dynamic_blocker("function main(): void { console.log(1); }", true, false);
+    assert_eq!(thaw_js_blockers_manifest(), serde_json::json!([]));
+    record_thaw_js_user_dynamic_blocker(dynamic, true, false);
+    record_thaw_js_user_dynamic_blocker(dynamic, true, false);
+    assert_eq!(
+        thaw_js_blockers_manifest(),
+        serde_json::json!([{
+            "package": "<program>",
+            "why": "program source uses dynamic code (new Function/eval): needs THAW_JS_USER_DYNAMIC=1",
+        }])
+    );
+    clear_thaw_js_blockers();
+}
+
+#[test]
+fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
+    clear_thaw_js_blockers();
+    record_thaw_js_fallback_blocker("thaw-js routing needs QuickJS");
+    assert_eq!(
+        thaw_js_blockers_manifest(),
+        serde_json::json!([{
+            "package": "<build>",
+            "why": "routed build fell back to QuickJS: thaw-js routing needs QuickJS",
+        }])
+    );
+    clear_thaw_js_blockers();
+}
+
+#[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
     // Same pinned scenario as `thaw_js_routing_falls_back_when_a_class_instance_needs_live_property_access`:
     // the routed build is rebuilt on QuickJS, and the artifact still carries the blockers key.
