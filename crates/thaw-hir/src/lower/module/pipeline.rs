@@ -1714,7 +1714,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             uses_this: function_uses_this(&method.function),
                             is_extern: false,
                             source_range: (method.span.lo.0, method.span.hi.0),
-                            source_length: None,
+                            source_length: Some(source_parameter_count(&method.function.params)),
                             accessor_owner: Some(name.clone()),
                             generic_type_params: Vec::new(),
                             generic_type_constraints: Vec::new(),

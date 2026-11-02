@@ -841,3 +841,4 @@ include!("tests/fx16_diff_contracts.rs");
 include!("tests/fx13_buffer_brand_contracts.rs");
 include!("tests/fx15_types_contracts.rs");
 include!("tests/fx18_callback_storage_contracts.rs");
+include!("tests/fx20_method_length_contracts.rs");
