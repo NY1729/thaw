@@ -537,15 +537,16 @@ fn build_with_thaw_js_routing_inner(
         // Whatever a routed build could not express (it needed QuickJS as well, or the compiler
         // rejected a construct) is built the ordinary way: never a build failure or a wrong result
         // that the unrouted path would not have had.
-        Err(error) if routing && {
+        Err(error) if routing => {
             if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
                 eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
             }
-            true
-        } => build_with_native_mode_routed(
-            input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
-            static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt, lib_mode, false,
-        ),
+            record_thaw_js_fallback_blocker(&error);
+            build_with_native_mode_routed(
+                input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
+                static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt, lib_mode, false,
+            )
+        }
         result => result,
     }
 }
@@ -836,6 +837,7 @@ fn build_with_native_mode_routed(
         if std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1") {
             manifest["thaw_js"] = thaw_js_eligibility(registry_dir, &resolved_packages);
         }
+        record_thaw_js_user_dynamic_blocker(&user_source, thaw_js_routing, thaw_js_user_dynamic_enabled());
         // Always present: the QuickJS retry of a routed build (routing off) must still report why.
         manifest["thaw_js_blockers"] = thaw_js_blockers_manifest();
         if std::env::var("THAW_JS_INFER").as_deref() == Ok("1") {
