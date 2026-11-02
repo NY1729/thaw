@@ -227,6 +227,64 @@ fn storage_has_any(ty: &TsType) -> bool {
         if matches!(keyword.kind, TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsUnknownKeyword))
 }
 
+/// Callback whose every use of its parameters is a primitive-yielding read: an operand of a
+/// non-logical binary op, of a unary op other than `delete`, or a `?:` test (optionally through a
+/// member chain). Such a callback cannot mutate or leak the element it is handed.
+fn callback_only_reads_params(callback: &Expr) -> bool {
+    let params: Vec<&Pat> = match callback {
+        Expr::Arrow(arrow) => arrow.params.iter().collect(),
+        Expr::Fn(function) => function.function.params.iter().map(|parameter| &parameter.pat).collect(),
+        _ => return false,
+    };
+    let mut names = Vec::new();
+    for pattern in params {
+        match pattern {
+            Pat::Ident(binding) => names.push(binding.id.sym.to_string()),
+            _ => return false,
+        }
+    }
+    struct Uses {
+        names: Vec<String>,
+        total: u32,
+        safe: u32,
+    }
+    impl Uses {
+        fn is_param(&self, expression: &Expr) -> bool {
+            match expression {
+                Expr::Ident(ident) => self.names.iter().any(|name| name == ident.sym.as_ref()),
+                Expr::Member(member) => self.is_param(&member.obj),
+                Expr::Paren(paren) => self.is_param(&paren.expr),
+                _ => false,
+            }
+        }
+    }
+    impl Visit for Uses {
+        fn visit_binding_ident(&mut self, _: &swc_ecma_ast::BindingIdent) {}
+        fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
+            if self.names.iter().any(|name| name == ident.sym.as_ref()) { self.total += 1; }
+        }
+        fn visit_bin_expr(&mut self, binary: &swc_ecma_ast::BinExpr) {
+            if !matches!(binary.op, BinaryOp::LogicalOr | BinaryOp::LogicalAnd | BinaryOp::NullishCoalescing) {
+                for side in [&binary.left, &binary.right] {
+                    if self.is_param(side) { self.safe += 1; }
+                }
+            }
+            binary.visit_children_with(self);
+        }
+        fn visit_unary_expr(&mut self, unary: &swc_ecma_ast::UnaryExpr) {
+            if unary.op != UnaryOp::Delete && self.is_param(&unary.arg) { self.safe += 1; }
+            unary.visit_children_with(self);
+        }
+        fn visit_cond_expr(&mut self, conditional: &swc_ecma_ast::CondExpr) {
+            if self.is_param(&conditional.test) { self.safe += 1; }
+            conditional.visit_children_with(self);
+        }
+    }
+    let mut uses = Uses { names, total: 0, safe: 0 };
+    callback.visit_with(&mut uses);
+    uses.total == uses.safe
+}
+
 struct StorageCallable {
     params: Vec<Span>,
     rest: bool,
@@ -1321,8 +1379,14 @@ impl Visit for StorageGraph {
                             let array_from = matches!((member.obj.as_ref(), &member.prop),
                                 (Expr::Ident(object), swc_ecma_ast::MemberProp::Ident(method))
                                     if object.sym == "Array" && method.sym == "from" && self.lookup("Array").is_none());
+                            // Callback-taking methods that never store their callback: a callback that only reads
+                            // its parameters cannot observe or leak the receiver's elements, so the receiver stays native.
+                            let pure_method = matches!(&member.prop, swc_ecma_ast::MemberProp::Ident(method)
+                                if matches!(method.sym.as_ref(), "sort" | "toSorted" | "some" | "every" | "find" | "findIndex"
+                                    | "findLast" | "findLastIndex" | "filter" | "forEach"));
                             for argument in &call.args {
-                                if array_from && matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) { continue; }
+                                let is_fn = matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_));
+                                if is_fn && (array_from || (pure_method && callback_only_reads_params(&argument.expr))) { continue; }
                                 self.contain(member.obj.span(), argument.expr.span());
                             }
                         }
