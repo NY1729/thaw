@@ -4722,6 +4722,11 @@
       "name": "r8a typeof CommonJS globals is undefined in an ES module",
       "expect": "matched",
       "source": "export const x = 1;\nfunction main(): void { console.log(typeof require, typeof module, typeof exports, typeof Nope); }"
+    },
+    {
+      "name": "r9a class method length ignores defaulted and rest parameters",
+      "expect": "matched",
+      "source": "class C { m(a: number, b: number = 1) {} static s(a: number, b = 2) {} n(a = 1, b = 2) {} r(a: number, ...c: number[]) {} }\nfunction main(): void { const c = new C(); console.log(c.m.length, C.s.length, c.n.length, c.r.length, C.prototype.m.length, new C().m.length); }"
     }
   ]
 }
