@@ -2664,8 +2664,11 @@
       }
       const fn = callbacks[callback++];
       if (kind === 'method') {
+        // Name the wrapper after its key (QuickJS would name it `value` from the descriptor field).
+        const method = function (...args) { return fn(this, ...args); };
+        thawGraphDefineProperty(method, 'name', { value: typeof key === 'symbol' ? '[' + (key.description || '') + ']' : String(key), configurable: true });
         Object.defineProperty(object, key, {
-          value: function (...args) { return fn(this, ...args); },
+          value: method,
           writable: true, enumerable: true, configurable: true,
         });
         continue;
@@ -3059,10 +3062,12 @@
   globalThis.clearTimeout = id => { const key = Number(id), timer = timers.get(key); if (timer) timer.cancelled = true; timers.delete(key); destroyTimerResource(timer); };
   globalThis.setInterval = (callback, delay = 0, ...args) =>
     schedule(callback, realTimerDelay(delay, 'setInterval'), true, args, true, 'setInterval');
-  globalThis.clearInterval = globalThis.clearTimeout;
+  // Node's clearInterval/clearImmediate are distinct functions, not aliases of clearTimeout.
+  const clearTimerById = globalThis.clearTimeout;
+  globalThis.clearInterval = id => clearTimerById(id);
   globalThis.setImmediate = (callback, ...args) =>
     schedule(callback, 0, false, args, true, 'setImmediate');
-  globalThis.clearImmediate = globalThis.clearTimeout;
+  globalThis.clearImmediate = id => clearTimerById(id);
   globalThis.__thaw_set_timeout_ref = (callback, delay, refed) =>
     schedule(callback, delay, false, [], Boolean(refed), 'setTimeout', true);
   globalThis.__thaw_set_timer_ref = (id, refed) => {
@@ -3724,7 +3729,7 @@
     removeListener: processOff,
     emit: processEmit,
     listenerCount: event => (processListeners.get(String(event)) || []).length,
-    emitWarning: (warning, type, code) => {
+    emitWarning: (warning, type, code, ctor) => {
       // Node signature: (warning, type[, code]) or (warning, { type, code, detail }); delivery is deferred to nextTick.
       const options = type !== null && typeof type === 'object' ? type : { type, code };
       const value = warning instanceof Error ? warning : new Error(String(warning));
