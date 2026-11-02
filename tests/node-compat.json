@@ -4747,6 +4747,16 @@
       "name": "round8 for...of over mixed closures with a throwing one caught in the body",
       "expect": "matched",
       "source": "function main(): void { for (const f of [() => { throw new Error(\"one\"); }, () => 2]) { try { console.log(f()); } catch (e) { console.log(\"caught\", (e as Error).message); } } }"
+    },
+    {
+      "name": "unary plus on arrays",
+      "expect": "matched",
+      "source": "function main(): void { console.log(+[], +[5], +[1,2], +['7']); }"
+    },
+    {
+      "name": "array literal constructor is Array",
+      "expect": "matched",
+      "source": "function main(): void { const a = [1,2]; console.log([].constructor === Array, a.constructor === Array, [].constructor !== Array); }"
     }
   ]
 }
