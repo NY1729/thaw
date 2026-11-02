@@ -364,6 +364,9 @@ const DATE_KEY: &str = "__thaw_tjs_date__";
 const MAP_KEY: &str = "__thaw_tjs_map__";
 const SET_KEY: &str = "__thaw_tjs_set__";
 const UNDEFINED_KEY: &str = "$__thaw_napi_undefined$";
+/// Marks an `Object.create(null)` object crossing as plain data; thaw-std's JSON parser
+/// turns the marked object back into a null-prototype one (`[Object: null prototype]`).
+const NULL_PROTO_KEY: &str = "__thaw_tjs_nullproto__";
 
 /// `(adapter, context)` of a compiled callback: `adapter(context, args_json) -> result_json`.
 type Adapter = unsafe extern "C" fn(*const c_void, *const c_char) -> *mut c_char;
@@ -3122,6 +3125,9 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
                     continue;
                 }
                 fields.push((k.to_string(), from_value(it, &val, depth + 1)?));
+            }
+            if matches!(&*o.kind.borrow(), Kind::Plain) && o.proto.borrow().is_none() {
+                fields.push((NULL_PROTO_KEY.to_string(), Native::Bool(true)));
             }
             Native::Object(fields)
         }

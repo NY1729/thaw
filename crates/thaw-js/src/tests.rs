@@ -593,6 +593,31 @@ fn typed_abi_reports_js_exceptions_and_unroutable_calls_as_errors() {
     );
 }
 
+const NULL_PROTO_EXPORTS: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require) {
+  module.exports.mk = function () { var o = Object.create(null); o.a = 1; o.n = Object.create(null); return o; };
+  module.exports.plain = function () { return { a: 1 }; };
+},
+};
+var __thaw_bundle_require_maps = { "p/index.js": {}, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn typed_abi_marks_null_prototype_objects_on_the_wire() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    let bundle = CString::new(NULL_PROTO_EXPORTS).unwrap();
+    assert_eq!(thaw_tjs_register(c"nullp".as_ptr(), bundle.as_ptr()), 1);
+    // nested and top-level null-prototype objects carry the marker; a plain object does not
+    assert_eq!(
+        typed_call("nullp::mk", "[]"),
+        Ok(r#"{"a":1,"n":{"__thaw_tjs_nullproto__":true},"__thaw_tjs_nullproto__":true}"#.into())
+    );
+    assert_eq!(typed_call("nullp::plain", "[]"), Ok(r#"{"a":1}"#.into()));
+}
+
 // ----- compiled callbacks (`thaw_tjs_register_callback`) -----
 
 /// A stand-in for a generated `(context, args_json) -> result_json` adapter: sums the numbers.

@@ -3365,7 +3365,40 @@ pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
     let value = JsonParser::new(bytes).parse();
     PARSE_ERROR.with(|error| error.set(value.is_none()));
     let value = value.unwrap_or(Value::Null);
+    // Only text carrying the marker pays for the walk (QuickJS-path results never do).
+    if bytes
+        .windows(NULL_PROTO_WIRE_KEY.len())
+        .any(|window| window == NULL_PROTO_WIRE_KEY)
+    {
+        adopt_null_protos(&value);
+    }
     leak(value)
+}
+
+/// The marker key a thaw-js `Object.create(null)` object carries on the wire (`from_value`).
+const NULL_PROTO_WIRE_KEY: &[u8] = b"__thaw_tjs_nullproto__";
+
+/// Removes the null-prototype marker from every object in `value` and records a `null` prototype
+/// for it, so it inspects as `[Object: null prototype]`. The object's identity (its `Rc`) is kept.
+fn adopt_null_protos(value: &Value) {
+    match value {
+        Value::Array(items) => {
+            for item in shared_array_ref(items) {
+                adopt_null_protos(item);
+            }
+        }
+        Value::Object(fields) => {
+            for item in shared_object_ref(fields).values() {
+                adopt_null_protos(item);
+            }
+            if shared_object_ref(fields).contains_key(NULL_PROTO_WIRE_KEY) {
+                shared_object_ref_mut(fields).shift_remove(NULL_PROTO_WIRE_KEY);
+                let identity = Rc::as_ptr(fields) as usize;
+                PROTOTYPES.with(|table| table.borrow_mut().insert(identity, Value::Null));
+            }
+        }
+        _ => {}
+    }
 }
 
 /// `thaw_json_parse` for the text of a caught error's own property
@@ -4870,6 +4903,29 @@ pub unsafe extern "C" fn thaw_json_callback_error_tuple(
             .unwrap_or_default()
             .into_raw()
     }
+}
+
+#[cfg(test)]
+#[test]
+fn null_prototype_wire_marker_is_stripped_and_inspects_as_null_prototype() {
+    use std::ffi::CString;
+    let text = CString::new(
+        r#"{"a":1,"n":{"__thaw_tjs_nullproto__":true},"__thaw_tjs_nullproto__":true}"#,
+    )
+    .unwrap();
+    let parsed = unsafe { &*thaw_json_parse(text.as_ptr()) };
+    assert!(parsed
+        .as_object()
+        .is_some_and(|fields| !fields.contains_key(b"__thaw_tjs_nullproto__".as_slice())));
+    assert_eq!(
+        inspect_json(parsed),
+        "[Object: null prototype] { a: 1, n: [Object: null prototype] {} }"
+    );
+    let plain = CString::new(r#"{"a":1}"#).unwrap();
+    assert_eq!(
+        inspect_json(unsafe { &*thaw_json_parse(plain.as_ptr()) }),
+        "{ a: 1 }"
+    );
 }
 
 #[cfg(test)]
