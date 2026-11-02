@@ -14,6 +14,214 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Run clippy
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          diagnostics="$RUNNER_TEMP/diagnostics"
+          mkdir -p "$diagnostics"
+          pkill -x vmstat || true
+          {
+            echo "== free -h"; free -h
+            echo "== df -h /"; df -h /
+            echo "== uptime"; uptime
+            echo "== dmesg (last 100 lines)"; (sudo dmesg -T 2>&1 || true) | tail -n 100
+            echo "== ps (top 25 by RSS)"; ps aux --sort=-rss | head -n 25
+          } > "$diagnostics/summary.txt" 2>&1 || true
+          cat "$diagnostics/summary.txt"
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-clippy-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/diagnostics
+          if-no-files-found: ignore
+
+  node-compat:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: node-compat
+            manifests: "node-compat"
+          - group: others
+            manifests: "typescript-runtime-compat builtins-compat path-contracts-compat process-credentials-compat text-encoding-contracts-compat"
+    name: node-compat (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Run compat manifests (${{ matrix.group }})
+        env:
+          MANIFESTS: ${{ matrix.manifests }}
+          GROUP: ${{ matrix.group }}
+        run: |
+          cargo build -p thaw-cli
+          if [[ "$GROUP" == others ]]; then
+            target/debug/thaw compat tests/typescript-compat.json
+          fi
+          for m in $MANIFESTS; do
+            target/debug/thaw node-compat "tests/$m.json"
+          done
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          diagnostics="$RUNNER_TEMP/diagnostics"
+          mkdir -p "$diagnostics"
+          pkill -x vmstat || true
+          {
+            echo "== free -h"; free -h
+            echo "== df -h /"; df -h /
+            echo "== uptime"; uptime
+            echo "== dmesg (last 100 lines)"; (sudo dmesg -T 2>&1 || true) | tail -n 100
+            echo "== ps (top 25 by RSS)"; ps aux --sort=-rss | head -n 25
+          } > "$diagnostics/summary.txt" 2>&1 || true
+          cat "$diagnostics/summary.txt"
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-node-compat-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/diagnostics
+          if-no-files-found: ignore
+
   test:
     runs-on: ubuntu-latest
     # Observed runs take 55-75 minutes; a hang fails with its logs instead of
@@ -98,21 +306,8 @@ jobs:
           echo "$prefix/bin" >> "$GITHUB_PATH"
           echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
-      - name: Install Rust components
-        run: rustup component add rustfmt clippy
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Run clippy
-        run: |
-          cargo clippy --workspace --all-targets -- -D warnings
       - name: Run tests
         run: |
-          cargo run -p thaw-cli -- compat tests/typescript-compat.json
-          cargo run -p thaw-cli -- node-compat tests/typescript-runtime-compat.json
-          cargo run -p thaw-cli -- node-compat tests/node-compat.json
-          for manifest in builtins path-contracts process-credentials text-encoding-contracts; do
-            cargo run -p thaw-cli -- node-compat tests/$manifest-compat.json
-          done
           cargo test --workspace --exclude thaw-cli --exclude thaw-llvm --exclude thaw-registry
           cargo test -p thaw-registry -- --test-threads=1
       - name: Install Prisma example
