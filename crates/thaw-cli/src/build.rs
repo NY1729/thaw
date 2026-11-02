@@ -1918,11 +1918,79 @@ fn build_staticlib_with_options(
     if let Some(path) = prepared_staticlib(pkg, no_default_features, features) {
         return Ok(path);
     }
-    // Concurrent node-compat cases may all miss the prepared archive; one cargo build at a time.
-    static CARGO_FALLBACK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _cargo_turn = CARGO_FALLBACK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    static STATICLIB_MEMO: StaticlibMemo = std::sync::Mutex::new(std::collections::BTreeMap::new());
+    memoized_staticlib(
+        &STATICLIB_MEMO,
+        staticlib_build_key(pkg, no_default_features, features),
+        || cargo_build_staticlib(pkg, no_default_features, features),
+    )
+}
+
+/// Process-wide memo of cargo's staticlib results. `thaw node-compat` builds the same few
+/// archives for every case. Cargo would treat each repeat as a no-op, but every spawn costs
+/// ~0.1-0.3s and the spawns used to run one at a time under a global lock.
+type StaticlibMemo = std::sync::Mutex<std::collections::BTreeMap<StaticlibBuildKey, PathBuf>>;
+
+/// Everything that can change which archive cargo produces or where it lands: the package and
+/// feature selection, the workspace, the working directory, and every `CARGO*`/`RUST*`
+/// environment variable (target dir, RUSTFLAGS, toolchain selection, ...).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+struct StaticlibBuildKey {
+    package: String,
+    no_default_features: bool,
+    features: Vec<String>,
+    workspace: PathBuf,
+    cwd: Option<PathBuf>,
+    env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+}
+
+fn staticlib_build_key(
+    pkg: &str,
+    no_default_features: bool,
+    features: &[&str],
+) -> StaticlibBuildKey {
+    let mut env: Vec<_> = std::env::vars_os()
+        .filter(|(name, _)| {
+            let name = name.to_string_lossy();
+            name.starts_with("CARGO") || name.starts_with("RUST")
+        })
+        .collect();
+    env.sort();
+    StaticlibBuildKey {
+        package: pkg.to_string(),
+        no_default_features,
+        features: features.iter().map(|feature| feature.to_string()).collect(),
+        workspace: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"),
+        cwd: std::env::current_dir().ok(),
+        env,
+    }
+}
+
+/// Returns the memoized archive for `key`, or runs `build` and memoizes its success. The memo
+/// lock is held across `build`, so concurrent first requests for a key run cargo once and the
+/// others wait, then hit. A hit is used only while the archive file still exists; failures are
+/// not memoized, so a later call retries.
+// ponytail: sources are fixed for one `thaw` process, so an edit made mid-process is not picked
+// up by a memoized key. Clear the memo or key on a source hash if a long-lived host ever needs that.
+fn memoized_staticlib(
+    memo: &StaticlibMemo,
+    key: StaticlibBuildKey,
+    build: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<PathBuf, String> {
+    let mut entries = memo.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(path) = entries.get(&key).filter(|path| path.is_file()) {
+        return Ok(path.clone());
+    }
+    let path = build()?;
+    entries.insert(key, path.clone());
+    Ok(path)
+}
+
+fn cargo_build_staticlib(
+    pkg: &str,
+    no_default_features: bool,
+    features: &[&str],
+) -> Result<PathBuf, String> {
     let mut command = Command::new("cargo");
     command
         .args(["build", "--release", "-p", pkg, "--message-format=json"])
@@ -2381,5 +2449,44 @@ mod asset_symlink_tests {
             "{error}"
         );
         std::fs::remove_dir_all(&base).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod staticlib_memo_tests {
+    use super::*;
+
+    #[test]
+    fn memo_runs_the_builder_once_and_rebuilds_a_deleted_archive() {
+        let dir = std::env::temp_dir().join(format!("thaw-staticlib-memo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("libthaw_fake.a");
+        let memo = StaticlibMemo::new(Default::default());
+        let runs = std::cell::Cell::new(0);
+        let build = || -> Result<PathBuf, String> {
+            runs.set(runs.get() + 1);
+            std::fs::write(&archive, b"archive").map_err(|e| e.to_string())?;
+            Ok(archive.clone())
+        };
+        let key = staticlib_build_key("thaw-fake", true, &["quickjs"]);
+
+        let first = memoized_staticlib(&memo, key.clone(), build).unwrap();
+        let second = memoized_staticlib(&memo, key.clone(), build).unwrap();
+        assert_eq!(first, archive);
+        assert_eq!(second, archive);
+        assert_eq!(runs.get(), 1, "a repeated request must hit the memo");
+
+        std::fs::remove_file(&archive).unwrap();
+        let rebuilt = memoized_staticlib(&memo, key.clone(), build).unwrap();
+        assert_eq!(rebuilt, archive);
+        assert_eq!(runs.get(), 2, "a deleted archive must trigger a rebuild");
+        assert!(archive.is_file());
+
+        let other = staticlib_build_key("thaw-fake", true, &[]);
+        assert_ne!(other, key);
+        memoized_staticlib(&memo, other, build).unwrap();
+        assert_eq!(runs.get(), 3, "other features must miss");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
