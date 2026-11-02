@@ -1242,6 +1242,27 @@ impl<'a> FnLowerer<'a> {
     /// rewrite below. Keep named-call overload/default/rest normalization in
     /// this shared path, then check the allocated class identity after all
     /// supplied arguments and their conversions have been evaluated.
+    /// `Object [Array Iterator] {}` / `Object [String Iterator] {}` for a console argument that is
+    /// one of those producing calls; any other value is returned unchanged.
+    fn console_iterator_text(&mut self, source: &Expr, value: HirExpr) -> Result<HirExpr, String> {
+        let mut inner = source;
+        while let Expr::Paren(paren) = inner {
+            inner = paren.expr.as_ref();
+        }
+        let Ok(ty) = self.infer_expr_type_inner(&value) else {
+            return Ok(value);
+        };
+        let Some(tag @ ("Array Iterator" | "String Iterator")) = self.iterator_tag_of_call(inner, &ty) else {
+            return Ok(value);
+        };
+        let name = format!("__thaw_console_iterator_{}", self.next_binding);
+        self.next_binding += 1;
+        self.wrap_call_argument_bindings(
+            HirExpr::Lit(HirLit::Str(format!("Object [{tag}] {{}}"))),
+            &[(name, ty, value)],
+        )
+    }
+
     fn lower_call_with_class_guard(
         &mut self,
         call: &CallExpr,
@@ -4469,6 +4490,18 @@ impl<'a> FnLowerer<'a> {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // `console.log(xs.values())`: Node prints the iterator object itself, which has no
+        // runtime form here, so the argument becomes its text (the call still runs first).
+        if callee_name.starts_with("console.")
+            && args.len() == call.args.len()
+            && call.args.iter().all(|argument| argument.spread.is_none())
+        {
+            args = args
+                .into_iter()
+                .zip(call.args.iter())
+                .map(|(value, source)| self.console_iterator_text(&source.expr, value))
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         if matches!(
             callee_name.as_str(),
             "console.log"

@@ -359,6 +359,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 "console_weak_set",
                 descriptor,
             )?;
+        } else if matches!(&hir_type, Some(HirType::Function(params, _)) if is_generator_producer_params(params)) {
+            // A generator/async-generator object is the internal producer closure;
+            // Node prints the object, not a function label.
+            let text = match &hir_type {
+                Some(HirType::Function(_, result)) if matches!(result.as_ref(), HirType::Promise(_)) => {
+                    "Object [AsyncGenerator] {}"
+                }
+                _ => "Object [Generator] {}",
+            };
+            self.compile_console_literal(text, newline, "console_generator", descriptor)?;
         } else if matches!(
             hir_type,
             Some(HirType::Function(_, _) | HirType::CallableFunction(..))
@@ -1649,4 +1659,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(merge_block);
         Ok(())
     }
+}
+
+/// The internal generator-producer closure shape (see `is_generator_producer_type` in thaw-hir).
+fn is_generator_producer_params(params: &[HirType]) -> bool {
+    params.len() == 6
+        && params[0] == HirType::I64
+        && params[1] == HirType::Json
+        && (3..6).all(|index| matches!(&params[index], HirType::Array(_)))
 }
