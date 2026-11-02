@@ -2470,21 +2470,21 @@ mod staticlib_memo_tests {
         };
         let key = staticlib_build_key("thaw-fake", true, &["quickjs"]);
 
-        let first = memoized_staticlib(&memo, key.clone(), &build).unwrap();
-        let second = memoized_staticlib(&memo, key.clone(), &build).unwrap();
+        let first = memoized_staticlib(&memo, key.clone(), build).unwrap();
+        let second = memoized_staticlib(&memo, key.clone(), build).unwrap();
         assert_eq!(first, archive);
         assert_eq!(second, archive);
         assert_eq!(runs.get(), 1, "a repeated request must hit the memo");
 
         std::fs::remove_file(&archive).unwrap();
-        let rebuilt = memoized_staticlib(&memo, key.clone(), &build).unwrap();
+        let rebuilt = memoized_staticlib(&memo, key.clone(), build).unwrap();
         assert_eq!(rebuilt, archive);
         assert_eq!(runs.get(), 2, "a deleted archive must trigger a rebuild");
         assert!(archive.is_file());
 
         let other = staticlib_build_key("thaw-fake", true, &[]);
         assert_ne!(other, key);
-        memoized_staticlib(&memo, other, &build).unwrap();
+        memoized_staticlib(&memo, other, build).unwrap();
         assert_eq!(runs.get(), 3, "other features must miss");
 
         std::fs::remove_dir_all(&dir).unwrap();
