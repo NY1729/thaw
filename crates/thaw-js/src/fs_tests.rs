@@ -239,3 +239,80 @@ fn fs_cp_recursive_and_single_file() {
     assert_eq!(s["length"], 4);
     assert_eq!(std::fs::read(&single).unwrap(), b"beta");
 }
+
+// Replays, at host level, the exact op sequence the JS shim issues for
+// `open(path,'w') -> writeFile -> stat -> close -> open(path,'r') -> readFile`.
+fn fd_call(op: &str, fd: &str, value: &str) -> serde_json::Value {
+    serde_json::from_str(&host_fs(op, fd, value, false)).unwrap()
+}
+
+#[test]
+fn fs_fd_replay_file_handle_sequence() {
+    let d = scratch("fd-replay");
+    let path = d.join("h.txt");
+    let p = path.to_str().unwrap();
+    let w = call("fd_open", &path, "w,438");
+    eprintln!("replay open w: {w}");
+    assert_eq!(w["ok"], true, "open w: {w}");
+    let fd = w["fd"].as_u64().unwrap().to_string();
+    let wr = fd_call("fd_write_all", &fd, "68656c6c6f");
+    eprintln!("replay write_all: {wr}");
+    assert_eq!(wr["ok"], true, "write_all: {wr}");
+    let st = fd_call("fd_stat", &fd, "");
+    eprintln!("replay stat: length={}", st["length"]);
+    assert_eq!(st["length"], 5, "stat: {st}");
+    let cl = fd_call("fd_close", &fd, "");
+    assert_eq!(cl["ok"], true, "close: {cl}");
+    let r = call("fd_open", &path, "r,438");
+    assert_eq!(r["ok"], true, "open r: {r}");
+    let rfd = r["fd"].as_u64().unwrap().to_string();
+    let data = fd_call("fd_read_all", &rfd, "");
+    eprintln!("replay read_all: {data}");
+    assert_eq!(data["data"], "68656c6c6f", "read_all: {data}");
+    assert_eq!(fd_call("fd_close", &rfd, "")["ok"], true);
+    assert_eq!(std::fs::read(p).unwrap(), b"hello");
+    assert_eq!(fd_call("fd_tell", &rfd, "")["code"], "EBADF");
+}
+
+#[test]
+fn fs_fd_ops_sync_truncate_tell_chmod_utimes_statfs() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = scratch("fd-ops");
+    let path = d.join("o.txt");
+    let fd = call("fd_open", &path, "w+,438")["fd"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    assert_eq!(fd_call("fd_write_all", &fd, "68656c6c6f")["ok"], true);
+    assert_eq!(fd_call("fd_sync", &fd, "")["ok"], true);
+    assert_eq!(fd_call("fd_datasync", &fd, "")["ok"], true);
+    assert_eq!(fd_call("fd_tell", &fd, "")["position"], 5);
+    assert_eq!(fd_call("fd_truncate", &fd, "2")["ok"], true);
+    assert_eq!(fd_call("fd_stat", &fd, "")["length"], 2);
+    assert_eq!(fd_call("fd_truncate", &fd, "x")["code"], "EINVAL");
+    assert_eq!(fd_call("fd_chmod", &fd, "384")["ok"], true);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(fd_call("fd_chmod", &fd, "x")["code"], "EINVAL");
+    assert_eq!(fd_call("fd_utimes", &fd, "5,6")["ok"], true);
+    let mtime = fd_call("fd_stat", &fd, "")["mtimeMs"].as_f64().unwrap();
+    assert!((mtime - 6000.0).abs() < 1e-6, "mtimeMs was {mtime}");
+    let st = fd_call("fd_statfs", &fd, "");
+    assert_eq!(st["ok"], true);
+    assert!(st["bsize"].as_u64().unwrap() > 0);
+    assert_eq!(fd_call("fd_close", &fd, "")["ok"], true);
+    for op in [
+        "fd_sync",
+        "fd_datasync",
+        "fd_tell",
+        "fd_truncate",
+        "fd_chmod",
+        "fd_utimes",
+        "fd_statfs",
+    ] {
+        assert_eq!(fd_call(op, &fd, "1")["code"], "EBADF", "{op} after close");
+    }
+    assert_eq!(fd_call("fd_sync", "999", "")["code"], "EBADF");
+}
