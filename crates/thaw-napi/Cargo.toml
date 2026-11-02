@@ -9,12 +9,13 @@ crate-type = ["staticlib", "rlib"]
 
 [features]
 default = ["quickjs-brotli", "quickjs-tls", "quickjs-wasm"]
-quickjs = ["dep:thaw-quickjs"]
-quickjs-brotli = ["quickjs", "thaw-quickjs/brotli"]
-quickjs-tls = ["quickjs", "thaw-quickjs/tls"]
-quickjs-wasm = ["quickjs", "thaw-quickjs/wasm"]
-quickjs-intl = ["quickjs", "thaw-quickjs/intl"]
-quickjs-icu4c = ["quickjs", "thaw-quickjs/icu4c"]
+js-engine = ["dep:thaw-quickjs"]
+quickjs = ["js-engine"]
+quickjs-brotli = ["js-engine", "thaw-quickjs/brotli"]
+quickjs-tls = ["js-engine", "thaw-quickjs/tls"]
+quickjs-wasm = ["js-engine", "thaw-quickjs/wasm"]
+quickjs-intl = ["js-engine", "thaw-quickjs/intl"]
+quickjs-icu4c = ["js-engine", "thaw-quickjs/icu4c"]
 
 [dependencies]
 thaw-arena = { path = "../thaw-arena" }
@@ -26,7 +27,7 @@ tempfile = "3"
 thaw-quickjs = { path = "../thaw-quickjs", optional = true, default-features = false }
 
 [dev-dependencies]
-# Test-only: with the `quickjs` feature (on by default), this crate
+# Test-only: with the `js-engine` feature (on by default), this crate
 # transitively needs thaw-quickjs's `thaw_js_dynamic_object_query`, which
 # calls thaw-std's `thaw_json_parse` as an `extern "C"` declaration
 # resolved at link time (no real Rust-level dependency between these

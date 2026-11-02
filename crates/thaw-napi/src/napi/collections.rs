@@ -39,7 +39,7 @@ pub unsafe extern "C" fn napi_get_all_property_names(
     {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         if matches!(value_ref(object), Ok(Value::QuickJsHandle { object_like: false, .. })) {
             return record_status(env, NAPI_OBJECT_EXPECTED);
@@ -249,7 +249,7 @@ pub unsafe extern "C" fn napi_object_seal(env: NapiEnv, object: NapiValue) -> Na
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_object_integrity(env, handle, false);
     }
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn napi_object_freeze(env: NapiEnv, object: NapiValue) -> 
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_object_integrity(env, handle, true);
     }
@@ -423,7 +423,7 @@ pub unsafe extern "C" fn napi_typeof(env: NapiEnv, value: NapiValue, out: *mut i
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         let kind = match qjs_query(handle, 0) {
@@ -472,7 +472,7 @@ pub unsafe extern "C" fn napi_is_array(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         return match qjs_query(handle, 4) {
@@ -496,7 +496,7 @@ pub unsafe extern "C" fn napi_is_promise(
     let Some(result) = result.as_mut() else {
         return record_status(env, NAPI_INVALID_ARG);
     };
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         return qjs_is_promise(env, handle, result);
@@ -514,7 +514,7 @@ pub unsafe extern "C" fn napi_get_array_length(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         return qjs_array_length(env, handle, out);
@@ -557,7 +557,7 @@ pub unsafe extern "C" fn napi_has_element(
         return record_status(env, NAPI_INVALID_ARG);
     };
     let key = PropertyKey::String(index.to_string());
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_property_predicate(env, handle, &key, 0, result);
     }
@@ -582,7 +582,7 @@ pub unsafe extern "C" fn napi_delete_element(
         return NAPI_INVALID_ARG;
     }
     let key = PropertyKey::String(index.to_string());
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_property_predicate(env, handle, &key, 2, result);
     }
@@ -638,7 +638,7 @@ pub unsafe extern "C" fn napi_get_element(
         return record_status(env, NAPI_INVALID_ARG);
     }
     let key = PropertyKey::String(index.to_string());
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
         return qjs_get_property(env, handle, &key, out);
     }
