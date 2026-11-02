@@ -474,7 +474,7 @@ impl Interp {
 // ----- `globalThis.__thaw_fs(operation, path, value, recursive)` -----
 // The synchronous subset of the QuickJS host's filesystem bridge that the registry's `node:fs`
 // shim needs for whole-file reads/writes, directory listing and stat. Descriptor operations
-// (string-flag `fd_open` and read/write/stat), chown/lchown, cp, mkdtemp and friends answer ENOSYS.
+// (string-flag `fd_open` and read/write/stat) and chown/lchown answer ENOSYS.
 // ponytail: add the rest when a package needs them; chown/lchown stay ENOSYS until the pinned test
 // `os_tty_process_and_fs_host_functions` is updated (it asserts ENOSYS for chown).
 
@@ -877,6 +877,192 @@ fn fs_statfs(p: &std::path::Path) -> std::io::Result<String> {
     .to_string())
 }
 
+// ---- mkdtemp ----
+#[cfg(unix)]
+fn fs_mkdtemp(prefix: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
+    use std::os::unix::fs::DirBuilderExt;
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    for _ in 0..8 {
+        let mut random = [0u8; 6];
+        std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+        let mut name = prefix.as_os_str().to_os_string();
+        name.push(
+            random
+                .iter()
+                .map(|b| CHARS[usize::from(*b) % CHARS.len()] as char)
+                .collect::<String>(),
+        );
+        let created = std::path::PathBuf::from(name);
+        match std::fs::DirBuilder::new().mode(0o700).create(&created) {
+            Ok(()) => {
+                return Ok(format!(
+                    "{{\"ok\":true,\"path\":{},\"pathHex\":\"{}\"}}",
+                    q(&created.to_string_lossy()),
+                    hex(&name_bytes(created.as_os_str()))
+                ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::from_raw_os_error(libc::EEXIST))
+}
+
+// ---- cp / copy_guard / copy_excl (ported from the QuickJS host) ----
+#[cfg(unix)]
+fn fs_same_metadata(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(unix)]
+fn fs_same_file(source: &std::path::Path, destination: &std::path::Path) -> std::io::Result<bool> {
+    let source_meta = std::fs::metadata(source)?;
+    match std::fs::metadata(destination) {
+        Ok(dest_meta) => Ok(fs_same_metadata(&source_meta, &dest_meta)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
+fn fs_copy_destination_resolved(
+    destination: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::path::Component;
+    let absolute = if destination.is_absolute() {
+        destination.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(destination)
+    };
+    let mut resolved = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => resolved.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Normal(name) => {
+                resolved.push(name);
+                match std::fs::canonicalize(&resolved) {
+                    Ok(path) => resolved = path,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        if std::fs::symlink_metadata(&resolved)
+                            .is_ok_and(|m| m.file_type().is_symlink())
+                        {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "unresolved destination symlink",
+                            ));
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+#[cfg(unix)]
+fn fs_copy_unsafe_relation(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    dereference: bool,
+) -> std::io::Result<bool> {
+    let source_link = std::fs::symlink_metadata(source)?;
+    if source_link.file_type().is_symlink() && !dereference {
+        return match std::fs::symlink_metadata(destination) {
+            Ok(dest_link) => Ok(fs_same_metadata(&source_link, &dest_link)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        };
+    }
+    if fs_same_file(source, destination)? {
+        return Ok(true);
+    }
+    let canonical_source = std::fs::canonicalize(source)?;
+    let canonical_destination = fs_copy_destination_resolved(destination)?;
+    Ok(canonical_destination == canonical_source
+        || (source_link.is_dir() || (dereference && std::fs::metadata(source)?.is_dir()))
+            && canonical_destination.starts_with(&canonical_source))
+}
+
+#[cfg(unix)]
+fn fs_copy_file(source: &std::path::Path, destination: &std::path::Path) -> std::io::Result<u64> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let same = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "source and destination are the same file",
+        )
+    };
+    let mut input = std::fs::File::open(source)?;
+    let source_meta = input.metadata()?;
+    if fs_same_file(source, destination)? {
+        return Err(same());
+    }
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(source_meta.permissions().mode() & 0o7777)
+        .open(destination)?;
+    if fs_same_metadata(&source_meta, &output.metadata()?) {
+        return Err(same());
+    }
+    output.set_len(0)?;
+    let bytes = std::io::copy(&mut input, &mut output)?;
+    output.set_permissions(source_meta.permissions())?;
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn fs_copy_exclusive(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<u64> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut input = std::fs::File::open(source)?;
+    let source_meta = input.metadata()?;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(source_meta.permissions().mode() & 0o7777)
+        .open(destination)?;
+    let bytes = std::io::copy(&mut input, &mut output)?;
+    output.set_permissions(source_meta.permissions())?;
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn fs_copy_recursive(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<u64> {
+    if std::fs::symlink_metadata(source)?.is_dir() {
+        if fs_copy_unsafe_relation(source, destination, false)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "destination is source or its descendant",
+            ));
+        }
+        std::fs::create_dir_all(destination)?;
+        let mut copied = 0;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            copied += fs_copy_recursive(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        Ok(copied)
+    } else {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        fs_copy_file(source, destination)
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn host_fs(op: &str, path: &str, value: &str, recursive: bool) -> String {
     let (op, raw_value) = op
@@ -984,6 +1170,16 @@ pub(crate) fn host_fs(op: &str, path: &str, value: &str, recursive: bool) -> Str
         "utimes" => ok(fs_path_utimes(&p, value, 0)),
         "lutimes" => ok(fs_path_utimes(&p, value, libc::AT_SYMLINK_NOFOLLOW)),
         "statfs" => fs_statfs(&p),
+        "mkdtemp" => fs_mkdtemp(&p),
+        "copy_excl" => fs_copy_exclusive(&p, &v).map(|n| format!("{{\"ok\":true,\"length\":{n}}}")),
+        "copy_guard" => fs_copy_unsafe_relation(&p, &v, recursive)
+            .map(|u| format!("{{\"ok\":true,\"unsafe\":{u}}}")),
+        "cp" => if recursive {
+            fs_copy_recursive(&p, &v)
+        } else {
+            fs_copy_file(&p, &v)
+        }
+        .map(|n| format!("{{\"ok\":true,\"length\":{n}}}")),
         _ => Err(std::io::Error::from_raw_os_error(libc::ENOSYS)),
     };
     result.unwrap_or_else(|e| fs_err(op, path, &e))
