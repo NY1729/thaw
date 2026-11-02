@@ -129,3 +129,113 @@ fn fs_path_ops_statfs() {
             > 0
     );
 }
+
+fn call_recursive(op: &str, path: &Path, value: &str) -> serde_json::Value {
+    serde_json::from_str(&host_fs(op, path.to_str().unwrap(), value, true)).unwrap()
+}
+
+#[test]
+fn fs_mkdtemp_makes_private_unique_dirs() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = scratch("mkdtemp");
+    let prefix = d.join("x-");
+    let a = call("mkdtemp", &prefix, "");
+    let b = call("mkdtemp", &prefix, "");
+    assert_eq!(a["ok"], true);
+    assert_eq!(b["ok"], true);
+    let (pa, pb) = (a["path"].as_str().unwrap(), b["path"].as_str().unwrap());
+    assert_ne!(pa, pb);
+    for p in [pa, pb] {
+        let name = Path::new(p).file_name().unwrap().to_str().unwrap();
+        let suffix = name.strip_prefix("x-").unwrap();
+        assert_eq!(suffix.len(), 6);
+        assert!(suffix.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert!(Path::new(p).is_dir());
+        assert_eq!(
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    assert_eq!(
+        call("mkdtemp", &d.join("missing").join("x-"), "")["code"],
+        "ENOENT"
+    );
+}
+
+#[test]
+fn fs_copy_excl_copies_mode_and_refuses_existing() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = scratch("copy-excl");
+    let src = d.join("src.txt");
+    let dst = d.join("dst.txt");
+    std::fs::write(&src, b"hello").unwrap();
+    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let r = call("copy_excl", &src, dst.to_str().unwrap());
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["length"], 5);
+    assert_eq!(std::fs::read(&dst).unwrap(), b"hello");
+    assert_eq!(
+        std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    assert_eq!(
+        call("copy_excl", &src, dst.to_str().unwrap())["code"],
+        "EEXIST"
+    );
+}
+
+#[test]
+fn fs_copy_guard_flags_self_and_descendant_copies() {
+    let d = scratch("copy-guard");
+    let src = d.join("src");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    let file = d.join("f.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let sub = src.join("sub");
+    let fresh = d.join("new.txt");
+    assert_eq!(
+        call("copy_guard", &src, sub.to_str().unwrap())["unsafe"],
+        true
+    );
+    assert_eq!(
+        call("copy_guard", &file, file.to_str().unwrap())["unsafe"],
+        true
+    );
+    assert_eq!(
+        call("copy_guard", &file, fresh.to_str().unwrap())["unsafe"],
+        false
+    );
+    assert_eq!(
+        call("copy_guard", &d.join("missing"), fresh.to_str().unwrap())["code"],
+        "ENOENT"
+    );
+}
+
+#[test]
+fn fs_cp_recursive_and_single_file() {
+    let d = scratch("cp");
+    let src = d.join("tree");
+    std::fs::create_dir_all(src.join("nested")).unwrap();
+    std::fs::write(src.join("nested").join("a.txt"), b"alpha").unwrap();
+    std::fs::write(src.join("b.txt"), b"beta").unwrap();
+    std::os::unix::fs::symlink("b.txt", src.join("link")).unwrap();
+    let dst = d.join("copy");
+    let r = call_recursive("cp", &src, dst.to_str().unwrap());
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["length"], 13);
+    assert_eq!(
+        std::fs::read(dst.join("nested").join("a.txt")).unwrap(),
+        b"alpha"
+    );
+    assert_eq!(std::fs::read(dst.join("b.txt")).unwrap(), b"beta");
+    // ponytail: symlinks are followed (copied as file contents), not recreated as links.
+    assert_eq!(std::fs::read(dst.join("link")).unwrap(), b"beta");
+    assert_eq!(
+        call_recursive("cp", &src, src.join("inner").to_str().unwrap())["code"],
+        "EINVAL"
+    );
+    let single = d.join("single.txt");
+    let s = call("cp", &src.join("b.txt"), single.to_str().unwrap());
+    assert_eq!(s["length"], 4);
+    assert_eq!(std::fs::read(&single).unwrap(), b"beta");
+}
