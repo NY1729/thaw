@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -30,7 +34,7 @@ jobs:
           --health-retries 10
     env:
       THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -40,10 +44,6 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/diagnostics"
           nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          df -h /
       - name: Install system dependencies
         run: |
           for attempt in 1 2 3; do
@@ -105,20 +105,14 @@ jobs:
       - name: Run clippy
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
-          cargo clean
       - name: Run tests
         run: |
           cargo run -p thaw-cli -- compat tests/typescript-compat.json
-          find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
           cargo run -p thaw-cli -- node-compat tests/typescript-runtime-compat.json
-          find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
           cargo run -p thaw-cli -- node-compat tests/node-compat.json
-          find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
           for manifest in builtins path-contracts process-credentials text-encoding-contracts; do
             cargo run -p thaw-cli -- node-compat tests/$manifest-compat.json
-            find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
           done
-          cargo clean
           cargo test --workspace --exclude thaw-cli --exclude thaw-llvm --exclude thaw-registry
           cargo test -p thaw-registry -- --test-threads=1
       - name: Install Prisma example
@@ -168,7 +162,7 @@ jobs:
     # Observed shards take 15-26 minutes.
     timeout-minutes: 75
     env:
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -178,8 +172,6 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/diagnostics"
           nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
-      - name: Free disk space
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
       - name: Install system dependencies
         run: |
           for attempt in 1 2 3; do
@@ -289,7 +281,7 @@ jobs:
     # with no log before this cap existed.
     timeout-minutes: 75
     env:
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -301,8 +293,6 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/diagnostics"
           nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
-      - name: Free disk space
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
       - name: Install system dependencies
         run: |
           for attempt in 1 2 3; do
@@ -478,6 +468,8 @@ jobs:
           echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
       - name: Compare Node, Bun, and Thaw
+        env:
+          CARGO_BUILD_JOBS: ${{ matrix.architecture == 'arm64' && '4' || '1' }}
         run: |
           cargo build --release -p thaw-cli
           benchmarks/runtime/run.sh target/release/thaw "runtime-${{ matrix.architecture }}.json"
