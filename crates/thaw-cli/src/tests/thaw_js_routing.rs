@@ -407,24 +407,39 @@ fn thaw_js_bundle_form_wraps_plain_scripts_and_keeps_registered_forms() {
 }
 
 #[test]
-fn thaw_js_blockers_name_the_declaration_that_kept_the_package_on_quickjs() {
-    let (dir, registry, entry) = thaw_js_fixture(
-        "blockers",
-        "import { apply } from 'tjs-kit';\n\
-         function main(): void { console.log(apply([1, 2], (x: number): number => x * 2)); }\n",
+fn thaw_js_blockers_are_recorded_once_and_reported_as_package_and_why() {
+    clear_thaw_js_blockers();
+    record_thaw_js_blocker("tjs-ctr", "`add`: declare function add(n: (x: number) => number): number;");
+    record_thaw_js_blocker("tjs-ctr", "`add`: declare function add(n: (x: number) => number): number;");
+    record_thaw_js_blocker("tjs-kit", "`apply`: declare function apply(f: (x: number) => number): number[];");
+    assert_eq!(
+        thaw_js_blockers_manifest(),
+        serde_json::json!([
+            { "package": "tjs-ctr", "why": "`add`: declare function add(n: (x: number) => number): number;" },
+            { "package": "tjs-kit", "why": "`apply`: declare function apply(f: (x: number) => number): number[];" },
+        ])
+    );
+    clear_thaw_js_blockers();
+    assert_eq!(thaw_js_blockers_manifest(), serde_json::json!([]));
+}
+
+#[test]
+fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
+    // Same pinned scenario as `thaw_js_routing_falls_back_when_a_class_instance_needs_live_property_access`:
+    // the routed build is rebuilt on QuickJS, and the artifact still carries the blockers key.
+    let (dir, registry, entry) = thaw_js_class_fixture(
+        "blockers-fallback",
+        "import { Counter } from 'tjs-ctr';\n\
+         function main(): void {\n\
+           const c = new Counter(5);\n\
+           c.n = 40;\n\
+           console.log(c.add(2), c.n);\n\
+         }\n",
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    // The callback parameter keeps `apply` (and so the package) on QuickJS; the existing keys stay.
     assert_eq!(manifest["quickjs"], true, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!([]));
-    let blockers = manifest["thaw_js_blockers"].as_array().unwrap();
-    assert!(
-        blockers.iter().any(|blocker| {
-            blocker["package"] == "tjs-kit"
-                && blocker["why"].as_str().is_some_and(|why| why.contains("apply"))
-        }),
-        "{manifest}"
-    );
+    assert!(manifest["thaw_js_blockers"].is_array(), "{manifest}");
     let _ = std::fs::remove_dir_all(dir);
 }

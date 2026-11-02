@@ -836,9 +836,8 @@ fn build_with_native_mode_routed(
         if std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1") {
             manifest["thaw_js"] = thaw_js_eligibility(registry_dir, &resolved_packages);
         }
-        if thaw_js_routing {
-            manifest["thaw_js_blockers"] = thaw_js_blockers_manifest();
-        }
+        // Always present: the QuickJS retry of a routed build (routing off) must still report why.
+        manifest["thaw_js_blockers"] = thaw_js_blockers_manifest();
         if std::env::var("THAW_JS_INFER").as_deref() == Ok("1") {
             manifest["js_infer"] = js_infer_entries(registry_dir, &resolved_packages, &user_source);
             manifest["js_infer_aot"] = js_infer_aot_manifest(&js_infer_aot);
