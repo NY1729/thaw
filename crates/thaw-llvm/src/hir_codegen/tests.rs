@@ -558,6 +558,7 @@ include!("tests/f_contracts.rs");
 include!("tests/i_contracts.rs");
 include!("tests/s_contracts.rs");
 include!("tests/p_contracts.rs");
+include!("tests/callback_mask_contracts.rs");
 include!("tests/r_contracts.rs");
 include!("tests/t_contracts.rs");
 include!("tests/tick_contracts.rs");

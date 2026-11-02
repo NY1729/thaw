@@ -384,6 +384,12 @@ struct CompiledCallback {
     graph: bool,
     finish: usize,
     has_rest: bool,
+    /// The compiler's `jsvalue_param_mask` (graph callbacks): low 32 bits = JsValue positions whose
+    /// arguments cross as handle leases, high 32 bits = `Str` positions where an `Error` is framed.
+    mask: u64,
+    /// An object-literal method (`thaw_tjs_register_native_method_callback_graph`): its receiver is
+    /// declared parameter 0, so the mask bit `i` is wire item `i`; a plain callback's is `i + 1`.
+    method: bool,
     /// Keeps the closure environment alive for as long as JS may call it.
     _root: thaw_arena::ArenaRoot,
 }
@@ -2490,7 +2496,17 @@ pub extern "C" fn thaw_tjs_register_callback(
     params: i64,
 ) -> i64 {
     let identity = PENDING_IDENTITY.with(|p| p.replace(0));
-    register_callback(adapter, context, identity, params as usize, false, 0, false)
+    register_callback(
+        adapter,
+        context,
+        identity,
+        params as usize,
+        false,
+        0,
+        false,
+        0,
+        false,
+    )
 }
 
 thread_local! {
@@ -2505,6 +2521,7 @@ pub extern "C" fn thaw_tjs_callback_identity(identity: *const c_void) {
     PENDING_IDENTITY.with(|p| p.set(identity as usize));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_callback(
     adapter: *const c_void,
     context: *const c_void,
@@ -2513,6 +2530,8 @@ fn register_callback(
     graph: bool,
     finish: usize,
     has_rest: bool,
+    mask: u64,
+    method: bool,
 ) -> i64 {
     CALLBACKS.with(|callbacks| {
         let mut callbacks = callbacks.borrow_mut();
@@ -2526,6 +2545,8 @@ fn register_callback(
                 && c.graph == graph
                 && c.finish == finish
                 && c.has_rest == has_rest
+                && c.mask == mask
+                && c.method == method
         }) {
             return id as i64;
         }
@@ -2537,6 +2558,8 @@ fn register_callback(
             graph,
             finish,
             has_rest,
+            mask,
+            method,
             _root: thaw_arena::ArenaRoot::new(context),
         });
         callbacks.len() as i64 - 1
@@ -2544,20 +2567,45 @@ fn register_callback(
 }
 
 /// Register a compiled graph-wire callback (the counterpart of QuickJS's
-/// `thaw_js_register_native_callback_graph`; the extra arguments are the same, the mask and void flag
-/// are not needed) and return it as a JS function kept by handle.
+/// `thaw_js_register_native_callback_graph`; the void flag is not needed) and return it as a JS function
+/// kept by handle. `jsvalue_param_mask` says which arguments cross as handles (see `CompiledCallback`).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_register_native_callback_graph(
     adapter: *const c_void,
     context: *const c_void,
-    _jsvalue_param_mask: u64,
+    jsvalue_param_mask: u64,
     param_count: u64,
     _void_result: u8,
     finish: *const c_void,
     has_rest: u8,
 ) -> HandleResult {
+    register_graph_callback(
+        adapter,
+        context,
+        jsvalue_param_mask,
+        param_count,
+        finish,
+        has_rest,
+        false,
+    )
+}
+
+fn register_graph_callback(
+    adapter: *const c_void,
+    context: *const c_void,
+    jsvalue_param_mask: u64,
+    param_count: u64,
+    finish: *const c_void,
+    has_rest: u8,
+    method: bool,
+) -> HandleResult {
     // The compiler announces the closure identity right before this call (see `thaw_tjs_callback_identity`).
     let identity = PENDING_IDENTITY.with(|p| p.replace(0));
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        eprintln!(
+            "thaw-js register: params {param_count} mask {jsvalue_param_mask:#x} method {method}"
+        );
+    }
     let id = register_callback(
         adapter,
         context,
@@ -2566,6 +2614,8 @@ pub extern "C" fn thaw_tjs_register_native_callback_graph(
         true,
         finish as usize,
         has_rest != 0,
+        jsvalue_param_mask,
+        method,
     );
     let owner = default_realm();
     handle_result(
@@ -2583,18 +2633,18 @@ pub extern "C" fn thaw_tjs_register_native_method_callback_graph(
     context: *const c_void,
     jsvalue_param_mask: u64,
     param_count: u64,
-    void_result: u8,
+    _void_result: u8,
     finish: *const c_void,
     has_rest: u8,
 ) -> HandleResult {
-    thaw_tjs_register_native_callback_graph(
+    register_graph_callback(
         adapter,
         context,
         jsvalue_param_mask,
         param_count,
-        void_result,
         finish,
         has_rest,
+        true,
     )
 }
 
@@ -2682,6 +2732,34 @@ fn take_callback_result(it: &mut Interp, result: *mut c_char) -> Result<Option<S
     Ok((!out.is_empty()).then_some(out))
 }
 
+/// One argument of a graph callback's wire. A JsValue position (`jsvalue`) keeps the value behind a
+/// handle lease, which the compiled side decodes; a `Str` position (`error`) holding an `Error` crosses
+/// as its framed text, the way QuickJS's `__thaw_error_to_tagged` does.
+fn callback_arg_token(
+    it: &mut Interp,
+    out: &mut WireOut,
+    item: &Value,
+    jsvalue: bool,
+    error: bool,
+) -> Result<String, HostError> {
+    if error {
+        if let Value::Object(o) = item {
+            if crate::builtins::is_error_instance(it, o) {
+                if let Some((_, framed)) = frame_error(it, item) {
+                    let mut q = String::new();
+                    crate::builtins::json_quote(&framed, &mut q);
+                    return Ok(format!("{{\"v\":{q}}}"));
+                }
+            }
+        }
+    }
+    if jsvalue {
+        let id = store_handle(out.owner, item.clone()) as u64;
+        return Ok(out.lease(id));
+    }
+    out.token(it, item)
+}
+
 /// A graph callback: `[this, ...args]` goes over as a graph wire (objects stay live behind handle
 /// leases), the result is a graph wire (or a native Promise polled through `finish`).
 #[allow(clippy::too_many_arguments)]
@@ -2692,6 +2770,8 @@ fn call_compiled_graph(
     params: usize,
     finish: usize,
     has_rest: bool,
+    mask: u64,
+    method: bool,
     this: &Value,
     args: &[Value],
 ) -> R<Value> {
@@ -2703,7 +2783,16 @@ fn call_compiled_graph(
     } else {
         items.extend(args.iter().take(params).cloned());
     }
-    let root = it.array(items);
+    // A masked declared position the caller did not pass (`cb(err)` for a `(err, data)` callback) crosses
+    // as an `undefined` handle, not as the absent sentinel that decodes to handle 0.
+    let (low, errors) = (mask & 0xffff_ffff, mask >> 32);
+    if let Some(last) = (0..params.min(32))
+        .filter(|p| (low >> p) & 1 == 1)
+        .map(|p| if method { p } else { p + 1 })
+        .max()
+    {
+        items.resize(items.len().max(last + 1), Value::Undefined);
+    }
     let mut out = WireOut {
         owner: LAST_PACKAGE.with(|l| l.get()),
         plain: false,
@@ -2714,17 +2803,34 @@ fn call_compiled_graph(
         seen: Vec::new(),
         leases: Vec::new(),
     };
-    let token = match out.token(it, &root) {
-        Ok(t) => t,
-        Err(e) => {
-            for id in &out.leases {
-                thaw_tjs_release_handle(*id as i64);
+    // The argument array is the wire's root (as a copied container, so only what it holds goes live).
+    let root = out.nodes.len();
+    out.nodes.push(String::new());
+    let mut parts = Vec::with_capacity(items.len());
+    for (j, item) in items.iter().enumerate() {
+        // The declared parameter of wire item `j` (`this` is item 0 of a plain callback).
+        let param = if method { Some(j) } else { j.checked_sub(1) }.filter(|p| *p < 32);
+        let jsvalue = param.is_some_and(|p| (low >> p) & 1 == 1);
+        let error = param.is_some_and(|p| (errors >> p) & 1 == 1);
+        match callback_arg_token(it, &mut out, item, jsvalue, error) {
+            Ok(part) => parts.push(part),
+            Err(e) => {
+                for id in &out.leases {
+                    thaw_tjs_release_handle(*id as i64);
+                }
+                return throw_type_error(it, &e.to_string());
             }
-            return throw_type_error(it, &e.to_string());
         }
-    };
+    }
+    out.nodes[root] = format!("{{\"a\":[{}]}}", parts.join(","));
+    let token = format!("{{\"r\":{root}}}");
     let leases = out.leases.clone();
     let wire = thaw_arena::owned_string(out.finish(token));
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        // SAFETY: `wire` is a fresh arena-owned string, read before it is handed to the adapter.
+        let text = unsafe { std::ffi::CStr::from_ptr(wire) }.to_string_lossy();
+        eprintln!("thaw-js callback wire: {text}");
+    }
     // SAFETY: `wire` is a fresh arena-owned string.
     let granted = unsafe { thaw_arena::register_owned_graph_wire(wire) };
     // SAFETY: `adapter` is a generated `(context, wire) -> result` function and `context` its environment.
@@ -2825,17 +2931,21 @@ fn native_promise_state(_promise: usize) -> u8 {
 fn native_promise_mark_handled(_promise: usize) {}
 
 fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<Value> {
-    let Some((adapter, context, params, graph, finish, has_rest)) = CALLBACKS.with(|c| {
-        c.borrow().get(id).map(|c| {
-            (
-                c.adapter, c.context, c.params, c.graph, c.finish, c.has_rest,
-            )
+    let Some((adapter, context, params, graph, finish, has_rest, mask, method)) =
+        CALLBACKS.with(|c| {
+            c.borrow().get(id).map(|c| {
+                (
+                    c.adapter, c.context, c.params, c.graph, c.finish, c.has_rest, c.mask, c.method,
+                )
+            })
         })
-    }) else {
+    else {
         return it.throw_error("Error", "unknown compiled callback");
     };
     if graph {
-        return call_compiled_graph(it, adapter, context, params, finish, has_rest, this, args);
+        return call_compiled_graph(
+            it, adapter, context, params, finish, has_rest, mask, method, this, args,
+        );
     }
     let mut items = Vec::new();
     for arg in args.iter().take(params) {
