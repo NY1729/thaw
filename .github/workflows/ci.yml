@@ -231,6 +231,134 @@ jobs:
           path: ${{ runner.temp }}/diagnostics
           if-no-files-found: ignore
 
+  node-compat-thaw-js:
+    # Non-gating measurement of the thaw-js runtime against the node-compat manifest (see
+    # designs/plan-tj23-user-dynamic-default.md, stage 0). Runs only for a pull request that
+    # carries the `thaw-js-measure` label when it is opened or synchronized, or on workflow_dispatch.
+    # Not triggered by the `labeled` event: adding `labeled` to pull_request would start every
+    # job above too, since none of them filters on it.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure')
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: runtime-only
+            dynamic: "0"
+          - mode: runtime-user-dynamic
+            dynamic: "1"
+    name: node-compat thaw-js (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Run node-compat with thaw-js (${{ matrix.mode }})
+        env:
+          THAW_JS_RUNTIME: "1"
+          THAW_JS_USER_DYNAMIC: ${{ matrix.dynamic }}
+          THAW_NODE_COMPAT_JOBS: "4"
+        run: |
+          set +e
+          cargo run -p thaw-cli -- node-compat tests/node-compat.json > "$RUNNER_TEMP/report.json" 2> "$RUNNER_TEMP/stderr.log"
+          status=$?
+          echo "$status" > "$RUNNER_TEMP/exit-status"
+          tail -n 5 "$RUNNER_TEMP/stderr.log"
+          exit "$status"
+      - name: Summarize thaw-js node-compat
+        if: always()
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          report="$RUNNER_TEMP/report.json"
+          status=$(cat "$RUNNER_TEMP/exit-status" 2>/dev/null || echo not-run)
+          jq -r '.cases[] | select(.source | test("new Function|eval\\(")) | .name' tests/node-compat.json > "$RUNNER_TEMP/dynamic-names.txt"
+          {
+            echo "### thaw-js node-compat: $MODE (exit $status)"
+            if jq -e '.results' "$report" > /dev/null 2>&1; then
+              jq -r '"total \(.total), bugs \(.bugs), referenceErrors \(.referenceErrors)"' "$report"
+              echo
+              echo "Failing cases (classification other than matched):"
+              jq -r '.results[] | select(.classification != "matched") | "- \(.name): \(.classification) \((.detail // "") | .[0:200] | gsub("\n"; " "))"' "$report"
+              echo
+              echo "Cases using new Function or eval (the user-dynamic set):"
+              jq -r --rawfile names "$RUNNER_TEMP/dynamic-names.txt" '($names | split("\n") | map(select(length > 0))) as $dyn | .results[] | select(.name as $n | any($dyn[]; . == $n)) | "- \(.name): \(.classification)"' "$report"
+            else
+              echo "No JSON report was produced; see the stderr.log artifact."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload thaw-js node-compat report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: thaw-js-node-compat-${{ matrix.mode }}
+          path: |
+            ${{ runner.temp }}/report.json
+            ${{ runner.temp }}/stderr.log
+          if-no-files-found: ignore
+
   test:
     runs-on: ubuntu-latest
     # Observed runs take 55-75 minutes; a hang fails with its logs instead of
