@@ -700,6 +700,15 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
             }
         }
     }
+    if let Some(entries) = manifest["thaw_js_blockers"].as_array() {
+        for entry in entries {
+            println!(
+                "thaw-js-blocker: package={} why={}",
+                entry["package"].as_str().unwrap_or("?"),
+                entry["why"].as_str().unwrap_or("?")
+            );
+        }
+    }
     for line in js_infer_inspect_lines(&manifest) {
         println!("{line}");
     }

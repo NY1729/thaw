@@ -488,6 +488,7 @@ fn build_with_thaw_js_routing_shared(
     lib_mode: Option<&LibBuildMode>,
     routing: bool,
 ) -> Result<(), String> {
+    clear_thaw_js_blockers();
     // Timers lower to thaw-runtime's queue first (no JS context for timer-only programs); any
     // failure, or a program that also needs a JS engine, is rebuilt with the QuickJS timers.
     if lib_mode.is_none() && native_timers_enabled() {
@@ -835,6 +836,8 @@ fn build_with_native_mode_routed(
         if std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1") {
             manifest["thaw_js"] = thaw_js_eligibility(registry_dir, &resolved_packages);
         }
+        // Always present: the QuickJS retry of a routed build (routing off) must still report why.
+        manifest["thaw_js_blockers"] = thaw_js_blockers_manifest();
         if std::env::var("THAW_JS_INFER").as_deref() == Ok("1") {
             manifest["js_infer"] = js_infer_entries(registry_dir, &resolved_packages, &user_source);
             manifest["js_infer_aot"] = js_infer_aot_manifest(&js_infer_aot);
