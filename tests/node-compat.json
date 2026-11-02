@@ -4672,6 +4672,31 @@
       "name": "tj11 module create require path basename",
       "expect": "matched",
       "source": "import { createRequire } from 'node:module'; function main(): void { const require = createRequire('/tmp/example/main.js'); console.log(require('node:path').basename('/a/b.txt')); }"
+    },
+    {
+      "name": "r6b top-level string append stays linear and keeps aliases",
+      "expect": "matched",
+      "source": "let s = \"\";\nfor (let i = 0; i < 300000; i++) { s += \"x\"; }\nconst t = s;\ns += \"y\";\nconsole.log(s.length, t.length, t === s.slice(0, -1));\n"
+    },
+    {
+      "name": "r6b top-level string global read by a function keeps snapshots",
+      "expect": "matched",
+      "source": "let g = \"\";\nconst seen: string[] = [];\nfunction peek(): string { return g; }\nfor (let i = 0; i < 4; i++) { g += \"x\"; seen.push(peek()); }\nconsole.log(seen.join(\",\"), g);\n"
+    },
+    {
+      "name": "r6b realm timer and global function names and lengths",
+      "expect": "matched",
+      "source": "const g: any = globalThis;\nconsole.log([\"queueMicrotask\", \"structuredClone\", \"atob\", \"btoa\", \"setTimeout\", \"setInterval\", \"setImmediate\", \"clearTimeout\", \"clearInterval\", \"clearImmediate\"].map((k) => k + \":\" + g[k].name + \"/\" + g[k].length).join(\" \"));\nconsole.log(process.emitWarning.length, queueMicrotask.name);\n"
+    },
+    {
+      "name": "r6b computed-key object methods named after their keys",
+      "expect": "matched",
+      "source": "const k = \"dyn\";\nconst o = { [k + \"1\"]: 1, [`t${2}`]: 2, f() { return this; } };\nconsole.log(o, o.f() === o);\nconsole.log({ [k]() { return 1; }, y: 2 });\n"
+    },
+    {
+      "name": "r6b URL and URLSearchParams console inspect",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(new URL(\"https://user:pw@example.com:8080/p/a/t/h?query=string&a=1&a=2#hash\"));\n  console.log(new URLSearchParams(\"a=1&b=2\"), new URLSearchParams(\"\"));\n}\n"
     }
   ]
 }

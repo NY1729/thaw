@@ -598,14 +598,23 @@ impl<'ctx> HirCompiler<'ctx> {
             let Some((cell, _)) = self.variables.get(&name).copied() else {
                 continue;
             };
-            if self.captured_names.as_ref().is_some_and(|captured| captured.contains(&name))
+            // A global's cell is an LLVM global, not an alloca, so only locals
+            // must be allocas. A global read by a function body keeps the plain path.
+            let is_global = self.global_variables.get(&name).is_some_and(|(pointer, _, _)| *pointer == cell);
+            if is_global
+                && (self.real_closure_names.contains(&name)
+                    || self.function_body_text.contains(&format!("\"{name}\"")))
+            {
+                continue;
+            }
+            if (!is_global && self.captured_names.as_ref().is_some_and(|captured| captured.contains(&name)))
                 || self.string_append_states.contains_key(&cell)
                 || self.arena_variables.contains(&name)
-                || self.global_variables.contains_key(&name)
                 || self.async_frame_cells.contains(&cell)
                 || !matches!(self.variable_hir_types.get(&name), Some(HirType::Str))
-                || cell.as_instruction().map(|i| i.get_opcode())
-                    != Some(inkwell::values::InstructionOpcode::Alloca)
+                || (!is_global
+                    && cell.as_instruction().map(|i| i.get_opcode())
+                        != Some(inkwell::values::InstructionOpcode::Alloca))
             {
                 continue;
             }
