@@ -1825,6 +1825,189 @@ fn graph_callbacks_receive_live_objects_and_return_graph_wires() {
     );
 }
 
+const MASK_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"mk/index.js": function(module, exports, require) {
+  exports.make = function () { return new Error('boom'); };
+},
+};
+var __thaw_bundle_require_maps = { "mk/index.js": {}, };
+var __thaw_bundle_entry_key = "mk/index.js";
+})(globalThis.require);"#;
+
+thread_local! {
+    /// What `mask_adapter` saw per call: the wire text and `String(value)` of each handle lease it carried.
+    static MASK_SEEN: std::cell::RefCell<Vec<(String, Vec<String>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A graph-callback adapter that records its wire, reads each handle lease the way the compiled side
+/// would, then releases it. It answers `undefined`.
+unsafe extern "C" fn mask_adapter(
+    _context: *const std::ffi::c_void,
+    wire: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let text = unsafe { std::ffi::CStr::from_ptr(wire) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(unsafe { thaw_arena::take_owned_graph_wire(wire) });
+    let mut shown = Vec::new();
+    for part in text.split("\"hdl\":").skip(1) {
+        let id: i64 = part.split('}').next().unwrap().parse().unwrap();
+        let value = crate::host::thaw_tjs_handle_to_string(id as u64);
+        shown.push(
+            unsafe { std::ffi::CStr::from_ptr(value) }
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+        unsafe { thaw_arena::destroy_string(value) };
+        crate::host::thaw_tjs_release_handle(id);
+    }
+    MASK_SEEN.with(|s| s.borrow_mut().push((text, shown)));
+    let ptr = thaw_arena::owned_string(
+        "{\"root\":{\"u\":1},\"nodes\":[],\"leases\":[],\"napiLeases\":[]}".to_string(),
+    );
+    assert!(unsafe { thaw_arena::register_owned_graph_wire(ptr) });
+    ptr
+}
+
+fn mask_callback(mask: u64) -> u64 {
+    let made = crate::host::thaw_tjs_register_native_callback_graph(
+        mask_adapter as *const _,
+        std::ptr::null(),
+        mask,
+        1,
+        0,
+        std::ptr::null(),
+        0,
+    );
+    assert!(made.error.is_null() && made.value > 0);
+    made.value
+}
+
+/// Call the callback `callback` with one argument given as wire nodes `nodes` (root = node 0's array).
+fn call_mask_callback(callback: u64, nodes: &str) {
+    let wire =
+        std::ffi::CString::new(format!("{{\"root\":{{\"r\":0}},\"nodes\":[{nodes}]}}")).unwrap();
+    let result =
+        crate::host::thaw_tjs_call_handle_handle_graph_args_result(callback, wire.as_ptr(), false);
+    assert!(result.error.is_null());
+}
+
+fn seen_calls() -> Vec<(String, Vec<String>)> {
+    MASK_SEEN.with(|s| std::mem::take(&mut *s.borrow_mut()))
+}
+
+#[test]
+fn graph_mask_passes_primitive_jsvalue_arguments_as_handles() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(MASK_BUNDLE).unwrap();
+    assert_eq!(thaw_tjs_register(c"mk".as_ptr(), source.as_ptr()), 1);
+    // bit 0: the callback's first declared parameter is a JsValue
+    let callback = mask_callback(1) as u64;
+    for (arg, shown) in [
+        (r#"{"v":null}"#, "null"),
+        (r#"{"u":1}"#, "undefined"),
+        (r#"{"v":"hello"}"#, "hello"),
+    ] {
+        call_mask_callback(callback, &format!(r#"{{"a":[{arg}]}}"#));
+        let seen = seen_calls();
+        assert_eq!(seen.len(), 1);
+        // items: [this, arg]; `this` stays inline, the argument is a handle lease
+        assert!(
+            seen[0].0.contains(r#""a":[{"u":1},{"r":1}]"#),
+            "{}",
+            seen[0].0
+        );
+        assert_eq!(seen[0].1, [shown]);
+    }
+}
+
+#[test]
+fn graph_mask_zero_keeps_primitive_arguments_inline() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(MASK_BUNDLE).unwrap();
+    assert_eq!(thaw_tjs_register(c"mk".as_ptr(), source.as_ptr()), 1);
+    let callback = mask_callback(0) as u64;
+    call_mask_callback(callback, r#"{"a":[{"v":null}]}"#);
+    let seen = seen_calls();
+    assert_eq!(
+        seen[0].0,
+        r#"{"root":{"r":0},"nodes":[{"a":[{"u":1},{"v":null}]}],"leases":[],"napiLeases":[]}"#
+    );
+    assert!(seen[0].1.is_empty());
+}
+
+#[test]
+fn graph_mask_frames_error_arguments_at_str_positions() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(MASK_BUNDLE).unwrap();
+    assert_eq!(thaw_tjs_register(c"mk".as_ptr(), source.as_ptr()), 1);
+    // `make()` returns a live `Error`; hand it to the callback as a lease
+    let make = thaw_tjs_get_global(c"mk::make".as_ptr());
+    assert!(make > 0);
+    let error = thaw_tjs_call_handle_handle_graph_args_result(
+        make as u64,
+        c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}]}".as_ptr(),
+        false,
+    );
+    assert!(error.error.is_null() && error.value > 0);
+    thaw_tjs_retain_handle(error.value as i64);
+    // bit 32: the callback's first declared parameter is a `Str` (an Error arrives framed)
+    let callback = mask_callback(1 << 32) as u64;
+    call_mask_callback(
+        callback,
+        &format!(r#"{{"a":[{{"r":1}}]}},{{"hdl":{}}}"#, error.value),
+    );
+    let seen = seen_calls();
+    assert!(
+        seen[0].0.contains(r#"{"v":"\u0001Error\u0001boom"#),
+        "{}",
+        seen[0].0
+    );
+    assert!(seen[0].1.is_empty());
+}
+
+#[test]
+fn graph_mask_method_variant_counts_the_receiver_as_parameter_zero() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(MASK_BUNDLE).unwrap();
+    assert_eq!(thaw_tjs_register(c"mk".as_ptr(), source.as_ptr()), 1);
+    // A method has the receiver as declared parameter 0 (wire item 0), so bit 1 is the first argument.
+    let method = |mask: u64| {
+        let made = thaw_tjs_register_native_method_callback_graph(
+            mask_adapter as *const _,
+            std::ptr::null(),
+            mask,
+            2,
+            0,
+            std::ptr::null(),
+            0,
+        );
+        assert!(made.error.is_null() && made.value > 0);
+        made.value as u64
+    };
+    call_mask_callback(method(1 << 1), r#"{"a":[{"v":null}]}"#);
+    let seen = seen_calls();
+    assert!(
+        seen[0].0.contains(r#""a":[{"u":1},{"r":1}]"#),
+        "{}",
+        seen[0].0
+    );
+    assert_eq!(seen[0].1, ["null"]);
+    // bit 0 is the receiver: `this` (undefined here) becomes the lease, the argument stays inline
+    call_mask_callback(method(1 << 0), r#"{"a":[{"v":null}]}"#);
+    let seen = seen_calls();
+    assert!(
+        seen[0].0.contains(r#""a":[{"r":1},{"v":null}]"#),
+        "{}",
+        seen[0].0
+    );
+    assert_eq!(seen[0].1, ["undefined"]);
+}
+
 #[test]
 fn exact_calls_await_returned_promises_only_when_resolving() {
     use crate::host::*;
