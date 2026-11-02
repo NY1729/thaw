@@ -845,3 +845,4 @@ include!("tests/fx18_callback_storage_contracts.rs");
 include!("tests/fx21_constructor_return_contracts.rs");
 include!("tests/fx20_method_length_contracts.rs");
 include!("tests/fx23_class_alias_contracts.rs");
+include!("tests/tostring_tags_round8_contracts.rs");

@@ -1,3 +1,23 @@
+/// `Object.prototype.toString.call(<name>)`: a read of `name`'s tag only.
+fn is_object_tag_read_of(call: &swc_ecma_ast::CallExpr, name: &str) -> bool {
+    use swc_ecma_ast::{Callee, Expr, MemberProp};
+    fn prop_is(prop: &MemberProp, want: &str) -> bool {
+        matches!(prop, MemberProp::Ident(p) if p.sym == want)
+    }
+    let Callee::Expr(callee) = &call.callee else { return false };
+    let Expr::Member(call_member) = callee.as_ref() else { return false };
+    let Expr::Member(tag_member) = call_member.obj.as_ref() else { return false };
+    let Expr::Member(proto_member) = tag_member.obj.as_ref() else { return false };
+    let Expr::Ident(root) = proto_member.obj.as_ref() else { return false };
+    let [arg] = call.args.as_slice() else { return false };
+    prop_is(&call_member.prop, "call")
+        && prop_is(&tag_member.prop, "toString")
+        && prop_is(&proto_member.prop, "prototype")
+        && root.sym == "Object"
+        && arg.spread.is_none()
+        && matches!(arg.expr.as_ref(), Expr::Ident(id) if id.sym == name)
+}
+
 fn collect_return_values<'a>(stmts: &'a [HirStmt], out: &mut Vec<&'a HirExpr>, bare: &mut bool) {
     for stmt in stmts {
         match stmt {
@@ -497,6 +517,13 @@ impl<'a> FnLowerer<'a> {
         impl Visit for OnlyIndexed<'_> {
             fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
                 self.ok &= ident.sym != self.name;
+            }
+            // `Object.prototype.toString.call(u)` reads only the static tag, which the native store answers.
+            fn visit_call_expr(&mut self, call: &swc_ecma_ast::CallExpr) {
+                if is_object_tag_read_of(call, self.name) {
+                    return;
+                }
+                call.visit_children_with(self);
             }
             fn visit_member_expr(&mut self, member: &swc_ecma_ast::MemberExpr) {
                 let own = matches!(member.obj.as_ref(), Expr::Ident(id) if id.sym == self.name);
