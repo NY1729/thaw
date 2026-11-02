@@ -2350,6 +2350,30 @@ impl<'a> FnLowerer<'a> {
                             values = HirExpr::ArrayLit(Vec::new());
                         }
                     }
+                    // A heterogeneous array literal (closures, mixed primitives) is typed as
+                    // a `Tuple`; iterate it as an array of the members' common element type.
+                    // Coercion failure falls through to the error below. `for await` over a
+                    // Promise member would need per-element awaiting of a union, so it stays there.
+                    let literal_element = match &values_type {
+                        HirType::Tuple(elements)
+                            if matches!(values, HirExpr::ArrayLit(_))
+                                && !elements.iter().all(Self::spread_json_encodable_type)
+                                && !(for_of.is_await
+                                    && elements.iter().any(|ty| matches!(ty, HirType::Promise(_)))) =>
+                        {
+                            for_of_literal_element_type(elements)
+                        }
+                        _ => None,
+                    };
+                    if let Some(element) = literal_element {
+                        let array = HirType::Array(Box::new(element.clone()));
+                        if let Ok(coerced) =
+                            self.coerce_literal_array_for_iteration(&element, values.clone())
+                        {
+                            values = coerced;
+                            values_type = array;
+                        }
+                    }
                     // A tuple remains an ordinary iterable array at runtime.
                     // Its declared prefix can be shorter than a reflected
                     // owner array, so read the canonical Json array rather
@@ -3483,6 +3507,44 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+}
+
+/// Common element type of a heterogeneous array literal for `for...of`: members that are
+/// all functions with the same parameters share one signature (results merge to `Json` when
+/// they differ); otherwise the deduplicated members form a union.
+fn for_of_literal_element_type(elements: &[HirType]) -> Option<HirType> {
+    if elements.is_empty() {
+        return None;
+    }
+    let functions: Option<Vec<(&Vec<HirType>, &HirType)>> = elements
+        .iter()
+        .map(|element| match element {
+            HirType::Function(params, result) => Some((params, result.as_ref())),
+            _ => None,
+        })
+        .collect();
+    if let Some(functions) = functions {
+        let (params, first_result) = functions[0];
+        if functions.iter().any(|(member, _)| *member != params) {
+            return None;
+        }
+        let result = if functions.iter().all(|(_, result)| *result == first_result) {
+            first_result.clone()
+        } else {
+            HirType::Json
+        };
+        return Some(HirType::Function(params.clone(), Box::new(result)));
+    }
+    let mut members: Vec<HirType> = Vec::new();
+    for element in elements {
+        if !members.contains(element) {
+            members.push(element.clone());
+        }
+    }
+    Some(match members.as_slice() {
+        [only] => only.clone(),
+        _ => HirType::Union(members),
+    })
 }
 
 /// Whether a `return` occurs at statement level (nested lambdas keep their own).
