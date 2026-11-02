@@ -53,11 +53,9 @@ target/release/thaw build app.ts -o app
 curl http://127.0.0.1:3000/
 ```
 
-This built-in server handles one request per connection (each response
-closes the connection) rather than keeping it alive for further
-requests -- for keep-alive, streaming responses, or a framework's own
-routing (Express, Fastify, Hono, ...), install it as a package instead;
-see [Projects and npm packages](#projects-and-npm-packages) below.
+This built-in server keeps connections alive for further requests. For a
+framework's own routing (Express, Fastify, Hono, ...), install it as a
+package; see [Projects and npm packages](#projects-and-npm-packages) below.
 
 Use `--static` on Linux to request a fully static ELF:
 
@@ -157,11 +155,14 @@ add-ons can be embedded or placed beside the executable with
 - Hono, React/Vite, Prisma/PostgreSQL, SQLite, and sharp integration examples
 - C ABI bridges through `--bridge`, `--link`, and `--ffi-metadata`
 - AWS Lambda entrypoints
+- Arbitrary-precision `BigInt`
 
 Statically understood code is compiled through HIR and LLVM. Package code that
 requires general JavaScript semantics uses the embedded QuickJS compatibility
-layer. `thaw inspect` reports whether QuickJS or N-API is present and explains
-known fallback reasons.
+layer. An experimental Thaw-native JavaScript evaluator (`thaw-js`) can serve a
+subset of this code instead; see [thaw-js](#thaw-js-experimental).
+`thaw inspect` reports whether QuickJS or N-API is present, which packages were
+routed to thaw-js, and explains known fallback reasons.
 
 Native strings preserve embedded NULs and UTF-16 lone surrogates. Their C ABI
 remains pointer-based; pointer-length FFI signatures carry the full byte length.
@@ -233,43 +234,50 @@ Known gaps against Node semantics:
 
 - A default parameter that reads itself or a later parameter outside a nested closure is a
   compile error, as in TypeScript (TS2373); Node 22 throws a `ReferenceError` at run time instead.
-- Frozen native arrays always throw `TypeError` on writes (code is strict).
-- `structuredClone` of a host array longer than 16,777,216 elements throws `RangeError`: arrays
-  are dense, so a huge sparse length cannot be materialized. Node returns a sparse array.
-- A `structuredClone`d `Map`/`Set` is a native collection: its methods are callable, but
-  `typeof m.get` reports `undefined` (Node: `function`).
+- `structuredClone` of a huge sparse array (for example `new Array(4e9)`) materializes the
+  elements and exhausts memory; Node keeps it sparse.
 - `structuredClone` of a function throws `DataCloneError` with a generic message
   (`function could not be cloned.`); Node quotes the function source.
 - Native FFI collection parameters require an authenticated native collection or a
   JavaScript-owned `Map`/`Set` whose declared key and value types have a supported
   copy-in layout. Unsupported JavaScript-owned collection layouts throw `TypeError`
   before native code is invoked.
-- Writing the same linked array through both a JavaScript (`any`) view and a typed native
-  view within one expression: the JavaScript-side write wins. Node applies the last write in
-  statement order.
 - Writes to a frozen native array always throw `TypeError`. Node ignores them silently in
   sloppy-mode scripts (CommonJS without `'use strict'`). Thaw code is always strict.
 - Class instances passed to npm or ambient functions are snapshots: later changes made in
   Thaw are not visible to npm code, and the reverse. Node passes live objects.
 - `new.target` is supported only inside a top-level, non-async, non-generator function
-  declaration; class constructors, methods, nested and exported functions are a compile error.
-- `f.length` is supported only on directly named, declared functions. Aliases, arrow functions
-  and methods are a compile error.
+  declaration or a class constructor, and only as `new.target === C`, `new.target.name` or
+  `Object.setPrototypeOf(this, new.target.prototype)`; in methods, nested functions and function
+  expressions it is a compile error.
 - A constructor that returns an object is ignored: `new` still yields the constructed instance
-  of the class.
-- `Error` values are tagged strings, so extra own properties, `cause` and subclass naming in
-  `util.inspect` differ from Node.
-- `class X extends Array` and `class X extends Map` are compile errors.
+  of the class; returning an instance of a different class is a compile error.
+- `Error` subclasses differ from Node in `util.inspect` (no stack or class header, `message`
+  listed as an own key), and `instanceof` against an `Error` subclass or `Error` can be false when
+  the value is held as `any`.
 - A class passed through an `any` parameter is a JavaScript copy: it has no shared static state
-  with the original, and an instance does not satisfy `instanceof` of a parent class.
-- An uninitialised `number` or `boolean` class field reads as `0` or `false` and is included in
-  `Object.keys` and `JSON.stringify`; Node reads `undefined`.
-- `localeCompare` compares by code point unless built with `--icu4c`.
-- `Buffer`/`Uint8Array` `slice` and `subarray` copy; writes through the result are not visible
-  in the original. Node shares the underlying memory.
-- `BigInt` is 64-bit: values outside the signed 64-bit range wrap instead of growing.
-- `Date.prototype.toLocale*String` and `Number.prototype.toLocaleString` on native values ignore
-  the locale and options (`Intl.DateTimeFormat`/`Intl.NumberFormat` do honor them).
+  with the original (static writes made through the copy are not visible to Thaw code).
+- `Number.prototype.toLocaleString` on native values does not apply non-Latin default numbering
+  systems (for example `ar-EG`); `Intl.NumberFormat` is the reference.
+
+## thaw-js (experimental)
+
+`thaw-js` is a Thaw-native JavaScript evaluator intended to replace the embedded
+QuickJS layer. It is opt-in: set `THAW_JS_RUNTIME=1` when running `thaw build`.
+Without it, QuickJS remains the default engine. With it, a package is served by
+thaw-js only when its bundle passes the thaw-js feature scan and every call the
+program makes is a typed call of plain data; anything else stays on QuickJS.
+Of the Node built-in modules, only `node:events`, `node:module`, `node:path` (and
+`path/posix`, `path/win32`), `node:assert` (and `assert/strict`), `node:os`, `node:util`,
+`node:constants`, `node:url`, `node:fs`, `node:fs/promises` and `node:timers/promises` are
+routed; other `node:*` modules keep using QuickJS.
+
+`THAW_JS_USER_DYNAMIC=1` (together with `THAW_JS_RUNTIME=1`) also serves the program's own
+`eval`/`new Function` on thaw-js. `THAW_JS_RUNTIME_DEBUG=1` prints, for each package that stayed
+on QuickJS, the reason (``thaw-js routing: package `x` stays on QuickJS: ...``), and names the
+compiled functions that still call into QuickJS. `thaw inspect <executable>` prints
+`quickjs: true|false`, `quickjs-reason:` lines, a `thaw-js-routed:` list of packages served by
+thaw-js, and `thaw-js: package=... eligible=true|false blockers=...` lines.
 
 ## Examples
 
