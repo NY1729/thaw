@@ -39,7 +39,18 @@ thread_local! {
 /// Names are not scoped, so the result over-approximates -- safe for a caller
 /// that only needs "this variable is certainly never captured".
 pub fn closure_captured_names_deep(program: &HirProgram) -> BTreeSet<Symbol> {
-    DEEP.with(|deep| deep.set(true));
+    captured_names_in_program(program, true)
+}
+
+/// Names captured by closures that are really created at run time: an inlinable IIFE
+/// is compiled in place and its captures are not included (the body still is walked).
+/// Each closure's `captures` already lists everything its nested closures reference.
+pub fn closure_captured_names_by_real_closures(program: &HirProgram) -> BTreeSet<Symbol> {
+    captured_names_in_program(program, false)
+}
+
+fn captured_names_in_program(program: &HirProgram, deep_mode: bool) -> BTreeSet<Symbol> {
+    DEEP.with(|deep| deep.set(deep_mode));
     let mut names = BTreeSet::new();
     for function in &program.functions {
         for stmt in &function.body {

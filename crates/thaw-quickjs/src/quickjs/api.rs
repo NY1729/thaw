@@ -2217,6 +2217,7 @@ pub extern "C" fn thaw_js_handle_to_console_string(handle: u64) -> *const c_char
                      s = name ? '[Function: ' + name + ']' : '[Function (anonymous)]'; \
                    } \
                  } \
+                 if (s === undefined && typeof value === 'object' && value !== null) { try { const c = value[Symbol.for('nodejs.util.inspect.custom')]; if (typeof c === 'function') { const r = c.call(value, 2, { breakLength: 80, depth: 2 }, undefined); if (typeof r === 'string') s = r; } } catch (e) {} } \
                  if (s === undefined) s = typeof value === 'bigint' ? String(value) + 'n' : String(value); \
                  const parts = []; for (let i = 0; i < s.length; i++) parts.push(s.charCodeAt(i)); \
                  return parts.join(','); }",
