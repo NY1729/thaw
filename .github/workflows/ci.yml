@@ -200,6 +200,8 @@ jobs:
         env:
           MANIFESTS: ${{ matrix.manifests }}
           GROUP: ${{ matrix.group }}
+          # runners have 4 vCPU; the default is cores/2 = 2 workers
+          THAW_NODE_COMPAT_JOBS: "4"
         run: |
           if [[ "$GROUP" == others ]]; then
             cargo run -p thaw-cli -- compat tests/typescript-compat.json
