@@ -700,53 +700,57 @@ impl<'a> FnLowerer<'a> {
             }
         }
         // Iterators share one producer type, so the tag comes from the producing call.
-        if matches!(ty, HirType::Function(..) | HirType::Object(_) | HirType::Array(_)) {
-            let tag = match inner {
-                Expr::Call(CallExpr { callee: Callee::Expr(callee), .. }) => match callee.as_ref() {
-                    Expr::Member(member) => {
-                        let receiver = self
-                            .infer_member_receiver_type(&member.obj)
-                            .or_else(|| self.peek_type_without_lowering(&member.obj))
-                            .or_else(|| {
-                                let receiver = self.lower_expr(&member.obj).ok()?;
-                                self.infer_expr_type(&receiver).ok()
-                            });
-                        let kind = match &member.prop {
-                            MemberProp::Computed(c) if self.builtin_symbol_member_name(&c.expr) == Some("iterator") => {
-                                Some("values".to_string())
-                            }
-                            prop => member_property_name(prop),
-                        };
-                        match (receiver, kind.as_deref()) {
-                            (Some(HirType::Array(_) | HirType::Tuple(_)), Some("entries" | "keys" | "values")) => Some("Array Iterator"),
-                            (Some(HirType::Map(..)), Some("entries" | "keys" | "values")) => Some("Map Iterator"),
-                            (Some(HirType::Set(_)), Some("entries" | "keys" | "values")) => Some("Set Iterator"),
-                            (Some(HirType::Str | HirType::StrLiteral(_)), Some("matchAll")) => Some("RegExp String Iterator"),
-                            _ => None,
-                        }
-                    }
-                    Expr::Ident(name)
-                        if is_generator_producer_type(&ty)
-                            && self.signatures.contains_key(&self.resolve_binding(name.sym.as_ref())) =>
-                    {
-                        Some("Generator")
-                    }
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(tag) = tag {
-                let name = format!("__thaw_object_tag_iterator_{}", self.next_binding);
-                self.next_binding += 1;
-                return self
-                    .wrap_call_argument_bindings(
-                        HirExpr::Lit(HirLit::Str(format!("[object {tag}]"))),
-                        &[(name, ty, value)],
-                    )
-                    .map(Some);
-            }
+        if let Some(tag) = self.iterator_tag_of_call(inner, &ty) {
+            let name = format!("__thaw_object_tag_iterator_{}", self.next_binding);
+            self.next_binding += 1;
+            return self
+                .wrap_call_argument_bindings(
+                    HirExpr::Lit(HirLit::Str(format!("[object {tag}]"))),
+                    &[(name, ty, value)],
+                )
+                .map(Some);
         }
         self.object_prototype_to_string_tag(value, &ty).map(Some)
+    }
+
+    /// The native iterator a producing call returns (`xs.values()`, `[1][Symbol.iterator]()`,
+    /// `g()`), from the call's syntax and its receiver type; `None` when the shape is not one.
+    pub(in crate::lower) fn iterator_tag_of_call(&mut self, inner: &Expr, ty: &HirType) -> Option<&'static str> {
+        let Expr::Call(CallExpr { callee: Callee::Expr(callee), .. }) = inner else {
+            return None;
+        };
+        match callee.as_ref() {
+            Expr::Member(member) => {
+                let receiver = self
+                    .infer_member_receiver_type(&member.obj)
+                    .or_else(|| self.peek_type_without_lowering(&member.obj))
+                    .or_else(|| {
+                        let receiver = self.lower_expr(&member.obj).ok()?;
+                        self.infer_expr_type(&receiver).ok()
+                    });
+                let symbol_iterator = matches!(&member.prop, MemberProp::Computed(c)
+                    if self.builtin_symbol_member_name(&c.expr) == Some("iterator"));
+                let kind = match &member.prop {
+                    MemberProp::Computed(_) if symbol_iterator => Some("values".to_string()),
+                    prop => member_property_name(prop),
+                };
+                match (receiver, kind.as_deref()) {
+                    (Some(HirType::Array(_) | HirType::Tuple(_)), Some("entries" | "keys" | "values")) => Some("Array Iterator"),
+                    (Some(HirType::Map(..)), Some("entries" | "keys" | "values")) => Some("Map Iterator"),
+                    (Some(HirType::Set(_)), Some("entries" | "keys" | "values")) => Some("Set Iterator"),
+                    (Some(HirType::Str | HirType::StrLiteral(_)), Some("values")) if symbol_iterator => Some("String Iterator"),
+                    (Some(HirType::Str | HirType::StrLiteral(_)), Some("matchAll")) => Some("RegExp String Iterator"),
+                    _ => None,
+                }
+            }
+            Expr::Ident(name)
+                if is_generator_producer_type(ty)
+                    && self.signatures.contains_key(&self.resolve_binding(name.sym.as_ref())) =>
+            {
+                Some("Generator")
+            }
+            _ => None,
+        }
     }
 
     fn object_prototype_to_string_tag(
