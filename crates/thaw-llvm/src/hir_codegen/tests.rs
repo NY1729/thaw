@@ -851,3 +851,4 @@ include!("tests/unary_plus_array_round9.rs");
 include!("tests/invalid_date_inspect_round9.rs");
 include!("tests/undefined_json_array_round9.rs");
 include!("tests/iterator_inspect_round10.rs");
+include!("tests/typed_array_inspect_round10.rs");
