@@ -1,3 +1,80 @@
+/// Clones a class constructor body and makes each `return` in it end in `this`. A bare `return;`
+/// becomes `return this`; a primitive literal return (`return 5`) is evaluated and then becomes
+/// `return this`, as JS ignores primitive returns; `return new Other()` is a compile error.
+/// Nested functions, arrows, classes and accessors keep their own returns.
+fn rewrite_constructor_returns(class_name: &str, stmts: &[Stmt]) -> Result<Vec<Stmt>, String> {
+    fn strip_wrappers(mut expr: &Expr) -> &Expr {
+        loop {
+            expr = match expr {
+                Expr::Paren(paren) => &paren.expr,
+                Expr::TsAs(cast) => &cast.expr,
+                Expr::TsNonNull(assertion) => &assertion.expr,
+                Expr::TsConstAssertion(assertion) => &assertion.expr,
+                _ => return expr,
+            };
+        }
+    }
+    struct Rewrite<'a> {
+        class_name: &'a str,
+        error: Option<String>,
+    }
+    impl VisitMut for Rewrite<'_> {
+        fn visit_mut_function(&mut self, _: &mut swc_ecma_ast::Function) {}
+        fn visit_mut_arrow_expr(&mut self, _: &mut swc_ecma_ast::ArrowExpr) {}
+        fn visit_mut_class(&mut self, _: &mut swc_ecma_ast::Class) {}
+        fn visit_mut_getter_prop(&mut self, _: &mut swc_ecma_ast::GetterProp) {}
+        fn visit_mut_setter_prop(&mut self, _: &mut swc_ecma_ast::SetterProp) {}
+        fn visit_mut_stmt(&mut self, stmt: &mut Stmt) {
+            stmt.visit_mut_children_with(self);
+            let Stmt::Return(ret) = stmt else { return };
+            let span = ret.span;
+            let this_expr = || Box::new(Expr::This(swc_ecma_ast::ThisExpr { span }));
+            let Some(value) = ret.arg.take() else {
+                ret.arg = Some(this_expr());
+                return;
+            };
+            let other_class = match strip_wrappers(&value) {
+                Expr::New(new) => match new.callee.as_ref() {
+                    Expr::Ident(id) if &*id.sym != self.class_name => Some(id.sym.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(other) = other_class {
+                self.error.get_or_insert(format!(
+                    "class `{}` constructor returns an instance of `{other}`; returning an instance of a different class from a constructor is not supported",
+                    self.class_name
+                ));
+                ret.arg = Some(value);
+                return;
+            }
+            let primitive = matches!(
+                strip_wrappers(&value),
+                Expr::Lit(Lit::Num(_) | Lit::Str(_) | Lit::Bool(_) | Lit::Null(_) | Lit::BigInt(_))
+            );
+            if primitive {
+                *stmt = Stmt::Block(swc_ecma_ast::BlockStmt {
+                    span,
+                    ctxt: swc_common::SyntaxContext::empty(),
+                    stmts: vec![
+                        Stmt::Expr(swc_ecma_ast::ExprStmt { span, expr: value }),
+                        Stmt::Return(swc_ecma_ast::ReturnStmt { span, arg: Some(this_expr()) }),
+                    ],
+                });
+                return;
+            }
+            ret.arg = Some(value);
+        }
+    }
+    let mut stmts = stmts.to_vec();
+    let mut rewrite = Rewrite { class_name, error: None };
+    stmts.visit_mut_with(&mut rewrite);
+    match rewrite.error {
+        Some(error) => Err(error),
+        None => Ok(stmts),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_class_constructor(
     declaration: &ClassDecl,
@@ -260,8 +337,9 @@ fn lower_class_constructor(
             let block = constructor.body.as_ref().ok_or_else(|| {
                 format!("class `{class_name}` constructor needs an implementation body")
             })?;
+            let stmts = rewrite_constructor_returns(&class_name, &block.stmts)?;
             let mut called_super = false;
-            for statement in &block.stmts {
+            for statement in &stmts {
                 let is_super = matches!(statement, Stmt::Expr(expression) if matches!(expression.expr.as_ref(), Expr::Call(call) if matches!(call.callee, Callee::Super(_))));
                 initializer_body.extend(lowerer.lower_stmt_seq(statement)?);
                 if is_super {
@@ -440,7 +518,8 @@ fn lower_class_constructor(
             let block = constructor.body.as_ref().ok_or_else(|| {
                 format!("class `{class_name}` constructor needs an implementation body")
             })?;
-            initializer_body.extend(lowerer.lower_stmts(&block.stmts)?);
+            let stmts = rewrite_constructor_returns(&class_name, &block.stmts)?;
+            initializer_body.extend(lowerer.lower_stmts(&stmts)?);
         }
     }
     initializer_body.push(HirStmt::Return(Some(HirExpr::Var(this_name.clone()))));
