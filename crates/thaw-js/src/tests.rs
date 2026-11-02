@@ -1441,6 +1441,45 @@ fn a_date_crosses_the_typed_abi_as_a_wire_node_both_ways() {
     );
 }
 
+const COLLECTIONS: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"c/index.js": function(module, exports, require) {
+  exports.describe = function (m) { return m instanceof Map ? "map:" + m.size + ":" + m.get("a") : "?"; };
+  exports.setd = function (s) { return s instanceof Set ? "set:" + s.size : "?"; };
+  exports.nested = function (m) { return m instanceof Map && m.get("k") instanceof Date ? "date" : "?"; };
+},
+};
+var __thaw_bundle_require_maps = { "c/index.js": {}, };
+var __thaw_bundle_entry_key = "c/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn a_map_and_set_cross_the_typed_abi_as_wire_nodes() {
+    use std::ffi::CString;
+    let bundle = CString::new(COLLECTIONS).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"cm".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    assert_eq!(
+        typed_call("cm::describe", r#"[{"__thaw_tjs_map__":[["a",1]]}]"#).unwrap(),
+        "\"map:1:1\""
+    );
+    assert_eq!(
+        typed_call("cm::setd", r#"[{"__thaw_tjs_set__":[2,3]}]"#).unwrap(),
+        "\"set:2\""
+    );
+    // a Date value inside a Map entry is still revived as a real Date
+    assert_eq!(
+        typed_call(
+            "cm::nested",
+            r#"[{"__thaw_tjs_map__":[["k",{"__thaw_tjs_date__":5}]]}]"#
+        )
+        .unwrap(),
+        "\"date\""
+    );
+}
+
 const CONTEXTS: &str = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
 "cx/index.js": function(module, exports, require) {
