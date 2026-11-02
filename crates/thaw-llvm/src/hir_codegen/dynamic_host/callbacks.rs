@@ -22,6 +22,32 @@ pub(super) fn json_callback_wants_graph(params: &[HirType]) -> bool {
     params.iter().any(contains_collection) || (!takes_byte_buffer && params.contains(&HirType::Json))
 }
 
+/// The callback's `jsvalue_param_mask` (thaw-js graph wire): low 32 bits = positions a value crosses as a
+/// handle lease (`JsValue`, `Function`, `CallableFunction`, or a `NonArrowReceiver(JsValue)` at 0); high
+/// 32 bits = `Str` positions, where an `Error` arriving there is framed as a native Error.
+fn jsvalue_param_mask(params: &[HirType]) -> u64 {
+    params
+        .iter()
+        .enumerate()
+        .filter(|(index, param)| {
+            matches!(
+                param,
+                HirType::JsValue | HirType::Function(_, _) | HirType::CallableFunction(..)
+            ) || (*index == 0 && matches!(param,
+                HirType::NonArrowReceiver(inner) if **inner == HirType::JsValue))
+        })
+        .map(|(index, _)| 1u64 << index)
+        .sum::<u64>()
+        // High half: `Str` positions. A `: Error` annotation lowers to `Str`, so an Error object arriving
+        // there must be framed as a native Error, not `String(error)`.
+        | params
+            .iter()
+            .enumerate()
+            .filter(|(index, param)| *index < 32 && **param == HirType::Str)
+            .map(|(index, _)| 1u64 << (32 + index))
+            .sum::<u64>()
+}
+
 fn json_callback_result_wants_graph(result: &HirType) -> bool {
     match result {
         HirType::Json | HirType::Dictionary(_) => true,
@@ -2281,26 +2307,10 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_conditional_branch(absent, absent_block, present_block)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(present_block);
-        let jsvalue_param_mask: u64 = params
-            .iter()
-            .enumerate()
-            .filter(|(index, param)| {
-                matches!(
-                    param,
-                    HirType::JsValue | HirType::Function(_, _) | HirType::CallableFunction(..)
-                ) || (*index == 0 && matches!(param,
-                    HirType::NonArrowReceiver(inner) if **inner == HirType::JsValue))
-            })
-            .map(|(index, _)| 1u64 << index)
-            .sum::<u64>()
-            // High half: `Str` positions. A `: Error` annotation lowers to `Str`, so an Error
-            // object arriving there must be framed as a native Error, not `String(error)`.
-            | params
-                .iter()
-                .enumerate()
-                .filter(|(index, param)| *index < 32 && **param == HirType::Str)
-                .map(|(index, _)| 1u64 << (32 + index))
-                .sum::<u64>();
+        let jsvalue_param_mask = jsvalue_param_mask(params);
+        if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
+            eprintln!("thaw-js callback params {params:?} mask {jsvalue_param_mask:#x}");
+        }
         // thaw-js: the alias-resolved closure is the callback's identity, so registering the same
         // closure again (`on` then `off`) yields the same JS function. Announced to the next register call.
         let identity = if self.js_engine() == JsEngine::ThawJs && !method_mode {

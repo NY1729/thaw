@@ -320,6 +320,8 @@ jobs:
           THAW_JS_RUNTIME: "1"
           THAW_JS_USER_DYNAMIC: ${{ matrix.dynamic }}
           THAW_NODE_COMPAT_JOBS: "4"
+          # TEMPORARY (PR diagnostics): remove after reading stderr.log (THAW_JS_RUNTIME_DEBUG prints callback param types and mask at compile time)
+          THAW_JS_RUNTIME_DEBUG: "1"
         run: |
           set +e
           cargo run -p thaw-cli -- node-compat tests/node-compat.json > "$RUNNER_TEMP/report.json" 2> "$RUNNER_TEMP/stderr.log"
