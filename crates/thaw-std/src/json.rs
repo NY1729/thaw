@@ -6105,6 +6105,7 @@ pub extern "C" fn thaw_json_buffer_inspect(
                     .iter()
                     .map(|&byte| crate::inspect::Node::Number(f64::from(byte)))
                     .collect(),
+                extra: Vec::new(),
             },
             &crate::inspect::InspectOptions::default(),
         ),
@@ -6134,7 +6135,8 @@ pub extern "C" fn thaw_console_typed_or(
     ))
 }
 
-/// The inspector node for a typed-array probe (`{"n":name,"v":[text, ..]}`).
+/// The inspector node for a typed-array probe (`{"n":name,"v":[text, ..],"e":[[key,tag,text], ..]}`).
+/// `e` (non-index own properties, primitives only) is optional.
 fn typed_probe_node(probe: &str) -> Option<crate::inspect::Node> {
     let json = serde_json::from_str::<serde_json::Value>(probe).ok()?;
     let name = json.get("n")?.as_str()?.to_string();
@@ -6150,7 +6152,29 @@ fn typed_probe_node(probe: &str) -> Option<crate::inspect::Node> {
             })
         })
         .collect::<Option<Vec<_>>>()?;
-    Some(crate::inspect::Node::Typed { name, items })
+    let extra = match json.get("e").and_then(|entries| entries.as_array()) {
+        Some(entries) => entries
+            .iter()
+            .map(|entry| {
+                let [key, tag, text] = entry.as_array()?.as_slice() else {
+                    return None;
+                };
+                let (key, tag, text) = (key.as_str()?, tag.as_str()?, text.as_str()?);
+                let value = match tag {
+                    "s" => crate::inspect::Node::Str(text.encode_utf16().collect()),
+                    "n" => crate::inspect::Node::Number(text.parse().ok()?),
+                    "g" => crate::inspect::Node::BigInt(text.to_string()),
+                    "b" => crate::inspect::Node::Bool(text == "true"),
+                    "u" => crate::inspect::Node::Undefined,
+                    "l" => crate::inspect::Node::Null,
+                    _ => return None,
+                };
+                Some((key.encode_utf16().collect(), value))
+            })
+            .collect::<Option<Vec<_>>>()?,
+        None => Vec::new(),
+    };
+    Some(crate::inspect::Node::Typed { name, items, extra })
 }
 
 #[no_mangle]
