@@ -2771,6 +2771,16 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "checked native argument")?;
                         return Ok(target.clone());
                     }
+                    "__thaw_dynamic_object_literal" => {
+                        // the builder block, then five operands per member (see `lower/objects.rs`)
+                        let Some((_, members)) = args.split_first() else {
+                            return Err("live object literal marker expects its builder block".into());
+                        };
+                        if members.len() % 5 != 0 {
+                            return Err("live object literal marker expects five operands per member".into());
+                        }
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_json_host_from_dynamic" => {
                         let [value] = args.as_slice() else {
                             return Err("live JSON host conversion expects one handle".into());

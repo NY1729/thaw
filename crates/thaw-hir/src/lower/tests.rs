@@ -69,3 +69,5 @@ include!("tests/var_hoist.rs");
 include!("tests/storage.rs");
 include!("tests/storage_scale.rs");
 include!("tests/fx21_constructor_return.rs");
+
+include!("tests/object_literal_marker.rs");
