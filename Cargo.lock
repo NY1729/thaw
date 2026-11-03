@@ -3107,6 +3107,7 @@ name = "thaw-arena"
 version = "0.1.0"
 dependencies = [
  "bumpalo",
+ "libc",
 ]
 
 [[package]]

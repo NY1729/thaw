@@ -18,6 +18,8 @@ mod strings;
 pub use strings::*;
 pub mod error_wire;
 pub mod exception;
+pub mod stack_guard;
+pub use stack_guard::with_thread_stack_guard;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AllocationId {

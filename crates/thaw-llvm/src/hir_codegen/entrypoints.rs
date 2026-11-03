@@ -634,9 +634,17 @@ impl<'ctx> HirCompiler<'ctx> {
         });
         let limit = self.builder.build_call(limit_fn, &[], "stack_guard_limit").unwrap()
             .try_as_basic_value().basic().unwrap();
-        self.builder.build_store(
-            self.module.get_global(STACK_LIMIT_SYMBOL).unwrap().as_pointer_value(), limit,
-        ).unwrap();
+        let limit_slot = self.module.get_global(STACK_LIMIT_SYMBOL).unwrap().as_pointer_value();
+        self.builder.build_store(limit_slot, limit).unwrap();
+        // Lets the host swap this limit for a coroutine thread's own stack while it runs compiled code.
+        let register_fn = self.module.get_function("thaw_stack_guard_register").unwrap_or_else(|| {
+            self.module.add_function(
+                "thaw_stack_guard_register",
+                self.context.void_type().fn_type(&[self.context.ptr_type(AddressSpace::default()).into()], false),
+                Some(Linkage::External),
+            )
+        });
+        self.builder.build_call(register_fn, &[limit_slot.into()], "stack_guard_register").unwrap();
         let reporter = if self.uses_quickjs || self.uses_quickjs_handles {
             self.module
                 .get_function("thaw_js_emit_unhandled_rejection_result")

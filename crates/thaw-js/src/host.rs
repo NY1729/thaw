@@ -2858,7 +2858,8 @@ fn call_compiled_graph(
     let granted = unsafe { thaw_arena::register_owned_graph_wire(wire) };
     // SAFETY: `adapter` is a generated `(context, wire) -> result` function and `context` its environment.
     let adapter: Adapter = unsafe { std::mem::transmute(adapter) };
-    let result = unsafe { adapter(context as *const c_void, wire) };
+    let result =
+        thaw_arena::with_thread_stack_guard(|| unsafe { adapter(context as *const c_void, wire) });
     // An unconsumed grant means the adapter never decoded the wire: return its leases.
     if granted && unsafe { thaw_arena::take_owned_graph_wire_snapshot(wire) }.is_some() {
         for id in &leases {
@@ -2897,7 +2898,9 @@ fn poll_native_promise(it: &mut Interp, p: Obj, promise: usize, finish: usize) -
             return poll_native_promise(it, p.clone(), promise, finish).map(|()| Value::Undefined);
         }
         let finish_fn: Adapter = unsafe { std::mem::transmute(finish) };
-        let result = unsafe { finish_fn(promise as *const c_void, ptr::null()) };
+        let result = thaw_arena::with_thread_stack_guard(|| unsafe {
+            finish_fn(promise as *const c_void, ptr::null())
+        });
         match take_callback_result(it, result) {
             Err(Ctl::Throw(e)) => it.reject_promise(&p, e),
             Err(other) => return Err(other),
@@ -3013,7 +3016,9 @@ fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<
     // SAFETY: `adapter` is a generated `(context, args_json) -> result_json` function and `context`
     // its matching environment, both kept alive by the compiled program.
     let adapter: Adapter = unsafe { std::mem::transmute(adapter) };
-    let result = unsafe { adapter(context as *const c_void, text.as_ptr()) };
+    let result = thaw_arena::with_thread_stack_guard(|| unsafe {
+        adapter(context as *const c_void, text.as_ptr())
+    });
     let packet = thaw_arena::take_owned_exception(result);
     let out = if result.is_null() {
         String::new()
