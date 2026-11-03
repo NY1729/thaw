@@ -659,8 +659,40 @@ fn is_proven_typed_quickjs_wrapper(function: &HirFunction) -> bool {
 
 #[derive(Clone, Copy)]
 enum HirPreflightQuery<'a> {
-    NamedCall(&'a str),
+    /// `thaw_js_routed` is the codegen flag: a thaw-js routed call's object-literal argument
+    /// skips its QuickJS builder (see `thaw_js_object_literal_bypasses_builder`).
+    NamedCall {
+        name: &'a str,
+        thaw_js_routed: bool,
+    },
     NonArrowThisValue,
+}
+
+/// The `__thaw_dynamic_object_literal` members (five operands each) that a thaw-js routed call
+/// builds without the QuickJS builder: `compile_dynamic_object_literal_call` returns before it
+/// when a getter/setter/`__proto__`/spread stub is emitted, or builds the Json object itself
+/// when every key is a plain string. Must match that function.
+fn thaw_js_object_literal_bypasses_builder(members: &[HirExpr]) -> bool {
+    if !members.len().is_multiple_of(5) {
+        return false;
+    }
+    let (members, _) = members.as_chunks::<5>();
+    let mut plain_keys = true;
+    for [kind, key, key_kind, _, _] in members {
+        if let HirExpr::Lit(HirLit::Str(kind)) = kind {
+            if matches!(kind.as_str(), "getter" | "setter" | "proto" | "spread") {
+                return true;
+            }
+        }
+        plain_keys &= matches!(
+            (key, key_kind),
+            (
+                HirExpr::Lit(HirLit::Str(_)),
+                HirExpr::Lit(HirLit::Bool(false))
+            )
+        );
+    }
+    plain_keys
 }
 
 fn hir_contains_preflight_query(program: &HirProgram, query: HirPreflightQuery<'_>) -> bool {
@@ -709,7 +741,7 @@ fn hir_contains_preflight_query(program: &HirProgram, query: HirPreflightQuery<'
                         .is_some_and(|owner| expr_has_call(owner, query));
                 }
                 matches!((callee.as_ref(), query),
-                    (HirExpr::Var(target), HirPreflightQuery::NamedCall(name)) if target == name)
+                    (HirExpr::Var(target), HirPreflightQuery::NamedCall { name, .. }) if target == name)
                     || expr_has_call(callee, query)
                     || args.iter().any(|arg| expr_has_call(arg, query))
             }
@@ -741,6 +773,32 @@ fn hir_contains_preflight_query(program: &HirProgram, query: HirPreflightQuery<'
                 expr_has_call(callee, query)
                     || expr_has_call(receiver, query)
                     || args.iter().any(|arg| expr_has_call(arg, query))
+            }
+            // A thaw-js routed call's object-literal argument is built from its members, so the
+            // QuickJS builder in the marker's first operand is never emitted: skip it.
+            HirExpr::DynamicCall(signature, args)
+                if matches!(
+                    query,
+                    HirPreflightQuery::NamedCall {
+                        thaw_js_routed: true,
+                        ..
+                    }
+                ) && signature.backend == DynamicBackend::ThawJs =>
+            {
+                args.iter().any(|arg| match arg {
+                    HirExpr::Call(callee, operands)
+                        if matches!(callee.as_ref(), HirExpr::Var(target)
+                            if target == "__thaw_dynamic_object_literal")
+                            && operands.split_first().is_some_and(|(_, members)| {
+                                thaw_js_object_literal_bypasses_builder(members)
+                            }) =>
+                    {
+                        operands[1..]
+                            .iter()
+                            .any(|member| expr_has_call(member, query))
+                    }
+                    _ => expr_has_call(arg, query),
+                })
             }
             HirExpr::DynamicCall(_, args)
             | HirExpr::FfiCall(_, args)
@@ -844,8 +902,14 @@ fn hir_contains_preflight_query(program: &HirProgram, query: HirPreflightQuery<'
             .any(|function| stmts(&function.body, query))
 }
 
-fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
-    hir_contains_preflight_query(program, HirPreflightQuery::NamedCall(name))
+fn hir_contains_named_call(program: &HirProgram, name: &str, thaw_js_routed: bool) -> bool {
+    hir_contains_preflight_query(
+        program,
+        HirPreflightQuery::NamedCall {
+            name,
+            thaw_js_routed,
+        },
+    )
 }
 
 fn hir_contains_non_arrow_this_value(program: &HirProgram) -> bool {
@@ -937,13 +1001,21 @@ impl<'ctx> HirCompiler<'ctx> {
         self.stack_guard = true;
         self.fn_locs = program.fn_locs.0.clone();
         self.class_layouts = program.class_layouts.clone();
-        self.projects_native_objects =
-            hir_contains_named_call(program, "__thaw_build_native_object_wrapper")
-                || hir_contains_non_arrow_this_value(program);
-        self.tracks_physical_object_layouts =
-            hir_contains_named_call(program, "__thaw_register_native_object_layout");
-        self.tracks_object_integrity =
-            hir_contains_named_call(program, "__thaw_object_set_state_and_return");
+        self.projects_native_objects = hir_contains_named_call(
+            program,
+            "__thaw_build_native_object_wrapper",
+            self.thaw_js_routed,
+        ) || hir_contains_non_arrow_this_value(program);
+        self.tracks_physical_object_layouts = hir_contains_named_call(
+            program,
+            "__thaw_register_native_object_layout",
+            self.thaw_js_routed,
+        );
+        self.tracks_object_integrity = hir_contains_named_call(
+            program,
+            "__thaw_object_set_state_and_return",
+            self.thaw_js_routed,
+        );
         self.declare_runtime_builtins();
         self.declare_exception_state();
         self.declare_globals(program)?;
