@@ -857,3 +857,4 @@ include!("tests/typed_array_inspect_round10.rs");
 include!("tests/stack_guard_contracts.rs");
 include!("tests/thaw_js_object_literal_callback_contracts.rs");
 include!("tests/thaw_js_jsvalue_object_literal_contracts.rs");
+include!("tests/tj35_bytes_contracts.rs");
