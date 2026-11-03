@@ -366,6 +366,15 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:timers",
         "node:worker_threads",
         "node:stream",
+        "node:readline",
+        "node:readline/promises",
+        "node:dns",
+        "node:dns/promises",
+        "node:inspector",
+        "node:inspector/promises",
+        "node:util/types",
+        "node:string_decoder",
+        "node:tty",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
