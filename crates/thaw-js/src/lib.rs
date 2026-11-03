@@ -642,6 +642,8 @@ pub struct Interp {
     /// The deadline has passed: sticky, so later checks and `catch` keep seeing the timeout.
     pub(crate) dl_hit: bool,
     pub(crate) dl_tick: u32,
+    /// Set by a worker's parent thread (worker.rs `terminate`): checked by `check_interrupt`.
+    pub(crate) interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -719,6 +721,7 @@ impl Interp {
             dl_ms: 0,
             dl_hit: false,
             dl_tick: 0,
+            interrupt: None,
         };
         it.install_builtins();
         it.install_collections();
@@ -788,10 +791,20 @@ impl Interp {
         self.max_depth = 200_000;
     }
 
+    /// Errors with `Ctl::Exit(1)` once the parent of this worker has asked it to terminate. Not catchable by JS.
+    #[inline]
+    pub(crate) fn check_interrupt(&self) -> R<()> {
+        match &self.interrupt {
+            Some(flag) if flag.load(std::sync::atomic::Ordering::Relaxed) => Err(Ctl::Exit(1)),
+            _ => Ok(()),
+        }
+    }
+
     /// Errors with `ERR_SCRIPT_EXECUTION_TIMEOUT` once the `node:vm` deadline has passed. Clock reads
-    /// are sampled every 1024 checks.
+    /// are sampled every 1024 checks. Also the point where a worker's interrupt is observed.
     #[inline]
     pub(crate) fn check_deadline(&mut self) -> R<()> {
+        self.check_interrupt()?;
         let Some(d) = self.deadline else {
             return Ok(());
         };

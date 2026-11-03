@@ -886,6 +886,7 @@ impl Interp {
     fn loop_inner(&mut self) -> R<()> {
         self.run_jobs()?;
         while self.loop_alive() {
+            self.check_interrupt()?;
             self.rt.now = clock_ms();
             self.poll_platform_events()?;
             self.run_timers()?;
@@ -904,13 +905,22 @@ impl Interp {
                 .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             {
                 let mut wait = next - clock_ms();
-                if crate::child::active() || crate::zlib::active() || crate::worker::active() {
+                // a worker wakes every 2ms so a terminate() is seen even while a timer is pending
+                if crate::child::active()
+                    || crate::zlib::active()
+                    || crate::worker::active()
+                    || self.interrupt.is_some()
+                {
                     wait = wait.min(2.0);
                 }
                 if wait > 0.0 {
                     std::thread::sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
-            } else if crate::child::active() || crate::zlib::active() || crate::worker::active() {
+            } else if crate::child::active()
+                || crate::zlib::active()
+                || crate::worker::active()
+                || self.interrupt.is_some()
+            {
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
