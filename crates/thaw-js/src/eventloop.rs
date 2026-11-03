@@ -896,6 +896,12 @@ impl Interp {
             self.rt.now = clock_ms();
             self.poll_platform_events()?;
             self.run_timers()?;
+            // the compiled host's native continuations: a timer just resolved a native Promise they wait on
+            if let Some(hook) = self.turn_hook {
+                if hook(self) {
+                    continue;
+                }
+            }
             if !self.rt.immediates.is_empty() {
                 self.run_immediates()?;
                 continue;
