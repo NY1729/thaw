@@ -184,3 +184,25 @@ fn worker_without_eval_is_rejected_with_err_worker_path() {
       try { new wt.Worker('1.js'); } catch (e) { console.log(e.code); }";
     assert_eq!(run_main(src), "ERR_WORKER_PATH");
 }
+
+/// The compiled path awaits a Promise result with `Interp::await_settled` (typed host calls), not `run_event_loop`.
+/// The worker's exit must be polled there too, or an awaited `terminate()` never settles.
+#[test]
+fn awaited_terminate_settles_through_await_settled() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut it = Interp::new();
+        let promise = it
+            .run("(async () => { const wt = __thaw_worker_threads_exports; const worker = new wt.Worker('while (true) {}', { eval: true }); await new Promise((resolve) => setTimeout(resolve, 100)); return worker.terminate(); })();")
+            .expect("main script runs");
+        let text = match it.await_settled(&promise).expect("loop runs") {
+            Some(Ok(thaw_js::Value::Number(code))) => code.to_string(),
+            _ => "unexpected".to_string(),
+        };
+        let _ = tx.send(text);
+    });
+    let text = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("await_settled settles the awaited terminate()");
+    assert_eq!(text, "1");
+}

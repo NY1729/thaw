@@ -128,8 +128,12 @@ fn run_worker(
 fn run_script(it: &mut Interp, source: &str, opts: &str) -> i32 {
     it.global
         .declare("__thaw_worker_opts", Value::str(opts), true);
-    it.run(BOOTSTRAP)
-        .unwrap_or_else(|_| panic!("worker bootstrap must evaluate"));
+    match it.run(BOOTSTRAP) {
+        Ok(_) => {}
+        // terminate() arrived before the bootstrap finished: the worker exits with the interrupt's code
+        Err(Ctl::Exit(code)) => return code,
+        Err(_) => panic!("worker bootstrap must evaluate"),
+    }
     let global = Value::Object(it.global_object.clone());
     let exports = it
         .get(&global, "__thaw_worker_side_exports")
