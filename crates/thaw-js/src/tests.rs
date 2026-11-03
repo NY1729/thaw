@@ -2677,3 +2677,43 @@ fn exception_packet_with_object_identity_stays_an_error() {
     let ctl = take_exception_packet(primitive_exception_packet(1, 0.0, 0, false, 8));
     assert!(matches!(ctl, Ctl::Throw(Value::Object(_))));
 }
+
+/// A busy worker keeps the thaw-js loop alive; a native continuation that a timer made ready must still run inside
+/// that loop (the compiled terminal loop's `turn_hook`), or the awaited `terminate()` never runs.
+#[test]
+fn busy_worker_does_not_starve_native_continuation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RESUMED: AtomicBool = AtomicBool::new(false);
+    // stands in for thaw_runtime_run_until_idle: the "native continuation" runs once the timer has fired
+    fn hook(it: &mut Interp) -> bool {
+        if RESUMED.load(Ordering::SeqCst) {
+            return false;
+        }
+        let fired = it
+            .run("globalThis.__fired === true")
+            .map(|v| v.truthy())
+            .unwrap_or(false);
+        if fired {
+            RESUMED.store(true, Ordering::SeqCst);
+            let _ = it.run("globalThis.__w.terminate()");
+            return true;
+        }
+        false
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // Interp is not Send: build it inside the thread
+        let mut it = Interp::new();
+        it.turn_hook = Some(hook);
+        let _ = it.run_main(
+            "const { Worker } = globalThis.__thaw_worker_threads_exports; \
+             globalThis.__w = new Worker('while(true){}', { eval: true }); \
+             setTimeout(() => { globalThis.__fired = true; }, 100);",
+        );
+        let _ = tx.send(RESUMED.load(Ordering::SeqCst));
+    });
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(10)),
+        Ok(true)
+    );
+}

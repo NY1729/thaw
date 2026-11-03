@@ -827,11 +827,13 @@ impl Interp {
             }
             self.rt.now = clock_ms();
             self.run_timers()?;
+            // the loop's own platform poll: a worker's exit (or child/zlib result) settles promises too
+            self.poll_platform_events()?;
             if !self.rt.immediates.is_empty() {
                 self.run_immediates()?;
                 continue;
             }
-            // a timer just settled the promise: do not sleep toward the next unrelated timer
+            // a timer or event just settled the promise: do not sleep toward the next unrelated timer
             if self.promise_state(v).is_some() {
                 continue;
             }
@@ -846,6 +848,10 @@ impl Interp {
                 if wait > 0.0 {
                     std::thread::sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
+            } else if crate::child::active() || crate::zlib::active() || crate::worker::active(self)
+            {
+                // nothing timed to wait for, but a platform event will arrive: poll again shortly
+                std::thread::sleep(Duration::from_millis(2));
             }
         }
     }
@@ -860,7 +866,7 @@ impl Interp {
             || self.rt.immediates.iter().any(|i| i.refd)
             || crate::child::active()
             || crate::zlib::active()
-            || crate::worker::active()
+            || crate::worker::active(self)
     }
 
     /// Call the shim-installed `globalThis.__thaw_poll_platform_events` (async zlib jobs, child process output and exits),
@@ -872,7 +878,7 @@ impl Interp {
             self.call(&f, &g, &[])?;
             self.run_jobs()?;
         }
-        let events = crate::worker::poll();
+        let events = crate::worker::poll(self);
         if events != "[]" {
             let f = self.get(&g, "__thaw_worker_dispatch")?;
             if matches!(f, Value::Object(_)) {
@@ -890,6 +896,12 @@ impl Interp {
             self.rt.now = clock_ms();
             self.poll_platform_events()?;
             self.run_timers()?;
+            // the compiled host's native continuations: a timer just resolved a native Promise they wait on
+            if let Some(hook) = self.turn_hook {
+                if hook(self) {
+                    continue;
+                }
+            }
             if !self.rt.immediates.is_empty() {
                 self.run_immediates()?;
                 continue;
@@ -908,7 +920,7 @@ impl Interp {
                 // a worker wakes every 2ms so a terminate() is seen even while a timer is pending
                 if crate::child::active()
                     || crate::zlib::active()
-                    || crate::worker::active()
+                    || crate::worker::active(self)
                     || self.interrupt.is_some()
                 {
                     wait = wait.min(2.0);
@@ -918,7 +930,7 @@ impl Interp {
                 }
             } else if crate::child::active()
                 || crate::zlib::active()
-                || crate::worker::active()
+                || crate::worker::active(self)
                 || self.interrupt.is_some()
             {
                 std::thread::sleep(Duration::from_millis(2));
