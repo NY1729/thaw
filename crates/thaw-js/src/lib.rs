@@ -1934,7 +1934,11 @@ impl Interp {
 
     /// Like [`run`](Self::run) for `eval` / `new Function` text: parsed as a sloppy-mode script.
     pub fn run_sloppy(&mut self, source: &str) -> R<Value> {
-        self.run_parsed(source, thaw_parser::parse_javascript_script(source))
+        let parsed = thaw_parser::parse_javascript_script(source);
+        if let Err(msg) = &parsed {
+            return self.throw_error("SyntaxError", msg);
+        }
+        self.run_parsed(source, parsed)
     }
 
     fn run_parsed(&mut self, source: &str, parsed: Result<a::Module, String>) -> R<Value> {

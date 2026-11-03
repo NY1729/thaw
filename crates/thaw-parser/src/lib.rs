@@ -257,18 +257,19 @@ pub fn parse_javascript_script(source: &str) -> Result<Module, String> {
         None,
     );
     let mut parser = Parser::new_from(lexer);
+    // Errors carry the parser's own message so callers can throw it as a `SyntaxError`.
     let script = parser.parse_script().map_err(|err| {
+        let msg = err.kind().msg().into_owned();
         err.into_diagnostic(&handler).emit();
-        "failed to parse JavaScript source".to_string()
+        msg
     })?;
-    if parser.take_errors().is_empty() {
-        Ok(Module {
+    match parser.take_errors().first() {
+        None => Ok(Module {
             span: script.span,
             body: script.body.into_iter().map(ModuleItem::Stmt).collect(),
             shebang: script.shebang,
-        })
-    } else {
-        Err("failed to parse JavaScript source".into())
+        }),
+        Some(err) => Err(err.kind().msg().into_owned()),
     }
 }
 
