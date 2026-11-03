@@ -261,6 +261,17 @@ const DYNAMIC_HELPERS: &str = r#"
 (function () {
   function put(name, fn) { Object.defineProperty(globalThis, name, { value: fn, writable: false, configurable: false, enumerable: false }); }
   put('__thaw_unary_plus', function (v) { return +v; });
+  put('__thaw_defer_thenable', function (value) {
+    if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return value;
+    var then;
+    try { then = value.then; } catch (error) { return Promise.reject(error); }
+    if (typeof then !== 'function') return value;
+    return new Promise(function (resolve, reject) {
+      Promise.resolve().then(function () {
+        try { then.call(value, resolve, reject); } catch (error) { reject(error); }
+      });
+    });
+  });
   put('__thaw_error_properties_json', function (error) {
     if (!error || (typeof error !== 'object' && typeof error !== 'function')) return '';
     var out = {};
