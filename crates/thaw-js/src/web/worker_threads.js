@@ -1,14 +1,158 @@
-// node:worker_threads, main-thread subset (W1): isMainThread/threadId, MessageChannel and environment data.
-// `Worker` is not implemented yet; thaw-cli keeps programs that use it on QuickJS (thaw_js_worker_threads_blocker).
+// node:worker_threads, main-thread side (W1 + W3): isMainThread/threadId, MessageChannel, environment data, and the
+// `Worker` class over the `__thaw_worker_*` natives of worker.rs (one OS thread and one Interp per worker).
+// `resourceLimits`, `stdin`/`stdout`/`stderr` streams, SharedArrayBuffer and SHARE_ENV are not implemented yet;
+// thaw-cli keeps programs that use them on QuickJS (thaw_js_worker_threads_blocker).
 (function () {
   const environmentData = new Map();
-  class Worker {
+  let nextThreadId = 1;
+  // handle (worker.rs table id) -> Worker, for events; Worker -> state, for everything else
+  const byHandle = new Map();
+  const states = new WeakMap();
+
+  // Small listener set (no `node:events` dependency): on/once/off/emit and friends, as EventEmitter behaves for these events.
+  class Emitter {
     constructor() {
-      const error = new Error('worker_threads Worker is not supported on thaw-js yet');
-      error.code = 'ERR_THAW_UNSUPPORTED';
-      throw error;
+      Object.defineProperty(this, '__thawListeners', { value: new Map() });
+    }
+    __thawList(name) {
+      if (!this.__thawListeners.has(name)) this.__thawListeners.set(name, []);
+      return this.__thawListeners.get(name);
+    }
+    on(name, listener) { this.__thawList(name).push({ listener, once: false }); return this; }
+    addListener(name, listener) { return this.on(name, listener); }
+    prependListener(name, listener) { this.__thawList(name).unshift({ listener, once: false }); return this; }
+    once(name, listener) { this.__thawList(name).push({ listener, once: true }); return this; }
+    off(name, listener) {
+      const list = this.__thawList(name);
+      const index = list.findIndex(entry => entry.listener === listener);
+      if (index >= 0) list.splice(index, 1);
+      return this;
+    }
+    removeListener(name, listener) { return this.off(name, listener); }
+    removeAllListeners(name) {
+      if (name === undefined) this.__thawListeners.clear();
+      else this.__thawListeners.delete(name);
+      return this;
+    }
+    listenerCount(name) { return this.__thawList(name).length; }
+    emit(name, ...args) {
+      const list = this.__thawList(name);
+      if (list.length === 0) {
+        // an unhandled 'error' is the uncaught exception (EventEmitter throws the error it was given)
+        if (name === 'error') throw args[0];
+        return false;
+      }
+      for (const entry of list.slice()) {
+        if (entry.once) list.splice(list.indexOf(entry), 1);
+        entry.listener.apply(this, args);
+      }
+      return true;
     }
   }
+
+  const decode = wire => __thaw_worker_decode(wire);
+  const encode = value => __thaw_worker_encode(value);
+
+  class Worker extends Emitter {
+    constructor(source, options = {}) {
+      super();
+      if (!options || !options.eval) {
+        const error = new Error('Thaw Worker currently requires { eval: true }');
+        error.code = 'ERR_WORKER_PATH';
+        throw error;
+      }
+      const threadId = nextThreadId++;
+      const opts = {
+        threadId,
+        // a non-cloneable workerData throws DataCloneError here, synchronously, as in Node
+        workerData: encode(options.workerData),
+        // the worker starts with a snapshot of the parent's environment data
+        envData: encode(Array.from(environmentData)),
+        env: {},
+      };
+      const env = options.env === undefined ? process.env : options.env;
+      for (const key of Object.keys(env)) opts.env[key] = String(env[key]);
+      if (options.argv !== undefined) opts.argv = Array.from(options.argv, String);
+      if (options.execArgv !== undefined) opts.execArgv = Array.from(options.execArgv, String);
+      const handle = __thaw_worker_spawn(String(source), JSON.stringify(opts));
+      let resolveExit;
+      const state = {
+        handle,
+        exited: false,
+        exitCode: undefined,
+        refd: true,
+        exitPromise: new Promise(resolve => { resolveExit = resolve; }),
+        resolveExit,
+      };
+      states.set(this, state);
+      byHandle.set(handle, this);
+      Object.defineProperty(this, 'threadId', { value: threadId, enumerable: true });
+      this.stdin = null;
+      this.stdout = null;
+      this.stderr = null;
+    }
+
+    postMessage(value, transferList) {
+      if (transferList !== undefined && Array.from(transferList).length) {
+        throw new DOMException('transfer lists are not supported on thaw-js yet', 'DataCloneError');
+      }
+      const state = states.get(this);
+      if (state.exited) return;
+      __thaw_worker_post(state.handle, encode(value));
+    }
+
+    terminate() {
+      const state = states.get(this);
+      if (!state.exited) __thaw_worker_terminate(state.handle);
+      return state.exitPromise;
+    }
+
+    ref() {
+      const state = states.get(this);
+      state.refd = true;
+      if (!state.exited) __thaw_worker_ref(state.handle, true);
+      return this;
+    }
+
+    unref() {
+      const state = states.get(this);
+      state.refd = false;
+      if (!state.exited) __thaw_worker_ref(state.handle, false);
+      return this;
+    }
+
+    hasRef() { return states.get(this).refd; }
+  }
+
+  // Events from the Rust poll (worker.rs `poll`), delivered by the event loop: [{handle, type, ...}].
+  globalThis.__thaw_worker_dispatch = function (json) {
+    for (const event of JSON.parse(json)) {
+      const worker = byHandle.get(event.handle);
+      if (worker === undefined) continue;
+      const state = states.get(worker);
+      if (event.type === 'online') {
+        worker.emit('online');
+      } else if (event.type === 'message') {
+        let value;
+        try {
+          value = decode(event.value);
+        } catch (error) {
+          worker.emit('messageerror', error);
+          continue;
+        }
+        worker.emit('message', value);
+      } else if (event.type === 'error') {
+        worker.emit('error', decode(event.value));
+      } else if (event.type === 'exit') {
+        state.exited = true;
+        state.exitCode = event.code;
+        byHandle.delete(event.handle);
+        worker.emit('exit', event.code);
+        state.resolveExit(event.code);
+      }
+    }
+  };
+
   const workerThreadsExports = {
     isMainThread: true,
     threadId: 0,

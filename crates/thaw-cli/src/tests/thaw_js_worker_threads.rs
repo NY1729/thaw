@@ -1,9 +1,14 @@
-// node:worker_threads main-thread subset on thaw-js (W1): routing blocker and the thaw-js form.
+// node:worker_threads on thaw-js (W1, W3): routing blocker and the thaw-js form.
 
 #[test]
-fn thaw_js_worker_threads_blocker_keeps_worker_use_on_quickjs() {
+fn thaw_js_worker_threads_blocker_keeps_unsupported_worker_use_on_quickjs() {
     let worker = "import { Worker } from \"node:worker_threads\";";
-    assert!(thaw_js_worker_threads_blocker("node:worker_threads", worker).is_some());
+    // Worker runs on thaw-js (W3): plain Worker programs route to it, Worker options it does not serve do not
+    assert!(thaw_js_worker_threads_blocker("node:worker_threads", worker).is_none());
+    let stdin = "import { Worker } from \"node:worker_threads\";\nconst w = new Worker(src, { eval: true, stdin: true });";
+    assert!(thaw_js_worker_threads_blocker("node:worker_threads", stdin).is_some());
+    let limits = "import { Worker } from \"node:worker_threads\";\nnew Worker(src, { eval: true, resourceLimits: {} });";
+    assert!(thaw_js_worker_threads_blocker("node:worker_threads", limits).is_some());
     assert!(thaw_js_worker_threads_blocker(
         "node:worker_threads",
         "import { postMessageToThread } from \"node:worker_threads\";"

@@ -1,9 +1,10 @@
 //! `node:worker_threads` workers (W2a/W2b): one OS thread and one `Interp` per worker. Messages cross threads as the
-//! wire strings of worker_wire.js, so this module only moves `String`s. The parent side is the `TABLE` of the
-//! spawning thread; the worker side is the `SIDE` of the worker's own thread. The event loop drains both via [`poll`].
+//! wire strings of worker_wire.js, so this module only moves `String`s. The parent side is the `workers` table of the
+//! spawning `Interp` (`WorkerState`); the worker side is its `side`. The event loop drains both via [`poll`].
+//! The state lives on the `Interp`, not in a thread-local: async functions and generators run on coroutine threads
+//! that call these natives with the same `Interp`, so the state must follow the `Interp`, not the OS thread.
 //! `terminate()` sets an interrupt flag that the worker's `Interp` checks (`Interp::check_interrupt`), so busy loops stop.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,23 +44,21 @@ struct Worker {
     join: Option<JoinHandle<()>>,
 }
 
-#[derive(Default)]
-struct Table {
-    next: u32,
-    workers: BTreeMap<u32, Worker>,
-}
-
 struct Side {
     rx: Receiver<Cmd>,
     tx: Sender<Evt>,
     interrupt: Arc<AtomicBool>,
     /// The worker's parentPort has a referenced `message` listener (set by the bootstrap).
-    alive: bool,
+    alive: Arc<AtomicBool>,
 }
 
-thread_local! {
-    static TABLE: RefCell<Table> = RefCell::new(Table::default());
-    static SIDE: RefCell<Option<Side>> = const { RefCell::new(None) };
+/// Per-`Interp` worker state: the workers this Interp spawned (`workers`, keyed by handle), and on a worker thread
+/// the channel to its parent (`side`).
+#[derive(Default)]
+pub(crate) struct WorkerState {
+    next: u32,
+    workers: BTreeMap<u32, Worker>,
+    side: Option<Side>,
 }
 
 fn quoted(s: &str) -> String {
@@ -68,7 +67,7 @@ fn quoted(s: &str) -> String {
     out
 }
 
-fn spawn(source: String, opts: String) -> u32 {
+fn spawn(it: &mut Interp, source: String, opts: String) -> u32 {
     let (tx, cmd_rx) = mpsc::channel();
     let (evt_tx, rx) = mpsc::channel();
     let interrupt = Arc::new(AtomicBool::new(false));
@@ -78,29 +77,26 @@ fn spawn(source: String, opts: String) -> u32 {
         .stack_size(STACK)
         .spawn(move || run_worker(&source, &opts, cmd_rx, evt_tx, flag))
         .expect("worker thread spawns");
-    TABLE.with(|t| {
-        let mut t = t.borrow_mut();
-        t.next += 1;
-        let id = t.next;
-        let worker = Worker {
+    it.worker.next += 1;
+    let id = it.worker.next;
+    it.worker.workers.insert(
+        id,
+        Worker {
             tx,
             rx,
             interrupt,
             refd: true,
             exited: false,
             join: Some(join),
-        };
-        t.workers.insert(id, worker);
-        id
-    })
+        },
+    );
+    id
 }
 
-fn to_parent(e: Evt) {
-    SIDE.with(|s| {
-        if let Some(side) = s.borrow().as_ref() {
-            let _ = side.tx.send(e);
-        }
-    });
+fn to_parent(it: &Interp, e: Evt) {
+    if let Some(side) = &it.worker.side {
+        let _ = side.tx.send(e);
+    }
 }
 
 /// Runs on the worker thread: the script, then its event loop; always ends with an `Exit` event.
@@ -111,25 +107,25 @@ fn run_worker(
     tx: Sender<Evt>,
     interrupt: Arc<AtomicBool>,
 ) {
-    let flag = interrupt.clone();
-    SIDE.with(|s| {
-        *s.borrow_mut() = Some(Side {
+    let exit_tx = tx.clone();
+    let code = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut it = Box::new(Interp::new());
+        it.configure_stack(STACK);
+        it.set_stream(true);
+        it.interrupt = Some(interrupt.clone());
+        it.worker.side = Some(Side {
             rx,
             tx,
             interrupt,
-            alive: false,
-        })
-    });
-    let code =
-        std::panic::catch_unwind(AssertUnwindSafe(|| run_script(source, opts, flag))).unwrap_or(1);
-    to_parent(Evt::Exit(code));
+            alive: Arc::new(AtomicBool::new(false)),
+        });
+        run_script(&mut it, source, opts)
+    }))
+    .unwrap_or(1);
+    let _ = exit_tx.send(Evt::Exit(code));
 }
 
-fn run_script(source: &str, opts: &str, interrupt: Arc<AtomicBool>) -> i32 {
-    let mut it = Box::new(Interp::new());
-    it.configure_stack(STACK);
-    it.set_stream(true);
-    it.interrupt = Some(interrupt);
+fn run_script(it: &mut Interp, source: &str, opts: &str) -> i32 {
     it.global
         .declare("__thaw_worker_opts", Value::str(opts), true);
     it.run(BOOTSTRAP)
@@ -142,16 +138,16 @@ fn run_script(source: &str, opts: &str, interrupt: Arc<AtomicBool>) -> i32 {
         ("node:worker_threads".into(), exports.clone()),
         ("worker_threads".into(), exports),
     ]);
-    to_parent(Evt::Online);
+    to_parent(it, Evt::Online);
     let r = it.run_commonjs(source).and_then(|_| it.run_event_loop());
     match r {
         Ok(code) | Err(Ctl::Exit(code)) => code,
         Err(e) => {
             let wire = match e {
-                Ctl::Throw(v) => wire_of(&mut it, &v),
+                Ctl::Throw(v) => wire_of(it, &v),
                 _ => OPAQUE_ERROR.into(),
             };
-            to_parent(Evt::Error(wire));
+            to_parent(it, Evt::Error(wire));
             1
         }
     }
@@ -170,62 +166,61 @@ fn wire_of(it: &mut Interp, v: &Value) -> String {
 
 /// Whether the loop must stay alive for workers: a referenced worker still running on the parent side, or
 /// (on a worker thread) a referenced parentPort listener.
-pub(crate) fn active() -> bool {
-    let listening = SIDE.with(|s| s.borrow().as_ref().is_some_and(|s| s.alive));
-    listening || TABLE.with(|t| t.borrow().workers.values().any(|w| w.refd && !w.exited))
+pub(crate) fn active(it: &Interp) -> bool {
+    let listening = it
+        .worker
+        .side
+        .as_ref()
+        .is_some_and(|s| s.alive.load(Ordering::Relaxed));
+    listening || it.worker.workers.values().any(|w| w.refd && !w.exited)
 }
 
 /// Pending worker events as a JSON array (`[]` when none): parent events carry a `handle`, worker events
 /// (`message` from the parent) do not. Joins and forgets a worker once its `exit` is delivered.
-pub(crate) fn poll() -> String {
+pub(crate) fn poll(it: &mut Interp) -> String {
     let mut items = Vec::new();
-    TABLE.with(|t| {
-        let mut t = t.borrow_mut();
-        for (id, w) in t.workers.iter_mut() {
-            while !w.exited {
-                let e = match w.rx.try_recv() {
-                    Ok(e) => e,
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => Evt::Exit(1),
-                };
-                items.push(match e {
-                    Evt::Online => format!(r#"{{"handle":{id},"type":"online"}}"#),
-                    Evt::Message(v) => format!(
-                        r#"{{"handle":{id},"type":"message","value":{}}}"#,
-                        quoted(&v)
-                    ),
-                    Evt::Error(v) => {
-                        format!(r#"{{"handle":{id},"type":"error","value":{}}}"#, quoted(&v))
-                    }
-                    Evt::Exit(code) => {
-                        w.exited = true;
-                        format!(r#"{{"handle":{id},"type":"exit","code":{code}}}"#)
-                    }
-                });
+    for (id, w) in it.worker.workers.iter_mut() {
+        while !w.exited {
+            let e = match w.rx.try_recv() {
+                Ok(e) => e,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => Evt::Exit(1),
+            };
+            items.push(match e {
+                Evt::Online => format!(r#"{{"handle":{id},"type":"online"}}"#),
+                Evt::Message(v) => format!(
+                    r#"{{"handle":{id},"type":"message","value":{}}}"#,
+                    quoted(&v)
+                ),
+                Evt::Error(v) => {
+                    format!(r#"{{"handle":{id},"type":"error","value":{}}}"#, quoted(&v))
+                }
+                Evt::Exit(code) => {
+                    w.exited = true;
+                    format!(r#"{{"handle":{id},"type":"exit","code":{code}}}"#)
+                }
+            });
+        }
+    }
+    it.worker.workers.retain(|_, w| {
+        if w.exited {
+            if let Some(j) = w.join.take() {
+                let _ = j.join();
             }
         }
-        t.workers.retain(|_, w| {
-            if w.exited {
-                if let Some(j) = w.join.take() {
-                    let _ = j.join();
-                }
-            }
-            !w.exited
-        });
+        !w.exited
     });
-    SIDE.with(|s| {
-        if let Some(side) = s.borrow().as_ref() {
-            while let Ok(cmd) = side.rx.try_recv() {
-                match cmd {
-                    Cmd::Message(v) => {
-                        items.push(format!(r#"{{"type":"message","value":{}}}"#, quoted(&v)))
-                    }
-                    // the parent already set the flag; setting it here too covers a command sent alone
-                    Cmd::Terminate => side.interrupt.store(true, Ordering::Relaxed),
+    if let Some(side) = &it.worker.side {
+        while let Ok(cmd) = side.rx.try_recv() {
+            match cmd {
+                Cmd::Message(v) => {
+                    items.push(format!(r#"{{"type":"message","value":{}}}"#, quoted(&v)))
                 }
+                // the parent already set the flag; setting it here too covers a command sent alone
+                Cmd::Terminate => side.interrupt.store(true, Ordering::Relaxed),
             }
         }
-    });
+    }
     format!("[{}]", items.join(","))
 }
 
@@ -239,52 +234,45 @@ pub(crate) fn install(it: &mut Interp) {
         } else {
             it.to_str(&arg(a, 1)).to_string()
         };
-        Ok(Value::Number(f64::from(spawn(source, opts))))
+        Ok(Value::Number(f64::from(spawn(it, source, opts))))
     });
     g.declare("__thaw_worker_spawn", f, true);
     let f = it.native(|it, _, a| {
         let (h, wire) = (it.num(&arg(a, 0)) as u32, it.to_str(&arg(a, 1)).to_string());
-        TABLE.with(|t| {
-            if let Some(w) = t.borrow().workers.get(&h) {
-                let _ = w.tx.send(Cmd::Message(wire));
-            }
-        });
+        if let Some(w) = it.worker.workers.get(&h) {
+            let _ = w.tx.send(Cmd::Message(wire));
+        }
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_post", f, true);
     let f = it.native(|it, _, a| {
         let h = it.num(&arg(a, 0)) as u32;
-        TABLE.with(|t| {
-            if let Some(w) = t.borrow().workers.get(&h) {
-                w.interrupt.store(true, Ordering::Relaxed);
-                let _ = w.tx.send(Cmd::Terminate);
-            }
-        });
+        if let Some(w) = it.worker.workers.get(&h) {
+            w.interrupt.store(true, Ordering::Relaxed);
+            let _ = w.tx.send(Cmd::Terminate);
+        }
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_terminate", f, true);
     let f = it.native(|it, _, a| {
         let (h, refd) = (it.num(&arg(a, 0)) as u32, arg(a, 1).truthy());
-        TABLE.with(|t| {
-            if let Some(w) = t.borrow_mut().workers.get_mut(&h) {
-                w.refd = refd;
-            }
-        });
+        if let Some(w) = it.worker.workers.get_mut(&h) {
+            w.refd = refd;
+        }
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_ref", f, true);
     let f = it.native(|it, _, a| {
-        to_parent(Evt::Message(it.to_str(&arg(a, 0)).to_string()));
+        let msg = it.to_str(&arg(a, 0)).to_string();
+        to_parent(it, Evt::Message(msg));
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_send", f, true);
-    let f = it.native(|_, _, a| {
+    let f = it.native(|it, _, a| {
         let alive = arg(a, 0).truthy();
-        SIDE.with(|s| {
-            if let Some(side) = s.borrow_mut().as_mut() {
-                side.alive = alive;
-            }
-        });
+        if let Some(side) = &it.worker.side {
+            side.alive.store(alive, Ordering::Relaxed);
+        }
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_set_alive", f, true);
