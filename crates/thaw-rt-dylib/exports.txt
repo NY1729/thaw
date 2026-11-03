@@ -609,6 +609,7 @@ thaw_runtime_watch_fd
 thaw_set_snapshot_entries
 thaw_sleep_ms
 thaw_stack_guard_limit
+thaw_stack_guard_register
 thaw_str_pointer_same
 thaw_string_array_includes
 thaw_string_array_index_of
