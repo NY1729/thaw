@@ -388,6 +388,25 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:worker_threads",
     "node:stream/web",
     "node:stream",
+    // TRIAL (measurement only, never merge): lets the thaw-js-measure job show how these modules behave on thaw-js
+    "node:buffer",
+    "node:process",
+    "node:perf_hooks",
+    "node:string_decoder",
+    "node:readline",
+    "node:readline/promises",
+    "node:util/types",
+    "node:tty",
+    "node:dns",
+    "node:cluster",
+    "node:inspector",
+    "node:inspector/promises",
+    "node:crypto",
+    "node:zlib",
+    "node:net",
+    "node:http",
+    "node:child_process",
+    "node:tls",
 ];
 
 /// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
