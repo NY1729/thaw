@@ -1647,6 +1647,11 @@ thread_local! {
     /// so an address is never reused for another object.
     static NATIVE_OWNERS: RefCell<HashMap<usize, Vec<(usize, String)>>> =
         RefCell::new(HashMap::new());
+    /// Native pointer -> the layouts it has canonical wrappers for, in interning order. A lookup
+    /// that misses the exact `(pointer, layout)` key falls back to these, as QuickJS's
+    /// `layoutContains` does.
+    static NATIVE_LAYOUTS: RefCell<HashMap<usize, Vec<String>>> =
+        RefCell::new(HashMap::new());
 }
 
 /// The prefix of a class identity name (the chain of class names follows it).
@@ -1743,10 +1748,19 @@ pub extern "C" fn thaw_tjs_lookup_native_object(
         if pointer.is_null() {
             return Err("native object lookup requires pointer and layout".to_string());
         }
+        let pointer = pointer as usize;
         Ok(NATIVE_OBJECTS.with(|m| {
-            m.borrow()
-                .get(&(pointer as usize, layout))
-                .map_or(0, |(owner, value, _)| store_handle(*owner, value.clone()))
+            let m = m.borrow();
+            let entry = m.get(&(pointer, layout.clone())).or_else(|| {
+                NATIVE_LAYOUTS.with(|l| {
+                    l.borrow()
+                        .get(&pointer)?
+                        .iter()
+                        .find(|actual| layout_contains(actual, &layout))
+                        .and_then(|actual| m.get(&(pointer, actual.clone())))
+                })
+            });
+            entry.map_or(0, |(owner, value, _)| store_handle(*owner, value.clone()))
         }))
     })())
 }
@@ -1774,6 +1788,9 @@ pub extern "C" fn thaw_tjs_intern_native_object(
             let mut m = m.borrow_mut();
             let key = (pointer as usize, layout);
             if !m.contains_key(&key) {
+                NATIVE_LAYOUTS.with(|l| {
+                    l.borrow_mut().entry(key.0).or_default().push(key.1.clone());
+                });
                 if let Value::Object(obj) = &candidate {
                     NATIVE_OWNERS.with(|o| {
                         o.borrow_mut()
@@ -3937,6 +3954,57 @@ mod native_owner_tests {
         assert_eq!(pointer_of(derived, &class_field("Base")), 0x4000);
         let base = intern(0x5000, &class_field("Base"));
         assert_eq!(pointer_of(base, &class_field("Derived\u{1f}Base")), 0);
+    }
+
+    /// The wrapper address behind a handle, else 0 for a miss (0 is never a live address).
+    fn wrapper_addr(handle: u64) -> usize {
+        if handle == 0 {
+            return 0;
+        }
+        match HANDLES.with(|h| h.borrow().get((handle as usize).wrapping_sub(1)).cloned()) {
+            Some((_, Value::Object(obj))) => Rc::as_ptr(&obj) as usize,
+            _ => panic!("handle is not an object"),
+        }
+    }
+
+    fn lookup(pointer: usize, layout: &str) -> usize {
+        let layout = CString::new(layout).unwrap();
+        let result = thaw_tjs_lookup_native_object(pointer as *const c_void, layout.as_ptr());
+        assert!(result.error.is_null());
+        wrapper_addr(result.value)
+    }
+
+    #[test]
+    fn lookup_serves_base_layout_from_interned_derived_wrapper() {
+        let derived = intern(0x7000, &class_field("Derived\u{1f}Base"));
+        let wrapper = lookup(0x7000, &class_field("Base"));
+        assert_ne!(wrapper, 0);
+        assert_eq!(wrapper, wrapper_addr(derived));
+    }
+
+    #[test]
+    fn lookup_does_not_serve_derived_layout_from_base_wrapper() {
+        intern(0x8000, &class_field("Base"));
+        assert_eq!(lookup(0x8000, &class_field("Derived\u{1f}Base")), 0);
+    }
+
+    #[test]
+    fn lookup_misses_unrelated_layout_and_other_pointers() {
+        intern(0x9000, &field("a"));
+        assert_eq!(lookup(0x9000, &field("b")), 0);
+        assert_eq!(lookup(0x9001, &field("a")), 0);
+    }
+
+    #[test]
+    fn lookup_exact_layout_hits_before_contained_layout() {
+        let derived = intern(0xa000, &class_field("Derived\u{1f}Base"));
+        let base = intern(0xa000, &class_field("Base"));
+        assert_ne!(wrapper_addr(derived), wrapper_addr(base));
+        assert_eq!(lookup(0xa000, &class_field("Base")), wrapper_addr(base));
+        assert_eq!(
+            lookup(0xa000, &class_field("Derived\u{1f}Base")),
+            wrapper_addr(derived)
+        );
     }
 
     #[test]
