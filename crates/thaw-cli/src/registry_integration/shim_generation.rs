@@ -425,6 +425,12 @@ fn generate_registry_shims_pass(
                 thaw_registry::builtin_bundle_with("node:module", &["path"])?,
             );
         }
+        if name == "node:worker_threads" {
+            thaw_js_bundles.insert(
+                name.clone(),
+                thaw_js::scan::script_as_bundle(THAW_JS_WORKER_THREADS_FORM).into_owned(),
+            );
+        }
         let explicit_type_exports =
             thaw_bridge::exported_type_names_named(&package.dts_source, &dts_filename);
         let value_exports =

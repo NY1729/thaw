@@ -385,6 +385,7 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:async_hooks",
     "node:querystring",
     "node:timers",
+    "node:worker_threads",
 ];
 
 /// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
@@ -398,6 +399,31 @@ fn thaw_js_bundle_form<'a>(
         Some(form) => form.as_str().into(),
         None => thaw_js::scan::script_as_bundle(bundle_js),
     }
+}
+
+/// The thaw-js form of `node:worker_threads`: the main-thread module the thaw-js prelude exports
+/// (`web/worker_threads.js`). Its QuickJS form needs `node:stream`, which thaw-js does not load.
+const THAW_JS_WORKER_THREADS_FORM: &str = "module.exports = globalThis.__thaw_worker_threads_exports;\n";
+
+/// `node:worker_threads` names thaw-js does not serve yet (only the main-thread subset is routed). A program
+/// that names one keeps the module on QuickJS.
+const THAW_JS_WORKER_THREADS_UNSUPPORTED: &[&str] = &[
+    "Worker",
+    "postMessageToThread",
+    "SHARE_ENV",
+    "moveMessagePortToContext",
+    "markAsUntransferable",
+    "markAsUncloneable",
+    "isMarkedAsUntransferable",
+];
+
+/// See `THAW_JS_WORKER_THREADS_UNSUPPORTED`: worker threads stay on QuickJS until thaw-js can run them.
+fn thaw_js_worker_threads_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
+    (pkg_name == "node:worker_threads"
+        && THAW_JS_WORKER_THREADS_UNSUPPORTED
+            .iter()
+            .any(|name| thaw_js_mentions(user_source, name)))
+    .then_some("worker threads (Worker, postMessageToThread, SHARE_ENV, ...) are not supported on thaw-js yet")
 }
 
 /// `node:path/posix` / `node:path/win32` as a registry bundle: the `node:path` bundle plus one factory
@@ -466,6 +492,9 @@ fn thaw_js_package_eligible(
         return reject("builtin module not validated on thaw-js".into());
     }
     if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
+        return reject(why.into());
+    }
+    if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     // A class the program names is served through thaw-js handles (`new`, instance and static
