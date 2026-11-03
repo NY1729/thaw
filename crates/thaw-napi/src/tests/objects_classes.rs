@@ -1,4 +1,4 @@
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn callback_native_handle_paths_keep_user_marker_objects_ordinary() {
     let mut env = Box::new(Env::new());
@@ -1824,7 +1824,7 @@ fn registered_symbol_survives_a_zero_count_reference_and_scope_close() {
 
 // Unrun: absence of a trusted JS owner is an unknown weak-target state. It
 // must not be turned into a collected/null result or a successful 0->1 ref.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn js_origin_symbol_weak_query_failure_is_not_collection_proof() {
     unsafe {
@@ -1944,7 +1944,7 @@ fn scoped_accessor_metadata_retires_with_unreachable_owner() {
             getter: None, setter: None,
             getter_data: ptr::null_mut(), setter_data: ptr::null_mut(),
             getter_reflection: Some(getter), setter_reflection: None,
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             js_owner: None,
         });
         assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
@@ -2013,7 +2013,7 @@ fn unrooted_scoped_finalizer_runs_once_after_retirement_and_reentry_is_live() {
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn scoped_accessor_js_roots_drop_only_after_owner_metadata_is_removed() {
     unsafe {

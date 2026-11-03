@@ -954,7 +954,7 @@ unsafe fn prepare_scoped_value(
     let recipient_scope = env_mut(env).map_err(|_| NAPI_INVALID_ARG)?
         .active_handle_scopes.last().copied();
     let root = root_existing_value(env, value)?;
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if !value.is_null() {
         let local_symbol = env.as_ref().and_then(|owner| {
             let Value::Symbol { id, .. } = value_ref(value).ok()? else { return None; };

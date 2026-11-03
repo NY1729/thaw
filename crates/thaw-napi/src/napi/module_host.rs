@@ -87,7 +87,7 @@ fn next_graph_owner_id() -> Result<u64, String> {
 unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&str>) -> Result<(), String> {
     // A failed initialization can leave async cleanup hooks and a Host-owned
     // Env. Register the Worker retirement seam before any fallible load step.
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     thaw_quickjs::register_napi_shutdown_bridge(
         thaw_napi_begin_shutdown,
         thaw_napi_poll_shutdown,
@@ -218,7 +218,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&s
         host.libraries.push(handle);
         host.module_envs.push(env);
     });
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     ensure_quickjs_bridge();
     Ok(())
 }
@@ -226,7 +226,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&s
 // The JS side of the graph codec reaches native code through this bridge. It is
 // installed when an addon loads and, lazily, when a loaded or caller-owned
 // environment first needs graph owner state.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 fn ensure_quickjs_bridge() {
     thaw_quickjs::register_napi_bridge(
         thaw_napi_export_names,
@@ -241,7 +241,7 @@ fn ensure_quickjs_bridge() {
 
 // Tell JavaScript which callback references native code no longer holds, so it
 // can drop the strong `__thaw_napi_reference_<id>` global and the callback.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 fn attach_released_js_references(response: &mut serde_json::Value) {
     let released = crate::take_pending_js_reference_releases();
     if let (false, Some(object)) = (released.is_empty(), response.as_object_mut()) {
@@ -249,7 +249,7 @@ fn attach_released_js_references(response: &mut serde_json::Value) {
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe extern "C" fn thaw_napi_call_typed_bridge(
     name: *const c_char,
     args: *const c_char,
@@ -268,7 +268,7 @@ unsafe extern "C" fn thaw_napi_call_typed_bridge(
     CString::new(result).unwrap_or_default().into_raw()
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe extern "C" fn thaw_napi_export_names() -> *const c_char {
     let exports = HOST.with(|host| {
         let host = host.borrow();
@@ -289,7 +289,7 @@ unsafe extern "C" fn thaw_napi_export_names() -> *const c_char {
         .into_raw()
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn symbol_from_js_owner(
     env: NapiEnv, name: String, args: &str,
 ) -> Result<serde_json::Value, String> {
@@ -347,7 +347,7 @@ unsafe fn symbol_from_js_owner(
     Ok(serde_json::json!({ "kind": "value", "value": id.to_string() }))
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe extern "C" fn thaw_napi_handle_bridge(
     operation: *const c_char,
     target: *const c_char,
@@ -1043,7 +1043,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
         .into_raw()
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 fn release_quickjs_reference(reference: u64) {
     let released = HOST.with(|host| {
         let mut host = host.borrow_mut();
@@ -1075,7 +1075,7 @@ fn release_quickjs_reference(reference: u64) {
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 fn release_napi_handle(handle: u64) -> Result<(), String> {
     // A live JS proxy is only one owner. A native parent field, active scope,
     // or escaped handle may still reach this Value after the proxy is gone.
@@ -1621,12 +1621,12 @@ fn value_from_json_with_undefined(
                 .get("__thaw_napi_function__")
                 .and_then(JsonValue::as_u64)
             {
-                #[cfg(not(feature = "quickjs"))]
+                #[cfg(not(feature = "js-engine"))]
                 {
                     let _ = reference;
                     return Ok(env.alloc(Value::Undefined));
                 }
-                #[cfg(feature = "quickjs")]
+                #[cfg(feature = "js-engine")]
                 {
                 if let Some(value) = env.quickjs_references.get(&reference) {
                     return Ok(*value);
@@ -1956,11 +1956,11 @@ fn napi_graph_property_key(
     let symbol = napi_graph_token(env, key, nodes)?;
     match unsafe { value_ref(symbol) }.map_err(|_| "invalid native graph Symbol key")? {
         Value::Symbol { id, .. } => Ok(PropertyKey::Symbol(*id)),
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         Value::QuickJsHandle { handle, .. } => Ok(PropertyKey::Symbol(
             *env.quickjs_symbol_ids.get(handle)
                 .ok_or("unverified JavaScript graph Symbol key")?)),
-        #[cfg(not(feature = "quickjs"))]
+        #[cfg(not(feature = "js-engine"))]
         Value::QuickJsHandle { .. } => Err("JavaScript graph Symbol keys require QuickJS".into()),
         _ => Err("invalid native graph property name".into()),
     }
@@ -2205,7 +2205,7 @@ fn standalone_graph_owner(owner_id: u64) -> Option<*mut Env> {
 fn ensure_graph_owner_id(env: NapiEnv) -> bool {
     let Some(owner) = (unsafe { env.as_mut() }) else { return false };
     if owner.graph_owner_id == 0 {
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         ensure_quickjs_bridge();
         let Ok(id) = next_graph_owner_id() else { return false };
         owner.graph_owner_id = id;
@@ -2278,7 +2278,7 @@ extern "C" fn release_napi_graph_reference(token: u64) -> u8 {
 
 impl Drop for GraphLeases {
     fn drop(&mut self) {
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         for handle in self.host.drain(..) {
             thaw_quickjs::thaw_js_release_handle(handle);
         }
@@ -2440,21 +2440,21 @@ impl NapiGraphInput {
         // Preflight every hdl without holding an Env borrow across QuickJS.
         // The wire leases remain owned by this input until a decoded carrier
         // acquires its own independent registry retain.
-        #[cfg(not(feature = "quickjs"))]
+        #[cfg(not(feature = "js-engine"))]
         if parsed.get("nodes").and_then(JsonValue::as_array).is_some_and(|nodes|
             nodes.iter().any(|node| node.get("hdl").is_some())) {
             return Err("JavaScript graph handles require QuickJS".into());
         }
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         let mut wire_handles = Vec::new();
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         let mut standalone_handles = Vec::new();
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         let mut native_pairs = Vec::new();
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         inbound_graph_handles(parsed, &mut wire_handles, &mut standalone_handles,
             &mut native_pairs)?;
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         let mut new_handles = {
             let owner = env_mut(env).map_err(|_| "invalid native addon environment")?;
             let leases = self.leases.borrow();
@@ -2469,9 +2469,9 @@ impl NapiGraphInput {
             }
             handles
         };
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         struct EnvRetains(Vec<u64>);
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         impl Drop for EnvRetains {
             fn drop(&mut self) {
                 for handle in self.0.drain(..) {
@@ -2479,25 +2479,25 @@ impl NapiGraphInput {
                 }
             }
         }
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         let mut owned = EnvRetains(Vec::new());
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         for handle in &new_handles {
             if thaw_quickjs::thaw_js_retain_handle(*handle) == 0 {
                 return Err("released JavaScript graph handle".into());
             }
             owned.0.push(*handle);
         }
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         let mut object_likes = HashMap::new();
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         for handle in &new_handles {
             object_likes.insert(*handle, qjs_query(*handle, 9)? == "1");
         }
         // A forged packet must not pair a live native pointer with some other
         // retained JS handle. The private wrapper maps validate the exact
         // Function or Symbol provenance before an Env borrow begins.
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         for (handle, native, kind) in &native_pairs {
             let checked = thaw_quickjs::thaw_js_graph_native_pair_matches_result(
                 *handle, *native, *kind);
@@ -2516,7 +2516,7 @@ impl NapiGraphInput {
         // Env -> hdl wrapper -> native positive Reference -> Env.
         // Keep an hdl only if the graph also uses it standalone, or some
         // paired occurrence belongs to a different Env.
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         {
             let owner = env.as_ref().ok_or("invalid native addon environment")?;
             new_handles.retain(|handle| {
@@ -2535,9 +2535,9 @@ impl NapiGraphInput {
         // A Symbol's native recipient owns an ID and a weak JS cache entry,
         // not an independently strong QuickJS handle. Keep the wire retain
         // only until decode finishes, and use a transient map for hdl tokens.
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         let mut transient_symbols = Vec::new();
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         {
             ensure_graph_owner_id(env);
             let owner_id = env.as_ref().ok_or("invalid native addon environment")?.graph_owner_id;
@@ -2554,9 +2554,9 @@ impl NapiGraphInput {
         // A graph key may refer to an hdl node. Verify its actual Symbol
         // type before entering the mutable Env decoder; QuickJS may reenter
         // addon code during a query, while the decoder's Env borrow may not.
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         let mut symbol_key_handles = Vec::new();
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         for (handle, native, kind) in &native_pairs {
             if *kind != 2 { continue; }
             if transient_symbols.iter().any(|(symbol, _)| symbol == handle) { continue; }
@@ -2578,7 +2578,7 @@ impl NapiGraphInput {
                 symbol_key_handles.push((*handle, Some(id)));
             }
         }
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         {
             let nodes = parsed.get("nodes").and_then(JsonValue::as_array)
                 .ok_or("native argument graph has no nodes")?;
@@ -2620,13 +2620,13 @@ impl NapiGraphInput {
         }
         let (decoded, inserted, new_symbol_ids) = {
             let owner = env_mut(env).map_err(|_| "invalid native addon environment")?;
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             let mut inserted = Vec::new();
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             for (handle, value) in &transient_symbols {
                 owner.quickjs_live_values.insert(*handle, *value);
             }
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             for handle in new_handles.drain(..) {
                 if owner.quickjs_live_values.contains_key(&handle) {
                     continue;
@@ -2637,11 +2637,11 @@ impl NapiGraphInput {
                 owner.quickjs_live_values.insert(handle, value);
                 inserted.push((handle, value));
             }
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             let mut new_symbol_ids = Vec::new();
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             let mut preparation_error = None;
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             for (handle, stable_id) in symbol_key_handles {
                 if owner.quickjs_symbol_ids.contains_key(&handle) { continue; }
                 let Some(value) = owner.quickjs_live_values.get(&handle).copied() else {
@@ -2653,20 +2653,20 @@ impl NapiGraphInput {
                 let inserted_owner = if let std::collections::hash_map::Entry::Vacant(e) = owner.symbols.entry(id) { e.insert(value); true } else { false };
                 new_symbol_ids.push((handle, id, inserted_owner));
             }
-            #[cfg(not(feature = "quickjs"))]
+            #[cfg(not(feature = "js-engine"))]
             let inserted: Vec<(u64, NapiValue)> = Vec::new();
-            #[cfg(not(feature = "quickjs"))]
+            #[cfg(not(feature = "js-engine"))]
             let new_symbol_ids: Vec<(u64, u64, bool)> = Vec::new();
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             let decoded = match preparation_error {
                 Some(error) => Err(error),
                 None => napi_graph_value(owner, parsed),
             };
-            #[cfg(not(feature = "quickjs"))]
+            #[cfg(not(feature = "js-engine"))]
             let decoded = napi_graph_value(owner, parsed);
             (decoded, inserted, new_symbol_ids)
         };
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         {
             let owner = env_mut(env).map_err(|_| "invalid native addon environment")?;
             for (handle, value) in &transient_symbols {
@@ -2805,7 +2805,7 @@ unsafe fn release_unconsumed_napi_callback_graph(text: &str) {
 
 // The public N-API property/call adapters use this same live carrier. No
 // Env reference or HOST borrow may survive a call into the QuickJS engine.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_handle(value: NapiValue) -> Option<u64> {
     match value_ref(value).ok()? {
         Value::QuickJsHandle { handle, .. } => Some(*handle),
@@ -2813,7 +2813,7 @@ unsafe fn qjs_handle(value: NapiValue) -> Option<u64> {
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_take_result_text(result: thaw_quickjs::ThawResult) -> Result<String, String> {
     let (pointer, error) = if result.error.is_null() {
         (result.value, false)
@@ -2826,7 +2826,7 @@ unsafe fn qjs_take_result_text(result: thaw_quickjs::ThawResult) -> Result<Strin
     if error { Err(text) } else { Ok(text) }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_error_status(env: NapiEnv, error: String) -> NapiStatus {
     let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
     let exception = owner.alloc(Value::Error(error));
@@ -2837,7 +2837,7 @@ unsafe fn qjs_error_status(env: NapiEnv, error: String) -> NapiStatus {
 // A retained engine Symbol is only a transfer lease. The recipient owns its
 // stable native Symbol ID and the engine keeps the original identity weakly;
 // storing this registry handle in Env would keep a local Symbol alive forever.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 fn adopted_symbol_root_proven(
     owner: &Env, id: u64, symbol: NapiValue, generation: u64,
 ) -> bool {
@@ -2847,7 +2847,7 @@ fn adopted_symbol_root_proven(
         && owner.value_generations.get(&(symbol as usize)) == Some(&generation)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_adopt_symbol(env: NapiEnv, handle: u64) -> Result<Option<NapiValue>, String> {
     if !qjs_is_symbol(handle)? { return Ok(None); }
     let owner_id = env.as_ref().ok_or("invalid native addon environment")?.graph_owner_id;
@@ -2882,7 +2882,7 @@ unsafe fn qjs_adopt_symbol(env: NapiEnv, handle: u64) -> Result<Option<NapiValue
 // A handle-valued QuickJS API result already owns one registry reference.
 // Adopt it for a new Env carrier or release it when the Env cache already has
 // the same JS identity. Release only after leaving the mutable Env borrow.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_adopt_handle_result(
     env: NapiEnv, result: thaw_quickjs::ThawHandleResult, out: *mut NapiValue,
 ) -> NapiStatus {
@@ -2964,7 +2964,7 @@ unsafe fn qjs_adopt_handle_result(
     write_scoped_value(env, out, value)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_adopt_thrown_handle(
     env: NapiEnv, handle: u64, object_like: bool,
 ) -> NapiStatus {
@@ -3024,7 +3024,7 @@ unsafe fn qjs_adopt_thrown_handle(
     record_status(env, NAPI_PENDING_EXCEPTION)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_adopt_property_read_result(
     env: NapiEnv, result: thaw_quickjs::ThawCallWithExceptionResult,
     out: *mut NapiValue,
@@ -3038,7 +3038,7 @@ unsafe fn qjs_adopt_property_read_result(
     }, out)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_finish_property_write_result(
     env: NapiEnv, result: thaw_quickjs::ThawCallWithExceptionResult,
 ) -> NapiStatus {
@@ -3056,7 +3056,7 @@ unsafe fn qjs_finish_property_write_result(
     NAPI_OK
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_utf16_key_handle(env: NapiEnv, units: &[u16]) -> Result<u64, NapiStatus> {
     let encoded = serde_json::to_string(units)
         .map_err(|_| record_status(env, NAPI_GENERIC_FAILURE))?;
@@ -3072,7 +3072,7 @@ unsafe fn qjs_utf16_key_handle(env: NapiEnv, units: &[u16]) -> Result<u64, NapiS
     Ok(result.value)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_native_symbol_key_handle(
     env: NapiEnv, symbol: NapiValue,
 ) -> Result<u64, NapiStatus> {
@@ -3094,7 +3094,7 @@ unsafe fn qjs_native_symbol_key_handle(
     Ok(result.value)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_nonstring_key_handle(
     env: NapiEnv, key: &PropertyKey,
 ) -> Option<Result<u64, NapiStatus>> {
@@ -3118,7 +3118,7 @@ unsafe fn qjs_nonstring_key_handle(
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_get_property(
     env: NapiEnv, handle: u64, key: &PropertyKey, out: *mut NapiValue,
 ) -> NapiStatus {
@@ -3145,7 +3145,7 @@ unsafe fn qjs_get_property(
     qjs_adopt_property_read_result(env, result, out)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_get_property_live_key(
     env: NapiEnv, handle: u64, key_handle: u64, out: *mut NapiValue,
 ) -> NapiStatus {
@@ -3155,7 +3155,7 @@ unsafe fn qjs_get_property_live_key(
     qjs_adopt_property_read_result(env, result, out)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_property_predicate_live_key(
     env: NapiEnv, handle: u64, key_handle: u64, operation: u8, out: *mut bool,
 ) -> NapiStatus {
@@ -3172,7 +3172,7 @@ unsafe fn qjs_property_predicate_live_key(
     NAPI_OK
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_set_property_live_key(
     env: NapiEnv, handle: u64, key_handle: u64, value: NapiValue,
     receiver_data: bool,
@@ -3189,7 +3189,7 @@ unsafe fn qjs_set_property_live_key(
     qjs_finish_property_write_result(env, result)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_descriptor_key_handle(env: NapiEnv, key: NapiValue)
     -> Result<(u64, bool), NapiStatus> {
     if let Some(handle) = qjs_handle(key) { return Ok((handle, false)); }
@@ -3205,7 +3205,7 @@ unsafe fn qjs_descriptor_key_handle(env: NapiEnv, key: NapiValue)
     qjs_utf16_key_handle(env, &units).map(|handle| (handle, true))
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_define_data_property(
     env: NapiEnv, handle: u64, key: NapiValue, value: NapiValue, attributes: u32,
 ) -> NapiStatus {
@@ -3232,7 +3232,7 @@ unsafe fn qjs_define_data_property(
     match status { Ok(()) => NAPI_OK, Err(status) => status }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[allow(clippy::too_many_arguments)]
 unsafe fn qjs_define_callback_property(
     env: NapiEnv, handle: u64, key: NapiValue,
@@ -3283,7 +3283,7 @@ unsafe fn qjs_define_callback_property(
     match status { Ok(()) => NAPI_OK, Err(status) => status }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_object_integrity(env: NapiEnv, handle: u64, freeze: bool) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
     let result = thaw_quickjs::thaw_js_host_object_integrity_result(handle, u8::from(freeze));
@@ -3297,7 +3297,7 @@ unsafe fn qjs_object_integrity(env: NapiEnv, handle: u64, freeze: bool) -> NapiS
     NAPI_OK
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_set_property(
     env: NapiEnv, handle: u64, key: &PropertyKey, value: NapiValue,
     receiver_data: bool,
@@ -3336,7 +3336,7 @@ unsafe fn qjs_set_property(
     qjs_finish_property_write_result(env, result)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_property_predicate(
     env: NapiEnv, handle: u64, key: &PropertyKey,
     operation: u8, out: *mut bool,
@@ -3371,13 +3371,13 @@ unsafe fn qjs_property_predicate(
     NAPI_OK
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_query(handle: u64, operation: u8) -> Result<String, String> {
     let _foreign_dispatch = ForeignCallbackGuard::new();
     qjs_take_result_text(thaw_quickjs::thaw_js_host_query_result(handle, operation))
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 fn qjs_is_symbol(handle: u64) -> Result<bool, String> {
     match thaw_quickjs::thaw_js_napi_handle_is_symbol(handle) {
         0 => Ok(false),
@@ -3386,7 +3386,7 @@ fn qjs_is_symbol(handle: u64) -> Result<bool, String> {
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_number_value(handle: u64) -> Result<f64, String> {
     // Operation 14 is the captured engine-level IsCallable query. Numeric
     // coercion uses its own host-query slot and may run ToPrimitive.
@@ -3400,7 +3400,7 @@ unsafe fn qjs_number_value(handle: u64) -> Result<f64, String> {
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_actual_number(env: NapiEnv, handle: u64) -> Result<f64, NapiStatus> {
     match qjs_query(handle, 0) {
         Ok(kind) if kind == "number" => {},
@@ -3410,7 +3410,7 @@ unsafe fn qjs_actual_number(env: NapiEnv, handle: u64) -> Result<f64, NapiStatus
     qjs_number_value(handle).map_err(|error| qjs_error_status(env, error))
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_actual_string_units(env: NapiEnv, handle: u64) -> Result<Vec<u16>, NapiStatus> {
     match qjs_query(handle, 0) {
         Ok(kind) if kind == "string" => {},
@@ -3422,7 +3422,7 @@ unsafe fn qjs_actual_string_units(env: NapiEnv, handle: u64) -> Result<Vec<u16>,
         .map_err(|_| record_status(env, NAPI_GENERIC_FAILURE))
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_strict_equals(
     env: NapiEnv, left: u64, right: u64, out: *mut bool,
 ) -> NapiStatus {
@@ -3438,7 +3438,7 @@ unsafe fn qjs_strict_equals(
     NAPI_OK
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_strict_equals_native_symbol(
     env: NapiEnv, handle: u64, symbol: NapiValue, out: *mut bool,
 ) -> NapiStatus {
@@ -3452,7 +3452,7 @@ unsafe fn qjs_strict_equals_native_symbol(
     status
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_is_promise(env: NapiEnv, handle: u64, out: *mut bool) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
     let result = thaw_quickjs::thaw_js_handle_is_promise_result(handle);
@@ -3466,7 +3466,7 @@ unsafe fn qjs_is_promise(env: NapiEnv, handle: u64, out: *mut bool) -> NapiStatu
     NAPI_OK
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_array_length(env: NapiEnv, handle: u64, out: *mut u32) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
     match qjs_query(handle, 4) {
@@ -3494,7 +3494,7 @@ unsafe fn qjs_array_length(env: NapiEnv, handle: u64, out: *mut u32) -> NapiStat
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_call_function(
     env: NapiEnv, handle: u64, this_arg: NapiValue,
     args: &[NapiValue], out: *mut NapiValue,
@@ -3529,7 +3529,7 @@ unsafe fn qjs_call_function(
 // graph packet which installed it. `find_accessor` returns an Accessor clone,
 // keeping these roots alive through the entire invocation even if a getter
 // replaces or deletes its own descriptor. No Env borrow crosses QuickJS.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe extern "C" fn reflected_native_getter(
     env: NapiEnv, info: NapiCallbackInfo,
 ) -> NapiValue {
@@ -3545,7 +3545,7 @@ unsafe extern "C" fn reflected_native_getter(
     invoke_napi_callback(env, getter, &mut forwarded)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe extern "C" fn reflected_native_setter(
     env: NapiEnv, info: NapiCallbackInfo,
 ) -> NapiValue {
@@ -3566,7 +3566,7 @@ unsafe extern "C" fn reflected_native_setter(
 // `.call(other)` and calls after replacement use the original callback and
 // call-time receiver. The descriptor caches only the value's address; the
 // snapshot deliberately omits reflection addresses to avoid a retention cycle.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_reflected_native_accessor_source(
     env: NapiEnv, object: NapiValue, key: &PropertyKey,
     accessor: &Accessor, getter: bool,
@@ -3610,7 +3610,7 @@ unsafe fn qjs_reflected_native_accessor_source(
     Ok(serde_json::json!({"nfn": (value as u64).to_string()}))
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe extern "C" fn quickjs_accessor_getter(
     env: NapiEnv, info: NapiCallbackInfo,
 ) -> NapiValue {
@@ -3633,7 +3633,7 @@ unsafe extern "C" fn quickjs_accessor_getter(
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe extern "C" fn quickjs_accessor_setter(
     env: NapiEnv, info: NapiCallbackInfo,
 ) -> NapiValue {
@@ -3659,7 +3659,7 @@ unsafe extern "C" fn quickjs_accessor_setter(
 // `roots` already owns independent retained QuickJS callback handles.
 // It owns them across every validation failure. Its final drop is deliberately
 // outside the Env mutation borrow, because releasing a handle may reenter JS.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_install_native_accessor(
     env: NapiEnv, object: NapiValue, key: PropertyKey,
     mut roots: Arc<QuickJsAccessorRoots>,
@@ -3792,9 +3792,9 @@ unsafe fn qjs_install_native_data_property(
     env: NapiEnv, object: NapiValue, key: PropertyKey,
     value: NapiValue, value_present: bool, attributes: u32,
 ) -> NapiStatus {
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     let is_quickjs_object = qjs_handle(object).is_some();
-    #[cfg(not(feature = "quickjs"))]
+    #[cfg(not(feature = "js-engine"))]
     let is_quickjs_object = false;
     if !value_belongs_to_environment(env, object)
         || (value_present && !value_belongs_to_environment(env, value))
@@ -3889,7 +3889,7 @@ unsafe fn qjs_install_native_data_property(
     record_status(env, status)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_construct_function(
     env: NapiEnv, handle: u64, args: &[NapiValue], out: *mut NapiValue,
 ) -> NapiStatus {
@@ -3907,7 +3907,7 @@ unsafe fn qjs_construct_function(
     qjs_adopt_handle_result(env, result, out)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_get_prototype(
     env: NapiEnv, handle: u64, out: *mut NapiValue,
 ) -> NapiStatus {
@@ -3931,7 +3931,7 @@ unsafe fn qjs_get_prototype(
     qjs_adopt_handle_result(env, result, out)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_property_names(
     env: NapiEnv, handle: u64, key_mode: i32, key_filter: u32,
     key_conversion: i32, out: *mut NapiValue,
@@ -3953,7 +3953,7 @@ unsafe fn qjs_property_names(
     write_value(out, value)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_set_prototype(env: NapiEnv, handle: u64, prototype: NapiValue) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
     let arguments = {
@@ -3975,7 +3975,7 @@ unsafe fn qjs_set_prototype(env: NapiEnv, handle: u64, prototype: NapiValue) -> 
     NAPI_OK
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_instanceof(env: NapiEnv, object: NapiValue, constructor: NapiValue, out: *mut bool) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
     let arguments = {
@@ -3997,7 +3997,7 @@ unsafe fn qjs_instanceof(env: NapiEnv, object: NapiValue, constructor: NapiValue
     NAPI_OK
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_instanceof_handles(
     env: NapiEnv, object: u64, constructor: u64, out: *mut bool,
 ) -> NapiStatus {
@@ -4012,7 +4012,7 @@ unsafe fn qjs_instanceof_handles(
     NAPI_OK
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_strict_equals_scalar(
     env: NapiEnv, handle: u64, scalar: NapiValue, out: *mut bool,
 ) -> NapiStatus {
@@ -4652,13 +4652,13 @@ impl NapiResultGraph {
             let array = matches!(value_ref(value), Ok(Value::Array(_)));
             let array = if array { Some(snapshot_array_keys(owner_env, value)?) } else { None };
             let node = if let Ok(Value::QuickJsHandle { handle, .. }) = value_ref(value) {
-                #[cfg(not(feature = "quickjs"))]
+                #[cfg(not(feature = "js-engine"))]
                 return Err("JavaScript graph handles require QuickJS".into());
-                #[cfg(feature = "quickjs")]
+                #[cfg(feature = "js-engine")]
                 if thaw_quickjs::thaw_js_retain_handle(*handle) == 0 {
                     return Err("released JavaScript graph handle".into());
                 }
-                #[cfg(feature = "quickjs")]
+                #[cfg(feature = "js-engine")]
                 self.leases.host.push(*handle);
                 serde_json::json!({"hdl": handle})
             } else if matches!(value_ref(value), Ok(Value::Function(_))) {
@@ -5145,7 +5145,7 @@ fn returned_handle(value: u64) -> ThawNapiHandleResult {
         // A previous JS proxy may have queued finalization while a graph
         // transfer pinned this same instance. The compiled raw handle is now
         // an independent Env-owned root, with no graph pin at shutdown.
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         unsafe { (*env).released_handles.remove(&(value as usize)) };
     }
     ThawNapiHandleResult { value, error: ptr::null_mut() }
@@ -5492,7 +5492,7 @@ unsafe fn take_env_exception_graph(env: NapiEnv) -> Result<Option<JsonValue>, St
         .map_err(|_| "invalid native addon environment")?
         .exception.take()
     else { return Ok(None); };
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if matches!(value_ref(exception), Ok(Value::QuickJsHandle { .. } | Value::Symbol { .. })) {
         return match napi_result_graph_for_env(env, exception, true) {
             Ok(wire) => Ok(Some(serde_json::json!({ "__thaw_exception_graph__": wire }))),
@@ -5757,7 +5757,7 @@ pub unsafe extern "C" fn thaw_napi_set_property_typed_graph_result(
     set_property_impl(receiver, property, args, true, true, false)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn callback_native_handle_paths(args: &[NapiValue]) -> Result<Vec<JsonValue>, String> {
     unsafe fn collect(value: NapiValue, path: &mut Vec<JsonValue>, paths: &mut Vec<JsonValue>) -> Result<(), String> {
         match value_ref(value).map_err(|_| "invalid napi_value")? {
@@ -5810,7 +5810,7 @@ impl Drop for CallbackGraphArguments {
 /// Calls a retained QuickJS function with arguments that need graph transport.
 /// The wire is `[true, receiver, ...arguments]`, the receiver-carrying form the
 /// reference wrapper understands.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn call_quickjs_reference_graph(
     env: NapiEnv, info: &CallbackInfo, context: usize,
 ) -> NapiValue {
@@ -5893,7 +5893,7 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
     let callback = match bridge.callback {
         ThawCallback::Value(callback) => Some((callback, false, false)),
         ThawCallback::ValueGraph(callback) => Some((callback, false, true)),
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         ThawCallback::QuickJs(callback) => Some((callback, true, false)),
         ThawCallback::Event(_) | ThawCallback::EventGraph(_) => None,
     };
@@ -5930,7 +5930,7 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
             .iter()
             .map(|value| json_from_value_with_undefined_for_env(_env, *value, true))
             .collect::<Result<Vec<_>, _>>();
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         let args = if _is_quickjs {
             args.and_then(|mut args| {
                 let paths = callback_native_handle_paths(&info.args)?;
@@ -5954,7 +5954,7 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
         };
         // Live JavaScript values have no JSON form: escalate this call to
         // graph transport instead of failing it silently.
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         if _is_quickjs && args.as_ref().is_err_and(|message| message.contains("requires graph transport")) {
             return call_quickjs_reference_graph(_env, info, bridge.context);
         }
@@ -6305,7 +6305,7 @@ mod bigint_graph_token_tests {
     }
 }
 
-#[cfg(all(test, feature = "quickjs"))]
+#[cfg(all(test, feature = "js-engine"))]
 mod native_graph_pin_tests {
     use super::*;
 
@@ -6605,7 +6605,7 @@ mod native_graph_pin_tests {
     }
 }
 
-#[cfg(all(test, feature = "quickjs"))]
+#[cfg(all(test, feature = "js-engine"))]
 mod typed_native_graph_value_tests {
     use super::*;
 
