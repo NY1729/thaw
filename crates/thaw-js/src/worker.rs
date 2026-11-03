@@ -25,6 +25,8 @@ const BOOTSTRAP: &str = include_str!("web/worker_bootstrap.js");
 /// Parent to worker commands. `Terminate` also sets the interrupt flag, which is what stops a busy worker.
 enum Cmd {
     Message(String),
+    /// Stdin bytes as hex, and whether this is the end of the stream (`worker.stdin.end()`).
+    Stdin(String, bool),
     Terminate,
 }
 
@@ -33,6 +35,8 @@ enum Evt {
     Message(String),
     Error(String),
     Exit(i32),
+    /// Captured stdout (fd 1) or stderr (fd 2) bytes as hex (only when the parent asked for them).
+    Stdio(u8, String),
 }
 
 struct Worker {
@@ -50,6 +54,9 @@ struct Side {
     interrupt: Arc<AtomicBool>,
     /// The worker's parentPort has a referenced `message` listener (set by the bootstrap).
     alive: Arc<AtomicBool>,
+    /// The parent passed `stdout: true` / `stderr: true`: console output goes to the parent, not the process fd.
+    capture_out: bool,
+    capture_err: bool,
 }
 
 /// Per-`Interp` worker state: the workers this Interp spawned (`workers`, keyed by handle), and on a worker thread
@@ -99,6 +106,27 @@ fn to_parent(it: &Interp, e: Evt) {
     }
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A console line (`text` with its newline) of a worker whose parent captures that fd: sent to the parent and true;
+/// false when it stays on the process's own fd (the default).
+pub(crate) fn capture_line(it: &Interp, fd: u8, text: &str) -> bool {
+    let Some(side) = &it.worker.side else {
+        return false;
+    };
+    let on = if fd == 1 {
+        side.capture_out
+    } else {
+        side.capture_err
+    };
+    if on {
+        to_parent(it, Evt::Stdio(fd, hex(text.as_bytes())));
+    }
+    on
+}
+
 /// Runs on the worker thread: the script, then its event loop; always ends with an `Exit` event.
 fn run_worker(
     source: &str,
@@ -118,6 +146,8 @@ fn run_worker(
             tx,
             interrupt,
             alive: Arc::new(AtomicBool::new(false)),
+            capture_out: false,
+            capture_err: false,
         });
         run_script(&mut it, source, opts)
     }))
@@ -203,6 +233,10 @@ pub(crate) fn poll(it: &mut Interp) -> String {
                     w.exited = true;
                     format!(r#"{{"handle":{id},"type":"exit","code":{code}}}"#)
                 }
+                Evt::Stdio(fd, hex) => {
+                    let name = if fd == 1 { "stdout" } else { "stderr" };
+                    format!(r#"{{"handle":{id},"type":"{name}","value":"{hex}"}}"#)
+                }
             });
         }
     }
@@ -219,6 +253,9 @@ pub(crate) fn poll(it: &mut Interp) -> String {
             match cmd {
                 Cmd::Message(v) => {
                     items.push(format!(r#"{{"type":"message","value":{}}}"#, quoted(&v)))
+                }
+                Cmd::Stdin(hex, end) => {
+                    items.push(format!(r#"{{"type":"stdin","value":"{hex}","end":{end}}}"#))
                 }
                 // the parent already set the flag; setting it here too covers a command sent alone
                 Cmd::Terminate => side.interrupt.store(true, Ordering::Relaxed),
@@ -250,6 +287,18 @@ pub(crate) fn install(it: &mut Interp) {
     });
     g.declare("__thaw_worker_post", f, true);
     let f = it.native(|it, _, a| {
+        let (h, hex, end) = (
+            it.num(&arg(a, 0)) as u32,
+            it.to_str(&arg(a, 1)).to_string(),
+            arg(a, 2).truthy(),
+        );
+        if let Some(w) = it.worker.workers.get(&h) {
+            let _ = w.tx.send(Cmd::Stdin(hex, end));
+        }
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_worker_stdin", f, true);
+    let f = it.native(|it, _, a| {
         let h = it.num(&arg(a, 0)) as u32;
         if let Some(w) = it.worker.workers.get(&h) {
             w.interrupt.store(true, Ordering::Relaxed);
@@ -280,4 +329,13 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_set_alive", f, true);
+    let f = it.native(|it, _, a| {
+        let (out, err) = (arg(a, 0).truthy(), arg(a, 1).truthy());
+        if let Some(side) = &mut it.worker.side {
+            side.capture_out = out;
+            side.capture_err = err;
+        }
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_worker_capture", f, true);
 }
