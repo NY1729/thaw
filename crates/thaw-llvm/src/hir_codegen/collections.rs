@@ -139,7 +139,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
     /// Loads the current raw `[length][elem...]` buffer pointer out of an
     /// array/tuple handle. See `compile_array_wrap`.
-    fn compile_array_data(
+    pub(crate) fn compile_array_data(
         &mut self,
         handle: PointerValue<'ctx>,
     ) -> Result<PointerValue<'ctx>, String> {
