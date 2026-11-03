@@ -517,6 +517,95 @@ fn enqueue_continuation(subscription: PromiseSubscription, result: *const u8) {
     });
 }
 
+/// A ready continuation moved off a coroutine thread by `thaw_runtime_park_ready`. Arena pins are
+/// per-thread, so the roots are released on park and retaken by `thaw_runtime_adopt_ready`.
+struct ParkedContinuation {
+    resume: PromiseResumeFn,
+    frame: *mut u8,
+    payload_roots: Vec<usize>,
+    result: *const u8,
+    js_barrier: u64,
+}
+
+// SAFETY: the pointers are opaque. Hand-offs are strict: the parking thread is blocked until the
+// host adopts the entry, so only one thread touches a parked continuation at a time.
+unsafe impl Send for ParkedContinuation {}
+
+/// Continuations parked by coroutine threads for their host (process-wide, see `thaw_runtime_park_ready`).
+static PARKED_CONTINUATIONS: Mutex<VecDeque<ParkedContinuation>> = Mutex::new(VecDeque::new());
+
+/// Moves this thread's ready continuations into the process-wide parked queue. thaw-js calls it
+/// just before a coroutine hands control back to its host, which calls `thaw_runtime_adopt_ready`.
+/// Continuations settled on a coroutine thread would otherwise sit in that thread's queue, which
+/// the host's `thaw_runtime_poll_one` never reads.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_park_ready() {
+    let ready = READY_CONTINUATIONS.with(|queue| std::mem::take(&mut *queue.borrow_mut()));
+    if ready.is_empty() {
+        return;
+    }
+    let mut parked = PARKED_CONTINUATIONS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    for continuation in ready {
+        let ReadyContinuation {
+            subscription,
+            result,
+            _result_root: result_root,
+            js_barrier,
+        } = continuation;
+        let PromiseSubscription {
+            resume,
+            frame,
+            _frame_root: frame_root,
+            _payload_roots: payload_roots,
+        } = subscription;
+        parked.push_back(ParkedContinuation {
+            resume,
+            frame,
+            payload_roots: payload_roots
+                .iter()
+                .map(thaw_arena::ArenaRoot::pointer)
+                .collect(),
+            result,
+            js_barrier,
+        });
+        drop((frame_root, result_root, payload_roots));
+    }
+}
+
+/// Moves the parked continuations into this thread's ready queue, re-rooting them here. No-op
+/// when nothing is parked.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_adopt_ready() {
+    let mut parked = PARKED_CONTINUATIONS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if parked.is_empty() {
+        return;
+    }
+    READY_CONTINUATIONS.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        for continuation in parked.drain(..) {
+            queue.push_back(ReadyContinuation {
+                subscription: PromiseSubscription {
+                    resume: continuation.resume,
+                    frame: continuation.frame,
+                    _frame_root: thaw_arena::ArenaRoot::new(continuation.frame as usize),
+                    _payload_roots: continuation
+                        .payload_roots
+                        .into_iter()
+                        .map(thaw_arena::ArenaRoot::new)
+                        .collect(),
+                },
+                result: continuation.result,
+                _result_root: thaw_arena::ArenaRoot::new(continuation.result as usize),
+                js_barrier: continuation.js_barrier,
+            });
+        }
+    });
+}
+
 thread_local! {
     /// QuickJS job barrier hooks, registered by `thaw-quickjs` on context
     /// creation (see `thaw_runtime_set_js_job_hooks`).
