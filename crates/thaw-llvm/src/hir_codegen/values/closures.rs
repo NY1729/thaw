@@ -734,13 +734,10 @@ impl<'ctx> HirCompiler<'ctx> {
         json: PointerValue<'ctx>,
         expected: &str,
     ) -> Result<(IntValue<'ctx>, IntValue<'ctx>), String> {
-        // A thaw-js build's `Json` values are plain parsed data: none of them is the interned view of a
-        // native owner, so there is nothing to ask the (absent) QuickJS realm.
+        // A routed build asks thaw-js the same question: a receiver that is a live handle to an interned
+        // wrapper answers with its owner. Plain `Json` receivers have no handle and answer "no".
         if self.thaw_js_routed {
-            return Ok((
-                self.context.i64_type().const_zero(),
-                self.context.bool_type().const_zero(),
-            ));
+            self.js_mark_handles_used();
         }
         let expected = self.intern_string(expected, "native_receiver_layout")
             .map_err(|error| error.to_string())?;
