@@ -387,6 +387,8 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:timers",
     "node:worker_threads",
     "node:stream/web",
+    // TRIAL (measurement only, never merge): lets the thaw-js-measure job show how node:stream cases behave on thaw-js
+    "node:stream",
 ];
 
 /// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
