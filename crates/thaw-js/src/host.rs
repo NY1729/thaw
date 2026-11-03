@@ -412,6 +412,9 @@ thread_local! {
     /// Outstanding references per handle id (index + 1): compiled code retains and releases handles
     /// the way it does QuickJS ones.
     static HANDLE_REFS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    /// Live handle ids by the object they hold (`Rc` address): a plain result that is such an object
+    /// leases the existing handle, so compiled code sees the same identity it holds.
+    static LIVE_BY_OBJECT: RefCell<HashMap<usize, Vec<u64>>> = RefCell::new(HashMap::new());
 }
 
 thread_local! {
@@ -421,11 +424,30 @@ thread_local! {
 
 fn store_handle(package: usize, value: Value) -> i64 {
     HANDLE_REFS.with(|r| r.borrow_mut().push(1));
-    HANDLES.with(|h| {
+    let object = object_key(&value);
+    let id = HANDLES.with(|h| {
         let mut h = h.borrow_mut();
         h.push((package, value));
         h.len() as i64
-    })
+    });
+    if let Some(key) = object {
+        LIVE_BY_OBJECT.with(|m| m.borrow_mut().entry(key).or_default().push(id as u64));
+    }
+    id
+}
+
+/// The identity of an object value (its `Rc` address), if it is one.
+fn object_key(v: &Value) -> Option<usize> {
+    match v {
+        Value::Object(o) => Some(Rc::as_ptr(o) as usize),
+        _ => None,
+    }
+}
+
+/// A live handle id that holds exactly this object, if compiled code has one.
+fn live_handle_of(v: &Value) -> Option<u64> {
+    let key = object_key(v)?;
+    LIVE_BY_OBJECT.with(|m| m.borrow().get(&key).and_then(|ids| ids.first().copied()))
 }
 
 /// Take another reference on a handle; returns 1 when it is live.
@@ -461,6 +483,17 @@ pub extern "C" fn thaw_tjs_release_handle(handle: i64) -> u8 {
                     .get_mut(index)
                     .map(|e| std::mem::replace(&mut e.1, Value::Undefined))
             });
+            if let Some(key) = value.as_ref().and_then(object_key) {
+                LIVE_BY_OBJECT.with(|m| {
+                    let mut m = m.borrow_mut();
+                    if let Some(ids) = m.get_mut(&key) {
+                        ids.retain(|&id| id != handle as u64);
+                        if ids.is_empty() {
+                            m.remove(&key);
+                        }
+                    }
+                });
+            }
             drop(value);
             1
         }
@@ -1076,6 +1109,13 @@ impl WireOut {
                 v = it
                     .call(&to_json, &v, &[Value::str("")])
                     .map_err(|c| classify(it, c))?;
+            }
+        }
+        // A plain result that compiled code already holds by handle stays that handle (same identity).
+        if self.plain && !v.is_callable() {
+            if let Some(id) = live_handle_of(&v) {
+                thaw_tjs_retain_handle(id as i64);
+                return Ok(self.lease(id));
             }
         }
         Ok(match &v {
@@ -3938,5 +3978,73 @@ mod native_owner_tests {
             &class_field("Base"),
             &class_field("Derived\u{1f}Base")
         ));
+    }
+}
+
+#[cfg(test)]
+mod live_result_lease_tests {
+    use super::*;
+
+    fn plain_wire() -> WireOut {
+        WireOut {
+            owner: 0,
+            plain: true,
+            live_functions: false,
+            copy_root: false,
+            receiver: None,
+            nodes: Vec::new(),
+            seen: Vec::new(),
+            leases: Vec::new(),
+        }
+    }
+
+    fn token_of(it: &mut Interp, v: &Value) -> (String, WireOut) {
+        let mut out = plain_wire();
+        let Ok(token) = out.token(it, v) else {
+            panic!("token failed")
+        };
+        (token, out)
+    }
+
+    fn object(it: &mut Interp, src: &str) -> Value {
+        let Ok(v) = it.run(src) else {
+            panic!("script failed")
+        };
+        v
+    }
+
+    #[test]
+    fn live_object_leases_its_handle_and_equal_shape_copies() {
+        let mut it = Interp::new();
+        let live = object(&mut it, "({x: 7})");
+        let id = store_handle(0, live.clone()) as u64;
+
+        let (token, out) = token_of(&mut it, &live);
+        assert_eq!(token, "{\"r\":0}");
+        assert_eq!(out.nodes, vec![format!("{{\"hdl\":{id}}}")]);
+        assert_eq!(out.leases, vec![id]);
+        assert_eq!(HANDLE_REFS.with(|r| r.borrow()[id as usize - 1]), 2);
+
+        // an equal-shaped but different object is still copied as data
+        let other = object(&mut it, "({x: 7})");
+        let (token, out) = token_of(&mut it, &other);
+        assert!(token.starts_with("{\"r\":0}"), "{token}");
+        assert!(out.nodes[0].starts_with("{\"o\":"), "{:?}", out.nodes);
+        assert!(out.leases.is_empty());
+    }
+
+    #[test]
+    fn released_object_is_copied_again() {
+        let mut it = Interp::new();
+        let live = object(&mut it, "[1, 2]");
+        let id = store_handle(0, live.clone()) as u64;
+        let (_, out) = token_of(&mut it, &live);
+        assert_eq!(out.leases, vec![id]);
+        // drop the lease the wire took, then the handle itself: the object is no longer held
+        assert_eq!(thaw_tjs_release_handle(id as i64), 1);
+        assert_eq!(thaw_tjs_release_handle(id as i64), 1);
+        let (_, out) = token_of(&mut it, &live);
+        assert!(out.leases.is_empty());
+        assert!(out.nodes[0].starts_with("{\"a\":"), "{:?}", out.nodes);
     }
 }
