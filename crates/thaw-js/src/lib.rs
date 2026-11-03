@@ -72,6 +72,9 @@ mod web_text_codec;
 mod web_wasm;
 #[path = "web/worker_threads.rs"]
 mod web_worker_threads;
+#[path = "web/worker_wire.rs"]
+mod web_worker_wire;
+mod worker;
 mod zlib;
 
 /// Feature names (as reported by [`scan`] and [`Ctl::Unsupported`]) the evaluator runs.
@@ -742,6 +745,7 @@ impl Interp {
         it.install_buffer();
         it.install_sysio();
         net::install(&mut it);
+        worker::install(&mut it);
         dns::install(&mut it);
         vm::install(&mut it);
         zlib::install(&mut it);
@@ -751,6 +755,7 @@ impl Interp {
         web_text_codec::install(&mut it);
         web_event_target::install(&mut it);
         web_messaging::install(&mut it);
+        web_worker_wire::install(&mut it);
         web_worker_threads::install(&mut it);
         web_abort::install(&mut it);
         web_blob::install(&mut it);

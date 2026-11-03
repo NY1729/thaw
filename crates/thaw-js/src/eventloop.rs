@@ -860,15 +860,25 @@ impl Interp {
             || self.rt.immediates.iter().any(|i| i.refd)
             || crate::child::active()
             || crate::zlib::active()
+            || crate::worker::active()
     }
 
-    /// Call the shim-installed `globalThis.__thaw_poll_platform_events` (async zlib jobs, child process output and exits).
+    /// Call the shim-installed `globalThis.__thaw_poll_platform_events` (async zlib jobs, child process output and exits),
+    /// then hand pending worker events to `globalThis.__thaw_worker_dispatch`.
     fn poll_platform_events(&mut self) -> R<()> {
         let g = Value::Object(self.global_object.clone());
         let f = self.get(&g, "__thaw_poll_platform_events")?;
         if matches!(f, Value::Object(_)) {
             self.call(&f, &g, &[])?;
             self.run_jobs()?;
+        }
+        let events = crate::worker::poll();
+        if events != "[]" {
+            let f = self.get(&g, "__thaw_worker_dispatch")?;
+            if matches!(f, Value::Object(_)) {
+                self.call(&f, &g, &[Value::str(&events)])?;
+                self.run_jobs()?;
+            }
         }
         Ok(())
     }
@@ -894,13 +904,13 @@ impl Interp {
                 .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             {
                 let mut wait = next - clock_ms();
-                if crate::child::active() || crate::zlib::active() {
+                if crate::child::active() || crate::zlib::active() || crate::worker::active() {
                     wait = wait.min(2.0);
                 }
                 if wait > 0.0 {
                     std::thread::sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
-            } else if crate::child::active() || crate::zlib::active() {
+            } else if crate::child::active() || crate::zlib::active() || crate::worker::active() {
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
