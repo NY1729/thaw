@@ -7,7 +7,8 @@ pub(crate) fn thaw_js_plain_type(ty: &HirType) -> bool {
         | HirType::Json
         | HirType::Null
         | HirType::Undefined
-        | HirType::Void => true,
+        | HirType::Void
+        | HirType::Bytes => true,
         HirType::Array(element) | HirType::Dictionary(element) => thaw_js_plain_type(element),
         HirType::Union(members) => members.iter().all(thaw_js_plain_type),
         HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
@@ -43,8 +44,27 @@ pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
                 && thaw_js_callback_type(inner)
         }
         _ => thaw_js_callback_abi(ty).is_some_and(|(params, ret, _)| {
-            params.iter().all(thaw_js_plain_type) && thaw_js_plain_type(&ret)
+            params.iter().all(|p| thaw_js_plain_type(p) && !thaw_js_contains_bytes(p))
+                && thaw_js_plain_type(&ret)
+                && !thaw_js_contains_bytes(&ret)
         }),
+    }
+}
+
+/// Whether `ty` holds a `Bytes` anywhere. Only a bare `Bytes` argument is encoded by
+/// `compile_thaw_js_bytes_argument`; a nested one would go through the generic JSON encoder as a
+/// `{"type":"Buffer"}` object, which thaw-js would hand over as a plain object.
+pub(crate) fn thaw_js_contains_bytes(ty: &HirType) -> bool {
+    match ty {
+        HirType::Bytes => true,
+        HirType::Array(inner)
+        | HirType::Dictionary(inner)
+        | HirType::Optional(inner)
+        | HirType::Nullable(inner)
+        | HirType::Nullish(inner) => thaw_js_contains_bytes(inner),
+        HirType::Union(members) => members.iter().any(thaw_js_contains_bytes),
+        HirType::Object(fields) => fields.iter().any(|(_, ty)| thaw_js_contains_bytes(ty)),
+        _ => false,
     }
 }
 
@@ -1724,7 +1744,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if let Some(bad) = signature
             .params
             .iter()
-            .find(|ty| !thaw_js_param_type(ty))
+            .find(|ty| !thaw_js_param_type(ty) || (**ty != HirType::Bytes && thaw_js_contains_bytes(ty)))
             .or_else(|| {
                 // a `Promise<Date>` would decode as a plain object: only plain `Promise<T>` routes
                 let unroutable = (!thaw_js_plain_type(awaited) && signature.ret != HirType::JsValue)
@@ -1745,6 +1765,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        // `randomFillSync(buf)` returns the filled bytes; they are copied back into the caller's buffer
+        // (the thaw-js side only ever sees a copy), as the QuickJS lane does.
+        let mut returned_bytes_argument = None;
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
             if thaw_js_callback_type(ty) && self.callback_expr_reads_receiver(arg) {
                 self.compile_thaw_js_receiver_callback_argument(array, arg)
@@ -1772,6 +1795,14 @@ impl<'ctx> HirCompiler<'ctx> {
             if thaw_js_callback_type(ty) {
                 self.compile_thaw_js_callback_argument(array, value, ty)
                     .map_err(|error| format!("thaw-js callback argument {}: {error}", index + 1))?;
+                continue;
+            }
+            if *ty == HirType::Bytes {
+                if index == 0 && signature.ret == HirType::Bytes && signature.symbol.ends_with("randomFillSync") {
+                    returned_bytes_argument = Some(value.into_pointer_value());
+                }
+                self.compile_thaw_js_bytes_argument(array, value)
+                    .map_err(|error| format!("thaw-js argument {} (Bytes): {error}", index + 1))?;
                 continue;
             }
             if *ty == HirType::JsValue {
@@ -1842,7 +1873,85 @@ impl<'ctx> HirCompiler<'ctx> {
                 .basic()
                 .ok_or("thaw_json_adopt_handle_marker returned no value")?;
         }
-        self.compile_typed_dynamic_result(json, &signature.ret)
+        let result = self.compile_typed_dynamic_result(json, &signature.ret)?;
+        if let Some(argument) = returned_bytes_argument {
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_bytes_copy").unwrap(),
+                    &[
+                        result.into_pointer_value().into(),
+                        argument.into(),
+                        self.context.f64_type().const_zero().into(),
+                        self.context.f64_type().const_zero().into(),
+                        self.context.f64_type().const_float(-1.0).into(),
+                    ],
+                    "thaw_js_returned_bytes_argument",
+                )
+                .map_err(|error| error.to_string())?;
+            return Ok(argument.into());
+        }
+        Ok(result)
+    }
+
+    /// A `Bytes` argument for thaw-js: `{"__thaw_tjs_bytes__": {"k": "Buffer", "b64": "<base64>"}}`,
+    /// base64 text rather than number slots. A plain `{"type":"Buffer"}` object is not used here, since
+    /// thaw-js would have no way to tell it from user data of that shape.
+    fn compile_thaw_js_bytes_argument(
+        &mut self,
+        array: BasicValueEnum<'ctx>,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        let record = self.compile_array_data(value.into_pointer_value())?;
+        let encoding = self.intern_string("base64", "thaw_js_bytes_encoding").map_err(|error| error.to_string())?;
+        let text = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_bytes_to_string").unwrap(),
+                &[record.into(), encoding.as_pointer_value().into()],
+                "thaw_js_bytes_base64",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_bytes_to_string returned no value")?;
+        let inner = self
+            .builder
+            .build_call(self.module.get_function("thaw_json_object_new").unwrap(), &[], "thaw_js_bytes_inner")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_object_new returned no value")?;
+        let kind_key = self.intern_string("k", "thaw_js_bytes_kind_key").map_err(|error| error.to_string())?;
+        let kind = self.intern_string("Buffer", "thaw_js_bytes_kind").map_err(|error| error.to_string())?;
+        let b64_key = self.intern_string("b64", "thaw_js_bytes_b64_key").map_err(|error| error.to_string())?;
+        for (key, value) in [(kind_key, kind.as_pointer_value().into()), (b64_key, text)] {
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_json_object_set_string").unwrap(),
+                    &[inner.into(), key.as_pointer_value().into(), value.into()],
+                    "thaw_js_bytes_set_field",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let outer = self
+            .builder
+            .build_call(self.module.get_function("thaw_json_object_new").unwrap(), &[], "thaw_js_bytes_outer")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_object_new returned no value")?;
+        let tag_key = self.intern_string("__thaw_tjs_bytes__", "thaw_js_bytes_tag_key").map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_object_set_json").unwrap(),
+                &[outer.into(), tag_key.as_pointer_value().into(), inner.into()],
+                "thaw_js_bytes_set_tag",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(self.module.get_function("thaw_json_destroy").unwrap(), &[inner.into()], "thaw_js_bytes_destroy_inner")
+            .map_err(|error| error.to_string())?;
+        self.compile_json_array_push_owned(array, outer)
     }
 
     /// `thaw_tjs_frame_error(error)` when a thaw-js call returned an error string (null stays null).
@@ -1931,6 +2040,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     && thaw_js_plain_type(awaited)
                     && !(is_promise && thaw_js_date_type(awaited))))
             && signature.params.iter().skip(usize::from(is_method)).all(|ty| thaw_js_plain_type(ty) || handle_param(ty) || thaw_js_callback_type(ty))
+            && !signature.params.iter().any(|ty| *ty != HirType::Bytes && thaw_js_contains_bytes(ty))
             && (!is_method || signature.params.first().is_some_and(handle_param))
             && args.len() == signature.params.len();
         if !supported {
@@ -1986,6 +2096,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     signature.symbol,
                     index + 1
                 ));
+            }
+            if *ty == HirType::Bytes {
+                self.compile_thaw_js_bytes_argument(array, value)
+                    .map_err(|error| format!("thaw-js class argument {} (Bytes): {error}", index + 1))?;
+                continue;
             }
             self.compile_typed_dynamic_argument(array, value, ty)
                 .map_err(|error| format!("thaw-js class argument {} ({ty:?}): {error}", index + 1))?;

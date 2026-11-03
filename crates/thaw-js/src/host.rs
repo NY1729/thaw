@@ -361,6 +361,8 @@ const CALLBACK_KEY: &str = "__thaw_tjs_cb__";
 const TIMER_KEY: &str = "__thaw_tjs_timer__";
 const HANDLE_KEY: &str = "__thaw_tjs_handle__";
 const DATE_KEY: &str = "__thaw_tjs_date__";
+/// `{"__thaw_tjs_bytes__": {"k": "Buffer", "b64": "..."}}`: compiled `Bytes` crossing as base64 text.
+const BYTES_KEY: &str = "__thaw_tjs_bytes__";
 const MAP_KEY: &str = "__thaw_tjs_map__";
 const SET_KEY: &str = "__thaw_tjs_set__";
 const UNDEFINED_KEY: &str = "$__thaw_napi_undefined$";
@@ -3182,6 +3184,25 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
         Native::Object(fields) if matches!(fields.as_slice(), [(k, _)] if k == DATE_KEY) => {
             new_date(it, &fields[0].1).unwrap_or(Value::Undefined)
         }
+        // `{"__thaw_tjs_bytes__": {"k", "b64"}}`: compiled byte data rebuilt as a `Buffer`.
+        Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Object(_))] if k == BYTES_KEY) => {
+            let Native::Object(parts) = &fields[0].1 else {
+                unreachable!()
+            };
+            let b64 = match parts.iter().find(|(k, _)| k == "b64") {
+                Some((_, Native::Str(s))) => s.as_str(),
+                _ => "",
+            };
+            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap_or_default();
+            let view = it.u8_from_vec(bytes);
+            // Buffer is a Uint8Array whose prototype is `Buffer.prototype` (see buffer.rs `wrap`)
+            let global = it.global.clone();
+            let proto = it.lookup(&global, "Buffer").and_then(|b| it.get(&b, "prototype").ok());
+            if let (Value::Object(o), Some(Value::Object(p))) = (&view, proto) {
+                *o.proto.borrow_mut() = Some(p);
+            }
+            view
+        }
         // `{"__thaw_tjs_map__": [[k, v], ...]}` / `{"__thaw_tjs_set__": [v, ...]}`: a compiled
         // `Map`/`Set` crossing as its entries, rebuilt as a real collection.
         Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Array(_))] if k == MAP_KEY || k == SET_KEY) =>
@@ -3265,6 +3286,21 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
                     Native::Str("NaN".into())
                 };
                 return Ok(Native::Object(vec![(DATE_KEY.to_string(), ms)]));
+            }
+            // a Buffer or Uint8Array crosses as `{"type":"Buffer","data":[...]}`, the shape the compiled
+            // side decodes as `Bytes` (both flavours share it: the compiled side has one byte type)
+            let bytes = match &*o.kind.borrow() {
+                Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8) => {
+                    Some(t.data.borrow()[t.off..t.off + t.len].to_vec())
+                }
+                _ => None,
+            };
+            if let Some(bytes) = bytes {
+                let data = bytes.into_iter().map(|b| Native::Number(f64::from(b))).collect();
+                return Ok(Native::Object(vec![
+                    ("type".to_string(), Native::Str("Buffer".to_string())),
+                    ("data".to_string(), Native::Array(data)),
+                ]));
             }
             // a Timeout/Immediate crosses as its id and is resolved back to the live timer
             if let Some(id) = it.timer_handle_id(v) {
