@@ -388,6 +388,15 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:worker_threads",
     "node:stream/web",
     "node:stream",
+    "node:readline",
+    "node:readline/promises",
+    "node:dns",
+    "node:dns/promises",
+    "node:inspector",
+    "node:inspector/promises",
+    "node:util/types",
+    "node:string_decoder",
+    "node:tty",
 ];
 
 /// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
