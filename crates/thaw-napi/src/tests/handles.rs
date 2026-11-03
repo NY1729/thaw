@@ -453,7 +453,7 @@ fn value_extractors_reject_handles_owned_by_another_environment() {
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn deleting_last_strong_reference_releases_pending_handle_once() {
     static FINALIZED: AtomicUsize = AtomicUsize::new(0);
@@ -1175,7 +1175,7 @@ fn element_apis_operate_on_objects_and_descriptors() {
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn run_script_evaluates_values_and_reports_exceptions() {
     unsafe {
@@ -1251,7 +1251,7 @@ fn run_script_evaluates_values_and_reports_exceptions() {
     }
 }
 
-#[cfg(not(feature = "quickjs"))]
+#[cfg(not(feature = "js-engine"))]
 #[test]
 fn run_script_without_quickjs_accepts_json_only() {
     unsafe {
@@ -1296,7 +1296,7 @@ fn run_script_without_quickjs_accepts_json_only() {
 // A JavaScript callback wrapper lives only while native code holds it. Once the
 // scope closes with no napi_ref, the wrapper is retired and JavaScript is told
 // (with the next bridge response) to drop the strong callback global.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn unheld_javascript_callback_wrapper_is_retired_and_reported() {
     unsafe {

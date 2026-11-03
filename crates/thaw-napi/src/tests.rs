@@ -10,12 +10,12 @@ static EXTERNAL_STRING_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 static PLAIN_EXTERNAL_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 static HELD_ASYNC_CLEANUP: AtomicUsize = AtomicUsize::new(0);
 static POSTED_FINALIZER_RAN: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 static RELEASED_HANDLE_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_os = "linux")]
 static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn quickjs_reference_throw_sets_napi_exception_without_spoofing_returned_object() {
     assert_eq!(
@@ -533,7 +533,7 @@ unsafe extern "C" fn plain_external_finalize(_env: NapiEnv, data: *mut c_void, h
     PLAIN_EXTERNAL_FINALIZED.fetch_add(total, Ordering::AcqRel);
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe extern "C" fn released_handle_finalize(
     _env: NapiEnv,
     _data: *mut c_void,
@@ -542,7 +542,7 @@ unsafe extern "C" fn released_handle_finalize(
     RELEASED_HANDLE_FINALIZED.fetch_add(1, Ordering::AcqRel);
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn released_handle_waits_for_strong_napi_reference() {
     RELEASED_HANDLE_FINALIZED.store(0, Ordering::Release);
@@ -1746,7 +1746,7 @@ fn private_napi_regexp_graph_last_index_keeps_nonfinite_number_kind() {
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn private_napi_graph_arguments_release_lease_when_export_is_missing() {
     assert_eq!(
@@ -1770,7 +1770,7 @@ fn private_napi_graph_arguments_release_lease_when_export_is_missing() {
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn public_graph_arguments_release_lease_before_native_callback() {
     unsafe extern "C" fn callback(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
@@ -2299,7 +2299,7 @@ fn settled_promise_getter_can_retry_settlement_without_borrow_panic() {
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
     let plain = unsafe { json_from_value_with_undefined_for_env(env_ptr, promise, true) }.unwrap();
     assert_eq!(plain["computed"], 7.0);
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     unsafe {
         let target = CString::new((promise as u64).to_string()).unwrap();
         let wire = thaw_napi_handle_bridge(
@@ -2360,7 +2360,7 @@ fn rejected_promise_object_getter_can_retry_settlement_without_borrow_panic() {
     let error =
         unsafe { json_from_value_with_undefined_for_env(env_ptr, promise, true) }.unwrap_err();
     assert!(error.contains("original rejection"), "{error}");
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     unsafe {
         let target = CString::new((promise as u64).to_string()).unwrap();
         let wire = thaw_napi_handle_bridge(
@@ -2486,7 +2486,7 @@ fn snapshot_walkers_use_cross_environment_child_and_promise_owner() {
         );
         let private = quickjs_reference_wire(first_env, root, true).unwrap();
         assert_eq!(private.value["child"]["computed"], 9.0);
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         {
             let target = CString::new((promise as u64).to_string()).unwrap();
             let wire = thaw_napi_handle_bridge(
@@ -2677,7 +2677,7 @@ fn repeated_acyclic_exception_child_is_serialized_on_each_branch() {
 
 // Unrun source regression: a graph hdl needs one Env retain beyond the
 // producer's temporary transfer lease; repeated references share one carrier.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_graph_handle_survives_lease_and_roundtrips_mutation() {
     assert_eq!(
@@ -2723,7 +2723,7 @@ fn live_quickjs_graph_handle_survives_lease_and_roundtrips_mutation() {
 // Native addons read elements of an array argument that crossed as a live
 // JavaScript handle (sqlite3 binds `[42]` this way), so element reads must go
 // through QuickJS like every other property read on a handle.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_array_handle_elements_are_readable_through_napi_get_element() {
     assert_eq!(
@@ -2765,7 +2765,7 @@ fn live_quickjs_array_handle_elements_are_readable_through_napi_get_element() {
 // A retained JavaScript function called by native code with a live JavaScript
 // value has no JSON form for that argument. The call escalates to graph
 // transport, delivering `this` and the live value, instead of being dropped.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn quickjs_reference_call_with_a_live_argument_uses_graph_transport() {
     assert_eq!(
@@ -2813,7 +2813,7 @@ fn quickjs_reference_call_with_a_live_argument_uses_graph_transport() {
 
 // A proxy finalizer can run after its addon environment is gone (shutdown).
 // Releasing a handle nobody owns any more is a no-op, not a thrown error.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn releasing_a_handle_whose_environment_is_gone_is_a_no_op() {
     let response = unsafe {
@@ -2834,7 +2834,7 @@ fn releasing_a_handle_whose_environment_is_gone_is_a_no_op() {
 // object retains its callbacks after the defining graph packet is gone.
 // Replacing the descriptor releases those roots after the native mutation
 // scope, including when the getter itself has entered QuickJS.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn graph_defined_native_accessor_owns_callbacks_until_replaced() {
     thaw_quickjs::register_napi_bridge(
@@ -2940,7 +2940,7 @@ fn graph_defined_native_accessor_owns_callbacks_until_replaced() {
 // and setter call back with the original object as `this`. Redefinition to a
 // data property releases the old descriptor owner without touching the Env's
 // unrelated graph handle cache.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn graph_proxy_define_property_keeps_live_native_accessor() {
     thaw_quickjs::register_napi_bridge(
@@ -3080,7 +3080,7 @@ fn graph_proxy_define_property_keeps_live_native_accessor() {
 // Unrun: a native accessor reflected into JS is the original callable.
 // Its identity is stable while installed, and an extracted getter retains
 // both the callback and its call-time receiver after native deletion.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn graph_proxy_reflects_native_accessor_with_snapshot_lifetime() {
     unsafe extern "C" fn own_receiver(_: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
@@ -3163,7 +3163,7 @@ fn graph_proxy_reflects_native_accessor_with_snapshot_lifetime() {
 // Unrun: an Array with a native accessor must remain an Array through the
 // live graph lane. Its holes, length, descriptor, and own-key order cannot
 // be flattened into the ordinary object proxy or snapshot codec.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn native_array_accessor_graph_keeps_array_identity_and_length() {
     unsafe extern "C" fn seven(_: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
@@ -3256,7 +3256,7 @@ fn native_array_accessor_graph_keeps_array_identity_and_length() {
 // Unrun: the native length authority must match an Array Proxy target after
 // descriptor changes. A sealed Array may still resize; a frozen or explicitly
 // readonly length may not, including through the direct N-API setter.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn native_array_length_attributes_survive_seal_freeze_and_live_definition() {
     let mut env = Env::new();
@@ -3560,7 +3560,7 @@ fn native_data_definition_skips_setter_and_checks_readonly_compatibility() {
 
 // Unrun regression: target lookup must return the graph's transferred lease
 // even though argument decoding was never entered.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_invalid_call_target_releases_argument_lease() {
     assert_eq!(
@@ -3586,7 +3586,7 @@ fn live_quickjs_invalid_call_target_releases_argument_lease() {
 
 // Unrun control: a failed `new` target check has not decoded its argument
 // graph, so the transferred handle lease must be returned at that boundary.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_invalid_constructor_releases_argument_lease() {
     assert_eq!(
@@ -3612,7 +3612,7 @@ fn live_quickjs_invalid_constructor_releases_argument_lease() {
 // Unrun: the paired native Function node must select its native half in the
 // owning Env before considering the generic hdl node route. A foreign Env
 // must select only its independently retained JS carrier.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn paired_native_function_graph_uses_owner_identity_and_foreign_carrier() {
     unsafe extern "C" fn native(env: NapiEnv, _: NapiCallbackInfo) -> NapiValue {
@@ -3655,7 +3655,7 @@ fn paired_native_function_graph_uses_owner_identity_and_foreign_carrier() {
 // Unrun: a foreign native Symbol's value token and property-key token share
 // the source Symbol ID, but neither may dereference that pointer as a value
 // belonging to the recipient Env.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn paired_native_symbol_graph_keeps_value_and_key_identity_across_envs() {
     let mut owner = Env::new();
@@ -3680,7 +3680,7 @@ fn paired_native_symbol_graph_keeps_value_and_key_identity_across_envs() {
     assert_eq!(key, PropertyKey::Symbol(93));
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn foreign_symbol_identity_preflight_rejects_unknown_pointer_before_dereference() {
     let mut owner = Box::new(Env::new());
@@ -3699,7 +3699,7 @@ fn foreign_symbol_identity_preflight_rejects_unknown_pointer_before_dereference(
 
 // Unrun control: an N-API property key carried by a live QuickJS Symbol
 // retains the exact symbol, including across a setter/getter roundtrip.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_symbol_property_key_keeps_identity() {
     assert_eq!(thaw_quickjs::thaw_js_load(
@@ -3754,7 +3754,7 @@ fn live_quickjs_symbol_property_key_keeps_identity() {
 
 // A QuickJS-origin string key keeps exact code units when used on a native
 // object. Rust's lossy String conversion would merge these two keys.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_surrogate_string_keys_stay_distinct_on_native_object() {
     assert_eq!(thaw_quickjs::thaw_js_load(
@@ -3824,7 +3824,7 @@ fn live_quickjs_surrogate_string_keys_stay_distinct_on_native_object() {
     assert_eq!(thaw_quickjs::thaw_js_release_handle(valid_handle), 1);
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_object_keeps_native_symbol_key_and_integrity() {
     assert_eq!(
@@ -3893,7 +3893,7 @@ fn live_quickjs_object_keeps_native_symbol_key_and_integrity() {
 
 // Unrun regression: registry-handle identity alone is not JavaScript ===.
 // One retained NaN handle compares false even with itself; ±0 compare true.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_strict_equality_uses_javascript_values() {
     assert_eq!(thaw_quickjs::thaw_js_load(
@@ -3948,7 +3948,7 @@ fn live_quickjs_strict_equality_uses_javascript_values() {
 
 // Own-key metadata and prototype traversal must not read an accessor value;
 // numeric keys and live Symbols keep their key kinds.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_property_names_filter_descriptors_without_getting_values() {
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiEnumReads = 0; globalThis.napiEnumSymbol = Symbol('enum'); globalThis.napiEnumObject = Object.create({ fromProto: 4, shadowed: 7 }); Object.defineProperty(napiEnumObject, '2', { value: 2, enumerable: true, configurable: true }); Object.defineProperty(napiEnumObject, 'lazy', { get() { napiEnumReads++; return 3; }, enumerable: true, configurable: true }); Object.defineProperty(napiEnumObject, 'hidden', { value: 5, enumerable: false, configurable: true }); Object.defineProperty(napiEnumObject, 'shadowed', { value: 8, enumerable: false, configurable: true }); Object.defineProperty(napiEnumObject, napiEnumSymbol, { value: 6, enumerable: true, configurable: true });".as_ptr()), 1);
@@ -4021,7 +4021,7 @@ fn live_quickjs_property_names_filter_descriptors_without_getting_values() {
 
 // Unrun control: distinct unpaired surrogates are distinct property keys and
 // survive N-API UTF-16 getter and the live QuickJS property bridge exactly.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_native_utf16_property_keys_keep_surrogate_units() {
     let mut env = Env::new();
@@ -4360,7 +4360,7 @@ fn live_quickjs_native_utf16_property_keys_keep_surrogate_units() {
 
 // Unrun: N-API ToString observes the string-hint primitive hook once, retains
 // exact UTF-16 units, and propagates the original thrown JavaScript value.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_string_coercion_preserves_effects_units_and_throw() {
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiCoercionReads = 0; globalThis.napiCoercionThrown = { token: 1 }; globalThis.napiCoercionValue = { [Symbol.toPrimitive](hint) { napiCoercionReads++; if (hint !== 'string') throw new Error('wrong hint'); return '\\uD800'; } }; globalThis.napiCoercionBad = { [Symbol.toPrimitive]() { throw napiCoercionThrown; } }; globalThis.napiCoercionSymbol = Symbol('native'); globalThis.napiCoercionNull = null;".as_ptr()), 1);
@@ -4467,7 +4467,7 @@ fn live_quickjs_string_coercion_preserves_effects_units_and_throw() {
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn graph_owned_native_symbol_coercion_throws_engine_type_error_before_exposure() {
     let mut env = Env::new();
@@ -4514,7 +4514,7 @@ fn graph_owned_native_symbol_coercion_throws_engine_type_error_before_exposure()
 // Unrun: QuickJS getter/setter failures reached through N-API retain the
 // original thrown object. The public HostOperations setter keeps its older
 // three-argument ABI; these N-API operations use the private result path.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_property_errors_preserve_original_exception_identity() {
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiPropertyThrown = { marker: 1 }; globalThis.napiPropertyTarget = {}; Object.defineProperty(napiPropertyTarget, 'read', { get() { throw napiPropertyThrown; } }); Object.defineProperty(napiPropertyTarget, 'write', { set(_) { throw napiPropertyThrown; } });".as_ptr()), 1);
@@ -4566,7 +4566,7 @@ fn live_quickjs_property_errors_preserve_original_exception_identity() {
 // callable Proxy target has been made nonextensible. The target shadow must
 // then be removed; a native key that temporarily overrode the bound target's
 // intrinsic name must instead restore that original descriptor.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn native_function_proxy_reconciles_deleted_shadows_after_prevent_extensions() {
     unsafe extern "C" fn return_undefined(env: NapiEnv, _: NapiCallbackInfo) -> NapiValue {
@@ -4646,7 +4646,7 @@ fn native_function_proxy_reconciles_deleted_shadows_after_prevent_extensions() {
 // new.target into N-API, read its prototype once before the callback, and use
 // that prototype only for the implicit instance. An explicit object returned
 // by the native constructor remains authoritative.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 #[test]
 fn native_function_proxy_construct_preserves_derived_new_target() {
     static OBSERVED_TARGET_TAG: AtomicUsize = AtomicUsize::new(0);
@@ -4829,7 +4829,7 @@ fn native_function_proxy_construct_preserves_derived_new_target() {
     drop(owned);
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 mod napi_dispatch_owner_scope_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

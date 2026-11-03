@@ -438,7 +438,7 @@ unsafe extern "C" fn inspect_retired_external_values(
         (ptr::null_mut(), 0, true));
     assert_eq!(json_from_value_with_undefined(probe.shared_view as NapiValue, true).unwrap(),
         serde_json::json!({ "type": "Buffer", "data": [] }));
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     assert!(quickjs_bridge_value(buffer).is_err());
 }
 

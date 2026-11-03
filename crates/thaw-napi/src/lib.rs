@@ -480,7 +480,7 @@ enum ThawCallback {
     EventGraph(ThawNativeCallback),
     Value(ThawNativeValueCallback),
     ValueGraph(ThawNativeValueCallback),
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     QuickJs(ThawNativeValueCallback),
 }
 
@@ -760,11 +760,11 @@ pub struct Env {
     utf16_symbols: HashMap<usize, Vec<u16>>,
     // Legacy ownerless carrier metadata; managed bridge Symbols use native
     // IDs plus per-owner weak JS identity rather than an Env-owned handle.
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     quickjs_symbol_ids: HashMap<u64, u64>,
     quickjs_references: HashMap<u64, NapiValue>,
     quickjs_live_values: HashMap<u64, NapiValue>,
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     released_handles: HashSet<usize>,
     // Positive references held by native Json graph nodes postpone proxy
     // finalization and Env cleanup until their last shared Rc owner drops.
@@ -850,11 +850,11 @@ struct Accessor {
     setter_data: *mut c_void,
     getter_reflection: Option<NapiValue>,
     setter_reflection: Option<NapiValue>,
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     js_owner: Option<Arc<QuickJsAccessorRoots>>,
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 struct QuickJsAccessorRoots {
     getter: u64,
     setter: u64,
@@ -862,7 +862,7 @@ struct QuickJsAccessorRoots {
     setter_native: NapiValue,
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 impl Drop for QuickJsAccessorRoots {
     fn drop(&mut self) {
         // Releasing the last callback handle may run a JS finalizer that
@@ -929,11 +929,11 @@ impl Env {
             utf16_property_keys: HashMap::new(),
             utf16_strings: HashMap::new(),
             utf16_symbols: HashMap::new(),
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             quickjs_symbol_ids: HashMap::new(),
             quickjs_references: HashMap::new(),
             quickjs_live_values: HashMap::new(),
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             released_handles: HashSet::new(),
             native_graph_pins: 0,
             graph_reference_tokens: HashSet::new(),
@@ -1060,16 +1060,16 @@ thread_local! {
     // JavaScript callback references whose native wrapper was retired. The
     // bridge reports them with the next response so JavaScript can drop the
     // strong `__thaw_napi_reference_<id>` global.
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     static PENDING_JS_REFERENCE_RELEASES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 pub(crate) fn take_pending_js_reference_releases() -> Vec<u64> {
     PENDING_JS_REFERENCE_RELEASES.with(|pending| std::mem::take(&mut *pending.borrow_mut()))
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 pub(crate) fn cancel_pending_js_reference_release(id: u64) {
     PENDING_JS_REFERENCE_RELEASES
         .with(|pending| pending.borrow_mut().retain(|pending| *pending != id));
@@ -1185,7 +1185,7 @@ impl Env {
             {
                 enqueue(*value, &live, &mut seen, &mut queue);
             }
-            #[cfg(feature = "quickjs")]
+            #[cfg(feature = "js-engine")]
             if include_js_weak && self.js_live_symbol_ids.contains(id) {
                 enqueue(*value, &live, &mut seen, &mut queue);
             }
@@ -1277,7 +1277,7 @@ impl Env {
                             }
                         }
                     }
-                    #[cfg(feature = "quickjs")]
+                    #[cfg(feature = "js-engine")]
                     if let Some(owner) = &function._accessor_owner {
                         if let Some(roots) = &owner.js_owner {
                             children.push(roots.getter_native);
@@ -1322,7 +1322,7 @@ impl Env {
                     if let Some(value) = accessor.setter_reflection {
                         children.push(value);
                     }
-                    #[cfg(feature = "quickjs")]
+                    #[cfg(feature = "js-engine")]
                     if let Some(roots) = &accessor.js_owner {
                         children.push(roots.getter_native);
                         children.push(roots.setter_native);
@@ -1400,7 +1400,7 @@ fn scope_external_roots(env: NapiEnv, host_managed: bool) -> Option<Vec<NapiValu
     .flatten()
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn sync_js_origin_symbol_pins(env: NapiEnv) {
     let _dispatch = ForeignCallbackGuard::new();
     let Some(host_managed) = env.as_ref().and_then(|owner| {
@@ -1619,7 +1619,7 @@ unsafe fn retire_scoped_value(
         env_ref.js_registering_symbol_ids.remove(id);
         env_ref.js_pinned_symbol_ids.remove(id);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     env_ref
         .quickjs_symbol_ids
         .retain(|_, id| !removed_symbols.contains(id));
@@ -1641,7 +1641,7 @@ unsafe fn retire_scoped_value(
             old_accessors.push(accessor);
         }
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Value::QuickJsHandle { handle, .. } = &*value {
         env_ref.quickjs_symbol_ids.remove(handle);
         if env_ref.quickjs_live_values.get(handle) == Some(&value) {
@@ -1649,9 +1649,9 @@ unsafe fn retire_scoped_value(
             quickjs_releases.push(*handle);
         }
     }
-    #[cfg(not(feature = "quickjs"))]
+    #[cfg(not(feature = "js-engine"))]
     let _ = quickjs_releases;
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if matches!(&*value, Value::Function(_)) {
         let released: Vec<u64> = env_ref
             .quickjs_references
@@ -1691,7 +1691,7 @@ unsafe fn retire_scoped_value(
 // Called after reference/graph-owner release, when user finalizers have run.
 unsafe fn sweep_pending_scope_values(env: NapiEnv) {
     let _dispatch = ForeignCallbackGuard::new();
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     sync_js_origin_symbol_pins(env);
     let Ok(env_ref) = env_mut(env) else {
         return;
@@ -1740,13 +1740,13 @@ unsafe fn sweep_pending_scope_values(env: NapiEnv) {
         drop(accessor);
         capture_shutdown_exception(env);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     for handle in quickjs_releases {
         thaw_quickjs::thaw_js_release_handle(handle);
         capture_shutdown_exception(env);
     }
     callbacks.run(env);
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     sync_js_origin_symbol_pins(env);
 }
 
@@ -1828,7 +1828,7 @@ unsafe fn close_handle_scope(
         })
         .map(|(value, _)| *value as usize)
         .collect();
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     sync_js_origin_symbol_pins(env);
     if candidates.is_empty() {
         return NAPI_OK;
@@ -1881,13 +1881,13 @@ unsafe fn close_handle_scope(
         drop(accessor);
         capture_shutdown_exception(env);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     for handle in quickjs_releases {
         thaw_quickjs::thaw_js_release_handle(handle);
         capture_shutdown_exception(env);
     }
     callbacks.run(env);
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     sync_js_origin_symbol_pins(env);
     NAPI_OK
 }
@@ -2111,11 +2111,11 @@ impl Env {
         // A QuickJS release can invoke a JS finalizer and reenter N-API.
         // Invalidate this Env's cache first, then release outside any HOST
         // borrow or reference into an Env value. The Box remains pinned.
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         let quickjs_handles = std::mem::take(&mut (*env).quickjs_live_values)
             .into_keys()
             .collect::<Vec<_>>();
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         for handle in quickjs_handles {
             thaw_quickjs::thaw_js_release_handle(handle);
         }

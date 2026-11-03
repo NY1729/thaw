@@ -7,7 +7,7 @@ pub unsafe extern "C" fn napi_get_value_double(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         match qjs_query(handle, 0) {
@@ -38,7 +38,7 @@ pub unsafe extern "C" fn napi_get_value_int32(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         let number = match qjs_actual_number(env, handle) {
@@ -67,7 +67,7 @@ pub unsafe extern "C" fn napi_get_value_uint32(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         let number = match qjs_actual_number(env, handle) {
@@ -123,7 +123,7 @@ pub unsafe extern "C" fn napi_get_value_int64(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         let number = match qjs_actual_number(env, handle) {
@@ -152,7 +152,7 @@ pub unsafe extern "C" fn napi_coerce_to_bool(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         return match qjs_query(handle, 1) {
@@ -296,7 +296,7 @@ unsafe fn javascript_string_utf16(
     arrays: &mut HashSet<usize>,
     array_element: bool,
 ) -> Result<Vec<u16>, NapiStatus> {
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         return qjs_abstract_string_units(env, handle, array_element);
     }
@@ -338,7 +338,7 @@ unsafe fn javascript_string_utf16(
             arrays.remove(&(value as usize));
             result
         }
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         Value::Symbol { id, .. } if env.as_ref().is_some_and(|env| env.graph_owner_id != 0) => {
             qjs_native_symbol_string_units(env, *id)
         }
@@ -348,7 +348,7 @@ unsafe fn javascript_string_utf16(
     }
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_abstract_string_units(env: NapiEnv, handle: u64, array_element: bool)
     -> Result<Vec<u16>, NapiStatus> {
     let _foreign_dispatch = ForeignCallbackGuard::new();
@@ -359,7 +359,7 @@ unsafe fn qjs_abstract_string_units(env: NapiEnv, handle: u64, array_element: bo
 
 /// ToString of a native-graph Symbol through the engine's own Symbol, so the
 /// engine's real TypeError becomes the pending exception.
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_native_symbol_string_units(env: NapiEnv, id: u64)
     -> Result<Vec<u16>, NapiStatus> {
     let owner = env.as_ref().map_or(0, |env| env.graph_owner_id);
@@ -368,7 +368,7 @@ unsafe fn qjs_native_symbol_string_units(env: NapiEnv, id: u64)
     qjs_string_units_from_result(env, result)
 }
 
-#[cfg(feature = "quickjs")]
+#[cfg(feature = "js-engine")]
 unsafe fn qjs_string_units_from_result(
     env: NapiEnv, result: thaw_quickjs::ThawStringCoercionResult,
 ) -> Result<Vec<u16>, NapiStatus> {
@@ -426,7 +426,7 @@ pub unsafe extern "C" fn napi_coerce_to_number(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         return match qjs_number_value(handle) {
@@ -514,7 +514,7 @@ pub unsafe extern "C" fn napi_get_value_bool(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         match qjs_query(handle, 0) {
@@ -548,7 +548,7 @@ pub unsafe extern "C" fn napi_get_value_string_utf8(
     if !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         let units = match qjs_actual_string_units(env, handle) {
@@ -596,7 +596,7 @@ pub unsafe extern "C" fn napi_get_value_string_latin1(
     if !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         let units = match qjs_actual_string_units(env, handle) {
@@ -645,7 +645,7 @@ pub unsafe extern "C" fn napi_get_value_string_utf16(
     if !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    #[cfg(feature = "quickjs")]
+    #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(value) {
         let _foreign_dispatch = ForeignCallbackGuard::new();
         let units = match qjs_actual_string_units(env, handle) {
@@ -893,9 +893,9 @@ pub unsafe extern "C" fn napi_run_script(
     // `napi_run_script` retains its existing semantics for non-JSON scripts.
     let evaluated = match serde_json::from_str::<JsonValue>(&source) {
         Ok(json) => Ok(Some(json.to_string())),
-        #[cfg(feature = "quickjs")]
+        #[cfg(feature = "js-engine")]
         Err(_) => thaw_quickjs::eval_json(&source),
-        #[cfg(not(feature = "quickjs"))]
+        #[cfg(not(feature = "js-engine"))]
         Err(_) => Err("napi_run_script requires the QuickJS feature for JavaScript syntax".into()),
     };
     let env_ptr = env;
