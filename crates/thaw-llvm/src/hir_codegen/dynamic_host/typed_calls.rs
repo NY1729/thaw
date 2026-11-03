@@ -70,6 +70,25 @@ pub(crate) fn thaw_js_param_type(ty: &HirType) -> bool {
     thaw_js_plain_type(ty) || thaw_js_callback_type(ty) || *ty == HirType::JsValue
 }
 
+/// The object literal under a `JsValue` thaw-js argument: `JsonAsNative(literal, JsValue)` is the
+/// coercion `coerce_to_declared` adds to a `Json`-typed literal, and its codegen would turn the
+/// literal into a handle id (0 for a members object). Returns the literal call, which the argument
+/// is sent as plain Json instead. `as any` lowers to the literal itself (no wrapper), so nothing
+/// else is peeled.
+pub(crate) fn thaw_js_object_literal_for_jsvalue(arg: &HirExpr) -> Option<&HirExpr> {
+    let HirExpr::JsonAsNative(inner, HirType::JsValue) = arg else {
+        return None;
+    };
+    match inner.as_ref() {
+        literal @ HirExpr::Call(callee, _)
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_dynamic_object_literal") =>
+        {
+            Some(literal)
+        }
+        _ => None,
+    }
+}
+
 fn ordinary_quickjs_typed_call(signature: &DynamicSignature) -> bool {
     signature.backend == DynamicBackend::QuickJs
         && ![
@@ -1732,6 +1751,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| format!("thaw-js callback argument {}: {error}", index + 1))?;
                 continue;
             }
+            if let Some(literal) = thaw_js_object_literal_for_jsvalue(arg).filter(|_| *ty == HirType::JsValue) {
+                // a literal has no handle yet: send it as Json, as a `Json` parameter gets it
+                let object = self.compile_thaw_js_object_literal_argument(literal)?;
+                self.compile_typed_dynamic_argument(array, object, &HirType::Json)
+                    .map_err(|error| format!("thaw-js argument {} (object literal): {error}", index + 1))?;
+                continue;
+            }
             self.thaw_js_call_arguments = true;
             let value = self.compile_expr(arg);
             self.thaw_js_call_arguments = false;
@@ -1934,6 +1960,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| format!("thaw-js class callback argument {}: {error}", index + 1))?;
                 continue;
             }
+            if let Some(literal) = thaw_js_object_literal_for_jsvalue(arg).filter(|_| handle_param(ty)) {
+                let object = self.compile_thaw_js_object_literal_argument(literal)?;
+                self.compile_typed_dynamic_argument(array, object, &HirType::Json)
+                    .map_err(|error| format!("thaw-js class argument {} (object literal): {error}", index + 1))?;
+                continue;
+            }
             self.thaw_js_call_arguments = true;
             let value = self.compile_expr(arg);
             self.thaw_js_call_arguments = false;
@@ -1981,6 +2013,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 .into());
         }
         self.compile_typed_dynamic_result(json, &signature.ret)
+    }
+
+    /// The object literal call of a `JsValue` argument, built as Json with the thaw-js argument flag
+    /// set (see `compile_dynamic_object_literal_call`). The result is the same owned Json a `Json`
+    /// argument gets, so the caller pushes it with `compile_typed_dynamic_argument` and no extra destroy.
+    fn compile_thaw_js_object_literal_argument(
+        &mut self,
+        literal: &HirExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.thaw_js_call_arguments = true;
+        let object = self.compile_expr(literal);
+        self.thaw_js_call_arguments = false;
+        object
     }
 
     /// `{"__thaw_tjs_handle__": id}` for an instance handle passed back into thaw-js.
