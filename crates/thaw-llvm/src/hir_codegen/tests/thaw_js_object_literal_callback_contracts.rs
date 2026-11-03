@@ -52,8 +52,12 @@ fn thaw_js_routed_object_literal_getters_stay_loud() {
 #[test]
 fn quickjs_engine_object_literal_keeps_the_builder() {
     let source = thaw_js_object_literal_program("{ cb(x: number): number { return x + 1; }, n: 1 }");
-    let (uses_thaw_js, _, ir) = thaw_js_routed_ir(&source, false);
-    assert!(!uses_thaw_js, "{ir}");
+    // The program's own `__thaw_typed_tjs_` call still reaches thaw-js (`uses_thaw_js` is set by the
+    // call, whatever the engine), so only the object literal is checked: the QuickJS builder is
+    // fetched through `thaw_js_get_global`, and no thaw-js callback marker or graph registration is used.
+    let (_, _, ir) = thaw_js_routed_ir(&source, false);
     assert!(ir.contains("__thaw_object_from_operations"), "{ir}");
+    assert!(ir.contains("@thaw_js_get_global("), "{ir}");
     assert!(!ir.contains("__thaw_tjs_handle__"), "{ir}");
+    assert!(!ir.contains("@thaw_tjs_register_native_callback_graph("), "{ir}");
 }
