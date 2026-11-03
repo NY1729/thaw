@@ -2890,3 +2890,51 @@ fn ready_continuation_settled_on_a_coroutine_thread_reaches_the_host() {
     assert_eq!(FAKE_READY.with(|ready| ready.borrow().clone()), vec![1]);
     *crate::eventloop::TEST_READY_HOOKS.lock().unwrap() = None;
 }
+
+const BYTES: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"b/index.js": function(module, exports, require) {
+  exports.make = function () { return Buffer.from([1, 2, 3]); };
+  exports.make8 = function () { return new Uint8Array([9]); };
+  exports.echo = function (b) { return b; };
+  exports.shape = function (b) { return [b.length, Buffer.isBuffer(b), b[2]].join(','); };
+  exports.fill = function (b) { for (var i = 0; i < b.length; i++) b[i] = 7; return b; };
+},
+};
+var __thaw_bundle_require_maps = { "b/index.js": {}, };
+var __thaw_bundle_entry_key = "b/index.js";
+})(globalThis.require);"#;
+
+/// `{"__thaw_tjs_bytes__": ...}` argument node for `data`, as the compiled side sends it.
+fn tj35_bytes_arg(data: &[u8]) -> String {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+    format!(r#"{{"__thaw_tjs_bytes__":{{"k":"Buffer","b64":"{b64}"}}}}"#)
+}
+
+#[test]
+fn tj35_bytes_cross_the_typed_abi_as_tagged_buffers_both_ways() {
+    use std::ffi::CString;
+    let bundle = CString::new(BYTES).unwrap();
+    assert_eq!(crate::host::thaw_tjs_register(c"bt".as_ptr(), bundle.as_ptr()), 1);
+    // a Buffer and a Uint8Array both leave as the Buffer shape the compiled side decodes as Bytes
+    assert_eq!(typed_call("bt::make", "[]").unwrap(), r#"{"type":"Buffer","data":[1,2,3]}"#);
+    assert_eq!(typed_call("bt::make8", "[]").unwrap(), r#"{"type":"Buffer","data":[9]}"#);
+    // the tagged node is rebuilt as a real Buffer
+    assert_eq!(typed_call("bt::shape", &format!("[{}]", tj35_bytes_arg(&[1, 2, 3]))).unwrap(), "3,true,3");
+    assert_eq!(typed_call("bt::shape", &format!("[{}]", tj35_bytes_arg(&[]))).unwrap(), "0,true,");
+    // every byte value survives both directions
+    let all: Vec<u8> = (0..=255).collect();
+    let echoed = format!(
+        r#"{{"type":"Buffer","data":[{}]}}"#,
+        all.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+    );
+    assert_eq!(typed_call("bt::echo", &format!("[{}]", tj35_bytes_arg(&all))).unwrap(), echoed);
+    // a mutated argument comes back with the new bytes (the compiled side copies them back)
+    assert_eq!(
+        typed_call("bt::fill", &format!("[{}]", tj35_bytes_arg(&[1, 2, 3]))).unwrap(),
+        r#"{"type":"Buffer","data":[7,7,7]}"#
+    );
+    // a user object with the Buffer shape is not revived: only the tagged node is
+    assert_eq!(typed_call("bt::shape", r#"[{"type":"Buffer","data":[1]}]"#).unwrap(), ",false,");
+}
