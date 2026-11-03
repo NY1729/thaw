@@ -3185,7 +3185,8 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
             new_date(it, &fields[0].1).unwrap_or(Value::Undefined)
         }
         // `{"__thaw_tjs_bytes__": {"k", "b64"}}`: compiled byte data rebuilt as a `Buffer`.
-        Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Object(_))] if k == BYTES_KEY) => {
+        Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Object(_))] if k == BYTES_KEY) =>
+        {
             let Native::Object(parts) = &fields[0].1 else {
                 unreachable!()
             };
@@ -3193,11 +3194,14 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
                 Some((_, Native::Str(s))) => s.as_str(),
                 _ => "",
             };
-            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap_or_default();
+            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+                .unwrap_or_default();
             let view = it.u8_from_vec(bytes);
             // Buffer is a Uint8Array whose prototype is `Buffer.prototype` (see buffer.rs `wrap`)
             let global = it.global.clone();
-            let proto = it.lookup(&global, "Buffer").and_then(|b| it.get(&b, "prototype").ok());
+            let proto = it
+                .lookup(&global, "Buffer")
+                .and_then(|b| it.get(&b, "prototype").ok());
             if let (Value::Object(o), Some(Value::Object(p))) = (&view, proto) {
                 *o.proto.borrow_mut() = Some(p);
             }
@@ -3296,7 +3300,10 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
                 _ => None,
             };
             if let Some(bytes) = bytes {
-                let data = bytes.into_iter().map(|b| Native::Number(f64::from(b))).collect();
+                let data = bytes
+                    .into_iter()
+                    .map(|b| Native::Number(f64::from(b)))
+                    .collect();
                 return Ok(Native::Object(vec![
                     ("type".to_string(), Native::Str("Buffer".to_string())),
                     ("data".to_string(), Native::Array(data)),

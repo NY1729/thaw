@@ -2916,26 +2916,47 @@ fn tj35_bytes_arg(data: &[u8]) -> String {
 fn tj35_bytes_cross_the_typed_abi_as_tagged_buffers_both_ways() {
     use std::ffi::CString;
     let bundle = CString::new(BYTES).unwrap();
-    assert_eq!(crate::host::thaw_tjs_register(c"bt".as_ptr(), bundle.as_ptr()), 1);
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"bt".as_ptr(), bundle.as_ptr()),
+        1
+    );
     // a Buffer and a Uint8Array both leave as the Buffer shape the compiled side decodes as Bytes
-    assert_eq!(typed_call("bt::make", "[]").unwrap(), r#"{"type":"Buffer","data":[1,2,3]}"#);
-    assert_eq!(typed_call("bt::make8", "[]").unwrap(), r#"{"type":"Buffer","data":[9]}"#);
+    assert_eq!(
+        typed_call("bt::make", "[]").unwrap(),
+        r#"{"type":"Buffer","data":[1,2,3]}"#
+    );
+    assert_eq!(
+        typed_call("bt::make8", "[]").unwrap(),
+        r#"{"type":"Buffer","data":[9]}"#
+    );
     // the tagged node is rebuilt as a real Buffer
     // (a string result is JSON text, so it is quoted)
-    assert_eq!(typed_call("bt::shape", &format!("[{}]", tj35_bytes_arg(&[1, 2, 3]))).unwrap(), "\"3,true,3\"");
-    assert_eq!(typed_call("bt::shape", &format!("[{}]", tj35_bytes_arg(&[]))).unwrap(), "\"0,true,\"");
+    assert_eq!(
+        typed_call("bt::shape", &format!("[{}]", tj35_bytes_arg(&[1, 2, 3]))).unwrap(),
+        "\"3,true,3\""
+    );
+    assert_eq!(
+        typed_call("bt::shape", &format!("[{}]", tj35_bytes_arg(&[]))).unwrap(),
+        "\"0,true,\""
+    );
     // every byte value survives both directions
     let all: Vec<u8> = (0..=255).collect();
     let echoed = format!(
         r#"{{"type":"Buffer","data":[{}]}}"#,
         all.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
     );
-    assert_eq!(typed_call("bt::echo", &format!("[{}]", tj35_bytes_arg(&all))).unwrap(), echoed);
+    assert_eq!(
+        typed_call("bt::echo", &format!("[{}]", tj35_bytes_arg(&all))).unwrap(),
+        echoed
+    );
     // a mutated argument comes back with the new bytes (the compiled side copies them back)
     assert_eq!(
         typed_call("bt::fill", &format!("[{}]", tj35_bytes_arg(&[1, 2, 3]))).unwrap(),
         r#"{"type":"Buffer","data":[7,7,7]}"#
     );
     // a user object with the Buffer shape is not revived: only the tagged node is
-    assert_eq!(typed_call("bt::shape", r#"[{"type":"Buffer","data":[1]}]"#).unwrap(), "\",false,\"");
+    assert_eq!(
+        typed_call("bt::shape", r#"[{"type":"Buffer","data":[1]}]"#).unwrap(),
+        "\",false,\""
+    );
 }
