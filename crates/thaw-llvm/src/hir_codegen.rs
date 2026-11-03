@@ -673,7 +673,7 @@ enum HirPreflightQuery<'a> {
 /// when a getter/setter/`__proto__`/spread stub is emitted, or builds the Json object itself
 /// when every key is a plain string. Must match that function.
 fn thaw_js_object_literal_bypasses_builder(members: &[HirExpr]) -> bool {
-    if members.len() % 5 != 0 {
+    if !members.len().is_multiple_of(5) {
         return false;
     }
     let (members, _) = members.as_chunks::<5>();
