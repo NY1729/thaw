@@ -387,6 +387,7 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:timers",
     "node:worker_threads",
     "node:stream/web",
+    "node:stream",
 ];
 
 /// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
@@ -403,7 +404,7 @@ fn thaw_js_bundle_form<'a>(
 }
 
 /// The thaw-js form of `node:worker_threads`: the main-thread module the thaw-js prelude exports
-/// (`web/worker_threads.js`). Its QuickJS form needs `node:stream`, which thaw-js does not load.
+/// (`web/worker_threads.js`). Its QuickJS form needs `node:stream`, which thaw-js now loads too.
 const THAW_JS_WORKER_THREADS_FORM: &str =
     "module.exports = globalThis.__thaw_worker_threads_exports;\n";
 

@@ -365,16 +365,12 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:querystring",
         "node:timers",
         "node:worker_threads",
+        "node:stream",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
     // modules whose cases do not match Node on thaw-js yet stay on QuickJS
-    for module in [
-        "node:stream",
-        "node:crypto",
-        "node:net",
-        "node:zlib",
-    ] {
+    for module in ["node:crypto", "node:net", "node:zlib"] {
         assert!(!THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
 }
