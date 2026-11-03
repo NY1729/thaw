@@ -2322,6 +2322,117 @@ fn async_generator_return_runs_finally() {
 }
 
 #[test]
+fn for_await_break_runs_async_generator_finally() {
+    let mut it = Interp::new();
+    it.run(
+        "async function* gen(){ try { yield 1; yield 2; yield 3; } finally { console.log('cleanup'); } }\n\
+         (async function () { for await (const v of gen()) { console.log('x', v); if (v === 2) break; } console.log('after'); })();",
+    )
+    .ok()
+    .unwrap();
+    it.run_event_loop().ok().unwrap();
+    assert_eq!(it.out, vec!["x 1", "x 2", "cleanup", "after"]);
+}
+
+#[test]
+fn new_function_for_await_break_runs_finally() {
+    let mut it = Interp::new();
+    it.run(
+        "const gen = new Function('return (async function* () { try { yield 1; yield 2; yield 3; } finally { console.log(\"cleanup\"); } })()')();\n\
+         (async function main() { for await (const x of gen) { console.log('x', x); if (x === 2) break; } console.log('after break'); })();",
+    )
+    .ok()
+    .unwrap();
+    it.run_event_loop().ok().unwrap();
+    assert_eq!(it.out, vec!["x 1", "x 2", "cleanup", "after break"]);
+}
+
+#[test]
+fn hosted_new_function_async_iterator_return_runs_finally() {
+    use crate::host::{
+        thaw_tjs_get_global, thaw_tjs_iterator_step_exact_result, thaw_tjs_load_script,
+        thaw_tjs_to_async_iterator_exact_result,
+    };
+    use std::ffi::CString;
+    let src = CString::new(
+        "globalThis.cleaned = false; globalThis.gen = new Function('return (async function* () { try { yield 1; yield 2; yield 3; } finally { globalThis.cleaned = true; } })()')();",
+    )
+    .unwrap();
+    assert_eq!(thaw_tjs_load_script(src.as_ptr()), 1);
+    let name = CString::new("gen").unwrap();
+    let src_handle = thaw_tjs_get_global(name.as_ptr());
+    assert!(src_handle > 0);
+    let acquired = thaw_tjs_to_async_iterator_exact_result(src_handle as u64);
+    assert!(acquired.error.is_null() && acquired.exception_handle == 0);
+    let iter = acquired.value;
+    let none = CString::new("").unwrap();
+    let n1 = thaw_tjs_iterator_step_exact_result(iter, 6, none.as_ptr());
+    assert!(n1.error.is_null() && n1.exception_handle == 0);
+    let n2 = thaw_tjs_iterator_step_exact_result(iter, 6, none.as_ptr());
+    assert!(n2.error.is_null() && n2.exception_handle == 0);
+    let ret = thaw_tjs_iterator_step_exact_result(iter, 7, none.as_ptr());
+    assert!(ret.error.is_null() && ret.exception_handle == 0);
+    let probe = CString::new("if (!globalThis.cleaned) throw new Error('no cleanup');").unwrap();
+    assert_eq!(thaw_tjs_load_script(probe.as_ptr()), 1);
+}
+
+#[test]
+fn host_realm_streams_console_output_from_a_closed_new_function_generator() {
+    use crate::host::{
+        default_realm, thaw_tjs_get_global, thaw_tjs_iterator_step_exact_result,
+        thaw_tjs_load_script, thaw_tjs_to_async_iterator_exact_result, with_package,
+    };
+    use std::ffi::CString;
+    // the node-compat case: `finally` logs with console.log, the close is the for-await break
+    let src = CString::new(
+        "globalThis.gen = new Function('return (async function* () { try { yield 1; yield 2; yield 3; } finally { console.log(\"cleanup\"); } })()')();",
+    )
+    .unwrap();
+    assert_eq!(thaw_tjs_load_script(src.as_ptr()), 1);
+    let name = CString::new("gen").unwrap();
+    let acquired =
+        thaw_tjs_to_async_iterator_exact_result(thaw_tjs_get_global(name.as_ptr()) as u64);
+    let iter = acquired.value;
+    let none = CString::new("").unwrap();
+    thaw_tjs_iterator_step_exact_result(iter, 6, none.as_ptr());
+    thaw_tjs_iterator_step_exact_result(iter, 6, none.as_ptr());
+    let ret = thaw_tjs_iterator_step_exact_result(iter, 7, none.as_ptr());
+    assert!(ret.error.is_null() && ret.exception_handle == 0);
+    // the compiled program never drains `Interp::out`, so the host realm must print as it goes
+    let (streamed, buffered) = with_package(default_realm(), |p| {
+        Ok((p.interp().rt.stream, p.interp().out.clone()))
+    })
+    .unwrap();
+    assert!(streamed);
+    assert!(buffered.is_empty(), "{buffered:?}");
+}
+
+#[test]
+fn hosted_async_step_return_runs_generator_finally() {
+    use crate::host::{
+        thaw_tjs_get_global, thaw_tjs_iterator_step_exact_result, thaw_tjs_load_script,
+    };
+    use std::ffi::CString;
+    let src = CString::new(
+        "globalThis.cleaned = false; globalThis.gen = (async function* () { try { yield 1; yield 2; yield 3; } finally { globalThis.cleaned = true; } })();",
+    )
+    .unwrap();
+    assert_eq!(thaw_tjs_load_script(src.as_ptr()), 1);
+    let name = CString::new("gen").unwrap();
+    let iter = thaw_tjs_get_global(name.as_ptr());
+    assert!(iter > 0);
+    let none = CString::new("").unwrap();
+    // mode 6 = async next, mode 7 = async return (the compiled for-await break close)
+    let next = thaw_tjs_iterator_step_exact_result(iter as u64, 6, none.as_ptr());
+    assert!(next.error.is_null() && next.exception_handle == 0);
+    let ret = thaw_tjs_iterator_step_exact_result(iter as u64, 7, none.as_ptr());
+    assert!(ret.error.is_null() && ret.exception_handle == 0);
+    // thaw_tjs_load_script returns 0 when the probe throws
+    let probe = CString::new("if (!globalThis.cleaned) throw new Error('no cleanup');").unwrap();
+    assert_eq!(thaw_tjs_load_script(probe.as_ptr()), 1);
+}
+
+#[test]
 fn get_prototype_of_runs_the_proxy_trap() {
     assert_eq!(
         one("try { Object.getPrototypeOf(new Proxy({}, { getPrototypeOf() { throw new Error('trap'); } })); console.log('accepted'); } catch (e) { console.log(e.message); }"),

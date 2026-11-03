@@ -194,6 +194,8 @@ impl Package {
             return Err(HostError::Unsupported((*problem).to_string()));
         }
         let mut interp = Box::new(Interp::new());
+        // console output goes straight to stdout: nothing in the host drains `Interp::out`
+        interp.set_stream(true);
         if stack_bytes != 0 {
             interp.configure_stack(stack_bytes);
         }
@@ -771,9 +773,11 @@ pub struct HandleResult {
 /// The realm user code without a package runs in (`new Function`, `eval`, `any` literals): the
 /// package last entered, or, in a program that loaded none, a bare interpreter created on first use.
 /// ponytail: a program mixing packages and dynamic code shares the last-entered package's realm.
-fn default_realm() -> usize {
+pub(crate) fn default_realm() -> usize {
     if PACKAGES.with(|ps| ps.borrow().is_empty()) {
         let mut interp = Box::new(Interp::new());
+        // console output goes straight to stdout: nothing in the host drains `Interp::out`
+        interp.set_stream(true);
         let stack = process_stack_bytes();
         if stack != 0 {
             interp.configure_stack(stack);
@@ -3403,7 +3407,7 @@ thread_local! {
 /// callback may call other packages; a re-entrant call into the same package runs on the same
 /// instance (ponytail: the suspended outer call holds a `&mut` to it, formally aliasing; the outer
 /// evaluator is parked inside the callback and touches nothing until it returns).
-fn with_package<T>(
+pub(crate) fn with_package<T>(
     handle: usize,
     f: impl FnOnce(&mut Package) -> Result<T, HostError>,
 ) -> Result<T, HostError> {
