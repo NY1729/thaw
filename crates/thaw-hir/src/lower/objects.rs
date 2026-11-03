@@ -813,10 +813,21 @@ impl<'a> FnLowerer<'a> {
         let mut key_kinds = Vec::new();
         let mut values = Vec::new();
         let mut callbacks = Vec::new();
+        // The members again, unbound, as five operands each (kind, key, key kind, value, callback)
+        // for `__thaw_dynamic_object_literal`: a codegen that builds the object itself reads these
+        // instead of the bound temporaries. Absent parts are `null`.
+        let mut member_operands = Vec::new();
         for property in &obj_lit.props {
             if let PropOrSpread::Spread(spread) = property {
                 let value = self.lower_expr(&spread.expr)?;
                 let value = self.coerce_to_declared(&HirType::Json, value)?;
+                member_operands.extend([
+                    HirExpr::Lit(HirLit::Str("spread".into())),
+                    HirExpr::Lit(HirLit::Str(String::new())),
+                    HirExpr::Lit(HirLit::Bool(false)),
+                    value.clone(),
+                    HirExpr::Lit(HirLit::Null),
+                ]);
                 let name = format!("__thaw_dynamic_object_value_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), HirType::Json);
@@ -990,6 +1001,13 @@ impl<'a> FnLowerer<'a> {
                 }
                 None => None,
             };
+            member_operands.extend([
+                HirExpr::Lit(HirLit::Str(kind.into())),
+                key.clone(),
+                HirExpr::Lit(HirLit::Bool(is_symbol_key)),
+                value.clone().unwrap_or(HirExpr::Lit(HirLit::Null)),
+                callback.clone().unwrap_or(HirExpr::Lit(HirLit::Null)),
+            ]);
             let key_name = format!("__thaw_dynamic_object_key_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(key_name.clone(), HirType::Str);
@@ -1111,7 +1129,15 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_json_host_from_dynamic".into())),
                 vec![built],
             ))));
-            self.wrap_call_argument_bindings(HirExpr::Block(body), &bindings)
+            let builder = self.wrap_call_argument_bindings(HirExpr::Block(body), &bindings)?;
+            // The builder block stays the first operand (QuickJS meaning, unchanged); the
+            // members follow so a thaw-js call can build the same object without QuickJS.
+            let mut operands = vec![builder];
+            operands.extend(member_operands);
+            Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_dynamic_object_literal".into())),
+                operands,
+            ))
         } else {
             let result = HirExpr::Call(
                 Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),

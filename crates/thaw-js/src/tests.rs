@@ -746,6 +746,35 @@ fn compiled_callbacks_are_callable_from_package_code() {
 }
 
 #[test]
+fn compiled_callbacks_nested_in_objects_and_arrays_decode_to_callables() {
+    use crate::host::{thaw_tjs_register_callback, Native, Package};
+    let sum = thaw_tjs_register_callback(sum_adapter as *const _, std::ptr::null(), 3);
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"o/index.js": function(module, exports, require) {
+  exports.obj = function (o) { return typeof o.init === 'function' ? o.init(20, 1, undefined) * 2 : -1; };
+  exports.arr = function (a) { return typeof a[0].cb === 'function' ? a[0].cb(20, 1, undefined) * 2 : -1; };
+},
+};
+var __thaw_bundle_require_maps = { "o/index.js": {}, };
+var __thaw_bundle_entry_key = "o/index.js";
+})(globalThis.require);"#;
+    let mut p = Package::load(bundle).expect("loads");
+    // `{init: marker, n: 1}`: the marker field decodes to a callable next to a plain value
+    let object = Native::Object(vec![
+        ("init".to_string(), callback_marker(sum)),
+        ("n".to_string(), Native::Number(1.0)),
+    ]);
+    assert_eq!(p.call("obj", &[object]).ok(), Some(Native::Number(42.0)));
+    // the same marker one level down, inside an array of objects
+    let array = Native::Array(vec![Native::Object(vec![(
+        "cb".to_string(),
+        callback_marker(sum),
+    )])]);
+    assert_eq!(p.call("arr", &[array]).ok(), Some(Native::Number(42.0)));
+}
+
+#[test]
 fn thrown_errors_are_framed_with_name_message_code_and_properties() {
     use crate::host::{HostError, Package};
     let bundle = MINI.replace(
