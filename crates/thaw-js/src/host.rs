@@ -394,11 +394,12 @@ struct CompiledCallback {
     _root: thaw_arena::ArenaRoot,
 }
 
-thread_local! {
-    static CALLBACKS: RefCell<Vec<CompiledCallback>> = const { RefCell::new(Vec::new()) };
-    /// Function values already made for (interpreter address, callback id): stable identity.
-    static CALLBACK_VALUES: RefCell<HashMap<(usize, usize), Value>> = RefCell::new(HashMap::new());
-}
+// SAFETY: the table is only appended to and read, and no entry is ever dropped, so its `ArenaRoot` pins
+// are never released on a thread other than the one that took them. Coroutine threads dispatch these
+// callbacks, so the table is process-wide rather than thread-local.
+unsafe impl Send for CompiledCallback {}
+
+static CALLBACKS: std::sync::Mutex<Vec<CompiledCallback>> = std::sync::Mutex::new(Vec::new());
 
 thread_local! {
     /// Values compiled code holds by handle (class instances): `(package handle, value)`; id = index + 1.
@@ -2533,37 +2534,35 @@ fn register_callback(
     mask: u64,
     method: bool,
 ) -> i64 {
-    CALLBACKS.with(|callbacks| {
-        let mut callbacks = callbacks.borrow_mut();
-        let (adapter, context) = (adapter as usize, context as usize);
-        if let Some(id) = callbacks.iter().position(|c| {
-            (if identity != 0 && c.identity != 0 {
-                c.identity == identity
-            } else {
-                c.adapter == adapter && c.context == context
-            }) && c.params == params
-                && c.graph == graph
-                && c.finish == finish
-                && c.has_rest == has_rest
-                && c.mask == mask
-                && c.method == method
-        }) {
-            return id as i64;
-        }
-        callbacks.push(CompiledCallback {
-            adapter,
-            context,
-            identity,
-            params,
-            graph,
-            finish,
-            has_rest,
-            mask,
-            method,
-            _root: thaw_arena::ArenaRoot::new(context),
-        });
-        callbacks.len() as i64 - 1
-    })
+    let mut callbacks = CALLBACKS.lock().unwrap();
+    let (adapter, context) = (adapter as usize, context as usize);
+    if let Some(id) = callbacks.iter().position(|c| {
+        (if identity != 0 && c.identity != 0 {
+            c.identity == identity
+        } else {
+            c.adapter == adapter && c.context == context
+        }) && c.params == params
+            && c.graph == graph
+            && c.finish == finish
+            && c.has_rest == has_rest
+            && c.mask == mask
+            && c.method == method
+    }) {
+        return id as i64;
+    }
+    callbacks.push(CompiledCallback {
+        adapter,
+        context,
+        identity,
+        params,
+        graph,
+        finish,
+        has_rest,
+        mask,
+        method,
+        _root: thaw_arena::ArenaRoot::new(context),
+    });
+    callbacks.len() as i64 - 1
 }
 
 /// Register a compiled graph-wire callback (the counterpart of QuickJS's
@@ -2649,12 +2648,11 @@ pub extern "C" fn thaw_tjs_register_native_method_callback_graph(
 }
 
 fn callback_value(it: &mut Interp, id: usize) -> Value {
-    let key = (it as *const Interp as usize, id);
-    if let Some(v) = CALLBACK_VALUES.with(|m| m.borrow().get(&key).cloned()) {
-        return v;
+    if let Some(v) = it.callback_values.get(&id) {
+        return v.clone();
     }
     let function = it.native(move |it, this, args| call_compiled(it, id, this, args));
-    CALLBACK_VALUES.with(|m| m.borrow_mut().insert(key, function.clone()));
+    it.callback_values.insert(id, function.clone());
     function
 }
 
@@ -2976,12 +2974,10 @@ fn native_promise_mark_handled(_promise: usize) {}
 
 fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<Value> {
     let Some((adapter, context, params, graph, finish, has_rest, mask, method)) =
-        CALLBACKS.with(|c| {
-            c.borrow().get(id).map(|c| {
-                (
-                    c.adapter, c.context, c.params, c.graph, c.finish, c.has_rest, c.mask, c.method,
-                )
-            })
+        CALLBACKS.lock().unwrap().get(id).map(|c| {
+            (
+                c.adapter, c.context, c.params, c.graph, c.finish, c.has_rest, c.mask, c.method,
+            )
         })
     else {
         return it.throw_error("Error", "unknown compiled callback");
