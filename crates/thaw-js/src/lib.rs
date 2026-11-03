@@ -651,6 +651,8 @@ pub struct Interp {
     /// Run once per loop turn after the timers (host.rs sets it for the compiled terminal loop, which also
     /// drains native continuations). Returns true when it made progress, so the loop re-checks without sleeping.
     pub(crate) turn_hook: Option<fn(&mut Interp) -> bool>,
+    /// Function values made for compiled callbacks, by callback id (host.rs `callback_value`): stable identity.
+    pub(crate) callback_values: HashMap<usize, Value>,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -731,6 +733,7 @@ impl Interp {
             interrupt: None,
             worker: Default::default(),
             turn_hook: None,
+            callback_values: HashMap::new(),
         };
         it.install_builtins();
         it.install_collections();
