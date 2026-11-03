@@ -789,6 +789,45 @@ fn compiled_callback_invoked_from_an_async_function_runs_on_its_coroutine_thread
     assert_eq!(it.out, vec!["sum=23".to_string()]);
 }
 
+/// The compiled prologue's stack check (`sp < slot` is an overflow), registered as the process limit.
+static STACK_PROBE_SLOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Reports `true` when the calling stack is above the registered limit, else the `RangeError` a
+/// compiled function prologue would throw.
+unsafe extern "C" fn stack_probe_adapter(
+    _context: *const std::ffi::c_void,
+    _args: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let marker = 0u8;
+    let sp = std::hint::black_box(&marker) as *const u8 as u64;
+    if sp < STACK_PROBE_SLOT.load(std::sync::atomic::Ordering::Acquire) {
+        thaw_arena::owned_string("\u{2}\u{1}RangeError\u{1}Maximum call stack size exceeded")
+    } else {
+        thaw_arena::owned_string("true")
+    }
+}
+
+#[test]
+fn compiled_listener_on_a_coroutine_thread_gets_that_threads_stack_limit() {
+    use crate::host::{thaw_tjs_register_callback, to_value};
+    thaw_arena::stack_guard::thaw_stack_guard_register(STACK_PROBE_SLOT.as_ptr());
+    let probe = thaw_tjs_register_callback(stack_probe_adapter as *const _, std::ptr::null(), 0);
+    let mut it = crate::Interp::new();
+    let cb = to_value(&mut it, &callback_marker(probe));
+    // Shaped like `Readable.from`: an async function driving an async generator, so the callback
+    // runs on a coroutine thread whose stack lies outside the registered process limit.
+    let f = it
+        .eval_function(
+            "(async function (cb) { async function* gen() { yield 'done'; } \
+             for await (const v of gen()) { try { cb(v); console.log('ok'); } \
+             catch (e) { console.log(e.name + ':' + e.message); } } })",
+        )
+        .expect("compiles");
+    assert!(it.call(&f, &Value::Undefined, &[cb]).is_ok());
+    it.run_event_loop().ok().unwrap();
+    assert_eq!(it.out, vec!["ok".to_string()]);
+}
+
 #[test]
 fn thrown_errors_are_framed_with_name_message_code_and_properties() {
     use crate::host::{HostError, Package};
