@@ -5170,4 +5170,43 @@ fn late_adopted_input_does_not_settle_a_released_output() {
     unsafe { thaw_promise_destroy(reused) };
 }
 
+static PARKED_RESUMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+extern "C" fn count_parked_resume(_frame: *mut u8, _result: *const u8) {
+    PARKED_RESUMES.fetch_add(1, Ordering::SeqCst);
+}
+
+#[test]
+fn coroutine_ready_continuation_parks_and_adopts_on_the_host() {
+    let promise = thaw_promise_new();
+    assert_eq!(
+        unsafe { thaw_promise_subscribe(promise, count_parked_resume, std::ptr::null_mut()) },
+        1
+    );
+    let address = promise as usize;
+    // A coroutine thread settles the promise: its continuation lands in that thread's queue.
+    std::thread::spawn(move || {
+        assert_eq!(
+            thaw_promise_resolve(address as *mut ThawPromise, std::ptr::null()),
+            1
+        );
+        assert_eq!(READY_CONTINUATIONS.with(|ready| ready.borrow().len()), 1);
+        thaw_runtime_park_ready();
+        assert_eq!(READY_CONTINUATIONS.with(|ready| ready.borrow().len()), 0);
+    })
+    .join()
+    .unwrap();
+    // The host's queue is untouched until adopt; then it runs the parked continuation.
+    assert_eq!(READY_CONTINUATIONS.with(|ready| ready.borrow().len()), 0);
+    thaw_runtime_adopt_ready();
+    assert_eq!(READY_CONTINUATIONS.with(|ready| ready.borrow().len()), 1);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(PARKED_RESUMES.load(Ordering::SeqCst), 1);
+    // Nothing parked: adopt and park are no-ops.
+    thaw_runtime_adopt_ready();
+    thaw_runtime_park_ready();
+    assert_eq!(READY_CONTINUATIONS.with(|ready| ready.borrow().len()), 0);
+    unsafe { thaw_promise_destroy(promise) };
+}
+
 include!("tests_timers.rs");
