@@ -176,7 +176,9 @@ impl Interp {
             let line: String = s.drain(..=i).collect();
             let line = &*crate::builtins::lossy_out(&line[..line.len() - 1]);
             if self.rt.stream {
-                println!("{line}");
+                if !crate::worker::capture_line(self, 1, &format!("{line}\n")) {
+                    println!("{line}");
+                }
             } else {
                 self.out.push(line.to_string());
             }
@@ -186,7 +188,9 @@ impl Interp {
 
     pub(crate) fn emit_err(&mut self, line: &str) {
         if self.rt.stream {
-            eprintln!("{line}");
+            if !crate::worker::capture_line(self, 2, &format!("{line}\n")) {
+                eprintln!("{line}");
+            }
         } else {
             self.err.push(line.to_string());
         }
@@ -1049,7 +1053,9 @@ impl Interp {
             return;
         }
         if self.rt.stream {
-            print!("{rest}");
+            if !crate::worker::capture_line(self, 1, &rest) {
+                print!("{rest}");
+            }
         } else {
             self.out.push(rest);
         }
