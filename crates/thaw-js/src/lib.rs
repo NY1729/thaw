@@ -70,6 +70,8 @@ mod web_streams;
 mod web_text_codec;
 #[path = "web/wasm.rs"]
 mod web_wasm;
+#[path = "web/worker_threads.rs"]
+mod web_worker_threads;
 mod zlib;
 
 /// Feature names (as reported by [`scan`] and [`Ctl::Unsupported`]) the evaluator runs.
@@ -749,6 +751,7 @@ impl Interp {
         web_text_codec::install(&mut it);
         web_event_target::install(&mut it);
         web_messaging::install(&mut it);
+        web_worker_threads::install(&mut it);
         web_abort::install(&mut it);
         web_blob::install(&mut it);
         web_fetch::install(&mut it);

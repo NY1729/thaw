@@ -364,6 +364,7 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:async_hooks",
         "node:querystring",
         "node:timers",
+        "node:worker_threads",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
