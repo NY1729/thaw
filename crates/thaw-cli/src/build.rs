@@ -1232,6 +1232,10 @@ fn build_with_native_mode_routed(
             // while they reenter the active QuickJS or thaw-js context.
             linker.args(quickjs_callback_export_args());
         }
+        if thaw_js_drain_export_needed(compiler.uses_thaw_js()) {
+            // The thaw-js loop drains compiled native continuations through RTLD_DEFAULT (host.rs).
+            linker.args(thaw_js_extra_export_args());
+        }
     }
     // `THAW_KEEP_SYMBOLS=1`: leave the symbol table in (profiling a generated program with gdb).
     if std::env::var_os("THAW_KEEP_SYMBOLS").is_none() {
@@ -1562,6 +1566,16 @@ fn quickjs_callback_export_args() -> [&'static str; 4] {
     ]
 }
 
+/// The thaw-js loop's native-continuation drain (`drain_native_continuations`, host.rs) looks this symbol up via
+/// RTLD_DEFAULT; it is not in `quickjs_callback_export_args` and must be exported from a thaw-js routed build.
+fn thaw_js_extra_export_args() -> [&'static str; 1] {
+    ["-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle"]
+}
+
+fn thaw_js_drain_export_needed(uses_thaw_js: bool) -> bool {
+    uses_thaw_js
+}
+
 /// thaw-js native-promise bridging also looks these symbols up via RTLD_DEFAULT,
 /// so a thaw-js routed build needs the same dynamic exports as a QuickJS build.
 fn native_poll_exports_needed(uses_quickjs: bool, uses_thaw_js: bool) -> bool {
@@ -1635,6 +1649,16 @@ fn native_poll_exports_needed_for_quickjs_or_thaw_js() {
     assert!(native_poll_exports_needed(true, false));
     assert!(native_poll_exports_needed(false, true));
     assert!(!native_poll_exports_needed(false, false));
+}
+
+#[test]
+fn thaw_js_builds_export_the_native_continuation_drain() {
+    assert_eq!(
+        thaw_js_extra_export_args(),
+        ["-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle"]
+    );
+    assert!(thaw_js_drain_export_needed(true));
+    assert!(!thaw_js_drain_export_needed(false));
 }
 
 #[test]
