@@ -2115,6 +2115,88 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(marker)
     }
 
+    /// `__thaw_dynamic_object_literal(builder, [kind, key, key kind, value, callback]*)`: a live
+    /// object literal (`lower/objects.rs`). As an argument of a thaw-js call it is built here as
+    /// plain Json: data members as they are, methods as `{"__thaw_tjs_handle__": id}` receiver
+    /// callbacks. Getters, setters, `__proto__` and spreads stay loud (an unsupported stub), and
+    /// computed or symbol keys keep the QuickJS builder. Anywhere else the builder is the meaning.
+    pub(crate) fn compile_dynamic_object_literal_call(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let Some((builder, members)) = args.split_first() else {
+            return Err("live object literal marker expects its builder block".into());
+        };
+        if members.len() % 5 != 0 {
+            return Err("live object literal marker expects five operands per member".into());
+        }
+        if !(self.thaw_js_routed && self.thaw_js_call_arguments) {
+            return self.compile_expr(builder);
+        }
+        let members: Vec<&[HirExpr]> = members.chunks_exact(5).collect();
+        for member in &members {
+            if let HirExpr::Lit(HirLit::Str(kind)) = &member[0] {
+                if matches!(kind.as_str(), "getter" | "setter" | "proto" | "spread") {
+                    self.compile_thaw_js_unsupported_stub(&format!(
+                        "\u{1}thaw-js: object literal {kind} members cannot cross the thaw-js boundary"
+                    ))?;
+                    return self.compile_json_null();
+                }
+            }
+        }
+        let plain_keys = members.iter().all(|member| {
+            matches!(
+                (&member[1], &member[2]),
+                (HirExpr::Lit(HirLit::Str(_)), HirExpr::Lit(HirLit::Bool(false)))
+            )
+        });
+        if !plain_keys {
+            return self.compile_expr(builder);
+        }
+        let object = self
+            .builder
+            .build_call(self.module.get_function("thaw_json_object_new").unwrap(), &[], "thaw_js_object_literal")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_object_new returned no value")?;
+        for member in members {
+            let [kind, key, _, value, callback] = member else {
+                return Err("live object literal member has five operands".into());
+            };
+            let HirExpr::Lit(HirLit::Str(key)) = key else {
+                return Err("live object literal key is not a literal".into());
+            };
+            let key = self.intern_string(key, "thaw_js_object_key").map_err(|error| error.to_string())?;
+            let saved = self.thaw_js_call_arguments;
+            let is_method = matches!(kind, HirExpr::Lit(HirLit::Str(kind)) if kind.as_str() == "method");
+            let field = if is_method {
+                // a method forwards its receiver, so it is a receiver callback (as a handle)
+                self.thaw_js_call_arguments = true;
+                let handle = self.compile_register_native_callback(std::slice::from_ref(callback), false);
+                self.thaw_js_call_arguments = saved;
+                let marker = self.compile_thaw_js_handle_marker(handle?.into_int_value())?;
+                self.compile_json_object_set_native(object, key.as_pointer_value(), marker, &HirType::Json)?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_json_destroy").unwrap(),
+                        &[marker.into()],
+                        "destroy_marshaled_object_method",
+                    )
+                    .map_err(|error| error.to_string())?;
+                continue;
+            } else {
+                self.thaw_js_call_arguments = true;
+                let value = self.compile_expr(value);
+                self.thaw_js_call_arguments = saved;
+                value?
+            };
+            self.compile_json_object_set_native(object, key.as_pointer_value(), field, &HirType::Json)?;
+        }
+        self.mark_fresh_owned_json_result(object)?;
+        Ok(object)
+    }
+
     /// `JsValueAsJson(registerNativeCallback(closure))` inside a thaw-js call: the coercion of a
     /// plain callback into a `Json` parameter. Anything else keeps the QuickJS meaning.
     fn try_compile_thaw_js_callback_marker(
