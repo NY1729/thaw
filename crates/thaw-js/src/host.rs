@@ -1602,6 +1602,94 @@ thread_local! {
     /// The `ArenaRoot` keeps the native allocation alive, so a pointer is never reused for another object.
     static NATIVE_OBJECTS: RefCell<HashMap<(usize, String), NativeWrapper>> =
         RefCell::new(HashMap::new());
+    /// The reverse of `NATIVE_OBJECTS` for compiled code: wrapper address (`Rc::as_ptr`) -> the
+    /// `(pointer, layout)` pairs it was interned with. The wrappers stay alive in `NATIVE_OBJECTS`,
+    /// so an address is never reused for another object.
+    static NATIVE_OWNERS: RefCell<HashMap<usize, Vec<(usize, String)>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The prefix of a class identity name (the chain of class names follows it).
+const CLASS_IDENTITY_MARKER: &[u8] = b"__thaw_class_identity_\x1e";
+
+/// Splits a layout into its fields: each field is two `<bytes>:<hex>` pairs, kept as their source text.
+/// `None` for a malformed layout.
+fn layout_fields(layout: &str) -> Option<Vec<&str>> {
+    let bytes = layout.as_bytes();
+    let mut fields = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let start = cursor;
+        for _ in 0..2 {
+            let colon = cursor + bytes.get(cursor..)?.iter().position(|&b| b == b':')?;
+            let len: usize = layout.get(cursor..colon)?.parse().ok()?;
+            cursor = colon.checked_add(1 + len.checked_mul(2)?)?;
+            if cursor > bytes.len() {
+                return None;
+            }
+        }
+        fields.push(layout.get(start..cursor)?);
+    }
+    Some(fields)
+}
+
+/// The name a field segment carries: the hex bytes of its first pair.
+fn segment_name(segment: &str) -> Option<Vec<u8>> {
+    let colon = segment.find(':')?;
+    let len: usize = segment.get(..colon)?.parse().ok()?;
+    (0..len)
+        .map(|index| {
+            let at = colon + 1 + index * 2;
+            u8::from_str_radix(segment.get(at..at + 2)?, 16).ok()
+        })
+        .collect()
+}
+
+/// A field of the actual layout satisfies a wanted one when they are equal, or when both are class
+/// identities and the actual chain ends with `\u{1f}` + the wanted chain (a subclass satisfies its base).
+fn segment_matches(have: &str, want: &str) -> bool {
+    if have == want {
+        return true;
+    }
+    let (Some(want_name), Some(have_name)) = (segment_name(want), segment_name(have)) else {
+        return false;
+    };
+    let (Some(want_chain), Some(have_chain)) = (
+        want_name.strip_prefix(CLASS_IDENTITY_MARKER),
+        have_name.strip_prefix(CLASS_IDENTITY_MARKER),
+    ) else {
+        return false;
+    };
+    let mut suffix = vec![0x1f];
+    suffix.extend_from_slice(want_chain);
+    have_chain.len() > want_chain.len() && have_chain.ends_with(&suffix)
+}
+
+/// Whether an object interned with layout `actual` satisfies a request for layout `expected`: every
+/// wanted field matches a distinct actual field. The empty `expected` matches any well-formed layout.
+/// Port of QuickJS's `layoutContains`.
+fn layout_contains(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    let (Some(have), Some(want)) = (layout_fields(actual), layout_fields(expected)) else {
+        return false;
+    };
+    let mut used = vec![false; have.len()];
+    for wanted in want {
+        let mut found = false;
+        for (index, field) in have.iter().enumerate() {
+            if !used[index] && segment_matches(field, wanted) {
+                used[index] = true;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
 }
 
 /// The retained canonical wrapper already made for this native object and layout, else 0.
@@ -1644,21 +1732,56 @@ pub extern "C" fn thaw_tjs_intern_native_object(
             .ok_or("invalid JavaScript handle")?;
         Ok(NATIVE_OBJECTS.with(|m| {
             let mut m = m.borrow_mut();
-            let entry = m
-                .entry((pointer as usize, layout))
+            let key = (pointer as usize, layout);
+            if !m.contains_key(&key) {
+                if let Value::Object(obj) = &candidate {
+                    NATIVE_OWNERS.with(|o| {
+                        o.borrow_mut()
+                            .entry(Rc::as_ptr(obj) as usize)
+                            .or_default()
+                            .push((key.0, key.1.clone()));
+                    });
+                }
                 // SAFETY: the compiler passes a live arena allocation; the root pins it.
-                .or_insert_with(|| {
-                    (
-                        owner,
-                        candidate,
-                        thaw_arena::ArenaRoot::new(pointer as usize),
-                    )
-                });
+                let root = thaw_arena::ArenaRoot::new(pointer as usize);
+                m.insert(key.clone(), (owner, candidate, root));
+            }
+            let entry = &m[&key];
             store_handle(entry.0, entry.1.clone())
         }))
     })());
     thaw_tjs_release_handle(candidate_handle as i64);
     result
+}
+
+/// The native pointer of the owner an interned wrapper (`handle`) was made for with a layout that
+/// satisfies `expected_layout`, else 0. A handle that is not such a wrapper is not an error: 0 says no.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_native_object_pointer(
+    handle: u64,
+    expected_layout: *const c_char,
+) -> HandleResult {
+    handle_result((|| {
+        let expected = cstr(expected_layout).ok_or("native object pointer requires a layout")?;
+        let value = HANDLES.with(|h| {
+            h.borrow()
+                .get((handle as usize).wrapping_sub(1))
+                .map(|(_, v)| v.clone())
+        });
+        let Some(Value::Object(obj)) = value else {
+            return Ok(0);
+        };
+        Ok(NATIVE_OWNERS.with(|o| {
+            o.borrow()
+                .get(&(Rc::as_ptr(&obj) as usize))
+                .and_then(|owners| {
+                    owners
+                        .iter()
+                        .find(|(_, layout)| layout_contains(layout, &expected))
+                })
+                .map_or(0, |(pointer, _)| *pointer as i64)
+        }))
+    })())
 }
 
 /// As [`thaw_tjs_call_selected_method_graph_result`], the result kept as a new handle.
@@ -3698,4 +3821,122 @@ pub extern "C" fn thaw_tjs_call_typed_result(
         })
         .map_err(|e| e.to_string())
     })())
+}
+
+#[cfg(test)]
+mod native_owner_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    /// One layout field: the field name and a second pair, each `<bytes>:<hex>`.
+    fn field(name: &str) -> String {
+        let seg = |text: &[u8]| {
+            format!(
+                "{}:{}",
+                text.len(),
+                text.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            )
+        };
+        format!("{}{}", seg(name.as_bytes()), seg(b"T"))
+    }
+
+    fn class_field(chain: &str) -> String {
+        field(&format!("__thaw_class_identity_\u{1e}{chain}"))
+    }
+
+    fn new_handle() -> u64 {
+        let args = CString::new(r#"["return 1"]"#).unwrap();
+        let result = thaw_tjs_new_function(args.as_ptr());
+        assert!(result.error.is_null());
+        result.value
+    }
+
+    /// Interns a fresh candidate object for `(pointer, layout)` and returns the handle.
+    fn intern(pointer: usize, layout: &str) -> u64 {
+        let layout = CString::new(layout).unwrap();
+        let result =
+            thaw_tjs_intern_native_object(pointer as *const c_void, layout.as_ptr(), new_handle());
+        assert!(result.error.is_null());
+        result.value
+    }
+
+    fn pointer_of(handle: u64, layout: &str) -> u64 {
+        let layout = CString::new(layout).unwrap();
+        let result = thaw_tjs_native_object_pointer(handle, layout.as_ptr());
+        assert!(result.error.is_null());
+        result.value
+    }
+
+    #[test]
+    fn interned_wrapper_reports_its_owner_pointer() {
+        let layout = field("a");
+        let wrapper = intern(0x1000, &layout);
+        assert_eq!(pointer_of(wrapper, &layout), 0x1000);
+        // interning the same (pointer, layout) again hands back the canonical wrapper
+        let again = intern(0x1000, &layout);
+        assert_eq!(pointer_of(again, &layout), 0x1000);
+    }
+
+    #[test]
+    fn layout_mismatch_and_plain_handles_report_no_owner() {
+        let wrapper = intern(0x2000, &field("a"));
+        assert_eq!(pointer_of(wrapper, &field("b")), 0);
+        assert_eq!(pointer_of(new_handle(), &field("a")), 0);
+        assert_eq!(pointer_of(0, &field("a")), 0);
+    }
+
+    #[test]
+    fn empty_expected_layout_matches_any_owner() {
+        let wrapper = intern(0x3000, &field("a"));
+        assert_eq!(pointer_of(wrapper, ""), 0x3000);
+    }
+
+    #[test]
+    fn subclass_wrapper_satisfies_base_layout_only() {
+        let derived = intern(0x4000, &class_field("Derived\u{1f}Base"));
+        assert_eq!(pointer_of(derived, &class_field("Base")), 0x4000);
+        let base = intern(0x5000, &class_field("Base"));
+        assert_eq!(pointer_of(base, &class_field("Derived\u{1f}Base")), 0);
+    }
+
+    #[test]
+    fn null_layout_is_an_error() {
+        let wrapper = intern(0x6000, &field("a"));
+        let result = thaw_tjs_native_object_pointer(wrapper, std::ptr::null());
+        assert!(!result.error.is_null());
+        // SAFETY: the error string was just returned by the call above and is freed once.
+        unsafe { thaw_arena::destroy_string(result.error) };
+    }
+
+    #[test]
+    fn layout_contains_matches_quickjs_rules() {
+        let a = field("a");
+        let b = field("b");
+        assert!(layout_contains(&a, &a));
+        assert!(layout_contains("", ""));
+        assert!(layout_contains(&a, ""));
+        assert!(!layout_contains("", &a));
+        // malformed actual layout (the field runs past the end)
+        assert!(!layout_contains("3:zz", ""));
+        // a wanted subset of the actual fields
+        assert!(layout_contains(&format!("{a}{b}"), &a));
+        assert!(!layout_contains(&a, &format!("{a}{b}")));
+        assert!(!layout_contains(
+            &format!("{a}{b}"),
+            &format!("{a}{}", field("c"))
+        ));
+        // each wanted field needs its own actual field
+        assert!(!layout_contains(&a, &format!("{a}{a}")));
+        assert!(layout_contains(&format!("{a}{a}"), &format!("{a}{a}")));
+        // a class identity only satisfies a class identity
+        assert!(!layout_contains(&field("Base"), &class_field("Base")));
+        assert!(layout_contains(
+            &class_field("Derived\u{1f}Base"),
+            &class_field("Base")
+        ));
+        assert!(!layout_contains(
+            &class_field("Base"),
+            &class_field("Derived\u{1f}Base")
+        ));
+    }
 }
