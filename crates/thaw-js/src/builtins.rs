@@ -1268,8 +1268,7 @@ impl Interp {
                 ),
                 None => ("".into(), String::new()),
             };
-            let r = it.eval_function(&format!("function anonymous({params}\n) {{\n{body}\n}}"));
-            dynamic_code(r)
+            it.eval_function(&format!("function anonymous({params}\n) {{\n{body}\n}}"))
         });
         g.declare(
             "globalThis",
@@ -1284,7 +1283,7 @@ impl Interp {
         g.declare("Function", function, true);
         // Only the indirect (global-scope) form: the scan rejects a direct `eval(...)` call.
         let eval = self.native(|it, _, args| match arg(args, 0) {
-            Value::Str(src) => dynamic_code(it.run_sloppy(&src)),
+            Value::Str(src) => it.run_sloppy(&src),
             other => Ok(other),
         });
         g.declare("eval", eval, true);
@@ -2392,16 +2391,5 @@ impl Interp {
             }
             Ok(acc)
         });
-    }
-}
-
-/// Code compiled at run time that the evaluator cannot parse (`with`, sloppy-only syntax) is an
-/// unsupported construct, not a JavaScript `SyntaxError`.
-fn dynamic_code(r: R<Value>) -> R<Value> {
-    match r {
-        Err(Ctl::Throw(Value::Str(m))) if &*m == "failed to parse JavaScript source" => {
-            Err(Ctl::Unsupported("dynamic-code".into()))
-        }
-        other => other,
     }
 }
