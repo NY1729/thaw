@@ -827,11 +827,13 @@ impl Interp {
             }
             self.rt.now = clock_ms();
             self.run_timers()?;
+            // the loop's own platform poll: a worker's exit (or child/zlib result) settles promises too
+            self.poll_platform_events()?;
             if !self.rt.immediates.is_empty() {
                 self.run_immediates()?;
                 continue;
             }
-            // a timer just settled the promise: do not sleep toward the next unrelated timer
+            // a timer or event just settled the promise: do not sleep toward the next unrelated timer
             if self.promise_state(v).is_some() {
                 continue;
             }
@@ -846,6 +848,10 @@ impl Interp {
                 if wait > 0.0 {
                     std::thread::sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
+            } else if crate::child::active() || crate::zlib::active() || crate::worker::active(self)
+            {
+                // nothing timed to wait for, but a platform event will arrive: poll again shortly
+                std::thread::sleep(Duration::from_millis(2));
             }
         }
     }
