@@ -2921,8 +2921,9 @@ fn tj35_bytes_cross_the_typed_abi_as_tagged_buffers_both_ways() {
     assert_eq!(typed_call("bt::make", "[]").unwrap(), r#"{"type":"Buffer","data":[1,2,3]}"#);
     assert_eq!(typed_call("bt::make8", "[]").unwrap(), r#"{"type":"Buffer","data":[9]}"#);
     // the tagged node is rebuilt as a real Buffer
-    assert_eq!(typed_call("bt::shape", &format!("[{}]", tj35_bytes_arg(&[1, 2, 3]))).unwrap(), "3,true,3");
-    assert_eq!(typed_call("bt::shape", &format!("[{}]", tj35_bytes_arg(&[]))).unwrap(), "0,true,");
+    // (a string result is JSON text, so it is quoted)
+    assert_eq!(typed_call("bt::shape", &format!("[{}]", tj35_bytes_arg(&[1, 2, 3]))).unwrap(), "\"3,true,3\"");
+    assert_eq!(typed_call("bt::shape", &format!("[{}]", tj35_bytes_arg(&[]))).unwrap(), "\"0,true,\"");
     // every byte value survives both directions
     let all: Vec<u8> = (0..=255).collect();
     let echoed = format!(
@@ -2936,5 +2937,5 @@ fn tj35_bytes_cross_the_typed_abi_as_tagged_buffers_both_ways() {
         r#"{"type":"Buffer","data":[7,7,7]}"#
     );
     // a user object with the Buffer shape is not revived: only the tagged node is
-    assert_eq!(typed_call("bt::shape", r#"[{"type":"Buffer","data":[1]}]"#).unwrap(), ",false,");
+    assert_eq!(typed_call("bt::shape", r#"[{"type":"Buffer","data":[1]}]"#).unwrap(), "\",false,\"");
 }
