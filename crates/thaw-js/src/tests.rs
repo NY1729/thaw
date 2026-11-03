@@ -3071,3 +3071,43 @@ fn tj35_bytes_cross_the_typed_abi_as_tagged_buffers_both_ways() {
         "\",false,\""
     );
 }
+
+#[test]
+fn defer_thenable_passes_non_thenables_through() {
+    assert_eq!(
+        one("var o = {}; console.log(__thaw_defer_thenable(5), __thaw_defer_thenable(null) === null, __thaw_defer_thenable(o) === o, typeof globalThis.__thaw_defer_thenable)"),
+        "5 true true function"
+    );
+}
+
+#[test]
+fn defer_thenable_adopts_a_thenable_and_reads_then_once() {
+    let (out, _) = main_run(
+        "var reads = 0; var t = { get then() { reads++; return function (r) { r(7); }; } };
+         (async () => { console.log(await __thaw_defer_thenable(t), reads); })();",
+    );
+    assert_eq!(out.join("|"), "7 1");
+}
+
+#[test]
+fn defer_thenable_turns_a_throwing_then_getter_into_a_rejection() {
+    let (out, _) = main_run(
+        "var bad = { get then() { throw new Error('boom'); } };
+         var p = __thaw_defer_thenable(bad);
+         console.log(p instanceof Promise);
+         (async () => { try { await p; console.log('no'); } catch (e) { console.log('caught', e.message); } })();",
+    );
+    assert_eq!(out.join("|"), "true|caught boom");
+}
+
+#[test]
+fn array_values_iterates_a_proxy_through_its_traps() {
+    assert_eq!(
+        one("var t = []; var p = new Proxy(t, { get(_, k, r) { if (k === 'length') return 2; if (k === '0') return 'a'; if (k === '1') return 'b'; return Reflect.get(t, k, r); } }); console.log([...p].join())"),
+        "a,b"
+    );
+    assert_eq!(
+        one("var h = new Proxy([], { get(_, k) { if (k === 'length') return 2; if (k === '1') return 'x'; return Reflect.get(Array.prototype, k); } }); var s = [...h]; console.log(s.length, 0 in s, s[1])"),
+        "2 true x"
+    );
+}
