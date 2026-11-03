@@ -2456,6 +2456,47 @@ fn als_resource_bind_and_disable() {
     );
 }
 
+static HOOK_INITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts `init` hook calls from the async_hooks dispatch; the result is ignored.
+unsafe extern "C" fn init_hook_adapter(
+    _context: *const std::ffi::c_void,
+    _args: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    HOOK_INITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    thaw_arena::owned_string("null")
+}
+
+#[test]
+fn async_hooks_create_hook_runs_a_callback_marker_from_a_literal_object() {
+    use crate::host::{thaw_tjs_register_callback, Native, Package};
+    let init = thaw_tjs_register_callback(init_hook_adapter as *const _, std::ptr::null(), 4);
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"h/index.js": function(module, exports, require) {
+  exports.hook = function (o) {
+    var A = __thaw_async_hooks_exports;
+    var h = A.createHook(o).enable();
+    new A.AsyncResource('X');
+    var kind = typeof h.disable;
+    h.disable();
+    return kind;
+  };
+},
+};
+var __thaw_bundle_require_maps = { "h/index.js": {}, };
+var __thaw_bundle_entry_key = "h/index.js";
+})(globalThis.require);"#;
+    let mut p = Package::load(bundle).expect("loads");
+    // the object literal's `init` arrives as a callback marker, the same wire shape the compiled side sends
+    let options = Native::Object(vec![("init".into(), callback_marker(init))]);
+    assert_eq!(
+        p.call("hook", &[options]).ok(),
+        Some(Native::Str("function".into()))
+    );
+    assert!(HOOK_INITS.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+}
+
 #[test]
 fn vm_run_ids_are_unique_across_realms() {
     let mut a = Interp::new();
