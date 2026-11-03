@@ -1189,6 +1189,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_js_intern_native_object",
                     "thaw_tjs_intern_native_object",
                 ),
+                (
+                    "thaw_js_native_object_pointer",
+                    "thaw_tjs_native_object_pointer",
+                ),
                 ("thaw_js_get_global", "thaw_tjs_get_global"),
                 ("thaw_js_new_function", "thaw_tjs_new_function"),
                 (
