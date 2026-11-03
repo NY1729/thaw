@@ -775,6 +775,21 @@ var __thaw_bundle_entry_key = "o/index.js";
 }
 
 #[test]
+fn compiled_callback_invoked_from_an_async_function_runs_on_its_coroutine_thread() {
+    use crate::host::{thaw_tjs_register_callback, to_value};
+    let sum = thaw_tjs_register_callback(sum_adapter as *const _, std::ptr::null(), 3);
+    let mut it = crate::Interp::new();
+    let cb = to_value(&mut it, &callback_marker(sum));
+    // An async body runs on its own coroutine thread up to the first await, so the callback is
+    // looked up and dispatched there, not on the thread that registered it.
+    let f = it
+        .eval_function("(async function (cb) { console.log('sum=' + cb(20, 1, 2)); })")
+        .expect("compiles");
+    assert!(it.call(&f, &Value::Undefined, &[cb]).is_ok());
+    assert_eq!(it.out, vec!["sum=23".to_string()]);
+}
+
+#[test]
 fn thrown_errors_are_framed_with_name_message_code_and_properties() {
     use crate::host::{HostError, Package};
     let bundle = MINI.replace(
