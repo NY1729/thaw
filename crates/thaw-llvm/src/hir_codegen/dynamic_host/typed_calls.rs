@@ -2133,8 +2133,9 @@ impl<'ctx> HirCompiler<'ctx> {
         if !(self.thaw_js_routed && self.thaw_js_call_arguments) {
             return self.compile_expr(builder);
         }
-        let members: Vec<&[HirExpr]> = members.chunks_exact(5).collect();
-        for member in &members {
+        // the length was checked to be a multiple of five, so no remainder is left
+        let (members, _) = members.as_chunks::<5>();
+        for member in members {
             if let HirExpr::Lit(HirLit::Str(kind)) = &member[0] {
                 if matches!(kind.as_str(), "getter" | "setter" | "proto" | "spread") {
                     self.compile_thaw_js_unsupported_stub(&format!(
@@ -2161,9 +2162,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_object_new returned no value")?;
         for member in members {
-            let [kind, key, _, value, callback] = member else {
-                return Err("live object literal member has five operands".into());
-            };
+            let [kind, key, _, value, callback] = member;
             let HirExpr::Lit(HirLit::Str(key)) = key else {
                 return Err("live object literal key is not a literal".into());
             };
