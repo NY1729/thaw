@@ -1235,6 +1235,7 @@ fn build_with_native_mode_routed(
         if thaw_js_drain_export_needed(compiler.uses_thaw_js()) {
             // The thaw-js loop drains compiled native continuations through RTLD_DEFAULT (host.rs).
             linker.args(thaw_js_extra_export_args());
+            linker.args(thaw_js_ready_export_args());
         }
     }
     // `THAW_KEEP_SYMBOLS=1`: leave the symbol table in (profiling a generated program with gdb).
@@ -1572,6 +1573,14 @@ fn thaw_js_extra_export_args() -> [&'static str; 1] {
     ["-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle"]
 }
 
+/// thaw-js looks up the ready-continuation hand-off (`park_native_ready` / `adopt_native_ready`, eventloop.rs) via RTLD_DEFAULT.
+fn thaw_js_ready_export_args() -> [&'static str; 2] {
+    [
+        "-Wl,--export-dynamic-symbol=thaw_runtime_park_ready",
+        "-Wl,--export-dynamic-symbol=thaw_runtime_adopt_ready",
+    ]
+}
+
 fn thaw_js_drain_export_needed(uses_thaw_js: bool) -> bool {
     uses_thaw_js
 }
@@ -1659,6 +1668,17 @@ fn thaw_js_builds_export_the_native_continuation_drain() {
     );
     assert!(thaw_js_drain_export_needed(true));
     assert!(!thaw_js_drain_export_needed(false));
+}
+
+#[test]
+fn thaw_js_builds_export_the_ready_continuation_hand_off() {
+    assert_eq!(
+        thaw_js_ready_export_args(),
+        [
+            "-Wl,--export-dynamic-symbol=thaw_runtime_park_ready",
+            "-Wl,--export-dynamic-symbol=thaw_runtime_adopt_ready",
+        ]
+    );
 }
 
 #[test]
