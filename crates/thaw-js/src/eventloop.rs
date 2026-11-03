@@ -860,7 +860,7 @@ impl Interp {
             || self.rt.immediates.iter().any(|i| i.refd)
             || crate::child::active()
             || crate::zlib::active()
-            || crate::worker::active()
+            || crate::worker::active(self)
     }
 
     /// Call the shim-installed `globalThis.__thaw_poll_platform_events` (async zlib jobs, child process output and exits),
@@ -872,7 +872,7 @@ impl Interp {
             self.call(&f, &g, &[])?;
             self.run_jobs()?;
         }
-        let events = crate::worker::poll();
+        let events = crate::worker::poll(self);
         if events != "[]" {
             let f = self.get(&g, "__thaw_worker_dispatch")?;
             if matches!(f, Value::Object(_)) {
@@ -908,7 +908,7 @@ impl Interp {
                 // a worker wakes every 2ms so a terminate() is seen even while a timer is pending
                 if crate::child::active()
                     || crate::zlib::active()
-                    || crate::worker::active()
+                    || crate::worker::active(self)
                     || self.interrupt.is_some()
                 {
                     wait = wait.min(2.0);
@@ -918,7 +918,7 @@ impl Interp {
                 }
             } else if crate::child::active()
                 || crate::zlib::active()
-                || crate::worker::active()
+                || crate::worker::active(self)
                 || self.interrupt.is_some()
             {
                 std::thread::sleep(Duration::from_millis(2));

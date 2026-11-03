@@ -644,6 +644,8 @@ pub struct Interp {
     pub(crate) dl_tick: u32,
     /// Set by a worker's parent thread (worker.rs `terminate`): checked by `check_interrupt`.
     pub(crate) interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Worker threads this Interp spawned, and its own parent channel on a worker thread (worker.rs).
+    pub(crate) worker: worker::WorkerState,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -722,6 +724,7 @@ impl Interp {
             dl_hit: false,
             dl_tick: 0,
             interrupt: None,
+            worker: Default::default(),
         };
         it.install_builtins();
         it.install_collections();
