@@ -165,6 +165,11 @@ impl ArenaRoot {
         }
         Self(pointer, std::marker::PhantomData)
     }
+
+    /// The pinned address, or 0 when this root pins nothing (tracing off at creation).
+    pub fn pointer(&self) -> usize {
+        self.0
+    }
 }
 impl Clone for ArenaRoot {
     fn clone(&self) -> Self {

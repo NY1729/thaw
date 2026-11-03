@@ -5,7 +5,7 @@
 //! are driven from the event loop (an `await` inside the body suspends the driver, not the caller).
 //! ponytail: one OS thread per started generator that is not run to completion (parked until exit).
 
-use crate::eventloop::{Co, Resume, SendBox, Yield};
+use crate::eventloop::{adopt_native_ready, park_native_ready, Co, Resume, SendBox, Yield};
 use crate::*;
 use std::collections::VecDeque;
 
@@ -180,6 +180,7 @@ impl Interp {
         };
         g.status.set(GStatus::Running);
         let y = co.from_co.recv();
+        adopt_native_ready();
         self.restore(snap);
         self.rt.cur_co.pop();
         match y.map(SendBox::into_inner) {
@@ -314,6 +315,7 @@ impl Interp {
             return unsupported("yield");
         };
         let snap = self.snapshot();
+        park_native_ready();
         let _ = ctx.to_host.send(SendBox(Yield::Yielded(v)));
         let msg = ctx.from_host.recv();
         self.restore(snap);
