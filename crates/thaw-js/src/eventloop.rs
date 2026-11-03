@@ -103,6 +103,64 @@ impl<T> SendBox<T> {
     }
 }
 
+type ReadyHook = extern "C" fn();
+
+/// The native runtime's ready-continuation hand-off (`thaw_runtime_park_ready` / `thaw_runtime_adopt_ready`),
+/// resolved through RTLD_DEFAULT like `drain_native_continuations`. Missing symbols make both no-ops.
+static NATIVE_READY_HOOKS: std::sync::OnceLock<Option<(ReadyHook, ReadyHook)>> =
+    std::sync::OnceLock::new();
+
+/// Test override for the hand-off hooks (process-wide: coroutine threads must see it too).
+#[cfg(test)]
+pub(crate) static TEST_READY_HOOKS: std::sync::Mutex<Option<(ReadyHook, ReadyHook)>> =
+    std::sync::Mutex::new(None);
+
+fn ready_hooks() -> Option<(ReadyHook, ReadyHook)> {
+    #[cfg(test)]
+    if let Some(hooks) = *TEST_READY_HOOKS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+    {
+        return Some(hooks);
+    }
+    *NATIVE_READY_HOOKS.get_or_init(resolve_native_ready_hooks)
+}
+
+#[cfg(unix)]
+fn resolve_native_ready_hooks() -> Option<(ReadyHook, ReadyHook)> {
+    // SAFETY: the symbols are the compiled runtime's `extern "C" fn()`s, looked up like the other natives.
+    unsafe {
+        let park = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_park_ready".as_ptr());
+        let adopt = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_adopt_ready".as_ptr());
+        if park.is_null() || adopt.is_null() {
+            return None;
+        }
+        Some((
+            std::mem::transmute::<*mut std::ffi::c_void, ReadyHook>(park),
+            std::mem::transmute::<*mut std::ffi::c_void, ReadyHook>(adopt),
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+fn resolve_native_ready_hooks() -> Option<(ReadyHook, ReadyHook)> {
+    None
+}
+
+/// Coroutine side, just before every hand-back: the continuations it settled move to the parked queue.
+pub(crate) fn park_native_ready() {
+    if let Some((park, _)) = ready_hooks() {
+        park();
+    }
+}
+
+/// Host side, right after a coroutine hands back: the parked continuations join this thread's queue.
+pub(crate) fn adopt_native_ready() {
+    if let Some((_, adopt)) = ready_hooks() {
+        adopt();
+    }
+}
+
 pub(crate) struct CoCtx {
     pub(crate) to_host: Sender<SendBox<Yield>>,
     pub(crate) from_host: Receiver<SendBox<Resume>>,
@@ -572,6 +630,7 @@ impl Interp {
                     it.call_closure_sync(&f, &def, &scope, &this, &args)
                     // every Rc captured above is dropped here, before the hand-back
                 };
+                park_native_ready();
                 let _ = done_tx.send(SendBox(Yield::Done(r)));
             });
         if spawned.is_err() {
@@ -593,6 +652,7 @@ impl Interp {
     /// Block until the coroutine yields or finishes, then act on what it did.
     pub(crate) fn co_wait(&mut self, co: &Rc<Co>, snap: CoSnapshot) -> R<()> {
         let y = co.from_co.recv();
+        adopt_native_ready();
         self.restore(snap);
         self.rt.cur_co.pop();
         match y.map(SendBox::into_inner) {
@@ -639,6 +699,7 @@ impl Interp {
             return Err(Ctl::Unsupported("await".into()));
         };
         let snap = self.snapshot();
+        park_native_ready();
         let _ = ctx.to_host.send(SendBox(Yield::Await(v)));
         // the host runs from here until it resumes us
         let msg = ctx.from_host.recv();

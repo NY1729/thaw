@@ -2841,3 +2841,52 @@ fn busy_worker_does_not_starve_native_continuation() {
         Ok(true)
     );
 }
+
+thread_local! {
+    static FAKE_READY: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+static FAKE_PARKED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+extern "C" fn fake_park_ready() {
+    FAKE_READY.with(|ready| {
+        FAKE_PARKED
+            .lock()
+            .unwrap()
+            .extend(ready.borrow_mut().drain(..))
+    });
+}
+
+extern "C" fn fake_adopt_ready() {
+    let parked: Vec<u32> = FAKE_PARKED.lock().unwrap().drain(..).collect();
+    FAKE_READY.with(|ready| ready.borrow_mut().extend(parked));
+}
+
+#[test]
+fn ready_continuation_settled_on_a_coroutine_thread_reaches_the_host() {
+    *crate::eventloop::TEST_READY_HOOKS.lock().unwrap() = Some((fake_park_ready, fake_adopt_ready));
+    let mut it = crate::Interp::new();
+    let emit = it.native(|_, _, _| {
+        FAKE_READY.with(|ready| ready.borrow_mut().push(1));
+        Ok(Value::Undefined)
+    });
+    // Shaped like the existing coroutine test: the callback is an argument, and the async body
+    // (a coroutine thread) drives an async generator with for-await.
+    let f = it
+        .eval_function(
+            "(async function (emit) { async function* gen() { yield 'done'; } \
+             for await (const v of gen()) { emit(v); } })",
+        )
+        .expect("compiles");
+    let started = it.call(&f, &Value::Undefined, &[emit]);
+    if let Err(Ctl::Throw(v)) = &started {
+        panic!("call threw: {}", it.to_str(v));
+    }
+    let looped = it.run_event_loop();
+    if let Err(Ctl::Throw(v)) = &looped {
+        panic!("loop threw: {}", it.to_str(v));
+    }
+    looped.expect("loop runs");
+    // `emit` ran on the async body's coroutine thread; the hand-off must have carried its entry back here.
+    assert_eq!(FAKE_READY.with(|ready| ready.borrow().clone()), vec![1]);
+    *crate::eventloop::TEST_READY_HOOKS.lock().unwrap() = None;
+}
