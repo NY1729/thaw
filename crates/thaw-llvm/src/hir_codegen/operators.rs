@@ -273,6 +273,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_error_get_prop"
                         | "__thaw_json_from_consumed_dynamic"
                         | "__thaw_json_host_from_dynamic"
+                        | "__thaw_dynamic_object_literal"
                         | "__thaw_json_host_from_borrowed_dynamic" => return Some(HirType::Json),
                         // `Object.keys`/`Object.getOwnPropertyNames`/
                         // `Reflect.ownKeys` on a `Json`/`Dictionary`/

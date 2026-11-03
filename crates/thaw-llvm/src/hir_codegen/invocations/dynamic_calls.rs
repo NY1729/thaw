@@ -157,6 +157,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "@@thaw_retain_borrowed_dynamic_handle" =>
                 self.compile_retain_borrowed_dynamic_handle(args),
             "__thaw_json_host_from_dynamic" => self.compile_host_json_from_dynamic(args),
+            "__thaw_dynamic_object_literal" => self.compile_dynamic_object_literal_call(args),
             "__thaw_json_from_consumed_dynamic" => self.compile_consumed_json_from_dynamic(args),
             "__thaw_json_host_from_borrowed_dynamic" =>
                 self.compile_host_json_from_borrowed_dynamic(args),
