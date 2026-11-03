@@ -210,7 +210,7 @@ pub(crate) const EXTRAS: &str = r#"
   }
   def(AP, 'entries', function () { var r = []; for (var i = 0; i < this.length; i++) r.push([i, this[i]]); return makeIter(r, 'Array Iterator'); });
   def(AP, 'keys', function () { var r = []; for (var i = 0; i < this.length; i++) r.push(i); return makeIter(r, 'Array Iterator'); });
-  def(AP, 'values', function () { return makeIter(this.slice(), 'Array Iterator'); });
+  def(AP, 'values', function () { var r = []; for (var i = 0; i < this.length; i++) r.push(this[i]); return makeIter(r, 'Array Iterator'); });
   def(AP, Symbol.iterator, AP.values);
   def(SP, Symbol.iterator, function () { return makeIter(Array.from(String(this)), 'String Iterator'); });
   Object.defineProperty(Object.prototype, '__proto__', {
