@@ -14,6 +14,13 @@
     Object.assign(process.env, opts.env);
   }
 
+  // stdio (W5): console output goes to the parent only when it asked for it (capture is decided in Rust, then
+  // stdin bytes arrive as 'stdin' events). Without `stdin: true` the stream is ended from the start (no data).
+  __thaw_worker_capture(opts.stdout === true, opts.stderr === true);
+  const stdin = new __thaw_worker_stream.Readable();
+  if (opts.stdin !== true) stdin.__thawEnd();
+  process.stdin = stdin;
+
   const parentPort = new MessagePort();
   // Messages to the parent are wire strings; transferring ports between threads is not supported yet.
   parentPort.postMessage = function postMessage(value, transferOrOptions = []) {
@@ -23,12 +30,14 @@
     __thaw_worker_send(__thaw_worker_encode(value));
   };
 
-  // Keep-alive: the worker runs while parentPort has a referenced message listener (close() or unref() releases it).
+  // Keep-alive: the worker runs while parentPort has a referenced message listener (close() or unref() releases it)
+  // or process.stdin is flowing and not ended.
   const sync = () => {
     const listening = parentPort.__thawRefed && !parentPort.__thawClosed
       && ((parentPort.__thawNodeListeners.get('message') || []).length > 0 || parentPort.onmessage !== null);
-    __thaw_worker_set_alive(listening);
+    __thaw_worker_set_alive(listening || (stdin.flowing && !stdin.endEmitted));
   };
+  stdin.onChange = sync;
   for (const name of ['on', 'once', 'off', 'addListener', 'removeListener', 'removeAllListeners', 'ref', 'unref', 'close', 'start']) {
     const original = parentPort[name];
     parentPort[name] = function (...args) {
@@ -47,9 +56,14 @@
   // Parent messages arrive as {type, value} records from the Rust poll: queue them on the port like messaging.js does.
   globalThis.__thaw_worker_dispatch = function (json) {
     for (const event of JSON.parse(json)) {
-      if (event.type !== 'message') continue;
-      parentPort.__thawQueue.push({ data: decode(event.value), ports: [] });
-      parentPort.__thawSchedule();
+      if (event.type === 'message') {
+        parentPort.__thawQueue.push({ data: decode(event.value), ports: [] });
+        parentPort.__thawSchedule();
+      } else if (event.type === 'stdin') {
+        if (event.value !== '') stdin.__thawPush(__thaw_worker_stream.hexToBytes(event.value));
+        if (event.end) stdin.__thawEnd();
+        stdin.__thawFlush();
+      }
     }
     // queued after the delivery microtasks, so listeners added or removed by a handler are seen
     queueMicrotask(sync);
