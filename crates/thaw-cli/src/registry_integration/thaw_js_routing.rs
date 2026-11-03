@@ -403,18 +403,23 @@ fn thaw_js_bundle_form<'a>(
 
 /// The thaw-js form of `node:worker_threads`: the main-thread module the thaw-js prelude exports
 /// (`web/worker_threads.js`). Its QuickJS form needs `node:stream`, which thaw-js does not load.
-const THAW_JS_WORKER_THREADS_FORM: &str = "module.exports = globalThis.__thaw_worker_threads_exports;\n";
+const THAW_JS_WORKER_THREADS_FORM: &str =
+    "module.exports = globalThis.__thaw_worker_threads_exports;\n";
 
-/// `node:worker_threads` names thaw-js does not serve yet (only the main-thread subset is routed). A program
-/// that names one keeps the module on QuickJS.
+/// `node:worker_threads` names thaw-js does not serve yet (`Worker` runs on thaw-js; its options and the rest of the
+/// module do not). A program that names one keeps the module on QuickJS. `stdin` also matches `process.stdin`.
 const THAW_JS_WORKER_THREADS_UNSUPPORTED: &[&str] = &[
-    "Worker",
     "postMessageToThread",
     "SHARE_ENV",
     "moveMessagePortToContext",
     "markAsUntransferable",
     "markAsUncloneable",
     "isMarkedAsUntransferable",
+    "resourceLimits",
+    "SharedArrayBuffer",
+    "Atomics",
+    "stdin",
+    "transferList",
 ];
 
 /// See `THAW_JS_WORKER_THREADS_UNSUPPORTED`: worker threads stay on QuickJS until thaw-js can run them.
@@ -423,7 +428,7 @@ fn thaw_js_worker_threads_blocker(pkg_name: &str, user_source: &str) -> Option<&
         && THAW_JS_WORKER_THREADS_UNSUPPORTED
             .iter()
             .any(|name| thaw_js_mentions(user_source, name)))
-    .then_some("worker threads (Worker, postMessageToThread, SHARE_ENV, ...) are not supported on thaw-js yet")
+    .then_some("worker threads options (stdin, resourceLimits, SharedArrayBuffer, ...) are not supported on thaw-js yet")
 }
 
 /// `node:path/posix` / `node:path/win32` as a registry bundle: the `node:path` bundle plus one factory

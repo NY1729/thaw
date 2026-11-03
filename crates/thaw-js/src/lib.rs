@@ -644,6 +644,11 @@ pub struct Interp {
     pub(crate) dl_tick: u32,
     /// Set by a worker's parent thread (worker.rs `terminate`): checked by `check_interrupt`.
     pub(crate) interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Worker threads this Interp spawned, and its own parent channel on a worker thread (worker.rs).
+    pub(crate) worker: worker::WorkerState,
+    /// Run once per loop turn after the timers (host.rs sets it for the compiled terminal loop, which also
+    /// drains native continuations). Returns true when it made progress, so the loop re-checks without sleeping.
+    pub(crate) turn_hook: Option<fn(&mut Interp) -> bool>,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -722,6 +727,8 @@ impl Interp {
             dl_hit: false,
             dl_tick: 0,
             interrupt: None,
+            worker: Default::default(),
+            turn_hook: None,
         };
         it.install_builtins();
         it.install_collections();

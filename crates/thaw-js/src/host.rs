@@ -2918,6 +2918,25 @@ fn poll_native_promise(it: &mut Interp, p: Obj, promise: usize, finish: usize) -
     it.defer_tick(check)
 }
 
+/// One drain of the compiled runtime's native continuations (`thaw_runtime_run_until_idle`), as a loop turn hook.
+/// True when a continuation ran. Missing symbol (no compiled runtime, e.g. tests): no progress.
+#[cfg(unix)]
+fn drain_native_continuations(_: &mut Interp) -> bool {
+    // SAFETY: the symbol is the compiled runtime's `extern "C" fn() -> usize`, looked up like the other natives.
+    unsafe {
+        let sym = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_run_until_idle".as_ptr());
+        if sym.is_null() {
+            return false;
+        }
+        std::mem::transmute::<*mut c_void, extern "C" fn() -> usize>(sym)() != 0
+    }
+}
+
+#[cfg(not(unix))]
+fn drain_native_continuations(_: &mut Interp) -> bool {
+    false
+}
+
 #[cfg(unix)]
 fn native_promise_state(promise: usize) -> u8 {
     // SAFETY: both symbols are the compiled runtime's, looked up like the QuickJS host does.
@@ -3451,9 +3470,15 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
             if !p.interp.work_pending() {
                 return Ok(0);
             }
-            p.interp
+            // native continuations (compiled async code) run inside the loop, so a worker that keeps the loop
+            // alive does not starve a Promise a timer just resolved; re-entry into this package is `with_package`'s
+            p.interp.turn_hook = Some(drain_native_continuations);
+            let r = p
+                .interp
                 .run_event_loop()
-                .map_err(|c| classify(&mut p.interp, c))
+                .map_err(|c| classify(&mut p.interp, c));
+            p.interp.turn_hook = None;
+            r
         });
         // `process.exit(n)` / `process.exitCode = n` inside a package (e.g. commander after a sub-command) is the program's status.
         match ran {

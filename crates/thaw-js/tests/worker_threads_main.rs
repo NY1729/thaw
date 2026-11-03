@@ -1,5 +1,5 @@
 //! `node:worker_threads` main-thread subset on thaw-js (src/web/worker_threads.js): message channels,
-//! environment data and receiveMessageOnPort. `Worker` is not implemented yet.
+//! environment data and receiveMessageOnPort. `Worker` itself is tested in worker_threads_worker.rs.
 use thaw_js::Interp;
 
 fn run_loop(src: &str) -> String {
@@ -41,9 +41,11 @@ fn receive_message_on_port_drains_the_queue_synchronously() {
 }
 
 #[test]
-fn main_thread_identity_is_exposed_and_worker_is_unsupported() {
+fn main_thread_identity_is_exposed_and_worker_runs() {
     let src = "const wt = __thaw_worker_threads_exports;
       console.log(wt.isMainThread, wt.threadId, wt.parentPort, wt.workerData);
-      try { new wt.Worker('1', { eval: true }); } catch (e) { console.log(e.code); }";
-    assert_eq!(run_loop(src), "true 0 null null|ERR_THAW_UNSUPPORTED");
+      const worker = new wt.Worker('1', { eval: true });
+      console.log(typeof worker.terminate, worker.threadId);
+      worker.on('exit', (code) => console.log('exit ' + code));";
+    assert_eq!(run_loop(src), "true 0 null null|function 1|exit 0");
 }
