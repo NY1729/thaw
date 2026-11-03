@@ -1475,6 +1475,34 @@ fn sloppy_with_statement_via_new_function() {
 }
 
 #[test]
+fn dynamic_code_parse_errors_are_syntax_errors() {
+    assert_eq!(
+        one("try { new Function('}') } catch (e) { console.log(e instanceof SyntaxError, e.name, !!e.message) }"),
+        "true SyntaxError true"
+    );
+    assert_eq!(
+        one(
+            "try { Function('a b', 'return') } catch (e) { console.log(e instanceof SyntaxError) }"
+        ),
+        "true"
+    );
+    assert_eq!(
+        one("const ev = eval; try { ev('var = ;') } catch (e) { console.log(e instanceof SyntaxError, !!e.message) }"),
+        "true true"
+    );
+    // valid dynamic code still runs
+    assert_eq!(
+        one("console.log(new Function('a', 'b', 'return a + b')(2, 3))"),
+        "5"
+    );
+    // a construct the evaluator does not run stays Unsupported, not a SyntaxError
+    assert_eq!(
+        one("new Function('return import(\"x\")')()"),
+        "unsupported: import()"
+    );
+}
+
+#[test]
 fn string_literal_with_text_is_not_code() {
     assert_eq!(one("console.log('with (x) {')"), "with (x) {");
 }
