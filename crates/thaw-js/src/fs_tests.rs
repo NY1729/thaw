@@ -316,3 +316,83 @@ fn fs_fd_ops_sync_truncate_tell_chmod_utimes_statfs() {
     }
     assert_eq!(fd_call("fd_sync", "999", "")["code"], "EBADF");
 }
+
+// Hex of a plain name, to compare against `nameHex` / `relativeHex`.
+fn hex_of(s: &str) -> String {
+    s.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn fd_table_is_shared_across_threads() {
+    let d = scratch("fd-threads");
+    let path = d.join("t.txt");
+    let w = call("fd_open", &path, "w,438");
+    assert_eq!(w["ok"], true, "open w: {w}");
+    let wfd = w["fd"].as_u64().unwrap().to_string();
+    // Write, stat and close on a different thread than the one that opened the fd.
+    let (wr, st, cl) = std::thread::spawn(move || {
+        (
+            fd_call("fd_write_all", &wfd, "68656c6c6f"),
+            fd_call("fd_stat", &wfd, ""),
+            fd_call("fd_close", &wfd, ""),
+        )
+    })
+    .join()
+    .unwrap();
+    assert_eq!(wr["ok"], true, "write_all off-thread: {wr}");
+    assert_eq!(st["length"], 5, "stat off-thread: {st}");
+    assert_eq!(cl["ok"], true, "close off-thread: {cl}");
+    // Reopen on another thread, read back on this one.
+    let p = path.clone();
+    let r = std::thread::spawn(move || call("fd_open", &p, "r,438"))
+        .join()
+        .unwrap();
+    assert_eq!(r["ok"], true, "open r off-thread: {r}");
+    let rfd = r["fd"].as_u64().unwrap().to_string();
+    let data = fd_call("fd_read_all", &rfd, "");
+    assert_eq!(
+        data["data"], "68656c6c6f",
+        "read_all on main thread: {data}"
+    );
+    assert_eq!(fd_call("fd_close", &rfd, "")["ok"], true);
+    assert_eq!(fd_call("fd_tell", &rfd, "")["code"], "EBADF");
+}
+
+#[test]
+fn fs_readdir_entries_sorted_by_name_bytes() {
+    let d = scratch("readdir-sort");
+    // Created out of order; expected order is byte order: "10" < "9" < "B" < "a" < "z" < "é".
+    for name in ["é", "a", "B", "9", "10"] {
+        std::fs::write(d.join(name), b"x").unwrap();
+    }
+    let names = |v: &serde_json::Value| -> Vec<String> {
+        v["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["nameHex"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let expected: Vec<String> = ["10", "9", "B", "a", "é"]
+        .iter()
+        .map(|s| hex_of(s))
+        .collect();
+    assert_eq!(names(&call("readdir", &d, "")), expected);
+
+    // Recursive: each directory is sorted, and a sub-directory's children follow it in place.
+    std::fs::create_dir(d.join("z")).unwrap();
+    std::fs::write(d.join("z").join("b"), b"x").unwrap();
+    std::fs::write(d.join("z").join("a"), b"x").unwrap();
+    let rec = call_recursive("readdir", &d, "");
+    let rel: Vec<String> = rec["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["relativeHex"].as_str().unwrap().to_string())
+        .collect();
+    let expected_rel: Vec<String> = ["10", "9", "B", "a", "z", "z/a", "z/b", "é"]
+        .iter()
+        .map(|s| hex_of(s))
+        .collect();
+    assert_eq!(rel, expected_rel);
+}
