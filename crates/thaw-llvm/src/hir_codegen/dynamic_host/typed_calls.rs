@@ -91,9 +91,24 @@ fn thaw_js_callback_abi(ty: &HirType) -> Option<(Vec<HirType>, HirType, Option<u
     }
 }
 
-/// A parameter type that can cross into thaw-js: plain data or a plain callback.
+/// Like `thaw_js_plain_type`, but a `JsValue` may sit at any leaf (zod's `z.object({ name: z.string() })`
+/// has a live schema in each field): it crosses as a handle marker inside the plain container.
+fn thaw_js_param_leaf_type(ty: &HirType) -> bool {
+    match ty {
+        HirType::JsValue => true,
+        HirType::Array(element) | HirType::Dictionary(element) => thaw_js_param_leaf_type(element),
+        HirType::Union(members) => members.iter().all(thaw_js_param_leaf_type),
+        HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
+            thaw_js_param_leaf_type(inner)
+        }
+        HirType::Object(fields) => fields.iter().all(|(_, ty)| thaw_js_param_leaf_type(ty)),
+        _ => thaw_js_plain_type(ty),
+    }
+}
+
+/// A parameter type that can cross into thaw-js: plain data (JsValue leaves allowed) or a plain callback.
 pub(crate) fn thaw_js_param_type(ty: &HirType) -> bool {
-    thaw_js_plain_type(ty) || thaw_js_callback_type(ty) || *ty == HirType::JsValue
+    thaw_js_param_leaf_type(ty) || thaw_js_callback_type(ty)
 }
 
 /// The object literal under a `JsValue` thaw-js argument: `JsonAsNative(literal, JsValue)` is the
