@@ -618,6 +618,185 @@ fn typed_abi_marks_null_prototype_objects_on_the_wire() {
     assert_eq!(typed_call("nullp::plain", "[]"), Ok(r#"{"a":1}"#.into()));
 }
 
+#[test]
+fn error_wire_framed_strings_revive_as_error_objects() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "fr/index.js": function(module, exports, require) {
+  exports.t = function (e) { return (e instanceof Error) + "|" + e.name + "|" + e.message + "|" + e.code; };
+  exports.kind = function (e) { return typeof e; };
+  exports.rethrow = function (e) { if (e instanceof Error) throw e; return "kept"; };
+}, };
+var __thaw_bundle_require_maps = { "fr/index.js": {}, };
+var __thaw_bundle_entry_key = "fr/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("fr").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    // legacy `\u{1}Name\u{1}message` framing
+    assert_eq!(
+        typed_call("fr::t", r#"["\u0001Error\u0001boom"]"#),
+        Ok(r#""true|Error|boom|undefined""#.into())
+    );
+    // `\u{3}code` suffix becomes `.code`
+    assert_eq!(
+        typed_call("fr::t", r#"["\u0001Error\u0001boom\u0003E42"]"#),
+        Ok(r#""true|Error|boom|E42""#.into())
+    );
+    // tagged `E1` frame (`\u{1e}E1:<units>:-:<message>`)
+    assert_eq!(
+        typed_call("fr::t", r#"["\u0001Error\u0001\u001eE1:4:-:boom"]"#),
+        Ok(r#""true|Error|boom|undefined""#.into())
+    );
+    // a framed error thrown by a handler is the same Error the compiled side sent (`emit('error', e)` rethrow)
+    assert!(typed_call("fr::rethrow", r#"["\u0001Error\u0001boom"]"#)
+        .unwrap_err()
+        .contains("boom"));
+    // plain strings stay strings: no leading U+0001, or a lone U+0001 with no closing frame delimiter
+    assert_eq!(
+        typed_call("fr::kind", r#"["a\u0001Error\u0001boom"]"#),
+        Ok(r#""string""#.into())
+    );
+    assert_eq!(
+        typed_call("fr::kind", r#"["\u0001x"]"#),
+        Ok(r#""string""#.into())
+    );
+}
+
+thread_local! {
+    /// The argument JSON of the last `capture_adapter` call.
+    static CAPTURED_ARGS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Records its argument JSON, so a test can see what compiled code is handed.
+unsafe extern "C" fn capture_adapter(
+    _context: *const std::ffi::c_void,
+    args: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let text = unsafe { std::ffi::CStr::from_ptr(args) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    CAPTURED_ARGS.with(|c| *c.borrow_mut() = text);
+    thaw_arena::owned_string("null")
+}
+
+#[test]
+fn error_frame_handed_back_to_compiled_callback_keeps_frame() {
+    use crate::host::{thaw_tjs_register_callback, Native, Package};
+    let capture = thaw_tjs_register_callback(capture_adapter as *const _, std::ptr::null(), 1);
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "rt/index.js": function(module, exports, require) {
+  exports.pass = function (cb, e) { cb(e); return 1; };
+}, };
+var __thaw_bundle_require_maps = { "rt/index.js": {}, };
+var __thaw_bundle_entry_key = "rt/index.js";
+})(globalThis.require);"#;
+    let mut p = Package::load(bundle).expect("loads");
+    // a compiled Error (framed string) emitted through JS and handed back to a compiled callback:
+    // the callback gets the same frame, which the compiled side revives as an Error again
+    let frame = "\u{1}RangeError\u{1}boom";
+    assert_eq!(
+        p.call(
+            "pass",
+            &[callback_marker(capture), Native::Str(frame.into())]
+        )
+        .ok(),
+        Some(Native::Number(1.0))
+    );
+    let got = CAPTURED_ARGS.with(|c| c.borrow().clone());
+    assert_eq!(
+        Native::from_json(&got).unwrap(),
+        Native::Array(vec![Native::Str(frame.into())])
+    );
+    // a plain object with a `message` is not an Error: it crosses as an object
+    let plain = Native::Object(vec![("message".into(), Native::Str("boom".into()))]);
+    p.call("pass", &[callback_marker(capture), plain.clone()])
+        .ok();
+    let got = CAPTURED_ARGS.with(|c| c.borrow().clone());
+    assert_eq!(Native::from_json(&got).unwrap(), Native::Array(vec![plain]));
+}
+
+thread_local! {
+    /// `(json, error)` of each `record_settle` call, in order.
+    static SETTLED: RefCell<Vec<(Option<String>, Option<String>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Records what a watched promise settled with.
+extern "C" fn record_settle(
+    _context: *mut std::ffi::c_void,
+    json: *const std::ffi::c_char,
+    error: *const std::ffi::c_char,
+) {
+    let text = |p: *const std::ffi::c_char| {
+        (!p.is_null()).then(|| {
+            unsafe { std::ffi::CStr::from_ptr(p) }
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+    SETTLED.with(|s| s.borrow_mut().push((text(json), text(error))));
+}
+
+#[test]
+fn pending_promise_settles_through_its_watch_after_a_later_call() {
+    use crate::host::{thaw_tjs_register, thaw_tjs_watch_promise};
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "pend/index.js": function(module, exports, require) {
+  exports.later = function () { return new Promise(function (r) { globalThis.fire = r; }); };
+  exports.fire = function (v) { globalThis.fire(v); };
+  exports.later2 = function () { return new Promise(function (_, j) { globalThis.fail = j; }); };
+  exports.boom = function (v) { globalThis.fail(new Error(v)); };
+  exports.now = function () { return Promise.resolve(1); };
+}, };
+var __thaw_bundle_require_maps = { "pend/index.js": {}, };
+var __thaw_bundle_entry_key = "pend/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("pend").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    // a still-pending promise comes back as its handle, not as "never settled"
+    let marker = typed_call("\u{4}pend::later", "[]").expect("pending marker");
+    let id: i64 = marker
+        .strip_prefix(r#"{"__thaw_tjs_pending__":"#)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .expect("marker shape")
+        .parse()
+        .expect("handle id");
+    SETTLED.with(|s| s.borrow_mut().clear());
+    thaw_tjs_watch_promise(id, std::ptr::null_mut(), record_settle);
+    // nothing settles until a later thaw-js call resolves the promise; the call drains the watch
+    assert!(SETTLED.with(|s| s.borrow().is_empty()));
+    typed_call("pend::fire", "[42]").expect("fire");
+    assert_eq!(
+        SETTLED.with(|s| s.borrow().clone()),
+        vec![(Some("42".to_string()), None)]
+    );
+    // a rejection settles with the framed Error
+    let marker = typed_call("\u{4}pend::later2", "[]").expect("pending marker");
+    let id: i64 = marker
+        .strip_prefix(r#"{"__thaw_tjs_pending__":"#)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .expect("marker shape")
+        .parse()
+        .expect("handle id");
+    SETTLED.with(|s| s.borrow_mut().clear());
+    thaw_tjs_watch_promise(id, std::ptr::null_mut(), record_settle);
+    typed_call("pend::boom", r#"["boom"]"#).expect("boom");
+    let settled = SETTLED.with(|s| s.borrow().clone());
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].0, None);
+    assert!(
+        settled[0]
+            .1
+            .as_deref()
+            .is_some_and(|e| e.starts_with("\u{1}Error\u{1}boom")),
+        "{settled:?}"
+    );
+    // an already-resolved promise is awaited as before: the marker never appears
+    assert_eq!(typed_call("\u{4}pend::now", "[]"), Ok("1".into()));
+}
+
 // ----- compiled callbacks (`thaw_tjs_register_callback`) -----
 
 /// A stand-in for a generated `(context, args_json) -> result_json` adapter: sums the numbers.
