@@ -1760,6 +1760,12 @@ pub extern "C" fn thaw_tjs_lookup_native_object(
                         .and_then(|actual| m.get(&(pointer, actual.clone())))
                 })
             });
+            if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+                let outcome = if entry.is_some() { "hit" } else { "miss" };
+                eprintln!(
+                    "[tjs] lookup_native_object ptr={pointer:?} layout={layout:?} -> {outcome}"
+                );
+            }
             entry.map_or(0, |(owner, value, _)| store_handle(*owner, value.clone()))
         }))
     })())
@@ -1786,6 +1792,9 @@ pub extern "C" fn thaw_tjs_intern_native_object(
             .ok_or("invalid JavaScript handle")?;
         Ok(NATIVE_OBJECTS.with(|m| {
             let mut m = m.borrow_mut();
+            if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+                eprintln!("[tjs] intern_native_object ptr={pointer:?} layout={layout:?}");
+            }
             let key = (pointer as usize, layout);
             if !m.contains_key(&key) {
                 NATIVE_LAYOUTS.with(|l| {
@@ -1825,18 +1834,32 @@ pub extern "C" fn thaw_tjs_native_object_pointer(
                 .get((handle as usize).wrapping_sub(1))
                 .map(|(_, v)| v.clone())
         });
+        let trace = std::env::var_os("THAW_JS_TRACE_WIRE").is_some();
+        if trace {
+            eprintln!("[tjs] native_object_pointer handle={handle} expected_layout={expected:?}");
+        }
         let Some(Value::Object(obj)) = value else {
             return Ok(0);
         };
         Ok(NATIVE_OWNERS.with(|o| {
-            o.borrow()
-                .get(&(Rc::as_ptr(&obj) as usize))
+            let o = o.borrow();
+            let owners = o.get(&(Rc::as_ptr(&obj) as usize));
+            if trace {
+                for (pointer, layout) in owners.into_iter().flatten() {
+                    eprintln!("[tjs]   owner ptr={pointer:?} layout={layout:?}");
+                }
+            }
+            let result = owners
                 .and_then(|owners| {
                     owners
                         .iter()
                         .find(|(_, layout)| layout_contains(layout, &expected))
                 })
-                .map_or(0, |(pointer, _)| *pointer as i64)
+                .map_or(0, |(pointer, _)| *pointer as i64);
+            if trace {
+                eprintln!("[tjs]   result={result:?}");
+            }
+            result
         }))
     })())
 }
