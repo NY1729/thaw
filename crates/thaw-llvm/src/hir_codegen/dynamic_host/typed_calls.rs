@@ -1776,7 +1776,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // (the thaw-js side only ever sees a copy), as the QuickJS lane does.
         let mut returned_bytes_argument = None;
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
-            if thaw_js_callback_type(ty) && self.callback_expr_reads_receiver(arg) {
+            if thaw_js_callback_type(ty) && (self.callback_expr_reads_receiver(arg) || self.closure_returns_promise(arg)) {
                 self.compile_thaw_js_receiver_callback_argument(array, arg)
                     .map_err(|error| format!("thaw-js callback argument {}: {error}", index + 1))?;
                 continue;
@@ -2209,7 +2209,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         for (index, (arg, ty)) in rest.iter().zip(signature.params.iter().skip(usize::from(is_method))).enumerate() {
-            if thaw_js_callback_type(ty) && self.callback_expr_reads_receiver(arg) {
+            if thaw_js_callback_type(ty) && (self.callback_expr_reads_receiver(arg) || self.closure_returns_promise(arg)) {
                 self.compile_thaw_js_receiver_callback_argument(array, arg)
                     .map_err(|error| format!("thaw-js class callback argument {}: {error}", index + 1))?;
                 continue;
@@ -2362,6 +2362,16 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
         self.builder.position_at_end(done);
         Ok(())
+    }
+
+    /// A closure whose own result is a Promise: registered through the graph route (handle marker) so
+    /// the compiled side's native Promise reaches JS as a Promise (`finish`); the JSON marker route has none.
+    fn closure_returns_promise(&self, arg: &HirExpr) -> bool {
+        matches!(
+            self.expr_hir_type(arg),
+            Some(HirType::Function(_, ret) | HirType::CallableFunction(_, _, _, ret))
+                if matches!(*ret, HirType::Promise(_))
+        )
     }
 
     /// A callback that reads the call-time receiver: registered through the graph path (its `this`
