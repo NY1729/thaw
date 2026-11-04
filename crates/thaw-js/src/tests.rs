@@ -1616,6 +1616,40 @@ fn a_map_and_set_cross_the_typed_abi_as_wire_nodes() {
     );
 }
 
+const BIG_AND_ZERO: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"bz/index.js": function(module, exports, require) {
+  exports.show = function (x) { return typeof x + ":" + String(x); };
+  exports.neg = function (x) { return Object.is(x, -0); };
+},
+};
+var __thaw_bundle_require_maps = { "bz/index.js": {}, };
+var __thaw_bundle_entry_key = "bz/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn a_bigint_and_negative_zero_cross_the_typed_abi_as_wire_nodes() {
+    use std::ffi::CString;
+    let bundle = CString::new(BIG_AND_ZERO).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"bz".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    assert_eq!(
+        typed_call(
+            "bz::show",
+            r#"[{"__thaw_tjs_bigint__":"12345678901234567890"}]"#
+        )
+        .unwrap(),
+        "\"bigint:12345678901234567890\""
+    );
+    assert_eq!(
+        typed_call("bz::neg", r#"[{"__thaw_tjs_num__":"-0"}]"#).unwrap(),
+        "true"
+    );
+    assert_eq!(typed_call("bz::neg", "[0]").unwrap(), "false");
+}
+
 const CONTEXTS: &str = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
 "cx/index.js": function(module, exports, require) {
