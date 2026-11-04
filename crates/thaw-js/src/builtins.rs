@@ -1354,6 +1354,17 @@ impl Interp {
             let Value::Object(o) = this else {
                 return it.throw_error("TypeError", "push on non-array");
             };
+            if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+                // generic push through the proxy's traps: length, indexed sets, then length
+                let len = it.get(this, "length")?;
+                let mut n = it.num(&len).max(0.0) as usize;
+                for v in args {
+                    it.set(this, &n.to_string(), v.clone())?;
+                    n += 1;
+                }
+                it.set(this, "length", Value::Number(n as f64))?;
+                return Ok(Value::Number(n as f64));
+            }
             let mut kind = o.kind.borrow_mut();
             let Kind::Array(items) = &mut *kind else {
                 drop(kind);
@@ -1365,8 +1376,21 @@ impl Interp {
             items.extend(args.iter().cloned());
             Ok(Value::Number(items.len() as f64))
         });
-        self.set_native(&ap, "pop", |_, this, _| {
+        self.set_native(&ap, "pop", |it, this, _| {
             if let Value::Object(o) = this {
+                if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+                    let len = it.get(this, "length")?;
+                    let n = it.num(&len).max(0.0) as usize;
+                    if n == 0 {
+                        it.set(this, "length", Value::Number(0.0))?;
+                        return Ok(Value::Undefined);
+                    }
+                    let key = (n - 1).to_string();
+                    let v = it.get(this, &key)?;
+                    it.proxy_delete(o, &key)?;
+                    it.set(this, "length", Value::Number((n - 1) as f64))?;
+                    return Ok(v);
+                }
                 if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
                     return Ok(items.pop().unwrap_or(Value::Undefined));
                 }
