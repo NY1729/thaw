@@ -71,3 +71,5 @@ include!("tests/storage_scale.rs");
 include!("tests/fx21_constructor_return.rs");
 
 include!("tests/object_literal_marker.rs");
+
+include!("tests/thaw_js_live_args.rs");
