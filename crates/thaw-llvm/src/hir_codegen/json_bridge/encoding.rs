@@ -1644,7 +1644,9 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         handle: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        if !self.compiling_quickjs_dynamic_arguments {
+        // thaw-js has no reviver either, but its host cannot read a Host lease (it serializes the object as
+        // plain data), so it takes the handle marker through the unchecked path below.
+        if !self.compiling_quickjs_dynamic_arguments && self.js_engine() != JsEngine::ThawJs {
             // No QuickJS reviver downstream: embed the live value itself (a Json Host lease).
             self.js_mark_handles_used();
             self.tracks_owned_json_roots = true;
