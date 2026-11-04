@@ -3629,3 +3629,26 @@ fn process_emit_warning_without_listener_writes_stderr_line() {
         .collect();
     assert_eq!(lines.len(), 1, "{:?}", it.err);
 }
+
+#[test]
+fn process_chdir_changes_cwd_and_throws_enoent_on_missing_dir() {
+    let original = std::env::current_dir().unwrap();
+    let dir = std::env::temp_dir().join(format!("thaw-chdir-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap().display().to_string();
+    let src = format!(
+        "process.chdir({dir:?}); console.log(process.cwd());
+         try {{ process.chdir('/nope/thaw-missing'); }} catch (e) {{ console.log(e.code, e.message); }}"
+    );
+    let out = run(&src);
+    std::env::set_current_dir(&original).unwrap();
+    assert_eq!(
+        out,
+        [
+            dir.clone(),
+            format!(
+                "ENOENT ENOENT: no such file or directory, chdir '{dir}' -> '/nope/thaw-missing'"
+            ),
+        ]
+    );
+}
