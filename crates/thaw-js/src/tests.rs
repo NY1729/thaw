@@ -3748,3 +3748,35 @@ fn loop_stats_are_zero_before_the_loop_and_split_idle_after() {
     );
     assert_eq!(out.join("|"), "true|true true");
 }
+
+#[test]
+fn push_on_proxy_forwards_to_target_array() {
+    assert_eq!(
+        one("var t = [1]; var p = new Proxy(t, { get(tg, k) { return tg[k]; }, set(tg, k, v) { tg[k] = v; return true; } }); var n = p.push(2, 3); console.log(n, t.length, t.join())"),
+        "3 3 1,2,3"
+    );
+}
+
+#[test]
+fn push_on_plain_array_is_unchanged() {
+    assert_eq!(
+        one("var a = [1]; var n = a.push(2, 3); console.log(n, a.join())"),
+        "3 1,2,3"
+    );
+}
+
+#[test]
+fn push_on_non_array_non_proxy_still_throws() {
+    assert_eq!(
+        one("try { Array.prototype.push.call({}, 1); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError push on non-array"
+    );
+}
+
+#[test]
+fn pop_on_proxy_forwards_to_target_array() {
+    assert_eq!(
+        one("var t = [1, 2]; var p = new Proxy(t, { get(tg, k) { return tg[k]; }, set(tg, k, v) { tg[k] = v; return true; }, deleteProperty(tg, k) { delete tg[k]; return true; } }); var v = p.pop(); console.log(v, t.length, t.join())"),
+        "2 1 1"
+    );
+}
