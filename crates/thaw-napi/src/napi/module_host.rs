@@ -88,7 +88,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&s
     // A failed initialization can leave async cleanup hooks and a Host-owned
     // Env. Register the Worker retirement seam before any fallible load step.
     #[cfg(feature = "js-engine")]
-    thaw_quickjs::register_napi_shutdown_bridge(
+    crate::engine::register_napi_shutdown_bridge(
         thaw_napi_begin_shutdown,
         thaw_napi_poll_shutdown,
         thaw_napi_take_shutdown_error,
@@ -228,7 +228,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&s
 // environment first needs graph owner state.
 #[cfg(feature = "js-engine")]
 fn ensure_quickjs_bridge() {
-    thaw_quickjs::register_napi_bridge(
+    crate::engine::register_napi_bridge(
         thaw_napi_export_names,
         thaw_napi_call_typed_bridge,
         thaw_napi_handle_bridge,
@@ -379,7 +379,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 .map_err(|_| "invalid JavaScript Symbol owner")?;
             let symbol_id = name.parse::<u64>()
                 .map_err(|_| "invalid JavaScript Symbol ID")?;
-            let weak_state = thaw_quickjs::thaw_js_napi_symbol_weak_live(owner_id, symbol_id);
+            let weak_state = crate::engine::thaw_js_napi_symbol_weak_live(owner_id, symbol_id);
             if (operation == "symbol_collected" && weak_state != 0)
                 || (operation == "symbol_pin" && weak_state != 1) {
                 return Err("JavaScript Symbol weak state is not confirmed".into());
@@ -697,7 +697,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 });
                 for (index, handle) in [getter, setter].into_iter().enumerate() {
                     if handle == 0 { continue; }
-                    if thaw_quickjs::thaw_js_retain_handle(handle) == 0 {
+                    if crate::engine::thaw_js_retain_handle(handle) == 0 {
                         return Err("released JavaScript accessor callback".into());
                     }
                     let owner = Arc::get_mut(&mut roots).unwrap();
@@ -719,7 +719,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                             Some(id)
                         }).collect::<Vec<_>>()
                 };
-                for id in temporary { thaw_quickjs::thaw_js_release_handle(id); }
+                for id in temporary { crate::engine::thaw_js_release_handle(id); }
                 let mut scope_sweep = ScopeMutationSweep::new(env);
                 let status = qjs_install_native_accessor(env, object, key,
                     roots,
@@ -1632,7 +1632,7 @@ fn value_from_json_with_undefined(
                     return Ok(*value);
                 }
                 let bridge = Rc::new(ThawCallbackBridge {
-                    callback: ThawCallback::QuickJs(thaw_quickjs::thaw_js_call_reference),
+                    callback: ThawCallback::QuickJs(crate::engine::thaw_js_call_reference),
                     context: reference as usize,
                     _context_root: None,
                 });
@@ -2280,7 +2280,7 @@ impl Drop for GraphLeases {
     fn drop(&mut self) {
         #[cfg(feature = "js-engine")]
         for handle in self.host.drain(..) {
-            thaw_quickjs::thaw_js_release_handle(handle);
+            crate::engine::thaw_js_release_handle(handle);
         }
         for reference in self.napi.drain(..) {
             release_napi_graph_reference(reference);
@@ -2475,7 +2475,7 @@ impl NapiGraphInput {
         impl Drop for EnvRetains {
             fn drop(&mut self) {
                 for handle in self.0.drain(..) {
-                    thaw_quickjs::thaw_js_release_handle(handle);
+                    crate::engine::thaw_js_release_handle(handle);
                 }
             }
         }
@@ -2483,7 +2483,7 @@ impl NapiGraphInput {
         let mut owned = EnvRetains(Vec::new());
         #[cfg(feature = "js-engine")]
         for handle in &new_handles {
-            if thaw_quickjs::thaw_js_retain_handle(*handle) == 0 {
+            if crate::engine::thaw_js_retain_handle(*handle) == 0 {
                 return Err("released JavaScript graph handle".into());
             }
             owned.0.push(*handle);
@@ -2499,7 +2499,7 @@ impl NapiGraphInput {
         // Function or Symbol provenance before an Env borrow begins.
         #[cfg(feature = "js-engine")]
         for (handle, native, kind) in &native_pairs {
-            let checked = thaw_quickjs::thaw_js_graph_native_pair_matches_result(
+            let checked = crate::engine::thaw_js_graph_native_pair_matches_result(
                 *handle, *native, *kind);
             if !checked.error.is_null() {
                 let error = thaw_arena::NativeStr::from_ptr(checked.error)
@@ -2543,7 +2543,7 @@ impl NapiGraphInput {
             let owner_id = env.as_ref().ok_or("invalid native addon environment")?.graph_owner_id;
             for handle in &new_handles {
                 if !qjs_is_symbol(*handle)? { continue; }
-                let id = thaw_quickjs::thaw_js_napi_graph_symbol_register(owner_id, *handle);
+                let id = crate::engine::thaw_js_napi_graph_symbol_register(owner_id, *handle);
                 if id == 0 { return Err("cannot register weak JavaScript graph Symbol".into()); }
                 let value = env.as_ref().and_then(|owner| owner.symbols.get(&id).copied())
                     .ok_or("registered JavaScript graph Symbol has no native owner")?;
@@ -2814,7 +2814,7 @@ unsafe fn qjs_handle(value: NapiValue) -> Option<u64> {
 }
 
 #[cfg(feature = "js-engine")]
-unsafe fn qjs_take_result_text(result: thaw_quickjs::ThawResult) -> Result<String, String> {
+unsafe fn qjs_take_result_text(result: crate::engine::ThawResult) -> Result<String, String> {
     let (pointer, error) = if result.error.is_null() {
         (result.value, false)
     } else {
@@ -2852,7 +2852,7 @@ unsafe fn qjs_adopt_symbol(env: NapiEnv, handle: u64) -> Result<Option<NapiValue
     if !qjs_is_symbol(handle)? { return Ok(None); }
     let owner_id = env.as_ref().ok_or("invalid native addon environment")?.graph_owner_id;
     if owner_id == 0 { return Ok(None); } // Standalone test Env has no owner state.
-    let id = thaw_quickjs::thaw_js_napi_graph_symbol_register(owner_id, handle);
+    let id = crate::engine::thaw_js_napi_graph_symbol_register(owner_id, handle);
     if id == 0 { return Err("cannot register weak JavaScript Symbol".into()); }
     let (symbol, generation) = {
         let owner = env.as_ref().ok_or("invalid native addon environment")?;
@@ -2884,7 +2884,7 @@ unsafe fn qjs_adopt_symbol(env: NapiEnv, handle: u64) -> Result<Option<NapiValue
 // the same JS identity. Release only after leaving the mutable Env borrow.
 #[cfg(feature = "js-engine")]
 unsafe fn qjs_adopt_handle_result(
-    env: NapiEnv, result: thaw_quickjs::ThawHandleResult, out: *mut NapiValue,
+    env: NapiEnv, result: crate::engine::ThawHandleResult, out: *mut NapiValue,
 ) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
     if !result.error.is_null() {
@@ -2895,13 +2895,13 @@ unsafe fn qjs_adopt_handle_result(
     }
     if result.value == 0 { return record_status(env, NAPI_INVALID_ARG); }
     if out.is_null() {
-        thaw_quickjs::thaw_js_release_handle(result.value);
+        crate::engine::thaw_js_release_handle(result.value);
         return NAPI_OK;
     }
     let symbol = match qjs_adopt_symbol(env, result.value) {
         Ok(symbol) => symbol,
         Err(error) => {
-            thaw_quickjs::thaw_js_release_handle(result.value);
+            crate::engine::thaw_js_release_handle(result.value);
             return qjs_error_status(env, error);
         }
     };
@@ -2910,7 +2910,7 @@ unsafe fn qjs_adopt_handle_result(
             owner.active_handle_scopes.last().copied());
         let generation = env.as_ref().and_then(|owner|
             owner.value_generations.get(&(symbol as usize)).copied());
-        thaw_quickjs::thaw_js_release_handle(result.value);
+        crate::engine::thaw_js_release_handle(result.value);
         let Some(generation) = generation else { return record_status(env, NAPI_INVALID_ARG); };
         if !prepared_scoped_values_still_rooted(env, recipient_scope,
             &[(symbol, generation)]) {
@@ -2921,13 +2921,13 @@ unsafe fn qjs_adopt_handle_result(
     let object_like = match qjs_query(result.value, 9) {
         Ok(value) => value == "1",
         Err(error) => {
-            thaw_quickjs::thaw_js_release_handle(result.value);
+            crate::engine::thaw_js_release_handle(result.value);
             return qjs_error_status(env, error);
         }
     };
     let (value, duplicate) = {
         let Ok(owner) = env_mut(env) else {
-            thaw_quickjs::thaw_js_release_handle(result.value);
+            crate::engine::thaw_js_release_handle(result.value);
             return NAPI_INVALID_ARG;
         };
         if let Some(value) = owner.quickjs_live_values.get(&result.value).copied() {
@@ -2946,13 +2946,13 @@ unsafe fn qjs_adopt_handle_result(
         let root = match prepare_scoped_value(env, value) {
             Ok(root) => root,
             Err(status) => {
-                thaw_quickjs::thaw_js_release_handle(result.value);
+                crate::engine::thaw_js_release_handle(result.value);
                 return record_status(env, status);
             }
         };
         let generation = env.as_ref().and_then(|owner|
             owner.value_generations.get(&(value as usize)).copied());
-        thaw_quickjs::thaw_js_release_handle(result.value);
+        crate::engine::thaw_js_release_handle(result.value);
         if !generation.is_some_and(|generation|
             prepared_scoped_values_still_rooted(env, recipient_scope,
                 &[(value, generation)])) {
@@ -2972,7 +2972,7 @@ unsafe fn qjs_adopt_thrown_handle(
     let symbol = match qjs_adopt_symbol(env, handle) {
         Ok(symbol) => symbol,
         Err(error) => {
-            thaw_quickjs::thaw_js_release_handle(handle);
+            crate::engine::thaw_js_release_handle(handle);
             return qjs_error_status(env, error);
         }
     };
@@ -2980,11 +2980,11 @@ unsafe fn qjs_adopt_thrown_handle(
         // The original thrown value becomes an Env root before the last
         // transferred engine retain can invoke a reentrant finalizer.
         let Ok(owner) = env_mut(env) else {
-            thaw_quickjs::thaw_js_release_handle(handle);
+            crate::engine::thaw_js_release_handle(handle);
             return NAPI_INVALID_ARG;
         };
         owner.exception = Some(symbol);
-        thaw_quickjs::thaw_js_release_handle(handle);
+        crate::engine::thaw_js_release_handle(handle);
         let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG; };
         if !owner.values.contains(&symbol)
             || owner.finalized_handles.contains(&(symbol as usize)) {
@@ -2995,7 +2995,7 @@ unsafe fn qjs_adopt_thrown_handle(
     }
     let (exception, generation, duplicate) = {
         let Ok(owner) = env_mut(env) else {
-            thaw_quickjs::thaw_js_release_handle(handle);
+            crate::engine::thaw_js_release_handle(handle);
             return NAPI_INVALID_ARG;
         };
         let (value, duplicate) = if let Some(value) = owner.quickjs_live_values.get(&handle).copied() {
@@ -3010,10 +3010,10 @@ unsafe fn qjs_adopt_thrown_handle(
         (value, generation, duplicate)
     };
     let Some(generation) = generation else {
-        if duplicate { thaw_quickjs::thaw_js_release_handle(handle); }
+        if duplicate { crate::engine::thaw_js_release_handle(handle); }
         return NAPI_INVALID_ARG;
     };
-    if duplicate { thaw_quickjs::thaw_js_release_handle(handle); }
+    if duplicate { crate::engine::thaw_js_release_handle(handle); }
     let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG; };
     if !owner.values.contains(&exception)
         || owner.finalized_handles.contains(&(exception as usize))
@@ -3026,21 +3026,21 @@ unsafe fn qjs_adopt_thrown_handle(
 
 #[cfg(feature = "js-engine")]
 unsafe fn qjs_adopt_property_read_result(
-    env: NapiEnv, result: thaw_quickjs::ThawCallWithExceptionResult,
+    env: NapiEnv, result: crate::engine::ThawCallWithExceptionResult,
     out: *mut NapiValue,
 ) -> NapiStatus {
     if result.exception_handle != 0 {
         return qjs_adopt_thrown_handle(env, result.exception_handle,
             result.exception_object_like != 0);
     }
-    qjs_adopt_handle_result(env, thaw_quickjs::ThawHandleResult {
+    qjs_adopt_handle_result(env, crate::engine::ThawHandleResult {
         value: result.value, error: result.error,
     }, out)
 }
 
 #[cfg(feature = "js-engine")]
 unsafe fn qjs_finish_property_write_result(
-    env: NapiEnv, result: thaw_quickjs::ThawCallWithExceptionResult,
+    env: NapiEnv, result: crate::engine::ThawCallWithExceptionResult,
 ) -> NapiStatus {
     if result.exception_handle != 0 {
         return qjs_adopt_thrown_handle(env, result.exception_handle,
@@ -3062,7 +3062,7 @@ unsafe fn qjs_utf16_key_handle(env: NapiEnv, units: &[u16]) -> Result<u64, NapiS
         .map_err(|_| record_status(env, NAPI_GENERIC_FAILURE))?;
     let encoded = CString::new(encoded)
         .map_err(|_| record_status(env, NAPI_INVALID_ARG))?;
-    let result = thaw_quickjs::thaw_js_string_from_utf16_units_result(encoded.as_ptr());
+    let result = crate::engine::thaw_js_string_from_utf16_units_result(encoded.as_ptr());
     if !result.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(result.error).to_string_lossy().into_owned();
         thaw_arena::destroy_string(result.error);
@@ -3083,7 +3083,7 @@ unsafe fn qjs_native_symbol_key_handle(
     // The QuickJS helper requests owner-validated metadata for this exact
     // native handle. Callers cannot seed its identity cache with an arbitrary
     // id/description pair.
-    let result = thaw_quickjs::thaw_js_native_symbol_handle_result(symbol as u64);
+    let result = crate::engine::thaw_js_native_symbol_handle_result(symbol as u64);
     if !result.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(result.error)
             .to_string_lossy().into_owned();
@@ -3107,7 +3107,7 @@ unsafe fn qjs_nonstring_key_handle(
                 None => return Some(Err(record_status(env, NAPI_INVALID_ARG))),
             };
             if let Some(source) = qjs_handle(symbol) {
-                return Some(if thaw_quickjs::thaw_js_retain_handle(source) != 0 {
+                return Some(if crate::engine::thaw_js_retain_handle(source) != 0 {
                     Ok(source)
                 } else {
                     Err(record_status(env, NAPI_INVALID_ARG))
@@ -3128,7 +3128,7 @@ unsafe fn qjs_get_property(
             Ok(handle) => handle, Err(status) => return status,
         };
         let status = qjs_get_property_live_key(env, handle, key_handle, out);
-        thaw_quickjs::thaw_js_release_handle(key_handle);
+        crate::engine::thaw_js_release_handle(key_handle);
         return status;
     }
     let PropertyKey::String(key) = key else {
@@ -3140,7 +3140,7 @@ unsafe fn qjs_get_property(
     let Ok(key_json) = CString::new(key_json) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
-    let result = thaw_quickjs::thaw_js_get_property_json_key_with_exception_result(
+    let result = crate::engine::thaw_js_get_property_json_key_with_exception_result(
         handle, key_json.as_ptr());
     qjs_adopt_property_read_result(env, result, out)
 }
@@ -3150,7 +3150,7 @@ unsafe fn qjs_get_property_live_key(
     env: NapiEnv, handle: u64, key_handle: u64, out: *mut NapiValue,
 ) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
-    let result = thaw_quickjs::thaw_js_get_property_key_handle_with_exception_result(
+    let result = crate::engine::thaw_js_get_property_key_handle_with_exception_result(
         handle, key_handle);
     qjs_adopt_property_read_result(env, result, out)
 }
@@ -3160,7 +3160,7 @@ unsafe fn qjs_property_predicate_live_key(
     env: NapiEnv, handle: u64, key_handle: u64, operation: u8, out: *mut bool,
 ) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
-    let result = thaw_quickjs::thaw_js_property_predicate_key_handle_result(
+    let result = crate::engine::thaw_js_property_predicate_key_handle_result(
         handle, key_handle, operation);
     if !result.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(result.error)
@@ -3184,7 +3184,7 @@ unsafe fn qjs_set_property_live_key(
     let Ok(encoded) = CString::new(encoded) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
-    let result = thaw_quickjs::thaw_js_set_property_key_handle_graph_with_exception_result(
+    let result = crate::engine::thaw_js_set_property_key_handle_graph_with_exception_result(
         handle, key_handle, encoded.as_ptr(), receiver_data as u8);
     qjs_finish_property_write_result(env, result)
 }
@@ -3218,7 +3218,7 @@ unsafe fn qjs_define_data_property(
             .map_err(|_| record_status(env, NAPI_GENERIC_FAILURE))?;
         let encoded = CString::new(encoded)
             .map_err(|_| record_status(env, NAPI_INVALID_ARG))?;
-        let result = thaw_quickjs::thaw_js_define_data_property_key_handle_graph_result(
+        let result = crate::engine::thaw_js_define_data_property_key_handle_graph_result(
             handle, key_handle, encoded.as_ptr(), attributes);
         if !result.error.is_null() {
             let error = thaw_arena::NativeStr::from_ptr(result.error)
@@ -3228,7 +3228,7 @@ unsafe fn qjs_define_data_property(
         }
         Ok(())
     })();
-    if owned_key { thaw_quickjs::thaw_js_release_handle(key_handle); }
+    if owned_key { crate::engine::thaw_js_release_handle(key_handle); }
     match status { Ok(()) => NAPI_OK, Err(status) => status }
 }
 
@@ -3268,7 +3268,7 @@ unsafe fn qjs_define_callback_property(
                 return Err(record_status(env, NAPI_GENERIC_FAILURE));
             }
         }
-        let result = thaw_quickjs::thaw_js_define_callback_property_key_handle_result(
+        let result = crate::engine::thaw_js_define_callback_property_key_handle_result(
             handle, key_handle, getter_id, setter_id, method_id, attributes,
             roots[0], roots[1], roots[2]);
         if !result.error.is_null() {
@@ -3279,14 +3279,14 @@ unsafe fn qjs_define_callback_property(
         }
         Ok(())
     })();
-    if owned_key { thaw_quickjs::thaw_js_release_handle(key_handle); }
+    if owned_key { crate::engine::thaw_js_release_handle(key_handle); }
     match status { Ok(()) => NAPI_OK, Err(status) => status }
 }
 
 #[cfg(feature = "js-engine")]
 unsafe fn qjs_object_integrity(env: NapiEnv, handle: u64, freeze: bool) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
-    let result = thaw_quickjs::thaw_js_host_object_integrity_result(handle, u8::from(freeze));
+    let result = crate::engine::thaw_js_host_object_integrity_result(handle, u8::from(freeze));
     if !result.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(result.error)
             .to_string_lossy().into_owned();
@@ -3308,7 +3308,7 @@ unsafe fn qjs_set_property(
             Ok(handle) => handle, Err(status) => return status,
         };
         let status = qjs_set_property_live_key(env, handle, key_handle, value, receiver_data);
-        thaw_quickjs::thaw_js_release_handle(key_handle);
+        crate::engine::thaw_js_release_handle(key_handle);
         return status;
     }
     let PropertyKey::String(key) = key else {
@@ -3327,10 +3327,10 @@ unsafe fn qjs_set_property(
         return record_status(env, NAPI_INVALID_ARG);
     };
     let result = if receiver_data {
-        thaw_quickjs::thaw_js_set_receiver_data_graph_with_exception_result(
+        crate::engine::thaw_js_set_receiver_data_graph_with_exception_result(
             handle, key_json.as_ptr(), encoded.as_ptr())
     } else {
-        thaw_quickjs::thaw_js_set_property_graph_with_exception_result(
+        crate::engine::thaw_js_set_property_graph_with_exception_result(
             handle, key_json.as_ptr(), encoded.as_ptr())
     };
     qjs_finish_property_write_result(env, result)
@@ -3347,7 +3347,7 @@ unsafe fn qjs_property_predicate(
             Ok(handle) => handle, Err(status) => return status,
         };
         let status = qjs_property_predicate_live_key(env, handle, key_handle, operation, out);
-        thaw_quickjs::thaw_js_release_handle(key_handle);
+        crate::engine::thaw_js_release_handle(key_handle);
         return status;
     }
     let PropertyKey::String(key) = key else {
@@ -3359,7 +3359,7 @@ unsafe fn qjs_property_predicate(
     let Ok(key_json) = CString::new(key_json) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
-    let result = thaw_quickjs::thaw_js_property_predicate_json_key_result(
+    let result = crate::engine::thaw_js_property_predicate_json_key_result(
         handle, key_json.as_ptr(), operation);
     if !result.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(result.error)
@@ -3374,12 +3374,12 @@ unsafe fn qjs_property_predicate(
 #[cfg(feature = "js-engine")]
 unsafe fn qjs_query(handle: u64, operation: u8) -> Result<String, String> {
     let _foreign_dispatch = ForeignCallbackGuard::new();
-    qjs_take_result_text(thaw_quickjs::thaw_js_host_query_result(handle, operation))
+    qjs_take_result_text(crate::engine::thaw_js_host_query_result(handle, operation))
 }
 
 #[cfg(feature = "js-engine")]
 fn qjs_is_symbol(handle: u64) -> Result<bool, String> {
-    match thaw_quickjs::thaw_js_napi_handle_is_symbol(handle) {
+    match crate::engine::thaw_js_napi_handle_is_symbol(handle) {
         0 => Ok(false),
         1 => Ok(true),
         _ => Err("released JavaScript Symbol handle".into()),
@@ -3427,7 +3427,7 @@ unsafe fn qjs_strict_equals(
     env: NapiEnv, left: u64, right: u64, out: *mut bool,
 ) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
-    let compared = thaw_quickjs::thaw_js_strict_equal_handles_result(left, right);
+    let compared = crate::engine::thaw_js_strict_equal_handles_result(left, right);
     if !compared.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(compared.error)
             .to_string_lossy().into_owned();
@@ -3448,14 +3448,14 @@ unsafe fn qjs_strict_equals_native_symbol(
         Err(status) => return status,
     };
     let status = qjs_strict_equals(env, handle, symbol_handle, out);
-    thaw_quickjs::thaw_js_release_handle(symbol_handle);
+    crate::engine::thaw_js_release_handle(symbol_handle);
     status
 }
 
 #[cfg(feature = "js-engine")]
 unsafe fn qjs_is_promise(env: NapiEnv, handle: u64, out: *mut bool) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
-    let result = thaw_quickjs::thaw_js_handle_is_promise_result(handle);
+    let result = crate::engine::thaw_js_handle_is_promise_result(handle);
     if !result.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(result.error)
             .to_string_lossy().into_owned();
@@ -3474,7 +3474,7 @@ unsafe fn qjs_array_length(env: NapiEnv, handle: u64, out: *mut u32) -> NapiStat
         Ok(_) => return record_status(env, NAPI_ARRAY_EXPECTED),
         Err(error) => return qjs_error_status(env, error),
     }
-    let result = thaw_quickjs::thaw_js_get_property_json_key_result(
+    let result = crate::engine::thaw_js_get_property_json_key_result(
         handle, c"\"length\"".as_ptr());
     if !result.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(result.error)
@@ -3484,7 +3484,7 @@ unsafe fn qjs_array_length(env: NapiEnv, handle: u64, out: *mut u32) -> NapiStat
     }
     if result.value == 0 { return record_status(env, NAPI_GENERIC_FAILURE); }
     let length = qjs_query(result.value, 16);
-    thaw_quickjs::thaw_js_release_handle(result.value);
+    crate::engine::thaw_js_release_handle(result.value);
     match length {
         Ok(length) => match length.parse::<u32>() {
             Ok(length) => { *out = length; NAPI_OK },
@@ -3516,13 +3516,13 @@ unsafe fn qjs_call_function(
     let Ok(encoded) = CString::new(encoded) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
-    let result = thaw_quickjs::thaw_js_call_handle_with_this_graph_result(handle, encoded.as_ptr());
+    let result = crate::engine::thaw_js_call_handle_with_this_graph_result(handle, encoded.as_ptr());
     if result.exception_handle != 0 {
         return qjs_adopt_thrown_handle(env, result.exception_handle,
             result.exception_object_like != 0);
     }
     qjs_adopt_handle_result(env,
-        thaw_quickjs::ThawHandleResult { value: result.value, error: result.error }, out)
+        crate::engine::ThawHandleResult { value: result.value, error: result.error }, out)
 }
 
 // An accessor descriptor owns its callback handles independently of the
@@ -3685,7 +3685,7 @@ unsafe fn qjs_install_native_accessor(
         }
         if let Some(handle) = previous.as_ref().and_then(|old| old.js_owner.as_ref())
             .map(|owner| owner.getter).filter(|handle| *handle != 0) {
-            if thaw_quickjs::thaw_js_retain_handle(handle) == 0 {
+            if crate::engine::thaw_js_retain_handle(handle) == 0 {
                 return record_status(env, NAPI_INVALID_ARG);
             }
             Arc::get_mut(&mut roots).unwrap().getter = handle;
@@ -3698,7 +3698,7 @@ unsafe fn qjs_install_native_accessor(
         }
         if let Some(handle) = previous.as_ref().and_then(|old| old.js_owner.as_ref())
             .map(|owner| owner.setter).filter(|handle| *handle != 0) {
-            if thaw_quickjs::thaw_js_retain_handle(handle) == 0 {
+            if crate::engine::thaw_js_retain_handle(handle) == 0 {
                 return record_status(env, NAPI_INVALID_ARG);
             }
             Arc::get_mut(&mut roots).unwrap().setter = handle;
@@ -3903,7 +3903,7 @@ unsafe fn qjs_construct_function(
     drop(guard);
     let Ok(encoded) = encoded else { return record_status(env, NAPI_GENERIC_FAILURE) };
     let Ok(encoded) = CString::new(encoded) else { return record_status(env, NAPI_INVALID_ARG) };
-    let result = thaw_quickjs::thaw_js_construct_handle_graph_args_result(handle, encoded.as_ptr());
+    let result = crate::engine::thaw_js_construct_handle_graph_args_result(handle, encoded.as_ptr());
     qjs_adopt_handle_result(env, result, out)
 }
 
@@ -3912,18 +3912,18 @@ unsafe fn qjs_get_prototype(
     env: NapiEnv, handle: u64, out: *mut NapiValue,
 ) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
-    let result = thaw_quickjs::thaw_js_get_prototype_handle_result(handle);
+    let result = crate::engine::thaw_js_get_prototype_handle_result(handle);
     if result.error.is_null() && result.value != 0 {
         match qjs_query(result.value, 7) {
             Ok(kind) if kind == "1" => {
-                thaw_quickjs::thaw_js_release_handle(result.value);
+                crate::engine::thaw_js_release_handle(result.value);
                 let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
                 let null = owner.alloc(Value::Null);
                 return write_value(out, null);
             }
             Ok(_) => {},
             Err(error) => {
-                thaw_quickjs::thaw_js_release_handle(result.value);
+                crate::engine::thaw_js_release_handle(result.value);
                 return qjs_error_status(env, error);
             }
         }
@@ -3937,7 +3937,7 @@ unsafe fn qjs_property_names(
     key_conversion: i32, out: *mut NapiValue,
 ) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
-    let result = thaw_quickjs::thaw_js_host_property_names_result(
+    let result = crate::engine::thaw_js_host_property_names_result(
         handle, key_mode, key_filter, key_conversion);
     let text = match qjs_take_result_text(result) {
         Ok(text) => text,
@@ -3965,7 +3965,7 @@ unsafe fn qjs_set_prototype(env: NapiEnv, handle: u64, prototype: NapiValue) -> 
     drop(guard);
     let Ok(encoded) = encoded else { return record_status(env, NAPI_GENERIC_FAILURE) };
     let Ok(encoded) = CString::new(encoded) else { return record_status(env, NAPI_INVALID_ARG) };
-    let result = thaw_quickjs::thaw_js_set_prototype_graph_result(handle, encoded.as_ptr());
+    let result = crate::engine::thaw_js_set_prototype_graph_result(handle, encoded.as_ptr());
     if !result.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(result.error).to_string_lossy().into_owned();
         thaw_arena::destroy_string(result.error);
@@ -3987,7 +3987,7 @@ unsafe fn qjs_instanceof(env: NapiEnv, object: NapiValue, constructor: NapiValue
     drop(guard);
     let Ok(encoded) = encoded else { return record_status(env, NAPI_GENERIC_FAILURE) };
     let Ok(encoded) = CString::new(encoded) else { return record_status(env, NAPI_INVALID_ARG) };
-    let result = thaw_quickjs::thaw_js_instanceof_graph_result(encoded.as_ptr());
+    let result = crate::engine::thaw_js_instanceof_graph_result(encoded.as_ptr());
     if !result.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(result.error).to_string_lossy().into_owned();
         thaw_arena::destroy_string(result.error);
@@ -4002,7 +4002,7 @@ unsafe fn qjs_instanceof_handles(
     env: NapiEnv, object: u64, constructor: u64, out: *mut bool,
 ) -> NapiStatus {
     let _foreign_dispatch = ForeignCallbackGuard::new();
-    let result = thaw_quickjs::thaw_js_instanceof_handles_result(object, constructor);
+    let result = crate::engine::thaw_js_instanceof_handles_result(object, constructor);
     if !result.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(result.error).to_string_lossy().into_owned();
         thaw_arena::destroy_string(result.error);
@@ -4037,7 +4037,7 @@ unsafe fn qjs_strict_equals_scalar(
         _ => return record_status(env, NAPI_INVALID_ARG),
     };
     let Ok(text) = CString::new(text) else { return record_status(env, NAPI_INVALID_ARG) };
-    let result = thaw_quickjs::thaw_js_strict_equal_handle_scalar_result(
+    let result = crate::engine::thaw_js_strict_equal_handle_scalar_result(
         handle, kind, number, text.as_ptr());
     if !result.error.is_null() {
         let error = thaw_arena::NativeStr::from_ptr(result.error).to_string_lossy().into_owned();
@@ -4655,7 +4655,7 @@ impl NapiResultGraph {
                 #[cfg(not(feature = "js-engine"))]
                 return Err("JavaScript graph handles require QuickJS".into());
                 #[cfg(feature = "js-engine")]
-                if thaw_quickjs::thaw_js_retain_handle(*handle) == 0 {
+                if crate::engine::thaw_js_retain_handle(*handle) == 0 {
                     return Err("released JavaScript graph handle".into());
                 }
                 #[cfg(feature = "js-engine")]
@@ -5852,7 +5852,7 @@ unsafe fn call_quickjs_reference_graph(
     let Ok(encoded) = CString::new(encoded) else {
         return fail("JavaScript callback arguments contain NUL".into());
     };
-    let result = thaw_quickjs::thaw_js_call_reference_graph(context as *mut c_void, encoded.as_ptr());
+    let result = crate::engine::thaw_js_call_reference_graph(context as *mut c_void, encoded.as_ptr());
     let Ok(result) = text(result) else {
         return fail("invalid QuickJS callback response".into());
     };
@@ -6619,7 +6619,7 @@ mod typed_native_graph_value_tests {
     #[test]
     fn duplicate_live_handle_result_and_throw_transfer_their_native_root() {
         unsafe {
-            assert_eq!(thaw_quickjs::eval_json(
+            assert_eq!(crate::engine::eval_json(
                 "globalThis.__thaw_duplicate_handle_control = {}; true"
             ).unwrap().as_deref(), Some("true"));
             for thrown in [false, true] {
@@ -6628,19 +6628,19 @@ mod typed_native_graph_value_tests {
                 let parent = env.alloc(Value::Object(HashMap::new()));
                 let mut creator = ptr::null_mut();
                 assert_eq!(napi_open_handle_scope(env_ptr, &mut creator), NAPI_OK);
-                let handle = thaw_quickjs::thaw_js_get_global(
+                let handle = crate::engine::thaw_js_get_global(
                     c"__thaw_duplicate_handle_control".as_ptr());
                 assert_ne!(handle, 0);
                 let mut first = ptr::null_mut();
                 assert_eq!(qjs_adopt_handle_result(env_ptr,
-                    thaw_quickjs::ThawHandleResult { value: handle, error: ptr::null() },
+                    crate::engine::ThawHandleResult { value: handle, error: ptr::null() },
                     &mut first), NAPI_OK);
                 assert_eq!(napi_set_named_property(env_ptr, parent,
                     c"child".as_ptr(), first), NAPI_OK);
                 assert_eq!(napi_close_handle_scope(env_ptr, creator), NAPI_OK);
                 let mut recipient = ptr::null_mut();
                 assert_eq!(napi_open_handle_scope(env_ptr, &mut recipient), NAPI_OK);
-                assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+                assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1);
                 if thrown {
                     assert_eq!(qjs_adopt_thrown_handle(env_ptr, handle, true),
                         NAPI_PENDING_EXCEPTION);
@@ -6648,7 +6648,7 @@ mod typed_native_graph_value_tests {
                 } else {
                     let mut second = ptr::null_mut();
                     assert_eq!(qjs_adopt_handle_result(env_ptr,
-                        thaw_quickjs::ThawHandleResult { value: handle, error: ptr::null() },
+                        crate::engine::ThawHandleResult { value: handle, error: ptr::null() },
                         &mut second), NAPI_OK);
                     assert_eq!(second, first);
                 }
@@ -6675,7 +6675,7 @@ mod typed_native_graph_value_tests {
     #[test]
     fn js_permanent_symbols_roundtrip_original_identity_and_throw() {
         unsafe {
-            thaw_quickjs::register_napi_bridge(
+            crate::engine::register_napi_bridge(
                 thaw_napi_export_names, thaw_napi_call_typed_bridge,
                 thaw_napi_handle_bridge, thaw_napi_poll_async_work,
                 thaw_napi_async_work_pending, thaw_napi_graph_owner,
@@ -6689,15 +6689,15 @@ mod typed_native_graph_value_tests {
             HOST.with(|host| host.borrow_mut().module_envs.push(env));
             let bootstrap = format!(
                 "__thaw_json_graph_proxy_for_handle('{}'); true", object as u64);
-            assert_eq!(thaw_quickjs::eval_json(&bootstrap).unwrap().as_deref(), Some("true"));
+            assert_eq!(crate::engine::eval_json(&bootstrap).unwrap().as_deref(), Some("true"));
             for source in ["Symbol.iterator", "Symbol.for('thaw-weak-permanent')"] {
                 let install = format!("globalThis.__thaw_weak_symbol_control = {source}; true");
-                assert_eq!(thaw_quickjs::eval_json(&install).unwrap().as_deref(), Some("true"));
-                let original = thaw_quickjs::thaw_js_get_global(
+                assert_eq!(crate::engine::eval_json(&install).unwrap().as_deref(), Some("true"));
+                let original = crate::engine::thaw_js_get_global(
                     c"__thaw_weak_symbol_control".as_ptr());
                 assert_ne!(original, 0);
                 let native = qjs_adopt_symbol(env_ptr, original).unwrap().unwrap();
-                assert_eq!(thaw_quickjs::thaw_js_release_handle(original), 1);
+                assert_eq!(crate::engine::thaw_js_release_handle(original), 1);
                 let id = match value_ref(native).unwrap() {
                     Value::Symbol { id, .. } => *id,
                     _ => panic!("native Symbol expected"),
@@ -6705,17 +6705,17 @@ mod typed_native_graph_value_tests {
                 assert!((*env_ptr).js_original_symbol_ids.contains(&id));
                 assert!((*env_ptr).strong_symbol_ids.contains(&id));
                 assert!(!(*env_ptr).js_pinned_symbol_ids.contains(&id));
-                let revived = thaw_quickjs::thaw_js_native_symbol_handle_result(native as u64);
+                let revived = crate::engine::thaw_js_native_symbol_handle_result(native as u64);
                 assert!(revived.error.is_null());
                 assert_ne!(revived.value, 0);
-                let original = thaw_quickjs::thaw_js_get_global(
+                let original = crate::engine::thaw_js_get_global(
                     c"__thaw_weak_symbol_control".as_ptr());
-                let same = thaw_quickjs::thaw_js_strict_equal_handles_result(
+                let same = crate::engine::thaw_js_strict_equal_handles_result(
                     original, revived.value);
                 assert!(same.error.is_null());
                 assert_eq!(same.value, 1);
-                assert_eq!(thaw_quickjs::thaw_js_release_handle(original), 1);
-                assert_eq!(thaw_quickjs::thaw_js_release_handle(revived.value), 1);
+                assert_eq!(crate::engine::thaw_js_release_handle(original), 1);
+                assert_eq!(crate::engine::thaw_js_release_handle(revived.value), 1);
                 for thrown in [false, true] {
                     let wire = if thrown {
                         (*env_ptr).exception = Some(native);
@@ -6727,10 +6727,10 @@ mod typed_native_graph_value_tests {
                     let compare = format!(
                         "__thaw_json_graph_decode_owned({}) === globalThis.__thaw_weak_symbol_control",
                         serde_json::to_string(&wire).unwrap());
-                    assert_eq!(thaw_quickjs::eval_json(&compare).unwrap().as_deref(), Some("true"));
+                    assert_eq!(crate::engine::eval_json(&compare).unwrap().as_deref(), Some("true"));
                 }
             }
-            thaw_quickjs::eval_json("delete globalThis.__thaw_weak_symbol_control; true").unwrap();
+            crate::engine::eval_json("delete globalThis.__thaw_weak_symbol_control; true").unwrap();
             let env = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());
             drop(env);
         }

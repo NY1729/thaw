@@ -23,6 +23,9 @@ use std::time::Duration;
 #[path = "napi/version.rs"]
 mod napi_version;
 
+#[cfg(feature = "js-engine")]
+mod engine;
+
 // With the `quickjs` feature (on by default), this crate transitively
 // needs thaw-quickjs's `thaw_js_dynamic_object_query`, which calls
 // thaw-std's `thaw_json_parse` as an `extern "C"` declaration resolved at
@@ -870,10 +873,10 @@ impl Drop for QuickJsAccessorRoots {
         // independent roots have been returned to the QuickJS registry.
         let _dispatch = ForeignCallbackGuard::new();
         if self.getter != 0 {
-            thaw_quickjs::thaw_js_release_handle(self.getter);
+            crate::engine::thaw_js_release_handle(self.getter);
         }
         if self.setter != 0 {
-            thaw_quickjs::thaw_js_release_handle(self.setter);
+            crate::engine::thaw_js_release_handle(self.setter);
         }
     }
 }
@@ -1440,7 +1443,7 @@ unsafe fn sync_js_origin_symbol_pins(env: NapiEnv) {
         return;
     };
     for (id, value, generation, pin) in changes {
-        if thaw_quickjs::thaw_js_napi_symbol_set_pin(graph_owner_id, id, u8::from(pin)) == 0 {
+        if crate::engine::thaw_js_napi_symbol_set_pin(graph_owner_id, id, u8::from(pin)) == 0 {
             continue;
         }
         let Some(owner) = env.as_mut() else {
@@ -1742,7 +1745,7 @@ unsafe fn sweep_pending_scope_values(env: NapiEnv) {
     }
     #[cfg(feature = "js-engine")]
     for handle in quickjs_releases {
-        thaw_quickjs::thaw_js_release_handle(handle);
+        crate::engine::thaw_js_release_handle(handle);
         capture_shutdown_exception(env);
     }
     callbacks.run(env);
@@ -1883,7 +1886,7 @@ unsafe fn close_handle_scope(
     }
     #[cfg(feature = "js-engine")]
     for handle in quickjs_releases {
-        thaw_quickjs::thaw_js_release_handle(handle);
+        crate::engine::thaw_js_release_handle(handle);
         capture_shutdown_exception(env);
     }
     callbacks.run(env);
@@ -2117,7 +2120,7 @@ impl Env {
             .collect::<Vec<_>>();
         #[cfg(feature = "js-engine")]
         for handle in quickjs_handles {
-            thaw_quickjs::thaw_js_release_handle(handle);
+            crate::engine::thaw_js_release_handle(handle);
         }
     }
 }
