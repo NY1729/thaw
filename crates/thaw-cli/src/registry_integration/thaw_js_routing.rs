@@ -407,8 +407,26 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:process",
     "node:http",
     "node:child_process",
+    "node:perf_hooks",
     "node:zlib",
 ];
+
+/// `node:perf_hooks` marks, measures, observers, timerify and entries exist only on QuickJS's performance.js.
+fn thaw_js_perf_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
+    (pkg_name == "node:perf_hooks"
+        && [
+            "mark",
+            "measure",
+            "PerformanceObserver",
+            "timerify",
+            "getEntries",
+            "PerformanceEntry",
+            "clearMarks",
+        ]
+        .iter()
+        .any(|name| thaw_js_mentions(user_source, name)))
+    .then_some("performance marks/measures/observers are not implemented on thaw-js yet")
+}
 
 /// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
 /// bundle itself (a plain script is wrapped into a one-module registry bundle).
@@ -549,6 +567,9 @@ fn thaw_js_package_eligible(
         return reject("builtin module not validated on thaw-js".into());
     }
     if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
+        return reject(why.into());
+    }
+    if let Some(why) = thaw_js_perf_hooks_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_buffer_blocker(&pkg.name, user_source) {
@@ -720,4 +741,16 @@ fn thaw_js_class_member_names_the_method_of_a_class_operation() {
     let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
     let line = format!("declare function __thaw_typed_js_{hex}(): JsValue;");
     assert_eq!(thaw_js_class_member(&line), None);
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_perf_hooks_blocker_keeps_marks_on_quickjs() {
+    let marks = "import { performance } from 'node:perf_hooks'; performance.mark('a');";
+    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", marks).is_some());
+    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "new PerformanceObserver(cb);").is_some());
+    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "monitorEventLoopDelay(); performance.now();").is_none());
+    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "performance.eventLoopUtilization();").is_none());
+    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "const marked = 1;").is_none());
+    assert!(thaw_js_perf_hooks_blocker("node:path", marks).is_none());
 }

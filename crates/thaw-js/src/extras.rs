@@ -534,7 +534,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
 
   var start = Date.now();
   if (typeof performance === 'undefined') {
-    globalThis.performance = { now: function now() { return Date.now() - start; }, timeOrigin: start };
+    globalThis.performance = { now: function now() { return typeof __thaw_perf_now === 'function' ? __thaw_perf_now() : Date.now() - start; }, timeOrigin: start };
   }
 })();
 "#;
