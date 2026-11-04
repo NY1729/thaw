@@ -3139,3 +3139,27 @@ fn array_values_iterates_a_proxy_through_its_traps() {
         "2 true x"
     );
 }
+
+#[test]
+fn reflect_get_runs_an_accessor_with_the_receiver() {
+    assert_eq!(
+        one("var t = { get x() { return this.v; } }; var r = { v: 7 }; console.log(Reflect.get(t, 'x', r), Reflect.get(t, 'x'), Reflect.get(Object.create(t), 'x', r));"),
+        "7 undefined 7"
+    );
+}
+
+#[test]
+fn reflect_get_without_receiver_and_data_props_unchanged() {
+    assert_eq!(
+        one("var a = [1, 2]; console.log(Reflect.get(a, 'length', {}), Reflect.get({ y: 3 }, 'y', {}), Reflect.get(a, 0));"),
+        "2 3 1"
+    );
+}
+
+#[test]
+fn reflect_get_inherited_getter_sees_proxy_receiver() {
+    assert_eq!(
+        one("var seen; var t = Object.create({ get g() { seen = this; return 1; } }); var p = new Proxy(t, { get(tg, k, r) { return Reflect.get(tg, k, r); } }); p.g; console.log(seen === p);"),
+        "true"
+    );
+}
