@@ -72,3 +72,79 @@ fn thaw_js_retarget_keeps_only_the_return_of_a_multi_line_wrapper() {
         "declare function __thaw_typed_tjs_6d73(\n  inner: Json,\n  name: string\n): JsValue {\n"
     );
 }
+
+#[test]
+fn thaw_js_free_function_unclassifiable_return_stays_a_handle() {
+    // An interface return (`makeHolder(): Holder`) is `Unsupported`, not `JsValue`, but still lowers
+    // to `JsValue`, so it must keep its handle the same way.
+    let function = tjs_free_function(
+        "makeHolder",
+        thaw_bridge::DtsType::Unsupported("interface Holder is not supported".into()),
+    );
+    let (_, declaration) = typed_dynamic_declaration(
+        "tjs!chain-kit",
+        &function,
+        false,
+        &std::collections::BTreeSet::new(),
+        None,
+    )
+    .unwrap();
+    assert!(declaration.contains("inner: Json"), "{declaration}");
+    assert!(declaration.contains("): JsValue"), "{declaration}");
+
+    // `any` and `unknown` returns still render as plain `Json`.
+    for reason in ["`any` is not supported", "`unknown` is not supported"] {
+        let function = tjs_free_function(
+            "readAny",
+            thaw_bridge::DtsType::Unsupported(reason.into()),
+        );
+        let (_, declaration) = typed_dynamic_declaration(
+            "tjs!chain-kit",
+            &function,
+            false,
+            &std::collections::BTreeSet::new(),
+            None,
+        )
+        .unwrap();
+        assert!(declaration.contains("): Json"), "{declaration}");
+        assert!(!declaration.contains("JsValue"), "{declaration}");
+    }
+
+    // A `node:` builtin keeps its plain `Json` return even for an interface return.
+    let spawn = tjs_free_function(
+        "spawn",
+        thaw_bridge::DtsType::Unsupported("interface Holder is not supported".into()),
+    );
+    let (_, declaration) = typed_dynamic_declaration(
+        "tjs!node:child_process",
+        &spawn,
+        false,
+        &std::collections::BTreeSet::new(),
+        None,
+    )
+    .unwrap();
+    assert!(declaration.contains("): Json"), "{declaration}");
+    assert!(!declaration.contains("JsValue"), "{declaration}");
+}
+
+#[test]
+fn thaw_js_free_function_promise_payload_return_is_not_a_bare_handle() {
+    // An opaque promise payload is rewritten to a `Promise<...>`, never to a bare handle return.
+    let function = tjs_free_function(
+        "loadAll",
+        thaw_bridge::DtsType::Unsupported(format!(
+            "{}: `any` is not supported",
+            thaw_bridge::PROMISE_PAYLOAD_UNSUPPORTED
+        )),
+    );
+    let (_, declaration) = typed_dynamic_declaration(
+        "tjs!chain-kit",
+        &function,
+        false,
+        &std::collections::BTreeSet::new(),
+        None,
+    )
+    .unwrap();
+    assert!(declaration.contains("Promise<"), "{declaration}");
+    assert!(!declaration.contains("): JsValue"), "{declaration}");
+}
