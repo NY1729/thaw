@@ -1627,6 +1627,47 @@ var __thaw_bundle_require_maps = { "bz/index.js": {}, };
 var __thaw_bundle_entry_key = "bz/index.js";
 })(globalThis.require);"#;
 
+const NON_FINITE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"nf/index.js": function(module, exports, require) {
+  exports.kind = function (x) { return Number.isNaN(x) ? "nan" : x === Infinity ? "inf" : x === -Infinity ? "-inf" : "finite:" + x; };
+  exports.opts = function (o) { return String(o.breakLength); };
+},
+};
+var __thaw_bundle_require_maps = { "nf/index.js": {}, };
+var __thaw_bundle_entry_key = "nf/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn non_finite_numbers_cross_the_typed_abi_as_wire_nodes() {
+    use std::ffi::CString;
+    let bundle = CString::new(NON_FINITE).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"nf".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    assert_eq!(
+        typed_call("nf::kind", r#"[{"__thaw_tjs_num__":"NaN"}]"#).unwrap(),
+        "\"nan\""
+    );
+    assert_eq!(
+        typed_call("nf::kind", r#"[{"__thaw_tjs_num__":"Infinity"}]"#).unwrap(),
+        "\"inf\""
+    );
+    assert_eq!(
+        typed_call("nf::kind", r#"[{"__thaw_tjs_num__":"-Infinity"}]"#).unwrap(),
+        "\"-inf\""
+    );
+    assert_eq!(
+        typed_call(
+            "nf::opts",
+            r#"[{"breakLength":{"__thaw_tjs_num__":"Infinity"}}]"#
+        )
+        .unwrap(),
+        "\"Infinity\""
+    );
+}
+
 #[test]
 fn a_bigint_and_negative_zero_cross_the_typed_abi_as_wire_nodes() {
     use std::ffi::CString;

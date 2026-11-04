@@ -2805,9 +2805,16 @@ fn ordered_json(value: &Value) -> Value {
             time,
         )]));
     }
-    // A BigInt crosses as `{"__thaw_tjs_bigint__": "<decimal>"}` and a negative zero as
-    // `{"__thaw_tjs_num__": "-0"}`, which JSON numbers cannot carry, so thaw-js revives them.
+    // A BigInt crosses as `{"__thaw_tjs_bigint__": "<decimal>"}` and a negative zero or a
+    // non-finite number as `{"__thaw_tjs_num__": "-0" | "NaN" | "Infinity" | "-Infinity"}`,
+    // which JSON numbers cannot carry, so thaw-js revives them.
     if DATE_WIRE.with(Cell::get) {
+        if let Some(number) = non_finite_number(value) {
+            return Value::shared_object(indexmap::IndexMap::from([(
+                b"__thaw_tjs_num__".to_vec(),
+                Value::String(non_finite_display(number).into()),
+            )]));
+        }
         match value {
             Value::BigInt(decimal) => {
                 return Value::shared_object(indexmap::IndexMap::from([(
@@ -13246,6 +13253,40 @@ mod tests {
         assert_eq!(
             read_c_string(thaw_json_stringify_tjs(root)),
             r#"{"big":{"__thaw_tjs_bigint__":"12345678901234567890"},"nz":{"__thaw_tjs_num__":"-0"},"z":0}"#
+        );
+    }
+
+    #[test]
+    fn tjs_stringify_writes_non_finite_numbers_as_wire_nodes() {
+        let root = thaw_json_object_new();
+        for (key, number) in [
+            ("nan", f64::NAN),
+            ("inf", f64::INFINITY),
+            ("ninf", f64::NEG_INFINITY),
+        ] {
+            thaw_json_object_set_json(
+                root,
+                CString::new(key).unwrap().as_ptr(),
+                leak(napi_non_finite_value(number)),
+            );
+        }
+        assert_eq!(
+            read_c_string(thaw_json_stringify_tjs(root)),
+            r#"{"nan":{"__thaw_tjs_num__":"NaN"},"inf":{"__thaw_tjs_num__":"Infinity"},"ninf":{"__thaw_tjs_num__":"-Infinity"}}"#
+        );
+    }
+
+    #[test]
+    fn plain_stringify_keeps_non_finite_numbers_as_null() {
+        let root = thaw_json_object_new();
+        thaw_json_object_set_json(
+            root,
+            CString::new("nan").unwrap().as_ptr(),
+            leak(napi_non_finite_value(f64::NAN)),
+        );
+        assert_eq!(
+            read_c_string(thaw_json_stringify_public(root)),
+            r#"{"nan":null}"#
         );
     }
 
