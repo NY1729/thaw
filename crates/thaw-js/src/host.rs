@@ -1409,10 +1409,13 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             28 => "{}".to_string(),
             // a value that must cross a thaw-js call argument as a live handle: a typed array other
             // than Uint8Array, an ArrayBuffer, a Map, a Set or a Proxy (the native array, collection and
-            // class views) would otherwise be flattened to a plain object
+            // class views) would otherwise be flattened to a plain object. A plain Uint8Array is live
+            // too (so `util.inspect` keeps it), but a Buffer (`__isBuffer` in its chain) still answers 0
             29 => flag(matches!(&v, Value::Object(o) if matches!(&*o.kind.borrow(),
                 Kind::ArrayBuffer(_) | Kind::Map(_) | Kind::Set(_) | Kind::Proxy(_))
-                || matches!(&*o.kind.borrow(), Kind::Typed(t) if !matches!(t.ty, crate::typed::Ty::U8)))),
+                || matches!(&*o.kind.borrow(), Kind::Typed(t) if !matches!(t.ty, crate::typed::Ty::U8))
+                || (matches!(&*o.kind.borrow(), Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8))
+                    && crate::find_in_chain(o, "__isBuffer").is_none()))),
             _ => {
                 return Err(HostError::Thrown(format!(
                     "TypeError: thaw-js does not support the host query {operation}"
@@ -4439,11 +4442,18 @@ mod host_query_live_tests {
 
     #[test]
     fn host_query_keep_live_answers_zero_for_copyable_values() {
-        assert_eq!(query(construct("Uint8Array", "[{\"v\":2}]"), 29), "0");
+        assert_eq!(query(construct("Uint8Array", "[{\"v\":2}]"), 29), "1");
         assert_eq!(query(construct("Object", "[]"), 29), "0");
         assert_eq!(query(construct("Array", "[]"), 29), "0");
         assert_eq!(query(construct("Date", "[{\"v\":0}]"), 29), "0");
         assert_eq!(query(thaw_tjs_new_function_handle(), 29), "0");
+    }
+
+    #[test]
+    fn host_query_keep_live_splits_plain_uint8array_from_buffer() {
+        assert_eq!(query(construct("Uint8Array", "[{\"v\":3}]"), 29), "1");
+        assert_eq!(query(construct("Uint8Array", "[{\"v\":0}]"), 29), "1");
+        assert_eq!(query(construct("Buffer", "[{\"v\":3}]"), 29), "0");
     }
 
     #[test]
