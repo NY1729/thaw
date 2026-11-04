@@ -3134,6 +3134,65 @@ fn tj35_bytes_cross_the_typed_abi_as_tagged_buffers_both_ways() {
     );
 }
 
+const BYTES_KIND: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"k/index.js": function(module, exports, require) {
+  exports.proto = function (b) { return [b.length, Buffer.isBuffer(b), b instanceof Uint8Array].join(','); };
+},
+};
+var __thaw_bundle_require_maps = { "k/index.js": {}, };
+var __thaw_bundle_entry_key = "k/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn tj35_bytes_kind_selects_buffer_or_plain_uint8array_on_the_tagged_node() {
+    use base64::Engine as _;
+    use std::ffi::CString;
+    let bundle = CString::new(BYTES_KIND).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"bk".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    let b64 = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+    // `k: "Uint8Array"` revives a plain Uint8Array: not a Buffer, no Buffer prototype
+    assert_eq!(
+        typed_call(
+            "bk::proto",
+            &format!(r#"[{{"__thaw_tjs_bytes__":{{"k":"Uint8Array","b64":"{b64}"}}}}]"#)
+        )
+        .unwrap(),
+        "\"3,false,true\""
+    );
+    // `k: "Buffer"` keeps the Buffer prototype
+    assert_eq!(
+        typed_call(
+            "bk::proto",
+            &format!(r#"[{{"__thaw_tjs_bytes__":{{"k":"Buffer","b64":"{b64}"}}}}]"#)
+        )
+        .unwrap(),
+        "\"3,true,true\""
+    );
+}
+
+#[test]
+fn tj35_branded_buffer_wrapper_node_revives_from_its_data_array() {
+    use std::ffi::CString;
+    let bundle = CString::new(BYTES_KIND).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"bkd".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    // the Json-routed form carries `data` (a number array) instead of `b64`
+    assert_eq!(
+        typed_call(
+            "bkd::proto",
+            r#"[{"__thaw_tjs_bytes__":{"k":"Buffer","data":[1,2]}}]"#
+        )
+        .unwrap(),
+        "\"2,true,true\""
+    );
+}
+
 #[test]
 fn defer_thenable_passes_non_thenables_through() {
     assert_eq!(
