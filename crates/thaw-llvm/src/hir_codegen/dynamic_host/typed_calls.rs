@@ -1780,7 +1780,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let live_listener = self.live_json_listener(arg, ty);
             if thaw_js_callback_type(ty) && (reads_receiver || live_listener.is_some()) {
                 let target = if reads_receiver { arg } else { live_listener.unwrap_or(arg) };
-                self.compile_thaw_js_receiver_callback_argument(array, target)
+                self.compile_thaw_js_receiver_callback_argument(array, target, !reads_receiver)
                     .map_err(|error| format!("thaw-js callback argument {}: {error}", index + 1))?;
                 continue;
             }
@@ -2216,7 +2216,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let live_listener = self.live_json_listener(arg, ty);
             if thaw_js_callback_type(ty) && (reads_receiver || live_listener.is_some()) {
                 let target = if reads_receiver { arg } else { live_listener.unwrap_or(arg) };
-                self.compile_thaw_js_receiver_callback_argument(array, target)
+                self.compile_thaw_js_receiver_callback_argument(array, target, !reads_receiver)
                     .map_err(|error| format!("thaw-js class callback argument {}: {error}", index + 1))?;
                 continue;
             }
@@ -2371,7 +2371,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     /// A listener declared with a rest signature (`(...args: any[]) => void`) whose own closure takes a
-    /// bare `Json` parameter must see live arguments, so it takes the graph route by its own type. The
+    /// bare `Json` or `JsValue` parameter (an `any` the closure uses as a live value) must see live arguments, so it takes the graph route by its own type. The
     /// rest-to-fixed adapter HIR wraps such a closure in is peeled: the user closure is registered.
     fn live_json_listener<'a>(&self, arg: &'a HirExpr, declared: &HirType) -> Option<&'a HirExpr> {
         let rest_declared = matches!(declared, HirType::CallableFunction(_, _, Some(_), _))
@@ -2379,7 +2379,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let takes_live_json = |closure: &HirExpr| {
             matches!(
                 self.expr_hir_type(closure),
-                Some(HirType::Function(params, _)) if params.contains(&HirType::Json) && json_callback_wants_graph(&params)
+                Some(HirType::Function(params, _)) if params.iter().any(|param| matches!(param, HirType::Json | HirType::JsValue))
             )
         };
         if !rest_declared {
@@ -2416,9 +2416,10 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         array: BasicValueEnum<'ctx>,
         arg: &HirExpr,
+        graph_mode: bool,
     ) -> Result<(), String> {
         self.thaw_js_call_arguments = true;
-        let handle = self.compile_register_native_callback(std::slice::from_ref(arg), false);
+        let handle = self.compile_register_native_callback(std::slice::from_ref(arg), graph_mode);
         self.thaw_js_call_arguments = false;
         let marker = self.compile_thaw_js_handle_marker(handle?.into_int_value())?;
         self.compile_json_array_push_owned(array, marker)
