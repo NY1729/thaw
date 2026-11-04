@@ -4782,6 +4782,11 @@
       "name": "round10 generator object and array iterator print as Node inspects them",
       "expect": "matched",
       "source": "function* g(): Generator<number> { yield 1; } function main(): void { console.log(g(), [1].values()); }"
+    },
+    {
+      "name": "tj49 child_process nested spawnSync error is an Error and error undefined stays undefined",
+      "expect": "matched",
+      "source": "import cp from \"node:child_process\"; function main(): void { const r = cp.spawnSync(\"nonexistent-cmd-xyz\") as any; console.log(r.error instanceof Error, r.error.code, r.error.errno, r.error.path, r.error.message); const o: any = cp.spawnSync(\"sh\", [\"-c\", \"exit 0\"]); console.log(o.error === undefined); }"
     }
   ]
 }
