@@ -1363,6 +1363,23 @@ impl Interp {
                     .unwrap_or_else(|_| "/".into()),
             ))
         });
+        self.set_native(&p, "chdir", |it, _, a| {
+            let dest = it.to_str(&arg(a, 0)).to_string();
+            let cwd = std::env::current_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|_| "/".into());
+            if std::env::set_current_dir(&dest).is_err() {
+                let e = it.make_error(
+                    "Error",
+                    &format!("ENOENT: no such file or directory, chdir '{cwd}' -> '{dest}'"),
+                )?;
+                if let Value::Object(o) = &e {
+                    put(o, "code", Value::str("ENOENT"));
+                }
+                return Err(Ctl::Throw(e));
+            }
+            Ok(Value::Undefined)
+        });
         self.set_native(&p, "binding", |it, _, a| {
             let name = it.to_str(&arg(a, 0));
             it.throw_error("Error", &format!("No such module: {name}"))
