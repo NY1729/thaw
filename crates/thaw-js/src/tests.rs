@@ -1542,6 +1542,29 @@ fn crypto_create_hash_matches_node() {
 }
 
 #[test]
+fn buffer_concat_accepts_an_omitted_or_nan_total_and_byte_swaps() {
+    assert_eq!(
+        one("var a = Buffer.from('a'), b = Buffer.from('b');
+             console.log(Buffer.concat([a, b]).toString(), Buffer.concat([a, b], NaN).toString(),
+               Buffer.concat([a, b], 1).toString(),
+               Buffer.from([0, 1, 2, 3]).swap16().toString('hex'),
+               Buffer.from([0, 1, 2, 3]).swap32().toString('hex'),
+               Buffer.from([0, 1, 2, 3, 4, 5, 6, 7]).swap64().toString('hex'))"),
+        "ab ab a 01000302 03020100 0706050403020100"
+    );
+}
+
+#[test]
+fn buffer_byte_swaps_reject_partial_units() {
+    assert_eq!(
+        one("try { Buffer.from([1, 2, 3]).swap16(); } catch (e) { console.log(e.name, e.message); }
+             try { Buffer.from([1, 2, 3, 4, 5]).swap32(); } catch (e) { console.log(e.name, e.message); }
+             try { Buffer.alloc(9).swap64(); } catch (e) { console.log(e.name, e.message); }"),
+        "RangeError Buffer size must be a multiple of 16-bits|RangeError Buffer size must be a multiple of 32-bits|RangeError Buffer size must be a multiple of 64-bits"
+    );
+}
+
+#[test]
 fn blob_and_file_basics() {
     assert_eq!(
         one("var f = new File(['ab', new Uint8Array([99])], 'x.txt', { type: 'Text/Plain' });
