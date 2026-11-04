@@ -1193,14 +1193,34 @@ const THAW_JS_PACKAGE_MARK: &str = "tjs!";
 /// Retargets a QuickJS typed declaration to thaw-js: symbols get the `tjs` prefix and an opaque
 /// `JsValue` result (an `any`-typed return, never a class instance: the routing scan rules those
 /// out) becomes plain `Json`, since thaw-js returns plain data by value. Packages in
-/// `thaw_js_keeps_js_value` keep `JsValue`, so their objects stay live handles.
-fn thaw_js_retarget(symbol: String, declaration: String, keep_js_value: bool) -> (String, String) {
+/// `thaw_js_keeps_js_value` keep `JsValue`, so their objects stay live handles. `keep_ret_js_value`
+/// keeps only the return type of a `JsValue` result (the parameters still flatten), so the caller
+/// gets a live handle back.
+fn thaw_js_retarget(
+    symbol: String,
+    declaration: String,
+    keep_js_value: bool,
+    keep_ret_js_value: bool,
+) -> (String, String) {
+    let declaration = declaration.replace("__thaw_typed_js_", "__thaw_typed_tjs_");
+    let declaration = if keep_js_value {
+        declaration
+    } else {
+        declaration
+            .split_inclusive('\n')
+            .map(|line| match line.rfind("): ") {
+                Some(split) if keep_ret_js_value => {
+                    let (head, tail) = line.split_at(split + "): ".len());
+                    format!("{}{tail}", head.replace("JsValue", "Json"))
+                }
+                _ => line.replace("JsValue", "Json"),
+            })
+            .collect()
+    };
     (
         // (Generated wrapper names keep `__thaw_typed_wrapper_js_`: thaw-hir recognizes them by it.)
         symbol.replace("__thaw_typed_js_", "__thaw_typed_tjs_"),
-        declaration
-            .replace("__thaw_typed_js_", "__thaw_typed_tjs_")
-            .replace("JsValue", if keep_js_value { "JsValue" } else { "Json" }),
+        declaration,
     )
 }
 
@@ -1234,6 +1254,11 @@ fn typed_dynamic_declaration(
 ) -> Option<(String, String)> {
     match package.strip_prefix(THAW_JS_PACKAGE_MARK) {
         Some(real) => {
+            let keep_ret_js_value = !real.starts_with("node:")
+                && matches!(
+                    function.ret,
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue)
+                );
             let function = if thaw_js_keeps_js_value(real) {
                 std::borrow::Cow::Borrowed(function)
             } else {
@@ -1243,7 +1268,12 @@ fn typed_dynamic_declaration(
                 real, &function, napi, observed_call_arities, overload_suffix,
             )
             .map(|(symbol, declaration)| {
-                thaw_js_retarget(symbol, declaration, thaw_js_keeps_js_value(real))
+                thaw_js_retarget(
+                    symbol,
+                    declaration,
+                    thaw_js_keeps_js_value(real),
+                    keep_ret_js_value,
+                )
             })
         }
         None => typed_dynamic_declaration_for_quickjs(

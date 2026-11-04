@@ -110,6 +110,7 @@ include!("tests/audit2_async_streams.rs");
 include!("tests/bytes_fs_crypto_process.rs");
 include!("tests/registry_fallback.rs");
 include!("tests/thaw_js_routing.rs");
+include!("tests/thaw_js_free_fn_return.rs");
 include!("tests/thaw_js_routing_callbacks.rs");
 include!("tests/thaw_js_worker_threads.rs");
 include!("tests/thaw_js_worker_threads_w3.rs");
