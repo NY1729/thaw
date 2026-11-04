@@ -830,6 +830,7 @@ include!("tests/sort_nan_contracts.rs");
 include!("tests/native_timer_contracts.rs");
 include!("tests/thaw_js_builtin_contracts.rs");
 include!("tests/thaw_js_receiver_callback_contracts.rs");
+include!("tests/thaw_js_json_callback_contracts.rs");
 include!("tests/tj6_promise_contracts.rs");
 include!("tests/fx7_types_contracts.rs");
 include!("tests/fx8_array_contracts.rs");

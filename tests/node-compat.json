@@ -4782,6 +4782,26 @@
       "name": "round10 generator object and array iterator print as Node inspects them",
       "expect": "matched",
       "source": "function* g(): Generator<number> { yield 1; } function main(): void { console.log(g(), [1].values()); }"
+    },
+    {
+      "name": "any callback param Set argument keeps identity after a mutation",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; class C { x = 1; } function main(): void { const s = new Set<number>([1, 2, 3]); const ee = new EventEmitter(); ee.on('s', (o: any): void => { o.add(4); console.log(o === s, s.size); }); ee.emit('s', s); }"
+    },
+    {
+      "name": "any callback listener removed by identity is not called on a later emit",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; class C { x = 1; } function main(): void { const c = new C(); const ee = new EventEmitter(); const f = (o: any): void => { console.log('f', o === c); }; ee.on('e', f); ee.off('e', f); ee.emit('e', c); console.log('done', ee.listenerCount('e')); }"
+    },
+    {
+      "name": "any callback once listener keeps a class instance and instanceof",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; class C { x = 1; } function main(): void { const ee = new EventEmitter(); ee.once('o', (o: any): void => { console.log(o instanceof C, o.x); }); ee.emit('o', new C()); ee.emit('o', new C()); }"
+    },
+    {
+      "name": "two any callback params keep class instance and array identity",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; class C { x = 1; } function main(): void { const c = new C(); const arr = [1, 2]; const ee = new EventEmitter(); ee.on('two', (a: any, b: any): void => { console.log(a instanceof C, b === arr, arr.length); }); ee.emit('two', c, arr); }"
     }
   ]
 }

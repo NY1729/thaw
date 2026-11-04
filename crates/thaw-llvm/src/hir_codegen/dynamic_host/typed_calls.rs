@@ -85,6 +85,13 @@ fn thaw_js_callback_abi(ty: &HirType) -> Option<(Vec<HirType>, HirType, Option<u
     }
 }
 
+/// Whether a callback must be registered as a graph callback with live argument handles: a `Json`
+/// parameter would otherwise receive a JSON copy of a live value (its identity and methods are lost).
+/// Rest callbacks keep the JSON-text protocol.
+fn thaw_js_callback_wants_live_args(params: &[HirType], rest_start: Option<usize>) -> bool {
+    rest_start.is_none() && params.iter().any(|p| matches!(p, HirType::Json))
+}
+
 /// A parameter type that can cross into thaw-js: plain data or a plain callback.
 pub(crate) fn thaw_js_param_type(ty: &HirType) -> bool {
     thaw_js_plain_type(ty) || thaw_js_callback_type(ty) || *ty == HirType::JsValue
@@ -2213,7 +2220,12 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
             self.builder.position_at_end(register);
         }
-        let marker = self.compile_thaw_js_callback_marker(closure, &params, &ret, rest_start)?;
+        let marker = if thaw_js_callback_wants_live_args(&params, rest_start) {
+            let handle = self.compile_register_native_callback_from_closure(closure, &params, &ret)?;
+            self.compile_thaw_js_handle_marker(handle.into_int_value())?
+        } else {
+            self.compile_thaw_js_callback_marker(closure, &params, &ret, rest_start)?
+        };
         self.compile_json_array_push_owned(array, marker)?;
         self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
         self.builder.position_at_end(done);
@@ -2370,6 +2382,7 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         if name != "registerNativeCallback"
             || !thaw_js_callback_type(&HirType::Function(params.clone(), ret.clone()))
+            || thaw_js_callback_wants_live_args(params, None)
         {
             return Ok(None);
         }
