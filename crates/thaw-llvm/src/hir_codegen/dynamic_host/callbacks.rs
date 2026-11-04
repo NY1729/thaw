@@ -2009,6 +2009,194 @@ impl<'ctx> HirCompiler<'ctx> {
         finisher_result
     }
 
+    /// Settles a thaw-js pending `Promise<resolved>` from its JSON text (or an error text).
+    /// `body(promise, json_text)` decodes and resolves; `settler(promise, json_text, err_text)`
+    /// is the address handed to the host, and releases the watcher's retain on exit.
+    fn compile_thaw_js_pending_settler(
+        &mut self,
+        resolved: &HirType,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let n = self.next_lambda;
+        self.next_lambda += 1;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let void = self.context.void_type();
+        let body = self.module.add_function(
+            &format!("__thaw_tjs_settle_body_{n}"),
+            void.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            Some(Linkage::Internal),
+        );
+        let settler = self.module.add_function(
+            &format!("__thaw_tjs_settle_{n}"),
+            void.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            Some(Linkage::Internal),
+        );
+        let return_block = self.builder.get_insert_block().unwrap();
+
+        let body_result = isolated_codegen_scope!(self, {
+            let entry = self.context.append_basic_block(body, "entry");
+            self.builder.position_at_end(entry);
+            let promise = body.get_nth_param(0).unwrap().into_pointer_value();
+            let text = body.get_nth_param(1).unwrap().into_pointer_value();
+            let json = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_parse").unwrap(),
+                    &[text.into()],
+                    "tjs_settle_json",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_parse returned no value")?;
+            let payload = if *resolved == HirType::Void {
+                self.compile_destroy_typed_input_if_detached(json, &HirType::Void, None)?;
+                ptr_type.const_null()
+            } else {
+                let value = self.compile_typed_dynamic_result(json, resolved)?;
+                let slot = self.allocate_arena_cell(self.basic_type(resolved)?, "tjs_settle_result")?;
+                self.builder
+                    .build_store(slot, value)
+                    .map_err(|error| error.to_string())?;
+                slot
+            };
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_promise_resolve").unwrap(),
+                    &[promise.into(), payload.into()],
+                    "tjs_settle_resolve",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_return(None)
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        });
+        self.builder.position_at_end(return_block);
+        body_result?;
+
+        let settle_result = isolated_codegen_scope!(self, {
+            let entry = self.context.append_basic_block(settler, "entry");
+            let has_err = self.context.append_basic_block(settler, "has_err");
+            let no_err = self.context.append_basic_block(settler, "no_err");
+            let has_json = self.context.append_basic_block(settler, "has_json");
+            let no_json = self.context.append_basic_block(settler, "no_json");
+            let body_failed = self.context.append_basic_block(settler, "body_failed");
+            let body_ok = self.context.append_basic_block(settler, "body_ok");
+            let finish = self.context.append_basic_block(settler, "finish");
+            self.builder.position_at_end(entry);
+            let promise = settler.get_nth_param(0).unwrap().into_pointer_value();
+            let json_text = settler.get_nth_param(1).unwrap().into_pointer_value();
+            let err_text = settler.get_nth_param(2).unwrap().into_pointer_value();
+            let pending_global = self.pending_exception().as_pointer_value();
+            self.builder
+                .build_store(pending_global, ptr_type.const_null())
+                .map_err(|error| error.to_string())?;
+            let is_err = self
+                .builder
+                .build_is_not_null(err_text, "tjs_settle_is_err")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_conditional_branch(is_err, has_err, no_err)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(has_err);
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_promise_reject_text_copy").unwrap(),
+                    &[promise.into(), err_text.into()],
+                    "tjs_settle_reject_err",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_unconditional_branch(finish)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(no_err);
+            let is_json = self
+                .builder
+                .build_is_not_null(json_text, "tjs_settle_is_json")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_conditional_branch(is_json, has_json, no_json)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(no_json);
+            let message = self
+                .intern_string(
+                    "\u{1}Error\u{1}thaw-js: promise settled without a value",
+                    "tjs_settle_no_value",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_promise_reject_text_copy").unwrap(),
+                    &[promise.into(), message.as_pointer_value().into()],
+                    "tjs_settle_reject_no_value",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_unconditional_branch(finish)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(has_json);
+            self.builder
+                .build_call(body, &[promise.into(), json_text.into()], "tjs_settle_body")
+                .map_err(|error| error.to_string())?;
+            let pending = self
+                .builder
+                .build_load(ptr_type, pending_global, "tjs_settle_pending")
+                .map_err(|error| error.to_string())?
+                .into_pointer_value();
+            let failed = self
+                .builder
+                .build_is_not_null(pending, "tjs_settle_failed")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_conditional_branch(failed, body_failed, body_ok)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(body_failed);
+            self.reject_promise_with_pending_exception(promise, pending, "reject_tjs_settle_exception")?;
+            self.builder
+                .build_store(pending_global, ptr_type.const_null())
+                .map_err(|error| error.to_string())?;
+            self.clear_pending_native_text()?;
+            self.builder
+                .build_store(self.pending_exception_object().as_pointer_value(), ptr_type.const_null())
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_zero(),
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_unconditional_branch(finish)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(body_ok);
+            self.builder
+                .build_unconditional_branch(finish)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(finish);
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_promise_destroy").unwrap(),
+                    &[promise.into()],
+                    "tjs_settle_release_watch_retain",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_return(None)
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        });
+        self.builder.position_at_end(return_block);
+        settle_result?;
+        Ok(settler.as_global_value().as_pointer_value())
+    }
+
     /// Wraps a real compiled (native) closure as a live, retained QuickJS
     /// value the Fallback dynamic-call path can pass around like any
     /// other `JsValue` -- real example: zod's `z.number().refine((n:

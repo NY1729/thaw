@@ -601,6 +601,12 @@ fn classify_ts_type(
                 };
                 return match classify_ts_type(value, interfaces, generic_interfaces) {
                     DtsType::Native(value) => DtsType::Native(HirType::Promise(Box::new(value))),
+                    DtsType::Unsupported(reason)
+                        if reason != "`any` is not supported"
+                            && reason != "`unknown` is not supported" =>
+                    {
+                        DtsType::Unsupported(format!("{PROMISE_PAYLOAD_UNSUPPORTED}: {reason}"))
+                    }
                     unsupported => unsupported,
                 };
             }

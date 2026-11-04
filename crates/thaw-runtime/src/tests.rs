@@ -1061,6 +1061,72 @@ fn detached_rejection_report_owns_text_and_never_reads_opaque_results() {
 }
 
 #[test]
+fn reject_text_copy_survives_caller_buffer_drop() {
+    let mut pending = std::ptr::null();
+    let promise = thaw_promise_new();
+    assert_eq!(
+        unsafe { thaw_promise_detach_for_report(promise, &mut pending) },
+        1
+    );
+    let text = std::ffi::CString::new("copied reason").unwrap();
+    assert_eq!(
+        unsafe { thaw_promise_reject_text_copy(promise, text.as_ptr().cast()) },
+        1
+    );
+    drop(text);
+    assert_eq!(thaw_promise_state(promise), 2);
+    thaw_runtime_run_until_idle();
+    assert_eq!(
+        unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(),
+        b"copied reason"
+    );
+    unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
+}
+
+#[test]
+fn reject_text_copy_keeps_text_across_idle_drains() {
+    let mut pending = std::ptr::null();
+    let promise = thaw_promise_new();
+    assert_eq!(
+        unsafe { thaw_promise_detach_for_report(promise, &mut pending) },
+        1
+    );
+    let text = std::ffi::CString::new("drained reason").unwrap();
+    assert_eq!(
+        unsafe { thaw_promise_reject_text_copy(promise, text.as_ptr().cast()) },
+        1
+    );
+    drop(text);
+    thaw_runtime_run_until_idle();
+    assert_eq!(thaw_runtime_run_until_idle(), 0);
+    assert_eq!(
+        unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(),
+        b"drained reason"
+    );
+    unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
+}
+
+#[test]
+fn reject_text_copy_null_uses_generic_error_text() {
+    let mut pending = std::ptr::null();
+    let promise = thaw_promise_new();
+    assert_eq!(
+        unsafe { thaw_promise_detach_for_report(promise, &mut pending) },
+        1
+    );
+    assert_eq!(
+        unsafe { thaw_promise_reject_text_copy(promise, std::ptr::null()) },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    assert_eq!(
+        unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(),
+        b"\x01Error\x01rejected"
+    );
+    unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
+}
+
+#[test]
 fn compiler_text_reporter_snapshots_opaque_and_typed_rejections() {
     thread_local! { static SEEN: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) }; }
     extern "C" fn reporter(text: *const u8) -> PromiseReportResult {
