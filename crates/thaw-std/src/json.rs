@@ -3770,9 +3770,15 @@ pub extern "C" fn thaw_json_brand_wrapper(value: *mut Value) -> *mut Value {
 
 /// Brands a callback's top-level `Json` argument only when it is exactly the handle placeholder
 /// the callback wrapper substitutes for a JS function, so a function stays callable through a
-/// `Json` parameter. Any other value is returned unbranded.
+/// `Json` parameter. A host-framed Error string is revived into an Error value, as a `Str`
+/// parameter already is. Any other value is returned unbranded.
 #[no_mangle]
 pub extern "C" fn thaw_json_brand_handle_placeholder(value: *mut Value) -> *mut Value {
+    if let Some(Value::String(text)) = unsafe { value.as_ref() } {
+        if is_error_frame_text(text.as_bytes()) {
+            return leak(revive_framed_errors(Value::String(text.clone())));
+        }
+    }
     let is_placeholder = unsafe { value.as_ref() }
         .and_then(Value::as_object)
         .filter(|fields| fields.len() == 1)
@@ -11442,6 +11448,44 @@ mod tests {
             fields.get(b"status".as_slice()),
             Some(Value::Null)
         ));
+    }
+
+    #[test]
+    fn brand_handle_placeholder_revives_only_framed_error_strings() {
+        let parse = |json: &str| {
+            let json = CString::new(json).unwrap();
+            thaw_json_parse(json.as_ptr())
+        };
+        let field = |value: *mut Value, key: &str| {
+            let key = CString::new(key).unwrap();
+            let out = thaw_json_get(value, key.as_ptr());
+            let text = unsafe { out.as_ref() }
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            unsafe { thaw_json_destroy(out) };
+            text
+        };
+
+        let framed = parse(r#""\u0001Error\u0001bad\u0003Z_DATA_ERROR""#);
+        let revived = thaw_json_brand_handle_placeholder(framed);
+        assert_eq!(field(revived, "name").as_deref(), Some("Error"));
+        assert_eq!(field(revived, "message").as_deref(), Some("bad"));
+        // `code` comes from the factory-built host Error only; without a registered factory the
+        // native fallback drops the `\u{3}` segment, so the thaw-js e2e case covers `code`.
+        unsafe { thaw_json_destroy(revived) };
+
+        let plain = parse(r#""\u0001x""#);
+        let kept = thaw_json_brand_handle_placeholder(plain);
+        assert!(
+            matches!(unsafe { kept.as_ref() }, Some(Value::String(text)) if text.as_str() == "\u{1}x")
+        );
+        unsafe { thaw_json_destroy(kept) };
+
+        let object = parse(r#"{"code":"E_OBJ"}"#);
+        let kept = thaw_json_brand_handle_placeholder(object);
+        assert_eq!(kept, object);
+        assert_eq!(field(kept, "code").as_deref(), Some("E_OBJ"));
+        unsafe { thaw_json_destroy(kept) };
     }
 
     unsafe extern "C" {

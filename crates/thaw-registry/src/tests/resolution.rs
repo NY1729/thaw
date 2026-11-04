@@ -5916,3 +5916,10 @@ fn builtin_bundle_with_folds_extra_builtins_into_the_node_module_bundle() {
     assert!(bundle.contains("__thaw_bundle_entry_key = \"node:module\""));
     assert!(builtin_bundle_with("node:module", &["no-such-builtin"]).is_err());
 }
+
+#[test]
+fn zlib_crc32_accepts_the_tagged_buffer_shape_thaw_js_passes() {
+    // a compiled Buffer crosses into the Json-typed `data` parameter as {type: 'Buffer', data: [...]}
+    let bundle = builtin_bundle_with("node:zlib", &[]).unwrap();
+    assert!(bundle.contains("data.type === 'Buffer' && Array.isArray(data.data)"));
+}
