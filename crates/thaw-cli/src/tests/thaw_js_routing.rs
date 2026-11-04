@@ -388,9 +388,7 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
     // modules whose cases do not match Node on thaw-js yet stay on QuickJS
-    for module in ["node:crypto"] {
-        assert!(!THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
-    }
+    assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:crypto"), "node:crypto");
 }
 
 #[test]
