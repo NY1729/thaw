@@ -530,6 +530,17 @@ fn thaw_js_child_process_blocker(pkg_name: &str, user_source: &str) -> Option<&'
         .then_some("node:child_process stays on QuickJS while node:http is in the program")
 }
 
+/// node:net's server pump keeps its package loop alive; the thaw-js terminal loop runs packages one after
+/// another, so a program that also needs zlib jobs or vm/tls timers on another package never sees them.
+/// Remove once `thaw_tjs_run_event_loop` is round-robin.
+fn thaw_js_net_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
+    let net = thaw_js_mentions(user_source, "node:net");
+    let zlib = thaw_js_mentions(user_source, "node:zlib");
+    let vm = thaw_js_mentions(user_source, "node:vm");
+    let hit = (pkg_name == "node:net" && (zlib || vm)) || (pkg_name == "node:zlib" && net);
+    hit.then_some("node:net stays on QuickJS next to node:zlib/node:vm until the thaw-js loop is round-robin")
+}
+
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
 /// feature scan, the program touches no class of it (those are live JavaScript objects), and
 /// every function the program mentions is a typed call whose declaration only carries plain data.
@@ -569,6 +580,9 @@ fn thaw_js_package_eligible(
         return reject(why.into());
     }
     if let Some(why) = thaw_js_child_process_blocker(&pkg.name, user_source) {
+        return reject(why.into());
+    }
+    if let Some(why) = thaw_js_net_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
@@ -694,6 +708,19 @@ fn thaw_js_child_process_blocker_keeps_child_process_on_quickjs_next_to_http() {
     assert!(thaw_js_child_process_blocker("node:child_process", http).is_some());
     assert!(thaw_js_child_process_blocker("node:child_process", spawn).is_none());
     assert!(thaw_js_child_process_blocker("node:http", http).is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_net_blocker_keeps_net_and_zlib_on_quickjs_together() {
+    let net = "import net from 'node:net';";
+    let zlib = "import zlib from 'node:zlib';";
+    let vm = "import vm from 'node:vm';";
+    assert!(thaw_js_net_blocker("node:net", &format!("{net}{zlib}")).is_some());
+    assert!(thaw_js_net_blocker("node:zlib", &format!("{net}{zlib}")).is_some());
+    assert!(thaw_js_net_blocker("node:net", &format!("{net}{vm}")).is_some());
+    assert!(thaw_js_net_blocker("node:net", net).is_none());
+    assert!(thaw_js_net_blocker("node:zlib", zlib).is_none());
 }
 
 #[cfg(test)]
