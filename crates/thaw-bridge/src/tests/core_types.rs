@@ -766,3 +766,19 @@ fn classifies_quoted_keys_inside_generic_interfaces() {
         )])]
     );
 }
+
+#[test]
+fn promise_of_unsupported_payload_keeps_a_marked_reason() {
+    let array = parse_dts("export declare function once(): Promise<any[]>;").unwrap();
+    match &array[0].ret {
+        DtsType::Unsupported(reason) => {
+            assert!(reason.starts_with(PROMISE_PAYLOAD_UNSUPPORTED), "{reason}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+    let any = parse_dts("export declare function f(): Promise<any>;").unwrap();
+    assert_eq!(
+        any[0].ret,
+        DtsType::Unsupported("`any` is not supported".into())
+    );
+}

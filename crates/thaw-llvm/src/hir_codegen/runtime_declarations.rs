@@ -3939,6 +3939,14 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_tjs_watch_promise",
+            self.context.void_type().fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_tjs_class_call",
             result_type.fn_type(
                 &[
@@ -4315,6 +4323,13 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_promise_reject_native_text",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_reject_text_copy",
             self.context
                 .i8_type()
                 .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
