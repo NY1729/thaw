@@ -3180,10 +3180,10 @@ fn poll_native_promise(it: &mut Interp, p: Obj, promise: usize, finish: usize) -
     it.defer_tick(check)
 }
 
-/// One drain of the compiled runtime's native continuations (`thaw_runtime_run_until_idle`), as a loop turn hook.
+/// One drain of the compiled runtime's native continuations (`thaw_runtime_run_until_idle`).
 /// True when a continuation ran. Missing symbol (no compiled runtime, e.g. tests): no progress.
 #[cfg(unix)]
-fn drain_native_continuations(_: &mut Interp) -> bool {
+fn drain_native() -> bool {
     // SAFETY: the symbol is the compiled runtime's `extern "C" fn() -> usize`, looked up like the other natives.
     unsafe {
         let sym = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_run_until_idle".as_ptr());
@@ -3195,8 +3195,13 @@ fn drain_native_continuations(_: &mut Interp) -> bool {
 }
 
 #[cfg(not(unix))]
-fn drain_native_continuations(_: &mut Interp) -> bool {
+fn drain_native() -> bool {
     false
+}
+
+/// `drain_native` as a loop turn hook.
+fn drain_native_continuations(_: &mut Interp) -> bool {
+    drain_native()
 }
 
 #[cfg(unix)]
@@ -3815,32 +3820,44 @@ pub extern "C" fn thaw_tjs_unload(handle: i64) {
 /// error. (The codegen renames `thaw_js_run_event_loop` to this symbol for such builds.)
 #[no_mangle]
 pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
-    pump_watches();
-    let count = PACKAGES.with(|ps| ps.borrow().len());
     let mut status = 0;
-    for handle in 0..count {
-        let ran = with_package(handle, |p| {
-            if !p.interp.work_pending() {
-                return Ok(0);
+    loop {
+        let settled = pump_watches();
+        // a settled watch resumes the compiled async code queued on the native side, which may watch new promises
+        let drained = settled > 0 && drain_native();
+        let count = PACKAGES.with(|ps| ps.borrow().len());
+        let mut ran_any = false;
+        for handle in 0..count {
+            let ran = with_package(handle, |p| {
+                if !p.interp.work_pending() {
+                    return Ok(0);
+                }
+                ran_any = true;
+                // native continuations (compiled async code) run inside the loop, so a worker that keeps the loop
+                // alive does not starve a Promise a timer just resolved; re-entry into this package is `with_package`'s
+                p.interp.turn_hook = Some(drain_native_continuations);
+                let r = p
+                    .interp
+                    .run_event_loop()
+                    .map_err(|c| classify(&mut p.interp, c));
+                p.interp.turn_hook = None;
+                r
+            });
+            // `process.exit(n)` / `process.exitCode = n` inside a package (e.g. commander after a sub-command) is the program's status.
+            match ran {
+                Err(e) => {
+                    eprintln!("{e}");
+                    status = 1;
+                }
+                Ok(code) if code != 0 => status = code,
+                Ok(_) => {}
             }
-            // native continuations (compiled async code) run inside the loop, so a worker that keeps the loop
-            // alive does not starve a Promise a timer just resolved; re-entry into this package is `with_package`'s
-            p.interp.turn_hook = Some(drain_native_continuations);
-            let r = p
-                .interp
-                .run_event_loop()
-                .map_err(|c| classify(&mut p.interp, c));
-            p.interp.turn_hook = None;
-            r
-        });
-        // `process.exit(n)` / `process.exitCode = n` inside a package (e.g. commander after a sub-command) is the program's status.
-        match ran {
-            Err(e) => {
-                eprintln!("{e}");
-                status = 1;
-            }
-            Ok(code) if code != 0 => status = code,
-            Ok(_) => {}
+        }
+        // ponytail: a long timer keeps a package's loop alive, so a watch whose promise settles only through jobs
+        // waits until that loop returns; pumping from inside the turn hook would re-enter `with_package`. Upgrade: pump there.
+        let watching = WATCHES.with(|w| !w.borrow().is_empty());
+        if settled == 0 && !drained && !(ran_any && watching) {
+            break;
         }
     }
     status
@@ -4023,11 +4040,11 @@ fn settle_native(native: *mut c_void, settle: SettleFn, result: Result<String, S
 }
 
 /// Drain the jobs of every package with a watched promise, then settle the watches that left Pending.
-/// A no-op while nothing is watched, so plain calls behave as before.
-fn pump_watches() {
+/// A no-op while nothing is watched, so plain calls behave as before. Returns how many watches settled.
+fn pump_watches() -> usize {
     let mut packages: Vec<usize> = WATCHES.with(|w| w.borrow().iter().map(|x| x.package).collect());
     if packages.is_empty() {
-        return;
+        return 0;
     }
     packages.sort_unstable();
     packages.dedup();
@@ -4070,9 +4087,11 @@ fn pump_watches() {
         waiting.append(&mut cur);
         *cur = waiting;
     });
+    let count = settled.len();
     for (w, result) in settled {
         settle_native(w.native, w.settle, result);
     }
+    count
 }
 
 /// Call `"<package>::<export>"` with a JSON array of arguments; the result is JSON text.
