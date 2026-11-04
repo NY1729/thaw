@@ -1409,9 +1409,53 @@ impl Interp {
             Err(Ctl::Exit(code))
         });
         self.set_native(&p, "emitWarning", |it, _, a| {
-            let msg = it.to_str(&arg(a, 0));
-            let pid = std::process::id();
-            it.emit_err(&format!("(node:{pid}) Warning: {msg}"));
+            let first = arg(a, 0);
+            // `(warning, options)` or `(warning, type, code)`
+            let (mut kind, mut code) = (arg(a, 1), arg(a, 2));
+            let opts = arg(a, 1);
+            if matches!(opts, Value::Object(_)) && !opts.is_callable() {
+                kind = it.get(&opts, "type")?;
+                code = it.get(&opts, "code")?;
+            }
+            let warning = match &first {
+                Value::Object(o) if crate::builtins::is_error_instance(it, o) => first.clone(),
+                _ => {
+                    let msg = it.to_str(&first);
+                    let e = it.make_error("Error", &msg)?;
+                    if let Value::Object(o) = &e {
+                        put(o, "name", Value::str("Warning"));
+                    }
+                    e
+                }
+            };
+            if let Value::Object(o) = &warning {
+                if !matches!(kind, Value::Undefined) {
+                    let t = it.to_str(&kind);
+                    put(o, "name", Value::str(&t));
+                }
+                if !matches!(code, Value::Undefined) {
+                    put(o, "code", code.clone());
+                }
+            }
+            // Node emits 'warning' asynchronously; stderr is only the fallback when nobody listens.
+            let cb = it.native(move |it, _, _| {
+                if !it.emit("warning", std::slice::from_ref(&warning))? {
+                    let name = it.get(&warning, "name")?;
+                    let name = it.to_str(&name);
+                    let msg = it.get(&warning, "message")?;
+                    let msg = it.to_str(&msg);
+                    let c = it.get(&warning, "code")?;
+                    let prefix = if matches!(c, Value::Undefined) {
+                        String::new()
+                    } else {
+                        format!("[{}] ", it.to_str(&c))
+                    };
+                    let pid = std::process::id();
+                    it.emit_err(&format!("(node:{pid}) {prefix}{name}: {msg}"));
+                }
+                Ok(Value::Undefined)
+            });
+            it.rt.ticks.push_back((it.rt.actx.clone(), cb, vec![]));
             Ok(Value::Undefined)
         });
         for (name, once) in [("on", false), ("addListener", false), ("once", true)] {

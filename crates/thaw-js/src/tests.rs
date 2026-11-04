@@ -3163,3 +3163,33 @@ fn reflect_get_inherited_getter_sees_proxy_receiver() {
         "true"
     );
 }
+
+#[test]
+fn process_emit_warning_emits_warning_event_on_next_tick() {
+    let out = run_loop(
+        "process.on('warning', function (w) { console.log(w.name, w.code, w.count, w.type); });
+process.emitWarning('dep', 'DeprecationWarning', 'DEP0XXX');
+process.emitWarning('plain');
+var e = new Error('m'); e.name = 'MaxListenersExceededWarning'; e.count = 2; e.type = 'x'; process.emitWarning(e);
+process.emitWarning('o', { type: 'T', code: 'C' });
+console.log('sync');",
+    );
+    assert_eq!(
+        out,
+        "sync|DeprecationWarning DEP0XXX undefined undefined|Warning undefined undefined undefined|MaxListenersExceededWarning undefined 2 x|T C undefined undefined"
+    );
+}
+
+#[test]
+fn process_emit_warning_without_listener_writes_stderr_line() {
+    let mut it = Interp::new();
+    it.run("process.emitWarning('plain');")
+        .expect("script runs");
+    it.run_event_loop().expect("loop runs");
+    let lines: Vec<&String> = it
+        .err
+        .iter()
+        .filter(|l| l.contains("Warning: plain"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{:?}", it.err);
+}
