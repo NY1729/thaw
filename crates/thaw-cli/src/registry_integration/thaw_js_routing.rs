@@ -407,6 +407,7 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:process",
     "node:http",
     "node:perf_hooks",
+    "node:zlib",
 ];
 
 /// `node:perf_hooks` marks, measures, observers, timerify and entries exist only on QuickJS's performance.js.
@@ -520,6 +521,14 @@ fn thaw_js_buffer_blocker(pkg_name: &str, user_source: &str) -> Option<&'static 
     .then_some("node:buffer stays on QuickJS while node:crypto/node:zlib are unrouted")
 }
 
+/// `node:zlib` completes its async jobs on the thaw-js event loop, while `node:net` still runs its
+/// sockets and timers on QuickJS's loop; a program naming both would never see the zlib callbacks.
+/// Remove once node:net is allowlisted.
+fn thaw_js_zlib_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
+    (pkg_name == "node:zlib" && thaw_js_mentions(user_source, "node:net"))
+        .then_some("node:zlib stays on QuickJS while node:net is unrouted")
+}
+
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
 /// feature scan, the program touches no class of it (those are live JavaScript objects), and
 /// every function the program mentions is a typed call whose declaration only carries plain data.
@@ -556,6 +565,9 @@ fn thaw_js_package_eligible(
         return reject(why.into());
     }
     if let Some(why) = thaw_js_buffer_blocker(&pkg.name, user_source) {
+        return reject(why.into());
+    }
+    if let Some(why) = thaw_js_zlib_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
@@ -671,6 +683,16 @@ fn thaw_js_buffer_blocker_keeps_buffer_on_quickjs_next_to_crypto_or_zlib() {
     assert!(thaw_js_buffer_blocker("node:buffer", zlib).is_some());
     assert!(thaw_js_buffer_blocker("node:buffer", "import { Buffer } from 'node:buffer';").is_none());
     assert!(thaw_js_buffer_blocker("node:crypto", crypto).is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_zlib_blocker_keeps_zlib_on_quickjs_next_to_net() {
+    let net = "import net from 'node:net';";
+    let zlib = "import zlib from 'node:zlib';";
+    assert!(thaw_js_zlib_blocker("node:zlib", net).is_some());
+    assert!(thaw_js_zlib_blocker("node:zlib", zlib).is_none());
+    assert!(thaw_js_zlib_blocker("node:net", net).is_none());
 }
 
 #[cfg(test)]
