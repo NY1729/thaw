@@ -334,6 +334,24 @@ fn reject_native_text(promise: *mut ThawPromise, error: *const u8) -> u8 {
     1
 }
 
+/// Rejects with a copy of a caller-owned NUL-terminated native string. The
+/// copy lives in invocation-managed arena storage, so the caller may drop its
+/// buffer immediately. A null `text` rejects with the generic Error text.
+///
+/// # Safety
+/// `text` must be null or a live NUL-terminated native string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_reject_text_copy(promise: *mut ThawPromise, text: *const u8) -> u8 {
+    let bytes: &[u8] = if text.is_null() {
+        b"\x01Error\x01rejected"
+    } else {
+        unsafe { thaw_arena::NativeStr::from_ptr(text.cast()) }.to_bytes()
+    };
+    let copy = thaw_arena::arena_string(bytes);
+    if copy.is_null() { return 0; }
+    reject_native_text(promise, copy.cast())
+}
+
 #[no_mangle]
 /// Rejects a live promise and attaches typed exception metadata.
 ///

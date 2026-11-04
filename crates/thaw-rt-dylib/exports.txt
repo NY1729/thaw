@@ -554,6 +554,7 @@ thaw_promise_new
 thaw_promise_race
 thaw_promise_reject
 thaw_promise_reject_native_text
+thaw_promise_reject_text_copy
 thaw_promise_reject_typed
 thaw_promise_reject_typed_with_aggregate
 thaw_promise_reject_typed_with_native_provenance
