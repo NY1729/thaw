@@ -2026,3 +2026,35 @@ fn fs_write_stream_close_callback_waits_for_native_close() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn fs_shim_revives_tagged_buffer_shape_in_data_and_fd_view() {
+    // Source contract: a native Buffer reaching an `any` parameter arrives in the
+    // shim as its plain JSON shape `{type:'Buffer',data:[..]}`. The fs shim must
+    // revive that shape in both the write-data path (`data`) and the fd-view path
+    // (`fdView`, used by readSync/writeSync), or those calls throw or write
+    // "[object Object]".
+    let dir = temp_registry("builtin_fs_buffer_shape");
+    fs::write(
+        dir.join("index.js"),
+        "var fs = require('node:fs'); module.exports = function () { return typeof fs.readSync; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_buffer_shape_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert!(
+        bundle.contains("function bufferShape(v) { return v && typeof v === 'object' && !ArrayBuffer.isView(v) && v.type === 'Buffer' && Array.isArray(v.data) ? Buffer.from(v.data) : v; }"),
+        "bufferShape helper missing from fs shim"
+    );
+    assert!(
+        bundle.contains("function data(value, options) { value = bufferShape(value); return ArrayBuffer.isView(value) ?"),
+        "data() does not revive the Buffer shape"
+    );
+    assert!(
+        bundle.contains("function fdView(buffer) { buffer = bufferShape(buffer); if (!ArrayBuffer.isView(buffer))"),
+        "fdView() does not revive the Buffer shape"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
