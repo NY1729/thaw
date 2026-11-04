@@ -79,3 +79,19 @@ fn tj43_promise_of_non_plain_element_gets_no_pending_machinery() {
     );
     assert!(!ir.contains("call void @thaw_tjs_watch_promise(") && !ir.contains("__thaw_tjs_settle_"), "{ir}");
 }
+
+#[test]
+fn tj43_events_once_declaration_gets_pending_machinery() {
+    let once = tj6_hex("node:events::once");
+    let source = format!(
+        "class EventEmitter {{}}
+         declare function __thaw_typed_tjs_{once}(emitter: EventEmitter, event: any, options?: any): Promise<any[]>;
+         async function main(): Promise<void> {{ const pending = __thaw_typed_tjs_{once}(new EventEmitter(), \"ready\", undefined); const values = await pending; console.log(values[0]); }}"
+    );
+    let (uses_thaw_js, uses_quickjs, ir) = tj43_compile_routed(&source, "tj43_events_once");
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(ir.contains("call void @thaw_tjs_watch_promise("), "{ir}");
+    assert!(ir.contains("define internal void @__thaw_tjs_settle_"), "{ir}");
+    assert!(ir.contains("__thaw_tjs_pending__"), "{ir}");
+    assert!(ir.contains("\\04node:events::once") || ir.contains("\u{4}node:events::once"), "{ir}");
+}

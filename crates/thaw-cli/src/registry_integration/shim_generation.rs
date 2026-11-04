@@ -1461,6 +1461,13 @@ fn generate_registry_shims_pass(
         // these (see its own `already_typed` parameter).
         let mut bare_aliased: std::collections::HashSet<String> = std::collections::HashSet::new();
         for function in &pkg.functions {
+            // The bare-alias wrappers below forward to thaw-js's own declaration, so they must
+            // see the same `Promise<Json>` return `typed_dynamic_declaration` gives it.
+            let alias_function = if thaw_js_package && !thaw_js_keeps_js_value(&pkg.name) {
+                thaw_js_promise_ret(function).into_owned()
+            } else {
+                function.clone()
+            };
             let is_fallback = pkg.classifications.iter().any(|(name, classification)| {
                 name == &function.name
                     && matches!(classification, thaw_bridge::Classification::Fallback { .. })
@@ -1574,7 +1581,7 @@ fn generate_registry_shims_pass(
                         if let Some(alias) = typed_dynamic_bare_alias(
                             &q.alias,
                             &symbol,
-                            function,
+                            &alias_function,
                             jit_operation.is_some(),
                             napi,
                         ) {
@@ -1610,7 +1617,7 @@ fn generate_registry_shims_pass(
                         if let Some(alias) = typed_dynamic_bare_alias(
                             &function.name,
                             &symbol,
-                            function,
+                            &alias_function,
                             jit_operation.is_some(),
                             napi,
                         ) {
