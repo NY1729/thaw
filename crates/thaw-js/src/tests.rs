@@ -797,6 +797,102 @@ var __thaw_bundle_entry_key = "pend/index.js";
     assert_eq!(typed_call("\u{4}pend::now", "[]"), Ok("1".into()));
 }
 
+#[test]
+fn pending_promise_settles_in_the_event_loop_without_a_later_call() {
+    use crate::host::{thaw_tjs_register, thaw_tjs_run_event_loop, thaw_tjs_watch_promise};
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "loop/index.js": function(module, exports, require) {
+  exports.later = function () { return new Promise(function (r) { globalThis.waiters = (globalThis.waiters || []).concat([r]); }); };
+  exports.arm = function (v) { setTimeout(function () { globalThis.waiters.shift()(v); }, 0); };
+}, };
+var __thaw_bundle_require_maps = { "loop/index.js": {}, };
+var __thaw_bundle_entry_key = "loop/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("loop").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let marker = typed_call("\u{4}loop::later", "[]").expect("pending marker");
+    let id: i64 = marker
+        .strip_prefix(r#"{"__thaw_tjs_pending__":"#)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .expect("marker shape")
+        .parse()
+        .expect("handle id");
+    SETTLED.with(|s| s.borrow_mut().clear());
+    thaw_tjs_watch_promise(id, std::ptr::null_mut(), record_settle);
+    // a timer resolves the promise during the loop, after the last call: only the loop can settle the watch
+    typed_call("loop::arm", "[7]").expect("arm");
+    thaw_tjs_run_event_loop();
+    assert_eq!(
+        SETTLED.with(|s| s.borrow().clone()),
+        vec![(Some("7".to_string()), None)]
+    );
+}
+
+thread_local! {
+    /// Set once `chain_settle` has issued its follow-up watched promise.
+    static CHAINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Records like `record_settle`, and on the first settle starts a second pending promise, arms its timer
+/// and watches it, as compiled code does when a continuation awaits again.
+extern "C" fn chain_settle(
+    context: *mut std::ffi::c_void,
+    json: *const std::ffi::c_char,
+    error: *const std::ffi::c_char,
+) {
+    use crate::host::thaw_tjs_watch_promise;
+    record_settle(context, json, error);
+    if CHAINED.with(|c| c.replace(true)) {
+        return;
+    }
+    let marker = typed_call("\u{4}loop2::later", "[]").expect("second pending marker");
+    let id: i64 = marker
+        .strip_prefix(r#"{"__thaw_tjs_pending__":"#)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .expect("marker shape")
+        .parse()
+        .expect("handle id");
+    typed_call("loop2::arm", "[8]").expect("second arm");
+    thaw_tjs_watch_promise(id, std::ptr::null_mut(), record_settle);
+}
+
+#[test]
+fn watch_registered_by_a_settle_callback_settles_in_the_same_event_loop() {
+    use crate::host::{thaw_tjs_register, thaw_tjs_run_event_loop, thaw_tjs_watch_promise};
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "loop2/index.js": function(module, exports, require) {
+  exports.later = function () { return new Promise(function (r) { globalThis.waiters = (globalThis.waiters || []).concat([r]); }); };
+  exports.arm = function (v) { setTimeout(function () { globalThis.waiters.shift()(v); }, 0); };
+}, };
+var __thaw_bundle_require_maps = { "loop2/index.js": {}, };
+var __thaw_bundle_entry_key = "loop2/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (
+        CString::new("loop2").unwrap(),
+        CString::new(bundle).unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let marker = typed_call("\u{4}loop2::later", "[]").expect("pending marker");
+    let id: i64 = marker
+        .strip_prefix(r#"{"__thaw_tjs_pending__":"#)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .expect("marker shape")
+        .parse()
+        .expect("handle id");
+    SETTLED.with(|s| s.borrow_mut().clear());
+    CHAINED.with(|c| c.set(false));
+    thaw_tjs_watch_promise(id, std::ptr::null_mut(), chain_settle);
+    typed_call("loop2::arm", "[1]").expect("arm");
+    // the first settle registers a second watch from inside the pump; the loop must keep pumping until both settle
+    thaw_tjs_run_event_loop();
+    assert_eq!(
+        SETTLED.with(|s| s.borrow().clone()),
+        vec![(Some("1".to_string()), None), (Some("8".to_string()), None)]
+    );
+}
+
 // ----- compiled callbacks (`thaw_tjs_register_callback`) -----
 
 /// A stand-in for a generated `(context, args_json) -> result_json` adapter: sums the numbers.
