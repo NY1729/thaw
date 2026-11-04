@@ -2846,6 +2846,26 @@ fn ordered_json(value: &Value) -> Value {
             }
         }
     }
+    // A branded Buffer wrapper (`{"type":"Buffer","data":[...]}`, see `coercions.rs`) crosses as
+    // `{"__thaw_tjs_bytes__": {"k":"Buffer","data":[...]}}` so thaw-js rebuilds a real `Buffer`
+    // instead of a plain object. The kind is always `Buffer` on this path.
+    if DATE_WIRE.with(Cell::get)
+        && is_branded_wrapper(value)
+        && thaw_json_is_buffer_shape(value as *const Value) == 1
+    {
+        if let Some(data) = value
+            .as_object()
+            .and_then(|fields| fields.get(b"data".as_slice()))
+        {
+            return Value::shared_object(indexmap::IndexMap::from([(
+                b"__thaw_tjs_bytes__".to_vec(),
+                Value::shared_object(indexmap::IndexMap::from([
+                    (b"k".to_vec(), Value::String("Buffer".into())),
+                    (b"data".to_vec(), ordered_json(data)),
+                ])),
+            )]));
+        }
+    }
     // A thaw-js call argument that cannot survive a copy (a typed array other than Uint8Array, an
     // ArrayBuffer, a Map or a Set held by thaw-js) stays a live handle: thaw-js resolves
     // `{"__thaw_tjs_handle__": id}` back to the same object.
@@ -13264,6 +13284,19 @@ mod tests {
         assert_eq!(
             read_c_string(thaw_json_stringify(root)),
             r#"{"m":{"__thaw_map_entries__":[["a",1]]},"s":{"__thaw_set_values__":[2,3]}}"#
+        );
+    }
+
+    #[test]
+    fn tjs_stringify_writes_branded_buffer_wrapper_as_a_tagged_bytes_node() {
+        let root = thaw_json_object_new();
+        let buffer = thaw_json_brand_wrapper(parse(r#"{"type":"Buffer","data":[1,2]}"#));
+        thaw_json_object_set_json(root, CString::new("b").unwrap().as_ptr(), buffer);
+        let plain = parse(r#"{"type":"Buffer","data":[3]}"#);
+        thaw_json_object_set_json(root, CString::new("p").unwrap().as_ptr(), plain);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_tjs(root)),
+            r#"{"b":{"__thaw_tjs_bytes__":{"k":"Buffer","data":[1,2]}},"p":{"type":"Buffer","data":[3]}}"#
         );
     }
 
