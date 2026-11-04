@@ -381,11 +381,12 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:process",
         "node:http",
         "node:perf_hooks",
+        "node:zlib",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
     // modules whose cases do not match Node on thaw-js yet stay on QuickJS
-    for module in ["node:crypto", "node:net", "node:zlib"] {
+    for module in ["node:crypto", "node:net"] {
         assert!(!THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
 }
