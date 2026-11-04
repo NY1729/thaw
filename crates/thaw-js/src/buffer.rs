@@ -170,10 +170,17 @@ const BUFFER_PRELUDE: &str = r#"
     return v.byteLength;
   });
   def(Buffer, 'concat', function (list, total) {
-    if (total === undefined) { total = 0; for (var i = 0; i < list.length; i++) total += list[i].length; }
+    // Buffers inside an array argument cross the typed ABI as {type:'Buffer', data:[...]}: normalize first.
+    var items = [];
+    for (var i = 0; i < list.length; i++) {
+      var it = list[i];
+      if (!ArrayBuffer.isView(it) && it && typeof it === 'object' && it.type === 'Buffer' && Array.isArray(it.data)) it = Buffer.from(it.data);
+      items.push(it);
+    }
+    if (total === undefined || total !== total) { total = 0; for (var n = 0; n < items.length; n++) total += items[n].length; }
     var out = Buffer.alloc(total), pos = 0;
-    for (var j = 0; j < list.length && pos < total; j++) {
-      var item = list[j];
+    for (var j = 0; j < items.length && pos < total; j++) {
+      var item = items[j];
       for (var k = 0; k < item.length && pos < total; k++) out[pos++] = item[k];
     }
     return out;
@@ -236,6 +243,26 @@ const BUFFER_PRELUDE: &str = r#"
     return n;
   });
   def(P, 'slice', function (s, e) { return this.subarray(s, e); });
+  def(P, 'swap16', function () {
+    if (this.length % 2) throw new RangeError('Buffer size must be a multiple of 16-bits');
+    for (var i = 0; i < this.length; i += 2) { var t = this[i]; this[i] = this[i + 1]; this[i + 1] = t; }
+    return this;
+  });
+  def(P, 'swap32', function () {
+    if (this.length % 4) throw new RangeError('Buffer size must be a multiple of 32-bits');
+    for (var i = 0; i < this.length; i += 4) {
+      var a = this[i], b = this[i + 1];
+      this[i] = this[i + 3]; this[i + 1] = this[i + 2]; this[i + 2] = b; this[i + 3] = a;
+    }
+    return this;
+  });
+  def(P, 'swap64', function () {
+    if (this.length % 8) throw new RangeError('Buffer size must be a multiple of 64-bits');
+    for (var i = 0; i < this.length; i += 8) {
+      for (var o = 0; o < 4; o++) { var t = this[i + o]; this[i + o] = this[i + 7 - o]; this[i + 7 - o] = t; }
+    }
+    return this;
+  });
   function search(buf, v, from, enc, last) {
     var needle = typeof v === 'number' ? [v & 255] : typeof v === 'string' ? fromString(v, enc) : v;
     from = from === undefined ? (last ? buf.length : 0) : (from < 0 ? Math.max(buf.length + from, 0) : from);
