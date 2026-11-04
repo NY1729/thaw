@@ -47,6 +47,18 @@ fn tj35_bare_buffer_argument_is_sent_as_the_tagged_base64_node() {
 }
 
 #[test]
+fn tj35_bare_buffer_argument_selects_its_kind_at_runtime() {
+    // `k` is picked from the runtime kind (`thaw_bytes_console_info`), not hard-coded to "Buffer"
+    let f = tj35_symbol("m::shape");
+    let (_, _, ir) = compile_thaw_js_program(&format!(
+        "declare function {f}(value: Buffer): Json;
+         function main(): void {{ console.log({f}(Buffer.from([1]))); }}"
+    ));
+    assert!(ir.contains("thaw_js_bytes_kind_u8"), "{ir}");
+    assert!(tj35_calls(&ir, "thaw_bytes_console_info"), "{ir}");
+}
+
+#[test]
 fn tj35_nested_buffer_argument_still_stubs() {
     // `Buffer[]` is not encoded per element yet (stage 2), so it keeps the stub
     let f = tj35_symbol("m::shapes");
