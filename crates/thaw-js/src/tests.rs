@@ -1565,6 +1565,14 @@ fn buffer_byte_swaps_reject_partial_units() {
 }
 
 #[test]
+fn buffer_concat_accepts_items_in_the_tagged_abi_shape() {
+    assert_eq!(
+        one("console.log(Buffer.concat([{ type: 'Buffer', data: [97] }, { type: 'Buffer', data: [98, 99] }]).toString())"),
+        "abc"
+    );
+}
+
+#[test]
 fn blob_and_file_basics() {
     assert_eq!(
         one("var f = new File(['ab', new Uint8Array([99])], 'x.txt', { type: 'Text/Plain' });

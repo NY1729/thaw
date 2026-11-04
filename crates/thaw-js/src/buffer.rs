@@ -170,10 +170,17 @@ const BUFFER_PRELUDE: &str = r#"
     return v.byteLength;
   });
   def(Buffer, 'concat', function (list, total) {
-    if (total === undefined || total !== total) { total = 0; for (var i = 0; i < list.length; i++) total += list[i].length; }
+    // Buffers inside an array argument cross the typed ABI as {type:'Buffer', data:[...]}: normalize first.
+    var items = [];
+    for (var i = 0; i < list.length; i++) {
+      var it = list[i];
+      if (!ArrayBuffer.isView(it) && it && typeof it === 'object' && it.type === 'Buffer' && Array.isArray(it.data)) it = Buffer.from(it.data);
+      items.push(it);
+    }
+    if (total === undefined || total !== total) { total = 0; for (var n = 0; n < items.length; n++) total += items[n].length; }
     var out = Buffer.alloc(total), pos = 0;
-    for (var j = 0; j < list.length && pos < total; j++) {
-      var item = list[j];
+    for (var j = 0; j < items.length && pos < total; j++) {
+      var item = items[j];
       for (var k = 0; k < item.length && pos < total; k++) out[pos++] = item[k];
     }
     return out;
