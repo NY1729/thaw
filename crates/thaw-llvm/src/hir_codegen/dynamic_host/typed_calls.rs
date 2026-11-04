@@ -1776,8 +1776,11 @@ impl<'ctx> HirCompiler<'ctx> {
         // (the thaw-js side only ever sees a copy), as the QuickJS lane does.
         let mut returned_bytes_argument = None;
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
-            if thaw_js_callback_type(ty) && (self.callback_expr_reads_receiver(arg) || self.closure_returns_promise(arg)) {
-                self.compile_thaw_js_receiver_callback_argument(array, arg)
+            let reads_receiver = self.callback_expr_reads_receiver(arg) || self.closure_returns_promise(arg);
+            let live_listener = self.live_json_listener(arg, ty);
+            if thaw_js_callback_type(ty) && (reads_receiver || live_listener.is_some()) {
+                let target = if reads_receiver { arg } else { live_listener.unwrap_or(arg) };
+                self.compile_thaw_js_receiver_callback_argument(array, target, !reads_receiver)
                     .map_err(|error| format!("thaw-js callback argument {}: {error}", index + 1))?;
                 continue;
             }
@@ -2209,8 +2212,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         for (index, (arg, ty)) in rest.iter().zip(signature.params.iter().skip(usize::from(is_method))).enumerate() {
-            if thaw_js_callback_type(ty) && (self.callback_expr_reads_receiver(arg) || self.closure_returns_promise(arg)) {
-                self.compile_thaw_js_receiver_callback_argument(array, arg)
+            let reads_receiver = self.callback_expr_reads_receiver(arg) || self.closure_returns_promise(arg);
+            let live_listener = self.live_json_listener(arg, ty);
+            if thaw_js_callback_type(ty) && (reads_receiver || live_listener.is_some()) {
+                let target = if reads_receiver { arg } else { live_listener.unwrap_or(arg) };
+                self.compile_thaw_js_receiver_callback_argument(array, target, !reads_receiver)
                     .map_err(|error| format!("thaw-js class callback argument {}: {error}", index + 1))?;
                 continue;
             }
@@ -2364,6 +2370,36 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    /// A listener declared with a rest signature (`(...args: any[]) => void`) whose own closure takes a
+    /// bare `Json` or `JsValue` parameter (an `any` the closure uses as a live value) must see live arguments, so it takes the graph route by its own type. The
+    /// rest-to-fixed adapter HIR wraps such a closure in is peeled: the user closure is registered.
+    fn live_json_listener<'a>(&self, arg: &'a HirExpr, declared: &HirType) -> Option<&'a HirExpr> {
+        let rest_declared = matches!(declared, HirType::CallableFunction(_, _, Some(_), _))
+            || matches!(declared, HirType::Optional(inner) if matches!(inner.as_ref(), HirType::CallableFunction(_, _, Some(_), _)));
+        let takes_live_json = |closure: &HirExpr| {
+            matches!(
+                self.expr_hir_type(closure),
+                Some(HirType::Function(params, _)) if params.iter().any(|param| matches!(param, HirType::Json | HirType::JsValue))
+            )
+        };
+        if !rest_declared {
+            return None;
+        }
+        // peel every coercion adapter (`(callback) => (...args) => callback(...)` wrappers) down to the user closure
+        let mut inner = arg;
+        while let HirExpr::Call(callee, args) = inner {
+            match (callee.as_ref(), args.as_slice()) {
+                (HirExpr::Lambda(_, params, _, _), [next])
+                    if matches!(params.as_slice(), [param] if param.name.starts_with("__thaw_") && param.name.contains("_callback_")) =>
+                {
+                    inner = next;
+                }
+                _ => break,
+            }
+        }
+        takes_live_json(inner).then_some(inner)
+    }
+
     /// A closure whose own result is a Promise: registered through the graph route (handle marker) so
     /// the compiled side's native Promise reaches JS as a Promise (`finish`); the JSON marker route has none.
     fn closure_returns_promise(&self, arg: &HirExpr) -> bool {
@@ -2380,9 +2416,10 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         array: BasicValueEnum<'ctx>,
         arg: &HirExpr,
+        graph_mode: bool,
     ) -> Result<(), String> {
         self.thaw_js_call_arguments = true;
-        let handle = self.compile_register_native_callback(std::slice::from_ref(arg), false);
+        let handle = self.compile_register_native_callback(std::slice::from_ref(arg), graph_mode);
         self.thaw_js_call_arguments = false;
         let marker = self.compile_thaw_js_handle_marker(handle?.into_int_value())?;
         self.compile_json_array_push_owned(array, marker)
