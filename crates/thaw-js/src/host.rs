@@ -365,7 +365,7 @@ const HANDLE_KEY: &str = "__thaw_tjs_handle__";
 const DATE_KEY: &str = "__thaw_tjs_date__";
 /// `{"__thaw_tjs_bigint__": "<decimal>"}`: a compiled BigInt, which a JSON number cannot carry exactly.
 const BIGINT_KEY: &str = "__thaw_tjs_bigint__";
-/// `{"__thaw_tjs_num__": "-0"}`: a compiled negative zero, which JSON integers lose.
+/// `{"__thaw_tjs_num__": "-0"}`: a compiled negative zero, which JSON integers lose; also `"NaN"`/`"Infinity"`/`"-Infinity"`.
 const NUM_KEY: &str = "__thaw_tjs_num__";
 /// `{"__thaw_tjs_bytes__": {"k": "Buffer", "b64": "..."}}`: compiled `Bytes` crossing as base64 text.
 const BYTES_KEY: &str = "__thaw_tjs_bytes__";
@@ -3410,9 +3410,18 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
                 .map(|b| Value::BigInt(Rc::new(b)))
                 .unwrap_or(Value::Undefined)
         }
-        // `{"__thaw_tjs_num__": "-0"}`: a compiled negative zero.
-        Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Str(s))] if k == NUM_KEY && s == "-0") => {
-            Value::Number(-0.0)
+        // `{"__thaw_tjs_num__": "-0" | "NaN" | "Infinity" | "-Infinity"}`: a compiled negative zero or non-finite number.
+        Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Str(s))] if k == NUM_KEY && matches!(s.as_str(), "-0" | "NaN" | "Infinity" | "-Infinity")) =>
+        {
+            let Native::Str(tag) = &fields[0].1 else {
+                unreachable!()
+            };
+            Value::Number(match tag.as_str() {
+                "NaN" => f64::NAN,
+                "Infinity" => f64::INFINITY,
+                "-Infinity" => f64::NEG_INFINITY,
+                _ => -0.0,
+            })
         }
         // `{"__thaw_tjs_bytes__": {"k", "b64"}}`: compiled byte data rebuilt as a `Buffer`, or as a
         // plain `Uint8Array` when `k` says so. A branded Json wrapper (`{"__thaw_tjs_bytes__":
