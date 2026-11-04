@@ -403,6 +403,7 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:tty",
     "node:dgram",
     "node:tls",
+    "node:buffer",
     "node:process",
 ];
 
@@ -489,6 +490,17 @@ fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'st
         .then_some("createHook callbacks in an object literal are not marshalled to thaw-js yet")
 }
 
+/// `node:buffer` keeps its Bytes on thaw-js, but `node:crypto` and `node:zlib` still run on QuickJS:
+/// a program that names either keeps `node:buffer` on QuickJS too, so the shared bytes never cross
+/// the runtime boundary. Remove once both modules are allowlisted.
+fn thaw_js_buffer_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
+    (pkg_name == "node:buffer"
+        && ["node:crypto", "node:zlib"]
+            .iter()
+            .any(|m| thaw_js_mentions(user_source, m)))
+    .then_some("node:buffer stays on QuickJS while node:crypto/node:zlib are unrouted")
+}
+
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
 /// feature scan, the program touches no class of it (those are live JavaScript objects), and
 /// every function the program mentions is a typed call whose declaration only carries plain data.
@@ -519,6 +531,9 @@ fn thaw_js_package_eligible(
         return reject("builtin module not validated on thaw-js".into());
     }
     if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
+        return reject(why.into());
+    }
+    if let Some(why) = thaw_js_buffer_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
@@ -623,6 +638,17 @@ fn thaw_js_async_hooks_create_hook_keeps_the_module_on_quickjs() {
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", import).is_some());
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", "new AsyncLocalStorage();").is_none());
     assert!(thaw_js_async_hooks_blocker("node:path", import).is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_buffer_blocker_keeps_buffer_on_quickjs_next_to_crypto_or_zlib() {
+    let crypto = "import { createHash } from 'node:crypto';";
+    let zlib = "import * as z from 'node:zlib';";
+    assert!(thaw_js_buffer_blocker("node:buffer", crypto).is_some());
+    assert!(thaw_js_buffer_blocker("node:buffer", zlib).is_some());
+    assert!(thaw_js_buffer_blocker("node:buffer", "import { Buffer } from 'node:buffer';").is_none());
+    assert!(thaw_js_buffer_blocker("node:crypto", crypto).is_none());
 }
 
 #[cfg(test)]
