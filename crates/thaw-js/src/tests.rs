@@ -3780,3 +3780,14 @@ fn pop_on_proxy_forwards_to_target_array() {
         "2 1 1"
     );
 }
+
+#[test]
+fn process_argv_starts_with_the_host_binary() {
+    let host = std::env::args().next().expect("test binary has argv[0]");
+    assert_eq!(
+        one(&format!(
+            "console.log(process.argv.length >= 1, process.argv[0] === {host:?}, typeof process.argv[0])"
+        )),
+        "true true string"
+    );
+}

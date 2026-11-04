@@ -1383,10 +1383,8 @@ impl Interp {
         let release = self.plain();
         put(&release, "name", Value::str("node"));
         put(&p, "release", Value::Object(release));
-        let argv = self.array(vec![
-            Value::str("/usr/local/bin/node"),
-            Value::str("main.js"),
-        ]);
+        // Mirrors thaw-quickjs context.rs: argv[0] is the host binary, then the forwarded arguments.
+        let argv = self.array(std::env::args().map(|a| Value::str(&a)).collect());
         put(&p, "argv", argv);
         let exec_argv = self.array(vec![]);
         put(&p, "execArgv", exec_argv);
