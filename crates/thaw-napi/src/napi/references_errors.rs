@@ -16,7 +16,7 @@ unsafe fn rollback_provisional_js_symbol_pin(
     } else {
         // IDs and graph-owner IDs are monotonic. No current native value can
         // claim this provisional pin after its original generation retired.
-        let _ = thaw_quickjs::thaw_js_napi_symbol_set_pin(owner_id, id, 0);
+        let _ = crate::engine::thaw_js_napi_symbol_set_pin(owner_id, id, 0);
     }
 }
 
@@ -44,7 +44,7 @@ pub unsafe extern "C" fn napi_create_reference(
     #[cfg(feature = "js-engine")]
     if initial_count > 0 {
         if let Some((id, owner_id)) = js_symbol {
-            if thaw_quickjs::thaw_js_napi_symbol_set_pin(owner_id, id, 1) == 0 {
+            if crate::engine::thaw_js_napi_symbol_set_pin(owner_id, id, 1) == 0 {
                 return record_status(env, NAPI_GENERIC_FAILURE);
             }
         }
@@ -146,7 +146,7 @@ pub unsafe extern "C" fn napi_get_reference_value(
                     owner.value_generations.get(&(value as usize)).copied()))
         });
         if let Some((owner_id, id, generation)) = query {
-            let live = thaw_quickjs::thaw_js_napi_symbol_weak_live(owner_id, id);
+            let live = crate::engine::thaw_js_napi_symbol_weak_live(owner_id, id);
             // Missing helper/owner and JS callback failures are unknown, not
             // evidence that a weak target was collected.
             if live == 2 { return record_status(env, NAPI_GENERIC_FAILURE); }
@@ -202,10 +202,10 @@ pub unsafe extern "C" fn napi_reference_ref(
         if let Some((owner_id, id)) = pin {
             // The JS callback may reenter this Env. Snapshot the provenance,
             // call without an Env borrow, then validate it again below.
-            if thaw_quickjs::thaw_js_napi_symbol_weak_live(owner_id, id) != 1 {
+            if crate::engine::thaw_js_napi_symbol_weak_live(owner_id, id) != 1 {
                 return record_status(env, NAPI_GENERIC_FAILURE);
             }
-            if thaw_quickjs::thaw_js_napi_symbol_set_pin(owner_id, id, 1) == 0 {
+            if crate::engine::thaw_js_napi_symbol_set_pin(owner_id, id, 1) == 0 {
                 return record_status(env, NAPI_GENERIC_FAILURE);
             }
             provisional_pin = Some((owner_id, id));
