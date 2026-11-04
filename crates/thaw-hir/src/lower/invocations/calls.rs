@@ -4442,11 +4442,11 @@ impl<'a> FnLowerer<'a> {
                             self.coerce_primitive_array_argument_aliasing(value, &HirType::Json)
                         } else if jit_structural_class_object {
                             self.coerce_jit_structural_class_argument(value, declared)
-                        } else if quickjs_function_value || user_function {
-                            self.coerce_primitive_array_argument_aliasing(value, declared)
-                        } else if thaw_js_live_json_slot
-                            && i > 0
-                            && Self::type_holds_any(declared)
+                        } else if quickjs_function_value
+                            || user_function
+                            || (thaw_js_live_json_slot
+                                && i > 0
+                                && Self::type_holds_any(declared))
                         {
                             self.coerce_primitive_array_argument_aliasing(value, declared)
                         } else if signature.as_ref().is_some_and(|sig| sig.is_extern)
