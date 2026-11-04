@@ -380,6 +380,7 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:buffer",
         "node:process",
         "node:http",
+        "node:perf_hooks",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
@@ -497,4 +498,12 @@ fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!([]));
     assert!(manifest["thaw_js_blockers"].is_array(), "{manifest}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn node_perf_hooks_thaw_js_bundle_scans_clean() {
+    let bundle = thaw_registry::builtin_bundle_with("node:perf_hooks", &[]).unwrap();
+    let report = thaw_js::scan::scan_bundle(&bundle).unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    assert_eq!(report.entry, "node:perf_hooks");
 }
