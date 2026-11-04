@@ -118,3 +118,22 @@ fn thaw_js_jsvalue_literal_peel_matches_only_the_literal_coercion() {
     let other = HirExpr::JsonAsNative(Box::new(other_call), HirType::JsValue);
     assert!(thaw_js_object_literal_for_jsvalue(&other).is_none());
 }
+
+#[test]
+fn thaw_js_jsvalue_leaf_inside_an_object_param_crosses_as_a_handle_marker() {
+    // zod's `z.object({ name: z.string() })`: a plain object whose field is a live handle, not a bare JsValue param.
+    let make = hex("nest::make");
+    let object = hex("nest::object");
+    let source = format!(
+        "declare function __thaw_typed_tjs_{make}(v: number): JsValue;
+         declare function __thaw_typed_tjs_{object}(shape: {{ name: JsValue }}): void;
+         function main(): void {{
+           const field = __thaw_typed_tjs_{make}(1);
+           __thaw_typed_tjs_{object}({{ name: field }});
+         }}"
+    );
+    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(!ir.contains("cannot cross the thaw-js boundary"), "{ir}");
+    assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
+}
