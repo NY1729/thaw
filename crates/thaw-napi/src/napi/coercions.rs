@@ -352,7 +352,7 @@ unsafe fn javascript_string_utf16(
 unsafe fn qjs_abstract_string_units(env: NapiEnv, handle: u64, array_element: bool)
     -> Result<Vec<u16>, NapiStatus> {
     let _foreign_dispatch = ForeignCallbackGuard::new();
-    let result = thaw_quickjs::thaw_js_abstract_to_string_units_result(
+    let result = crate::engine::thaw_js_abstract_to_string_units_result(
         handle, u8::from(array_element));
     qjs_string_units_from_result(env, result)
 }
@@ -364,18 +364,18 @@ unsafe fn qjs_native_symbol_string_units(env: NapiEnv, id: u64)
     -> Result<Vec<u16>, NapiStatus> {
     let owner = env.as_ref().map_or(0, |env| env.graph_owner_id);
     let _foreign_dispatch = ForeignCallbackGuard::new();
-    let result = thaw_quickjs::thaw_js_napi_symbol_abstract_to_string_units_result(owner, id);
+    let result = crate::engine::thaw_js_napi_symbol_abstract_to_string_units_result(owner, id);
     qjs_string_units_from_result(env, result)
 }
 
 #[cfg(feature = "js-engine")]
 unsafe fn qjs_string_units_from_result(
-    env: NapiEnv, result: thaw_quickjs::ThawStringCoercionResult,
+    env: NapiEnv, result: crate::engine::ThawStringCoercionResult,
 ) -> Result<Vec<u16>, NapiStatus> {
     if result.exception_handle != 0 {
         let (exception, duplicate) = {
             let Ok(owner) = env_mut(env) else {
-                thaw_quickjs::thaw_js_release_handle(result.exception_handle);
+                crate::engine::thaw_js_release_handle(result.exception_handle);
                 return Err(NAPI_INVALID_ARG);
             };
             if let Some(value) = owner.quickjs_live_values.get(&result.exception_handle).copied() {
@@ -389,7 +389,7 @@ unsafe fn qjs_string_units_from_result(
                 (value, false)
             }
         };
-        if duplicate { thaw_quickjs::thaw_js_release_handle(result.exception_handle); }
+        if duplicate { crate::engine::thaw_js_release_handle(result.exception_handle); }
         let Ok(owner) = env_mut(env) else { return Err(NAPI_INVALID_ARG); };
         owner.exception = Some(exception);
         return Err(record_status(env, NAPI_PENDING_EXCEPTION));
@@ -894,7 +894,7 @@ pub unsafe extern "C" fn napi_run_script(
     let evaluated = match serde_json::from_str::<JsonValue>(&source) {
         Ok(json) => Ok(Some(json.to_string())),
         #[cfg(feature = "js-engine")]
-        Err(_) => thaw_quickjs::eval_json(&source),
+        Err(_) => crate::engine::eval_json(&source),
         #[cfg(not(feature = "js-engine"))]
         Err(_) => Err("napi_run_script requires the QuickJS feature for JavaScript syntax".into()),
     };

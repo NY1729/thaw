@@ -19,14 +19,14 @@ static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 #[test]
 fn quickjs_reference_throw_sets_napi_exception_without_spoofing_returned_object() {
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"globalThis.__thaw_napi_reference_746291201 = () => ({ __thaw_error__: 'ordinary' }); globalThis.__thaw_napi_reference_746291202 = () => { throw new TypeError('callback \\u0002boom'); };".as_ptr()),
+        crate::engine::thaw_js_load(c"globalThis.__thaw_napi_reference_746291201 = () => ({ __thaw_error__: 'ordinary' }); globalThis.__thaw_napi_reference_746291202 = () => { throw new TypeError('callback \\u0002boom'); };".as_ptr()),
         1
     );
     let mut env = Env::new();
     let this_arg = env.alloc(Value::Undefined);
     for (reference, throws) in [(746291201_usize, false), (746291202, true)] {
         let bridge = Rc::new(ThawCallbackBridge {
-            callback: ThawCallback::QuickJs(thaw_quickjs::thaw_js_call_reference),
+            callback: ThawCallback::QuickJs(crate::engine::thaw_js_call_reference),
             context: reference,
             _context_root: None,
         });
@@ -1750,11 +1750,11 @@ fn private_napi_regexp_graph_last_index_keeps_nonfinite_number_kind() {
 #[test]
 fn private_napi_graph_arguments_release_lease_when_export_is_missing() {
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"globalThis.napiLeaseInput = {};".as_ptr()),
+        crate::engine::thaw_js_load(c"globalThis.napiLeaseInput = {};".as_ptr()),
         1
     );
-    let handle = thaw_quickjs::thaw_js_get_global(c"napiLeaseInput".as_ptr());
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+    let handle = crate::engine::thaw_js_get_global(c"napiLeaseInput".as_ptr());
+    assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1);
     let graph = CString::new(format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[]}}],"leases":[{handle}]}}"#
     ))
@@ -1766,8 +1766,8 @@ fn private_napi_graph_arguments_release_lease_when_export_is_missing() {
     unsafe {
         thaw_arena::destroy_string(result.error);
     }
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 0);
 }
 
 #[cfg(feature = "js-engine")]
@@ -1797,11 +1797,11 @@ fn public_graph_arguments_release_lease_before_native_callback() {
         host.module_envs.push(env);
     });
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"globalThis.napiPublicLeaseInput = {};".as_ptr()),
+        crate::engine::thaw_js_load(c"globalThis.napiPublicLeaseInput = {};".as_ptr()),
         1
     );
-    let handle = thaw_quickjs::thaw_js_get_global(c"napiPublicLeaseInput".as_ptr());
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+    let handle = crate::engine::thaw_js_get_global(c"napiPublicLeaseInput".as_ptr());
+    assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1);
     let graph = CString::new(format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[]}}],"leases":[{handle}]}}"#
     ))
@@ -1811,11 +1811,11 @@ fn public_graph_arguments_release_lease_before_native_callback() {
             thaw_napi_call_graph_result(c"graph-lease-test::call".as_ptr(), graph.as_ptr());
         assert!(result.error.is_null());
         thaw_arena::destroy_string(result.value);
-        assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
-        assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
+        assert_eq!(crate::engine::thaw_js_release_handle(handle), 1);
+        assert_eq!(crate::engine::thaw_js_release_handle(handle), 0);
         // The valid lease must still be released when a later list entry is malformed.
-        let malformed_handle = thaw_quickjs::thaw_js_get_global(c"napiPublicLeaseInput".as_ptr());
-        assert_eq!(thaw_quickjs::thaw_js_retain_handle(malformed_handle), 1);
+        let malformed_handle = crate::engine::thaw_js_get_global(c"napiPublicLeaseInput".as_ptr());
+        assert_eq!(crate::engine::thaw_js_retain_handle(malformed_handle), 1);
         let malformed = CString::new(format!(
             r#"{{"root":{{"r":0}},"nodes":[{{"a":[]}}],"leases":[{malformed_handle},0]}}"#
         ))
@@ -1828,8 +1828,8 @@ fn public_graph_arguments_release_lease_before_native_callback() {
             b"invalid native argument graph lease"
         );
         thaw_arena::destroy_string(result.error);
-        assert_eq!(thaw_quickjs::thaw_js_release_handle(malformed_handle), 1);
-        assert_eq!(thaw_quickjs::thaw_js_release_handle(malformed_handle), 0);
+        assert_eq!(crate::engine::thaw_js_release_handle(malformed_handle), 1);
+        assert_eq!(crate::engine::thaw_js_release_handle(malformed_handle), 0);
     }
     HOST.with(|host| {
         let mut host = host.borrow_mut();
@@ -2681,12 +2681,12 @@ fn repeated_acyclic_exception_child_is_serialized_on_each_branch() {
 #[test]
 fn live_quickjs_graph_handle_survives_lease_and_roundtrips_mutation() {
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"globalThis.napiLiveRoundtrip = { x: 4 };".as_ptr()),
+        crate::engine::thaw_js_load(c"globalThis.napiLiveRoundtrip = { x: 4 };".as_ptr()),
         1
     );
-    let handle = thaw_quickjs::thaw_js_get_global(c"napiLiveRoundtrip".as_ptr());
+    let handle = crate::engine::thaw_js_get_global(c"napiLiveRoundtrip".as_ptr());
     assert_ne!(handle, 0);
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1); // wire transfer
+    assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1); // wire transfer
     let graph = format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}},{{"r":1}}]}},{{"hdl":{handle}}}],"leases":[{handle}]}}"#
     );
@@ -2700,24 +2700,24 @@ fn live_quickjs_graph_handle_survives_lease_and_roundtrips_mutation() {
     assert!(
         matches!(unsafe { value_ref(live) }, Ok(Value::QuickJsHandle { handle: id, .. }) if *id == handle)
     );
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1); // original only
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 1); // original only
     let nine = env.alloc(Value::Number(9.0));
     assert_eq!(
         unsafe { napi_set_named_property(&mut env, live, c"x".as_ptr(), nine) },
         NAPI_OK
     );
-    let property = thaw_quickjs::thaw_js_get_property_result(handle, c"x".as_ptr());
+    let property = crate::engine::thaw_js_get_property_result(handle, c"x".as_ptr());
     assert!(property.error.is_null());
     assert_eq!(unsafe { qjs_query(property.value, 2) }.unwrap(), "9");
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(property.value), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(property.value), 1);
     let encoded: JsonValue =
         serde_json::from_str(&unsafe { napi_result_graph_for_env(&mut env, live, true) }.unwrap())
             .unwrap();
     assert_eq!(encoded["nodes"][0]["hdl"], handle);
     assert_eq!(encoded["leases"][0], handle);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1); // outbound wire lease
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 1); // outbound wire lease
     drop(env); // Env-owned retain
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 0);
 }
 
 // Native addons read elements of an array argument that crossed as a live
@@ -2727,12 +2727,12 @@ fn live_quickjs_graph_handle_survives_lease_and_roundtrips_mutation() {
 #[test]
 fn live_quickjs_array_handle_elements_are_readable_through_napi_get_element() {
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"globalThis.napiElementArray = [42, 'x'];".as_ptr()),
+        crate::engine::thaw_js_load(c"globalThis.napiElementArray = [42, 'x'];".as_ptr()),
         1
     );
-    let handle = thaw_quickjs::thaw_js_get_global(c"napiElementArray".as_ptr());
+    let handle = crate::engine::thaw_js_get_global(c"napiElementArray".as_ptr());
     assert_ne!(handle, 0);
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1);
     let graph = format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{handle}}}],"leases":[{handle}]}}"#
     );
@@ -2759,7 +2759,7 @@ fn live_quickjs_array_handle_elements_are_readable_through_napi_get_element() {
         assert_eq!(number, 42.0);
     }
     drop(env);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 1);
 }
 
 // A retained JavaScript function called by native code with a live JavaScript
@@ -2769,15 +2769,15 @@ fn live_quickjs_array_handle_elements_are_readable_through_napi_get_element() {
 #[test]
 fn quickjs_reference_call_with_a_live_argument_uses_graph_transport() {
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"globalThis.napiLiveArgument = [42]; globalThis.napiLiveReceiver = { tag: 'receiver' }; globalThis.__thaw_napi_reference_746291203 = function(meta, receiver, argument) { return (meta === true && receiver.tag === 'receiver' && argument === globalThis.napiLiveArgument) ? 'graph-ok' : 'graph-bad'; };".as_ptr()),
+        crate::engine::thaw_js_load(c"globalThis.napiLiveArgument = [42]; globalThis.napiLiveReceiver = { tag: 'receiver' }; globalThis.__thaw_napi_reference_746291203 = function(meta, receiver, argument) { return (meta === true && receiver.tag === 'receiver' && argument === globalThis.napiLiveArgument) ? 'graph-ok' : 'graph-bad'; };".as_ptr()),
         1
     );
-    let argument = thaw_quickjs::thaw_js_get_global(c"napiLiveArgument".as_ptr());
-    let receiver = thaw_quickjs::thaw_js_get_global(c"napiLiveReceiver".as_ptr());
+    let argument = crate::engine::thaw_js_get_global(c"napiLiveArgument".as_ptr());
+    let receiver = crate::engine::thaw_js_get_global(c"napiLiveReceiver".as_ptr());
     assert_ne!(argument, 0);
     assert_ne!(receiver, 0);
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(argument), 1);
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(receiver), 1);
+    assert_eq!(crate::engine::thaw_js_retain_handle(argument), 1);
+    assert_eq!(crate::engine::thaw_js_retain_handle(receiver), 1);
     let graph = format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}},{{"r":2}}]}},{{"hdl":{argument}}},{{"hdl":{receiver}}}],"leases":[{argument},{receiver}]}}"#
     );
@@ -2788,7 +2788,7 @@ fn quickjs_reference_call_with_a_live_argument_uses_graph_transport() {
     };
     let (live_argument, live_receiver) = (children[0].unwrap(), children[1].unwrap());
     let bridge = Rc::new(ThawCallbackBridge {
-        callback: ThawCallback::QuickJs(thaw_quickjs::thaw_js_call_reference),
+        callback: ThawCallback::QuickJs(crate::engine::thaw_js_call_reference),
         context: 746291203,
         _context_root: None,
     });
@@ -2807,8 +2807,8 @@ fn quickjs_reference_call_with_a_live_argument_uses_graph_transport() {
         matches!(unsafe { value_ref(result) }, Ok(Value::String(value)) if value == "graph-ok")
     );
     drop(env);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(argument), 1);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(receiver), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(argument), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(receiver), 1);
 }
 
 // A proxy finalizer can run after its addon environment is gone (shutdown).
@@ -2837,7 +2837,7 @@ fn releasing_a_handle_whose_environment_is_gone_is_a_no_op() {
 #[cfg(feature = "js-engine")]
 #[test]
 fn graph_defined_native_accessor_owns_callbacks_until_replaced() {
-    thaw_quickjs::register_napi_bridge(
+    crate::engine::register_napi_bridge(
         thaw_napi_export_names,
         thaw_napi_call_typed_bridge,
         thaw_napi_handle_bridge,
@@ -2846,9 +2846,9 @@ fn graph_defined_native_accessor_owns_callbacks_until_replaced() {
         thaw_napi_graph_owner,
         release_napi_graph_reference,
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiLiveGetter = function(){ return this.seed + 1 }; globalThis.napiLiveSetter = function(value){ this.seed = value };".as_ptr()), 1);
-    let getter = thaw_quickjs::thaw_js_get_global(c"napiLiveGetter".as_ptr());
-    let setter = thaw_quickjs::thaw_js_get_global(c"napiLiveSetter".as_ptr());
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.napiLiveGetter = function(){ return this.seed + 1 }; globalThis.napiLiveSetter = function(value){ this.seed = value };".as_ptr()), 1);
+    let getter = crate::engine::thaw_js_get_global(c"napiLiveGetter".as_ptr());
+    let setter = crate::engine::thaw_js_get_global(c"napiLiveSetter".as_ptr());
     assert_ne!(getter, 0);
     assert_ne!(setter, 0);
     let mut env = Box::new(Env::new());
@@ -2861,8 +2861,8 @@ fn graph_defined_native_accessor_owns_callbacks_until_replaced() {
     )])));
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
     let key = PropertyKey::String("computed".into());
-    assert_ne!(thaw_quickjs::thaw_js_retain_handle(getter), 0);
-    assert_ne!(thaw_quickjs::thaw_js_retain_handle(setter), 0);
+    assert_ne!(crate::engine::thaw_js_retain_handle(getter), 0);
+    assert_ne!(crate::engine::thaw_js_retain_handle(setter), 0);
     #[allow(clippy::arc_with_non_send_sync)]
     let callbacks = Arc::new(QuickJsAccessorRoots {
         getter,
@@ -2943,7 +2943,7 @@ fn graph_defined_native_accessor_owns_callbacks_until_replaced() {
 #[cfg(feature = "js-engine")]
 #[test]
 fn graph_proxy_define_property_keeps_live_native_accessor() {
-    thaw_quickjs::register_napi_bridge(
+    crate::engine::register_napi_bridge(
         thaw_napi_export_names,
         thaw_napi_call_typed_bridge,
         thaw_napi_handle_bridge,
@@ -2979,13 +2979,13 @@ fn graph_proxy_define_property_keeps_live_native_accessor() {
         object as u64
     ))
     .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let identity = thaw_quickjs::thaw_js_get_global(c"nativeAccessorIdentity".as_ptr());
+    assert_eq!(crate::engine::thaw_js_load(script.as_ptr()), 1);
+    let identity = crate::engine::thaw_js_get_global(c"nativeAccessorIdentity".as_ptr());
     assert_eq!(unsafe { qjs_query(identity, 2) }.unwrap(), "true");
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(identity), 1);
-    let observed = thaw_quickjs::thaw_js_get_global(c"nativeDescriptorObserved".as_ptr());
+    assert_eq!(crate::engine::thaw_js_release_handle(identity), 1);
+    let observed = crate::engine::thaw_js_get_global(c"nativeDescriptorObserved".as_ptr());
     assert_eq!(unsafe { qjs_query(observed, 2) }.unwrap(), "11");
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(observed), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(observed), 1);
     let mut native = ptr::null_mut();
     assert_eq!(
         unsafe { napi_get_named_property(env_ptr, object, c"computed".as_ptr(), &mut native) },
@@ -2995,53 +2995,53 @@ fn graph_proxy_define_property_keeps_live_native_accessor() {
         unsafe { qjs_query(qjs_handle(native).unwrap(), 2) }.unwrap(),
         "11"
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeOtherReceiver = { seed: 40 }; globalThis.nativeReceiverObserved = [Reflect.get(nativeDescriptorOwner, 'computed', nativeOtherReceiver), Reflect.set(nativeDescriptorOwner, 'computed', 27, nativeOtherReceiver), nativeOtherReceiver.seed, nativeDescriptorOwner.seed];".as_ptr()), 1);
-    let receiver_observed = thaw_quickjs::thaw_js_get_global(c"nativeReceiverObserved".as_ptr());
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.nativeOtherReceiver = { seed: 40 }; globalThis.nativeReceiverObserved = [Reflect.get(nativeDescriptorOwner, 'computed', nativeOtherReceiver), Reflect.set(nativeDescriptorOwner, 'computed', 27, nativeOtherReceiver), nativeOtherReceiver.seed, nativeDescriptorOwner.seed];".as_ptr()), 1);
+    let receiver_observed = crate::engine::thaw_js_get_global(c"nativeReceiverObserved".as_ptr());
     assert_eq!(
         unsafe { qjs_query(receiver_observed, 2) }.unwrap(),
         "43,true,27,8"
     );
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(receiver_observed), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeDataReceiverObserved = (() => { let calls = 0; const accessor = {}; Object.defineProperty(accessor, 'seed', { set(value) { calls++; }, configurable: true }); const plain = {}; const accessorWrite = Reflect.set(nativeDescriptorOwner, 'seed', 61, accessor); const plainWrite = Reflect.set(nativeDescriptorOwner, 'seed', 62, plain); return [accessorWrite, calls, plainWrite, plain.seed, nativeDescriptorOwner.seed]; })();".as_ptr()), 1);
-    let data_receiver = thaw_quickjs::thaw_js_get_global(c"nativeDataReceiverObserved".as_ptr());
+    assert_eq!(crate::engine::thaw_js_release_handle(receiver_observed), 1);
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.nativeDataReceiverObserved = (() => { let calls = 0; const accessor = {}; Object.defineProperty(accessor, 'seed', { set(value) { calls++; }, configurable: true }); const plain = {}; const accessorWrite = Reflect.set(nativeDescriptorOwner, 'seed', 61, accessor); const plainWrite = Reflect.set(nativeDescriptorOwner, 'seed', 62, plain); return [accessorWrite, calls, plainWrite, plain.seed, nativeDescriptorOwner.seed]; })();".as_ptr()), 1);
+    let data_receiver = crate::engine::thaw_js_get_global(c"nativeDataReceiverObserved".as_ptr());
     assert_eq!(
         unsafe { qjs_query(data_receiver, 2) }.unwrap(),
         "false,0,true,62,8"
     );
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(data_receiver), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeThrownIdentity = (() => { const marker = { thrown: true }; Object.defineProperty(nativeDescriptorOwner, 'throwingGet', { get() { throw marker; }, configurable: true }); Object.defineProperty(nativeDescriptorOwner, 'throwingSet', { set(_) { throw marker; }, configurable: true }); let read = false, write = false; try { nativeDescriptorOwner.throwingGet; } catch (error) { read = error === marker; } try { nativeDescriptorOwner.throwingSet = 1; } catch (error) { write = error === marker; } return [read, write]; })();".as_ptr()), 1);
-    let thrown_identity = thaw_quickjs::thaw_js_get_global(c"nativeThrownIdentity".as_ptr());
+    assert_eq!(crate::engine::thaw_js_release_handle(data_receiver), 1);
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.nativeThrownIdentity = (() => { const marker = { thrown: true }; Object.defineProperty(nativeDescriptorOwner, 'throwingGet', { get() { throw marker; }, configurable: true }); Object.defineProperty(nativeDescriptorOwner, 'throwingSet', { set(_) { throw marker; }, configurable: true }); let read = false, write = false; try { nativeDescriptorOwner.throwingGet; } catch (error) { read = error === marker; } try { nativeDescriptorOwner.throwingSet = 1; } catch (error) { write = error === marker; } return [read, write]; })();".as_ptr()), 1);
+    let thrown_identity = crate::engine::thaw_js_get_global(c"nativeThrownIdentity".as_ptr());
     assert_eq!(
         unsafe { qjs_query(thrown_identity, 2) }.unwrap(),
         "true,true"
     );
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(thrown_identity), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"Object.defineProperty(nativeDescriptorOwner, 'attributeOnlySetter', { set(value) { this.seed = value; }, configurable: true }); Object.defineProperty(nativeDescriptorOwner, 'attributeOnlySetter', { configurable: false }); globalThis.nativeAttributeOnlySetter = [Object.getOwnPropertyDescriptor(nativeDescriptorOwner, 'attributeOnlySetter').get === undefined, Reflect.set(nativeDescriptorOwner, 'attributeOnlySetter', 19), nativeDescriptorOwner.attributeOnlySetter === undefined, nativeDescriptorOwner.seed === 19];".as_ptr()), 1);
-    let attribute_only = thaw_quickjs::thaw_js_get_global(c"nativeAttributeOnlySetter".as_ptr());
+    assert_eq!(crate::engine::thaw_js_release_handle(thrown_identity), 1);
+    assert_eq!(crate::engine::thaw_js_load(c"Object.defineProperty(nativeDescriptorOwner, 'attributeOnlySetter', { set(value) { this.seed = value; }, configurable: true }); Object.defineProperty(nativeDescriptorOwner, 'attributeOnlySetter', { configurable: false }); globalThis.nativeAttributeOnlySetter = [Object.getOwnPropertyDescriptor(nativeDescriptorOwner, 'attributeOnlySetter').get === undefined, Reflect.set(nativeDescriptorOwner, 'attributeOnlySetter', 19), nativeDescriptorOwner.attributeOnlySetter === undefined, nativeDescriptorOwner.seed === 19];".as_ptr()), 1);
+    let attribute_only = crate::engine::thaw_js_get_global(c"nativeAttributeOnlySetter".as_ptr());
     assert_eq!(
         unsafe { qjs_query(attribute_only, 2) }.unwrap(),
         "true,true,true,true"
     );
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(attribute_only), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"Object.defineProperty(nativeDescriptorOwner, 'writeOnly', { set(value) { this.seed = value; }, configurable: false }); globalThis.nativeWriteOnlyObserved = [Reflect.set(nativeDescriptorOwner, 'writeOnly', 13), nativeDescriptorOwner.writeOnly === undefined, nativeDescriptorOwner.seed === 13]; Object.defineProperty(nativeDescriptorOwner, 'stable', { get() { return 9; }, configurable: false }); globalThis.nativeStableRedefined = Reflect.defineProperty(nativeDescriptorOwner, 'stable', Reflect.getOwnPropertyDescriptor(nativeDescriptorOwner, 'stable')); Object.defineProperty(nativeDescriptorOwner, 'computed', { value: 22, writable: true, configurable: true }); Object.defineProperty(nativeDescriptorOwner, 'fixed', { value: 1, writable: true, configurable: false }); Object.defineProperty(nativeDescriptorOwner, 'fixed', { value: 2 }); Object.defineProperty(nativeDescriptorOwner, 'fixed', { writable: false }); globalThis.nativeFixedObserved = nativeDescriptorOwner.fixed; Object.preventExtensions(nativeDescriptorOwner); globalThis.nativeIntegrityObserved = [Object.isExtensible(nativeDescriptorOwner), Reflect.set(nativeDescriptorOwner, 'added', 1), Reflect.ownKeys(nativeDescriptorOwner).includes('fixed'), Reflect.setPrototypeOf(nativeDescriptorOwner, Object.getPrototypeOf(nativeDescriptorOwner))];".as_ptr()), 1);
-    let write_only = thaw_quickjs::thaw_js_get_global(c"nativeWriteOnlyObserved".as_ptr());
+    assert_eq!(crate::engine::thaw_js_release_handle(attribute_only), 1);
+    assert_eq!(crate::engine::thaw_js_load(c"Object.defineProperty(nativeDescriptorOwner, 'writeOnly', { set(value) { this.seed = value; }, configurable: false }); globalThis.nativeWriteOnlyObserved = [Reflect.set(nativeDescriptorOwner, 'writeOnly', 13), nativeDescriptorOwner.writeOnly === undefined, nativeDescriptorOwner.seed === 13]; Object.defineProperty(nativeDescriptorOwner, 'stable', { get() { return 9; }, configurable: false }); globalThis.nativeStableRedefined = Reflect.defineProperty(nativeDescriptorOwner, 'stable', Reflect.getOwnPropertyDescriptor(nativeDescriptorOwner, 'stable')); Object.defineProperty(nativeDescriptorOwner, 'computed', { value: 22, writable: true, configurable: true }); Object.defineProperty(nativeDescriptorOwner, 'fixed', { value: 1, writable: true, configurable: false }); Object.defineProperty(nativeDescriptorOwner, 'fixed', { value: 2 }); Object.defineProperty(nativeDescriptorOwner, 'fixed', { writable: false }); globalThis.nativeFixedObserved = nativeDescriptorOwner.fixed; Object.preventExtensions(nativeDescriptorOwner); globalThis.nativeIntegrityObserved = [Object.isExtensible(nativeDescriptorOwner), Reflect.set(nativeDescriptorOwner, 'added', 1), Reflect.ownKeys(nativeDescriptorOwner).includes('fixed'), Reflect.setPrototypeOf(nativeDescriptorOwner, Object.getPrototypeOf(nativeDescriptorOwner))];".as_ptr()), 1);
+    let write_only = crate::engine::thaw_js_get_global(c"nativeWriteOnlyObserved".as_ptr());
     assert_eq!(
         unsafe { qjs_query(write_only, 2) }.unwrap(),
         "true,true,true"
     );
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(write_only), 1);
-    let redefined = thaw_quickjs::thaw_js_get_global(c"nativeStableRedefined".as_ptr());
+    assert_eq!(crate::engine::thaw_js_release_handle(write_only), 1);
+    let redefined = crate::engine::thaw_js_get_global(c"nativeStableRedefined".as_ptr());
     assert_eq!(unsafe { qjs_query(redefined, 2) }.unwrap(), "true");
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(redefined), 1);
-    let fixed = thaw_quickjs::thaw_js_get_global(c"nativeFixedObserved".as_ptr());
+    assert_eq!(crate::engine::thaw_js_release_handle(redefined), 1);
+    let fixed = crate::engine::thaw_js_get_global(c"nativeFixedObserved".as_ptr());
     assert_eq!(unsafe { qjs_query(fixed, 2) }.unwrap(), "2");
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(fixed), 1);
-    let integrity = thaw_quickjs::thaw_js_get_global(c"nativeIntegrityObserved".as_ptr());
+    assert_eq!(crate::engine::thaw_js_release_handle(fixed), 1);
+    let integrity = crate::engine::thaw_js_get_global(c"nativeIntegrityObserved".as_ptr());
     assert_eq!(
         unsafe { qjs_query(integrity, 2) }.unwrap(),
         "false,false,true,true"
     );
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(integrity), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(integrity), 1);
     let mut data = ptr::null_mut();
     assert_eq!(
         unsafe { napi_get_named_property(env_ptr, object, c"computed".as_ptr(), &mut data) },
@@ -3051,13 +3051,13 @@ fn graph_proxy_define_property_keeps_live_native_accessor() {
         unsafe { value_ref(data) },
         Ok(Value::Number(22.0))
     ));
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeNonextensibleReplace = [Reflect.defineProperty(nativeDescriptorOwner, 'computed', { get() { return this.seed + 1; }, configurable: true }), nativeDescriptorOwner.computed === nativeDescriptorOwner.seed + 1, Reflect.defineProperty(nativeDescriptorOwner, 'absentAfterPrevent', { get() { return 1; }, configurable: true })];".as_ptr()), 1);
-    let replaced = thaw_quickjs::thaw_js_get_global(c"nativeNonextensibleReplace".as_ptr());
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.nativeNonextensibleReplace = [Reflect.defineProperty(nativeDescriptorOwner, 'computed', { get() { return this.seed + 1; }, configurable: true }), nativeDescriptorOwner.computed === nativeDescriptorOwner.seed + 1, Reflect.defineProperty(nativeDescriptorOwner, 'absentAfterPrevent', { get() { return 1; }, configurable: true })];".as_ptr()), 1);
+    let replaced = crate::engine::thaw_js_get_global(c"nativeNonextensibleReplace".as_ptr());
     assert_eq!(
         unsafe { qjs_query(replaced, 2) }.unwrap(),
         "true,true,false"
     );
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(replaced), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(replaced), 1);
     let computed = unsafe { env_mut(env_ptr) }
         .unwrap()
         .alloc(Value::String("computed".into()));
@@ -3067,10 +3067,10 @@ fn graph_proxy_define_property_keeps_live_native_accessor() {
         NAPI_OK
     );
     assert!(deleted);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeDeletedObserved = [Reflect.ownKeys(nativeDescriptorOwner).includes('computed'), Reflect.getOwnPropertyDescriptor(nativeDescriptorOwner, 'computed') === undefined, nativeDescriptorOwner.computed === undefined]; delete globalThis.nativeDescriptorOwner;".as_ptr()), 1);
-    let deleted = thaw_quickjs::thaw_js_get_global(c"nativeDeletedObserved".as_ptr());
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.nativeDeletedObserved = [Reflect.ownKeys(nativeDescriptorOwner).includes('computed'), Reflect.getOwnPropertyDescriptor(nativeDescriptorOwner, 'computed') === undefined, nativeDescriptorOwner.computed === undefined]; delete globalThis.nativeDescriptorOwner;".as_ptr()), 1);
+    let deleted = crate::engine::thaw_js_get_global(c"nativeDeletedObserved".as_ptr());
     assert_eq!(unsafe { qjs_query(deleted, 2) }.unwrap(), "false,true,true");
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(deleted), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(deleted), 1);
     let owned = HOST
         .with(|host| host.borrow_mut().module_envs.pop())
         .unwrap();
@@ -3086,7 +3086,7 @@ fn graph_proxy_reflects_native_accessor_with_snapshot_lifetime() {
     unsafe extern "C" fn own_receiver(_: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
         info.as_ref().map_or(ptr::null_mut(), |info| info.this_arg)
     }
-    thaw_quickjs::register_napi_bridge(
+    crate::engine::register_napi_bridge(
         thaw_napi_export_names,
         thaw_napi_call_typed_bridge,
         thaw_napi_handle_bridge,
@@ -3130,7 +3130,7 @@ fn graph_proxy_reflects_native_accessor_with_snapshot_lifetime() {
         object as u64, other as u64
     ))
     .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    assert_eq!(crate::engine::thaw_js_load(script.as_ptr()), 1);
     let env = HOST
         .with(|host| host.borrow().module_envs.last().unwrap().as_ref() as *const Env as NapiEnv);
     let key_value = unsafe { env_mut(env) }
@@ -3142,18 +3142,18 @@ fn graph_proxy_reflects_native_accessor_with_snapshot_lifetime() {
         NAPI_OK
     );
     assert!(deleted);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeAccessorAfter = nativeAccessorExtracted.call(nativeAccessorOther) === nativeAccessorOther; globalThis.nativeAccessorGone = Reflect.getOwnPropertyDescriptor(nativeAccessorObject, 'live') === undefined;".as_ptr()), 1);
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.nativeAccessorAfter = nativeAccessorExtracted.call(nativeAccessorOther) === nativeAccessorOther; globalThis.nativeAccessorGone = Reflect.getOwnPropertyDescriptor(nativeAccessorObject, 'live') === undefined;".as_ptr()), 1);
     for name in [
         c"nativeAccessorSame".as_ptr(),
         c"nativeAccessorBefore".as_ptr(),
         c"nativeAccessorAfter".as_ptr(),
         c"nativeAccessorGone".as_ptr(),
     ] {
-        let handle = thaw_quickjs::thaw_js_get_global(name);
+        let handle = crate::engine::thaw_js_get_global(name);
         assert_eq!(unsafe { qjs_query(handle, 2) }.unwrap(), "true");
-        assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
+        assert_eq!(crate::engine::thaw_js_release_handle(handle), 1);
     }
-    assert_eq!(thaw_quickjs::thaw_js_load(c"delete globalThis.nativeAccessorObject; delete globalThis.nativeAccessorOther; delete globalThis.nativeAccessorExtracted;".as_ptr()), 1);
+    assert_eq!(crate::engine::thaw_js_load(c"delete globalThis.nativeAccessorObject; delete globalThis.nativeAccessorOther; delete globalThis.nativeAccessorExtracted;".as_ptr()), 1);
     let owned = HOST
         .with(|host| host.borrow_mut().module_envs.pop())
         .unwrap();
@@ -3170,7 +3170,7 @@ fn native_array_accessor_graph_keeps_array_identity_and_length() {
         info.as_ref()
             .map_or(ptr::null_mut(), |info| info.data as NapiValue)
     }
-    thaw_quickjs::register_napi_bridge(
+    crate::engine::register_napi_bridge(
         thaw_napi_export_names,
         thaw_napi_call_typed_bridge,
         thaw_napi_handle_bridge,
@@ -3229,24 +3229,24 @@ fn native_array_accessor_graph_keeps_array_identity_and_length() {
         array as u64
     ))
     .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let observed = thaw_quickjs::thaw_js_get_global(c"nativeLiveArrayObserved".as_ptr());
+    assert_eq!(crate::engine::thaw_js_load(script.as_ptr()), 1);
+    let observed = crate::engine::thaw_js_get_global(c"nativeLiveArrayObserved".as_ptr());
     assert_eq!(
         unsafe { qjs_query(observed, 2) }.unwrap(),
         "true,3,1,7,3,0,1,2,length,extra,function"
     );
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(observed), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(
+    assert_eq!(crate::engine::thaw_js_release_handle(observed), 1);
+    assert_eq!(crate::engine::thaw_js_load(
         c"Object.defineProperty(nativeLiveArray, 'length', { writable: false }); globalThis.nativeLiveArrayReadonly = Object.getOwnPropertyDescriptor(nativeLiveArray, 'length').writable;".as_ptr()), 1);
-    let readonly = thaw_quickjs::thaw_js_get_global(c"nativeLiveArrayReadonly".as_ptr());
+    let readonly = crate::engine::thaw_js_get_global(c"nativeLiveArrayReadonly".as_ptr());
     assert_eq!(unsafe { qjs_query(readonly, 2) }.unwrap(), "false");
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(readonly), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(readonly), 1);
     let three = unsafe { env.as_mut() }.unwrap().alloc(Value::Number(3.0));
     assert_eq!(
         unsafe { napi_set_named_property(env, array, c"length".as_ptr(), three) },
         NAPI_GENERIC_FAILURE
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(c"delete globalThis.nativeLiveArray; delete globalThis.nativeLiveArrayObserved; delete globalThis.nativeLiveArrayReadonly;".as_ptr()), 1);
+    assert_eq!(crate::engine::thaw_js_load(c"delete globalThis.nativeLiveArray; delete globalThis.nativeLiveArrayObserved; delete globalThis.nativeLiveArrayReadonly;".as_ptr()), 1);
     let owned = HOST
         .with(|host| host.borrow_mut().module_envs.pop())
         .unwrap();
@@ -3564,24 +3564,24 @@ fn native_data_definition_skips_setter_and_checks_readonly_compatibility() {
 #[test]
 fn live_quickjs_invalid_call_target_releases_argument_lease() {
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"globalThis.napiLeaseValue = {};".as_ptr()),
+        crate::engine::thaw_js_load(c"globalThis.napiLeaseValue = {};".as_ptr()),
         1
     );
-    let handle = thaw_quickjs::thaw_js_get_global(c"napiLeaseValue".as_ptr());
+    let handle = crate::engine::thaw_js_get_global(c"napiLeaseValue".as_ptr());
     assert_ne!(handle, 0);
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1);
     let graph = std::ffi::CString::new(format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{handle}}}],"leases":[{handle}]}}"#
     )).unwrap();
-    let result = thaw_quickjs::thaw_js_call_handle_with_this_graph_result(0, graph.as_ptr());
+    let result = crate::engine::thaw_js_call_handle_with_this_graph_result(0, graph.as_ptr());
     assert_eq!(result.value, 0);
     assert!(!result.error.is_null());
     unsafe {
         thaw_arena::destroy_string(result.error);
     }
     // The only remaining reference is the original get_global retain.
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 0);
 }
 
 // Unrun control: a failed `new` target check has not decoded its argument
@@ -3590,23 +3590,23 @@ fn live_quickjs_invalid_call_target_releases_argument_lease() {
 #[test]
 fn live_quickjs_invalid_constructor_releases_argument_lease() {
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"globalThis.napiConstructorLease = {};".as_ptr()),
+        crate::engine::thaw_js_load(c"globalThis.napiConstructorLease = {};".as_ptr()),
         1
     );
-    let handle = thaw_quickjs::thaw_js_get_global(c"napiConstructorLease".as_ptr());
+    let handle = crate::engine::thaw_js_get_global(c"napiConstructorLease".as_ptr());
     assert_ne!(handle, 0);
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1);
     let graph = std::ffi::CString::new(format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{handle}}}],"leases":[{handle}]}}"#
     )).unwrap();
-    let result = thaw_quickjs::thaw_js_construct_handle_graph_args_result(0, graph.as_ptr());
+    let result = crate::engine::thaw_js_construct_handle_graph_args_result(0, graph.as_ptr());
     assert_eq!(result.value, 0);
     assert!(!result.error.is_null());
     unsafe {
         thaw_arena::destroy_string(result.error);
     }
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 0);
 }
 
 // Unrun: the paired native Function node must select its native half in the
@@ -3702,14 +3702,14 @@ fn foreign_symbol_identity_preflight_rejects_unknown_pointer_before_dereference(
 #[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_symbol_property_key_keeps_identity() {
-    assert_eq!(thaw_quickjs::thaw_js_load(
+    assert_eq!(crate::engine::thaw_js_load(
         c"globalThis.napiSymbolKey = Symbol('same'); globalThis.napiSymbolObject = {[napiSymbolKey]: 6};".as_ptr()), 1);
-    let key_handle = thaw_quickjs::thaw_js_get_global(c"napiSymbolKey".as_ptr());
-    let object_handle = thaw_quickjs::thaw_js_get_global(c"napiSymbolObject".as_ptr());
+    let key_handle = crate::engine::thaw_js_get_global(c"napiSymbolKey".as_ptr());
+    let object_handle = crate::engine::thaw_js_get_global(c"napiSymbolObject".as_ptr());
     assert_ne!(key_handle, 0);
     assert_ne!(object_handle, 0);
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(key_handle), 1);
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(object_handle), 1);
+    assert_eq!(crate::engine::thaw_js_retain_handle(key_handle), 1);
+    assert_eq!(crate::engine::thaw_js_retain_handle(object_handle), 1);
     let graph = format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}},{{"r":2}}]}},{{"hdl":{object_handle}}},{{"hdl":{key_handle}}}],"leases":[{object_handle},{key_handle}]}}"#
     );
@@ -3747,8 +3747,8 @@ fn live_quickjs_symbol_property_key_keeps_identity() {
         NAPI_OK
     );
     assert_eq!(value, 9.0);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(key_handle), 1);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(object_handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(key_handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(object_handle), 1);
     drop(env);
 }
 
@@ -3757,11 +3757,11 @@ fn live_quickjs_symbol_property_key_keeps_identity() {
 #[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_surrogate_string_keys_stay_distinct_on_native_object() {
-    assert_eq!(thaw_quickjs::thaw_js_load(
+    assert_eq!(crate::engine::thaw_js_load(
         c"globalThis.napiHighKey = String.fromCharCode(0xd800); globalThis.napiLowKey = String.fromCharCode(0xdc00); globalThis.napiValidKey = 'a';".as_ptr()), 1);
-    let high_handle = thaw_quickjs::thaw_js_get_global(c"napiHighKey".as_ptr());
-    let low_handle = thaw_quickjs::thaw_js_get_global(c"napiLowKey".as_ptr());
-    let valid_handle = thaw_quickjs::thaw_js_get_global(c"napiValidKey".as_ptr());
+    let high_handle = crate::engine::thaw_js_get_global(c"napiHighKey".as_ptr());
+    let low_handle = crate::engine::thaw_js_get_global(c"napiLowKey".as_ptr());
+    let valid_handle = crate::engine::thaw_js_get_global(c"napiValidKey".as_ptr());
     assert_ne!(high_handle, 0);
     assert_ne!(low_handle, 0);
     assert_ne!(valid_handle, 0);
@@ -3819,21 +3819,21 @@ fn live_quickjs_surrogate_string_keys_stay_distinct_on_native_object() {
     // the call; the caller's handle stays valid until its scope closes. The
     // QuickJS handles therefore still belong to the test and release cleanly
     // (1), exactly like the key handle in the preceding test.
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(high_handle), 1);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(low_handle), 1);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(valid_handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(high_handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(low_handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(valid_handle), 1);
 }
 
 #[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_object_keeps_native_symbol_key_and_integrity() {
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"globalThis.napiSymbolObject = {};".as_ptr()),
+        crate::engine::thaw_js_load(c"globalThis.napiSymbolObject = {};".as_ptr()),
         1
     );
-    let handle = thaw_quickjs::thaw_js_get_global(c"napiSymbolObject".as_ptr());
+    let handle = crate::engine::thaw_js_get_global(c"napiSymbolObject".as_ptr());
     assert_ne!(handle, 0);
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1);
     let graph = format!(r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{handle}}}],"leases":[{handle}]}}"#);
     let mut env = Env::new();
     let object = unsafe { parse_napi_graph_value(&mut env, &graph) }.unwrap();
@@ -3887,7 +3887,7 @@ fn live_quickjs_object_keeps_native_symbol_key_and_integrity() {
         NAPI_OK
     );
     assert!(!present);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 1);
     drop(env);
 }
 
@@ -3896,14 +3896,14 @@ fn live_quickjs_object_keeps_native_symbol_key_and_integrity() {
 #[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_strict_equality_uses_javascript_values() {
-    assert_eq!(thaw_quickjs::thaw_js_load(
+    assert_eq!(crate::engine::thaw_js_load(
         c"globalThis.napiNan = NaN; globalThis.napiPositiveZero = 0; globalThis.napiNegativeZero = -0;".as_ptr()), 1);
-    let nan = thaw_quickjs::thaw_js_get_global(c"napiNan".as_ptr());
-    let positive = thaw_quickjs::thaw_js_get_global(c"napiPositiveZero".as_ptr());
-    let negative = thaw_quickjs::thaw_js_get_global(c"napiNegativeZero".as_ptr());
+    let nan = crate::engine::thaw_js_get_global(c"napiNan".as_ptr());
+    let positive = crate::engine::thaw_js_get_global(c"napiPositiveZero".as_ptr());
+    let negative = crate::engine::thaw_js_get_global(c"napiNegativeZero".as_ptr());
     let mut env = Env::new();
     for handle in [nan, positive, negative] {
-        assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+        assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1);
     }
     let graph = format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}},{{"r":2}},{{"r":3}}]}},{{"hdl":{nan}}},{{"hdl":{positive}}},{{"hdl":{negative}}}],"leases":[{nan},{positive},{negative}]}}"#
@@ -3941,7 +3941,7 @@ fn live_quickjs_strict_equality_uses_javascript_values() {
     );
     assert!(!equal);
     for handle in [nan, positive, negative] {
-        assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
+        assert_eq!(crate::engine::thaw_js_release_handle(handle), 1);
     }
     drop(env);
 }
@@ -3951,10 +3951,10 @@ fn live_quickjs_strict_equality_uses_javascript_values() {
 #[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_property_names_filter_descriptors_without_getting_values() {
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiEnumReads = 0; globalThis.napiEnumSymbol = Symbol('enum'); globalThis.napiEnumObject = Object.create({ fromProto: 4, shadowed: 7 }); Object.defineProperty(napiEnumObject, '2', { value: 2, enumerable: true, configurable: true }); Object.defineProperty(napiEnumObject, 'lazy', { get() { napiEnumReads++; return 3; }, enumerable: true, configurable: true }); Object.defineProperty(napiEnumObject, 'hidden', { value: 5, enumerable: false, configurable: true }); Object.defineProperty(napiEnumObject, 'shadowed', { value: 8, enumerable: false, configurable: true }); Object.defineProperty(napiEnumObject, napiEnumSymbol, { value: 6, enumerable: true, configurable: true });".as_ptr()), 1);
-    let handle = thaw_quickjs::thaw_js_get_global(c"napiEnumObject".as_ptr());
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.napiEnumReads = 0; globalThis.napiEnumSymbol = Symbol('enum'); globalThis.napiEnumObject = Object.create({ fromProto: 4, shadowed: 7 }); Object.defineProperty(napiEnumObject, '2', { value: 2, enumerable: true, configurable: true }); Object.defineProperty(napiEnumObject, 'lazy', { get() { napiEnumReads++; return 3; }, enumerable: true, configurable: true }); Object.defineProperty(napiEnumObject, 'hidden', { value: 5, enumerable: false, configurable: true }); Object.defineProperty(napiEnumObject, 'shadowed', { value: 8, enumerable: false, configurable: true }); Object.defineProperty(napiEnumObject, napiEnumSymbol, { value: 6, enumerable: true, configurable: true });".as_ptr()), 1);
+    let handle = crate::engine::thaw_js_get_global(c"napiEnumObject".as_ptr());
     assert_ne!(handle, 0);
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1);
     let graph = format!(r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{handle}}}],"leases":[{handle}]}}"#);
     let mut env = Env::new();
     let object = unsafe { parse_napi_graph_value(&mut env, &graph) }.unwrap();
@@ -4010,12 +4010,12 @@ fn live_quickjs_property_names_filter_descriptors_without_getting_values() {
         .iter()
         .flatten()
         .any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::QuickJsHandle { .. }))));
-    let reads = thaw_quickjs::thaw_js_get_global(c"napiEnumReads".as_ptr());
+    let reads = crate::engine::thaw_js_get_global(c"napiEnumReads".as_ptr());
     assert_eq!(unsafe { qjs_query(reads, 2) }.unwrap(), "0");
     // thaw_js_get_global retains a handle for every value, primitives included
     // (see the `nativeAccessorIdentity` boolean elsewhere): releasing it succeeds.
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(reads), 1);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(reads), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 1);
     drop(env);
 }
 
@@ -4209,12 +4209,12 @@ fn live_quickjs_native_utf16_property_keys_keep_surrogate_units() {
     assert!(!present);
 
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"globalThis.napiUtf16Object = {};".as_ptr()),
+        crate::engine::thaw_js_load(c"globalThis.napiUtf16Object = {};".as_ptr()),
         1
     );
-    let handle = thaw_quickjs::thaw_js_get_global(c"napiUtf16Object".as_ptr());
+    let handle = crate::engine::thaw_js_get_global(c"napiUtf16Object".as_ptr());
     assert_ne!(handle, 0);
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1);
     let graph = format!(r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{handle}}}],"leases":[{handle}]}}"#);
     let live = unsafe { parse_napi_graph_value(&mut env, &graph) }.unwrap();
     assert_eq!(
@@ -4230,7 +4230,7 @@ fn live_quickjs_native_utf16_property_keys_keep_surrogate_units() {
         NAPI_OK
     );
     assert_eq!(
-        thaw_quickjs::thaw_js_load(
+        crate::engine::thaw_js_load(
             c"globalThis.napiSavedReflectSet = Reflect.set; Reflect.set = () => false;".as_ptr()
         ),
         1
@@ -4240,7 +4240,7 @@ fn live_quickjs_native_utf16_property_keys_keep_surrogate_units() {
         NAPI_OK
     );
     assert_eq!(
-        thaw_quickjs::thaw_js_load(
+        crate::engine::thaw_js_load(
             c"Reflect.set = napiSavedReflectSet; delete globalThis.napiSavedReflectSet;".as_ptr()
         ),
         1
@@ -4354,7 +4354,7 @@ fn live_quickjs_native_utf16_property_keys_keep_surrogate_units() {
         .collect::<Vec<_>>();
     units.sort_unstable();
     assert_eq!(units, vec![0xd800, 0xdc00]);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 1);
     drop(env);
 }
 
@@ -4363,15 +4363,15 @@ fn live_quickjs_native_utf16_property_keys_keep_surrogate_units() {
 #[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_string_coercion_preserves_effects_units_and_throw() {
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiCoercionReads = 0; globalThis.napiCoercionThrown = { token: 1 }; globalThis.napiCoercionValue = { [Symbol.toPrimitive](hint) { napiCoercionReads++; if (hint !== 'string') throw new Error('wrong hint'); return '\\uD800'; } }; globalThis.napiCoercionBad = { [Symbol.toPrimitive]() { throw napiCoercionThrown; } }; globalThis.napiCoercionSymbol = Symbol('native'); globalThis.napiCoercionNull = null;".as_ptr()), 1);
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.napiCoercionReads = 0; globalThis.napiCoercionThrown = { token: 1 }; globalThis.napiCoercionValue = { [Symbol.toPrimitive](hint) { napiCoercionReads++; if (hint !== 'string') throw new Error('wrong hint'); return '\\uD800'; } }; globalThis.napiCoercionBad = { [Symbol.toPrimitive]() { throw napiCoercionThrown; } }; globalThis.napiCoercionSymbol = Symbol('native'); globalThis.napiCoercionNull = null;".as_ptr()), 1);
     let mut env = Env::new();
-    let good_handle = thaw_quickjs::thaw_js_get_global(c"napiCoercionValue".as_ptr());
-    let bad_handle = thaw_quickjs::thaw_js_get_global(c"napiCoercionBad".as_ptr());
-    let symbol_handle = thaw_quickjs::thaw_js_get_global(c"napiCoercionSymbol".as_ptr());
-    let null_handle = thaw_quickjs::thaw_js_get_global(c"napiCoercionNull".as_ptr());
-    let thrown_handle = thaw_quickjs::thaw_js_get_global(c"napiCoercionThrown".as_ptr());
+    let good_handle = crate::engine::thaw_js_get_global(c"napiCoercionValue".as_ptr());
+    let bad_handle = crate::engine::thaw_js_get_global(c"napiCoercionBad".as_ptr());
+    let symbol_handle = crate::engine::thaw_js_get_global(c"napiCoercionSymbol".as_ptr());
+    let null_handle = crate::engine::thaw_js_get_global(c"napiCoercionNull".as_ptr());
+    let thrown_handle = crate::engine::thaw_js_get_global(c"napiCoercionThrown".as_ptr());
     for handle in [good_handle, bad_handle, symbol_handle, null_handle] {
-        assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+        assert_eq!(crate::engine::thaw_js_retain_handle(handle), 1);
     }
     let good = unsafe {
         parse_napi_graph_value(
@@ -4423,7 +4423,7 @@ fn live_quickjs_string_coercion_preserves_effects_units_and_throw() {
         NAPI_OK
     );
     assert_eq!((written, &units[..2]), (2, &[0xd800, b',' as u16][..]));
-    let reads = thaw_quickjs::thaw_js_get_global(c"napiCoercionReads".as_ptr());
+    let reads = crate::engine::thaw_js_get_global(c"napiCoercionReads".as_ptr());
     assert_eq!(unsafe { qjs_query(reads, 10) }.unwrap(), "1");
     assert_eq!(
         unsafe { napi_coerce_to_string(&mut env, bad, &mut output) },
@@ -4435,10 +4435,10 @@ fn live_quickjs_string_coercion_preserves_effects_units_and_throw() {
         NAPI_OK
     );
     let retained = unsafe { qjs_handle(exception) }.expect("original JS thrown value");
-    let same = thaw_quickjs::thaw_js_strict_equal_handles_result(retained, thrown_handle);
+    let same = crate::engine::thaw_js_strict_equal_handles_result(retained, thrown_handle);
     assert!(same.error.is_null());
     assert_eq!(same.value, 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiSavedConcat = String.prototype.concat; String.prototype.concat = () => 'spoof';".as_ptr()), 1);
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.napiSavedConcat = String.prototype.concat; String.prototype.concat = () => 'spoof';".as_ptr()), 1);
     assert_eq!(
         unsafe { napi_coerce_to_string(&mut env, symbol, &mut output) },
         NAPI_PENDING_EXCEPTION
@@ -4449,7 +4449,7 @@ fn live_quickjs_string_coercion_preserves_effects_units_and_throw() {
     );
     assert!(unsafe { qjs_handle(exception) }.is_some());
     assert_eq!(
-        thaw_quickjs::thaw_js_load(
+        crate::engine::thaw_js_load(
             c"String.prototype.concat = napiSavedConcat; delete globalThis.napiSavedConcat;"
                 .as_ptr()
         ),
@@ -4463,7 +4463,7 @@ fn live_quickjs_string_coercion_preserves_effects_units_and_throw() {
         thrown_handle,
         reads,
     ] {
-        thaw_quickjs::thaw_js_release_handle(handle);
+        crate::engine::thaw_js_release_handle(handle);
     }
 }
 
@@ -4482,7 +4482,7 @@ fn graph_owned_native_symbol_coercion_throws_engine_type_error_before_exposure()
     // The native graph bridge must use its captured Symbol intrinsic and the
     // actual native Symbol descriptor, even when user code replaces Symbol.
     assert_eq!(
-        thaw_quickjs::thaw_js_load(
+        crate::engine::thaw_js_load(
             c"globalThis.__savedNapiSymbol = Symbol; globalThis.Symbol = () => 17;".as_ptr()
         ),
         1
@@ -4502,9 +4502,9 @@ fn graph_owned_native_symbol_coercion_throws_engine_type_error_before_exposure()
     assert!(unsafe { qjs_query(handle, 2) }
         .unwrap()
         .starts_with("TypeError:"));
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(handle), 1);
     assert_eq!(
-        thaw_quickjs::thaw_js_load(
+        crate::engine::thaw_js_load(
             c"globalThis.Symbol = __savedNapiSymbol; delete globalThis.__savedNapiSymbol;".as_ptr()
         ),
         1
@@ -4517,12 +4517,12 @@ fn graph_owned_native_symbol_coercion_throws_engine_type_error_before_exposure()
 #[cfg(feature = "js-engine")]
 #[test]
 fn live_quickjs_property_errors_preserve_original_exception_identity() {
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiPropertyThrown = { marker: 1 }; globalThis.napiPropertyTarget = {}; Object.defineProperty(napiPropertyTarget, 'read', { get() { throw napiPropertyThrown; } }); Object.defineProperty(napiPropertyTarget, 'write', { set(_) { throw napiPropertyThrown; } });".as_ptr()), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiSavedJSONParse = JSON.parse; JSON.parse = () => { throw new Error('spoofed parser'); };".as_ptr()), 1);
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.napiPropertyThrown = { marker: 1 }; globalThis.napiPropertyTarget = {}; Object.defineProperty(napiPropertyTarget, 'read', { get() { throw napiPropertyThrown; } }); Object.defineProperty(napiPropertyTarget, 'write', { set(_) { throw napiPropertyThrown; } });".as_ptr()), 1);
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.napiSavedJSONParse = JSON.parse; JSON.parse = () => { throw new Error('spoofed parser'); };".as_ptr()), 1);
     let mut env = Env::new();
-    let target_handle = thaw_quickjs::thaw_js_get_global(c"napiPropertyTarget".as_ptr());
-    let thrown_handle = thaw_quickjs::thaw_js_get_global(c"napiPropertyThrown".as_ptr());
-    assert_eq!(thaw_quickjs::thaw_js_retain_handle(target_handle), 1);
+    let target_handle = crate::engine::thaw_js_get_global(c"napiPropertyTarget".as_ptr());
+    let thrown_handle = crate::engine::thaw_js_get_global(c"napiPropertyThrown".as_ptr());
+    assert_eq!(crate::engine::thaw_js_retain_handle(target_handle), 1);
     let target = unsafe { parse_napi_graph_value(&mut env, &format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{target_handle}}}],"leases":[{target_handle}]}}"#)) }.unwrap();
     let mut value = ptr::null_mut();
@@ -4536,7 +4536,7 @@ fn live_quickjs_property_errors_preserve_original_exception_identity() {
         NAPI_OK
     );
     let returned = unsafe { qjs_handle(exception) }.expect("original JS getter exception");
-    let same = thaw_quickjs::thaw_js_strict_equal_handles_result(returned, thrown_handle);
+    let same = crate::engine::thaw_js_strict_equal_handles_result(returned, thrown_handle);
     assert!(same.error.is_null());
     assert_eq!(same.value, 1);
     let argument = env.alloc(Value::Number(3.0));
@@ -4549,17 +4549,17 @@ fn live_quickjs_property_errors_preserve_original_exception_identity() {
         NAPI_OK
     );
     let returned = unsafe { qjs_handle(exception) }.expect("original JS setter exception");
-    let same = thaw_quickjs::thaw_js_strict_equal_handles_result(returned, thrown_handle);
+    let same = crate::engine::thaw_js_strict_equal_handles_result(returned, thrown_handle);
     assert!(same.error.is_null());
     assert_eq!(same.value, 1);
     assert_eq!(
-        thaw_quickjs::thaw_js_load(
+        crate::engine::thaw_js_load(
             c"JSON.parse = napiSavedJSONParse; delete globalThis.napiSavedJSONParse;".as_ptr()
         ),
         1
     );
-    thaw_quickjs::thaw_js_release_handle(target_handle);
-    thaw_quickjs::thaw_js_release_handle(thrown_handle);
+    crate::engine::thaw_js_release_handle(target_handle);
+    crate::engine::thaw_js_release_handle(thrown_handle);
 }
 
 // Unrun: a live native Function may lose a configurable own key after its
@@ -4572,7 +4572,7 @@ fn native_function_proxy_reconciles_deleted_shadows_after_prevent_extensions() {
     unsafe extern "C" fn return_undefined(env: NapiEnv, _: NapiCallbackInfo) -> NapiValue {
         env_mut(env).unwrap().alloc(Value::Undefined)
     }
-    thaw_quickjs::register_napi_bridge(
+    crate::engine::register_napi_bridge(
         thaw_napi_export_names,
         thaw_napi_call_typed_bridge,
         thaw_napi_handle_bridge,
@@ -4602,7 +4602,7 @@ fn native_function_proxy_reconciles_deleted_shadows_after_prevent_extensions() {
         function as u64
     ))
     .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    assert_eq!(crate::engine::thaw_js_load(source.as_ptr()), 1);
     let extra = unsafe { env_mut(env_ptr) }
         .unwrap()
         .alloc(Value::Number(3.0));
@@ -4618,7 +4618,7 @@ fn native_function_proxy_reconciles_deleted_shadows_after_prevent_extensions() {
         NAPI_OK
     );
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"Object.preventExtensions(liveNativeFunction);".as_ptr()),
+        crate::engine::thaw_js_load(c"Object.preventExtensions(liveNativeFunction);".as_ptr()),
         1
     );
     for name in ["extra", "name"] {
@@ -4632,10 +4632,10 @@ fn native_function_proxy_reconciles_deleted_shadows_after_prevent_extensions() {
         );
         assert!(deleted);
     }
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeFunctionShadowCleared = !Reflect.ownKeys(liveNativeFunction).includes('extra') && Reflect.getOwnPropertyDescriptor(liveNativeFunction, 'extra') === undefined && liveNativeFunction.extra === undefined && liveNativeFunction.name === originalNativeFunctionName; delete globalThis.liveNativeFunction; delete globalThis.originalNativeFunctionName;".as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_get_global(c"nativeFunctionShadowCleared".as_ptr());
+    assert_eq!(crate::engine::thaw_js_load(c"globalThis.nativeFunctionShadowCleared = !Reflect.ownKeys(liveNativeFunction).includes('extra') && Reflect.getOwnPropertyDescriptor(liveNativeFunction, 'extra') === undefined && liveNativeFunction.extra === undefined && liveNativeFunction.name === originalNativeFunctionName; delete globalThis.liveNativeFunction; delete globalThis.originalNativeFunctionName;".as_ptr()), 1);
+    let result = crate::engine::thaw_js_get_global(c"nativeFunctionShadowCleared".as_ptr());
     assert_eq!(unsafe { qjs_query(result, 2) }.unwrap(), "true");
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(result), 1);
+    assert_eq!(crate::engine::thaw_js_release_handle(result), 1);
     let owned = HOST
         .with(|host| host.borrow_mut().module_envs.pop())
         .unwrap();
@@ -4680,7 +4680,7 @@ fn native_function_proxy_construct_preserves_derived_new_target() {
         }
         ptr::null_mut()
     }
-    thaw_quickjs::register_napi_bridge(
+    crate::engine::register_napi_bridge(
         thaw_napi_export_names,
         thaw_napi_call_typed_bridge,
         thaw_napi_handle_bridge,
@@ -4813,15 +4813,15 @@ fn native_function_proxy_construct_preserves_derived_new_target() {
         function as u64
     ))
     .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_get_global(c"nativeCtorWithTargetResult".as_ptr());
+    assert_eq!(crate::engine::thaw_js_load(source.as_ptr()), 1);
+    let result = crate::engine::thaw_js_get_global(c"nativeCtorWithTargetResult".as_ptr());
     assert_eq!(
         unsafe { qjs_query(result, 2) }.unwrap(),
         "true,true,true,true,true,true,true,true,true,true,true,true,true,true,true"
     );
     assert_eq!(OBSERVED_TARGET_TAG.load(Ordering::SeqCst), 0);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(result), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(
+    assert_eq!(crate::engine::thaw_js_release_handle(result), 1);
+    assert_eq!(crate::engine::thaw_js_load(
         c"delete globalThis.nativeCtorWithTargetResult; delete globalThis.nativeCtorWithTarget;".as_ptr()), 1);
     let owned = HOST
         .with(|host| host.borrow_mut().module_envs.pop())

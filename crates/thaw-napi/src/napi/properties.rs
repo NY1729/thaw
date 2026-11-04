@@ -170,12 +170,12 @@ unsafe fn property_key(env: NapiEnv, handle: NapiValue) -> Result<PropertyKey, N
                     !owner.quickjs_live_values.contains_key(&source));
                 // A key may arrive from another live addon Env. Own a separate
                 // QuickJS registry retain before storing it in this Env's map.
-                if needs_retain && thaw_quickjs::thaw_js_retain_handle(source) == 0 {
+                if needs_retain && crate::engine::thaw_js_retain_handle(source) == 0 {
                     return Err(record_status(env, NAPI_INVALID_ARG));
                 }
                 let (id, duplicate_retain) = {
                     let Ok(owner) = env_mut(env) else {
-                        if needs_retain { thaw_quickjs::thaw_js_release_handle(source); }
+                        if needs_retain { crate::engine::thaw_js_release_handle(source); }
                         return Err(record_status(env, NAPI_INVALID_ARG));
                     };
                     let duplicate_retain = owner.quickjs_live_values.contains_key(&source) && needs_retain;
@@ -192,10 +192,10 @@ unsafe fn property_key(env: NapiEnv, handle: NapiValue) -> Result<PropertyKey, N
                     owner.symbols.insert(id, owned);
                     (id, duplicate_retain)
                 };
-                if duplicate_retain { thaw_quickjs::thaw_js_release_handle(source); }
+                if duplicate_retain { crate::engine::thaw_js_release_handle(source); }
                 return Ok(PropertyKey::Symbol(id));
             }
-            let id = thaw_quickjs::thaw_js_napi_graph_symbol_register(owner_id, source);
+            let id = crate::engine::thaw_js_napi_graph_symbol_register(owner_id, source);
             if id == 0 { return Err(record_status(env, NAPI_GENERIC_FAILURE)); }
             Ok(PropertyKey::Symbol(id))
         }
