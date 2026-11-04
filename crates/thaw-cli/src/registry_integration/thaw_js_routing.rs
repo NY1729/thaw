@@ -40,11 +40,15 @@ fn thaw_js_blockers_manifest() -> serde_json::Value {
     })
 }
 
-/// `THAW_JS_USER_DYNAMIC=1` (with `THAW_JS_RUNTIME=1`) also serves the program's own dynamic code
-/// (`new Function`, `eval`) on thaw-js. Opt-in until the dynamic-storage cases it cannot yet run
-/// (see the QuickJS-removal readiness audit, class 3) match Node.
+/// The program's own dynamic code (`new Function`, `eval`) is served on thaw-js by default under
+/// `THAW_JS_RUNTIME=1`; `THAW_JS_USER_DYNAMIC=0` opts out and keeps it on QuickJS.
 fn thaw_js_user_dynamic_enabled() -> bool {
-    std::env::var("THAW_JS_USER_DYNAMIC").as_deref() == Ok("1")
+    thaw_js_user_dynamic_from(std::env::var("THAW_JS_USER_DYNAMIC").ok().as_deref())
+}
+
+/// Only an explicit `0` turns user dynamic code off; unset or any other value leaves it on.
+fn thaw_js_user_dynamic_from(value: Option<&str>) -> bool {
+    value != Some("0")
 }
 
 /// A routed program whose own source needs the dynamic host, built without `THAW_JS_USER_DYNAMIC=1`,
