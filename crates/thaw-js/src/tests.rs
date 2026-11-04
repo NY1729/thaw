@@ -3707,3 +3707,23 @@ fn property_is_enumerable_sees_accessor_on_proxy_target() {
         "a true"
     );
 }
+
+#[test]
+fn performance_now_is_sub_millisecond_and_monotonic() {
+    assert_eq!(
+        one("let p = performance.now(), mono = true, frac = false;
+             for (let i = 0; i < 100000 && !frac; i++) { const n = performance.now(); if (n < p) mono = false; if (n % 1 !== 0) frac = true; p = n; }
+             console.log(typeof p, mono, frac);"),
+        "number true true"
+    );
+}
+
+#[test]
+fn loop_stats_are_zero_before_the_loop_and_split_idle_after() {
+    let (out, _) = main_run(
+        "const a = __thaw_loop_stats(); console.log(a[0] === 0 && a[1] === 0);
+         // armed from a loop callback: a timer armed in the main script is scheduled from a stale rt.now
+         setTimeout(() => setTimeout(() => { const s = __thaw_loop_stats(); console.log(s[1] > 0, s[0] >= 0); }, 15), 0);",
+    );
+    assert_eq!(out.join("|"), "true|true true");
+}
