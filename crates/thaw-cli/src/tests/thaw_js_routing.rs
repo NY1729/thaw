@@ -452,6 +452,14 @@ fn thaw_js_user_dynamic_blocker_needs_routing_and_no_opt_in() {
 }
 
 #[test]
+fn thaw_js_user_dynamic_is_on_unless_set_to_zero() {
+    assert!(thaw_js_user_dynamic_from(None));
+    assert!(thaw_js_user_dynamic_from(Some("1")));
+    assert!(thaw_js_user_dynamic_from(Some("")));
+    assert!(!thaw_js_user_dynamic_from(Some("0")));
+}
+
+#[test]
 fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
     clear_thaw_js_blockers();
     record_thaw_js_fallback_blocker("thaw-js routing needs QuickJS");
