@@ -375,6 +375,8 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:util/types",
         "node:string_decoder",
         "node:tty",
+        "node:dgram",
+        "node:tls",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
