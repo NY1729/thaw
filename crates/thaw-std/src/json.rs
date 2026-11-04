@@ -10046,6 +10046,8 @@ fn add_error_suffix_properties(
     revive: bool,
 ) {
     let mut index = 0;
+    // `code` goes in after the props bag so bag keys (errno before code) keep their order.
+    let mut code = None;
     while index < suffix.len() {
         let marker = suffix[index];
         if !(2..=6).contains(&marker) {
@@ -10063,11 +10065,7 @@ fn add_error_suffix_properties(
                     Value::String(String::from_utf8_lossy(segment).into_owned())
                 });
             }
-            3 => {
-                fields.entry(b"code".to_vec()).or_insert_with(|| {
-                    Value::String(String::from_utf8_lossy(segment).into_owned())
-                });
-            }
+            3 => code = Some(String::from_utf8_lossy(segment).into_owned()),
             5 => {
                 if let Some(bag) = JsonParser::new(segment).parse() {
                     if let Some(object) = bag.as_object() {
@@ -10094,6 +10092,11 @@ fn add_error_suffix_properties(
             _ => {}
         }
         index = end;
+    }
+    if let Some(code) = code {
+        fields
+            .entry(b"code".to_vec())
+            .or_insert(Value::String(code));
     }
 }
 
@@ -11448,6 +11451,22 @@ mod tests {
             fields.get(b"status".as_slice()),
             Some(Value::Null)
         ));
+    }
+
+    #[test]
+    fn add_error_suffix_keeps_bag_key_order_before_code() {
+        let keys = |suffix: &[u8]| {
+            let mut fields = indexmap::IndexMap::new();
+            add_error_suffix_properties(&mut fields, suffix, false);
+            fields
+                .keys()
+                .map(|key| String::from_utf8_lossy(key).into_owned())
+                .collect::<Vec<_>>()
+        };
+        let bag = b"\x03ENOENT\x05{\"errno\":-2,\"code\":\"ENOENT\",\"syscall\":\"s\"}";
+        assert_eq!(keys(bag), ["errno", "code", "syscall"]);
+        // Without a bag `code` must still be present.
+        assert_eq!(keys(b"\x03X"), ["code"]);
     }
 
     #[test]
