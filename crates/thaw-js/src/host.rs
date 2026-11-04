@@ -249,7 +249,7 @@ impl Package {
         args: Option<&[Native]>,
         export_fallback: bool,
     ) -> Result<Native, HostError> {
-        let r = self.call_or_get_value(path, args, export_fallback)?;
+        let r = self.call_or_get_value(path, args, export_fallback, false)?;
         from_value(&mut self.interp, &r, 0)
     }
 
@@ -258,13 +258,14 @@ impl Package {
         path: &str,
         args: Option<&[Native]>,
         export_fallback: bool,
+        pending_ok: bool,
     ) -> Result<Value, HostError> {
         let args = args.map(|a| {
             a.iter()
                 .map(|a| to_value(&mut self.interp, a))
                 .collect::<Vec<_>>()
         });
-        self.call_or_get_values(path, args.as_deref(), export_fallback)
+        self.call_or_get_values(path, args.as_deref(), export_fallback, pending_ok)
     }
 
     fn call_or_get_values(
@@ -272,6 +273,7 @@ impl Package {
         path: &str,
         args: Option<&[Value]>,
         export_fallback: bool,
+        pending_ok: bool,
     ) -> Result<Value, HostError> {
         let it = &mut self.interp;
         let mut this = self.exports.clone();
@@ -295,7 +297,11 @@ impl Package {
             Some(args) => {
                 let r = it.call(&f, &this, args).map_err(|c| classify(it, c))?;
                 // an async export: await only until its promise settles, not until the loop is idle
-                awaited(it, r)?
+                if pending_ok {
+                    awaited_or_pending(it, r)?
+                } else {
+                    awaited(it, r)?
+                }
             }
             None => f,
         };
@@ -643,7 +649,9 @@ pub extern "C" fn thaw_tjs_class_call(
         if let Some(message) = symbol.strip_prefix('\u{1}') {
             return Err(message.to_string());
         }
-        class_call(&symbol, &args, receiver, flags).map_err(|e| e.to_string())
+        let out = class_call(&symbol, &args, receiver, flags).map_err(|e| e.to_string());
+        pump_watches();
+        out
     })())
 }
 
@@ -2652,6 +2660,15 @@ fn awaited(it: &mut Interp, v: Value) -> Result<Value, HostError> {
     }
 }
 
+/// `awaited` for a `\u{4}` call: a promise still pending when the loop runs out of work is returned as it is.
+fn awaited_or_pending(it: &mut Interp, v: Value) -> Result<Value, HostError> {
+    match it.await_settled(&v).map_err(|c| classify(it, c))? {
+        Some(Ok(v)) => Ok(v),
+        Some(Err(e)) => Err(classify(it, Ctl::Throw(e))),
+        None => Ok(v),
+    }
+}
+
 fn handle_marker_json(id: i64) -> String {
     format!("{{\"{HANDLE_KEY}\":{id}}}")
 }
@@ -2876,27 +2893,34 @@ fn callback_value(it: &mut Interp, id: usize) -> Value {
 
 /// Rebuild a thrown error from the compiled side's `\u{1}Name\u{1}message` framing.
 pub(crate) fn tagged_error(it: &mut Interp, tagged: &str) -> Ctl {
+    match error_object(it, tagged) {
+        Ok(err) => Ctl::Throw(err),
+        Err(c) => c,
+    }
+}
+
+/// The error object for a framed error string (`\u{1}Name\u{1}message`, or the tagged `\u{1}Name\u{1}\u{1e}E1:..`
+/// form), with its `\u{3}code` and `\u{5}<json>` own properties; `Err` is what the construction raised.
+fn error_object(it: &mut Interp, tagged: &str) -> Result<Value, Ctl> {
     let tagged = tagged.strip_prefix('\u{2}').unwrap_or(tagged);
-    // a native error token (`\u{1}Name\u{1}\u{1e}E1:<units>:-:<message>`): the name and the message it frames
+    // a native error token (`\u{1}Name\u{1}\u{1e}E1:<units>:-:<message>`): the name, the message and the suffix it frames
     let framed = thaw_arena::error_wire::parse_tagged(tagged.as_bytes()).and_then(|f| {
         Some((
             std::str::from_utf8(f.chain).ok()?,
             std::str::from_utf8(f.display).ok()?,
+            std::str::from_utf8(f.suffix).ok()?,
         ))
     });
-    let (name, message) = match framed.or_else(|| {
-        tagged
-            .strip_prefix('\u{1}')
-            .and_then(|t| t.split_once('\u{1}'))
+    let (name, message, suffix) = match framed.or_else(|| {
+        let (name, rest) = tagged.strip_prefix('\u{1}')?.split_once('\u{1}')?;
+        // the message runs up to the first marker (`\u{2}`..=`\u{5}`); the rest is the suffix
+        let end = rest
+            .find(|c| ('\u{2}'..='\u{5}').contains(&c))
+            .unwrap_or(rest.len());
+        Some((name, &rest[..end], &rest[end..]))
     }) {
-        Some((name, message)) => (
-            name,
-            message
-                .split(|c| ('\u{2}'..='\u{5}').contains(&c))
-                .next()
-                .unwrap_or(""),
-        ),
-        None => ("Error", tagged),
+        Some(parts) => parts,
+        None => ("Error", tagged, ""),
     };
     let global = it.global.clone();
     let ctor = it
@@ -2904,23 +2928,42 @@ pub(crate) fn tagged_error(it: &mut Interp, tagged: &str) -> Ctl {
         .filter(|c| c.is_callable())
         .or_else(|| it.lookup(&global, "Error"))
         .unwrap_or(Value::Undefined);
-    match it.construct(&ctor, &[Value::str(message)]) {
-        Ok(err) => {
-            // the `\u{5}<json>` bag of the error's own properties (`isAxiosError`, `response`, ...)
-            if let Some((_, bag)) = tagged.split_once('\u{5}') {
-                if let Ok(Native::Object(fields)) = crate::json::parse_native(bag) {
-                    for (k, v) in fields {
-                        if k != "name" && k != "message" && k != "stack" {
-                            let v = to_value(it, &v);
-                            let _ = it.set(&err, &k, v);
-                        }
-                    }
+    let err = it.construct(&ctor, &[Value::str(message)])?;
+    if let Some(code) = suffix_segment(suffix, '\u{3}') {
+        let _ = it.set(&err, "code", Value::str(code));
+    }
+    // the `\u{5}<json>` bag of the error's own properties (`isAxiosError`, `response`, ...)
+    if let Some(bag) = suffix_segment(suffix, '\u{5}') {
+        if let Ok(Native::Object(fields)) = crate::json::parse_native(bag) {
+            for (k, v) in fields {
+                if k != "name" && k != "message" && k != "stack" {
+                    let v = to_value(it, &v);
+                    let _ = it.set(&err, &k, v);
                 }
             }
-            Ctl::Throw(err)
         }
-        Err(c) => c,
     }
+    Ok(err)
+}
+
+/// The text after `marker` in a framed error suffix, up to the next marker (`\u{2}`..=`\u{6}`).
+fn suffix_segment(suffix: &str, marker: char) -> Option<&str> {
+    let (_, rest) = suffix.split_once(marker)?;
+    Some(
+        rest.split(|c| ('\u{2}'..='\u{6}').contains(&c))
+            .next()
+            .unwrap_or(""),
+    )
+}
+
+/// A compiled `Error` that crossed as its framed string (the test of json.rs `is_error_frame_text`): the
+/// Error object. Any other string, or a frame that does not parse, stays a string.
+fn framed_error(it: &mut Interp, s: &str) -> Option<Value> {
+    let bytes = s.as_bytes();
+    if bytes.first() != Some(&1) || !bytes[1..].contains(&1) {
+        return None;
+    }
+    error_object(it, s).ok()
 }
 
 fn throw_type_error<T>(it: &mut Interp, message: &str) -> R<T> {
@@ -3361,7 +3404,7 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
         Native::Null => Value::Null,
         Native::Bool(b) => Value::Bool(*b),
         Native::Number(x) => Value::Number(*x),
-        Native::Str(s) => Value::str(s),
+        Native::Str(s) => framed_error(it, s).unwrap_or_else(|| Value::str(s)),
         Native::Array(items) => {
             let v = items.iter().map(|i| to_value(it, i)).collect();
             it.array(v)
@@ -3536,6 +3579,14 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
                         })
                         .collect::<Result<_, _>>()?,
                 ));
+            }
+            // an Error object crosses as its framed string, the form a compiled Error takes, so compiled
+            // code revives it as an Error again (a plain object with a `message` stays an object)
+            if matches!(&*o.kind.borrow(), Kind::Plain) && crate::builtins::is_error_instance(it, o)
+            {
+                if let Some((_, framed)) = frame_error(it, v) {
+                    return Ok(Native::Str(framed));
+                }
             }
             // a Date crosses as its time value
             if matches!(&*o.kind.borrow(), Kind::Plain) && it.date_target(v) {
@@ -3764,6 +3815,7 @@ pub extern "C" fn thaw_tjs_unload(handle: i64) {
 /// error. (The codegen renames `thaw_js_run_event_loop` to this symbol for such builds.)
 #[no_mangle]
 pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
+    pump_watches();
     let count = PACKAGES.with(|ps| ps.borrow().len());
     let mut status = 0;
     for handle in 0..count {
@@ -3909,6 +3961,120 @@ fn process_stack_bytes() -> usize {
     }
 }
 
+/// `{"__thaw_tjs_pending__": <handle>}`: the result of a `\u{4}` call whose Promise is still pending.
+const PENDING_KEY: &str = "__thaw_tjs_pending__";
+
+fn pending_marker_json(id: i64) -> String {
+    format!("{{\"{PENDING_KEY}\":{id}}}")
+}
+
+/// Settles a native promise compiled code holds: `(context, result JSON or NULL, framed error or NULL)`.
+pub type SettleFn = extern "C" fn(*mut c_void, *const c_char, *const c_char);
+
+struct Watch {
+    package: usize,
+    promise: Value,
+    native: *mut c_void,
+    settle: SettleFn,
+}
+
+thread_local! {
+    /// Pending promises compiled code watches (`thaw_tjs_watch_promise`); `pump_watches` settles them.
+    static WATCHES: RefCell<Vec<Watch>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Watch the Promise behind a `\u{4}` call's pending handle: `settle` runs once it leaves Pending, after the
+/// queued jobs of its package have drained (see `pump_watches`).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settle: SettleFn) {
+    let entry = HANDLES.with(|h| {
+        h.borrow()
+            .get((handle as usize).wrapping_sub(1))
+            .map(|(p, v)| (*p, v.clone()))
+    });
+    match entry {
+        Some((package, promise)) => WATCHES.with(|w| {
+            w.borrow_mut().push(Watch {
+                package,
+                promise,
+                native,
+                settle,
+            })
+        }),
+        None => settle_native(
+            native,
+            settle,
+            Err("thaw-js: invalid pending promise handle".into()),
+        ),
+    }
+}
+
+fn settle_native(native: *mut c_void, settle: SettleFn, result: Result<String, String>) {
+    let text = |s: String| CString::new(s.replace('\0', "\u{FFFD}")).unwrap();
+    let (json, error) = match result {
+        Ok(json) => (Some(text(json)), None),
+        Err(error) => (None, Some(text(error))),
+    };
+    settle(
+        native,
+        json.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+        error.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+    );
+}
+
+/// Drain the jobs of every package with a watched promise, then settle the watches that left Pending.
+/// A no-op while nothing is watched, so plain calls behave as before.
+fn pump_watches() {
+    let mut packages: Vec<usize> = WATCHES.with(|w| w.borrow().iter().map(|x| x.package).collect());
+    if packages.is_empty() {
+        return;
+    }
+    packages.sort_unstable();
+    packages.dedup();
+    for package in packages {
+        if let Err(e) = with_package(package, |p| {
+            p.interp.run_jobs().map_err(|c| classify(&mut p.interp, c))
+        }) {
+            eprintln!("{e}");
+        }
+    }
+    let watches = WATCHES.with(|w| std::mem::take(&mut *w.borrow_mut()));
+    let mut waiting = Vec::new();
+    let mut settled = Vec::new();
+    for w in watches {
+        let state = with_package(w.package, |p| {
+            let Some(state) = p.interp.promise_state(&w.promise) else {
+                return Ok(None);
+            };
+            Ok(Some(match state {
+                Ok(v) => from_value(&mut p.interp, &v, 0)
+                    .map(|n| n.to_json())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(match frame_error(&mut p.interp, &e) {
+                    Some((_, framed)) => framed,
+                    None => from_value(&mut p.interp, &e, 0)
+                        .map(|n| n.to_json())
+                        .unwrap_or_default(),
+                }),
+            }))
+        });
+        match state {
+            Ok(None) => waiting.push(w),
+            Ok(Some(result)) => settled.push((w, result)),
+            Err(e) => settled.push((w, Err(e.to_string()))),
+        }
+    }
+    // keep the still-pending watches (in order) and any added while settling; settle outside the borrow
+    WATCHES.with(|w| {
+        let mut cur = w.borrow_mut();
+        waiting.append(&mut cur);
+        *cur = waiting;
+    });
+    for (w, result) in settled {
+        settle_native(w.native, w.settle, result);
+    }
+}
+
 /// Call `"<package>::<export>"` with a JSON array of arguments; the result is JSON text.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_call_typed_result(
@@ -3923,11 +4089,13 @@ pub extern "C" fn thaw_tjs_call_typed_result(
         if let Some(message) = symbol.strip_prefix('\u{1}') {
             return Err(message.to_string());
         }
-        // `\u{2}` prefix: the result is wanted as a handle id (a `JsValue` result); `\u{3}`: as a Date node.
-        let (want_handle, want_date, symbol) = match symbol.as_str() {
-            s if s.starts_with('\u{2}') => (true, false, &s[1..]),
-            s if s.starts_with('\u{3}') => (false, true, &s[1..]),
-            s => (false, false, s),
+        // `\u{2}` prefix: the result is wanted as a handle id (a `JsValue` result); `\u{3}`: as a Date node;
+        // `\u{4}`: a Promise result, which may still be pending (`{"__thaw_tjs_pending__":<handle>}`).
+        let (want_handle, want_date, want_pending, symbol) = match symbol.as_str() {
+            s if s.starts_with('\u{2}') => (true, false, false, &s[1..]),
+            s if s.starts_with('\u{3}') => (false, true, false, &s[1..]),
+            s if s.starts_with('\u{4}') => (false, false, true, &s[1..]),
+            s => (false, false, false, s),
         };
         if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
             eprintln!("thaw-js call: {symbol} {args}");
@@ -3939,8 +4107,11 @@ pub extern "C" fn thaw_tjs_call_typed_result(
         let Native::Array(args) = Native::from_json(&args).map_err(|e| e.to_string())? else {
             return Err("arguments must be a JSON array".into());
         };
-        with_package(handle, |p| {
-            let r = p.call_or_get_value(export, Some(&args), true)?;
+        let out = with_package(handle, |p| {
+            let r = p.call_or_get_value(export, Some(&args), true, want_pending)?;
+            if want_pending && p.interp.is_promise(&r) && p.interp.promise_state(&r).is_none() {
+                return Ok(pending_marker_json(store_handle(handle, r)));
+            }
             if want_handle {
                 return Ok(store_handle(handle, r).to_string());
             }
@@ -3949,7 +4120,9 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             }
             from_value(&mut p.interp, &r, 0).map(|n| n.to_json())
         })
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+        pump_watches();
+        out
     })())
 }
 
