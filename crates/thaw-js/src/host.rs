@@ -2929,18 +2929,23 @@ fn error_object(it: &mut Interp, tagged: &str) -> Result<Value, Ctl> {
         .or_else(|| it.lookup(&global, "Error"))
         .unwrap_or(Value::Undefined);
     let err = it.construct(&ctor, &[Value::str(message)])?;
-    if let Some(code) = suffix_segment(suffix, '\u{3}') {
-        let _ = it.set(&err, "code", Value::str(code));
-    }
-    // the `\u{5}<json>` bag of the error's own properties (`isAxiosError`, `response`, ...)
+    // the `\u{5}<json>` bag of the error's own properties (`isAxiosError`, `response`, ...); its key order is the error's own order
+    let mut has_code = false;
     if let Some(bag) = suffix_segment(suffix, '\u{5}') {
         if let Ok(Native::Object(fields)) = crate::json::parse_native(bag) {
             for (k, v) in fields {
                 if k != "name" && k != "message" && k != "stack" {
+                    has_code |= k == "code";
                     let v = to_value(it, &v);
                     let _ = it.set(&err, &k, v);
                 }
             }
+        }
+    }
+    // `code` only when the bag did not carry it (a frame without a bag): after the bag so bag order wins
+    if !has_code {
+        if let Some(code) = suffix_segment(suffix, '\u{3}') {
+            let _ = it.set(&err, "code", Value::str(code));
         }
     }
     Ok(err)

@@ -2676,6 +2676,27 @@ fn error_subclasses_inherit_from_error_and_native_error_tokens_keep_their_messag
 }
 
 #[test]
+fn tagged_error_keeps_bag_key_order_with_code_after_errno() {
+    let mut it = crate::Interp::new();
+    let frame = "\u{1}Error\u{1}\u{1e}E1:1:-:m\u{3}ENOENT\u{5}{\"errno\":-2,\"code\":\"ENOENT\",\"syscall\":\"s\"}";
+    let crate::Ctl::Throw(error) = crate::host::tagged_error(&mut it, frame) else {
+        panic!("expected a throw")
+    };
+    let global = crate::Value::Object(it.global_object.clone());
+    it.set(&global, "e", error).unwrap();
+    let keys = it.run("Object.keys(e).join()").unwrap();
+    assert_eq!(&*it.to_str(&keys), "errno,code,syscall");
+    // a frame with a code but no bag still gets `code`
+    let crate::Ctl::Throw(error) = crate::host::tagged_error(&mut it, "\u{1}Error\u{1}m\u{3}X")
+    else {
+        panic!("expected a throw")
+    };
+    it.set(&global, "e", error).unwrap();
+    let keys = it.run("Object.keys(e).join()").unwrap();
+    assert_eq!(&*it.to_str(&keys), "code");
+}
+
+#[test]
 fn os_network_interfaces_are_grouped_by_name_with_real_addresses() {
     let src = "var all = JSON.parse(__thaw_os_network_interfaces()); var names = Object.keys(all);\
                console.log(names.length > 0, names.every(function (n) { return all[n].every(function (a) { return typeof a.address === 'string' && (a.family === 'IPv4' || a.family === 'IPv6') && typeof a.internal === 'boolean'; }); }));";
