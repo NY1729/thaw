@@ -406,6 +406,7 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:buffer",
     "node:process",
     "node:http",
+    "node:child_process",
 ];
 
 /// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
