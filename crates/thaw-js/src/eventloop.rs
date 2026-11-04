@@ -12,6 +12,7 @@
 //! is suspended (`Package` boxes it; `co_step` asserts it).
 
 use crate::*;
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -219,6 +220,42 @@ pub(crate) struct Rt {
 fn clock_ms() -> f64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
+}
+
+thread_local! {
+    // per thread: a worker runs its own event loop
+    static LOOP_START: Cell<Option<Instant>> = const { Cell::new(None) };
+    static LOOP_IDLE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+}
+
+fn mark_loop_started() {
+    LOOP_START.with(|s| {
+        if s.get().is_none() {
+            s.set(Some(Instant::now()));
+        }
+    });
+}
+
+/// The loop has nothing to run: sleep, and count the time as idle.
+fn loop_idle_sleep(d: Duration) {
+    mark_loop_started();
+    std::thread::sleep(d);
+    LOOP_IDLE.with(|i| i.set(i.get() + d));
+}
+
+/// (active_ms, idle_ms) since the loop started; (0, 0) before it did.
+fn host_loop_stats() -> (f64, f64) {
+    match LOOP_START.with(|s| s.get()) {
+        None => (0.0, 0.0),
+        Some(start) => {
+            let elapsed = start.elapsed();
+            let idle = LOOP_IDLE.with(|i| i.get()).min(elapsed);
+            (
+                (elapsed - idle).as_secs_f64() * 1000.0,
+                idle.as_secs_f64() * 1000.0,
+            )
+        }
+    }
 }
 
 impl Interp {
@@ -882,6 +919,7 @@ impl Interp {
             return Ok(Some(Ok(v.clone())));
         }
         self.mark_handled(v);
+        mark_loop_started();
         loop {
             self.run_jobs()?;
             if let Some(state) = self.promise_state(v) {
@@ -911,12 +949,12 @@ impl Interp {
             {
                 let wait = next - clock_ms();
                 if wait > 0.0 {
-                    std::thread::sleep(Duration::from_secs_f64(wait / 1000.0));
+                    loop_idle_sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
             } else if crate::child::active() || crate::zlib::active() || crate::worker::active(self)
             {
                 // nothing timed to wait for, but a platform event will arrive: poll again shortly
-                std::thread::sleep(Duration::from_millis(2));
+                loop_idle_sleep(Duration::from_millis(2));
             }
         }
     }
@@ -955,6 +993,7 @@ impl Interp {
     }
 
     fn loop_inner(&mut self) -> R<()> {
+        mark_loop_started();
         self.run_jobs()?;
         while self.loop_alive() {
             self.check_interrupt()?;
@@ -991,14 +1030,14 @@ impl Interp {
                     wait = wait.min(2.0);
                 }
                 if wait > 0.0 {
-                    std::thread::sleep(Duration::from_secs_f64(wait / 1000.0));
+                    loop_idle_sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
             } else if crate::child::active()
                 || crate::zlib::active()
                 || crate::worker::active(self)
                 || self.interrupt.is_some()
             {
-                std::thread::sleep(Duration::from_millis(2));
+                loop_idle_sleep(Duration::from_millis(2));
             }
         }
         Ok(())
@@ -1384,6 +1423,13 @@ impl Interp {
             let name = it.to_str(&arg(a, 0));
             it.throw_error("Error", &format!("No such module: {name}"))
         });
+        let perf_now = self.native(|_, _, _| Ok(Value::Number(clock_ms())));
+        g.declare("__thaw_perf_now", perf_now, true);
+        let loop_stats = self.native(|it, _, _| {
+            let (active, idle) = host_loop_stats();
+            Ok(it.array(vec![Value::Number(active), Value::Number(idle)]))
+        });
+        g.declare("__thaw_loop_stats", loop_stats, true);
         self.set_native(&p, "uptime", |_, _, _| {
             Ok(Value::Number(clock_ms() / 1000.0))
         });
