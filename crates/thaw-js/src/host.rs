@@ -1408,9 +1408,10 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             21 | 27 => String::new(),
             28 => "{}".to_string(),
             // a value that must cross a thaw-js call argument as a live handle: a typed array other
-            // than Uint8Array, an ArrayBuffer, a Map or a Set would otherwise be flattened to a plain object
+            // than Uint8Array, an ArrayBuffer, a Map, a Set or a Proxy (the native array, collection and
+            // class views) would otherwise be flattened to a plain object
             29 => flag(matches!(&v, Value::Object(o) if matches!(&*o.kind.borrow(),
-                Kind::ArrayBuffer(_) | Kind::Map(_) | Kind::Set(_))
+                Kind::ArrayBuffer(_) | Kind::Map(_) | Kind::Set(_) | Kind::Proxy(_))
                 || matches!(&*o.kind.borrow(), Kind::Typed(t) if !matches!(t.ty, crate::typed::Ty::U8)))),
             _ => {
                 return Err(HostError::Thrown(format!(
@@ -4443,6 +4444,15 @@ mod host_query_live_tests {
         assert_eq!(query(construct("Array", "[]"), 29), "0");
         assert_eq!(query(construct("Date", "[{\"v\":0}]"), 29), "0");
         assert_eq!(query(thaw_tjs_new_function_handle(), 29), "0");
+    }
+
+    #[test]
+    fn host_query_keep_live_answers_one_for_proxies() {
+        // a native array / collection / class view is a Proxy, so it must cross as a live handle too
+        assert_eq!(
+            query(construct("Proxy", "[{\"v\":{}},{\"v\":{}}]"), 29),
+            "1"
+        );
     }
 
     #[test]

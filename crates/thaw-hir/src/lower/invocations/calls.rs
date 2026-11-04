@@ -4347,6 +4347,14 @@ impl<'a> FnLowerer<'a> {
                     Self::is_quickjs_instance_typed_method(backend, &symbol)
                 })
         });
+        let thaw_js_live_json_slot = signature.as_ref().is_some_and(|signature| {
+            signature.is_extern
+                && method_argument_sources_aligned
+                && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)| {
+                    backend == DynamicBackend::ThawJs
+                        && (symbol.starts_with("$method$") || symbol.starts_with("$methodvoid$"))
+                })
+        });
         let napi_constructor_typed_call = signature.as_ref().is_some_and(|signature| {
             signature.is_extern
                 && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)| {
@@ -4434,7 +4442,12 @@ impl<'a> FnLowerer<'a> {
                             self.coerce_primitive_array_argument_aliasing(value, &HirType::Json)
                         } else if jit_structural_class_object {
                             self.coerce_jit_structural_class_argument(value, declared)
-                        } else if quickjs_function_value || user_function {
+                        } else if quickjs_function_value
+                            || user_function
+                            || (thaw_js_live_json_slot
+                                && i > 0
+                                && Self::type_holds_any(declared))
+                        {
                             self.coerce_primitive_array_argument_aliasing(value, declared)
                         } else if signature.as_ref().is_some_and(|sig| sig.is_extern)
                             && dynamic_symbol(&callee_name).is_none()
