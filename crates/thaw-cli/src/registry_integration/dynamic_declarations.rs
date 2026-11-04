@@ -1254,11 +1254,21 @@ fn typed_dynamic_declaration(
 ) -> Option<(String, String)> {
     match package.strip_prefix(THAW_JS_PACKAGE_MARK) {
         Some(real) => {
+            // An unclassifiable return (an interface such as `Holder`) also lowers to `JsValue`
+            // below, so it must stay a live handle too. `any`/`unknown` render as `Json` already,
+            // and the promise-payload case is rewritten to `Promise<JsValue>` by `thaw_js_promise_ret`.
             let keep_ret_js_value = !real.starts_with("node:")
-                && matches!(
-                    function.ret,
-                    thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue)
-                );
+                && match &function.ret {
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue) => true,
+                    thaw_bridge::DtsType::Unsupported(reason) => {
+                        !(reason == "`any` is not supported"
+                            || reason == "`unknown` is not supported"
+                            || reason == "`undefined` is not supported"
+                            || reason == "`null` is not supported"
+                            || reason.starts_with(thaw_bridge::PROMISE_PAYLOAD_UNSUPPORTED))
+                    }
+                    _ => false,
+                };
             let function = if thaw_js_keeps_js_value(real) {
                 std::borrow::Cow::Borrowed(function)
             } else {
