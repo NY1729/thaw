@@ -567,6 +567,7 @@ include!("tests/thaw_js_contracts.rs");
 include!("tests/thaw_js_handle_intrinsics_contracts.rs");
 include!("tests/thaw_js_dynamic_code_contracts.rs");
 include!("tests/thaw_js_value_export_contracts.rs");
+include!("tests/thaw_js_free_fn_jsvalue_contracts.rs");
 include!("tests/thaw_js_callback_contracts.rs");
 include!("tests/thaw_js_native_receiver_contracts.rs");
 include!("tests/evloop_contracts.rs");
