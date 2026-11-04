@@ -94,3 +94,18 @@ fn real_node_events_shape_capturing_closure_takes_the_graph_route() {
     assert!(calls("@thaw_tjs_register_native_callback_graph("), "{ir}");
     assert!(!calls("@thaw_tjs_register_callback("), "{ir}");
 }
+
+#[test]
+fn json_slot_callback_with_a_json_closure_takes_the_graph_route() {
+    let source = "declare function __thaw_typed_tjs_6d733a3a6d73(f: Json): Json;
+         function main(): void {
+           console.log(__thaw_typed_tjs_6d733a3a6d73((socket: Json): void => { console.log(socket); }));
+         }";
+    let (uses_thaw_js, uses_quickjs, ir) = compile_routed(source, "thaw_js_json_slot_callback");
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let calls = |name: &str| ir.lines().any(|line| line.contains("call ") && line.contains(name));
+    assert!(calls("@thaw_tjs_register_native_callback_graph("), "{ir}");
+    assert!(!calls("@thaw_tjs_register_callback("), "{ir}");
+    assert!(!ir.contains("__thaw_tjs_cb__"), "{ir}");
+    assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
+}
