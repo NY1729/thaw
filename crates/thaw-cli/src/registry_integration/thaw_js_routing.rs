@@ -403,6 +403,7 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:tty",
     "node:dgram",
     "node:tls",
+    "node:process",
 ];
 
 /// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
