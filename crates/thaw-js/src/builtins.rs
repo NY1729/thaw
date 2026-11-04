@@ -1163,6 +1163,18 @@ impl Interp {
             Ok(Value::Bool(false))
         });
         self.set_native(&op, "propertyIsEnumerable", |it, this, args| {
+            if let Value::Object(po) = this {
+                if matches!(&*po.kind.borrow(), Kind::Proxy(_)) {
+                    let object = it.lookup(&it.global.clone(), "Object").unwrap_or(Value::Undefined);
+                    let gopd = it.get(&object, "getOwnPropertyDescriptor")?;
+                    let d = it.call(&gopd, &object, &[this.clone(), arg(args, 0)])?;
+                    if matches!(d, Value::Undefined) {
+                        return Ok(Value::Bool(false));
+                    }
+                    let e = it.get(&d, "enumerable")?;
+                    return Ok(Value::Bool(e.truthy()));
+                }
+            }
             let key = it.to_str(&arg(args, 0));
             Ok(Value::Bool(match this {
                 Value::Object(o) => find_own(o, &key).is_some_and(|(_, e)| e) || matches!(&*o.kind.borrow(), Kind::Array(items) if key.parse::<usize>().is_ok_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole)))),
