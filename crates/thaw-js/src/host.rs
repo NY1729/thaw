@@ -3661,6 +3661,15 @@ impl Native {
         }
     }
 
+    /// JSON text of a typed-ABI call result: a top-level `undefined` keeps the compiled side's marker
+    /// (so `any`/optional results can tell it from `null`); nested values still use `to_json`.
+    fn to_result_json(&self) -> String {
+        match self {
+            Native::Undefined => format!("{{\"{UNDEFINED_KEY}\":true}}"),
+            other => other.to_json(),
+        }
+    }
+
     /// JSON text (`undefined` becomes `null`; object keys keep order).
     pub fn to_json(&self) -> String {
         match self {
@@ -4137,7 +4146,7 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             if is_live_value(&p.interp, &r) && !(want_date && p.interp.date_target(&r)) {
                 return Ok(handle_marker_json(store_handle(handle, r)));
             }
-            from_value(&mut p.interp, &r, 0).map(|n| n.to_json())
+            from_value(&mut p.interp, &r, 0).map(|n| n.to_result_json())
         })
         .map_err(|e| e.to_string());
         pump_watches();

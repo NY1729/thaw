@@ -3450,6 +3450,33 @@ fn tj35_bytes_cross_the_typed_abi_as_tagged_buffers_both_ways() {
     );
 }
 
+const UNDEF: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"ud/index.js": function(module, exports, require) {
+  exports.nothing = function () {};
+  exports.nul = function () { return null; };
+},
+};
+var __thaw_bundle_require_maps = { "ud/index.js": {}, };
+var __thaw_bundle_entry_key = "ud/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn tj46_undefined_result_keeps_the_marker() {
+    use std::ffi::CString;
+    let bundle = CString::new(UNDEF).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"ud".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    // a top-level undefined keeps the marker so the compiled side can tell it from null
+    assert_eq!(
+        typed_call("ud::nothing", "[]").unwrap(),
+        r#"{"$__thaw_napi_undefined$":true}"#
+    );
+    assert_eq!(typed_call("ud::nul", "[]").unwrap(), "null");
+}
+
 const BYTES_KIND: &str = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
 "k/index.js": function(module, exports, require) {
