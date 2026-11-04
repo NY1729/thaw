@@ -621,12 +621,17 @@ fn readdir_json(dir: &std::path::Path, typed: bool, recursive: bool) -> std::io:
         recursive: bool,
         out: &mut Vec<String>,
     ) -> std::io::Result<()> {
+        // Sorted per directory by name bytes, like the QuickJS host (libuv scandir order).
+        let mut entries = Vec::new();
         for entry in std::fs::read_dir(dir)? {
-            let entry = match entry {
-                Ok(e) => e,
+            match entry {
+                Ok(e) => entries.push(e),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(e),
-            };
+            }
+        }
+        entries.sort_by_cached_key(|e| name_bytes(&e.file_name()));
+        for entry in entries {
             let name = name_bytes(&entry.file_name());
             let mut rel = prefix.to_vec();
             if !rel.is_empty() {
@@ -662,9 +667,15 @@ fn readdir_json(dir: &std::path::Path, typed: bool, recursive: bool) -> std::io:
     Ok(format!("{{\"ok\":true,\"entries\":[{}]}}", out.join(",")))
 }
 
-thread_local! {
-    static FDS: std::cell::RefCell<(u32, std::collections::HashMap<u32, std::fs::File>)> =
-        std::cell::RefCell::new((10, std::collections::HashMap::new()));
+// Process-wide: async fn bodies run on coroutine threads, so fds opened on one thread must be
+// visible from another. The lock covers only table access, never file IO; ops work on a dup
+// (`try_clone`, same open file description, so the offset is shared as with a real fd).
+// ponytail: one global table lock, per-fd locks if fd-heavy threads contend
+static FDS: std::sync::Mutex<(u32, std::collections::BTreeMap<u32, std::fs::File>)> =
+    std::sync::Mutex::new((10, std::collections::BTreeMap::new()));
+
+fn fds() -> std::sync::MutexGuard<'static, (u32, std::collections::BTreeMap<u32, std::fs::File>)> {
+    FDS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// `fd_open` (string flags: `r`, `w`, `a+`, `wx`, ...) and the `fd_*` operations on the files it opened.
@@ -696,126 +707,123 @@ fn fd_op(op: &str, p: &std::path::Path, path: &str, value: &str) -> std::io::Res
             o.mode(mode.parse::<u32>().unwrap_or(0o666));
         }
         let file = o.open(p)?;
-        return FDS.with(|t| {
-            let mut t = t.borrow_mut();
-            let fd = t.0;
-            t.0 += 1;
-            t.1.insert(fd, file);
-            Ok(format!("{{\"ok\":true,\"fd\":{fd}}}"))
-        });
+        let mut t = fds();
+        let fd = t.0;
+        t.0 += 1;
+        t.1.insert(fd, file);
+        return Ok(format!("{{\"ok\":true,\"fd\":{fd}}}"));
     }
     let fd: u32 = path
         .parse()
         .map_err(|_| std::io::Error::from_raw_os_error(libc::EBADF))?;
-    FDS.with(|t| {
-        let mut t = t.borrow_mut();
-        if op == "fd_close" {
-            return t
-                .1
-                .remove(&fd)
-                .map(|_| "{\"ok\":true}".to_string())
-                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EBADF));
+    if op == "fd_close" {
+        return fds()
+            .1
+            .remove(&fd)
+            .map(|_| "{\"ok\":true}".to_string())
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EBADF));
+    }
+    let mut file = fds()
+        .1
+        .get(&fd)
+        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EBADF))?
+        .try_clone()?;
+    match op {
+        "fd_read_all" => {
+            let mut b = Vec::new();
+            file.read_to_end(&mut b)?;
+            Ok(format!("{{\"ok\":true,\"data\":\"{}\"}}", hex(&b)))
         }
-        let file =
-            t.1.get_mut(&fd)
-                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EBADF))?;
-        match op {
-            "fd_read_all" => {
-                let mut b = Vec::new();
-                file.read_to_end(&mut b)?;
-                Ok(format!("{{\"ok\":true,\"data\":\"{}\"}}", hex(&b)))
-            }
-            "fd_write_all" => {
-                file.write_all(&unhex(value).ok_or_else(|| bad("invalid hex"))?)?;
+        "fd_write_all" => {
+            file.write_all(&unhex(value).ok_or_else(|| bad("invalid hex"))?)?;
+            Ok("{\"ok\":true}".into())
+        }
+        "fd_read" => {
+            let (pos, len) = value
+                .split_once(',')
+                .ok_or_else(|| bad("invalid read options"))?;
+            let mut b = vec![
+                0;
+                len.parse::<usize>()
+                    .map_err(|_| bad("invalid read length"))?
+            ];
+            let n = if pos == "-1" {
+                file.read(&mut b)?
+            } else {
+                let cursor = file.stream_position()?;
+                file.seek(SeekFrom::Start(
+                    pos.parse().map_err(|_| bad("invalid read position"))?,
+                ))?;
+                let r = file.read(&mut b);
+                file.seek(SeekFrom::Start(cursor))?;
+                r?
+            };
+            b.truncate(n);
+            Ok(format!(
+                "{{\"ok\":true,\"data\":\"{}\",\"length\":{n}}}",
+                hex(&b)
+            ))
+        }
+        "fd_write" => {
+            let (pos, data) = value
+                .split_once(':')
+                .ok_or_else(|| bad("invalid write options"))?;
+            let b = unhex(data).ok_or_else(|| bad("invalid hex"))?;
+            let n = if pos == "-1" {
+                file.write(&b)?
+            } else {
+                let cursor = file.stream_position()?;
+                file.seek(SeekFrom::Start(
+                    pos.parse().map_err(|_| bad("invalid write position"))?,
+                ))?;
+                let r = file.write(&b);
+                file.seek(SeekFrom::Start(cursor))?;
+                r?
+            };
+            Ok(format!("{{\"ok\":true,\"length\":{n}}}"))
+        }
+        "fd_stat" => file.metadata().map(|m| stat_json(&m)),
+        "fd_sync" => file.sync_all().map(|()| "{\"ok\":true}".into()),
+        "fd_datasync" => file.sync_data().map(|()| "{\"ok\":true}".into()),
+        "fd_truncate" => value
+            .parse::<u64>()
+            .map_err(|_| bad("invalid truncate length"))
+            .and_then(|len| file.set_len(len))
+            .map(|()| "{\"ok\":true}".into()),
+        "fd_tell" => file
+            .stream_position()
+            .map(|position| format!("{{\"ok\":true,\"position\":{position}}}")),
+        #[cfg(unix)]
+        "fd_chmod" => fs_parse_mode(value)
+            .and_then(|mode| {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(mode))
+            })
+            .map(|()| "{\"ok\":true}".into()),
+        #[cfg(unix)]
+        "fd_utimes" => {
+            use std::os::fd::AsRawFd;
+            let mut values = value.split(',');
+            let times = [fs_timespec(values.next())?, fs_timespec(values.next())?];
+            if unsafe { libc::futimens(file.as_raw_fd(), times.as_ptr()) } == 0 {
                 Ok("{\"ok\":true}".into())
+            } else {
+                Err(std::io::Error::last_os_error())
             }
-            "fd_read" => {
-                let (pos, len) = value
-                    .split_once(',')
-                    .ok_or_else(|| bad("invalid read options"))?;
-                let mut b = vec![
-                    0;
-                    len.parse::<usize>()
-                        .map_err(|_| bad("invalid read length"))?
-                ];
-                let n = if pos == "-1" {
-                    file.read(&mut b)?
-                } else {
-                    let cursor = file.stream_position()?;
-                    file.seek(SeekFrom::Start(
-                        pos.parse().map_err(|_| bad("invalid read position"))?,
-                    ))?;
-                    let r = file.read(&mut b);
-                    file.seek(SeekFrom::Start(cursor))?;
-                    r?
-                };
-                b.truncate(n);
-                Ok(format!(
-                    "{{\"ok\":true,\"data\":\"{}\",\"length\":{n}}}",
-                    hex(&b)
-                ))
-            }
-            "fd_write" => {
-                let (pos, data) = value
-                    .split_once(':')
-                    .ok_or_else(|| bad("invalid write options"))?;
-                let b = unhex(data).ok_or_else(|| bad("invalid hex"))?;
-                let n = if pos == "-1" {
-                    file.write(&b)?
-                } else {
-                    let cursor = file.stream_position()?;
-                    file.seek(SeekFrom::Start(
-                        pos.parse().map_err(|_| bad("invalid write position"))?,
-                    ))?;
-                    let r = file.write(&b);
-                    file.seek(SeekFrom::Start(cursor))?;
-                    r?
-                };
-                Ok(format!("{{\"ok\":true,\"length\":{n}}}"))
-            }
-            "fd_stat" => file.metadata().map(|m| stat_json(&m)),
-            "fd_sync" => file.sync_all().map(|()| "{\"ok\":true}".into()),
-            "fd_datasync" => file.sync_data().map(|()| "{\"ok\":true}".into()),
-            "fd_truncate" => value
-                .parse::<u64>()
-                .map_err(|_| bad("invalid truncate length"))
-                .and_then(|len| file.set_len(len))
-                .map(|()| "{\"ok\":true}".into()),
-            "fd_tell" => file
-                .stream_position()
-                .map(|position| format!("{{\"ok\":true,\"position\":{position}}}")),
-            #[cfg(unix)]
-            "fd_chmod" => fs_parse_mode(value)
-                .and_then(|mode| {
-                    use std::os::unix::fs::PermissionsExt;
-                    file.set_permissions(std::fs::Permissions::from_mode(mode))
-                })
-                .map(|()| "{\"ok\":true}".into()),
-            #[cfg(unix)]
-            "fd_utimes" => {
-                use std::os::fd::AsRawFd;
-                let mut values = value.split(',');
-                let times = [fs_timespec(values.next())?, fs_timespec(values.next())?];
-                if unsafe { libc::futimens(file.as_raw_fd(), times.as_ptr()) } == 0 {
-                    Ok("{\"ok\":true}".into())
-                } else {
-                    Err(std::io::Error::last_os_error())
-                }
-            }
-            #[cfg(unix)]
-            "fd_statfs" => {
-                use std::os::fd::AsRawFd;
-                let fd = file.as_raw_fd();
-                let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-                if unsafe { libc::fstatvfs(fd, st.as_mut_ptr()) } != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                let st = unsafe { st.assume_init() };
-                fs_fstatfs_type(fd).map(|fs_type| fs_statfs_record(&st, fs_type))
-            }
-            _ => Err(std::io::Error::from_raw_os_error(libc::ENOSYS)),
         }
-    })
+        #[cfg(unix)]
+        "fd_statfs" => {
+            use std::os::fd::AsRawFd;
+            let fd = file.as_raw_fd();
+            let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+            if unsafe { libc::fstatvfs(fd, st.as_mut_ptr()) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let st = unsafe { st.assume_init() };
+            fs_fstatfs_type(fd).map(|fs_type| fs_statfs_record(&st, fs_type))
+        }
+        _ => Err(std::io::Error::from_raw_os_error(libc::ENOSYS)),
+    }
 }
 
 #[cfg(unix)]
