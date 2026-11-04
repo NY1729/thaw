@@ -711,7 +711,7 @@ pub extern "C" fn thaw_json_host_from_borrowed_handle(handle: u64) -> *mut Value
 
 /// A thaw-js call result that is the one-key handle marker `{"__thaw_tjs_handle__": id}` becomes the
 /// live host lease for that handle (the marker's reference passes to the lease); any other value is
-/// returned unchanged.
+/// returned unchanged, except that framed Error strings inside it (at any depth) become Error values.
 #[no_mangle]
 pub extern "C" fn thaw_json_adopt_handle_marker(value: *mut Value) -> *mut Value {
     let handle = unsafe { value.as_ref() }
@@ -722,17 +722,17 @@ pub extern "C" fn thaw_json_adopt_handle_marker(value: *mut Value) -> *mut Value
         .filter(|handle| handle.is_finite() && *handle > 0.0 && handle.fract() == 0.0)
         .map(|handle| handle as u64);
     let Some(handle) = handle else {
-        return value;
+        return revive_framed_errors_in_place(value);
     };
     if HOST_OPERATIONS.with(|slot| slot.get()).is_none() {
-        return value;
+        return revive_framed_errors_in_place(value);
     }
     match host_value_from_owned_handle(handle) {
         Some(adopted) => {
             unsafe { thaw_json_destroy(value) };
             thaw_json_track_arena_owned_root(leak(materialize_native_wrapper(adopted)))
         }
-        None => value,
+        None => revive_framed_errors_in_place(value),
     }
 }
 
@@ -10046,6 +10046,8 @@ fn add_error_suffix_properties(
     revive: bool,
 ) {
     let mut index = 0;
+    // `code` goes in after the props bag so bag keys (errno before code) keep their order.
+    let mut code = None;
     while index < suffix.len() {
         let marker = suffix[index];
         if !(2..=6).contains(&marker) {
@@ -10063,11 +10065,7 @@ fn add_error_suffix_properties(
                     Value::String(String::from_utf8_lossy(segment).into_owned())
                 });
             }
-            3 => {
-                fields.entry(b"code".to_vec()).or_insert_with(|| {
-                    Value::String(String::from_utf8_lossy(segment).into_owned())
-                });
-            }
+            3 => code = Some(String::from_utf8_lossy(segment).into_owned()),
             5 => {
                 if let Some(bag) = JsonParser::new(segment).parse() {
                     if let Some(object) = bag.as_object() {
@@ -10095,6 +10093,11 @@ fn add_error_suffix_properties(
         }
         index = end;
     }
+    if let Some(code) = code {
+        fields
+            .entry(b"code".to_vec())
+            .or_insert(Value::String(code));
+    }
 }
 
 fn revive_framed_errors(value: Value) -> Value {
@@ -10115,8 +10118,25 @@ fn revive_framed_errors(value: Value) -> Value {
             }
             value
         }
+        Value::Object(_) => {
+            if let Some(mut fields) = value.as_object_mut() {
+                for item in fields.values_mut() {
+                    *item = revive_framed_errors(std::mem::replace(item, Value::Null));
+                }
+            }
+            value
+        }
         _ => value,
     }
+}
+
+/// Revives framed Error strings in the Json value at `value`, in place, so the pointer (and any
+/// object identity inside it) is kept.
+fn revive_framed_errors_in_place(value: *mut Value) -> *mut Value {
+    if let Some(slot) = unsafe { value.as_mut() } {
+        *slot = revive_framed_errors(std::mem::replace(slot, Value::Null));
+    }
+    value
 }
 
 #[no_mangle]
@@ -11401,6 +11421,52 @@ mod tests {
             thaw_json_destroy(value);
             thaw_arena::destroy_string(text);
         }
+    }
+
+    #[test]
+    fn revive_framed_errors_reaches_nested_object_values() {
+        let framed = Value::String("\u{1}TypeError\u{1}native failure".to_string());
+        let fields = indexmap::IndexMap::from([
+            (b"error".to_vec(), framed),
+            (b"status".to_vec(), Value::Null),
+        ]);
+        let revived = revive_framed_errors(Value::shared_object(fields));
+        let Value::Object(fields) = &revived else {
+            panic!("object should stay an object");
+        };
+        let fields = shared_object_ref(fields);
+        let Some(Value::Object(error)) = fields.get(b"error".as_slice()) else {
+            panic!("nested framed Error should become an object");
+        };
+        let error = shared_object_ref(error);
+        assert_eq!(
+            error.get(b"name".as_slice()).and_then(Value::as_str),
+            Some("TypeError")
+        );
+        assert_eq!(
+            error.get(b"message".as_slice()).and_then(Value::as_str),
+            Some("native failure")
+        );
+        assert!(matches!(
+            fields.get(b"status".as_slice()),
+            Some(Value::Null)
+        ));
+    }
+
+    #[test]
+    fn add_error_suffix_keeps_bag_key_order_before_code() {
+        let keys = |suffix: &[u8]| {
+            let mut fields = indexmap::IndexMap::new();
+            add_error_suffix_properties(&mut fields, suffix, false);
+            fields
+                .keys()
+                .map(|key| String::from_utf8_lossy(key).into_owned())
+                .collect::<Vec<_>>()
+        };
+        let bag = b"\x03ENOENT\x05{\"errno\":-2,\"code\":\"ENOENT\",\"syscall\":\"s\"}";
+        assert_eq!(keys(bag), ["errno", "code", "syscall"]);
+        // Without a bag `code` must still be present.
+        assert_eq!(keys(b"\x03X"), ["code"]);
     }
 
     #[test]
