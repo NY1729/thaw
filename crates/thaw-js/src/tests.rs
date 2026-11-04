@@ -3683,3 +3683,27 @@ fn process_chdir_changes_cwd_and_throws_enoent_on_missing_dir() {
         ]
     );
 }
+
+#[test]
+fn property_is_enumerable_forwards_to_proxy_descriptor() {
+    assert_eq!(
+        one("var p = new Proxy({a:1}, {}); console.log(p.propertyIsEnumerable('a'), Object.prototype.propertyIsEnumerable.call(p,'b'))"),
+        "true false"
+    );
+}
+
+#[test]
+fn property_is_enumerable_uses_proxy_trap_enumerable_flag() {
+    assert_eq!(
+        one("var p = new Proxy({a:1}, { getOwnPropertyDescriptor(t,k){ return { value: 1, enumerable: false, configurable: true }; } }); console.log(p.propertyIsEnumerable('a'))"),
+        "false"
+    );
+}
+
+#[test]
+fn property_is_enumerable_sees_accessor_on_proxy_target() {
+    assert_eq!(
+        one("var t = {}; Object.defineProperty(t,'a',{get(){return 1},enumerable:true,configurable:true}); var p = new Proxy(t,{}); console.log(Object.keys(p).join(), p.propertyIsEnumerable('a'))"),
+        "a true"
+    );
+}
