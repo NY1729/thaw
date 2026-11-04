@@ -1204,6 +1204,27 @@ fn thaw_js_retarget(symbol: String, declaration: String, keep_js_value: bool) ->
     )
 }
 
+/// thaw-js awaits a `Promise<Json>` result later instead of settling it synchronously, so an
+/// opaque `Promise<...>` payload (`Promise<any[]>`, `Promise<Buffer>`, ...) must stay a promise
+/// rather than erase to a bare `Json`. Only the thaw-js declarations are rewritten; QuickJS keeps
+/// its own `JsValue` text.
+fn thaw_js_promise_ret(
+    function: &thaw_bridge::DtsFunction,
+) -> std::borrow::Cow<'_, thaw_bridge::DtsFunction> {
+    match &function.ret {
+        thaw_bridge::DtsType::Unsupported(reason)
+            if reason.starts_with(thaw_bridge::PROMISE_PAYLOAD_UNSUPPORTED) =>
+        {
+            let mut rewritten = function.clone();
+            rewritten.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::Promise(Box::new(
+                thaw_hir::HirType::JsValue,
+            )));
+            std::borrow::Cow::Owned(rewritten)
+        }
+        _ => std::borrow::Cow::Borrowed(function),
+    }
+}
+
 fn typed_dynamic_declaration(
     package: &str,
     function: &thaw_bridge::DtsFunction,
@@ -1212,12 +1233,19 @@ fn typed_dynamic_declaration(
     overload_suffix: Option<usize>,
 ) -> Option<(String, String)> {
     match package.strip_prefix(THAW_JS_PACKAGE_MARK) {
-        Some(real) => typed_dynamic_declaration_for_quickjs(
-            real, function, napi, observed_call_arities, overload_suffix,
-        )
-        .map(|(symbol, declaration)| {
-            thaw_js_retarget(symbol, declaration, thaw_js_keeps_js_value(real))
-        }),
+        Some(real) => {
+            let function = if thaw_js_keeps_js_value(real) {
+                std::borrow::Cow::Borrowed(function)
+            } else {
+                thaw_js_promise_ret(function)
+            };
+            typed_dynamic_declaration_for_quickjs(
+                real, &function, napi, observed_call_arities, overload_suffix,
+            )
+            .map(|(symbol, declaration)| {
+                thaw_js_retarget(symbol, declaration, thaw_js_keeps_js_value(real))
+            })
+        }
         None => typed_dynamic_declaration_for_quickjs(
             package, function, napi, observed_call_arities, overload_suffix,
         ),

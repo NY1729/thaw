@@ -138,6 +138,11 @@ pub struct DtsValue {
     pub ty: DtsType,
 }
 
+/// Reason prefix on a `DtsType::Unsupported` produced by a `Promise<T>` whose payload `T` has no
+/// native layout (`Promise<any[]>`, `Promise<Buffer>`, ...). Consumers that need to keep the promise
+/// itself (thaw-js) match on it; every other consumer treats the whole type as `Unsupported`.
+pub const PROMISE_PAYLOAD_UNSUPPORTED: &str = "Promise<T> payload has no native layout";
+
 /// A parameter/return type as written in the `.d.ts`, before deciding
 /// whether the whole signature is representable in Thaw's native type
 /// system.

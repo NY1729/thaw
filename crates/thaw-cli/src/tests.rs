@@ -1755,6 +1755,63 @@ fn adapts_typed_dynamic_callable_results_to_natural_calls() {
 }
 
 #[test]
+fn keeps_a_promise_of_an_opaque_payload_as_a_promise_on_thaw_js() {
+    let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: "once".into(),
+        generic: None,
+        params: vec![
+            (
+                "emitter".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Json),
+            ),
+            (
+                "event".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Json),
+            ),
+            (
+                "options".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+                    thaw_hir::HirType::Json,
+                ))),
+            ),
+        ],
+        required_params: 2,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Unsupported(format!(
+            "{}: array element has no native collection layout",
+            thaw_bridge::PROMISE_PAYLOAD_UNSUPPORTED
+        )),
+    };
+    let arities = std::collections::BTreeSet::from([3usize]);
+    let (_, thaw_js) =
+        typed_dynamic_declaration("tjs!node:events", &function, false, &arities, None).unwrap();
+    assert!(
+        thaw_js.contains(
+            "__arity_3(emitter: Json, event: Json, options: Json | undefined): Promise<Json>;"
+        ),
+        "{thaw_js}"
+    );
+    assert!(thaw_js.contains("): Promise<Json> {"), "{thaw_js}");
+    assert!(!thaw_js.contains(": Json;"), "{thaw_js}");
+
+    // QuickJS keeps its own opaque-handle return.
+    let (_, quickjs) =
+        typed_dynamic_declaration("node:events", &function, false, &arities, None).unwrap();
+    assert!(quickjs.contains("): JsValue;"), "{quickjs}");
+    assert!(!quickjs.contains("Promise<"), "{quickjs}");
+
+    // A `Promise<any>` payload is still erased to a plain Json result on thaw-js.
+    let erased = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Unsupported("`any` is not supported".into()),
+        ..function.clone()
+    };
+    let (_, erased_thaw_js) =
+        typed_dynamic_declaration("tjs!node:events", &erased, false, &arities, None).unwrap();
+    assert!(!erased_thaw_js.contains("Promise<"), "{erased_thaw_js}");
+}
+
+#[test]
 fn widens_callable_union_parameters_at_the_quickjs_boundary() {
     let function = thaw_bridge::DtsFunction {
         param_field_constraints: Vec::new(),
