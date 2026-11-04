@@ -272,8 +272,8 @@ Of the Node built-in modules, only `node:events`, `node:module`, `node:path` (an
 `node:constants`, `node:url`, `node:fs`, `node:fs/promises` and `node:timers/promises` are
 routed; other `node:*` modules keep using QuickJS.
 
-`THAW_JS_USER_DYNAMIC=1` (together with `THAW_JS_RUNTIME=1`) also serves the program's own
-`eval`/`new Function` on thaw-js. `THAW_JS_RUNTIME_DEBUG=1` prints, for each package that stayed
+With `THAW_JS_RUNTIME=1`, the program's own `eval`/`new Function` is served on thaw-js by default;
+`THAW_JS_USER_DYNAMIC=0` keeps `eval`/`new Function` on QuickJS. `THAW_JS_RUNTIME_DEBUG=1` prints, for each package that stayed
 on QuickJS, the reason (``thaw-js routing: package `x` stays on QuickJS: ...``), and names the
 compiled functions that still call into QuickJS. `thaw inspect <executable>` prints
 `quickjs: true|false`, `quickjs-reason:` lines, a `thaw-js-routed:` list of packages served by
