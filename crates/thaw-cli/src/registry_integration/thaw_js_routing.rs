@@ -512,6 +512,13 @@ fn thaw_js_zlib_blocker(pkg_name: &str, user_source: &str) -> Option<&'static st
         .then_some("node:zlib stays on QuickJS while node:net is unrouted")
 }
 
+/// `node:child_process` delivers stdout/exit on the thaw-js loop, which node:http's client has not been
+/// shown to share reliably under CI load. Remove once the 3 http+spawn cases pass in CI.
+fn thaw_js_child_process_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
+    (pkg_name == "node:child_process" && thaw_js_mentions(user_source, "node:http"))
+        .then_some("node:child_process stays on QuickJS while node:http is in the program")
+}
+
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
 /// feature scan, the program touches no class of it (those are live JavaScript objects), and
 /// every function the program mentions is a typed call whose declaration only carries plain data.
@@ -548,6 +555,9 @@ fn thaw_js_package_eligible(
         return reject(why.into());
     }
     if let Some(why) = thaw_js_zlib_blocker(&pkg.name, user_source) {
+        return reject(why.into());
+    }
+    if let Some(why) = thaw_js_child_process_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
@@ -673,6 +683,16 @@ fn thaw_js_zlib_blocker_keeps_zlib_on_quickjs_next_to_net() {
     assert!(thaw_js_zlib_blocker("node:zlib", net).is_some());
     assert!(thaw_js_zlib_blocker("node:zlib", zlib).is_none());
     assert!(thaw_js_zlib_blocker("node:net", net).is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_child_process_blocker_keeps_child_process_on_quickjs_next_to_http() {
+    let http = "import { get } from 'node:http';";
+    let spawn = "import { spawn } from 'node:child_process';";
+    assert!(thaw_js_child_process_blocker("node:child_process", http).is_some());
+    assert!(thaw_js_child_process_blocker("node:child_process", spawn).is_none());
+    assert!(thaw_js_child_process_blocker("node:http", http).is_none());
 }
 
 #[cfg(test)]
