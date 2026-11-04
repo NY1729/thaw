@@ -2805,6 +2805,29 @@ fn ordered_json(value: &Value) -> Value {
             time,
         )]));
     }
+    // A BigInt crosses as `{"__thaw_tjs_bigint__": "<decimal>"}` and a negative zero as
+    // `{"__thaw_tjs_num__": "-0"}`, which JSON numbers cannot carry, so thaw-js revives them.
+    if DATE_WIRE.with(Cell::get) {
+        match value {
+            Value::BigInt(decimal) => {
+                return Value::shared_object(indexmap::IndexMap::from([(
+                    b"__thaw_tjs_bigint__".to_vec(),
+                    Value::String(decimal.clone()),
+                )]));
+            }
+            Value::Number(number)
+                if number
+                    .as_f64()
+                    .is_some_and(|x| x == 0.0 && x.is_sign_negative()) =>
+            {
+                return Value::shared_object(indexmap::IndexMap::from([(
+                    b"__thaw_tjs_num__".to_vec(),
+                    Value::String("-0".into()),
+                )]));
+            }
+            _ => {}
+        }
+    }
     // A branded Map/Set wrapper crosses as `{"__thaw_tjs_map__": [[k, v], ...]}` /
     // `{"__thaw_tjs_set__": [v, ...]}` so thaw-js rebuilds a real `Map`/`Set`.
     if DATE_WIRE.with(Cell::get) && is_branded_wrapper(value) {
@@ -13195,6 +13218,21 @@ mod tests {
         assert_eq!(
             read_c_string(thaw_json_stringify(root)),
             r#"{"when":{"timestamp":86400000},"plain":{"timestamp":0}}"#
+        );
+    }
+
+    #[test]
+    fn tjs_stringify_writes_bigint_and_negative_zero_as_wire_nodes() {
+        let root = thaw_json_object_new();
+        let big = leak(Value::BigInt("12345678901234567890".into()));
+        thaw_json_object_set_json(root, CString::new("big").unwrap().as_ptr(), big);
+        let neg_zero = parse("-0.0");
+        thaw_json_object_set_json(root, CString::new("nz").unwrap().as_ptr(), neg_zero);
+        let zero = parse("0.0");
+        thaw_json_object_set_json(root, CString::new("z").unwrap().as_ptr(), zero);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_tjs(root)),
+            r#"{"big":{"__thaw_tjs_bigint__":"12345678901234567890"},"nz":{"__thaw_tjs_num__":"-0"},"z":0}"#
         );
     }
 
