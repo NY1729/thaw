@@ -3414,26 +3414,44 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
         Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Str(s))] if k == NUM_KEY && s == "-0") => {
             Value::Number(-0.0)
         }
-        // `{"__thaw_tjs_bytes__": {"k", "b64"}}`: compiled byte data rebuilt as a `Buffer`.
+        // `{"__thaw_tjs_bytes__": {"k", "b64"}}`: compiled byte data rebuilt as a `Buffer`, or as a
+        // plain `Uint8Array` when `k` says so. A branded Json wrapper (`{"__thaw_tjs_bytes__":
+        // {"k":"Buffer","data":[...]}}`) carries its bytes as a number array instead of base64.
         Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Object(_))] if k == BYTES_KEY) =>
         {
             let Native::Object(parts) = &fields[0].1 else {
                 unreachable!()
             };
-            let b64 = match parts.iter().find(|(k, _)| k == "b64") {
-                Some((_, Native::Str(s))) => s.as_str(),
-                _ => "",
+            let bytes = match parts.iter().find(|(k, _)| k == "b64") {
+                Some((_, Native::Str(s))) => {
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s.as_str())
+                        .unwrap_or_default()
+                }
+                _ => match parts.iter().find(|(k, _)| k == "data") {
+                    Some((_, Native::Array(items))) => items
+                        .iter()
+                        .map(|item| match item {
+                            Native::Number(n) => *n as u8,
+                            _ => 0,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                },
             };
-            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
-                .unwrap_or_default();
+            let is_u8 = matches!(
+                parts.iter().find(|(k, _)| k == "k"),
+                Some((_, Native::Str(s))) if s == "Uint8Array"
+            );
             let view = it.u8_from_vec(bytes);
             // Buffer is a Uint8Array whose prototype is `Buffer.prototype` (see buffer.rs `wrap`)
-            let global = it.global.clone();
-            let proto = it
-                .lookup(&global, "Buffer")
-                .and_then(|b| it.get(&b, "prototype").ok());
-            if let (Value::Object(o), Some(Value::Object(p))) = (&view, proto) {
-                *o.proto.borrow_mut() = Some(p);
+            if !is_u8 {
+                let global = it.global.clone();
+                let proto = it
+                    .lookup(&global, "Buffer")
+                    .and_then(|b| it.get(&b, "prototype").ok());
+                if let (Value::Object(o), Some(Value::Object(p))) = (&view, proto) {
+                    *o.proto.borrow_mut() = Some(p);
+                }
             }
             view
         }
