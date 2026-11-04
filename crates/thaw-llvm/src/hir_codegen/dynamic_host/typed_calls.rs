@@ -2564,6 +2564,18 @@ impl<'ctx> HirCompiler<'ctx> {
         {
             return Ok(None);
         }
+        // A closure with a bare `Json` parameter (an `any` it may call methods on) must receive live
+        // arguments: register it on the graph route (handle marker), as the QuickJS lane does. Bytes and
+        // number closures keep the text route.
+        if params.contains(&HirType::Json) && json_callback_wants_graph(params) {
+            self.thaw_js_call_arguments = true;
+            let handle = self.compile_register_native_callback(std::slice::from_ref(closure_expr), false);
+            self.thaw_js_call_arguments = false;
+            let marker = self.compile_thaw_js_handle_marker(handle?.into_int_value())?;
+            self.tracks_owned_json_roots = true;
+            self.mark_fresh_owned_json_result(marker)?;
+            return Ok(Some(marker));
+        }
         let closure = self.compile_expr(closure_expr)?.into_pointer_value();
         let marker = self.compile_thaw_js_callback_marker(closure, params, ret, None)?;
         self.tracks_owned_json_roots = true;
