@@ -9,13 +9,17 @@ crate-type = ["staticlib", "rlib"]
 
 [features]
 default = ["quickjs-brotli", "quickjs-tls", "quickjs-wasm"]
-js-engine = ["dep:thaw-quickjs"]
-quickjs = ["js-engine"]
-quickjs-brotli = ["js-engine", "thaw-quickjs/brotli"]
-quickjs-tls = ["js-engine", "thaw-quickjs/tls"]
-quickjs-wasm = ["js-engine", "thaw-quickjs/wasm"]
-quickjs-intl = ["js-engine", "thaw-quickjs/intl"]
-quickjs-icu4c = ["js-engine", "thaw-quickjs/icu4c"]
+# `js-engine` = "some engine backend is present"; all existing cfg(feature="js-engine") gates keep working.
+js-engine = []
+engine-quickjs = ["js-engine", "dep:thaw-quickjs"]
+# Stage-1 placeholder: no backend yet (compile_error in engine.rs); thaw-js is reached via extern "C" later, never a Cargo dep.
+engine-thaw-js = ["js-engine"]
+quickjs = ["engine-quickjs"]
+quickjs-brotli = ["engine-quickjs", "thaw-quickjs/brotli"]
+quickjs-tls = ["engine-quickjs", "thaw-quickjs/tls"]
+quickjs-wasm = ["engine-quickjs", "thaw-quickjs/wasm"]
+quickjs-intl = ["engine-quickjs", "thaw-quickjs/intl"]
+quickjs-icu4c = ["engine-quickjs", "thaw-quickjs/icu4c"]
 
 [dependencies]
 thaw-arena = { path = "../thaw-arena" }
