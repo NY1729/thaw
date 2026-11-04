@@ -375,11 +375,22 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:util/types",
         "node:string_decoder",
         "node:tty",
+        "node:buffer",
+        "node:process",
+        "node:http",
+        "node:child_process",
+        "node:tls",
+        "node:cluster",
+        "node:perf_hooks",
+        "node:dgram",
+        "node:crypto",
+        "node:net",
+        "node:zlib",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
-    // modules whose cases do not match Node on thaw-js yet stay on QuickJS
-    for module in ["node:crypto", "node:net", "node:zlib"] {
+    // modules not yet allowlisted stay on QuickJS
+    for module in ["node:https", "node:http2"] {
         assert!(!THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
 }

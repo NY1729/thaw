@@ -401,6 +401,17 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:util/types",
     "node:string_decoder",
     "node:tty",
+    "node:buffer",
+    "node:process",
+    "node:http",
+    "node:child_process",
+    "node:tls",
+    "node:cluster",
+    "node:perf_hooks",
+    "node:dgram",
+    "node:crypto",
+    "node:net",
+    "node:zlib",
 ];
 
 /// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
