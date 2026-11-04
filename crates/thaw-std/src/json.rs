@@ -1108,6 +1108,9 @@ impl<T> Drop for SharedValue<T> {
         let _ = WRAPPER_BRANDS.try_with(|brands| {
             brands.borrow_mut().remove(&key);
         });
+        let _ = U8_WRAPPERS.try_with(|brands| {
+            brands.borrow_mut().remove(&key);
+        });
         let _ = GRAPH_PLAIN_OBJECTS.try_with(|objects| {
             objects.borrow_mut().remove(&key);
         });
@@ -1284,6 +1287,8 @@ thread_local! {
     static STRINGIFY_ANCESTORS: RefCell<Vec<(usize, *const Value)>> = const { RefCell::new(Vec::new()) };
     static STRINGIFY_CYCLE_MESSAGE: RefCell<Option<String>> = const { RefCell::new(None) };
     static WRAPPER_BRANDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    // Branded wrappers that are plain `Uint8Array`s (`thaw_json_brand_bytes_kind`), not `Buffer`s.
+    static U8_WRAPPERS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
     static GRAPH_PLAIN_OBJECTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
     // `hdl` markers decoded without HostOperations: branded so they re-encode
     // as `hdl`, but not a projection of the original handle.
@@ -2855,7 +2860,8 @@ fn ordered_json(value: &Value) -> Value {
     }
     // A branded Buffer wrapper (`{"type":"Buffer","data":[...]}`, see `coercions.rs`) crosses as
     // `{"__thaw_tjs_bytes__": {"k":"Buffer","data":[...]}}` so thaw-js rebuilds a real `Buffer`
-    // instead of a plain object. The kind is always `Buffer` on this path.
+    // instead of a plain object. The kind is `Uint8Array` only for a wrapper marked by
+    // `thaw_json_brand_bytes_kind`; every other wrapper stays `Buffer`.
     if DATE_WIRE.with(Cell::get)
         && is_branded_wrapper(value)
         && thaw_json_is_buffer_shape(value as *const Value) == 1
@@ -2867,7 +2873,14 @@ fn ordered_json(value: &Value) -> Value {
             return Value::shared_object(indexmap::IndexMap::from([(
                 b"__thaw_tjs_bytes__".to_vec(),
                 Value::shared_object(indexmap::IndexMap::from([
-                    (b"k".to_vec(), Value::String("Buffer".into())),
+                    (
+                        b"k".to_vec(),
+                        Value::String(String::from(if is_uint8_wrapper(value) {
+                            "Uint8Array"
+                        } else {
+                            "Buffer"
+                        })),
+                    ),
                     (b"data".to_vec(), ordered_json(data)),
                 ])),
             )]));
@@ -3766,6 +3779,25 @@ pub extern "C" fn thaw_json_brand_wrapper(value: *mut Value) -> *mut Value {
         });
     }
     value
+}
+
+/// Marks a branded Buffer-shaped wrapper as a plain `Uint8Array` when `kind` is 3.0
+/// (`thaw_bytes_console_info` code); any other kind returns `value` untouched.
+#[no_mangle]
+pub extern "C" fn thaw_json_brand_bytes_kind(value: *mut Value, kind: f64) -> *mut Value {
+    if kind == 3.0 {
+        if let Some(identity) = unsafe { value.as_ref() }.and_then(object_identity_key) {
+            U8_WRAPPERS.with(|brands| {
+                brands.borrow_mut().insert(identity);
+            });
+        }
+    }
+    value
+}
+
+fn is_uint8_wrapper(value: &Value) -> bool {
+    object_identity_key(value)
+        .is_some_and(|identity| U8_WRAPPERS.with(|brands| brands.borrow().contains(&identity)))
 }
 
 /// Brands a callback's top-level `Json` argument only when it is exactly the handle placeholder
@@ -5753,7 +5785,7 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
         return host_inspect_node(lease, stack);
     }
     if is_branded_wrapper(value) && thaw_json_is_buffer_shape(value as *const Value) == 1 {
-        let bytes = value
+        let bytes: Vec<u8> = value
             .as_object()
             .and_then(|fields| fields.get(b"data".as_slice()))
             .and_then(Value::as_array)
@@ -5764,6 +5796,16 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                     .collect()
             })
             .unwrap_or_default();
+        if is_uint8_wrapper(value) {
+            return Node::Typed {
+                name: "Uint8Array".into(),
+                items: bytes
+                    .iter()
+                    .map(|&byte| Node::Number(f64::from(byte)))
+                    .collect(),
+                extra: Vec::new(),
+            };
+        }
         return Node::Buffer(bytes);
     }
     let id = object_identity_key(value).unwrap_or(0);
@@ -13449,6 +13491,44 @@ mod tests {
             read_c_string(thaw_json_stringify_tjs(root)),
             r#"{"b":{"__thaw_tjs_bytes__":{"k":"Buffer","data":[1,2]}},"p":{"type":"Buffer","data":[3]}}"#
         );
+    }
+
+    #[test]
+    fn tjs_stringify_writes_uint8array_marked_wrapper_with_kind_uint8array() {
+        let root = thaw_json_object_new();
+        let marked = thaw_json_brand_bytes_kind(
+            thaw_json_brand_wrapper(parse(r#"{"type":"Buffer","data":[1,2]}"#)),
+            3.0,
+        );
+        thaw_json_object_set_json(root, CString::new("u").unwrap().as_ptr(), marked);
+        let other_kind = thaw_json_brand_bytes_kind(
+            thaw_json_brand_wrapper(parse(r#"{"type":"Buffer","data":[3]}"#)),
+            1.0,
+        );
+        thaw_json_object_set_json(root, CString::new("a").unwrap().as_ptr(), other_kind);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_tjs(root)),
+            r#"{"u":{"__thaw_tjs_bytes__":{"k":"Uint8Array","data":[1,2]}},"a":{"__thaw_tjs_bytes__":{"k":"Buffer","data":[3]}}}"#
+        );
+    }
+
+    #[test]
+    fn tj62_marked_uint8array_wrapper_inspects_as_typed_uint8array() {
+        let marked = thaw_json_brand_bytes_kind(
+            thaw_json_brand_wrapper(parse(r#"{"type":"Buffer","data":[1,2]}"#)),
+            3.0,
+        );
+        let node = inspect_node(unsafe { &*marked }, &mut Vec::new());
+        assert!(
+            matches!(&node, crate::inspect::Node::Typed { name, items, .. }
+                if name == "Uint8Array" && items.len() == 2),
+            "{node:?}"
+        );
+        let plain = thaw_json_brand_wrapper(parse(r#"{"type":"Buffer","data":[1,2]}"#));
+        assert!(matches!(
+            inspect_node(unsafe { &*plain }, &mut Vec::new()),
+            crate::inspect::Node::Buffer(_)
+        ));
     }
 
     #[test]

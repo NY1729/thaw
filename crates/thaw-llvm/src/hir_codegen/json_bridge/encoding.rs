@@ -2020,6 +2020,29 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_brand_wrapper returned no value")?;
+        let record = self.compile_array_data(value)?;
+        let kind = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_bytes_console_info").unwrap(),
+                &[record.into(), self.context.f64_type().const_zero().into()],
+                "bytes_json_kind",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_bytes_console_info returned no value")?;
+        let branded = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_brand_bytes_kind").unwrap(),
+                &[branded.into(), kind.into()],
+                "brand_bytes_kind",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_brand_bytes_kind returned no value")?;
         Ok(branded)
     }
 

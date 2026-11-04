@@ -271,6 +271,7 @@ thaw_json_borrowed_handle_id
 thaw_json_borrowed_tracked_handle_id
 thaw_json_brand_handle_placeholder
 thaw_json_brand_wrapper
+thaw_json_brand_bytes_kind
 thaw_json_brand_wrapper_if
 thaw_json_buffer_inspect
 thaw_json_callback_error

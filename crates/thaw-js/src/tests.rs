@@ -3589,6 +3589,25 @@ fn tj35_branded_buffer_wrapper_node_revives_from_its_data_array() {
 }
 
 #[test]
+fn tj62_uint8array_kind_with_data_array_revives_plain_uint8array() {
+    use std::ffi::CString;
+    let bundle = CString::new(BYTES_KIND).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"bku".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    // the Json-routed form of a marked Uint8Array carries `data` with `k: "Uint8Array"`
+    assert_eq!(
+        typed_call(
+            "bku::proto",
+            r#"[{"__thaw_tjs_bytes__":{"k":"Uint8Array","data":[1,2]}}]"#
+        )
+        .unwrap(),
+        "\"2,false,true\""
+    );
+}
+
+#[test]
 fn defer_thenable_passes_non_thenables_through() {
     assert_eq!(
         one("var o = {}; console.log(__thaw_defer_thenable(5), __thaw_defer_thenable(null) === null, __thaw_defer_thenable(o) === o, typeof globalThis.__thaw_defer_thenable)"),
