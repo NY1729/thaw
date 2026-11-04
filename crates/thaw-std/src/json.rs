@@ -2846,6 +2846,19 @@ fn ordered_json(value: &Value) -> Value {
             }
         }
     }
+    // A thaw-js call argument that cannot survive a copy (a typed array other than Uint8Array, an
+    // ArrayBuffer, a Map or a Set held by thaw-js) stays a live handle: thaw-js resolves
+    // `{"__thaw_tjs_handle__": id}` back to the same object.
+    if DATE_WIRE.with(Cell::get) {
+        if let Value::Host(lease) = value {
+            if host_query(lease, 29).as_deref() == Some("1") {
+                return Value::shared_object(indexmap::IndexMap::from([(
+                    b"__thaw_tjs_handle__".to_vec(),
+                    number_value(lease.handle as f64),
+                )]));
+            }
+        }
+    }
     match value {
         Value::Object(fields) => Value::shared_object(
             ordered_object_fields_shared(fields)
@@ -13252,6 +13265,60 @@ mod tests {
             read_c_string(thaw_json_stringify(root)),
             r#"{"m":{"__thaw_map_entries__":[["a",1]]},"s":{"__thaw_set_values__":[2,3]}}"#
         );
+    }
+
+    #[test]
+    fn tjs_stringify_keeps_typed_host_values_as_live_handles() {
+        std::thread::spawn(|| {
+            extern "C" fn query(handle: u64, operation: u8) -> HostTextResult {
+                let value: &[u8] = match (handle, operation) {
+                    (7, 29) => b"1",
+                    (8, 29) => b"0",
+                    (7 | 8, 8) => b"{\"0\":0,\"1\":0}",
+                    // Date, array, callable and other probes answer "no"
+                    _ => b"0",
+                };
+                HostTextResult {
+                    value: thaw_arena::owned_string(value),
+                    error: std::ptr::null(),
+                }
+            }
+            HOST_OPERATIONS.with(|slot| {
+                slot.set(Some(HostOperations {
+                    retain: host_array_test_retain,
+                    release: host_array_test_release,
+                    get: host_array_test_get,
+                    query,
+                    date_set: unused_typed_scope_date,
+                    set: unused_typed_scope_set,
+                    predicate: unused_typed_scope_predicate,
+                    enumerate: unused_typed_scope_text,
+                }))
+            });
+            let live = leak(Value::Host(Rc::new(HostLease {
+                handle: 7,
+                release: host_array_test_release,
+            })));
+            let copied = leak(Value::Host(Rc::new(HostLease {
+                handle: 8,
+                release: host_array_test_release,
+            })));
+            let root = thaw_json_object_new();
+            thaw_json_object_set_json(root, CString::new("live").unwrap().as_ptr(), live);
+            thaw_json_object_set_json(root, CString::new("copied").unwrap().as_ptr(), copied);
+            // the tjs argument form keeps the live value as a handle and copies the other
+            assert_eq!(
+                read_c_string(thaw_json_stringify_tjs(root)),
+                r#"{"live":{"__thaw_tjs_handle__":7},"copied":{"0":0,"1":0}}"#
+            );
+            // the ordinary stringifier (op 8 for both) is unaffected
+            assert_eq!(
+                read_c_string(thaw_json_stringify(root)),
+                r#"{"live":{"0":0,"1":0},"copied":{"0":0,"1":0}}"#
+            );
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

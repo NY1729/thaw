@@ -1339,7 +1339,7 @@ fn unsupported_text(what: &str) -> ThawResult {
 // package has not needed yet report an error instead of linking the QuickJS runtime.
 /// Introspection of the value behind `handle` for the Json host bridge (the numbering is the QuickJS
 /// `__thaw_json_host_query`'s). Kinds thaw-js has no value for (Date, Buffer, Map, Set, native
-/// wrappers) answer "no".
+/// wrappers) answer "no" to the copy queries; operation 29 says whether the value must stay a live handle.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> ThawResult {
     if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
@@ -1399,6 +1399,11 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             17..=20 | 22..=24 => prelude_call(it, "__thaw_json_host_query", &v, operation)?,
             21 | 27 => String::new(),
             28 => "{}".to_string(),
+            // a value that must cross a thaw-js call argument as a live handle: a typed array other
+            // than Uint8Array, an ArrayBuffer, a Map or a Set would otherwise be flattened to a plain object
+            29 => flag(matches!(&v, Value::Object(o) if matches!(&*o.kind.borrow(),
+                Kind::ArrayBuffer(_) | Kind::Map(_) | Kind::Set(_))
+                || matches!(&*o.kind.borrow(), Kind::Typed(t) if !matches!(t.ty, crate::typed::Ty::U8)))),
             _ => {
                 return Err(HostError::Thrown(format!(
                     "TypeError: thaw-js does not support the host query {operation}"
@@ -4155,5 +4160,72 @@ mod live_result_lease_tests {
         let (_, out) = token_of(&mut it, &live);
         assert!(out.leases.is_empty());
         assert!(out.nodes[0].starts_with("{\"a\":"), "{:?}", out.nodes);
+    }
+}
+
+#[cfg(test)]
+mod host_query_live_tests {
+    use super::*;
+    use std::ffi::{CStr, CString};
+
+    /// `new <global>(...args)` as a handle; `args` is a JSON array of graph argument nodes.
+    fn construct(global: &str, args: &str) -> u64 {
+        let ctor = thaw_tjs_get_global(CString::new(global).unwrap().as_ptr());
+        assert_ne!(ctor, 0, "{global} is not defined");
+        let wire =
+            CString::new(format!(r#"{{"root":{{"r":0}},"nodes":[{{"a":{args}}}]}}"#)).unwrap();
+        let result = thaw_tjs_construct_handle_graph_args_result(ctor as u64, wire.as_ptr());
+        assert!(result.error.is_null());
+        result.value
+    }
+
+    fn query(handle: u64, operation: u8) -> String {
+        let result = thaw_tjs_host_query_result(handle, operation);
+        assert!(result.error.is_null());
+        let text = unsafe { CStr::from_ptr(result.value) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { thaw_arena::destroy_string(result.value) };
+        text
+    }
+
+    #[test]
+    fn host_query_keep_live_answers_one_for_typed_buffers_maps_and_sets() {
+        for (global, args) in [
+            ("Float64Array", "[{\"v\":2}]"),
+            ("Uint16Array", "[{\"v\":2}]"),
+            ("ArrayBuffer", "[{\"v\":8}]"),
+            ("Map", "[]"),
+            ("Set", "[]"),
+        ] {
+            assert_eq!(query(construct(global, args), 29), "1", "{global}");
+        }
+    }
+
+    #[test]
+    fn host_query_keep_live_answers_zero_for_copyable_values() {
+        assert_eq!(query(construct("Uint8Array", "[{\"v\":2}]"), 29), "0");
+        assert_eq!(query(construct("Object", "[]"), 29), "0");
+        assert_eq!(query(construct("Array", "[]"), 29), "0");
+        assert_eq!(query(construct("Date", "[{\"v\":0}]"), 29), "0");
+        assert_eq!(query(thaw_tjs_new_function_handle(), 29), "0");
+    }
+
+    #[test]
+    fn host_query_keep_live_leaves_operation_eight_unchanged() {
+        // op 8 still flattens a typed array for a real JSON.stringify
+        assert_eq!(
+            query(construct("Float64Array", "[{\"v\":2}]"), 8),
+            r#"{"0":0,"1":0}"#
+        );
+        assert_eq!(query(construct("Map", "[]"), 8), "{}");
+    }
+
+    fn thaw_tjs_new_function_handle() -> u64 {
+        let args = CString::new(r#"["return 1"]"#).unwrap();
+        let result = thaw_tjs_new_function(args.as_ptr());
+        assert!(result.error.is_null());
+        result.value
     }
 }
