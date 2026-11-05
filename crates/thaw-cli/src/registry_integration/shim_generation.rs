@@ -521,6 +521,7 @@ fn generate_registry_shims_pass(
         functions.retain(|function| !type_only_value_names.contains(&function.name));
         values.retain(|value| !type_only_value_names.contains(&value.name));
         if path_builtin.is_none() && !name.starts_with("node:") {
+            let unpruned = functions.clone();
             prune_unused_functions(
                 &mut functions,
                 name,
@@ -528,6 +529,12 @@ fn generate_registry_shims_pass(
                 // a thaw-js build also compiles every shim it emits, so an unmentioned function's
                 // adapter (ejs `compile`'s callable result) must not be emitted at all
                 thaw_js_routing || std::env::var("THAW_PRUNE_SHIMS").as_deref() == Ok("1"),
+            );
+            keep_nested_namespace_targets(
+                unpruned,
+                &mut functions,
+                &nested_namespaces,
+                user_source,
             );
         }
         restrict_type_only_class_values(&mut classes, &type_only_value_names);
@@ -2830,4 +2837,32 @@ fn prune_unused_functions(
         function.name == "default"
             || tokens.contains(function.name.split('.').next().unwrap_or(&function.name))
     });
+}
+
+/// `pkg.mid.member` reaches its target `leaf` (`export { leaf as member }` inside `mid`) only through the
+/// nested namespace table, so the program never writes `leaf` and `prune_unused_functions` drops it, leaving
+/// the chain with no wrapper. Restore the targets of every namespace the program mentions. Keeps the
+/// original function order.
+fn keep_nested_namespace_targets(
+    unpruned: Vec<thaw_bridge::DtsFunction>,
+    functions: &mut Vec<thaw_bridge::DtsFunction>,
+    nested: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    user_source: &str,
+) {
+    let targets = nested
+        .iter()
+        .filter(|(namespace, _)| thaw_js_mentions(user_source, namespace))
+        .flat_map(|(_, members)| members.values().cloned())
+        // `__thaw_ns_*` are synthetic flattened names for dotted exports (`coerce.number`): the bundle has no
+        // top-level export of that name, so restoring one would point the member at a function that is not there.
+        .filter(|target| !target.starts_with("__thaw_ns_"))
+        .collect::<std::collections::HashSet<_>>();
+    let kept = functions
+        .iter()
+        .map(|function| function.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    *functions = unpruned
+        .into_iter()
+        .filter(|function| kept.contains(&function.name) || targets.contains(&function.name))
+        .collect();
 }
