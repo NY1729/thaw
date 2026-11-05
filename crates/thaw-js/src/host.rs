@@ -176,7 +176,7 @@ fn install_module_loader(it: &mut Interp, loader: &Rc<Loader>, bundle_js: &str) 
 /// A loaded package: one interpreter, the bundle's modules, and its entry exports.
 pub struct Package {
     /// Boxed: async functions hold its address while suspended.
-    interp: Box<Interp>,
+    pub(crate) interp: Box<Interp>,
     exports: Value,
 }
 
@@ -347,7 +347,7 @@ impl Package {
     }
 }
 
-fn classify(it: &mut Interp, c: Ctl) -> HostError {
+pub(crate) fn classify(it: &mut Interp, c: Ctl) -> HostError {
     match c {
         Ctl::Unsupported(f) => HostError::Unsupported(f),
         Ctl::Throw(v) => {
@@ -425,7 +425,7 @@ static CALLBACKS: std::sync::Mutex<Vec<CompiledCallback>> = std::sync::Mutex::ne
 thread_local! {
     /// Values compiled code holds by handle (class instances): `(package handle, value)`; id = index + 1.
     /// A released handle keeps its slot (ids are never reused, so a stale id is `undefined`).
-    static HANDLES: RefCell<Vec<(usize, Value)>> = const { RefCell::new(Vec::new()) };
+    pub(crate) static HANDLES: RefCell<Vec<(usize, Value)>> = const { RefCell::new(Vec::new()) };
     /// Outstanding references per handle id (index + 1): compiled code retains and releases handles
     /// the way it does QuickJS ones.
     static HANDLE_REFS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
@@ -439,7 +439,7 @@ thread_local! {
     static LAST_PACKAGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn store_handle(package: usize, value: Value) -> i64 {
+pub(crate) fn store_handle(package: usize, value: Value) -> i64 {
     HANDLE_REFS.with(|r| r.borrow_mut().push(1));
     let object = object_key(&value);
     let id = HANDLES.with(|h| {
@@ -948,7 +948,7 @@ pub extern "C" fn thaw_tjs_call_graph_result(
 /// Decode a graph wire (`thaw_json_graph_encode`) into `(owning package, value)`. The package is the one
 /// that owns a handle the wire references, else the package last entered (a value only needs an
 /// interpreter to be built in and a package for later method calls on it).
-fn decode_wire(wire: &str) -> Result<(usize, Value), String> {
+pub(crate) fn decode_wire(wire: &str) -> Result<(usize, Value), String> {
     if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
         eprintln!("thaw-js decode: {wire}");
     }
@@ -981,7 +981,7 @@ fn decode_wire(wire: &str) -> Result<(usize, Value), String> {
     .map_err(|e| e.to_string())
 }
 
-fn handle_result(result: Result<i64, String>) -> HandleResult {
+pub(crate) fn handle_result(result: Result<i64, String>) -> HandleResult {
     match result {
         Ok(handle) => HandleResult {
             value: handle as u64,
@@ -1006,7 +1006,7 @@ pub extern "C" fn thaw_tjs_retain_graph_result(wire: *const c_char) -> HandleRes
 }
 
 /// The error text a failed handle operation reports: the framed form of the last `Error` object thrown.
-fn error_text(e: HostError) -> String {
+pub(crate) fn error_text(e: HostError) -> String {
     let display = e.to_string();
     LAST_FRAME.with(|f| match f.borrow_mut().take() {
         Some((d, framed)) if d == display => framed,
@@ -1015,7 +1015,7 @@ fn error_text(e: HostError) -> String {
 }
 
 /// Run `f(interpreter, package, value)` on the value behind `handle`, in the package that owns it.
-fn on_handle<T>(
+pub(crate) fn on_handle<T>(
     handle: u64,
     f: impl FnOnce(&mut Package, usize, Value) -> Result<T, HostError>,
 ) -> Result<T, String> {
@@ -1443,12 +1443,22 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             10 => number(it, &v),
             14 => flag(v.is_callable()),
             16 => number(it, &v),
+            // the UTF-16 code units of a string, as a JSON array of numbers
+            15 => match &v {
+                Value::Str(s) => {
+                    let units = crate::builtins::str_units(s);
+                    let items: Vec<String> = units.iter().map(u16::to_string).collect();
+                    format!("[{}]", items.join(","))
+                }
+                _ => return Err(HostError::Thrown("TypeError: Expected string".into())),
+            },
             26 => flag(matches!(&v, Value::Object(o) if o.proto.borrow().is_none())),
             11 | 25 => "0".to_string(),
             12 => flag(it.date_target(&v)),
             13 => crate::number_to_string(it.date_time(&v).map_err(|c| classify(it, c))?),
             17..=20 | 22..=24 => prelude_call(it, "__thaw_json_host_query", &v, operation)?,
-            21 | 27 => String::new(),
+            21 => native_owner_pointer_hex(&v),
+            27 => String::new(),
             28 => "{}".to_string(),
             // a value that must cross a thaw-js call argument as a live handle: a typed array other
             // than Uint8Array, an ArrayBuffer, a Map, a Set or a Proxy (the native array, collection and
@@ -1889,6 +1899,24 @@ pub extern "C" fn thaw_tjs_intern_native_object(
     })());
     thaw_tjs_release_handle(candidate_handle as i64);
     result
+}
+
+/// Host query 21: the native owner pointer (lowercase hex) of an interned native wrapper, under any
+/// layout, or "" for anything else. The counterpart of QuickJS's `object_pointer` bridge with an empty layout.
+fn native_owner_pointer_hex(v: &Value) -> String {
+    let Value::Object(obj) = v else {
+        return String::new();
+    };
+    NATIVE_OWNERS.with(|o| {
+        o.borrow()
+            .get(&(Rc::as_ptr(obj) as usize))
+            .and_then(|owners| {
+                owners
+                    .iter()
+                    .find(|(_, layout)| layout_contains(layout, ""))
+            })
+            .map_or_else(String::new, |(pointer, _)| format!("{pointer:x}"))
+    })
 }
 
 /// The native pointer of the owner an interned wrapper (`handle`) was made for with a layout that
@@ -4022,7 +4050,7 @@ fn terminate_process(it: &mut Interp, code: i32) {
     unsafe { libc::_exit(status) }
 }
 
-fn cstr(p: *const c_char) -> Option<String> {
+pub(crate) fn cstr(p: *const c_char) -> Option<String> {
     if p.is_null() {
         return None;
     }
