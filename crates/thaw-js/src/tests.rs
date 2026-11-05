@@ -4041,6 +4041,68 @@ fn typed_call_result_marks_non_finite_numbers() {
     assert_eq!(typed_call("nfn::num", "[1.5]").unwrap(), "1.5");
 }
 
+#[test]
+fn typed_result_keeps_an_undefined_own_property_as_the_marker() {
+    register_exit_package(
+        "tjskeep",
+        "  exports.mk = function () { return { a: 1, gone: undefined, n: { z: undefined }, l: [undefined, { y: undefined }] }; };",
+    );
+    let marker = r#"{"$__thaw_napi_undefined$":true}"#;
+    assert_eq!(
+        typed_call("tjskeep::mk", "[]").unwrap(),
+        format!(r#"{{"a":1,"gone":{marker},"n":{{"z":{marker}}},"l":[null,{{"y":{marker}}}]}}"#)
+    );
+}
+
+#[test]
+fn typed_result_top_level_and_array_undefined_are_unchanged() {
+    register_exit_package(
+        "tjsku",
+        "  exports.u = function () { return undefined; };\n  exports.a = function () { return [undefined, 1]; };",
+    );
+    assert_eq!(
+        typed_call("tjsku::u", "[]").unwrap(),
+        r#"{"$__thaw_napi_undefined$":true}"#
+    );
+    assert_eq!(typed_call("tjsku::a", "[]").unwrap(), "[null,1]");
+}
+
+#[test]
+fn typed_arg_undefined_marker_round_trips_as_an_own_property() {
+    register_exit_package(
+        "tjsarg",
+        "  exports.k = function (o) { return Object.keys(o).join() + ':' + (o.a === undefined); };",
+    );
+    assert_eq!(
+        typed_call("tjsarg::k", r#"[{"a":{"$__thaw_napi_undefined$":true}}]"#).unwrap(),
+        "\"a:true\""
+    );
+}
+
+#[test]
+fn async_result_keeps_an_undefined_own_property() {
+    use crate::host::thaw_tjs_watch_promise;
+    register_exit_package(
+        "tjskpend",
+        "  exports.later = function () { return new Promise(function (r) { globalThis.fireObj = r; }); };\n  exports.fire = function () { globalThis.fireObj({ gone: undefined, a: 1 }); };",
+    );
+    let marker = typed_call("\u{4}tjskpend::later", "[]").expect("pending marker");
+    let id: i64 = marker
+        .strip_prefix(r#"{"__thaw_tjs_pending__":"#)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .expect("marker shape")
+        .parse()
+        .expect("handle id");
+    SETTLED.with(|s| s.borrow_mut().clear());
+    thaw_tjs_watch_promise(id, std::ptr::null_mut(), record_settle);
+    typed_call("tjskpend::fire", "[]").expect("fire");
+    let marker = r#"{"$__thaw_napi_undefined$":true}"#;
+    assert_eq!(
+        SETTLED.with(|s| s.borrow().clone()),
+        vec![(Some(format!(r#"{{"gone":{marker},"a":1}}"#)), None)]
+    );
+}
+
 // ----- process.exit / exitCode across packages (host.rs terminate_process) -----
 
 thread_local! {
