@@ -17,6 +17,18 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+thread_local! {
+    /// Timer/immediate ids are unique across every realm on this thread, so a Timeout can be cleared from any realm.
+    static NEXT_TIMER_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn next_timer_id() -> u64 {
+    NEXT_TIMER_ID.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    })
+}
+
 const TIMEOUT_MAX: f64 = 2147483647.0;
 const CO_STACK: usize = 64 << 20;
 const MAIN_FILE_LOADER: &str = include_str!("web/main_file.js");
@@ -201,7 +213,6 @@ pub(crate) struct Rt {
     pub(crate) to_prim_key: Option<Rc<str>>,
     /// Every symbol by id, so `Object.getOwnPropertySymbols` can map `@@sym:<id>` keys back.
     pub(crate) symbols: HashMap<u64, Obj>,
-    next_id: u64,
     seq: u64,
     now: f64,
     listeners: HashMap<String, Vec<(Value, bool)>>,
@@ -804,9 +815,8 @@ impl Interp {
         if !(1.0..=TIMEOUT_MAX).contains(&delay) {
             delay = 1.0;
         }
-        self.rt.next_id += 1;
         self.rt.seq += 1;
-        let id = self.rt.next_id;
+        let id = next_timer_id();
         let obj = new_obj(self.rt.timeout_proto.clone(), Kind::Plain);
         put_hidden(&obj, "@@tid", Value::Number(id as f64));
         self.rt.timers.push(Timer {
@@ -858,6 +868,26 @@ impl Interp {
             },
             _ => None,
         }
+    }
+
+    /// Remove timer/immediate `id` here, else in the realm that owns it. Ids are unique across realms.
+    pub(crate) fn clear_timer_anywhere(&mut self, id: u64, immediate: bool) {
+        let n = self.rt.timers.len() + self.rt.immediates.len();
+        self.rt.timers.retain(|t| t.id != id);
+        self.rt.immediates.retain(|t| t.id != id);
+        if immediate {
+            self.rt.cleared.push(id);
+        }
+        if self.rt.timers.len() + self.rt.immediates.len() != n {
+            return;
+        }
+        crate::host::for_other_realms(self, |other| {
+            other.rt.timers.retain(|t| t.id != id);
+            other.rt.immediates.retain(|t| t.id != id);
+            if immediate {
+                other.rt.cleared.push(id);
+            }
+        });
     }
 
     fn set_ref(&mut self, this: &Value, refd: Option<bool>) -> bool {
@@ -1376,7 +1406,7 @@ impl Interp {
         });
         self.set_native(&timeout_proto, "close", |it, this, _| {
             if let Some(id) = it.timer_id(this) {
-                it.rt.timers.retain(|t| t.id != id);
+                it.clear_timer_anywhere(id, false);
             }
             Ok(this.clone())
         });
@@ -1387,7 +1417,7 @@ impl Interp {
         for name in ["clearTimeout", "clearInterval"] {
             let f = self.native(|it, _, a| {
                 if let Some(id) = it.timer_id(&arg(a, 0)) {
-                    it.rt.timers.retain(|t| t.id != id);
+                    it.clear_timer_anywhere(id, false);
                 }
                 Ok(Value::Undefined)
             });
@@ -1396,8 +1426,7 @@ impl Interp {
         let f = self.native(|it, _, a| {
             let cb = arg(a, 0);
             it.need_callback(&cb)?;
-            it.rt.next_id += 1;
-            let id = it.rt.next_id;
+            let id = next_timer_id();
             let obj = new_obj(it.rt.immediate_proto.clone(), Kind::Plain);
             put_hidden(&obj, "@@tid", Value::Number(id as f64));
             it.rt.immediates.push(Imm {
@@ -1413,8 +1442,7 @@ impl Interp {
         g.declare("setImmediate", f, true);
         let f = self.native(|it, _, a| {
             if let Some(id) = it.timer_id(&arg(a, 0)) {
-                it.rt.immediates.retain(|t| t.id != id);
-                it.rt.cleared.push(id);
+                it.clear_timer_anywhere(id, true);
             }
             Ok(Value::Undefined)
         });
