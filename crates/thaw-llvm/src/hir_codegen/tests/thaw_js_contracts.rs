@@ -198,3 +198,33 @@ fn typed_thaw_js_calls_carry_dates_on_the_date_wire_and_accept_live_value_params
     assert!(ir.contains("\\03dt::plus"), "{ir}");
     assert!(ir.contains("__thaw_tjs_date__"), "{ir}");
 }
+
+#[test]
+fn thaw_js_param_accepts_optional_dynamic() {
+    use thaw_hir::HirType::*;
+    assert!(thaw_js_param_type(&Optional(Box::new(Dynamic))));
+    assert!(thaw_js_param_type(&Array(Box::new(Dynamic))));
+    assert!(!thaw_js_plain_type(&Dynamic));
+}
+
+#[test]
+fn thaw_js_result_type_accepts_tuple_and_union_with_resolved_promise() {
+    use thaw_hir::HirType::*;
+    assert!(thaw_js_result_type(&Tuple(vec![Json, Array(Box::new(Json)), Array(Box::new(Json))])));
+    assert!(thaw_js_result_type(&Union(vec![Str, Promise(Box::new(Str))])));
+    assert!(!thaw_js_result_type(&Union(vec![Str, Promise(Box::new(JsValue))])));
+    assert!(!thaw_js_result_type(&Tuple(vec![JsValue])));
+    assert!(!thaw_js_result_type(&JsValue));
+    assert!(!thaw_js_result_type(&Array(Box::new(JsValue))));
+    assert!(!thaw_js_result_type(&Dynamic));
+}
+
+#[test]
+fn thaw_js_union_with_a_resolved_promise_member_is_a_routed_call_not_a_stub() {
+    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_program(
+        "declare function __thaw_typed_tjs_6d733a3a6d73(): string | Promise<string>;
+         function main(): void { console.log(__thaw_typed_tjs_6d733a3a6d73()); }",
+    );
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(!ir.contains("non-plain-data"), "{ir}");
+}

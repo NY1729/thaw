@@ -19,6 +19,22 @@ pub(crate) fn thaw_js_plain_type(ty: &HirType) -> bool {
     }
 }
 
+/// Result types that cross as plain JSON although `thaw_js_plain_type` is stricter: tuples of plain
+/// members, and unions whose `Promise<T>` members are already-resolved plain `T`. `Dynamic` is not
+/// included: the result decoder has no `Dynamic` arm, so it would fail the build instead of stubbing.
+pub(crate) fn thaw_js_result_type(ty: &HirType) -> bool {
+    match ty {
+        HirType::Tuple(members) => members.iter().all(thaw_js_result_type),
+        HirType::Union(members) => members.iter().all(|m| match m {
+            HirType::Promise(inner) => thaw_js_plain_type(inner),
+            other => thaw_js_result_type(other),
+        }),
+        HirType::Array(e) | HirType::Dictionary(e) | HirType::Optional(e) | HirType::Nullable(e)
+        | HirType::Nullish(e) => thaw_js_result_type(e),
+        other => thaw_js_plain_type(other),
+    }
+}
+
 /// The type a thaw-js call yields once awaited: `Promise<T>` is awaited on the JS side and returned as
 /// a resolved native Promise of `T`, so only `T` has to cross the boundary.
 fn thaw_js_awaited_type(ty: &HirType) -> &HirType {
@@ -102,6 +118,8 @@ fn thaw_js_param_leaf_type(ty: &HirType) -> bool {
             thaw_js_param_leaf_type(inner)
         }
         HirType::Object(fields) => fields.iter().all(|(_, ty)| thaw_js_param_leaf_type(ty)),
+        // an unresolved generic (`spec?: S`) is passed as a dynamic handle, like JsValue
+        HirType::Dynamic => true,
         _ => thaw_js_plain_type(ty),
     }
 }
@@ -1769,7 +1787,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .find(|ty| !thaw_js_param_type(ty) || (**ty != HirType::Bytes && thaw_js_contains_bytes(ty)))
             .or_else(|| {
                 // a `Promise<Date>` would decode as a plain object: only plain `Promise<T>` routes
-                let unroutable = (!thaw_js_plain_type(awaited) && signature.ret != HirType::JsValue)
+                let unroutable = (!thaw_js_result_type(awaited) && signature.ret != HirType::JsValue)
                     || (awaited != &signature.ret && thaw_js_date_type(awaited));
                 unroutable.then_some(&signature.ret)
             })
