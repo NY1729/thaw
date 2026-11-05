@@ -2721,10 +2721,43 @@ pub extern "C" fn thaw_tjs_handle_is_plain_data(handle: u64) -> u8 {
     .unwrap_or(0)
 }
 
-/// Typed arrays print through `String(value)` here: no probe text.
+/// `console.log` of a typed array: `{"n":name,"v":[text, ..],"e":[]}` for the std inspector
+/// (`thaw_console_typed_or`), or null for any other value (and for a `Buffer`, which prints itself).
 #[no_mangle]
-pub extern "C" fn thaw_tjs_handle_typed_array_probe(_handle: u64) -> *const c_char {
-    ptr::null()
+pub extern "C" fn thaw_tjs_handle_typed_array_probe(handle: u64) -> *const c_char {
+    let probe = on_handle(handle, |_, _, v| {
+        let Value::Object(o) = &v else {
+            return Ok(None);
+        };
+        let Kind::Typed(t) = &*o.kind.borrow() else {
+            return Ok(None);
+        };
+        if crate::find_in_chain(o, "__isBuffer").is_some() {
+            return Ok(None);
+        }
+        let items: Vec<String> = t
+            .to_vec()
+            .into_iter()
+            .map(|x| {
+                let text = if x == 0.0 && x.is_sign_negative() {
+                    "-0".to_string()
+                } else {
+                    crate::number_to_string(x)
+                };
+                format!("\"{text}\"")
+            })
+            .collect();
+        // ponytail: no extra own-property list ("e"); add if a package prints a typed array with extra keys
+        Ok(Some(format!(
+            "{{\"n\":\"{}\",\"v\":[{}],\"e\":[]}}",
+            t.ty.name(),
+            items.join(",")
+        )))
+    });
+    match probe {
+        Ok(Some(text)) => thaw_arena::owned_string(text),
+        _ => ptr::null(),
+    }
 }
 
 /// Register a compiled closure callable from JS; returns its id. The same closure registered twice
@@ -2891,6 +2924,17 @@ fn callback_value(it: &mut Interp, id: usize) -> Value {
         return v.clone();
     }
     let function = it.native(move |it, this, args| call_compiled(it, id, this, args));
+    // the declared arity (a rest parameter does not count), as a JS function's `length`
+    let arity = CALLBACKS.lock().unwrap().get(id).map(|c| {
+        if c.has_rest {
+            c.params.saturating_sub(1)
+        } else {
+            c.params
+        }
+    });
+    if let (Value::Object(o), Some(n)) = (&function, arity) {
+        crate::put_hidden(o, "length", Value::Number(n as f64));
+    }
     it.callback_values.insert(id, function.clone());
     function
 }
@@ -3675,6 +3719,17 @@ impl Native {
     fn to_result_json(&self) -> String {
         match self {
             Native::Undefined => format!("{{\"{UNDEFINED_KEY}\":true}}"),
+            // NaN and the infinities cannot be JSON numbers: the sentinel object decodes back to them
+            Native::Number(n) if !n.is_finite() => format!(
+                "{{\"$__thaw_non_finite$\":\"{}\"}}",
+                if n.is_nan() {
+                    "NaN"
+                } else if *n > 0.0 {
+                    "Infinity"
+                } else {
+                    "-Infinity"
+                }
+            ),
             other => other.to_json(),
         }
     }
