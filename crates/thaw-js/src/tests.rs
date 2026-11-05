@@ -1209,6 +1209,35 @@ var __thaw_bundle_entry_key = "n/index.js";
     assert_eq!(value, "12");
 }
 
+#[test]
+fn a_plain_object_held_by_a_handle_comes_back_as_the_same_handle() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "h/index.js": function(module, exports, require) {
+  exports.make = function () { return { a: 1 }; };
+  exports.identity = function (v) { return v; };
+}, };
+var __thaw_bundle_require_maps = { "h/index.js": {}, };
+var __thaw_bundle_entry_key = "h/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("held").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    // `\u{2}` asks for the result as a handle id, which compiled code then holds
+    let held: u64 = typed_call("\u{2}held::make", "[]")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let marker = format!("{{\"__thaw_tjs_handle__\":{held}}}");
+    // the held object goes in as a live handle and comes back as that same handle
+    assert_eq!(
+        typed_call("held::identity", &format!("[{marker}]")).unwrap(),
+        marker
+    );
+    // a fresh plain result that compiled code does not hold is still a copy
+    assert_eq!(typed_call("held::make", "[]").unwrap(), r#"{"a":1}"#);
+}
+
 // ----- class instances as handles (`thaw_tjs_class_call`) -----
 
 const CLASS_BUNDLE: &str = r#"module.exports = (function(require){
