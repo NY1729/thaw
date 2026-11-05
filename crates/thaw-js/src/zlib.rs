@@ -71,7 +71,8 @@ type ZlibJobResult = Result<Vec<u8>, String>;
 /// Pending jobs by handle, tagged with the realm that started them: only that realm's shim may collect the result.
 static JOBS: Table<HashMap<u32, (usize, Receiver<ZlibJobResult>)>> =
     Table::new(|| Mutex::new(HashMap::new()));
-static DONE: Table<HashMap<u32, Vec<u8>>> = Table::new(|| Mutex::new(HashMap::new()));
+/// Finished results not yet taken, tagged with the owning realm (see `active_for`).
+static DONE: Table<HashMap<u32, (usize, Vec<u8>)>> = Table::new(|| Mutex::new(HashMap::new()));
 static STREAMS: Table<HashMap<u32, WebZlibStream>> = Table::new(|| Mutex::new(HashMap::new()));
 static NEXT_JOB: AtomicU32 = AtomicU32::new(1);
 static NEXT_STREAM: AtomicU32 = AtomicU32::new(1);
@@ -110,7 +111,7 @@ fn poll(owner: usize) -> String {
             }
             match receiver.try_recv() {
                 Ok(Ok(bytes)) => {
-                    DONE.with(|done| done.borrow_mut().insert(*handle, bytes));
+                    DONE.with(|done| done.borrow_mut().insert(*handle, (owner, bytes)));
                     finished.push(format!("{{\"handle\":{handle},\"ok\":true}}"));
                     false
                 }
@@ -138,6 +139,12 @@ fn poll(owner: usize) -> String {
 /// A pending job keeps the event loop alive.
 pub(crate) fn active() -> bool {
     JOBS.with(|jobs| !jobs.borrow().is_empty()) || DONE.with(|done| !done.borrow().is_empty())
+}
+
+/// Pending work of realm `owner` only: its running jobs plus results it has not taken yet.
+pub(crate) fn active_for(owner: usize) -> bool {
+    JOBS.with(|j| j.borrow().values().any(|(o, _)| *o == owner))
+        || DONE.with(|d| d.borrow().values().any(|(o, _)| *o == owner))
 }
 
 pub(crate) fn install(it: &mut Interp) {
@@ -234,7 +241,10 @@ pub(crate) fn install(it: &mut Interp) {
     g.declare("__thaw_zlib_async_poll", f, true);
     let f = it.native(|it, _, a| {
         let h = it.num(&arg(a, 0)) as u32;
-        let bytes = DONE.with(|d| d.borrow_mut().remove(&h)).unwrap_or_default();
+        let bytes = DONE
+            .with(|d| d.borrow_mut().remove(&h))
+            .map(|(_, bytes)| bytes)
+            .unwrap_or_default();
         Ok(it.array_buffer_from_vec(bytes))
     });
     g.declare("__thaw_zlib_async_take", f, true);
