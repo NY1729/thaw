@@ -10102,6 +10102,25 @@ fn add_error_suffix_properties(
     }
 }
 
+/// `{"__thaw_tjs_date__": ms}` (`"NaN"` for an Invalid Date) is how thaw-js writes a Date nested in a plain result.
+/// Same construction as the graph `d` node (~4365): a branded `{timestamp}` object.
+fn revive_tjs_date_marker(value: &Value) -> Option<Value> {
+    let timestamp = {
+        let fields = value.as_object()?;
+        if fields.len() != 1 {
+            return None;
+        }
+        match fields.get(b"__thaw_tjs_date__".as_slice())? {
+            number if number.as_f64().is_some() => number.clone(),
+            Value::String(text) if text == "NaN" => napi_non_finite_value(f64::NAN),
+            _ => return None,
+        }
+    };
+    Some(brand_internal_value(Value::shared_object(
+        indexmap::IndexMap::from([(b"timestamp".to_vec(), timestamp)]),
+    )))
+}
+
 fn revive_framed_errors(value: Value) -> Value {
     match &value {
         Value::String(text) if is_error_frame_text(text.as_bytes()) => {
@@ -10121,6 +10140,9 @@ fn revive_framed_errors(value: Value) -> Value {
             value
         }
         Value::Object(_) => {
+            if let Some(date) = revive_tjs_date_marker(&value) {
+                return date;
+            }
             if let Some(mut fields) = value.as_object_mut() {
                 for item in fields.values_mut() {
                     *item = revive_framed_errors(std::mem::replace(item, Value::Null));
@@ -11453,6 +11475,50 @@ mod tests {
             fields.get(b"status".as_slice()),
             Some(Value::Null)
         ));
+    }
+
+    #[test]
+    fn revive_framed_errors_turns_a_tjs_date_marker_into_a_date() {
+        let marker = |ms: Value| {
+            Value::shared_object(indexmap::IndexMap::from([(
+                b"__thaw_tjs_date__".to_vec(),
+                ms,
+            )]))
+        };
+        let root = Value::shared_object(indexmap::IndexMap::from([
+            (b"d".to_vec(), marker(number_value(86400000.0))),
+            (b"n".to_vec(), marker(Value::String("NaN".to_string()))),
+            (
+                b"a".to_vec(),
+                Value::shared_array(vec![marker(number_value(0.0))]),
+            ),
+        ]));
+        let revived = revive_framed_errors(root);
+        let fields = revived.as_object().expect("root stays an object");
+        let date = fields.get(b"d".as_slice()).expect("d is present");
+        assert_eq!(thaw_json_is_date_shape(date as *const Value), 1);
+        assert_eq!(thaw_json_date_timestamp(date as *const Value), 86400000.0);
+        let invalid = fields.get(b"n".as_slice()).expect("n is present");
+        assert_eq!(thaw_json_is_date_shape(invalid as *const Value), 1);
+        assert!(thaw_json_date_timestamp(invalid as *const Value).is_nan());
+        let items = fields
+            .get(b"a".as_slice())
+            .and_then(Value::as_array)
+            .expect("a is an array");
+        assert_eq!(thaw_json_is_date_shape(&items[0] as *const Value), 1);
+    }
+
+    #[test]
+    fn revive_framed_errors_keeps_an_object_with_extra_keys_next_to_the_tjs_date_key_plain() {
+        let fields = indexmap::IndexMap::from([
+            (b"__thaw_tjs_date__".to_vec(), number_value(1.0)),
+            (b"x".to_vec(), number_value(2.0)),
+        ]);
+        let revived = revive_framed_errors(Value::shared_object(fields));
+        assert_eq!(thaw_json_is_date_shape(&revived as *const Value), 0);
+        assert!(revived
+            .as_object()
+            .is_some_and(|fields| fields.contains_key(b"__thaw_tjs_date__".as_slice())));
     }
 
     #[test]
