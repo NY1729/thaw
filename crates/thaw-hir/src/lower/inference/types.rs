@@ -2801,6 +2801,13 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Json);
                     }
+                    "__thaw_tjs_live_owner_arg" => {
+                        let [projected, original] = args.as_slice() else {
+                            return Err("live owner argument expects a handle and the original value".into());
+                        };
+                        self.expect_type(&HirType::JsValue, projected, "live owner handle")?;
+                        return self.infer_expr_type_inner(original);
+                    }
                     "__thaw_json_borrowed_handle_id" => {
                         let [value] = args.as_slice() else {
                             return Err("borrowed JSON handle probe expects one operand".into());
