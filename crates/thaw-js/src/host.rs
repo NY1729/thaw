@@ -3833,6 +3833,46 @@ pub extern "C" fn thaw_tjs_unload(handle: i64) {
     });
 }
 
+/// Node's `-e SRC` for a compiled app that re-runs itself through `process.execPath` (the codegen
+/// renames `thaw_js_run_cli` to this symbol for thaw-js builds). Returns -1 for an ordinary start,
+/// otherwise the exit status. Script files are not handled here, so they still run as `main`.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_run_cli() -> i32 {
+    let arguments: Vec<String> = std::env::args().collect();
+    let Some(index) = crate::eventloop::cli_eval_index(&arguments) else {
+        return -1;
+    };
+    let Some(source) = arguments.get(index + 1) else {
+        eprintln!("{}: -e requires an argument", arguments[0]);
+        return 1;
+    };
+    run_eval_source(source)
+}
+
+/// Runs `source` in the default realm the way `node -e` does, then drains the event loop; returns
+/// the exit status (an uncaught error is 1).
+pub(crate) fn run_eval_source(source: &str) -> i32 {
+    let handle = default_realm();
+    let ran = with_package(handle, |p| {
+        p.interp
+            .run_main(source)
+            .map_err(|c| classify(&mut p.interp, c))
+    });
+    let status = match ran {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    };
+    let loop_status = thaw_tjs_run_event_loop();
+    if status != 0 {
+        status
+    } else {
+        loop_status
+    }
+}
+
 /// Terminal event loop for a routed build that holds no QuickJS context: runs every loaded
 /// package's timers/immediates/jobs until idle. Returns 1 if a package ended with an uncaught
 /// error. (The codegen renames `thaw_js_run_event_loop` to this symbol for such builds.)
