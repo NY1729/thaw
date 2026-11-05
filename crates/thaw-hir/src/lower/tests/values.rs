@@ -2873,6 +2873,47 @@ fn typeof_and_custom_properties_on_a_caught_error() {
     assert!(source.contains("__thaw_error_message"), "{source}");
 }
 
+/// A carrier `catch (e)` binding's String member can hold a framed Error (thaw-js call
+/// failures carry text only), so `typeof e` must go through the error-aware Json receiver
+/// and report "object", not the generic String "string".
+#[test]
+fn typeof_of_a_carrier_catch_binding_reads_its_string_member_as_a_framed_error() {
+    let program = lower(
+        r#"
+            function main(): void {
+                try { throw 1; } catch (e) {
+                    console.log(typeof e);
+                    throw e;
+                }
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    assert!(
+        source.contains(
+            "Var(\"__thaw_json_typeof\"), [Call(Var(\"__thaw_json_receiver_string\")"
+        ),
+        "the carrier String member should be typed through the framed-error receiver:\n{source}"
+    );
+}
+
+/// An ordinary `string` union member (not a caught carrier) keeps the plain "string" typeof.
+#[test]
+fn typeof_of_an_ordinary_string_union_member_does_not_use_the_error_receiver() {
+    let program = lower(
+        r#"
+            function kind(value: string | number): string {
+                return typeof value;
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    assert!(
+        !source.contains("__thaw_json_receiver_string"),
+        "a plain string union member must not be read as a framed error:\n{source}"
+    );
+}
+
 #[test]
 fn rejects_unsafe_values_for_mutating_union_array_methods() {
     for expression in [
