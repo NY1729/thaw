@@ -4396,6 +4396,15 @@ fn run_loop_or_fail(setup: impl FnOnce() + Send + 'static) -> i32 {
     }
 }
 
+/// Serializes every test that starts a zlib job or reads the process-wide zlib tables (`zlib::active()`): those
+/// tables are shared by all threads, so a parallel test's pending job would otherwise leak into another's assertion.
+/// Held for the whole test body; a poisoned lock (an earlier panic) is recovered so later tests still run.
+pub(crate) static ZLIB_GLOBAL_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn zlib_global_guard() -> std::sync::MutexGuard<'static, ()> {
+    ZLIB_GLOBAL_TESTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Owner package: starts one gzip job and sets exitCode 3 once its own poll collects the result.
 const ZLIB_OWNER_BODY: &str = r#"exports.go = function () {
   var job = __thaw_zlib_async_start('compress', 'gzip', new Uint8Array(1 << 18), '');
@@ -4416,6 +4425,7 @@ const ZLIB_FOREIGN_POLLER_BODY: &str = r#"exports.arm = function () { var t0 = D
 
 #[test]
 fn zlib_job_completes_when_another_package_polls_the_table_first() {
+    let _zlib_guard = zlib_global_guard();
     let code = run_loop_or_fail(|| {
         register_exit_package("zfa", ZLIB_FOREIGN_POLLER_BODY);
         register_exit_package("zfo", ZLIB_OWNER_BODY);
@@ -4428,6 +4438,7 @@ fn zlib_job_completes_when_another_package_polls_the_table_first() {
 
 #[test]
 fn zlib_jobs_are_delivered_once_each_to_their_owner_despite_a_foreign_poller() {
+    let _zlib_guard = zlib_global_guard();
     // The owner starts two jobs; a foreign package polls the table; each owner callback must run exactly once.
     let owner = r#"exports.go = function () {
   var jobs = [__thaw_zlib_async_start('compress', 'gzip', new Uint8Array(1 << 18), ''),
@@ -4453,6 +4464,7 @@ fn zlib_jobs_are_delivered_once_each_to_their_owner_despite_a_foreign_poller() {
 
 #[test]
 fn zlib_chain_with_a_pending_net_connect_in_another_package_ends() {
+    let _zlib_guard = zlib_global_guard();
     // "tnb" (registered first) polls the zlib table and lives 100 ms; "tna" connects a loopback socket and runs a
     // gzip round trip whose second job starts inside the first job's callback, then tears everything down.
     let owner = r#"exports.go = function () {
@@ -4499,6 +4511,7 @@ fn zlib_chain_with_a_pending_net_connect_in_another_package_ends() {
 
 #[test]
 fn zlib_job_is_collected_only_by_the_realm_that_started_it() {
+    let _zlib_guard = zlib_global_guard();
     let mut owner = Interp::new();
     let mut other = Interp::new();
     owner
@@ -4564,6 +4577,7 @@ function netOpen(then) {
 
 #[test]
 fn zlib_hook_gzip_callback_with_net_write_destroy_close_ends() {
+    let _zlib_guard = zlib_global_guard();
     let owner = format!(
         "{ZLIB_SHIM_HOOK}{NET_OPEN_BODY}\n{}",
         r#"exports.go = function () {
@@ -4600,6 +4614,7 @@ fn zlib_hook_gzip_callback_with_net_write_destroy_close_ends() {
 
 #[test]
 fn zlib_owner_and_net_in_separate_packages_end() {
+    let _zlib_guard = zlib_global_guard();
     let net = format!(
         "{NET_OPEN_BODY}\n{}",
         r#"exports.arm = function () { netOpen(function (l, conn, acc) {
@@ -4630,6 +4645,7 @@ fn zlib_owner_and_net_in_separate_packages_end() {
 
 #[test]
 fn zlib_hook_without_registered_job_does_not_leak_done() {
+    let _zlib_guard = zlib_global_guard();
     // A result whose handle is in no callback table (a second shim instance) must still be taken, or DONE keeps
     // `zlib::active()` true and the loop never ends.
     let body = format!(
@@ -4646,6 +4662,7 @@ fn zlib_hook_without_registered_job_does_not_leak_done() {
 
 #[test]
 fn zlib_active_for_ignores_foreign_realm_jobs() {
+    let _zlib_guard = zlib_global_guard();
     let mut owner = Interp::new();
     let other = Interp::new();
     owner
