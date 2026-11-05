@@ -296,6 +296,9 @@ impl Package {
         }
         let r = match args {
             Some(args) => {
+                if !f.is_callable() {
+                    return Err(not_callable(it, format!("`{path}` is not a function")));
+                }
                 let r = it.call(&f, &this, args).map_err(|c| classify(it, c))?;
                 // an async export: await only until its promise settles, not until the loop is idle
                 if pending_ok {
@@ -545,7 +548,11 @@ fn parse_class_symbol(symbol: &str) -> Option<(&str, &str, &str, Option<&str>)> 
     let (package, class_path) = class.split_once("::")?;
     let member = match kind {
         "new" => None,
-        _ => Some(rest.split('$').next()?),
+        // the member may itself start with `$` (`$disconnect`): cut at the trailing `$overloadK$arityN`
+        _ => Some(
+            rest.rsplit_once("$overload")
+                .map_or(rest, |(member, _)| member),
+        ),
     };
     Some((kind, package, class_path, member))
 }
@@ -614,12 +621,22 @@ fn class_call(
                     .unwrap_or(Value::Undefined);
                 let it = &mut p.interp;
                 let f = it.get(&this, name).map_err(|c| classify(it, c))?;
+                if !f.is_callable() {
+                    let message =
+                        format!("`{name}` is not a function (class operation `{symbol}`)");
+                    return Err(not_callable(it, message));
+                }
                 it.call(&f, &this, &args).map_err(|c| classify(it, c))?
             }
             ClassOp::Static { class, name } => {
                 let ctor = p.exports_member(class)?;
                 let it = &mut p.interp;
                 let f = it.get(&ctor, name).map_err(|c| classify(it, c))?;
+                if !f.is_callable() {
+                    let message =
+                        format!("`{name}` is not a function (class operation `{symbol}`)");
+                    return Err(not_callable(it, message));
+                }
                 it.call(&f, &ctor, &args).map_err(|c| classify(it, c))?
             }
         };
@@ -1639,6 +1656,7 @@ pub extern "C" fn thaw_tjs_has_property_result(handle: u64, name: *const c_char)
 pub extern "C" fn thaw_tjs_resolve_handle_handle_result(handle: u64) -> HandleResult {
     handle_result(on_handle(handle, |p, owner, v| {
         let it = &mut p.interp;
+        let v = adopt_thenable(it, v)?;
         Ok(store_handle(owner, awaited(it, v)?))
     }))
 }
@@ -2621,6 +2639,7 @@ pub extern "C" fn thaw_tjs_iterator_step_exact_result(
 pub extern "C" fn thaw_tjs_resolve_handle_graph_result(handle: u64) -> ThawResult {
     graph_result(on_handle(handle, |p, owner, v| {
         // a Promise is awaited first, like QuickJS's resolve
+        let v = adopt_thenable(&mut p.interp, v)?;
         let v = match p
             .interp
             .await_settled(&v)
@@ -2658,6 +2677,30 @@ fn is_live_value(it: &Interp, v: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+/// A `TypeError` for a call of something that is not a function, classified like any thrown error.
+fn not_callable(it: &mut Interp, message: String) -> HostError {
+    let Err(c) = it.throw_error::<()>("TypeError", &message) else {
+        unreachable!("throw_error always returns Err")
+    };
+    classify(it, c)
+}
+
+/// `await v` on a live value: a non-Promise object with a callable `then` is adopted like
+/// `Promise.resolve(v)` (so the thenable's `then` runs); everything else is unchanged.
+fn adopt_thenable(it: &mut Interp, v: Value) -> Result<Value, HostError> {
+    if it.is_promise(&v) || !matches!(v, Value::Object(_)) {
+        return Ok(v);
+    }
+    let then = it.get(&v, "then").map_err(|c| classify(it, c))?;
+    if !then.is_callable() {
+        return Ok(v);
+    }
+    let promise = it.new_promise();
+    it.resolve_promise(&promise, v)
+        .map_err(|c| classify(it, c))?;
+    Ok(Value::Object(promise))
 }
 
 /// A call result with a returned Promise awaited (the event loop runs until it settles); a rejection throws.
@@ -4153,6 +4196,7 @@ pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) 
             1
         }
         Err(e) => {
+            eprintln!("thaw-js: failed to load package `{name}`: {e}");
             LAST_ERROR.with(|l| *l.borrow_mut() = e.to_string());
             0
         }
@@ -4744,5 +4788,54 @@ mod host_query_live_tests {
         let result = thaw_tjs_new_function(args.as_ptr());
         assert!(result.error.is_null());
         result.value
+    }
+}
+
+#[cfg(test)]
+mod class_symbol_thenable_tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    #[test]
+    fn class_symbol_member_may_start_with_a_dollar() {
+        assert_eq!(
+            parse_class_symbol("$method$p::C$$disconnect$overload0$arity0"),
+            Some(("method", "p", "C", Some("$disconnect")))
+        );
+        assert_eq!(
+            parse_class_symbol("$staticmethodvoid$p::C$of$overload0$arity1"),
+            Some(("staticmethodvoid", "p", "C", Some("of")))
+        );
+        assert_eq!(
+            parse_class_symbol("$method$p::C$describe$overload0$arity0"),
+            Some(("method", "p", "C", Some("describe")))
+        );
+        assert_eq!(
+            parse_class_symbol("$new$p::C$arity0"),
+            Some(("new", "p", "C", None))
+        );
+    }
+
+    #[test]
+    fn await_of_a_handle_to_a_thenable_runs_its_then() {
+        let owner = default_realm();
+        let handle = with_package(owner, |p| {
+            let it = &mut p.interp;
+            let v = it
+                .run("({ then: function (resolve) { resolve(7); } })")
+                .map_err(|c| classify(it, c))?;
+            // the call-result path (`awaited`) still hands the object back untouched
+            let same = awaited(it, v.clone())?;
+            assert_eq!(object_key(&same), object_key(&v));
+            Ok(store_handle(owner, v))
+        })
+        .unwrap();
+        let result = thaw_tjs_resolve_handle_handle_result(handle as u64);
+        assert!(result.error.is_null());
+        let text = unsafe { CStr::from_ptr(thaw_tjs_handle_to_string(result.value)) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(text, "7");
     }
 }
