@@ -1,6 +1,7 @@
 //! Vectors for the `node:crypto` digests, HMAC and random functions. The expected values are the
 //! published RFC/NIST ones or were cross-checked against OpenSSL (Python hashlib).
 
+use super::cipher::{sym_block_cipher, sym_ctr_xor, sym_gcm_tag, sym_gcm_xor};
 use super::digest::{digest_bytes, hmac_bytes};
 use super::kdf::{pbkdf2_bytes, pbkdf2_in_house, scrypt_bytes};
 use crate::*;
@@ -357,5 +358,206 @@ fn kdf_argument_errors_match_the_quickjs_messages() {
              console.log(t(function () { m.scrypt('p', 's', 8, {}, 1); }));
              console.log(t(function () { m.pbkdf2('p', 's', 1, 8, 'sha1', 1); }));"#),
         "RangeError:iterations out of range|RangeError:keylen out of range|RangeError:iterations out of range|Error:Digest method not supported|TypeError:Error converting from js 'scrypt cost' into type 'power of two greater than one': 3|TypeError:Error converting from js 'scrypt options' into type 'valid scrypt options': invalid scrypt parameters: N=16, r=0, p=1, length=8|TypeError:callback must be a function|TypeError:callback must be a function"
+    );
+}
+
+fn nist(text: &str) -> Vec<u8> {
+    crate::zlib::hex_decode(text)
+}
+
+#[test]
+fn aes_block_modes_and_ctr_match_nist_sp800_38a_for_every_key_size() {
+    // NIST SP 800-38A F.1/F.2/F.5 plaintext (four blocks), keys for AES-128/192/256 (F.x.1/3/5).
+    let plain = nist("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710");
+    let iv = nist("000102030405060708090a0b0c0d0e0f");
+    let ctr_iv = nist("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff");
+    let cases = [
+        ("2b7e151628aed2a6abf7158809cf4f3c", "7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b273bed6b8e3c1743b7116e69e222295163ff1caa1681fac09120eca307586e1a7", "3ad77bb40d7a3660a89ecaf32466ef97f5d3d58503b9699de785895a96fdbaaf43b1cd7f598ece23881b00e3ed0306887b0c785e27e8ad3f8223207104725dd4", "874d6191b620e3261bef6864990db6ce9806f66b7970fdff8617187bb9fffdff5ae4df3edbd5d35e5b4f09020db03eab1e031dda2fbe03d1792170a0f3009cee"),
+        ("8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b", "4f021db243bc633d7178183a9fa071e8b4d9ada9ad7dedf4e5e738763f69145a571b242012fb7ae07fa9baac3df102e008b0e27988598881d920a9e64f5615cd", "bd334f1d6e45f25ff712a214571fa5cc974104846d0ad3ad7734ecb3ecee4eefef7afd2270e2e60adce0ba2face6444e9a4b41ba738d6c72fb16691603c18e0e", "1abc932417521ca24f2b0459fe7e6e0b090339ec0aa6faefd5ccc2c6f4ce8e941e36b26bd1ebc670d1bd1d665620abf74f78a7f6d29809585a97daec58c6b050"),
+        ("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4", "f58c4c04d6e5f1ba779eabfb5f7bfbd69cfc4e967edb808d679f777bc6702c7d39f23369a9d9bacfa530e26304231461b2eb05e2c39be9fcda6c19078c6a9d1b", "f3eed1bdb5d2a03c064b5a7e3db181f8591ccb10d410ed26dc5ba74a31362870b6ed21b99ca6f4f9f153e7b1beafed1d23304b7a39f9f3ff067d8d8f9e24ecc7", "601ec313775789a5b7a7f504bbf3d228f443e3ca4d62b59aca84e990cacaf5c52b0930daa23de94ce87017ba2d84988ddfc9c58db67aada613c2dd08457941a6"),
+    ];
+    for (key, cbc, ecb, ctr) in cases {
+        let (key, cbc, ecb, ctr) = (nist(key), nist(cbc), nist(ecb), nist(ctr));
+        assert_eq!(
+            sym_block_cipher(false, &key, &iv, &plain, false, false, false).unwrap(),
+            cbc
+        );
+        assert_eq!(
+            sym_block_cipher(false, &key, &iv, &cbc, true, false, false).unwrap(),
+            plain
+        );
+        assert_eq!(
+            sym_block_cipher(true, &key, &[], &plain, false, false, false).unwrap(),
+            ecb
+        );
+        assert_eq!(
+            sym_block_cipher(true, &key, &[], &ecb, true, false, false).unwrap(),
+            plain
+        );
+        assert_eq!(sym_ctr_xor(&key, &ctr_iv, 0, &plain, true).unwrap(), ctr);
+    }
+    assert_eq!(
+        sym_block_cipher(true, &[0u8; 15], &[], &[0u8; 16], false, false, false),
+        Err("Invalid key length".to_string())
+    );
+}
+
+#[test]
+fn gcm_test_case_two_matches_nist() {
+    let (key, iv, plain) = (vec![0u8; 16], vec![0u8; 12], vec![0u8; 16]);
+    let cipher = sym_gcm_xor(&key, &iv, 0, &plain).unwrap();
+    assert_eq!(
+        crate::zlib::hex_encode(&cipher),
+        "0388dace60b6a392f328c2b971b2fe78"
+    );
+    assert_eq!(
+        crate::zlib::hex_encode(&sym_gcm_tag(&key, &iv, &[], &cipher).unwrap()),
+        "ab6e47d42cec13bdf53a67b21257bddf"
+    );
+}
+
+#[test]
+fn cipher_known_answers_and_round_trips_match_node() {
+    assert_eq!(
+        run(r#"
+var m = globalThis.__thaw_crypto_module;
+var pt = Buffer.from('6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710', 'hex');
+var iv = Buffer.from('000102030405060708090a0b0c0d0e0f', 'hex');
+var ctrIv = Buffer.from('f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff', 'hex');
+var keys = { 128: '2b7e151628aed2a6abf7158809cf4f3c', 192: '8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b', 256: '603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4' };
+[128, 192, 256].forEach(function (bits) {
+  var key = Buffer.from(keys[bits], 'hex');
+  var c = m.createCipheriv('aes-' + bits + '-cbc', key, iv); c.setAutoPadding(false);
+  var ct = Buffer.concat([c.update(pt), c.final()]);
+  console.log(ct.toString('hex'));
+  var d = m.createDecipheriv('aes-' + bits + '-cbc', key, iv); d.setAutoPadding(false);
+  console.log(Buffer.concat([d.update(ct), d.final()]).equals(pt));
+  var e = m.createCipheriv('aes-' + bits + '-ecb', key, null); e.setAutoPadding(false);
+  console.log(Buffer.concat([e.update(pt), e.final()]).toString('hex'));
+  var t = m.createCipheriv('aes-' + bits + '-ctr', key, ctrIv);
+  console.log(Buffer.concat([t.update(pt), t.final()]).toString('hex'));
+});
+"#),
+        "7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b273bed6b8e3c1743b7116e69e222295163ff1caa1681fac09120eca307586e1a7|true|3ad77bb40d7a3660a89ecaf32466ef97f5d3d58503b9699de785895a96fdbaaf43b1cd7f598ece23881b00e3ed0306887b0c785e27e8ad3f8223207104725dd4|874d6191b620e3261bef6864990db6ce9806f66b7970fdff8617187bb9fffdff5ae4df3edbd5d35e5b4f09020db03eab1e031dda2fbe03d1792170a0f3009cee|4f021db243bc633d7178183a9fa071e8b4d9ada9ad7dedf4e5e738763f69145a571b242012fb7ae07fa9baac3df102e008b0e27988598881d920a9e64f5615cd|true|bd334f1d6e45f25ff712a214571fa5cc974104846d0ad3ad7734ecb3ecee4eefef7afd2270e2e60adce0ba2face6444e9a4b41ba738d6c72fb16691603c18e0e|1abc932417521ca24f2b0459fe7e6e0b090339ec0aa6faefd5ccc2c6f4ce8e941e36b26bd1ebc670d1bd1d665620abf74f78a7f6d29809585a97daec58c6b050|f58c4c04d6e5f1ba779eabfb5f7bfbd69cfc4e967edb808d679f777bc6702c7d39f23369a9d9bacfa530e26304231461b2eb05e2c39be9fcda6c19078c6a9d1b|true|f3eed1bdb5d2a03c064b5a7e3db181f8591ccb10d410ed26dc5ba74a31362870b6ed21b99ca6f4f9f153e7b1beafed1d23304b7a39f9f3ff067d8d8f9e24ecc7|601ec313775789a5b7a7f504bbf3d228f443e3ca4d62b59aca84e990cacaf5c52b0930daa23de94ce87017ba2d84988ddfc9c58db67aada613c2dd08457941a6"
+    );
+}
+
+#[test]
+fn gcm_case_two_and_aad_round_trip_match_node() {
+    assert_eq!(
+        run(r#"
+var m = globalThis.__thaw_crypto_module;
+var zero16 = Buffer.alloc(16), iv12 = Buffer.alloc(12);
+var c = m.createCipheriv('aes-128-gcm', zero16, iv12);
+var ct = Buffer.concat([c.update(zero16), c.final()]);
+console.log(ct.toString('hex'));
+console.log(c.getAuthTag().toString('hex'));
+var d = m.createDecipheriv('aes-128-gcm', zero16, iv12);
+d.setAuthTag(c.getAuthTag());
+console.log(Buffer.concat([d.update(ct), d.final()]).toString('hex'));
+var g = m.createCipheriv('aes-192-gcm', Buffer.alloc(24, 3), Buffer.alloc(12, 4));
+g.setAAD(Buffer.from('header'));
+var aadCt = Buffer.concat([g.update('secret message here'), g.final()]);
+console.log(aadCt.toString('hex'));
+console.log(g.getAuthTag().toString('hex'));
+var h = m.createDecipheriv('aes-192-gcm', Buffer.alloc(24, 3), Buffer.alloc(12, 4));
+h.setAAD(Buffer.from('header'));
+h.setAuthTag(g.getAuthTag());
+console.log(Buffer.concat([h.update(aadCt), h.final()]).toString());
+var odd = m.createCipheriv('aes-128-gcm', Buffer.alloc(16, 5), Buffer.alloc(9, 6));
+var msg = Buffer.from('The quick brown fox jumps over the lazy dog, twice over!!');
+console.log(Buffer.concat([odd.update(msg), odd.final()]).toString('hex'));
+console.log(odd.getAuthTag().toString('hex'));
+"#),
+        "0388dace60b6a392f328c2b971b2fe78|ab6e47d42cec13bdf53a67b21257bddf|00000000000000000000000000000000|65fef97960e44934314d5d6009e1bb42430939|ffbd1293459d03e83519001dcda3382d|secret message here|fa74eeb208bc982e5c219f2036473eaea336b89ea498929830affd2b722e8021b4a98e35cc7bf0598130f4a136b18e4d3af4c69f267f9b3dec|34c146485ed83b7f5154c95366e59987"
+    );
+}
+
+#[test]
+fn cipher_argument_and_final_errors_match_node_codes() {
+    assert_eq!(
+        run(r#"
+var m = globalThis.__thaw_crypto_module;
+var t = function (f) { try { var r = f(); return 'ok:' + (Buffer.isBuffer(r) ? r.toString('hex') : r); } catch (e) { return e.name + '|' + e.code + '|' + e.message; } };
+var k16 = Buffer.alloc(16), iv12 = Buffer.alloc(12);
+console.log(t(function () { return m.createCipheriv('aes-128-cbc', Buffer.alloc(15), Buffer.alloc(16)); }));
+console.log(t(function () { return m.createCipheriv('aes-256-cbc', Buffer.alloc(16), Buffer.alloc(16)); }));
+console.log(t(function () { return m.createCipheriv('aes-128-cbc', k16, Buffer.alloc(8)); }));
+console.log(t(function () { return m.createCipheriv('aes-128-ecb', k16, Buffer.alloc(16)); }));
+console.log(t(function () { return m.createCipheriv('aes-128-gcm', k16, Buffer.alloc(0)); }));
+console.log(t(function () { return m.createCipheriv('aes-128-foo', k16, Buffer.alloc(16)); }));
+console.log(t(function () { return m.createCipheriv('aes-128-cbc', k16, Buffer.alloc(16)).getAuthTag(); }));
+console.log(t(function () { return m.createCipheriv('aes-128-gcm', k16, iv12).getAuthTag(); }));
+var nopad = m.createCipheriv('aes-128-cbc', k16, Buffer.alloc(16)); nopad.setAutoPadding(false); nopad.update(Buffer.alloc(10));
+console.log(t(function () { return nopad.final(); }));
+var enc = m.createCipheriv('aes-128-cbc', k16, Buffer.alloc(16));
+var e1 = Buffer.concat([enc.update('hello world'), enc.final()]);
+var wrong = m.createDecipheriv('aes-128-cbc', Buffer.alloc(16, 2), Buffer.alloc(16)); wrong.update(e1);
+console.log(t(function () { return wrong.final(); }));
+var badPad = m.createDecipheriv('aes-128-cbc', k16, Buffer.alloc(16)); badPad.update(Buffer.alloc(16));
+console.log(t(function () { return badPad.final(); }));
+var gcmBad = m.createDecipheriv('aes-128-gcm', k16, iv12); gcmBad.setAuthTag(Buffer.alloc(16, 1)); gcmBad.update(Buffer.alloc(16));
+console.log(t(function () { return gcmBad.final(); }));
+var gcmNone = m.createDecipheriv('aes-128-gcm', k16, iv12); gcmNone.update(Buffer.alloc(16));
+console.log(t(function () { return gcmNone.final(); }));
+"#),
+        "RangeError|ERR_CRYPTO_INVALID_KEYLEN|Invalid key length|RangeError|ERR_CRYPTO_INVALID_KEYLEN|Invalid key length|TypeError|ERR_CRYPTO_INVALID_IV|Invalid initialization vector|TypeError|ERR_CRYPTO_INVALID_IV|Invalid initialization vector|TypeError|ERR_CRYPTO_INVALID_IV|Invalid initialization vector|Error|ERR_CRYPTO_UNKNOWN_CIPHER|Unknown cipher|Error|ERR_CRYPTO_INVALID_STATE|Invalid state for operation getAuthTag|Error|ERR_CRYPTO_INVALID_STATE|Invalid state for operation getAuthTag|Error|ERR_OSSL_WRONG_FINAL_BLOCK_LENGTH|error:1C80006B:Provider routines::wrong final block length|Error|ERR_OSSL_BAD_DECRYPT|error:1C800064:Provider routines::bad decrypt|Error|ERR_OSSL_BAD_DECRYPT|error:1C800064:Provider routines::bad decrypt|Error|undefined|Unsupported state or unable to authenticate data|Error|undefined|Unsupported state or unable to authenticate data"
+    );
+}
+
+#[test]
+fn update_then_final_chunking_and_output_sizes_match_node() {
+    assert_eq!(
+        run(r#"
+var m = globalThis.__thaw_crypto_module;
+var msg = Buffer.from('The quick brown fox jumps over the lazy dog, twice over!!');
+function parts(c, size) { var out = []; for (var i = 0; i < msg.length; i += size) out.push(c.update(msg.subarray(i, i + size))); out.push(c.final()); return Buffer.concat(out).toString('hex'); }
+var one = function (alg, key, iv) { var c = m.createCipheriv(alg, key, iv); return Buffer.concat([c.update(msg), c.final()]).toString('hex'); };
+var key32 = Buffer.alloc(32, 9), iv16 = Buffer.alloc(16, 8);
+console.log(parts(m.createCipheriv('aes-256-cbc', key32, iv16), 7) === one('aes-256-cbc', key32, iv16));
+console.log(one('aes-256-cbc', key32, iv16));
+console.log(parts(m.createCipheriv('aes-256-ctr', key32, iv16), 5) === one('aes-256-ctr', key32, iv16));
+console.log(one('aes-256-ctr', key32, iv16));
+var c = m.createCipheriv('aes-128-cbc', Buffer.alloc(16), Buffer.alloc(16));
+console.log(c.update(Buffer.alloc(20)).length + '|' + c.update(Buffer.alloc(12)).length + '|' + c.final().length);
+var enc = m.createCipheriv('aes-128-cbc', Buffer.alloc(16), Buffer.alloc(16));
+var ctx = Buffer.concat([enc.update(Buffer.alloc(20)), enc.final()]);
+var dec = m.createDecipheriv('aes-128-cbc', Buffer.alloc(16), Buffer.alloc(16));
+console.log(dec.update(ctx).length + '|' + dec.final().length);
+console.log(m.createCipheriv('aes-128-ecb', Buffer.alloc(16), null).update(Buffer.alloc(16)).toString('hex'));
+var odd = m.createCipheriv('aes-128-gcm', Buffer.alloc(16, 5), Buffer.alloc(9, 6));
+console.log(one('aes-128-gcm', Buffer.alloc(16, 5), Buffer.alloc(9, 6)));
+"#),
+        "true|a228d17c61bddab3b630578c8deac2c796828239b4e0d1e1c3b1f293271efc9f17a209752304547052cb82b29af6aede626ad86912270fdabacfc7502467f112|true|f49e76834fae9a6ef556300d5fbaf43bc587bcc2f76f64ee2f6f54996470ed10e692d3d62399a6f4ba8b08fc5c18bb5c96c738a870db4159f8|16|16|16|16|4|66e94bd4ef8a2c3b884cfa59ca342b2e|fa74eeb208bc982e5c219f2036473eaea336b89ea498929830affd2b722e8021b4a98e35cc7bf0598130f4a136b18e4d3af4c69f267f9b3dec"
+    );
+}
+
+#[test]
+fn timing_safe_equal_matches_node_for_views_and_errors() {
+    assert_eq!(
+        run(r#"
+var m = globalThis.__thaw_crypto_module;
+var t = function (f) { try { return String(f()); } catch (e) { return e.name + '|' + e.code + '|' + e.message; } };
+console.log(t(function () { return m.timingSafeEqual(Buffer.from('ab'), Buffer.from('ab')); }));
+console.log(t(function () { return m.timingSafeEqual(Buffer.from('ab'), Buffer.from('ac')); }));
+console.log(t(function () { return m.timingSafeEqual(Buffer.from('ab'), Buffer.from('a')); }));
+console.log(t(function () { return m.timingSafeEqual('abc', Buffer.from('abc')); }));
+console.log(t(function () { return m.timingSafeEqual(Buffer.from('a'), 'a'); }));
+console.log(t(function () { return m.timingSafeEqual(1, Buffer.from('a')); }));
+console.log(t(function () { return m.timingSafeEqual(null, Buffer.from('a')); }));
+console.log(t(function () { return m.timingSafeEqual(undefined, Buffer.from('a')); }));
+console.log(t(function () { return m.timingSafeEqual({}, Buffer.from('a')); }));
+console.log(t(function () { return m.timingSafeEqual(Buffer.from('a'), [1]); }));
+console.log(t(function () { return m.timingSafeEqual(new ArrayBuffer(2), new Uint8Array([0, 0])); }));
+console.log(t(function () { return m.timingSafeEqual(new DataView(new ArrayBuffer(2)), new Uint16Array(1)); }));
+console.log(t(function () { return m.timingSafeEqual(new Uint16Array([1]), new Uint8Array([1, 0])); }));
+console.log(t(function () { return m.timingSafeEqual(Buffer.from('a'), Buffer.from('b'), 1); }));
+console.log(t(function () { return m.timingSafeEqual(Buffer.from('a'), new Uint8Array([97])); }));
+console.log(t(function () { return m.timingSafeEqual(Buffer.from('a'), new ArrayBuffer(0)); }));
+console.log(t(function () { return m.timingSafeEqual(new Uint8Array(0), Buffer.alloc(0)); }));
+console.log(t(function () { return m.timingSafeEqual(Buffer.from('abc'), Buffer.from('abcd').subarray(0, 3)); }));
+console.log(t(function () { return m.timingSafeEqual(Buffer.from('a'), 5); }));
+"#),
+        "true|false|RangeError|ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH|Input buffers must have the same byte length|TypeError|ERR_INVALID_ARG_TYPE|The \"buf1\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf2\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf1\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf1\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf1\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf1\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf2\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|true|true|true|false|true|RangeError|ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH|Input buffers must have the same byte length|true|true|TypeError|ERR_INVALID_ARG_TYPE|The \"buf2\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView."
     );
 }
