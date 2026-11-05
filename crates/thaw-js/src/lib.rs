@@ -487,6 +487,13 @@ pub(crate) fn next_run_id() -> u32 {
     RUN_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
+/// Realm ids are process-wide (worker threads share the platform tables), starting at 1.
+static REALM_IDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+fn next_realm_id() -> usize {
+    REALM_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn unsupported<T>(what: &str) -> R<T> {
     Err(Ctl::Unsupported(what.to_string()))
 }
@@ -624,6 +631,8 @@ pub struct Interp {
     loop_captures: FxMap<(u32, u32), bool>,
     /// Distinguishes source positions of different `run` calls (spans restart at 1 per parse).
     run_id: u32,
+    /// Process-unique id of this realm: tags the zlib jobs it starts so only it collects their results.
+    pub(crate) realm_id: usize,
     depth: usize,
     /// Call-depth cap; replaced by the stack-address check once `configure_stack` was called.
     max_depth: usize,
@@ -723,6 +732,7 @@ impl Interp {
             sources: FxMap::default(),
             loop_captures: FxMap::default(),
             run_id: 0,
+            realm_id: next_realm_id(),
             depth: 0,
             max_depth: MAX_DEPTH,
             stack_limit: 0,

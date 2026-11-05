@@ -4374,3 +4374,159 @@ fn not_callable_error_names_the_constructor_of_an_object() {
         _ => panic!("expected a TypeError throw"),
     }
 }
+
+/// Runs the package setup and the event loop on a fresh thread (its own package table) and fails instead of
+/// hanging when the loop never ends.
+fn run_loop_or_fail(setup: impl FnOnce() + Send + 'static) -> i32 {
+    use std::sync::mpsc::RecvTimeoutError;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(move || {
+            setup();
+            let _ = sender.send(crate::host::thaw_tjs_run_event_loop());
+        })
+        .expect("spawn");
+    match receiver.recv_timeout(std::time::Duration::from_secs(20)) {
+        Ok(code) => code,
+        Err(RecvTimeoutError::Timeout) => {
+            panic!("event loop did not end: a platform job or timer leaked")
+        }
+        Err(RecvTimeoutError::Disconnected) => panic!("package setup panicked"),
+    }
+}
+
+/// Owner package: starts one gzip job and sets exitCode 3 once its own poll collects the result.
+const ZLIB_OWNER_BODY: &str = r#"exports.go = function () {
+  var job = __thaw_zlib_async_start('compress', 'gzip', new Uint8Array(1 << 18), '');
+  (function wait() {
+    var done = JSON.parse(__thaw_zlib_async_poll());
+    if (!done.some(function (d) { return d.handle === job; })) return setTimeout(wait, 1);
+    var bytes = new Uint8Array(__thaw_zlib_async_take(job));
+    process.exitCode = bytes.length > 0 && bytes[0] === 31 ? 3 : 4;
+  })();
+};"#;
+
+/// Foreign package: polls the shared zlib table every turn (as a realm whose shim polls would) until the owner
+/// sets exitCode 3, or gives up after 10 s with 99.
+const ZLIB_FOREIGN_POLLER_BODY: &str = r#"exports.arm = function () { var t0 = Date.now(); var t = setInterval(function () {
+  __thaw_zlib_async_poll();
+  if (process.exitCode === 3) clearInterval(t);
+  else if (Date.now() - t0 > 10000) { clearInterval(t); process.exitCode = 99; } }, 1); };"#;
+
+#[test]
+fn zlib_job_completes_when_another_package_polls_the_table_first() {
+    let code = run_loop_or_fail(|| {
+        register_exit_package("zfa", ZLIB_FOREIGN_POLLER_BODY);
+        register_exit_package("zfo", ZLIB_OWNER_BODY);
+        typed_call("zfa::arm", "[]").expect("arm");
+        typed_call("zfo::go", "[]").expect("go");
+    });
+    assert_eq!(code, 3);
+    assert!(!crate::zlib::active());
+}
+
+#[test]
+fn zlib_jobs_are_delivered_once_each_to_their_owner_despite_a_foreign_poller() {
+    // The owner starts two jobs; a foreign package polls the table; each owner callback must run exactly once.
+    let owner = r#"exports.go = function () {
+  var jobs = [__thaw_zlib_async_start('compress', 'gzip', new Uint8Array(1 << 18), ''),
+              __thaw_zlib_async_start('compress', 'deflate', new Uint8Array(1 << 18), '')];
+  var hits = 0;
+  (function wait() {
+    JSON.parse(__thaw_zlib_async_poll()).forEach(function (d) {
+      if (jobs.indexOf(d.handle) >= 0) { hits++; __thaw_zlib_async_take(d.handle); }
+    });
+    if (hits < 2) return setTimeout(wait, 1);
+    process.exitCode = hits === 2 ? 3 : 4;
+  })();
+};"#;
+    let code = run_loop_or_fail(move || {
+        register_exit_package("zgp", ZLIB_FOREIGN_POLLER_BODY);
+        register_exit_package("zgo", owner);
+        typed_call("zgp::arm", "[]").expect("arm");
+        typed_call("zgo::go", "[]").expect("go");
+    });
+    assert_eq!(code, 3);
+    assert!(!crate::zlib::active());
+}
+
+#[test]
+fn zlib_chain_with_a_pending_net_connect_in_another_package_ends() {
+    // "tnb" (registered first) polls the zlib table and lives 100 ms; "tna" connects a loopback socket and runs a
+    // gzip round trip whose second job starts inside the first job's callback, then tears everything down.
+    let owner = r#"exports.go = function () {
+  var l = __thaw_net_listen('127.0.0.1', 0).split(':');
+  var op = __thaw_net_connect_start('127.0.0.1', Number(l[2]));
+  var conn = null, acc = null, input = new Uint8Array(1 << 16);
+  function job(operation, format, bytes, next) {
+    var h = __thaw_zlib_async_start(operation, format, bytes, '');
+    (function wait() {
+      var done = JSON.parse(__thaw_zlib_async_poll()).filter(function (d) { return d.handle === h; });
+      if (!done.length) return setTimeout(wait, 1);
+      if (!done[0].ok) { process.exitCode = 6; return; }
+      next(new Uint8Array(__thaw_zlib_async_take(h)));
+    })();
+  }
+  (function connect() {
+    if (!conn) { var r = __thaw_async_poll(op); if (r === 'pending') return setTimeout(connect, 1); conn = r.split(':'); }
+    if (!acc) { var a = __thaw_net_poll_accept(Number(l[1])); if (a === 'err:pending') return setTimeout(connect, 1); acc = a.split(':'); }
+    __thaw_net_write(Number(conn[1]), Buffer.from('ping').toString('hex'));
+    job('compress', 'gzip', input, function (packed) {
+      job('decompress', 'gzip', packed, function (plain) {
+        process.exitCode = plain.length === input.length ? 0 : 7;
+        __thaw_net_destroy(Number(conn[1]));
+        __thaw_net_destroy(Number(acc[1]));
+        __thaw_net_close_listener(Number(l[1]));
+      });
+    });
+  })();
+};"#;
+    let code = run_loop_or_fail(move || {
+        register_exit_package(
+            "tnb",
+            "exports.arm = function () { var t0 = Date.now(); var t = setInterval(function () {
+               __thaw_zlib_async_poll();
+               if (Date.now() - t0 > 100) clearInterval(t); }, 1); };",
+        );
+        register_exit_package("tna", owner);
+        typed_call("tnb::arm", "[]").expect("arm");
+        typed_call("tna::go", "[]").expect("go");
+    });
+    assert_eq!(code, 0);
+    assert!(!crate::zlib::active());
+}
+
+#[test]
+fn zlib_job_is_collected_only_by_the_realm_that_started_it() {
+    let mut owner = Interp::new();
+    let mut other = Interp::new();
+    owner
+        .run("globalThis.h = __thaw_zlib_async_start('compress', 'deflate', new Uint8Array([1, 2, 3]), '');")
+        .unwrap_or_else(|_| panic!("start"));
+    other
+        .run("console.log(__thaw_zlib_async_poll());")
+        .unwrap_or_else(|_| panic!("foreign poll"));
+    assert_eq!(other.out.last().map(String::as_str), Some("[]"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        owner
+            .run("console.log(__thaw_zlib_async_poll());")
+            .unwrap_or_else(|_| panic!("owner poll"));
+        let line = owner.out.last().cloned().unwrap_or_default();
+        if line.contains("\"ok\":true") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "owner never saw its job finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    owner
+        .run("console.log(__thaw_zlib_async_take(h).byteLength);")
+        .unwrap_or_else(|_| panic!("take"));
+    let size: usize = owner.out.last().and_then(|l| l.parse().ok()).unwrap_or(0);
+    assert!(size > 0, "deflate result must be non-empty");
+    assert!(!crate::zlib::active());
+}

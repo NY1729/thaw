@@ -68,7 +68,8 @@ impl ZlibOptions {
 
 type ZlibJobResult = Result<Vec<u8>, String>;
 
-static JOBS: Table<HashMap<u32, Receiver<ZlibJobResult>>> =
+/// Pending jobs by handle, tagged with the realm that started them: only that realm's shim may collect the result.
+static JOBS: Table<HashMap<u32, (usize, Receiver<ZlibJobResult>)>> =
     Table::new(|| Mutex::new(HashMap::new()));
 static DONE: Table<HashMap<u32, Vec<u8>>> = Table::new(|| Mutex::new(HashMap::new()));
 static STREAMS: Table<HashMap<u32, WebZlibStream>> = Table::new(|| Mutex::new(HashMap::new()));
@@ -76,7 +77,13 @@ static NEXT_JOB: AtomicU32 = AtomicU32::new(1);
 static NEXT_STREAM: AtomicU32 = AtomicU32::new(1);
 
 /// Starts a one-shot (de)compression on its own thread; collected by `poll`.
-fn start(operation: String, format: String, input: Vec<u8>, options: ZlibOptions) -> u32 {
+fn start(
+    operation: String,
+    format: String,
+    input: Vec<u8>,
+    options: ZlibOptions,
+    owner: usize,
+) -> u32 {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let result = if operation == "compress" {
@@ -87,16 +94,21 @@ fn start(operation: String, format: String, input: Vec<u8>, options: ZlibOptions
         let _ = sender.send(result.map_err(|error| error.to_string()));
     });
     let handle = NEXT_JOB.fetch_add(1, Ordering::Relaxed).max(1);
-    JOBS.with(|jobs| jobs.borrow_mut().insert(handle, receiver));
+    JOBS.with(|jobs| jobs.borrow_mut().insert(handle, (owner, receiver)));
     handle
 }
 
-/// The finished jobs as `[{handle, ok, message?}]` JSON.
-fn poll() -> String {
+/// The finished jobs of realm `owner` as `[{handle, ok, message?}]` JSON. Other realms' jobs are left in place:
+/// a realm that polled them would move the result to DONE and its JS would drop it, leaving DONE (and so
+/// `active()`) stuck for every package.
+fn poll(owner: usize) -> String {
     let mut finished = Vec::new();
     JOBS.with(|jobs| {
-        jobs.borrow_mut()
-            .retain(|handle, receiver| match receiver.try_recv() {
+        jobs.borrow_mut().retain(|handle, (job_owner, receiver)| {
+            if *job_owner != owner {
+                return true;
+            }
+            match receiver.try_recv() {
                 Ok(Ok(bytes)) => {
                     DONE.with(|done| done.borrow_mut().insert(*handle, bytes));
                     finished.push(format!("{{\"handle\":{handle},\"ok\":true}}"));
@@ -117,7 +129,8 @@ fn poll() -> String {
                     ));
                     false
                 }
-            });
+            }
+        });
     });
     format!("[{}]", finished.join(","))
 }
@@ -208,10 +221,16 @@ pub(crate) fn install(it: &mut Interp) {
         };
         let input = buf.data.borrow()[buf.off..buf.off + buf.len * buf.ty.size()].to_vec();
         let options = ZlibOptions::parse(&it.to_str(&arg(a, 3)));
-        Ok(Value::Number(f64::from(start(op, format, input, options))))
+        Ok(Value::Number(f64::from(start(
+            op,
+            format,
+            input,
+            options,
+            it.realm_id,
+        ))))
     });
     g.declare("__thaw_zlib_async_start", f, true);
-    let f = it.native(|_, _, _| Ok(Value::str(&poll())));
+    let f = it.native(|it, _, _| Ok(Value::str(&poll(it.realm_id))));
     g.declare("__thaw_zlib_async_poll", f, true);
     let f = it.native(|it, _, a| {
         let h = it.num(&arg(a, 0)) as u32;
