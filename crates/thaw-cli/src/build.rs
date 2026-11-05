@@ -20,6 +20,27 @@ fn build(
     )
 }
 
+/// `build` with thaw-js routing forced off: for tests that assert QuickJS-specific manifest facts
+/// (`manifest["quickjs"]`, `quickjs_reasons`) and must not depend on `THAW_JS_RUNTIME` in the environment.
+#[cfg(test)]
+fn build_quickjs_pinned(input: &Path, output: &Path, registry_dir: &Path) -> Result<(), String> {
+    build_with_thaw_js_routing(
+        input,
+        output,
+        &[],
+        &[],
+        &[],
+        registry_dir,
+        &[],
+        false,
+        None,
+        true,
+        false,
+        false,
+        false,
+    )
+}
+
 thread_local! {
     /// Backend optimisation level forced for builds on this thread (`thaw build --fast-compile`,
     /// node-compat cases). `None` defers to `THAW_CODEGEN_OPT`.
