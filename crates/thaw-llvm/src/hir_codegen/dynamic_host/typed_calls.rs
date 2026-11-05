@@ -1877,6 +1877,7 @@ impl<'ctx> HirCompiler<'ctx> {
             &[],
         )?;
         if signature.ret == HirType::JsValue {
+            self.uses_thaw_js_handles = true;
             let id = self.compile_json_value_to_native(json, &HirType::F64)?.into_float_value();
             return Ok(self
                 .builder
@@ -2269,6 +2270,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 continue;
             }
             if handle_param(ty) {
+                self.uses_thaw_js_handles = true;
                 let marker = self.compile_thaw_js_handle_marker(value.into_int_value())?;
                 self.compile_json_array_push_owned(array, marker)?;
                 continue;
@@ -2303,6 +2305,7 @@ impl<'ctx> HirCompiler<'ctx> {
             &[],
         )?;
         if ret_handle {
+            self.uses_thaw_js_handles = true;
             let id = self.compile_json_value_to_native(json, &HirType::F64)?.into_float_value();
             return Ok(self
                 .builder
