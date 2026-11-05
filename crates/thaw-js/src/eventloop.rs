@@ -1170,6 +1170,8 @@ impl Interp {
         if self.rt.stream {
             if !crate::worker::capture_line(self, 1, &rest) {
                 print!("{rest}");
+                // A partial line has no newline, so Rust's stdout buffer would keep it past the C `main` exit.
+                let _ = std::io::Write::flush(&mut std::io::stdout());
             }
         } else {
             self.out.push(rest);
