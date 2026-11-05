@@ -5047,3 +5047,49 @@ fn tj85_foreign_unref_does_not_touch_the_local_timer_in_the_caller() {
         assert_eq!(text.to_str().unwrap(), "true", "b's timer was affected");
     });
 }
+
+#[test]
+fn slowbuffer_is_a_global_function_returning_a_sized_buffer() {
+    assert_eq!(
+        one("console.log(typeof SlowBuffer, SlowBuffer(4).length, SlowBuffer(4) instanceof Buffer, Buffer.isBuffer(SlowBuffer(2)))"),
+        "function 4 true true"
+    );
+}
+
+#[test]
+fn slowbuffer_prototype_is_buffer_prototype_and_validates_size() {
+    assert_eq!(
+        one("console.log(SlowBuffer.prototype === Buffer.prototype, typeof SlowBuffer.prototype.toString);
+             try { SlowBuffer('4'); } catch (e) { console.log(e.name, e.code); }"),
+        "true function|TypeError ERR_INVALID_ARG_TYPE"
+    );
+}
+
+#[test]
+fn slowbuffer_is_exposed_through_the_buffer_module_shape() {
+    // Same object shape as the registry `buffer` builtin (basic.rs): {Buffer, SlowBuffer, ...} from globals.
+    assert_eq!(
+        one("var require = function (n) { if (n === 'buffer') return { Buffer: globalThis.Buffer, SlowBuffer: globalThis.SlowBuffer }; throw new Error('Cannot find module ' + n); };
+             console.log(require('buffer').SlowBuffer === SlowBuffer, require('buffer').Buffer === Buffer);"),
+        "true true"
+    );
+}
+
+#[test]
+fn buffer_equal_constant_time_load_shape_does_not_throw() {
+    // buffer-equal-constant-time reads `require('buffer').SlowBuffer.prototype.equal` at module load, then
+    // installs a comparator; the comparator here mirrors its byte-wise equality check.
+    assert_eq!(
+        one("var require = function (n) { if (n === 'buffer') return { Buffer: globalThis.Buffer, SlowBuffer: globalThis.SlowBuffer }; throw new Error('Cannot find module ' + n); };
+             var B = require('buffer').SlowBuffer;
+             var origSlowBufEqual = B.prototype.equal;
+             function bufferEq(a, b) {
+               if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b) || a.length !== b.length) return false;
+               var c = 0;
+               for (var i = 0; i < a.length; i++) c |= a[i] ^ b[i];
+               return c === 0;
+             }
+             console.log(typeof origSlowBufEqual, bufferEq(Buffer.from('secret'), Buffer.from('secret')), bufferEq(Buffer.from('secret'), Buffer.from('secrex')));"),
+        "undefined true false"
+    );
+}
