@@ -546,10 +546,10 @@ unsafe extern "C" fn fake_bridge(
     _graph: *const c_char,
 ) -> *const c_char {
     if CStr::from_ptr(target).to_bytes() == b"7" {
-        b"{\"kind\":\"graph\",\"value\":\"{\\\"root\\\":{\\\"v\\\":42},\\\"nodes\\\":[]}\"}\0"
-            .as_ptr() as *const c_char
+        c"{\"kind\":\"graph\",\"value\":\"{\\\"root\\\":{\\\"v\\\":42},\\\"nodes\\\":[]}\"}"
+            .as_ptr()
     } else {
-        b"{\"__thaw_error__\":\"bad id\"}\0".as_ptr() as *const c_char
+        c"{\"__thaw_error__\":\"bad id\"}".as_ptr()
     }
 }
 
