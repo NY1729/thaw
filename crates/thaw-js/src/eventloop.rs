@@ -1374,7 +1374,12 @@ impl Interp {
         put(&p, "platform", Value::str("linux"));
         put(&p, "arch", Value::str("x64"));
         put(&p, "pid", Value::Number(std::process::id() as f64));
-        put(&p, "execPath", Value::str("/usr/local/bin/node"));
+        // The compiled binary re-runs itself as `node` (thaw_tjs_run_cli handles `-e`).
+        let arguments: Vec<String> = std::env::args().collect();
+        let exec_path = std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| arguments.first().cloned().unwrap_or_default());
+        put(&p, "execPath", Value::str(&exec_path));
         put(&p, "exitCode", Value::Undefined);
         let versions = self.plain();
         put(&versions, "node", Value::str("22.23.1"));
@@ -1384,9 +1389,10 @@ impl Interp {
         put(&release, "name", Value::str("node"));
         put(&p, "release", Value::Object(release));
         // Mirrors thaw-quickjs context.rs: argv[0] is the host binary, then the forwarded arguments.
-        let argv = self.array(std::env::args().map(|a| Value::str(&a)).collect());
+        let (node_argv, node_exec_argv) = node_argv_split(&arguments);
+        let argv = self.array(node_argv.iter().map(|a| Value::str(a)).collect());
         put(&p, "argv", argv);
-        let exec_argv = self.array(vec![]);
+        let exec_argv = self.array(node_exec_argv.iter().map(|a| Value::str(a)).collect());
         put(&p, "execArgv", exec_argv);
         let env = self.plain();
         for (k, v) in std::env::vars() {
@@ -1667,3 +1673,67 @@ const PROMISE_PRELUDE: &str = r#"
   });
 })();
 "#;
+
+/// Index of the `-e` flag among leading flags, the same rule as thaw-quickjs `cli_eval`.
+pub(crate) fn cli_eval_index(arguments: &[String]) -> Option<usize> {
+    arguments
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take_while(|(_, argument)| argument.starts_with('-'))
+        .find_map(|(index, argument)| (argument == "-e").then_some(index))
+}
+
+/// `(process.argv, process.execArgv)` for the process arguments, matching thaw-quickjs context.rs:
+/// `-e SRC` keeps `-e SRC` in execArgv and drops it from argv; otherwise argv is every argument.
+pub(crate) fn node_argv_split(arguments: &[String]) -> (Vec<String>, Vec<String>) {
+    match cli_eval_index(arguments) {
+        Some(index) => {
+            let mut argv = vec![arguments.first().cloned().unwrap_or_default()];
+            argv.extend(arguments.iter().skip(index + 2).cloned());
+            (argv, arguments[1..arguments.len().min(index + 2)].to_vec())
+        }
+        None => (arguments.to_vec(), Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod cli_argv_tests {
+    use super::*;
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn cli_eval_and_script_split_matches_quickjs_rules() {
+        let (argv, exec) = node_argv_split(&args(&["app", "-e", "src", "tail"]));
+        assert_eq!(argv, args(&["app", "tail"]));
+        assert_eq!(exec, args(&["-e", "src"]));
+        let (argv, exec) = node_argv_split(&args(&["app", "--x", "-e", "src"]));
+        assert_eq!(argv, args(&["app"]));
+        assert_eq!(exec, args(&["--x", "-e", "src"]));
+        // A script (no -e) keeps the plain argument list, as before.
+        let (argv, exec) = node_argv_split(&args(&["app", "a", "b"]));
+        assert_eq!(argv, args(&["app", "a", "b"]));
+        assert!(exec.is_empty());
+        // `-e` after a positional argument is not a flag, so it is not an eval.
+        let (argv, _) = node_argv_split(&args(&["app", "a", "-e", "src"]));
+        assert_eq!(argv, args(&["app", "a", "-e", "src"]));
+    }
+
+    #[test]
+    fn run_eval_source_returns_the_exit_status() {
+        assert_eq!(crate::host::run_eval_source("1 + 1"), 0);
+        assert_eq!(crate::host::run_eval_source("process.exitCode = 3"), 3);
+        assert_eq!(crate::host::run_eval_source("throw new Error('boom')"), 1);
+    }
+
+    #[test]
+    fn process_exec_path_is_the_current_binary_not_a_hard_coded_node() {
+        let mut it = Interp::new();
+        it.run("console.log(process.execPath)").unwrap();
+        let expected = std::env::current_exe().unwrap().display().to_string();
+        assert_eq!(it.out.join("").trim(), expected);
+    }
+}

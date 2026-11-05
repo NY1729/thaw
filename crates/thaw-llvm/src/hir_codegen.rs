@@ -1305,6 +1305,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_tjs_event_key_handle_result",
                 ),
                 ("thaw_js_run_event_loop", "thaw_tjs_run_event_loop"),
+                ("thaw_js_run_cli", "thaw_tjs_run_cli"),
                 (
                     "thaw_js_terminal_work_pending",
                     "thaw_tjs_terminal_work_pending",
