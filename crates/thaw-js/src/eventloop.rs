@@ -1691,6 +1691,18 @@ impl Interp {
                         it.flush_partial();
                     }
                 }
+                // Node: write(chunk[, encoding][, callback]) calls the trailing callback on a later tick
+                if let Some(cb) = a
+                    .get(1..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .rev()
+                    .find(|v| v.is_callable())
+                {
+                    it.rt
+                        .ticks
+                        .push_back((it.rt.actx.clone(), cb.clone(), vec![]));
+                }
                 Ok(Value::Bool(true))
             });
             // Node leaves isTTY undefined on a pipe or file
