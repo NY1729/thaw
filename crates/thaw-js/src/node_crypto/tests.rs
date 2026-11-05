@@ -2,6 +2,7 @@
 //! published RFC/NIST ones or were cross-checked against OpenSSL (Python hashlib).
 
 use super::digest::{digest_bytes, hmac_bytes};
+use super::kdf::{pbkdf2_bytes, pbkdf2_in_house, scrypt_bytes};
 use crate::*;
 
 /// Run `src` and return the console.log lines joined by `|` (or the uncaught error text).
@@ -188,5 +189,173 @@ fn random_functions_keep_their_shape_bounds_and_async_timing() {
              m.randomBytes(4, function (e, v) { console.log('cb', e, v.length); });
              console.log('sync');"#),
         "true 0 5 0|true true RangeError:invalid random integer range|true ERR_OUT_OF_RANGE|sync"
+    );
+}
+
+fn pbkdf2_hex(
+    algorithm: &str,
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    length: usize,
+) -> String {
+    crate::zlib::hex_encode(
+        &pbkdf2_bytes(algorithm, password, salt, iterations, length).expect("supported digest"),
+    )
+}
+
+fn scrypt_hex(
+    password: &[u8],
+    salt: &[u8],
+    length: u32,
+    cost: u32,
+    block_size: u32,
+    parallelization: u32,
+) -> String {
+    crate::zlib::hex_encode(
+        &scrypt_bytes(password, salt, length, cost, block_size, parallelization)
+            .expect("valid scrypt params"),
+    )
+}
+
+#[test]
+fn pbkdf2_sha1_matches_the_rfc6070_vectors() {
+    assert_eq!(
+        pbkdf2_hex("sha1", b"password", b"salt", 1, 20),
+        "0c60c80f961f0e71f3a9b524af6012062fe037a6"
+    );
+    assert_eq!(
+        pbkdf2_hex("sha1", b"password", b"salt", 2, 20),
+        "ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957"
+    );
+    assert_eq!(
+        pbkdf2_hex("sha1", b"password", b"salt", 4096, 20),
+        "4b007901b765489abead49d926f721d065a429c1"
+    );
+    // Multi-block output (RFC 6070 vectors 5 and 6).
+    assert_eq!(
+        pbkdf2_hex(
+            "sha1",
+            b"passwordPASSWORDpassword",
+            b"saltSALTsaltSALTsaltSALTsaltSALTsalt",
+            4096,
+            25
+        ),
+        "3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038"
+    );
+    assert_eq!(
+        pbkdf2_hex("sha1", b"pass\0word", b"sa\0lt", 4096, 16),
+        "56fa6aa75548099dcc37d7f03425e0c3"
+    );
+    assert_eq!(
+        pbkdf2_in_house("sha1", b"password", b"salt", 4096, 20)
+            .map(|key| crate::zlib::hex_encode(&key))
+            .unwrap(),
+        "4b007901b765489abead49d926f721d065a429c1"
+    );
+    assert!(pbkdf2_bytes("nope", b"p", b"s", 1, 8).is_none());
+    assert!(pbkdf2_in_house("nope", b"p", b"s", 1, 8).is_none());
+}
+
+#[test]
+fn pbkdf2_in_house_loop_matches_the_crate_path_and_other_digests() {
+    assert_eq!(
+        pbkdf2_hex("sha3256", b"password", b"salt", 3, 32),
+        "6677065466c97fdef1c15ae8d95020ca948334f53eceeafc6115ddf405f6d6a4"
+    );
+    assert_eq!(
+        pbkdf2_hex("md5", b"password", b"salt", 3, 16),
+        "f6acd4bda3e4d3d831a5f61da9ca9d5c"
+    );
+    assert_eq!(
+        pbkdf2_hex("ripemd160", b"pw", b"salt", 3, 40),
+        "872082fba2e5e614e84d9290769acc835cdf6bf33bfa77845b62947255cd4aec63aeaeb39b5c379b"
+    );
+    let in_house =
+        pbkdf2_in_house("sha256", b"password", b"salt", 3, 70).expect("supported digest");
+    assert_eq!(
+        in_house,
+        pbkdf2_bytes("sha256", b"password", b"salt", 3, 70).expect("supported digest")
+    );
+}
+
+#[test]
+fn scrypt_matches_the_rfc7914_vectors() {
+    assert_eq!(
+        scrypt_hex(b"", b"", 64, 16, 1, 1),
+        "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"
+    );
+    assert_eq!(
+        scrypt_hex(b"password", b"NaCl", 64, 1024, 8, 16),
+        "fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b3731622eaf30d92e22a3886ff109279d9830dac727afb94a83ee6d8360cbdfa2cc0640"
+    );
+}
+
+#[test]
+fn scrypt_rejects_bad_cost_and_params_with_the_quickjs_messages() {
+    assert_eq!(
+        scrypt_bytes(b"", b"", 64, 3, 8, 1).unwrap_err(),
+        "Error converting from js 'scrypt cost' into type 'power of two greater than one': 3"
+    );
+    assert_eq!(
+        scrypt_bytes(b"", b"", 64, 1, 8, 1).unwrap_err(),
+        "Error converting from js 'scrypt cost' into type 'power of two greater than one': 1"
+    );
+    assert_eq!(
+        scrypt_bytes(b"", b"", 64, 0, 8, 1).unwrap_err(),
+        "Error converting from js 'scrypt cost' into type 'power of two greater than one': 0"
+    );
+    assert_eq!(
+        scrypt_bytes(b"", b"", 8, 16, 0, 1).unwrap_err(),
+        "Error converting from js 'scrypt options' into type 'valid scrypt options': invalid scrypt parameters: N=16, r=0, p=1, length=8"
+    );
+    assert_eq!(
+        scrypt_bytes(b"", b"", 8, 16, 1, 0).unwrap_err(),
+        "Error converting from js 'scrypt options' into type 'valid scrypt options': invalid scrypt parameters: N=16, r=1, p=0, length=8"
+    );
+}
+
+#[test]
+fn pbkdf2_sha256_600k_iterations_stays_within_budget() {
+    let started = std::time::Instant::now();
+    let key = pbkdf2_bytes("sha256", b"password", b"salt", 600_000, 32).expect("supported digest");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        crate::zlib::hex_encode(&key),
+        "669cfe52482116fda1aa2cbe409b2f56c8e4563752b7a28f6eaab614ee005178"
+    );
+    assert!(
+        // ~4 s in a debug build on a quiet host; the guard only has to catch an order-of-magnitude slowdown.
+        elapsed.as_secs_f64() < 20.0,
+        "pbkdf2-sha256 with 600000 iterations took {elapsed:?}"
+    );
+}
+
+#[test]
+fn kdfs_match_the_vectors_through_the_module() {
+    assert_eq!(
+        run(r#"var m = globalThis.__thaw_crypto_module;
+             console.log(m.pbkdf2Sync('password', 'salt', 2, 20, 'sha1').toString('hex'));
+             console.log(m.pbkdf2Sync('password', 'salt', 1, 20, 'SHA-1').toString('hex'));
+             console.log(m.scryptSync('', '', 64, { N: 16, r: 1, p: 1 }).toString('hex').slice(0, 32));
+             console.log(m.scryptSync('password', 'NaCl', 64, { N: 1024, r: 8, p: 16 }).toString('hex').slice(0, 32));
+             console.log(m.hkdfSync('sha256', Buffer.alloc(22, 0x0b), Buffer.from('000102030405060708090a0b0c', 'hex'), Buffer.from('f0f1f2f3f4f5f6f7f8f9', 'hex'), 42).toString('hex'));"#),
+        "ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957|0c60c80f961f0e71f3a9b524af6012062fe037a6|77d6576238657b203b19ca42c18a0497|fdbabe1c9d3472007856e7190d01e9fe|3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+    );
+}
+
+#[test]
+fn kdf_argument_errors_match_the_quickjs_messages() {
+    assert_eq!(
+        run(r#"var m = globalThis.__thaw_crypto_module, t = function (f) { try { f(); return 'ok'; } catch (e) { return e.name + ':' + e.message; } };
+             console.log(t(function () { m.pbkdf2Sync('p', 's', 0, 8, 'sha1'); }));
+             console.log(t(function () { m.pbkdf2Sync('p', 's', 1, -1, 'sha1'); }));
+             console.log(t(function () { m.pbkdf2Sync('p', 's', 4294967296, 8, 'sha1'); }));
+             console.log(t(function () { m.pbkdf2Sync('p', 's', 1, 8, 'nope'); }));
+             console.log(t(function () { m.scryptSync('p', 's', 8, { N: 3 }); }));
+             console.log(t(function () { m.scryptSync('p', 's', 8, { N: 16, r: 0 }); }));
+             console.log(t(function () { m.scrypt('p', 's', 8, {}, 1); }));
+             console.log(t(function () { m.pbkdf2('p', 's', 1, 8, 'sha1', 1); }));"#),
+        "RangeError:iterations out of range|RangeError:keylen out of range|RangeError:iterations out of range|Error:Digest method not supported|TypeError:Error converting from js 'scrypt cost' into type 'power of two greater than one': 3|TypeError:Error converting from js 'scrypt options' into type 'valid scrypt options': invalid scrypt parameters: N=16, r=0, p=1, length=8|TypeError:callback must be a function|TypeError:callback must be a function"
     );
 }
