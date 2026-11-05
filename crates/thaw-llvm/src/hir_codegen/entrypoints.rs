@@ -46,7 +46,8 @@ impl<'ctx> HirCompiler<'ctx> {
         // must have the process reporters installed before reaching cleanup.
         self.configure_unhandled_rejection_reporter();
         self.call_module_init_if_present(cleanup);
-        if self.uses_quickjs {
+        // A thaw-js build calls the same CLI shim, renamed to `thaw_tjs_run_cli` by the rename table.
+        if self.uses_quickjs || self.uses_thaw_js {
             let status = self
                 .builder
                 .build_call(
