@@ -57,10 +57,15 @@
   class Worker extends Emitter {
     constructor(source, options = {}) {
       super();
+      // a file worker runs its file as a CommonJS main module (the disk loader resolves relative paths)
+      let code = String(source);
       if (!options || !options.eval) {
-        const error = new Error('Thaw Worker currently requires { eval: true }');
-        error.code = 'ERR_WORKER_PATH';
-        throw error;
+        if (!code.startsWith('/') && !code.startsWith('./') && !code.startsWith('../')) {
+          const error = new Error('The worker script or module filename must be an absolute path or a relative path starting with ./ or ../. Received "' + code + '"');
+          error.code = 'ERR_WORKER_PATH';
+          throw error;
+        }
+        code = 'globalThis.__thaw_run_main_file(' + JSON.stringify(code) + ')';
       }
       const threadId = nextThreadId++;
       const opts = {
@@ -79,7 +84,7 @@
       opts.stdin = options.stdin === true;
       opts.stdout = options.stdout === true;
       opts.stderr = options.stderr === true;
-      const handle = __thaw_worker_spawn(String(source), JSON.stringify(opts));
+      const handle = __thaw_worker_spawn(code, JSON.stringify(opts));
       let resolveExit;
       const state = {
         handle,
