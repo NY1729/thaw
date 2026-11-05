@@ -864,3 +864,4 @@ include!("tests/thaw_js_jsvalue_object_literal_contracts.rs");
 include!("tests/tj35_bytes_contracts.rs");
 include!("tests/thaw_js_json_listener_contracts.rs");
 include!("tests/thaw_js_live_args_contracts.rs");
+include!("tests/thaw_js_live_owner_args_contracts.rs");
