@@ -1,6 +1,7 @@
 //! `node:crypto` natives for thaw-js: digests, HMAC and OS randomness. The JS half is
 //! `web/node_crypto.js`; the digest code is copied from thaw-quickjs (see `digest.rs`).
 
+mod asym;
 mod cipher;
 mod digest;
 mod kdf;
@@ -10,6 +11,10 @@ mod tests;
 use crate::net::{n, s};
 use crate::zlib::{hex_decode, hex_encode};
 use crate::*;
+use asym::{
+    crypto_asymmetric_sign_hex, crypto_asymmetric_sign_pss_hex, crypto_asymmetric_verify,
+    crypto_asymmetric_verify_pss, crypto_import_key_json,
+};
 use cipher::{sym_block_cipher, sym_ctr_xor, sym_gcm_tag, sym_gcm_xor};
 use digest::{digest_bytes, hmac_bytes};
 use kdf::{pbkdf2_bytes, scrypt_bytes};
@@ -116,6 +121,68 @@ pub(crate) fn install(interp: &mut Interp) {
         );
         Ok(cipher_result(result))
     });
+    // `__thaw_crypto_import_key_json(keyhex, isDer, passphrase)`: normalized PEM plus key info as JSON.
+    let import_key = interp.native(|it, _, a| {
+        let json = crypto_import_key_json(&s(it, a, 0), flag(a, 1), &s(it, a, 2));
+        Ok(Value::str(&json))
+    });
+    // `__thaw_crypto_asymmetric_sign_hex(alg, pem, datahex)` / `_sign_pss_hex`: signature as hex.
+    let sign = interp.native(|it, _, a| {
+        let result =
+            crypto_asymmetric_sign_hex(&s(it, a, 0), &s(it, a, 1), &hex_decode(&s(it, a, 2)));
+        match result {
+            Ok(signature) => Ok(Value::str(&hex_encode(&signature))),
+            Err(message) => it.throw_error("Error", &message),
+        }
+    });
+    let sign_pss = interp.native(|it, _, a| {
+        let result =
+            crypto_asymmetric_sign_pss_hex(&s(it, a, 0), &s(it, a, 1), &hex_decode(&s(it, a, 2)));
+        match result {
+            Ok(signature) => Ok(Value::str(&hex_encode(&signature))),
+            Err(message) => it.throw_error("Error", &message),
+        }
+    });
+    // `__thaw_crypto_asymmetric_verify(alg, pem, datahex, sighex)` / `_verify_pss`: boolean.
+    let verify = interp.native(|it, _, a| {
+        let result = crypto_asymmetric_verify(
+            &s(it, a, 0),
+            &s(it, a, 1),
+            &hex_decode(&s(it, a, 2)),
+            &hex_decode(&s(it, a, 3)),
+        );
+        match result {
+            Ok(valid) => Ok(Value::Bool(valid)),
+            Err(message) => it.throw_error("Error", &message),
+        }
+    });
+    let verify_pss = interp.native(|it, _, a| {
+        let result = crypto_asymmetric_verify_pss(
+            &s(it, a, 0),
+            &s(it, a, 1),
+            &hex_decode(&s(it, a, 2)),
+            &hex_decode(&s(it, a, 3)),
+        );
+        match result {
+            Ok(valid) => Ok(Value::Bool(valid)),
+            Err(message) => it.throw_error("Error", &message),
+        }
+    });
+    interp
+        .global
+        .declare("__thaw_crypto_import_key_json", import_key, true);
+    interp
+        .global
+        .declare("__thaw_crypto_asymmetric_sign_hex", sign, true);
+    interp
+        .global
+        .declare("__thaw_crypto_asymmetric_sign_pss_hex", sign_pss, true);
+    interp
+        .global
+        .declare("__thaw_crypto_asymmetric_verify", verify, true);
+    interp
+        .global
+        .declare("__thaw_crypto_asymmetric_verify_pss", verify_pss, true);
     interp
         .global
         .declare("__thaw_crypto_cipher_hex", cipher_hex, true);

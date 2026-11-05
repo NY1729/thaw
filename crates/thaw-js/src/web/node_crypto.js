@@ -35,7 +35,7 @@ class Hash {
   }
 }
 class Hmac extends Hash {
-  constructor(algorithm, key) { super(algorithm); this._key = Buffer.from(key); }
+  constructor(algorithm, key) { super(algorithm); this._key = Buffer.from(key instanceof KeyObject ? key.export() : key); }
   digest(encoding) {
     if (this._digested) throw hashFinalized();
     this._digested = true;
@@ -178,8 +178,7 @@ function hkdf(digest, ikm, salt, info, keylen, callback) {
   queueMicrotask(function () { callback(null, value); });
 }
 Object.assign(cryptoModule, { pbkdf2Sync: pbkdf2Sync, pbkdf2: pbkdf2, scryptSync: scryptSync, scrypt: scrypt, hkdfSync: hkdfSync, hkdf: hkdf });
-// Ciphers (AES cbc/ecb/ctr/gcm; natives in node_crypto/cipher.rs). Lifted from buffer_crypto.js with the
-// KeyObject branch dropped (KeyObject lands with the asymmetric PR). Stream (Transform) API is a known gap.
+// Ciphers (AES cbc/ecb/ctr/gcm; natives in node_crypto/cipher.rs). Lifted from buffer_crypto.js. Stream (Transform) API is a known gap.
 function cryptoError(Type, code, message) { var e = new Type(message); e.code = code; return e; }
 // Natives return hex, or `!reason` on failure; map the reasons to the OpenSSL-style errors Node throws.
 function cipherChecked(result) {
@@ -198,7 +197,7 @@ class Cipheriv {
     if (!match) throw cryptoError(Error, 'ERR_CRYPTO_UNKNOWN_CIPHER', 'Unknown cipher');
     this.algorithm = name;
     this.mode = match[2];
-    this.key = Buffer.from(key);
+    this.key = Buffer.from(key instanceof KeyObject ? key.export() : key);
     if (this.key.length * 8 !== Number(match[1])) throw cryptoError(RangeError, 'ERR_CRYPTO_INVALID_KEYLEN', 'Invalid key length');
     this.iv = iv === null || iv === undefined ? Buffer.alloc(0) : Buffer.from(iv);
     var ivOk = this.mode === 'ecb' ? this.iv.length === 0 : this.mode === 'gcm' ? this.iv.length > 0 : this.iv.length === 16;
@@ -281,6 +280,170 @@ function timingSafeEqual(left, right) {
   return difference === 0;
 }
 Object.assign(cryptoModule, { createCipheriv: createCipheriv, createDecipheriv: createDecipheriv, Cipheriv: Cipheriv, timingSafeEqual: timingSafeEqual });
+// Asymmetric keys and signatures (natives in node_crypto/asym.rs).
+// Sign/Verify side of node:crypto (lifted from buffer_crypto.js, with the same natives).
+// Digest names are checked by the natives: sha1/sha256/sha384/sha512 only (RSA), ECDSA uses its curve's digest.
+function normalizeSignDigestAlgorithm(algorithm) {
+  return normalizeDigestAlgorithm(String(algorithm).replace(/^(rsa|ecdsa|dsa)-/i, ''));
+}
+// A minimal stand-in for real Node's `crypto.KeyObject` -- thaw's own
+// crypto shim has no asymmetric-key support at all (no
+// `createPrivateKey`/`createPublicKey`), but real packages commonly do
+// `x instanceof KeyObject` purely to tell a wrapped key apart from a
+// plain string/Buffer secret -- real example: jsonwebtoken's own
+// `sign.js`/`verify.js`, `secretOrPrivateKey instanceof KeyObject`.
+// Without *something* named `KeyObject` reachable here, that check
+// threw outright ("invalid 'instanceof' right operand" -- the
+// right-hand side of `instanceof` was `undefined`), aborting every
+// call regardless of the key's actual shape.
+//
+// `type`/`export()` mirror real `KeyObject`'s own shape closely enough
+// for the *symmetric* (HMAC) case real packages actually exercise
+// through this: jsonwebtoken's own fallback chain, real Node's
+// `createPrivateKey(secret)` throwing on a plain HMAC secret (thaw
+// doesn't implement it at all -- calling it throws "not a function",
+// caught the same way) then `createSecretKey(secret)` succeeding and
+// producing a `KeyObject` whose `.type` must read back `"secret"` for
+// the rest of jsonwebtoken's own logic to accept it.
+//
+// Also backs a real asymmetric (RSA/EC/Ed25519) key now: `_material`
+// for those is always a plain, unencrypted, normalized PKCS8/SPKI PEM
+// string -- regardless of what format/encryption the *original* input
+// was in (PEM, DER, or passphrase-protected PKCS8; see
+// `parseAsymmetricKeyMaterial` and `crypto_import_key_json`,
+// `asymmetric_crypto.rs`) -- reparsed fresh on every `sign`/`verify`,
+// no persistent native key object. `asymmetricKeyType`/
+// `asymmetricKeyDetails` are populated from the same import call
+// (`namedCurve` for EC, `modulusLength`/`publicExponent` -- a
+// `BigInt`, matching real Node -- for RSA), matching real
+// `KeyObject`'s own fields closely enough for `x.asymmetricKeyType
+// === 'rsa'`-style feature checks. `export()`
+// for an asymmetric key returns the normalized PEM text as a string
+// (real Node's own default `format: 'pem'`) -- `format: 'der'`/`jwk`
+// output are not supported, matching this shim's existing PEM-only
+// *output* scope (DER *input* is supported, see above).
+function rejectEncryptedPrivateKeyOutput(encoding) {
+  if (encoding && (encoding.cipher !== undefined || encoding.passphrase !== undefined)) {
+    throw new TypeError('Encrypted private key output is not supported');
+  }
+};
+class KeyObject {
+  constructor(type, material, asymmetricInfo) {
+    this.type = type;
+    this._material = material;
+    if (asymmetricInfo) {
+      this.asymmetricKeyType = asymmetricInfo.keyType;
+      this.asymmetricKeyDetails = asymmetricInfo.namedCurve
+        ? { namedCurve: { 'P-256': 'prime256v1', 'P-384': 'secp384r1', 'P-521': 'secp521r1' }[asymmetricInfo.namedCurve] || asymmetricInfo.namedCurve }
+        : asymmetricInfo.modulusLength != null
+        ? { modulusLength: asymmetricInfo.modulusLength, publicExponent: BigInt(asymmetricInfo.publicExponent) }
+        : {};
+    }
+  }
+  export(options) {
+    if (this.type === 'private') rejectEncryptedPrivateKeyOutput(options);
+    return this.type === 'secret' ? Buffer.from(this._material) : this._material;
+  }
+}
+// Extracts a PEM string plus its parsed key-info from whatever shape
+// `createPrivateKey`/`createPublicKey`/`.sign()`/`.verify()` accepts:
+// a bare PEM string/Buffer, a `{key, format, type, passphrase}`
+// options object, or an existing `KeyObject` (already normalized at
+// construction time -- returned as-is, no need to reimport). `format:
+// 'der'` reads `key`'s raw bytes as DER instead of PEM text;
+// `passphrase` decrypts a modern PKCS8 `ENCRYPTED PRIVATE KEY` (the
+// legacy OpenSSL "Proc-Type: 4,ENCRYPTED" PKCS#1/SEC1 header format
+// is not supported -- real Node's own modern default is PKCS8 too).
+// Whatever shape/encoding the input was in, the *output* is always a
+// plain, unencrypted, normalized PEM string (`crypto_import_key_json`
+// re-encodes it) -- every other caller of this function only ever
+// sees that.
+function parseAsymmetricKeyMaterial(key) {
+  if (key instanceof KeyObject) return { pem: key._material, info: {
+    valid: true, keyType: key.asymmetricKeyType, isPrivate: key.type === 'private',
+    namedCurve: key.asymmetricKeyDetails && key.asymmetricKeyDetails.namedCurve
+  } };
+  const rawKey = key && key.key instanceof KeyObject ? key.key
+    : key && (typeof key.key === 'string' || key.key instanceof Buffer || ArrayBuffer.isView(key.key)) ? key.key
+    : key;
+  if (rawKey instanceof KeyObject) return parseAsymmetricKeyMaterial(rawKey);
+  const material = typeof rawKey === 'string' ? Buffer.from(rawKey)
+    : rawKey instanceof Buffer || ArrayBuffer.isView(rawKey) ? Buffer.from(rawKey)
+    : null;
+  if (material === null) throw new TypeError('Only a PEM/DER string/Buffer or a KeyObject is supported');
+  const isDer = Boolean(key && key.format === 'der');
+  const passphrase = (key && key.passphrase) || '';
+  const info = JSON.parse(__thaw_crypto_import_key_json(material.toString('hex'), isDer, String(passphrase)));
+  if (!info.valid) throw new Error('Invalid or unsupported key (only RSA/EC/Ed25519 PEM or DER keys are supported)');
+  return { pem: info.pem, info };
+};
+function createSecretKey(key) { return new KeyObject('secret', Buffer.from(key)); }
+// Real Node's `createPrivateKey`/`createPublicKey`, now backed by
+// real RSA/EC/Ed25519 PEM *and DER* parsing, including passphrase-
+// protected PKCS8 private keys (`asymmetric_crypto.rs`,
+// `parseAsymmetricKeyMaterial`). `createPublicKey` deriving a public
+// key *from* a private key/PEM (real Node supports this) is still
+// not implemented -- pass the public key PEM directly instead.
+const createPrivateKey = key => {
+  const { pem, info } = parseAsymmetricKeyMaterial(key);
+  if (!info.isPrivate) throw new Error('Expected a private key');
+  return new KeyObject('private', pem, info);
+};
+const createPublicKey = key => {
+  if (key instanceof KeyObject) {
+    if (key.type === 'public') return key;
+    throw new Error('Deriving a public key from a private key is not supported here -- pass the public key PEM directly');
+  }
+  const { pem, info } = parseAsymmetricKeyMaterial(key);
+  if (info.isPrivate) throw new Error('Deriving a public key from a private key is not supported here -- pass the public key PEM directly');
+  return new KeyObject('public', pem, info);
+};
+const RSA_PKCS1_PADDING = 1;
+const RSA_PKCS1_PSS_PADDING = 6;
+const RSA_PKCS1_OAEP_PADDING = 4;
+// `createSign(algorithm).update(data).sign(privateKey)` /
+// `createVerify(algorithm).update(data).verify(publicKey, signature)`
+// -- `algorithm` is a *digest* name (real Node accepts an
+// `"RSA-SHA256"`-style prefixed form too, see
+// `normalizeSignDigestAlgorithm`); the actual RSA-vs-ECDSA choice
+// always comes from the key passed to `.sign()`/`.verify()`, not from
+// this string. ECDSA signatures are DER-encoded, matching real Node's
+// own default (`dsaEncoding: 'der'`) -- no `ieee-p1363` raw-format
+// support (out of scope; real packages that need JOSE's raw r||s
+// format, e.g. jsonwebtoken's own `ecdsa-sig-formatter` dependency,
+// already convert DER<->raw entirely in JS, so this needs no special
+// handling here).
+class Sign {
+  constructor(algorithm) { this.algorithm = normalizeSignDigestAlgorithm(algorithm); this._chunks = []; }
+  update(data, encoding) { this._chunks.push(Buffer.from(data, encoding)); return this; }
+  sign(privateKey, outputEncoding) {
+    const { pem } = parseAsymmetricKeyMaterial(privateKey);
+    const data = Buffer.concat(this._chunks).toString('hex');
+    const usePss = privateKey && privateKey.padding === RSA_PKCS1_PSS_PADDING;
+    const signer = usePss ? __thaw_crypto_asymmetric_sign_pss_hex : __thaw_crypto_asymmetric_sign_hex;
+    const value = Buffer.from(signer(this.algorithm, pem, data), 'hex');
+    return outputEncoding === undefined ? value : value.toString(outputEncoding);
+  }
+}
+class Verify {
+  constructor(algorithm) { this.algorithm = normalizeSignDigestAlgorithm(algorithm); this._chunks = []; }
+  update(data, encoding) { this._chunks.push(Buffer.from(data, encoding)); return this; }
+  verify(publicKey, signature, signatureEncoding) {
+    const { pem } = parseAsymmetricKeyMaterial(publicKey);
+    const data = Buffer.concat(this._chunks).toString('hex');
+    const signatureHex = Buffer.from(signature, signatureEncoding).toString('hex');
+    const usePss = publicKey && publicKey.padding === RSA_PKCS1_PSS_PADDING;
+    const verifier = usePss ? __thaw_crypto_asymmetric_verify_pss : __thaw_crypto_asymmetric_verify;
+    return verifier(this.algorithm, pem, data, signatureHex);
+  }
+}
+const createSign = algorithm => new Sign(algorithm);
+const createVerify = algorithm => new Verify(algorithm);
+const sign = (algorithm, data, key) => new Sign(algorithm || 'sha256').update(data).sign(key);
+const verify = (algorithm, data, key, signature) => new Verify(algorithm || 'sha256').update(data).verify(key, signature);
+Object.assign(cryptoModule, { KeyObject: KeyObject, createSecretKey: createSecretKey, createPrivateKey: createPrivateKey, createPublicKey: createPublicKey,
+  Sign: Sign, Verify: Verify, createSign: createSign, createVerify: createVerify, sign: sign, verify: verify,
+  constants: { RSA_PKCS1_PADDING: RSA_PKCS1_PADDING, RSA_PKCS1_PSS_PADDING: RSA_PKCS1_PSS_PADDING, RSA_PKCS1_OAEP_PADDING: RSA_PKCS1_OAEP_PADDING } });
 def(globalThis, '__thaw_Hash', Hash); // globals so the scan knows update/digest/copy
 def(globalThis, '__thaw_Hmac', Hmac);
 def(globalThis, '__thaw_Cipheriv', Cipheriv);

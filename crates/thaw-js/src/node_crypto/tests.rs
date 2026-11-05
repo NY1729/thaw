@@ -561,3 +561,360 @@ console.log(t(function () { return m.timingSafeEqual(Buffer.from('a'), 5); }));
         "true|false|RangeError|ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH|Input buffers must have the same byte length|TypeError|ERR_INVALID_ARG_TYPE|The \"buf1\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf2\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf1\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf1\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf1\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf1\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|TypeError|ERR_INVALID_ARG_TYPE|The \"buf2\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.|true|true|true|false|true|RangeError|ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH|Input buffers must have the same byte length|true|true|TypeError|ERR_INVALID_ARG_TYPE|The \"buf2\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView."
     );
 }
+
+#[test]
+fn asym_key_import_formats_match_node() {
+    let program = [
+        r##"function rsaPrivatePkcs8() { return '-----BEGIN PRIVATE KEY-----\nMIIEugIBADANBgkqhkiG9w0BAQEFAASCBKQwggSgAgEAAoIBAQCwwf4NV+7sbU0z\nwaL5V1ABx9epdw571f4wNuNcic8x7CRchIv4DuDlKrHsI6T0y8+pKMdq4rHrDeEt\neeTylrgK7HnqKDe31b8Cxr7BkDLlandEmP3/VPQu7EFDN70rF68IdMn/y9ywbpwY\nNENCIyjyRkfraM5Lr5sBVKjfma8Kfu1PdoE3iMmJX2zhQXQjlnCVAEvelZfSRh64\nTmBv8XoB3dp93HQmRlvpuEObVi6p0wViMYueSaYFviqJONtnwu9xRVBiXXg9qKz6\nsDsRwBuNQTgmCpAXsgwcKmIjl1pvEAroln+LTB3HL20aIJvTD1doJ4Wq3N/17Z5p\ni4jouRUNAgMBAAECgf9ClNB1KqSVMFEkbdIeyNZgMmzKQE6XS36dE4Q/6NfXtkSf\nCWX14gH38+jXSn6vzrj71qCNYp0LFmO2FOjGBCL9+mdPJCiTBYJcjy9XaNzaazp2\nXIgLFJ3mbAxvKGcfQumxqKmdCJCqWV0KY+s3vobLGUV+EDDrF286i0ZulqnHZtAO\nkGGTXsptC86gZHaRYsIuZ0US5KYC1h1tGmwbISdvmfwaXm7N5XW2qU5W3VUZYx4Q\nwjiZ+JJ5RddKYM8TIvK6+AGPqcLdqJxDp/rr5jb0MVJsv+m9BkWRVDSBvnp+zE+b\nJWvUMRc3FeMwqxYAzWVpfsUFUDuc/94fuL6Z68kCgYEA6zuo1Jbe8yEFd8KwJvEj\nN6S7OYmaud9wtKfLTJLa0OmkiXqd88Lw1Mf8uvb4TBP+IOS0XwJYL/R2dmBix4TY\neMesaK1h9twsbKp86sq2bDL5SbT/cWLI6xpgV27vnYIcXKHdtO48FbUrYriTf1sb\n8XYGKAxygcjYewYiLAow6MkCgYEAwFzGDj2HntZaLvHAi/10d7CMhF1bLKNK2l/Q\n46TW+xjAjlAToQ1T+2gfhEvTQ0b+nLJt/ld/FqTogT/3TKpoFG3YWlLZ8ruoPOXY\nxBhL/kxZLchmHN45hzXkd91lOlRLf9TsfHxsYEkOU56kkpIw9zSbHxHbTgUgpwM+\nB5qT8CUCgYB9uuyZfG58O1kl0uy+U8MEGctsjI0j7jbaiJkUO6YzZb5pMR29zaNV\nx/Lgp+K9Hy6EvFlgMuuZ7itnSEtj4zClFeykIpArFzGzf0i3YlQw7unpqJGkNC25\n4+Y8tXHjmUi5hlbvPyrkW2puIMPNnZAI9pGB1G1by1NSJkwbh/LuaQKBgCBB7nyI\n2OtL6seghrdzA0rm8kloFlf/8hd4peDmzZ5B4lh7GS+SupiYN2DKDl1j1GKWkVdr\neMZlVRAHmALlOJrkaLmM1zubOHUt3hHUOTolt3az+luw8Fi6Mtve5pDHffmrzRR7\nEPl8hsiC+/oQReHOkoy9Q9driLQ5GPfRdil5AoGAX64TOs4kpbzM045OgM65Cm2t\nW+SreofkSv2ErT4dzAoPhs0x1xX6BUDNCqn74einRfr1NBJj/llkbMiD8QAHJNq2\npqS4IynQWgf4hYsJlrvG0F79WWadArLVQNLxebGxThzx6l+mIm1wGn/xHibbYBB2\nJz01Ou8GC/69JgjMjas=\n-----END PRIVATE KEY-----\n'; }
+function rsaPrivatePkcs1() { return '-----BEGIN RSA PRIVATE KEY-----\nMIIEoAIBAAKCAQEAsMH+DVfu7G1NM8Gi+VdQAcfXqXcOe9X+MDbjXInPMewkXISL\n+A7g5Sqx7COk9MvPqSjHauKx6w3hLXnk8pa4Cux56ig3t9W/Asa+wZAy5Wp3RJj9\n/1T0LuxBQze9KxevCHTJ/8vcsG6cGDRDQiMo8kZH62jOS6+bAVSo35mvCn7tT3aB\nN4jJiV9s4UF0I5ZwlQBL3pWX0kYeuE5gb/F6Ad3afdx0JkZb6bhDm1YuqdMFYjGL\nnkmmBb4qiTjbZ8LvcUVQYl14Pais+rA7EcAbjUE4JgqQF7IMHCpiI5dabxAK6JZ/\ni0wdxy9tGiCb0w9XaCeFqtzf9e2eaYuI6LkVDQIDAQABAoH/QpTQdSqklTBRJG3S\nHsjWYDJsykBOl0t+nROEP+jX17ZEnwll9eIB9/Po10p+r864+9agjWKdCxZjthTo\nxgQi/fpnTyQokwWCXI8vV2jc2ms6dlyICxSd5mwMbyhnH0LpsaipnQiQqlldCmPr\nN76GyxlFfhAw6xdvOotGbpapx2bQDpBhk17KbQvOoGR2kWLCLmdFEuSmAtYdbRps\nGyEnb5n8Gl5uzeV1tqlOVt1VGWMeEMI4mfiSeUXXSmDPEyLyuvgBj6nC3aicQ6f6\n6+Y29DFSbL/pvQZFkVQ0gb56fsxPmyVr1DEXNxXjMKsWAM1laX7FBVA7nP/eH7i+\nmevJAoGBAOs7qNSW3vMhBXfCsCbxIzekuzmJmrnfcLSny0yS2tDppIl6nfPC8NTH\n/Lr2+EwT/iDktF8CWC/0dnZgYseE2HjHrGitYfbcLGyqfOrKtmwy+Um0/3FiyOsa\nYFdu752CHFyh3bTuPBW1K2K4k39bG/F2BigMcoHI2HsGIiwKMOjJAoGBAMBcxg49\nh57WWi7xwIv9dHewjIRdWyyjStpf0OOk1vsYwI5QE6ENU/toH4RL00NG/pyybf5X\nfxak6IE/90yqaBRt2FpS2fK7qDzl2MQYS/5MWS3IZhzeOYc15HfdZTpUS3/U7Hx8\nbGBJDlOepJKSMPc0mx8R204FIKcDPgeak/AlAoGAfbrsmXxufDtZJdLsvlPDBBnL\nbIyNI+422oiZFDumM2W+aTEdvc2jVcfy4KfivR8uhLxZYDLrme4rZ0hLY+MwpRXs\npCKQKxcxs39It2JUMO7p6aiRpDQtuePmPLVx45lIuYZW7z8q5FtqbiDDzZ2QCPaR\ngdRtW8tTUiZMG4fy7mkCgYAgQe58iNjrS+rHoIa3cwNK5vJJaBZX//IXeKXg5s2e\nQeJYexkvkrqYmDdgyg5dY9RilpFXa3jGZVUQB5gC5Tia5Gi5jNc7mzh1Ld4R1Dk6\nJbd2s/pbsPBYujLb3uaQx335q80UexD5fIbIgvv6EEXhzpKMvUPXa4i0ORj30XYp\neQKBgF+uEzrOJKW8zNOOToDOuQptrVvkq3qH5Er9hK0+HcwKD4bNMdcV+gVAzQqp\n++Hop0X69TQSY/5ZZGzIg/EAByTatqakuCMp0FoH+IWLCZa7xtBe/VlmnQKy1UDS\n8XmxsU4c8epfpiJtcBp/8R4m22AQdic9NTrvBgv+vSYIzI2r\n-----END RSA PRIVATE KEY-----\n'; }
+function rsaPublicKey() { return '-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMH+DVfu7G1NM8Gi+VdQ\nAcfXqXcOe9X+MDbjXInPMewkXISL+A7g5Sqx7COk9MvPqSjHauKx6w3hLXnk8pa4\nCux56ig3t9W/Asa+wZAy5Wp3RJj9/1T0LuxBQze9KxevCHTJ/8vcsG6cGDRDQiMo\n8kZH62jOS6+bAVSo35mvCn7tT3aBN4jJiV9s4UF0I5ZwlQBL3pWX0kYeuE5gb/F6\nAd3afdx0JkZb6bhDm1YuqdMFYjGLnkmmBb4qiTjbZ8LvcUVQYl14Pais+rA7EcAb\njUE4JgqQF7IMHCpiI5dabxAK6JZ/i0wdxy9tGiCb0w9XaCeFqtzf9e2eaYuI6LkV\nDQIDAQAB\n-----END PUBLIC KEY-----\n'; }
+function ecPrivatePkcs8() { return '-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgHqV2FCeyxUa9ivDr\nlBxTfnDLAsoI5yqk63+Gu/wHFFehRANCAARuk+iU6lIfCrZ55skHVPDCLJokBINo\nHetn8HlbmnNJwQvHw0cTM3BelUyYVXZkLPW5kCLhhNiRpRgGOm+3vLOI\n-----END PRIVATE KEY-----\n'; }
+function ecPrivateSec1() { return '-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIB6ldhQnssVGvYrw65QcU35wywLKCOcqpOt/hrv8BxRXoAoGCCqGSM49\nAwEHoUQDQgAEbpPolOpSHwq2eebJB1TwwiyaJASDaB3rZ/B5W5pzScELx8NHEzNw\nXpVMmFV2ZCz1uZAi4YTYkaUYBjpvt7yziA==\n-----END EC PRIVATE KEY-----\n'; }
+function ecPublicKey() { return '-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbpPolOpSHwq2eebJB1TwwiyaJASD\naB3rZ/B5W5pzScELx8NHEzNwXpVMmFV2ZCz1uZAi4YTYkaUYBjpvt7yziA==\n-----END PUBLIC KEY-----\n'; }
+function rsaRoundTrip() {
+const sig = __thaw_crypto_module.createSign('RSA-SHA256').update('hello world').sign(rsaPrivatePkcs8(), 'hex');
+const ok = __thaw_crypto_module.createVerify('RSA-SHA256').update('hello world').verify(rsaPublicKey(), sig, 'hex');
+const okPkcs1Key = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(rsaPublicKey(), __thaw_crypto_module.createSign('sha256').update('hello world').sign(rsaPrivatePkcs1(), 'hex'), 'hex');
+const tamperedMessage = __thaw_crypto_module.createVerify('sha256').update('goodbye world').verify(rsaPublicKey(), sig, 'hex');
+const tamperedSignature = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(rsaPublicKey(), sig.slice(0, -2) + '00', 'hex');
+const opensslSig = 'a7e86b1a31fe823a693f5fedd193ebfb60098de3e41bac389e9e52215d785ee5cc3d211560be5dd87cbadbc264bdea375f96e87420f71b30891352d9a7631e2e1d42d0f8422a4f9af640b3a41617d754e7bdc1738436ac81fa79f6455ed431ab9221671d9582687bf3999ecf618085426bcc3a41c69ec89d0aedcbfaa835d37a89e215859d85d4509afbfb22b569318e779193764f63b9dabfb11c5360b08c2bfcfe257ab5f08f1438f397b2bf284f46848c8ff660ead19e35c67727fef275baf9d91fe56f7a9544f04dcc1ed1152bf737c17a141aaca770fdf4241cef76141722d8910a178b8ca3f183502d49a0c8cf51443e2a797b4ee6ad2be49aea9c9e40';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(rsaPublicKey(), opensslSig, 'hex');
+return [ok, okPkcs1Key, tamperedMessage, tamperedSignature, opensslVerifies];
+}
+function rsaPssRoundTrip() {
+const sig = __thaw_crypto_module.createSign('sha256').update('hello world').sign({ key: rsaPrivatePkcs8(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PSS_PADDING }, 'hex');
+const ok = __thaw_crypto_module.createVerify('sha256').update('hello world').verify({ key: rsaPublicKey(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PSS_PADDING }, sig, 'hex');
+const opensslSig = '37ceb5072ae254254115b5910f7a8e45723f1a6ca203eb2084074ab4f95672a0c9d6db585f5bed06cef0208bc5ed474ae0177422928739b05eb40ea4dc2da6204bb73d3e88174f32e01cb94b21b317615e61b8df7e561303261f0868ff704013b20f976c8a77ab5a802f15348b0969a35e57802cd7068f7a386481831c43f19bb511882e5163368ef25f93f73bf47f4374483772dddbb8ca2c03defdb5c4fca89549fea202fab7bf5ca82fc55953119781219ff67b58689866466f2c2bddb4b2f152244b8562fd5e13e3e5e087137e5835cd53978b10f4d4dd37e57ee4aff83dafc1973b0600a780938bddc559bd57b46cdc099895fbd284963a67fe0e9d120b';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify({ key: rsaPublicKey(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PSS_PADDING }, opensslSig, 'hex');
+return [ok, opensslVerifies];
+}
+function ecdsaRoundTrip() {
+const sig = __thaw_crypto_module.createSign('sha256').update('hello world').sign(ecPrivatePkcs8(), 'hex');
+const ok = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(ecPublicKey(), sig, 'hex');
+const okSec1Key = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(ecPublicKey(), __thaw_crypto_module.createSign('sha256').update('hello world').sign(ecPrivateSec1(), 'hex'), 'hex');
+const tamperedMessage = __thaw_crypto_module.createVerify('sha256').update('goodbye world').verify(ecPublicKey(), sig, 'hex');
+const opensslSig = '304502210091b5f1192a836c1d9582197cab6ceac74a952a794d1276781e8f1ac1cf9a001b02203c65bd65ec0b91e24d1f5b52ccaa466e28748e2e56b944d5e7a9aec1bc712210';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(ecPublicKey(), opensslSig, 'hex');
+return [ok, okSec1Key, tamperedMessage, opensslVerifies];
+}
+function oneShotSignVerify() {
+const sig = __thaw_crypto_module.sign('sha256', 'one shot', rsaPrivatePkcs8());
+return __thaw_crypto_module.verify('sha256', 'one shot', rsaPublicKey(), sig);
+}
+function keyObjectAsymmetricInfo() {
+const priv = __thaw_crypto_module.createPrivateKey(rsaPrivatePkcs8());
+const pub = __thaw_crypto_module.createPublicKey(rsaPublicKey());
+const ecPub = __thaw_crypto_module.createPublicKey(ecPublicKey());
+return [priv.type, priv.asymmetricKeyType, pub.type, pub.asymmetricKeyType, ecPub.asymmetricKeyType, ecPub.asymmetricKeyDetails.namedCurve];
+}"##,
+        r##"
+var m = __thaw_crypto_module;
+var rp = m.createPrivateKey(rsaPrivatePkcs1());
+var rk = m.createPrivateKey(rsaPrivatePkcs8());
+console.log(JSON.stringify([rp.type, rp.asymmetricKeyType, rk.asymmetricKeyType,
+  String(rk.asymmetricKeyDetails.modulusLength), String(rk.asymmetricKeyDetails.publicExponent),
+  m.createPublicKey(rsaPublicKey()).asymmetricKeyType, m.createPublicKey(ecPublicKey()).asymmetricKeyDetails.namedCurve,
+  m.createPrivateKey(ecPrivateSec1()).asymmetricKeyType, rp.export().indexOf('-----BEGIN PRIVATE KEY-----') === 0]));
+"##,
+    ]
+    .concat();
+    assert_eq!(
+        run(&program),
+        r#"["private","rsa","rsa","2048","65537","rsa","prime256v1","ec",true]"#
+    );
+}
+
+#[test]
+fn asym_ecdsa_p256_sign_verify_matches_openssl() {
+    let program = [
+        r##"function rsaPrivatePkcs8() { return '-----BEGIN PRIVATE KEY-----\nMIIEugIBADANBgkqhkiG9w0BAQEFAASCBKQwggSgAgEAAoIBAQCwwf4NV+7sbU0z\nwaL5V1ABx9epdw571f4wNuNcic8x7CRchIv4DuDlKrHsI6T0y8+pKMdq4rHrDeEt\neeTylrgK7HnqKDe31b8Cxr7BkDLlandEmP3/VPQu7EFDN70rF68IdMn/y9ywbpwY\nNENCIyjyRkfraM5Lr5sBVKjfma8Kfu1PdoE3iMmJX2zhQXQjlnCVAEvelZfSRh64\nTmBv8XoB3dp93HQmRlvpuEObVi6p0wViMYueSaYFviqJONtnwu9xRVBiXXg9qKz6\nsDsRwBuNQTgmCpAXsgwcKmIjl1pvEAroln+LTB3HL20aIJvTD1doJ4Wq3N/17Z5p\ni4jouRUNAgMBAAECgf9ClNB1KqSVMFEkbdIeyNZgMmzKQE6XS36dE4Q/6NfXtkSf\nCWX14gH38+jXSn6vzrj71qCNYp0LFmO2FOjGBCL9+mdPJCiTBYJcjy9XaNzaazp2\nXIgLFJ3mbAxvKGcfQumxqKmdCJCqWV0KY+s3vobLGUV+EDDrF286i0ZulqnHZtAO\nkGGTXsptC86gZHaRYsIuZ0US5KYC1h1tGmwbISdvmfwaXm7N5XW2qU5W3VUZYx4Q\nwjiZ+JJ5RddKYM8TIvK6+AGPqcLdqJxDp/rr5jb0MVJsv+m9BkWRVDSBvnp+zE+b\nJWvUMRc3FeMwqxYAzWVpfsUFUDuc/94fuL6Z68kCgYEA6zuo1Jbe8yEFd8KwJvEj\nN6S7OYmaud9wtKfLTJLa0OmkiXqd88Lw1Mf8uvb4TBP+IOS0XwJYL/R2dmBix4TY\neMesaK1h9twsbKp86sq2bDL5SbT/cWLI6xpgV27vnYIcXKHdtO48FbUrYriTf1sb\n8XYGKAxygcjYewYiLAow6MkCgYEAwFzGDj2HntZaLvHAi/10d7CMhF1bLKNK2l/Q\n46TW+xjAjlAToQ1T+2gfhEvTQ0b+nLJt/ld/FqTogT/3TKpoFG3YWlLZ8ruoPOXY\nxBhL/kxZLchmHN45hzXkd91lOlRLf9TsfHxsYEkOU56kkpIw9zSbHxHbTgUgpwM+\nB5qT8CUCgYB9uuyZfG58O1kl0uy+U8MEGctsjI0j7jbaiJkUO6YzZb5pMR29zaNV\nx/Lgp+K9Hy6EvFlgMuuZ7itnSEtj4zClFeykIpArFzGzf0i3YlQw7unpqJGkNC25\n4+Y8tXHjmUi5hlbvPyrkW2puIMPNnZAI9pGB1G1by1NSJkwbh/LuaQKBgCBB7nyI\n2OtL6seghrdzA0rm8kloFlf/8hd4peDmzZ5B4lh7GS+SupiYN2DKDl1j1GKWkVdr\neMZlVRAHmALlOJrkaLmM1zubOHUt3hHUOTolt3az+luw8Fi6Mtve5pDHffmrzRR7\nEPl8hsiC+/oQReHOkoy9Q9driLQ5GPfRdil5AoGAX64TOs4kpbzM045OgM65Cm2t\nW+SreofkSv2ErT4dzAoPhs0x1xX6BUDNCqn74einRfr1NBJj/llkbMiD8QAHJNq2\npqS4IynQWgf4hYsJlrvG0F79WWadArLVQNLxebGxThzx6l+mIm1wGn/xHibbYBB2\nJz01Ou8GC/69JgjMjas=\n-----END PRIVATE KEY-----\n'; }
+function rsaPrivatePkcs1() { return '-----BEGIN RSA PRIVATE KEY-----\nMIIEoAIBAAKCAQEAsMH+DVfu7G1NM8Gi+VdQAcfXqXcOe9X+MDbjXInPMewkXISL\n+A7g5Sqx7COk9MvPqSjHauKx6w3hLXnk8pa4Cux56ig3t9W/Asa+wZAy5Wp3RJj9\n/1T0LuxBQze9KxevCHTJ/8vcsG6cGDRDQiMo8kZH62jOS6+bAVSo35mvCn7tT3aB\nN4jJiV9s4UF0I5ZwlQBL3pWX0kYeuE5gb/F6Ad3afdx0JkZb6bhDm1YuqdMFYjGL\nnkmmBb4qiTjbZ8LvcUVQYl14Pais+rA7EcAbjUE4JgqQF7IMHCpiI5dabxAK6JZ/\ni0wdxy9tGiCb0w9XaCeFqtzf9e2eaYuI6LkVDQIDAQABAoH/QpTQdSqklTBRJG3S\nHsjWYDJsykBOl0t+nROEP+jX17ZEnwll9eIB9/Po10p+r864+9agjWKdCxZjthTo\nxgQi/fpnTyQokwWCXI8vV2jc2ms6dlyICxSd5mwMbyhnH0LpsaipnQiQqlldCmPr\nN76GyxlFfhAw6xdvOotGbpapx2bQDpBhk17KbQvOoGR2kWLCLmdFEuSmAtYdbRps\nGyEnb5n8Gl5uzeV1tqlOVt1VGWMeEMI4mfiSeUXXSmDPEyLyuvgBj6nC3aicQ6f6\n6+Y29DFSbL/pvQZFkVQ0gb56fsxPmyVr1DEXNxXjMKsWAM1laX7FBVA7nP/eH7i+\nmevJAoGBAOs7qNSW3vMhBXfCsCbxIzekuzmJmrnfcLSny0yS2tDppIl6nfPC8NTH\n/Lr2+EwT/iDktF8CWC/0dnZgYseE2HjHrGitYfbcLGyqfOrKtmwy+Um0/3FiyOsa\nYFdu752CHFyh3bTuPBW1K2K4k39bG/F2BigMcoHI2HsGIiwKMOjJAoGBAMBcxg49\nh57WWi7xwIv9dHewjIRdWyyjStpf0OOk1vsYwI5QE6ENU/toH4RL00NG/pyybf5X\nfxak6IE/90yqaBRt2FpS2fK7qDzl2MQYS/5MWS3IZhzeOYc15HfdZTpUS3/U7Hx8\nbGBJDlOepJKSMPc0mx8R204FIKcDPgeak/AlAoGAfbrsmXxufDtZJdLsvlPDBBnL\nbIyNI+422oiZFDumM2W+aTEdvc2jVcfy4KfivR8uhLxZYDLrme4rZ0hLY+MwpRXs\npCKQKxcxs39It2JUMO7p6aiRpDQtuePmPLVx45lIuYZW7z8q5FtqbiDDzZ2QCPaR\ngdRtW8tTUiZMG4fy7mkCgYAgQe58iNjrS+rHoIa3cwNK5vJJaBZX//IXeKXg5s2e\nQeJYexkvkrqYmDdgyg5dY9RilpFXa3jGZVUQB5gC5Tia5Gi5jNc7mzh1Ld4R1Dk6\nJbd2s/pbsPBYujLb3uaQx335q80UexD5fIbIgvv6EEXhzpKMvUPXa4i0ORj30XYp\neQKBgF+uEzrOJKW8zNOOToDOuQptrVvkq3qH5Er9hK0+HcwKD4bNMdcV+gVAzQqp\n++Hop0X69TQSY/5ZZGzIg/EAByTatqakuCMp0FoH+IWLCZa7xtBe/VlmnQKy1UDS\n8XmxsU4c8epfpiJtcBp/8R4m22AQdic9NTrvBgv+vSYIzI2r\n-----END RSA PRIVATE KEY-----\n'; }
+function rsaPublicKey() { return '-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMH+DVfu7G1NM8Gi+VdQ\nAcfXqXcOe9X+MDbjXInPMewkXISL+A7g5Sqx7COk9MvPqSjHauKx6w3hLXnk8pa4\nCux56ig3t9W/Asa+wZAy5Wp3RJj9/1T0LuxBQze9KxevCHTJ/8vcsG6cGDRDQiMo\n8kZH62jOS6+bAVSo35mvCn7tT3aBN4jJiV9s4UF0I5ZwlQBL3pWX0kYeuE5gb/F6\nAd3afdx0JkZb6bhDm1YuqdMFYjGLnkmmBb4qiTjbZ8LvcUVQYl14Pais+rA7EcAb\njUE4JgqQF7IMHCpiI5dabxAK6JZ/i0wdxy9tGiCb0w9XaCeFqtzf9e2eaYuI6LkV\nDQIDAQAB\n-----END PUBLIC KEY-----\n'; }
+function ecPrivatePkcs8() { return '-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgHqV2FCeyxUa9ivDr\nlBxTfnDLAsoI5yqk63+Gu/wHFFehRANCAARuk+iU6lIfCrZ55skHVPDCLJokBINo\nHetn8HlbmnNJwQvHw0cTM3BelUyYVXZkLPW5kCLhhNiRpRgGOm+3vLOI\n-----END PRIVATE KEY-----\n'; }
+function ecPrivateSec1() { return '-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIB6ldhQnssVGvYrw65QcU35wywLKCOcqpOt/hrv8BxRXoAoGCCqGSM49\nAwEHoUQDQgAEbpPolOpSHwq2eebJB1TwwiyaJASDaB3rZ/B5W5pzScELx8NHEzNw\nXpVMmFV2ZCz1uZAi4YTYkaUYBjpvt7yziA==\n-----END EC PRIVATE KEY-----\n'; }
+function ecPublicKey() { return '-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbpPolOpSHwq2eebJB1TwwiyaJASD\naB3rZ/B5W5pzScELx8NHEzNwXpVMmFV2ZCz1uZAi4YTYkaUYBjpvt7yziA==\n-----END PUBLIC KEY-----\n'; }
+function rsaRoundTrip() {
+const sig = __thaw_crypto_module.createSign('RSA-SHA256').update('hello world').sign(rsaPrivatePkcs8(), 'hex');
+const ok = __thaw_crypto_module.createVerify('RSA-SHA256').update('hello world').verify(rsaPublicKey(), sig, 'hex');
+const okPkcs1Key = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(rsaPublicKey(), __thaw_crypto_module.createSign('sha256').update('hello world').sign(rsaPrivatePkcs1(), 'hex'), 'hex');
+const tamperedMessage = __thaw_crypto_module.createVerify('sha256').update('goodbye world').verify(rsaPublicKey(), sig, 'hex');
+const tamperedSignature = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(rsaPublicKey(), sig.slice(0, -2) + '00', 'hex');
+const opensslSig = 'a7e86b1a31fe823a693f5fedd193ebfb60098de3e41bac389e9e52215d785ee5cc3d211560be5dd87cbadbc264bdea375f96e87420f71b30891352d9a7631e2e1d42d0f8422a4f9af640b3a41617d754e7bdc1738436ac81fa79f6455ed431ab9221671d9582687bf3999ecf618085426bcc3a41c69ec89d0aedcbfaa835d37a89e215859d85d4509afbfb22b569318e779193764f63b9dabfb11c5360b08c2bfcfe257ab5f08f1438f397b2bf284f46848c8ff660ead19e35c67727fef275baf9d91fe56f7a9544f04dcc1ed1152bf737c17a141aaca770fdf4241cef76141722d8910a178b8ca3f183502d49a0c8cf51443e2a797b4ee6ad2be49aea9c9e40';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(rsaPublicKey(), opensslSig, 'hex');
+return [ok, okPkcs1Key, tamperedMessage, tamperedSignature, opensslVerifies];
+}
+function rsaPssRoundTrip() {
+const sig = __thaw_crypto_module.createSign('sha256').update('hello world').sign({ key: rsaPrivatePkcs8(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PSS_PADDING }, 'hex');
+const ok = __thaw_crypto_module.createVerify('sha256').update('hello world').verify({ key: rsaPublicKey(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PSS_PADDING }, sig, 'hex');
+const opensslSig = '37ceb5072ae254254115b5910f7a8e45723f1a6ca203eb2084074ab4f95672a0c9d6db585f5bed06cef0208bc5ed474ae0177422928739b05eb40ea4dc2da6204bb73d3e88174f32e01cb94b21b317615e61b8df7e561303261f0868ff704013b20f976c8a77ab5a802f15348b0969a35e57802cd7068f7a386481831c43f19bb511882e5163368ef25f93f73bf47f4374483772dddbb8ca2c03defdb5c4fca89549fea202fab7bf5ca82fc55953119781219ff67b58689866466f2c2bddb4b2f152244b8562fd5e13e3e5e087137e5835cd53978b10f4d4dd37e57ee4aff83dafc1973b0600a780938bddc559bd57b46cdc099895fbd284963a67fe0e9d120b';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify({ key: rsaPublicKey(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PSS_PADDING }, opensslSig, 'hex');
+return [ok, opensslVerifies];
+}
+function ecdsaRoundTrip() {
+const sig = __thaw_crypto_module.createSign('sha256').update('hello world').sign(ecPrivatePkcs8(), 'hex');
+const ok = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(ecPublicKey(), sig, 'hex');
+const okSec1Key = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(ecPublicKey(), __thaw_crypto_module.createSign('sha256').update('hello world').sign(ecPrivateSec1(), 'hex'), 'hex');
+const tamperedMessage = __thaw_crypto_module.createVerify('sha256').update('goodbye world').verify(ecPublicKey(), sig, 'hex');
+const opensslSig = '304502210091b5f1192a836c1d9582197cab6ceac74a952a794d1276781e8f1ac1cf9a001b02203c65bd65ec0b91e24d1f5b52ccaa466e28748e2e56b944d5e7a9aec1bc712210';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(ecPublicKey(), opensslSig, 'hex');
+return [ok, okSec1Key, tamperedMessage, opensslVerifies];
+}
+function oneShotSignVerify() {
+const sig = __thaw_crypto_module.sign('sha256', 'one shot', rsaPrivatePkcs8());
+return __thaw_crypto_module.verify('sha256', 'one shot', rsaPublicKey(), sig);
+}
+function keyObjectAsymmetricInfo() {
+const priv = __thaw_crypto_module.createPrivateKey(rsaPrivatePkcs8());
+const pub = __thaw_crypto_module.createPublicKey(rsaPublicKey());
+const ecPub = __thaw_crypto_module.createPublicKey(ecPublicKey());
+return [priv.type, priv.asymmetricKeyType, pub.type, pub.asymmetricKeyType, ecPub.asymmetricKeyType, ecPub.asymmetricKeyDetails.namedCurve];
+}"##,
+        r##"console.log(JSON.stringify(ecdsaRoundTrip()));"##,
+    ]
+    .concat();
+    assert_eq!(run(&program), r#"[true,true,false,true]"#);
+}
+
+#[test]
+fn asym_p521_and_ed25519_sign_verify_match_openssl() {
+    let program = [
+        r##"function ec521PrivateKey() { return '-----BEGIN PRIVATE KEY-----\nMIHuAgEAMBAGByqGSM49AgEGBSuBBAAjBIHWMIHTAgEBBEIBjSW4dVBkRUfwm4RF\nl+sHT3Bb+K3g3OK8rBc9FKUI7yseNOqjMJH4NWAA4COGQLrcrEZd8i3mC6PMiYlP\nW2kM0rWhgYkDgYYABABj3B3pln7Wni4OZxl1rPfCXviip4IG30MzhbXxCmsdtWZW\n9rs74AS0HzfD3JmxhpsyykdhymyRcCUTK6Dg0AMn4AFkkRuVJ6EH5naQbrW/gm1S\nVhMwsFhDH8U4eFloVh5F224ipvr8StOkFbX7bc8SEAInT4mJoPOVhHIh3Nic5RPT\nzw==\n-----END PRIVATE KEY-----\n'; }
+function ec521PublicKey() { return '-----BEGIN PUBLIC KEY-----\nMIGbMBAGByqGSM49AgEGBSuBBAAjA4GGAAQAY9wd6ZZ+1p4uDmcZdaz3wl74oqeC\nBt9DM4W18QprHbVmVva7O+AEtB83w9yZsYabMspHYcpskXAlEyug4NADJ+ABZJEb\nlSehB+Z2kG61v4JtUlYTMLBYQx/FOHhZaFYeRdtuIqb6/ErTpBW1+23PEhACJ0+J\niaDzlYRyIdzYnOUT088=\n-----END PUBLIC KEY-----\n'; }
+function ed25519PrivateKey() { return '-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIIQeFoclOMRan6+SUSRbRw78/TZyhWbyoWJcEbyE9MM+\n-----END PRIVATE KEY-----\n'; }
+function ed25519PublicKey() { return '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAbKI14Nm8FASaqC+aL64yTxj+nIFlCG8Ylhs1gQwQDls=\n-----END PUBLIC KEY-----\n'; }
+function ec521RoundTrip() {
+const sig = __thaw_crypto_module.createSign('sha512').update('hello world').sign(ec521PrivateKey(), 'hex');
+const ok = __thaw_crypto_module.createVerify('sha512').update('hello world').verify(ec521PublicKey(), sig, 'hex');
+const tamperedMessage = __thaw_crypto_module.createVerify('sha512').update('goodbye world').verify(ec521PublicKey(), sig, 'hex');
+const opensslSig = '30818702414b69e53677eca1ee5f0d40de0ad064064a480a1de9b0b9fe82e898778f705e56f57b8899e53b58d32603aee99f18c4921330487c339e1b3c8d05c0011c90122c1b02420091998e2df97d18f040bcca159eae7f27f3d046188801b92c88771e0dbd2fe74767b20bde678eb460f1819e30523b5c9f5ba1580b74a495acdf67b83009728d3225';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha512').update('hello world').verify(ec521PublicKey(), opensslSig, 'hex');
+return [ok, tamperedMessage, opensslVerifies];
+}
+function ed25519RoundTrip() {
+const sig = __thaw_crypto_module.sign('sha256', 'hello world', ed25519PrivateKey());
+const ok = __thaw_crypto_module.verify('sha256', 'hello world', ed25519PublicKey(), sig);
+const tamperedMessage = __thaw_crypto_module.verify('sha256', 'goodbye world', ed25519PublicKey(), sig);
+const opensslSig = Buffer.from('34eb966388de794ba39493a2da457c263e716beea079da49cb8ce8cd544dfaf1bc494987096177c3edda654fe1fbb1efe34e8266eec20c2e17a69481ddc1780d', 'hex');
+const opensslVerifies = __thaw_crypto_module.verify('sha256', 'hello world', ed25519PublicKey(), opensslSig);
+return [ok, tamperedMessage, opensslVerifies];
+}
+function keyObjectAsymmetricInfoP521AndEd25519() {
+const ecPriv = __thaw_crypto_module.createPrivateKey(ec521PrivateKey());
+const edPub = __thaw_crypto_module.createPublicKey(ed25519PublicKey());
+return [ecPriv.asymmetricKeyType, ecPriv.asymmetricKeyDetails.namedCurve, edPub.asymmetricKeyType];
+}"##,
+        r##"
+console.log(JSON.stringify([ec521RoundTrip(), ed25519RoundTrip(), keyObjectAsymmetricInfoP521AndEd25519()]));
+"##,
+    ]
+    .concat();
+    assert_eq!(
+        run(&program),
+        r#"[[true,false,true],[true,false,true],["ec","secp521r1","ed25519"]]"#
+    );
+}
+
+#[test]
+fn asym_ed448_sign_verify_matches_openssl() {
+    let program = [
+        r##"function ed448PrivateKey() { return '-----BEGIN PRIVATE KEY-----\nMEcCAQAwBQYDK2VxBDsEOWI45zIeyrnS8uNzaeXrUST94qjNL9kNXt+kgTRCpDQ+\n2z9MswYirqpG3vBlGeJPDeOTwUTjRfgBpg==\n-----END PRIVATE KEY-----\n'; }
+function ed448PublicKey() { return '-----BEGIN PUBLIC KEY-----\nMEMwBQYDK2VxAzoAsFWCVQcqbRnP1fEgvOSUY+ox4UCiTUB7BBkIi5qa45sFbG+S\n9Q7VuaLnCrJEg0kZKGFQZNwh2nKA\n-----END PUBLIC KEY-----\n'; }
+function ed448RoundTrip() {
+const message = 'hello ed448 signature test';
+const sig = __thaw_crypto_module.sign('sha256', message, ed448PrivateKey());
+const ok = __thaw_crypto_module.verify('sha256', message, ed448PublicKey(), sig);
+const tamperedMessage = __thaw_crypto_module.verify('sha256', 'goodbye world', ed448PublicKey(), sig);
+const opensslSig = Buffer.from('33e1730abda15ccd9421c9692972486b8f5d276ad88c589e55de128c4821a7faa414bd58da8426a9bd4a953387e4277358715f1e7ea2737e80754233aa485b36a9b52dfc405f8c43d6d95cc2e48d90b74c8bd68217410b1be081c7022de70ddf131eea49f012ddf2d7629aad2c4b73761d00', 'hex');
+const opensslVerifies = __thaw_crypto_module.verify('sha256', message, ed448PublicKey(), opensslSig);
+return [ok, tamperedMessage, opensslVerifies];
+}
+function keyObjectAsymmetricInfoEd448() {
+const priv = __thaw_crypto_module.createPrivateKey(ed448PrivateKey());
+const pub = __thaw_crypto_module.createPublicKey(ed448PublicKey());
+return [priv.asymmetricKeyType, pub.asymmetricKeyType];
+}"##,
+        r##"
+console.log(JSON.stringify([ed448RoundTrip(), keyObjectAsymmetricInfoEd448()]));
+"##,
+    ]
+    .concat();
+    assert_eq!(run(&program), r#"[[true,false,true],["ed448","ed448"]]"#);
+}
+
+#[test]
+fn asym_rsa_pkcs1_and_pss_sign_verify_match_openssl() {
+    let program = [
+        r##"function rsaPrivatePkcs8() { return '-----BEGIN PRIVATE KEY-----\nMIIEugIBADANBgkqhkiG9w0BAQEFAASCBKQwggSgAgEAAoIBAQCwwf4NV+7sbU0z\nwaL5V1ABx9epdw571f4wNuNcic8x7CRchIv4DuDlKrHsI6T0y8+pKMdq4rHrDeEt\neeTylrgK7HnqKDe31b8Cxr7BkDLlandEmP3/VPQu7EFDN70rF68IdMn/y9ywbpwY\nNENCIyjyRkfraM5Lr5sBVKjfma8Kfu1PdoE3iMmJX2zhQXQjlnCVAEvelZfSRh64\nTmBv8XoB3dp93HQmRlvpuEObVi6p0wViMYueSaYFviqJONtnwu9xRVBiXXg9qKz6\nsDsRwBuNQTgmCpAXsgwcKmIjl1pvEAroln+LTB3HL20aIJvTD1doJ4Wq3N/17Z5p\ni4jouRUNAgMBAAECgf9ClNB1KqSVMFEkbdIeyNZgMmzKQE6XS36dE4Q/6NfXtkSf\nCWX14gH38+jXSn6vzrj71qCNYp0LFmO2FOjGBCL9+mdPJCiTBYJcjy9XaNzaazp2\nXIgLFJ3mbAxvKGcfQumxqKmdCJCqWV0KY+s3vobLGUV+EDDrF286i0ZulqnHZtAO\nkGGTXsptC86gZHaRYsIuZ0US5KYC1h1tGmwbISdvmfwaXm7N5XW2qU5W3VUZYx4Q\nwjiZ+JJ5RddKYM8TIvK6+AGPqcLdqJxDp/rr5jb0MVJsv+m9BkWRVDSBvnp+zE+b\nJWvUMRc3FeMwqxYAzWVpfsUFUDuc/94fuL6Z68kCgYEA6zuo1Jbe8yEFd8KwJvEj\nN6S7OYmaud9wtKfLTJLa0OmkiXqd88Lw1Mf8uvb4TBP+IOS0XwJYL/R2dmBix4TY\neMesaK1h9twsbKp86sq2bDL5SbT/cWLI6xpgV27vnYIcXKHdtO48FbUrYriTf1sb\n8XYGKAxygcjYewYiLAow6MkCgYEAwFzGDj2HntZaLvHAi/10d7CMhF1bLKNK2l/Q\n46TW+xjAjlAToQ1T+2gfhEvTQ0b+nLJt/ld/FqTogT/3TKpoFG3YWlLZ8ruoPOXY\nxBhL/kxZLchmHN45hzXkd91lOlRLf9TsfHxsYEkOU56kkpIw9zSbHxHbTgUgpwM+\nB5qT8CUCgYB9uuyZfG58O1kl0uy+U8MEGctsjI0j7jbaiJkUO6YzZb5pMR29zaNV\nx/Lgp+K9Hy6EvFlgMuuZ7itnSEtj4zClFeykIpArFzGzf0i3YlQw7unpqJGkNC25\n4+Y8tXHjmUi5hlbvPyrkW2puIMPNnZAI9pGB1G1by1NSJkwbh/LuaQKBgCBB7nyI\n2OtL6seghrdzA0rm8kloFlf/8hd4peDmzZ5B4lh7GS+SupiYN2DKDl1j1GKWkVdr\neMZlVRAHmALlOJrkaLmM1zubOHUt3hHUOTolt3az+luw8Fi6Mtve5pDHffmrzRR7\nEPl8hsiC+/oQReHOkoy9Q9driLQ5GPfRdil5AoGAX64TOs4kpbzM045OgM65Cm2t\nW+SreofkSv2ErT4dzAoPhs0x1xX6BUDNCqn74einRfr1NBJj/llkbMiD8QAHJNq2\npqS4IynQWgf4hYsJlrvG0F79WWadArLVQNLxebGxThzx6l+mIm1wGn/xHibbYBB2\nJz01Ou8GC/69JgjMjas=\n-----END PRIVATE KEY-----\n'; }
+function rsaPrivatePkcs1() { return '-----BEGIN RSA PRIVATE KEY-----\nMIIEoAIBAAKCAQEAsMH+DVfu7G1NM8Gi+VdQAcfXqXcOe9X+MDbjXInPMewkXISL\n+A7g5Sqx7COk9MvPqSjHauKx6w3hLXnk8pa4Cux56ig3t9W/Asa+wZAy5Wp3RJj9\n/1T0LuxBQze9KxevCHTJ/8vcsG6cGDRDQiMo8kZH62jOS6+bAVSo35mvCn7tT3aB\nN4jJiV9s4UF0I5ZwlQBL3pWX0kYeuE5gb/F6Ad3afdx0JkZb6bhDm1YuqdMFYjGL\nnkmmBb4qiTjbZ8LvcUVQYl14Pais+rA7EcAbjUE4JgqQF7IMHCpiI5dabxAK6JZ/\ni0wdxy9tGiCb0w9XaCeFqtzf9e2eaYuI6LkVDQIDAQABAoH/QpTQdSqklTBRJG3S\nHsjWYDJsykBOl0t+nROEP+jX17ZEnwll9eIB9/Po10p+r864+9agjWKdCxZjthTo\nxgQi/fpnTyQokwWCXI8vV2jc2ms6dlyICxSd5mwMbyhnH0LpsaipnQiQqlldCmPr\nN76GyxlFfhAw6xdvOotGbpapx2bQDpBhk17KbQvOoGR2kWLCLmdFEuSmAtYdbRps\nGyEnb5n8Gl5uzeV1tqlOVt1VGWMeEMI4mfiSeUXXSmDPEyLyuvgBj6nC3aicQ6f6\n6+Y29DFSbL/pvQZFkVQ0gb56fsxPmyVr1DEXNxXjMKsWAM1laX7FBVA7nP/eH7i+\nmevJAoGBAOs7qNSW3vMhBXfCsCbxIzekuzmJmrnfcLSny0yS2tDppIl6nfPC8NTH\n/Lr2+EwT/iDktF8CWC/0dnZgYseE2HjHrGitYfbcLGyqfOrKtmwy+Um0/3FiyOsa\nYFdu752CHFyh3bTuPBW1K2K4k39bG/F2BigMcoHI2HsGIiwKMOjJAoGBAMBcxg49\nh57WWi7xwIv9dHewjIRdWyyjStpf0OOk1vsYwI5QE6ENU/toH4RL00NG/pyybf5X\nfxak6IE/90yqaBRt2FpS2fK7qDzl2MQYS/5MWS3IZhzeOYc15HfdZTpUS3/U7Hx8\nbGBJDlOepJKSMPc0mx8R204FIKcDPgeak/AlAoGAfbrsmXxufDtZJdLsvlPDBBnL\nbIyNI+422oiZFDumM2W+aTEdvc2jVcfy4KfivR8uhLxZYDLrme4rZ0hLY+MwpRXs\npCKQKxcxs39It2JUMO7p6aiRpDQtuePmPLVx45lIuYZW7z8q5FtqbiDDzZ2QCPaR\ngdRtW8tTUiZMG4fy7mkCgYAgQe58iNjrS+rHoIa3cwNK5vJJaBZX//IXeKXg5s2e\nQeJYexkvkrqYmDdgyg5dY9RilpFXa3jGZVUQB5gC5Tia5Gi5jNc7mzh1Ld4R1Dk6\nJbd2s/pbsPBYujLb3uaQx335q80UexD5fIbIgvv6EEXhzpKMvUPXa4i0ORj30XYp\neQKBgF+uEzrOJKW8zNOOToDOuQptrVvkq3qH5Er9hK0+HcwKD4bNMdcV+gVAzQqp\n++Hop0X69TQSY/5ZZGzIg/EAByTatqakuCMp0FoH+IWLCZa7xtBe/VlmnQKy1UDS\n8XmxsU4c8epfpiJtcBp/8R4m22AQdic9NTrvBgv+vSYIzI2r\n-----END RSA PRIVATE KEY-----\n'; }
+function rsaPublicKey() { return '-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMH+DVfu7G1NM8Gi+VdQ\nAcfXqXcOe9X+MDbjXInPMewkXISL+A7g5Sqx7COk9MvPqSjHauKx6w3hLXnk8pa4\nCux56ig3t9W/Asa+wZAy5Wp3RJj9/1T0LuxBQze9KxevCHTJ/8vcsG6cGDRDQiMo\n8kZH62jOS6+bAVSo35mvCn7tT3aBN4jJiV9s4UF0I5ZwlQBL3pWX0kYeuE5gb/F6\nAd3afdx0JkZb6bhDm1YuqdMFYjGLnkmmBb4qiTjbZ8LvcUVQYl14Pais+rA7EcAb\njUE4JgqQF7IMHCpiI5dabxAK6JZ/i0wdxy9tGiCb0w9XaCeFqtzf9e2eaYuI6LkV\nDQIDAQAB\n-----END PUBLIC KEY-----\n'; }
+function ecPrivatePkcs8() { return '-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgHqV2FCeyxUa9ivDr\nlBxTfnDLAsoI5yqk63+Gu/wHFFehRANCAARuk+iU6lIfCrZ55skHVPDCLJokBINo\nHetn8HlbmnNJwQvHw0cTM3BelUyYVXZkLPW5kCLhhNiRpRgGOm+3vLOI\n-----END PRIVATE KEY-----\n'; }
+function ecPrivateSec1() { return '-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIB6ldhQnssVGvYrw65QcU35wywLKCOcqpOt/hrv8BxRXoAoGCCqGSM49\nAwEHoUQDQgAEbpPolOpSHwq2eebJB1TwwiyaJASDaB3rZ/B5W5pzScELx8NHEzNw\nXpVMmFV2ZCz1uZAi4YTYkaUYBjpvt7yziA==\n-----END EC PRIVATE KEY-----\n'; }
+function ecPublicKey() { return '-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbpPolOpSHwq2eebJB1TwwiyaJASD\naB3rZ/B5W5pzScELx8NHEzNwXpVMmFV2ZCz1uZAi4YTYkaUYBjpvt7yziA==\n-----END PUBLIC KEY-----\n'; }
+function rsaRoundTrip() {
+const sig = __thaw_crypto_module.createSign('RSA-SHA256').update('hello world').sign(rsaPrivatePkcs8(), 'hex');
+const ok = __thaw_crypto_module.createVerify('RSA-SHA256').update('hello world').verify(rsaPublicKey(), sig, 'hex');
+const okPkcs1Key = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(rsaPublicKey(), __thaw_crypto_module.createSign('sha256').update('hello world').sign(rsaPrivatePkcs1(), 'hex'), 'hex');
+const tamperedMessage = __thaw_crypto_module.createVerify('sha256').update('goodbye world').verify(rsaPublicKey(), sig, 'hex');
+const tamperedSignature = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(rsaPublicKey(), sig.slice(0, -2) + '00', 'hex');
+const opensslSig = 'a7e86b1a31fe823a693f5fedd193ebfb60098de3e41bac389e9e52215d785ee5cc3d211560be5dd87cbadbc264bdea375f96e87420f71b30891352d9a7631e2e1d42d0f8422a4f9af640b3a41617d754e7bdc1738436ac81fa79f6455ed431ab9221671d9582687bf3999ecf618085426bcc3a41c69ec89d0aedcbfaa835d37a89e215859d85d4509afbfb22b569318e779193764f63b9dabfb11c5360b08c2bfcfe257ab5f08f1438f397b2bf284f46848c8ff660ead19e35c67727fef275baf9d91fe56f7a9544f04dcc1ed1152bf737c17a141aaca770fdf4241cef76141722d8910a178b8ca3f183502d49a0c8cf51443e2a797b4ee6ad2be49aea9c9e40';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(rsaPublicKey(), opensslSig, 'hex');
+return [ok, okPkcs1Key, tamperedMessage, tamperedSignature, opensslVerifies];
+}
+function rsaPssRoundTrip() {
+const sig = __thaw_crypto_module.createSign('sha256').update('hello world').sign({ key: rsaPrivatePkcs8(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PSS_PADDING }, 'hex');
+const ok = __thaw_crypto_module.createVerify('sha256').update('hello world').verify({ key: rsaPublicKey(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PSS_PADDING }, sig, 'hex');
+const opensslSig = '37ceb5072ae254254115b5910f7a8e45723f1a6ca203eb2084074ab4f95672a0c9d6db585f5bed06cef0208bc5ed474ae0177422928739b05eb40ea4dc2da6204bb73d3e88174f32e01cb94b21b317615e61b8df7e561303261f0868ff704013b20f976c8a77ab5a802f15348b0969a35e57802cd7068f7a386481831c43f19bb511882e5163368ef25f93f73bf47f4374483772dddbb8ca2c03defdb5c4fca89549fea202fab7bf5ca82fc55953119781219ff67b58689866466f2c2bddb4b2f152244b8562fd5e13e3e5e087137e5835cd53978b10f4d4dd37e57ee4aff83dafc1973b0600a780938bddc559bd57b46cdc099895fbd284963a67fe0e9d120b';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify({ key: rsaPublicKey(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PSS_PADDING }, opensslSig, 'hex');
+return [ok, opensslVerifies];
+}
+function ecdsaRoundTrip() {
+const sig = __thaw_crypto_module.createSign('sha256').update('hello world').sign(ecPrivatePkcs8(), 'hex');
+const ok = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(ecPublicKey(), sig, 'hex');
+const okSec1Key = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(ecPublicKey(), __thaw_crypto_module.createSign('sha256').update('hello world').sign(ecPrivateSec1(), 'hex'), 'hex');
+const tamperedMessage = __thaw_crypto_module.createVerify('sha256').update('goodbye world').verify(ecPublicKey(), sig, 'hex');
+const opensslSig = '304502210091b5f1192a836c1d9582197cab6ceac74a952a794d1276781e8f1ac1cf9a001b02203c65bd65ec0b91e24d1f5b52ccaa466e28748e2e56b944d5e7a9aec1bc712210';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(ecPublicKey(), opensslSig, 'hex');
+return [ok, okSec1Key, tamperedMessage, opensslVerifies];
+}
+function oneShotSignVerify() {
+const sig = __thaw_crypto_module.sign('sha256', 'one shot', rsaPrivatePkcs8());
+return __thaw_crypto_module.verify('sha256', 'one shot', rsaPublicKey(), sig);
+}
+function keyObjectAsymmetricInfo() {
+const priv = __thaw_crypto_module.createPrivateKey(rsaPrivatePkcs8());
+const pub = __thaw_crypto_module.createPublicKey(rsaPublicKey());
+const ecPub = __thaw_crypto_module.createPublicKey(ecPublicKey());
+return [priv.type, priv.asymmetricKeyType, pub.type, pub.asymmetricKeyType, ecPub.asymmetricKeyType, ecPub.asymmetricKeyDetails.namedCurve];
+}"##,
+        r##"
+var m = __thaw_crypto_module;
+var PSS = m.constants.RSA_PKCS1_PSS_PADDING;
+var sig = m.createSign('RSA-SHA256').update('hello world').sign(rsaPrivatePkcs1(), 'hex');
+var ok = m.createVerify('sha256').update('hello world').verify(rsaPublicKey(), sig, 'hex');
+var tamperedMessage = m.createVerify('sha256').update('goodbye world').verify(rsaPublicKey(), sig, 'hex');
+var flipped = sig.slice(0, -2) + (sig.slice(-2) === '00' ? '01' : '00');
+var tamperedSignature = m.createVerify('sha256').update('hello world').verify(rsaPublicKey(), flipped, 'hex');
+var opensslRs = m.createVerify('sha256').update('hello world').verify(rsaPublicKey(), 'a7e86b1a31fe823a693f5fedd193ebfb60098de3e41bac389e9e52215d785ee5cc3d211560be5dd87cbadbc264bdea375f96e87420f71b30891352d9a7631e2e1d42d0f8422a4f9af640b3a41617d754e7bdc1738436ac81fa79f6455ed431ab9221671d9582687bf3999ecf618085426bcc3a41c69ec89d0aedcbfaa835d37a89e215859d85d4509afbfb22b569318e779193764f63b9dabfb11c5360b08c2bfcfe257ab5f08f1438f397b2bf284f46848c8ff660ead19e35c67727fef275baf9d91fe56f7a9544f04dcc1ed1152bf737c17a141aaca770fdf4241cef76141722d8910a178b8ca3f183502d49a0c8cf51443e2a797b4ee6ad2be49aea9c9e40', 'hex');
+var pssSig = m.createSign('sha256').update('hello world').sign({ key: rsaPrivatePkcs8(), padding: PSS }, 'hex');
+var pssOk = m.createVerify('sha256').update('hello world').verify({ key: rsaPublicKey(), padding: PSS }, pssSig, 'hex');
+var pssOpenssl = m.createVerify('sha256').update('hello world').verify({ key: rsaPublicKey(), padding: PSS }, '37ceb5072ae254254115b5910f7a8e45723f1a6ca203eb2084074ab4f95672a0c9d6db585f5bed06cef0208bc5ed474ae0177422928739b05eb40ea4dc2da6204bb73d3e88174f32e01cb94b21b317615e61b8df7e561303261f0868ff704013b20f976c8a77ab5a802f15348b0969a35e57802cd7068f7a386481831c43f19bb511882e5163368ef25f93f73bf47f4374483772dddbb8ca2c03defdb5c4fca89549fea202fab7bf5ca82fc55953119781219ff67b58689866466f2c2bddb4b2f152244b8562fd5e13e3e5e087137e5835cd53978b10f4d4dd37e57ee4aff83dafc1973b0600a780938bddc559bd57b46cdc099895fbd284963a67fe0e9d120b', 'hex');
+var pssAsPkcs1 = m.createVerify('sha256').update('hello world').verify(rsaPublicKey(), pssSig, 'hex');
+console.log(JSON.stringify([ok, tamperedMessage, tamperedSignature, opensslRs, pssOk, pssOpenssl, pssAsPkcs1]));
+"##,
+    ]
+    .concat();
+    assert_eq!(run(&program), r#"[true,false,false,true,true,true,false]"#);
+}
+
+#[test]
+fn asym_der_and_encrypted_pkcs8_import_match_openssl() {
+    let program = [
+        r##"function rsaPublicPem() { return '-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoORKaNK2ZuUTmkCb/Oqh\n3vw+cO8OCUFJRz+nPYP9gYArPbwy8I3nJe2ft5rVHPTn8u4gzSVwQGBpQ5fYMx4g\n80htGj3JD16v1DHg8qIGDnnk9MGGEHJ6DcdJsKiWK8SK2xEttirRTY5fHGQwkAWg\nMDFIjzG6OIoGDCZyRH+1zY1xdP617629Z2UvNL5eB9A6FPHwpmSlgr8T/nHmqGeN\nL6VJuC61pnZTehGm6hvUMdqPEm0ciiHmavx0DAaWqzVjLBb5jTssayMabrmRCUdq\nTpe3g/MeBcdQ/LCwF/j0QKmgoL3gzWubFA8IO+e2M+AnkV25wbrVTV4ysvWlzdKK\nxwIDAQAB\n-----END PUBLIC KEY-----\n'; }
+function rsaPrivateDerHex() { return '308204be020100300d06092a864886f70d0101010500048204a8308204a40201000282010100a0e44a68d2b666e5139a409bfceaa1defc3e70ef0e094149473fa73d83fd81802b3dbc32f08de725ed9fb79ad51cf4e7f2ee20cd25704060694397d8331e20f3486d1a3dc90f5eafd431e0f2a2060e79e4f4c18610727a0dc749b0a8962bc48adb112db62ad14d8e5f1c64309005a03031488f31ba388a060c2672447fb5cd8d7174feb5efadbd67652f34be5e07d03a14f1f0a664a582bf13fe71e6a8678d2fa549b82eb5a676537a11a6ea1bd431da8f126d1c8a21e66afc740c0696ab35632c16f98d3b2c6b231a6eb99109476a4e97b783f31e05c750fcb0b017f8f440a9a0a0bde0cd6b9b140f083be7b633e027915db9c1bad54d5e32b2f5a5cdd28ac7020301000102820100061c457b2fad7fc0e97aad437f5a85e54b1d2ffad444a3b71dbe9c2268f5e2ca345a36e094643f48207b3564eafd1b8c079ce5a004f0fb70edee8440d0c82f262e34fe8f2428b246e93f2fb4e754658e5994b618da5d0ea7a14efa279cf472957776728efd974f63bdd6fd331ef527bd4cd1dda65cd532e0c1eb5fe19c1c127f6237172346eb71d7d5a74e5d0bfafbe7bd1de6da4d361c011100cc7881b2b824df573445e8a166938960942ee19ad27fd6e96da35b954341c1896f6e47ae27d6d4e8b10e21bdcc75ac8f2023866920271dd6b4dce35b11db1e68ac0f9c8901617ea9cb2790b6879417a8f85eb1eff48573eb31580c008e37fae17666bf677d9102818100dffe4d703426d74947f8bf6fd8cdfc709276efe554364ebed55bb74c2555d17c80765d9523426fce8d22082c3fdb0fe3b779b2839348caa9866e2a24c643a75f722618e0ab5d3db6ceec1704bb28b4809714b5cc14811e0412adee71c68ae4f098cfc03c71744288394ce6c4a5cd19b0039dc657e1d0e01d92ef55881aa5a4bf02818100b7e1b9c5782fe8f801f13c994244057e527c3d84e38c641e2c8c27cd33702b073a36077bc12824de002856493f0cf8f5fa20a4b641258b594ae878482414e924aa40e68e09146063a7467f4e3a82d4a2b3d2c3e8afa12135066b6979b40b90be457f8ce0f3f8f627bc1d7368f8e25b5b04af0e56107ee6c4e1da53acc9acf3f902818039a35689e8e195c465a0bca22b47d60da1a2b95869b30fd04b56ae7409a76ba07dedf766c90bef795717cac2982be68ad24b9e83fd025e24015397c49ec009f1a58de818e7ffb641b43d4c2f0b7a0df888e7eb5ff866c1328b1bf69f90576d51fc007997141ab684173a92a74782df794b74edf4ef46b064ebca6a57fb83644102818100a5a93bf776bf1b110c96ec745aa9f39509f51a6b75a18eb54c86fc78b765cfae143886e76c6ea1404c3e0af6b452189d6aba2c0a7288c3912f965e7f07dabaeca8620e145a83bc0f2badac95aacb218c6f9b6b9a5f583815907206b5798a8ddd8db94b0f835d814eed004f707c015a3296f6ab60c83dbbe41661decea56726e9028181009557356289cef177e2aeb16a98f4dae588341eeda0dd47565736836a0338ea0c70f87dc077fe2cf75e0529b2c8c4b07a28a3d8052ce434bcf8bf61bcd8d4c0c7015b629af00743c6cf69a1b868df316b5886986fa1c98a4626975a27660efc84e8b2c61b4a57b89bd36af4b11a4828b8baac12bebe1ae990cb59b81591f9442b'; }
+function rsaPublicDerHex() { return '30820122300d06092a864886f70d01010105000382010f003082010a0282010100a0e44a68d2b666e5139a409bfceaa1defc3e70ef0e094149473fa73d83fd81802b3dbc32f08de725ed9fb79ad51cf4e7f2ee20cd25704060694397d8331e20f3486d1a3dc90f5eafd431e0f2a2060e79e4f4c18610727a0dc749b0a8962bc48adb112db62ad14d8e5f1c64309005a03031488f31ba388a060c2672447fb5cd8d7174feb5efadbd67652f34be5e07d03a14f1f0a664a582bf13fe71e6a8678d2fa549b82eb5a676537a11a6ea1bd431da8f126d1c8a21e66afc740c0696ab35632c16f98d3b2c6b231a6eb99109476a4e97b783f31e05c750fcb0b017f8f440a9a0a0bde0cd6b9b140f083be7b633e027915db9c1bad54d5e32b2f5a5cdd28ac70203010001'; }
+function rsaPrivateEncryptedPem() { return '-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFNTBfBgkqhkiG9w0BBQ0wUjAxBgkqhkiG9w0BBQwwJAQQvq2l3eEnfnFD3GVd\nhtvb+QICCAAwDAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEECBT8TeR7sQt2Vmo\nNpQJ+i0EggTQDM28rgAAPQmRjennOGuBEspP8qH2Yv0tWH51YDJ2xu+FswPDs8H2\n7hA+kQRHhR6U+vw4UM31iQofb0qZ+XSRtfYldZ/4qfk0ND5sTuL4wPzktA/BlCY3\n98m7TDW6OCYN+N1lzHn7FzNqmmEDD3uEUptgCkE2FVgN1bfvMBb25+2zXV6nNbEw\nw+nDIQbdtsn+9P9+TN4DAO43l4Ep/wsVulPyiC2JWxMrly/59V+KMatJ4sPuvVEq\na6JXgdllICzUMZz2cR1/vNzAQklZpI3ePZTSGPJNbH+0QvcPgun8OQGkDnTe3Eb0\nQ3wcHbzjfb+w1x5M6l1KKtkQG1fq7tPHsV/4/HFkabxkQV50ZjpMIfwYeZlYo1Tl\nEHSEgqR/GB5BcefaQSwBAzTJ7Jcn4SIWirIplG77+IG1FftdnIKq6Hx0uok9jC97\nKdP9PTJFO/x7Istm4D844IuZ1wPe4cIZ3gTF/URptaDZYnYUQw2X3tH5mwdCO1Sl\ngaQLsVTAhvPzR6pm4iUGHUwFa6vq6gA9AM8mnGXJdHSdcTeaPnOeJcVxtz+/DKma\nI8dXUeECfzmW30jhQuBaYm4WyKTATjXHxuU3GsbhmKJn51LbfGePu7dXxGsaPvnQ\nIfESiysT0BkdXPql7AEmjEG1HVqMxr/cxMW4Lm2YAHL9mqIig+w9lMiD/CCjOrXR\nZIkgPqOyFEdtZJ6pVvAKg/GDiKX9Yv9V8pjxuGqLdcKv2nf8jXtNE8DusvIoCGtz\n12nHHdBQwDKI4wQyqlEeRrgAALa+lbYHtxIlA7RktRjFA5PtFMdy5ZJf5Ft6Esns\nIxEJSI6AVP0OKQaaTaNZpErfHbgFO/5fqMoLjS6XEy0UVX0ykjW7voNMV91GduGS\nJI3HwH7OkjnvPyG81PwjOzdi/VqtzCYmI2zl6LuHemndEOD06DXUa6mztudIs1cM\nN+WaiAAmbX5ppzN+YzAzhTM3bn3W/vN0vkLydKzekCs1hMs8ErwPkNkmdzySg+Zu\nntvR3OOQXcl+7kNRISEr1OVELB3Th78TDeUcsx/JIGhIFpOIjtGeXz6rjusoJ/FJ\n1jmonh830SiRmBvtdOA+uLHXw4Xsx2ucmWSIYpiQMRlZcsPfQBmU75l5bXrSpGtt\ncEPngFVsSBeS5HuyVpU2fsYmmTZ2S3Q6imzg+1zsVnyXYo00V/3cyFIs+DIYB/a0\ni1iKpns68Bj54qCrkxeaD/G1o1aMlQeekw7fRDZ5PxKI/EzIi/7P/3YL7zL8eRqE\nTa/Bq9Z/Xm7nTVf3oUvzJdL4V3nSS1tmruktz0KXr/d1di2u7gtp6YqyR94DZtju\ncrmuEKVdLhtdrYvstI8Rk9fJm7QR0il8FriwBaeti9aJjPPXDEjmeYf0o01wcpfn\nuxtFM4JLtxOIKORU/enB1XSOsAmLG27IpIJfBWauAJmoPBiE8uOmiYb7Hx5DHUx5\nmgWejWMOTCI/9gYu7RfYc5ZY2lO4BVMefpPWAWufag6Nwolti2l2FHLJBjfd2RBR\ndv44+nFunyx1gE+bEiOUr4YbKRfaxvlTeDLbTTuZFX0wV24asByJhEeFFqJI6SA8\nVK13uyQCON9eCknnEQKxkowmiXsgwzUX4pUmB48WpaHArrk8Ynifkxg=\n-----END ENCRYPTED PRIVATE KEY-----\n'; }
+function derRoundTrip() {
+const priv = __thaw_crypto_module.createPrivateKey({ key: Buffer.from(rsaPrivateDerHex(), 'hex'), format: 'der' });
+const pub = __thaw_crypto_module.createPublicKey({ key: Buffer.from(rsaPublicDerHex(), 'hex'), format: 'der' });
+const sig = __thaw_crypto_module.createSign('sha256').update('hello world').sign(priv, 'hex');
+const ok = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(pub, sig, 'hex');
+const opensslSig = '8d357033bbae2065e82bd5cea6be16e4520ed5b5e2513862d0ab4e9817542944202c8dd7b0e738d71618a7cf93b0d75ea3a04022822ad6858446237729883dfa7c4f399472a742cb68fdb80cfd46a1865cd28f4d21a5b8f539ba6ac7ce8fcf67d03fd159bcd6b47f148822eedf83d93d3815c4fffe3943e008c2f68d07c2ef31c5e2ead3cd82bcf2b6164a4bff2e5ea199ad000f29af65d4cb633eff190a1add38cfea512bf6757a4a04ff868fe530973bf66ad0dc69775da151c86d78e174ded32722b3339da059823efc4e2f6645ca814be5bfe3663808c048ef60aec4a34223615819a354e340935684132fdf93641a4047cf623c7dac075357b7f4e6f514';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(pub, opensslSig, 'hex');
+return [priv.asymmetricKeyType, pub.asymmetricKeyType, ok, opensslVerifies];
+}
+function passphraseRoundTrip() {
+let wrongPassphraseThrew = false;
+try { __thaw_crypto_module.createPrivateKey({ key: rsaPrivateEncryptedPem(), passphrase: 'wrong' }); } catch (error) { wrongPassphraseThrew = true; }
+const priv = __thaw_crypto_module.createPrivateKey({ key: rsaPrivateEncryptedPem(), passphrase: 'hunter2' });
+const pub = __thaw_crypto_module.createPublicKey(rsaPublicPem());
+const sig = __thaw_crypto_module.createSign('sha256').update('hello world').sign(priv, 'hex');
+const ok = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(pub, sig, 'hex');
+const opensslSig = '8d357033bbae2065e82bd5cea6be16e4520ed5b5e2513862d0ab4e9817542944202c8dd7b0e738d71618a7cf93b0d75ea3a04022822ad6858446237729883dfa7c4f399472a742cb68fdb80cfd46a1865cd28f4d21a5b8f539ba6ac7ce8fcf67d03fd159bcd6b47f148822eedf83d93d3815c4fffe3943e008c2f68d07c2ef31c5e2ead3cd82bcf2b6164a4bff2e5ea199ad000f29af65d4cb633eff190a1add38cfea512bf6757a4a04ff868fe530973bf66ad0dc69775da151c86d78e174ded32722b3339da059823efc4e2f6645ca814be5bfe3663808c048ef60aec4a34223615819a354e340935684132fdf93641a4047cf623c7dac075357b7f4e6f514';
+const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(pub, opensslSig, 'hex');
+return [wrongPassphraseThrew, priv.asymmetricKeyType, ok, opensslVerifies];
+}"##,
+        r##"
+var m = __thaw_crypto_module;
+var derPriv = m.createPrivateKey({ key: Buffer.from(rsaPrivateDerHex(), 'hex'), format: 'der' });
+var derPub = m.createPublicKey({ key: Buffer.from(rsaPublicDerHex(), 'hex'), format: 'der' });
+var wrongPassphraseThrew = false;
+try { m.createPrivateKey({ key: rsaPrivateEncryptedPem(), passphrase: 'wrong' }); } catch (error) { wrongPassphraseThrew = true; }
+var enc = m.createPrivateKey({ key: rsaPrivateEncryptedPem(), passphrase: 'hunter2' });
+var opensslVerifies = m.createVerify('sha256').update('hello world').verify(derPub, '8d357033bbae2065e82bd5cea6be16e4520ed5b5e2513862d0ab4e9817542944202c8dd7b0e738d71618a7cf93b0d75ea3a04022822ad6858446237729883dfa7c4f399472a742cb68fdb80cfd46a1865cd28f4d21a5b8f539ba6ac7ce8fcf67d03fd159bcd6b47f148822eedf83d93d3815c4fffe3943e008c2f68d07c2ef31c5e2ead3cd82bcf2b6164a4bff2e5ea199ad000f29af65d4cb633eff190a1add38cfea512bf6757a4a04ff868fe530973bf66ad0dc69775da151c86d78e174ded32722b3339da059823efc4e2f6645ca814be5bfe3663808c048ef60aec4a34223615819a354e340935684132fdf93641a4047cf623c7dac075357b7f4e6f514', 'hex');
+console.log(JSON.stringify([derPriv.asymmetricKeyType, derPub.asymmetricKeyType, derPub.export() === rsaPublicPem(),
+  opensslVerifies, wrongPassphraseThrew, enc.asymmetricKeyType, enc.export().indexOf('-----BEGIN PRIVATE KEY-----') === 0]));
+"##,
+    ]
+    .concat();
+    assert_eq!(run(&program), r#"["rsa","rsa",true,true,true,"rsa",true]"#);
+}
+
+#[test]
+fn asym_legacy_encrypted_pem_import_matches_node() {
+    let program = [
+        r##"function rsaPublicPem() { return '-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsFF0EaFZ+6scQKkIVSoa\nf8oy5gXO8TDhBbKh7SK0P8ALHEB4flyKVaL4Qvzbh5aRrfpOLwCmlo9ucr4V95SH\nOX7dZ5eo2fONA5CNIaMNY5NzebjV8+kYj4ICRTLugR654Bf22EqCOtMsy4EJ15Ce\nuNfY6+N54bj8pPDyO81NEwn3bRdZr6Wn3Nut6mRG30j/etwNGSFxXoChUAhCbcfL\nxdGzEdIOpL3qBLFnJ2cmurC02wVEx6F1eJt2G6fedxoAgogCtDDtMa89FmeKNh11\nCVxjc6Ma/vGh3jzO5zZegP5yuPGm9mKGsvmNYm6GHCQJUhUmdNNJx0hqDP+gC3X7\nXQIDAQAB\n-----END PUBLIC KEY-----\n'; }
+function rsaPrivateDes3Pem() { return '-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: DES-EDE3-CBC,B000B3DC7910EE4F\n\nERnhRI/uyDWAr0JB9jmi8KtmYYV7cUFvVYAIIv7iUSeH3o18T+jLHKvxb5rQDXKy\nSj+sjFWzf/+DaJo/6SXp81RzS3hvIHj0TG5JzGZT8nPk18JOIXB5BUQ6CbFBtfON\nE+wPTU4+cwUlL0ugbbHiKx7tdrtuQT5fUjvWhpZOER+fKyi7uCUyrpZyhPGvlsMA\n2rEv5DfWk494rCnHUg+da2mFT0PKtPGDPUBxIcNwlfwNZERMuwlFYiVTKIclncAn\n0K1PjIskNixOG3SkYVhp8YOKfVar/sFaU7DzPQTXqGJIGOhHQeT9ILUcY4Yb17jx\ngPMtH7gw8j5B68F/r4hl+KIQXSg05G1SkGXKM2zvWu1UUIpW2LlYlD5D4UxtiCit\nNSeV5xVpv4wZZzDTLZAZjRS0SUZ8plY16k9SNQdfTCB+/biFxI/kIHv/hQqB8+ML\nTe8W0rzxDRIwYjc0MB0nhjsfnb+dT6EiNSW4jZEWS5Z5G88CUVjFNI2UOFjwlIO0\nOd0e6d0vuMPJ9rRQMGKA0TfPyioYkJUQ0ED+13ML1W9wC+MvkG7SjtQKLJDQzRMk\nyYGHiToYI9DktYTGipbB2YEt5I/07YWKgEa++dkGYsQZOqFoOGvOvdwZeo2laZjG\nAAp2Q1F2ji5wQR5mUZOtqBWjFJc0VRYA3S26wwqaOk1axydFt6ilk/E1BeblJNzN\nxfmtsg1ZQJof3YTYtlkn2ur/3PWsmerip8H5TgyAIsF3bHVy4hWn/GdFE+LCPkgb\nVIO0Qekz1nANYjl4kfPi/ImCB6VtHkp7aOAC/2QvFu8rs4F/+Mtyxsx+OjRH9LEM\nplyiA3hNmyccMXlSLnVJA7tQ1ub0fkGb9y9xRwKM7SP8CA+xvnsVjoq3qFp/Wyft\ngDyB/gLZE/TlXH5NftHi7qkSSb3ZHslFJjJbuG6q/Byv8/VgVk7rwpHRkGH6lPRm\nTZvAqI0nSR3+4eq586598kJcylrxFgcRysZRQUVVInnmKZcQqZIl24l4D5o0Q5al\na+RN1ICirl9Gc7TVjxntbt3JpSjFbFkN+LQNz3fiim+N6+jOC/CURQf9T45AWyWM\n+8zZCiMm20EA+WUGqbiSV4LAPT+3QMOGJZHhbwauipyww2s7Cg+2WJQOnJRzqQ6/\no0DQqX8v4otuhAPrDFvdex9tIJiFjicOrBTsuMe8DSPHMqYh8EktuI4WSKVHXs95\nujyVq1BFWfFacE4PyVXjbWXMBHC9Ln/HnwIbMmHNxZQF1vgPZitWITYGuODrZgaV\naNiNmnrgwlwxETidQlcgz7vbVdm6AQJjg8b8mGzI8Ms1w9JPx3HWjmHUW+bKgbHM\nTiOEKdwK1R+0yYUpcdaUb8g5tgH9QtBD+zz3amI9bncYjUYBzD9x9lJ5qEFg8F7z\nHhV8PolH4R9IoDZdJ5NW7hzfw2itcfGiNAn6FOwqjDRvfZz7T4GprFU4r6A5PIrW\nvXxayS0owhGxa46wjg0h+Pwz2ykuMJwXc6f7LQ2YfO83DAT/BdpA7NEKBA/u3cKG\ngANfOLN5Qx2EPnPvQ7QzQkhk+ICOVRdga5n8JL4FXK9anDSCdBNjrw==\n-----END RSA PRIVATE KEY-----\n'; }
+function rsaPrivateAes256Pem() { return '-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,520C22EC6F81EC4DA4E87A99C3B0EDBB\n\nkXE+R6HCuJ+Pl1O79NeU0Zpx/NGzD51NxmHAN6R2ky7zyX3DHhzXvnrVEfXdTIAm\np7Ptg+BMiZyynLPYP3C5okveUm0RL+K0SLdcssczxYMw8Xrvo1wNVsX4M0ISy+h5\nvPPLlDlot7BQwWWlnXC4rqJIo0N6Z2KYtDXiDCXTQA870PHGEGHTTey7Cpi82tOS\nrBVZElzIJ0rVc1i+CSjAFlyctvD75fy+ixZ45Npl50UUMOfHCu8zc3jetLU+1jxy\nbBkGvhKhhCuUhaNRjhhITiqJcvfNzvuVmjaiIFVC4LWX9p5aq8c2aDPtt10gqRKZ\n6sH5t3DUYSwvsPQUPrIDpeGapfs3wifeqmdyTkOynk43fvurENUM2MLX4WTs5VG1\nAHZHAMWR2HeX1nECDGaAr2Qkw5B9y1gUbIugDoq9rD27EDwqbfiCmJWJfWTsePtJ\nGNvckfDEkAkmlPg1j0oWpMM4G0ojFV/oiyKePebG82rZDuUINM5UFNd+z3jXe+0J\nw67ZKJvOtneITWL3MKsyjJbc9V6LlsH3xJcGKsSrfFhXF4iPPaHjsGC5q6Snx6IX\nd/S9RUcmddcmNnZHW48v8MI8wWc+ysEyodPM+zPOk+pyBVPkUcMmpv1HVaNdv3sZ\nhTij2VxXfuBKU9wp83PtQf3vZcMFkD2J/JHuuAYXrvhxOAHrIl6TWsJBuZa6CChZ\nB9myNPbPb8b14VuYNjdjec8USsnZPt3U6QP38cEO2WUZeLVBsk9zUZK5Dkj5phy5\nPBqlIBL0u+EmcUubYYD86aqTomdH5uQkM2wMCdNmM7Xb1g5j06lpyRfdSISZG/ps\nNu4KxxJGCWa6i5NswtbkyuXExXOjt8CeCLvBjotysUYPnL0AC56bWQG1LNanV3Ef\nIUip05vJTFSz9jIoB5tCrjSyb4vZ9WtFhOF5I5w9sPmhvinD+AjT//FLF4+O6Wue\nWQxt0Gyj5BSOjh7nOrQZGVXHNhrQJkAQZMv07OXMoJjgeA7I87Y6WWukv+9QRXn2\nviBN5I7Iq63VQXzN2RVUHKbZPIgu9P0IwyMHrnfUwnDN8074NeDpRPw6snSAsarZ\nPzh0ZuvxXV4iS17P4VnGJ1oCZnkKPU4phvH00ZkQg0mXIy4tH9tn/MhQpy9GQEmh\n//PtfKKAp7s9ctVqDNwNjt1GY++gHP9GmLOdFS2AJFipQqj6mzM+foOsNyhalIqS\ntXXLaSUAt89F4JED6A8xDJMFANUm5NKmNOTFcbeNzeEjq8gxPZXtCMxyH8k77vwR\n9oLKZMtToD8yF09sCAM9vQyztwEgV/u7n+9x1t51YnODmVrIsvQbYBU/HxmMUQd7\nqNkfCugPprJ7OhMNbWafnTeyPacr30AsEcJ7IgOxGPY3rt2VPxObI14clPbVEz+1\nO4NMzbaSYHwILAkxyNIrnf0ZzXOXKkgN0elMxnc2AwDkjm79R0KGAh4+yLxWPlxo\nfPgzxmo+3lI7fpILxwotzXnPXV2YxI7QIeFA+/q0kC8NTw2d0WoSDm4m8N0J7MR6\npbO6Mu0/vl5u6p8WhJKnxPOrSWVtTsDo2vm99fSkBHyUnbqqJr/FwUvaTWBAh/Lk\n-----END RSA PRIVATE KEY-----\n'; }
+function legacyRoundTrip(pem) {
+const priv = __thaw_crypto_module.createPrivateKey({ key: pem, passphrase: 'hunter2' });
+const sig = __thaw_crypto_module.createSign('sha256').update('legacy pem test').sign(priv, 'hex');
+const ok = __thaw_crypto_module.createVerify('sha256').update('legacy pem test').verify(rsaPublicPem(), sig, 'hex');
+let wrongPassphraseThrew = false;
+try { __thaw_crypto_module.createPrivateKey({ key: pem, passphrase: 'wrong' }); } catch (error) { wrongPassphraseThrew = true; }
+return [priv.asymmetricKeyType, ok, wrongPassphraseThrew];
+}
+function des3RoundTrip() { return legacyRoundTrip(rsaPrivateDes3Pem()); }
+function aes256RoundTrip() { return legacyRoundTrip(rsaPrivateAes256Pem()); }"##,
+        r##"
+var m = __thaw_crypto_module;
+var des = m.createPrivateKey({ key: rsaPrivateDes3Pem(), passphrase: 'hunter2' });
+var aes = m.createPrivateKey({ key: rsaPrivateAes256Pem(), passphrase: 'hunter2' });
+var desWrong = false, aesWrong = false;
+try { m.createPrivateKey({ key: rsaPrivateDes3Pem(), passphrase: 'wrong' }); } catch (error) { desWrong = true; }
+try { m.createPrivateKey({ key: rsaPrivateAes256Pem(), passphrase: 'wrong' }); } catch (error) { aesWrong = true; }
+console.log(JSON.stringify([des.asymmetricKeyType, aes.asymmetricKeyType, desWrong, aesWrong]));
+"##,
+    ]
+    .concat();
+    assert_eq!(run(&program), r#"["rsa","rsa",true,true]"#);
+}
+
+#[test]
+fn asym_x25519_cannot_sign_and_secret_key_export() {
+    let program = [
+        r##"function x25519PrivateEncryptedPem() { return '-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIGjMF8GCSqGSIb3DQEFDTBSMDEGCSqGSIb3DQEFDDAkBBB7tmOZrnczjFnNG9jN\nYZ1fAgIIADAMBggqhkiG9w0CCQUAMB0GCWCGSAFlAwQBKgQQ7nt4x5kr1Oyp/30P\nhjd1KwRAPOtfFpXXehOtGmKdUDrNZt0kN1BGoevUg1UaV6IifpLoD/7rx0yKDYi7\nj3Mlx1DVoubvAvNgDari+t5VGInS5w==\n-----END ENCRYPTED PRIVATE KEY-----\n'; }
+function peerPublicPem() { return '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VuAyEA6PZLnkCbBlDxzjBJOcUA+J4MLON3SqHkcn7rLRsauks=\n-----END PUBLIC KEY-----\n'; }
+function x25519PassphraseRoundTrip() {
+let wrongPassphraseThrew = false;
+try { __thaw_crypto_module.createPrivateKey({ key: x25519PrivateEncryptedPem(), passphrase: 'wrong' }); } catch (error) { wrongPassphraseThrew = true; }
+const priv = __thaw_crypto_module.createPrivateKey({ key: x25519PrivateEncryptedPem(), passphrase: 'hunter2' });
+const secret = __thaw_crypto_module.diffieHellman({
+privateKey: priv,
+publicKey: __thaw_crypto_module.createPublicKey(peerPublicPem())
+}).toString('hex');
+return [priv.asymmetricKeyType, secret, wrongPassphraseThrew];
+}"##,
+        r##"
+var m = __thaw_crypto_module;
+var CANNOT = "an X25519 key cannot sign -- it's a Diffie-Hellman key-agreement key, not a signing key";
+var VERIFY_CANNOT = "an X25519 key cannot verify -- it's a Diffie-Hellman key-agreement key, not a signing key";
+var peer = m.createPublicKey(peerPublicPem());
+var signErr = '', verifyErr = '';
+try { m.sign(null, 'hi', peer); } catch (error) { signErr = error.message; }
+try { m.verify(null, 'hi', peer, Buffer.alloc(64)); } catch (error) { verifyErr = error.message; }
+var x = m.createPrivateKey({ key: x25519PrivateEncryptedPem(), passphrase: 'hunter2' });
+var encErr = '';
+try { m.createSign('sha256').update('hi').sign(x); } catch (error) { encErr = error.message; }
+var secret = m.createSecretKey(Buffer.from('secret-key'));
+var viaKeyObject = m.createHmac('sha256', secret).update('payload').digest('hex');
+var viaBuffer = m.createHmac('sha256', Buffer.from('secret-key')).update('payload').digest('hex');
+console.log(JSON.stringify([signErr === CANNOT, verifyErr === VERIFY_CANNOT, x.asymmetricKeyType, encErr === CANNOT,
+  secret.type, secret.export().toString(), secret.asymmetricKeyType === undefined, viaKeyObject === viaBuffer]));
+"##,
+    ]
+    .concat();
+    assert_eq!(
+        run(&program),
+        r#"[true,true,"x25519",true,"secret","secret-key",true,true]"#
+    );
+}
