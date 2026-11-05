@@ -1704,7 +1704,7 @@ impl Interp {
             self.set_native(&s, "write", move |it, _, a| {
                 // a typed array or ArrayBuffer carries bytes; anything else is text
                 let chunk = arg(a, 0);
-                let raw = Interp::view_bytes(&chunk);
+                let raw = Interp::view_bytes(&chunk).or_else(|| buffer_json_bytes(it, &chunk));
                 let text = match &raw {
                     Some(b) => String::from_utf8_lossy(b).into_owned(),
                     None => it.to_str(&chunk).to_string(),
@@ -1747,6 +1747,39 @@ impl Interp {
         }
         g.declare("process", Value::Object(p), true);
     }
+}
+
+/// `{"type":"Buffer","data":[0..255,...]}`: a Buffer inside a compiled `any`/Json comes back across the
+/// boundary in Node's `Buffer.prototype.toJSON` shape; write it as its bytes. Strict: exactly those two
+/// own keys, `data` an array whose every item is an integer 0..=255 (no getters or coercion run).
+fn buffer_json_bytes(it: &mut Interp, v: &Value) -> Option<Vec<u8>> {
+    let Value::Object(o) = v else { return None };
+    if v.is_callable() || !matches!(&*o.kind.borrow(), Kind::Plain) {
+        return None;
+    }
+    let keys = it.own_keys(v);
+    if keys.len() != 2
+        || !keys.iter().any(|k| &**k == "type")
+        || !keys.iter().any(|k| &**k == "data")
+    {
+        return None;
+    }
+    let kind = it.get(v, "type").ok()?;
+    if !matches!(kind, Value::Str(_)) || &*it.to_str(&kind) != "Buffer" {
+        return None;
+    }
+    let data = it.get(v, "data").ok()?;
+    let Value::Object(d) = &data else { return None };
+    if !matches!(&*d.kind.borrow(), Kind::Array(_)) {
+        return None;
+    }
+    it.array_items_raw(&data)
+        .iter()
+        .map(|item| match item {
+            Value::Number(n) if n.fract() == 0.0 && (0.0..=255.0).contains(n) => Some(*n as u8),
+            _ => None,
+        })
+        .collect()
 }
 
 /// How Node's `ERR_INVALID_ARG_TYPE` message describes a bad argument.
