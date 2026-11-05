@@ -497,6 +497,8 @@ const TYPED_PRELUDE: &str = r#"
   ['forEach', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex', 'reduce', 'reduceRight', 'fill', 'at', 'toString', 'keys', 'values', 'entries'].forEach(function (n) {
     if (AP[n]) def(TP, n, AP[n]);
   });
+  // Spec: %TypedArray%.prototype[Symbol.iterator] is the `values` function. Compiled `Array.from(view)` and `for..of` use the protocol.
+  def(TP, Symbol.iterator, TP.values);
   def(TP, 'toLocaleString', AP.toString);
   def(TP, 'indexOf', function (v, from) {
     from = from === undefined ? 0 : (from < 0 ? Math.max(this.length + from, 0) : from);
