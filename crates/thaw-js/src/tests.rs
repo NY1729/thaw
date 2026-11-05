@@ -469,6 +469,38 @@ fn typed_arrays_wrap_values_and_share_their_buffer() {
 }
 
 #[test]
+fn typed_arrays_iterate_in_for_of_spread_array_from_and_entries() {
+    assert_eq!(
+        one("var u = new Uint8Array([7, 8]), out = [];
+             for (var x of u) out.push(x);
+             var f = new Float64Array([1.5, 2.5]);
+             console.log(out.join(), [...f].join(), Array.from(u).join(), Array.from(u.entries()).join(';'), [...u.keys()].join())"),
+        "7,8 1.5,2.5 7,8 0,7;1,8 0,1"
+    );
+}
+
+#[test]
+fn typed_array_symbol_iterator_is_the_values_function() {
+    assert_eq!(
+        one("var it = new Uint8Array([7, 8])[Symbol.iterator]();
+             var a = it.next(), b = it.next(), c = it.next();
+             var TP = Object.getPrototypeOf(Uint8Array.prototype);
+             console.log(a.value, b.value, c.done, TP[Symbol.iterator] === TP.values, Float32Array.prototype[Symbol.iterator] === TP.values)"),
+        "7 8 true true true"
+    );
+}
+
+#[test]
+fn buffer_iterates_like_a_uint8array() {
+    assert_eq!(
+        one("var b = Buffer.from([104, 105]), out = [];
+             for (var x of b) out.push(x);
+             console.log(out.join(), [...b].join(), Array.from(b).join())"),
+        "104,105 104,105 104,105"
+    );
+}
+
+#[test]
 fn url_parses_and_resolves_relative_references() {
     assert_eq!(
         one(
