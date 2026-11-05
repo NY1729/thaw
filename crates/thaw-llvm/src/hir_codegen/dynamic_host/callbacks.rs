@@ -1467,7 +1467,12 @@ impl<'ctx> HirCompiler<'ctx> {
         let result_json = if matches!(ret, HirType::Undefined) {
             self.compile_napi_undefined_json()?
         } else if matches!(ret, HirType::Void) {
-            self.compile_json_null()?
+            // Graph wire: `undefined` (the same sentinel the `Undefined` arm uses), not `null`.
+            if graph_wire {
+                self.compile_napi_undefined_json()?
+            } else {
+                self.compile_json_null()?
+            }
         } else {
             let result = call
                 .try_as_basic_value()
@@ -1496,7 +1501,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 other => (result, other),
             };
             if matches!(ret, HirType::Undefined | HirType::Void) {
-                self.compile_json_null()?
+                if graph_wire {
+                    self.compile_napi_undefined_json()?
+                } else {
+                    self.compile_json_null()?
+                }
             } else {
                 let result_json = self
                     .builder
@@ -1927,7 +1936,11 @@ impl<'ctx> HirCompiler<'ctx> {
         let mut result_array = None;
         let result_json = if *resolved == HirType::Void {
             self.drive_promise_to_completion(promise)?;
-            self.compile_json_null()?
+            if graph_wire {
+                self.compile_napi_undefined_json()?
+            } else {
+                self.compile_json_null()?
+            }
         } else {
             let value = self.drive_promise_to_resolved_value(promise, resolved)?;
             let array = self
