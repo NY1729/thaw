@@ -824,6 +824,26 @@ fn graph_node(
             let items = graph_token(it, token, nodes, memo, busy)?;
             construct_global(it, if k == "m" { "Map" } else { "Set" }, &[items])?
         }
+        // `{"b":[0..255,...]}`: a branded Buffer/ArrayBuffer wrapper from compiled code, rebuilt as a `Buffer` exactly
+        // like the `__thaw_tjs_bytes__` arm of `to_value`.
+        [(k, Native::Array(items))] if k == "b" => {
+            let bytes: Vec<u8> = items
+                .iter()
+                .map(|item| match item {
+                    Native::Number(n) => *n as u8,
+                    _ => 0,
+                })
+                .collect();
+            let view = it.u8_from_vec(bytes);
+            let global = it.global.clone();
+            let proto = it
+                .lookup(&global, "Buffer")
+                .and_then(|b| it.get(&b, "prototype").ok());
+            if let (Value::Object(o), Some(Value::Object(p))) = (&view, proto) {
+                *o.proto.borrow_mut() = Some(p);
+            }
+            view
+        }
         _ => return Err("unsupported graph node (Buffer)".into()),
     };
     memo[index] = Some(value.clone());
@@ -4975,5 +4995,17 @@ mod handle_value_graph_await_tests {
         let argument = function_handle("return 1");
         let result = thaw_tjs_call_handle_value_graph_result(f, argument);
         assert!(!result.error.is_null());
+    }
+}
+
+#[cfg(test)]
+mod graph_bytes_node_tests {
+    use super::*;
+
+    #[test]
+    fn graph_b_node_decodes_to_a_buffer_over_its_bytes() {
+        let (_, v) = decode_wire(r#"{"root":{"r":0},"nodes":[{"b":[104,105]}]}"#).unwrap();
+        assert_eq!(Interp::view_bytes(&v), Some(vec![104, 105]));
+        assert!(Interp::typed_of(&v).is_some());
     }
 }
