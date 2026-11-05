@@ -2595,6 +2595,9 @@ impl Interp {
                             a::Prop::KeyValue(kv) => {
                                 let k = self.prop_name(&kv.key, scope)?;
                                 let v = self.eval(&kv.value, scope)?;
+                                if is_anonymous_fn_def(&kv.value) {
+                                    name_anonymous_fn(&v, &k);
+                                }
                                 put(&obj, &k, v);
                             }
                             a::Prop::Shorthand(i) => {
@@ -3419,6 +3422,32 @@ pub(crate) fn put(o: &Obj, key: &str, value: Value) {
                 writable: true,
             },
         ),
+    }
+}
+
+/// ES NamedEvaluation: an anonymous function, arrow or class (possibly parenthesized)
+/// takes the property key it is assigned to as its name.
+fn is_anonymous_fn_def(e: &a::Expr) -> bool {
+    match e {
+        a::Expr::Paren(p) => is_anonymous_fn_def(&p.expr),
+        a::Expr::Arrow(_) => true,
+        a::Expr::Fn(f) => f.ident.is_none(),
+        a::Expr::Class(c) => c.ident.is_none(),
+        _ => false,
+    }
+}
+
+/// Give an anonymous closure an own `name` (a function's `def.name` is shared by every
+/// closure from the same source, so the name lives on the object). Named functions and
+/// functions that already have an own `name` are left alone.
+// ponytail: symbol keys are not named "[desc]" (key_of stringifies them); add when needed.
+fn name_anonymous_fn(v: &Value, key: &str) {
+    if let Value::Object(o) = v {
+        let anonymous =
+            matches!(&*o.kind.borrow(), Kind::Closure { def, .. } if def.name.is_none());
+        if anonymous && find_own(o, "name").is_none() {
+            put_hidden(o, "name", Value::str(key));
+        }
     }
 }
 
