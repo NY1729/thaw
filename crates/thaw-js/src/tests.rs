@@ -3879,3 +3879,135 @@ fn main_file_loader_strips_shebang_and_binds_this_to_exports() {
     );
     assert_eq!(it.out, vec!["object true".to_string()]);
 }
+
+const PROBE_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"tpa/index.js": function(module, exports, require) {
+  exports.u8 = new Uint8Array([1, 2]);
+  exports.buf = Buffer.from([1]);
+  exports.obj = { a: 1 };
+},
+};
+var __thaw_bundle_require_maps = { "tpa/index.js": {}, };
+var __thaw_bundle_entry_key = "tpa/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn typed_array_handle_probe_reports_name_and_values() {
+    use crate::host::{thaw_tjs_get_global, thaw_tjs_handle_typed_array_probe, thaw_tjs_register};
+    use std::ffi::{CStr, CString};
+    let source = CString::new(PROBE_BUNDLE).unwrap();
+    assert_eq!(thaw_tjs_register(c"tpa".as_ptr(), source.as_ptr()), 1);
+    let probe_of = |export: &str| {
+        let handle = thaw_tjs_get_global(CString::new(format!("tpa::{export}")).unwrap().as_ptr());
+        assert!(handle > 0, "{export}");
+        let text = thaw_tjs_handle_typed_array_probe(handle as u64);
+        if text.is_null() {
+            return None;
+        }
+        let owned = unsafe { CStr::from_ptr(text) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        unsafe { thaw_arena::destroy_string(text) };
+        Some(owned)
+    };
+    assert_eq!(
+        probe_of("u8").as_deref(),
+        Some(r#"{"n":"Uint8Array","v":["1","2"],"e":[]}"#)
+    );
+    // a Buffer prints itself, and a plain object is not a typed array
+    assert_eq!(probe_of("buf"), None);
+    assert_eq!(probe_of("obj"), None);
+}
+
+const LENGTH_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"lenb/index.js": function(module, exports, require) {
+  exports.len = function (f) { return f.length; };
+},
+};
+var __thaw_bundle_require_maps = { "lenb/index.js": {}, };
+var __thaw_bundle_entry_key = "lenb/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn compiled_callback_function_length_is_its_declared_arity() {
+    use crate::host::{thaw_tjs_register_callback, Native, Package};
+    let four = thaw_tjs_register_callback(sum_adapter as *const _, std::ptr::null(), 4);
+    let mut p = Package::load(LENGTH_BUNDLE).expect("loads");
+    assert_eq!(
+        p.call("len", &[callback_marker(four)]).ok(),
+        Some(Native::Number(4.0))
+    );
+}
+
+#[test]
+fn compiled_rest_callback_length_leaves_out_the_rest_parameter() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(LENGTH_BUNDLE).unwrap();
+    assert_eq!(thaw_tjs_register(c"lenb".as_ptr(), source.as_ptr()), 1);
+    // three declared parameters, the last one a rest parameter: `length` is 2
+    let made = thaw_tjs_register_native_callback_graph(
+        graph_adapter as *const _,
+        std::ptr::null(),
+        0,
+        3,
+        0,
+        std::ptr::null(),
+        1,
+    );
+    assert!(made.error.is_null() && made.value > 0);
+    let callback = made.value;
+    let function = thaw_tjs_get_global(c"lenb::len".as_ptr());
+    assert!(function > 0);
+    let wire = std::ffi::CString::new(format!(
+        "{{\"root\":{{\"r\":0}},\"nodes\":[{{\"a\":[{{\"r\":1}}]}},{{\"hdl\":{callback}}}]}}"
+    ))
+    .unwrap();
+    thaw_tjs_retain_handle(callback as i64);
+    let result =
+        thaw_tjs_call_handle_handle_graph_args_result(function as u64, wire.as_ptr(), false);
+    assert!(result.error.is_null());
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(result.value)) }
+            .to_str()
+            .unwrap(),
+        "2"
+    );
+}
+
+const NUMBER_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"nfn/index.js": function(module, exports, require) {
+  exports.num = function (x) { return x; };
+},
+};
+var __thaw_bundle_require_maps = { "nfn/index.js": {}, };
+var __thaw_bundle_entry_key = "nfn/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn typed_call_result_marks_non_finite_numbers() {
+    use std::ffi::CString;
+    let bundle = CString::new(NUMBER_BUNDLE).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"nfn".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    let sentinel = |name: &str| format!("{{\"$__thaw_non_finite$\":\"{name}\"}}");
+    assert_eq!(
+        typed_call("nfn::num", r#"[{"__thaw_tjs_num__":"NaN"}]"#).unwrap(),
+        sentinel("NaN")
+    );
+    assert_eq!(
+        typed_call("nfn::num", r#"[{"__thaw_tjs_num__":"Infinity"}]"#).unwrap(),
+        sentinel("Infinity")
+    );
+    assert_eq!(
+        typed_call("nfn::num", r#"[{"__thaw_tjs_num__":"-Infinity"}]"#).unwrap(),
+        sentinel("-Infinity")
+    );
+    // finite numbers are unchanged
+    assert_eq!(typed_call("nfn::num", "[1.5]").unwrap(), "1.5");
+}
