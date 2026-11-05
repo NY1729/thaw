@@ -143,3 +143,38 @@ fn tls_loopback_handshake_alpn_and_round_trip_with_a_trusted_ca() {
     let out = run_ok(&script);
     assert_eq!(out, "ok:|ok|hello tls|true");
 }
+
+#[test]
+fn server_socket_with_unread_data_reads_eof_after_peer_destroy() {
+    // The accepted side must see the buffered byte and then EOF once the peer is destroyed (the half-open read path
+    // the registry shim's accepted-socket pump relies on to stop).
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(move || {
+            let mut it = Interp::new();
+            it.run(r#"
+                var l = __thaw_net_listen('127.0.0.1', 0).split(':');
+                var op = __thaw_net_connect_start('127.0.0.1', Number(l[2]));
+                var conn = null, acc = null, wrote = false, closed = false;
+                (function wait() {
+                  if (!conn) { var r = __thaw_async_poll(op); if (r === 'pending') return setTimeout(wait, 1); conn = r.split(':'); }
+                  if (!acc) { var a = __thaw_net_poll_accept(Number(l[1])); if (a === 'err:pending') return setTimeout(wait, 1); acc = a.split(':'); }
+                  if (!wrote) { __thaw_net_write(Number(conn[1]), Buffer.from('x').toString('hex')); wrote = true; }
+                  var d = __thaw_net_poll_read(Number(acc[1]), true);
+                  if (d === 'pending') return setTimeout(wait, 1);
+                  console.log(d);
+                  if (d.indexOf('ok:') === 0 && !closed) { closed = true; __thaw_net_destroy(Number(conn[1])); return setTimeout(wait, 1); }
+                  __thaw_net_destroy(Number(acc[1]));
+                  __thaw_net_close_listener(Number(l[1]));
+                })();
+            "#).unwrap_or_else(|_| panic!("script must run"));
+            it.run_event_loop().unwrap_or_else(|_| panic!("event loop"));
+            let _ = sender.send(it.out.join("|"));
+        })
+        .expect("spawn");
+    let out = receiver
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("server socket never reached EOF (hang)");
+    assert_eq!(out, "ok:78|eof");
+}
