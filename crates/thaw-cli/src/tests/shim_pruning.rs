@@ -77,3 +77,28 @@ fn shim_pruning_drops_a_nested_namespace_target_when_its_namespace_is_not_mentio
         ["other"]
     );
 }
+
+fn synthetic_chain_pruned_names(source: &str) -> Vec<String> {
+    // `coerce.number` has no top-level export: the registry flattens it to a synthetic `__thaw_ns_coerce_number`.
+    let dts = "export declare namespace coerce {\n\
+            export { __thaw_ns_coerce_number as number };\n\
+        }\n\
+        export declare function coerce(): string;\n\
+        export declare function __thaw_ns_coerce_number(): number;\n";
+    let filename = thaw_parser::common::FileName::Custom("pkg.d.ts".into());
+    let unpruned = thaw_bridge::parse_dts_named(dts, filename.clone()).unwrap();
+    let nested = thaw_bridge::nested_namespace_members_named(dts, &filename);
+    assert_eq!(nested["coerce"]["number"], "__thaw_ns_coerce_number");
+    let mut functions = unpruned.clone();
+    prune_unused_functions(&mut functions, "pkg", source, true);
+    keep_nested_namespace_targets(unpruned, &mut functions, &nested, source);
+    functions.into_iter().map(|f| f.name).collect()
+}
+
+#[test]
+fn shim_pruning_does_not_restore_a_synthetic_namespace_target() {
+    assert_eq!(
+        synthetic_chain_pruned_names("import pkg from 'pkg';\npkg.coerce.number();"),
+        ["coerce"]
+    );
+}

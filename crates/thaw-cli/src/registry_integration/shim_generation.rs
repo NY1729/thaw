@@ -2853,6 +2853,9 @@ fn keep_nested_namespace_targets(
         .iter()
         .filter(|(namespace, _)| thaw_js_mentions(user_source, namespace))
         .flat_map(|(_, members)| members.values().cloned())
+        // `__thaw_ns_*` are synthetic flattened names for dotted exports (`coerce.number`): the bundle has no
+        // top-level export of that name, so restoring one would point the member at a function that is not there.
+        .filter(|target| !target.starts_with("__thaw_ns_"))
         .collect::<std::collections::HashSet<_>>();
     let kept = functions
         .iter()
