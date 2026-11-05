@@ -512,15 +512,12 @@ fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'st
         .then_some("createHook callbacks in an object literal are not marshalled to thaw-js yet")
 }
 
-/// `node:buffer` keeps its Bytes on thaw-js, but `node:crypto` and `node:zlib` still run on QuickJS:
-/// a program that names either keeps `node:buffer` on QuickJS too, so the shared bytes never cross
-/// the runtime boundary. Remove once both modules are allowlisted.
+/// `node:buffer` keeps its Bytes on thaw-js, but `node:crypto` still runs on QuickJS:
+/// a program that names it keeps `node:buffer` on QuickJS too, so the shared bytes never cross
+/// the runtime boundary. Remove once `node:crypto` is allowlisted.
 fn thaw_js_buffer_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    (pkg_name == "node:buffer"
-        && ["node:crypto", "node:zlib"]
-            .iter()
-            .any(|m| thaw_js_mentions(user_source, m)))
-    .then_some("node:buffer stays on QuickJS while node:crypto/node:zlib are unrouted")
+    (pkg_name == "node:buffer" && thaw_js_mentions(user_source, "node:crypto"))
+        .then_some("node:buffer stays on QuickJS while node:crypto is unrouted")
 }
 
 /// `node:child_process` delivers stdout/exit on the thaw-js loop, which node:http's client has not been
@@ -528,17 +525,6 @@ fn thaw_js_buffer_blocker(pkg_name: &str, user_source: &str) -> Option<&'static 
 fn thaw_js_child_process_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
     (pkg_name == "node:child_process" && thaw_js_mentions(user_source, "node:http"))
         .then_some("node:child_process stays on QuickJS while node:http is in the program")
-}
-
-/// node:net's server pump keeps its package loop alive; the thaw-js terminal loop runs packages one after
-/// another, so a program that also needs zlib jobs or vm/tls timers on another package never sees them.
-/// Remove once `thaw_tjs_run_event_loop` is round-robin.
-fn thaw_js_net_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    let net = thaw_js_mentions(user_source, "node:net");
-    let zlib = thaw_js_mentions(user_source, "node:zlib");
-    let vm = thaw_js_mentions(user_source, "node:vm");
-    let hit = (pkg_name == "node:net" && (zlib || vm)) || (pkg_name == "node:zlib" && net);
-    hit.then_some("node:net stays on QuickJS next to node:zlib/node:vm until the thaw-js loop is round-robin")
 }
 
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
@@ -580,9 +566,6 @@ fn thaw_js_package_eligible(
         return reject(why.into());
     }
     if let Some(why) = thaw_js_child_process_blocker(&pkg.name, user_source) {
-        return reject(why.into());
-    }
-    if let Some(why) = thaw_js_net_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
@@ -695,7 +678,7 @@ fn thaw_js_buffer_blocker_keeps_buffer_on_quickjs_next_to_crypto_or_zlib() {
     let crypto = "import { createHash } from 'node:crypto';";
     let zlib = "import * as z from 'node:zlib';";
     assert!(thaw_js_buffer_blocker("node:buffer", crypto).is_some());
-    assert!(thaw_js_buffer_blocker("node:buffer", zlib).is_some());
+    assert!(thaw_js_buffer_blocker("node:buffer", zlib).is_none());
     assert!(thaw_js_buffer_blocker("node:buffer", "import { Buffer } from 'node:buffer';").is_none());
     assert!(thaw_js_buffer_blocker("node:crypto", crypto).is_none());
 }
@@ -708,19 +691,6 @@ fn thaw_js_child_process_blocker_keeps_child_process_on_quickjs_next_to_http() {
     assert!(thaw_js_child_process_blocker("node:child_process", http).is_some());
     assert!(thaw_js_child_process_blocker("node:child_process", spawn).is_none());
     assert!(thaw_js_child_process_blocker("node:http", http).is_none());
-}
-
-#[cfg(test)]
-#[test]
-fn thaw_js_net_blocker_keeps_net_and_zlib_on_quickjs_together() {
-    let net = "import net from 'node:net';";
-    let zlib = "import zlib from 'node:zlib';";
-    let vm = "import vm from 'node:vm';";
-    assert!(thaw_js_net_blocker("node:net", &format!("{net}{zlib}")).is_some());
-    assert!(thaw_js_net_blocker("node:zlib", &format!("{net}{zlib}")).is_some());
-    assert!(thaw_js_net_blocker("node:net", &format!("{net}{vm}")).is_some());
-    assert!(thaw_js_net_blocker("node:net", net).is_none());
-    assert!(thaw_js_net_blocker("node:zlib", zlib).is_none());
 }
 
 #[cfg(test)]

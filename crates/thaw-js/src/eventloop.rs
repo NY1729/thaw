@@ -1017,7 +1017,7 @@ impl Interp {
                     loop_idle_sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
             } else if crate::child::active()
-                || crate::zlib::active()
+                || crate::zlib::active_for(self.realm_id)
                 || crate::worker::active(self)
                 || self.stdin_live()
             {
@@ -1036,7 +1036,7 @@ impl Interp {
         self.rt.timers.iter().any(|t| t.refd)
             || self.rt.immediates.iter().any(|i| i.refd)
             || crate::child::active()
-            || crate::zlib::active()
+            || crate::zlib::active_for(self.realm_id)
             || crate::worker::active(self)
             || self.stdin_live()
     }
@@ -1118,7 +1118,7 @@ impl Interp {
                 let mut wait = next - clock_ms();
                 // a worker wakes every 2ms so a terminate() is seen even while a timer is pending
                 if crate::child::active()
-                    || crate::zlib::active()
+                    || crate::zlib::active_for(self.realm_id)
                     || crate::worker::active(self)
                     || self.stdin_live()
                     || self.interrupt.is_some()
@@ -1132,7 +1132,7 @@ impl Interp {
                     loop_idle_sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
             } else if crate::child::active()
-                || crate::zlib::active()
+                || crate::zlib::active_for(self.realm_id)
                 || crate::worker::active(self)
                 || self.stdin_live()
                 || self.interrupt.is_some()
