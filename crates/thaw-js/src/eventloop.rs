@@ -1041,8 +1041,19 @@ impl Interp {
     fn loop_inner(&mut self) -> R<()> {
         mark_loop_started();
         self.run_jobs()?;
+        let mut first = true;
         while self.loop_alive() {
             self.check_interrupt()?;
+            // ponytail: wall-clock slice, taken only at an iteration boundary so timer/immediate order within this
+            // realm is unchanged. Upgrade: yield on a blocking native call too.
+            if !std::mem::replace(&mut first, false) {
+                if let Some(end) = self.slice_end {
+                    if Instant::now() >= end && crate::host::other_packages_have_work() {
+                        self.yielded = true;
+                        return Ok(());
+                    }
+                }
+            }
             self.rt.now = clock_ms();
             self.poll_platform_events()?;
             self.run_timers()?;
@@ -1076,6 +1087,9 @@ impl Interp {
                 {
                     wait = wait.min(2.0);
                 }
+                if self.slice_end.is_some() && crate::host::other_packages_have_work() {
+                    wait = wait.min(2.0);
+                }
                 if wait > 0.0 {
                     loop_idle_sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
@@ -1097,7 +1111,11 @@ impl Interp {
         let mut code = None;
         loop {
             match self.loop_inner() {
-                Ok(()) => {}
+                Ok(()) => {
+                    if self.yielded {
+                        return Ok(0); // slice ended: not idle, so no beforeExit/exit; the host re-enters and reads `yielded`
+                    }
+                }
                 Err(Ctl::Exit(c)) => {
                     code = Some(c);
                     break;
