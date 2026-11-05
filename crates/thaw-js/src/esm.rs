@@ -332,7 +332,9 @@ fn convert(source: &str, public_specs: &[String]) -> Result<Converted, String> {
     if uses_origin {
         head.push_str(
             "function __thaw_esm_origin_obj(t) { return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, \
-             read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); } }; }\n",
+             read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); }, \
+             readImport: function (s, n) { return t[s]()[n]; }, namespaceImport: function (s) { return t[s](); }, \
+             defaultImport: function (s, m) { return __thaw_esm_default(m); } }; }\n",
         );
     }
     Ok(Converted {
@@ -467,4 +469,30 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
         "module.exports = (function (require) {{\nvar __thaw_bundle_factories = {{\n{factories}}};\nvar __thaw_bundle_require_maps = {{\n{maps}}};\n{entry}}})(globalThis.require);\n"
     );
     Ok(Some((bundle, problems, pure)))
+}
+
+#[cfg(test)]
+mod origin_vocabulary_tests {
+    use super::convert;
+
+    // The origin object must carry every method the registry transform emits
+    // (module_transform.rs readImport/readDefault/namespaceImport/defaultImport).
+    #[test]
+    fn origin_object_has_the_registry_vocabulary() {
+        let source = "import { __thaw_esm_origin_0 } from '__thaw_private_origin_spec/k';\n\
+                      export const x = __thaw_esm_origin_0.readImport('dep', 'a');\n";
+        let converted = convert(source, &["dep".to_string()]).expect("convert");
+        for method in [
+            "readImport",
+            "namespaceImport",
+            "defaultImport",
+            "readDefault",
+        ] {
+            assert!(
+                converted.body.contains(&format!("{method}: function")),
+                "origin object missing {method}: {}",
+                converted.body
+            );
+        }
+    }
 }
