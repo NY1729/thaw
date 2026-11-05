@@ -49,6 +49,7 @@ fn tcp_loopback_listen_connect_write_read() {
 
 #[test]
 fn zlib_one_shot_and_async_jobs_round_trip() {
+    let _zlib_guard = crate::tests::zlib_global_guard();
     let out = run_ok(
         r#"
         var hex = __thaw_zlib_hex('compress', 'gzip', Buffer.from('hello hello hello').toString('hex'));
