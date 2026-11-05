@@ -1028,6 +1028,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.next_lambda += 1;
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let adapter_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        // thaw-js passes `undefined` as a text-lane result too; QuickJS keeps `null`.
+        let undefined_result = graph_wire || self.js_engine() == JsEngine::ThawJs;
         let adapter = self
             .module
             .add_function(&callback_name, adapter_type, Some(Linkage::Internal));
@@ -1467,8 +1469,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let result_json = if matches!(ret, HirType::Undefined) {
             self.compile_napi_undefined_json()?
         } else if matches!(ret, HirType::Void) {
-            // Graph wire: `undefined` (the same sentinel the `Undefined` arm uses), not `null`.
-            if graph_wire {
+            // Graph wire or thaw-js: `undefined` (the same sentinel the `Undefined` arm uses), not `null`.
+            if undefined_result {
                 self.compile_napi_undefined_json()?
             } else {
                 self.compile_json_null()?
@@ -1501,7 +1503,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 other => (result, other),
             };
             if matches!(ret, HirType::Undefined | HirType::Void) {
-                if graph_wire {
+                if undefined_result {
                     self.compile_napi_undefined_json()?
                 } else {
                     self.compile_json_null()?
@@ -1936,7 +1938,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let mut result_array = None;
         let result_json = if *resolved == HirType::Void {
             self.drive_promise_to_completion(promise)?;
-            if graph_wire {
+            if graph_wire || self.js_engine() == JsEngine::ThawJs {
                 self.compile_napi_undefined_json()?
             } else {
                 self.compile_json_null()?
