@@ -194,6 +194,15 @@ impl Interp {
         self.new_typed(ty, abuf, data, 0, len)
     }
 
+    /// The bytes a typed array views (its window, not the whole buffer) or an `ArrayBuffer` holds; None for anything else.
+    pub(crate) fn view_bytes(v: &Value) -> Option<Vec<u8>> {
+        if let Some(t) = Self::typed_of(v) {
+            let d = t.data.borrow();
+            return Some(d[t.off..t.off + t.len * t.ty.size()].to_vec());
+        }
+        Self::bytes_of_buffer(v).map(|b| b.borrow().clone())
+    }
+
     /// An `ArrayBuffer` owning `bytes`.
     pub(crate) fn array_buffer_from_vec(&self, bytes: Vec<u8>) -> Value {
         Value::Object(self.new_array_buffer(Rc::new(RefCell::new(bytes))))

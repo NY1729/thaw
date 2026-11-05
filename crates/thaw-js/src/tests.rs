@@ -4117,3 +4117,32 @@ fn object_literal_anonymous_function_takes_its_key_as_name() {
         "[Function: describe]"
     );
 }
+
+#[test]
+fn stdout_write_takes_typed_array_and_arraybuffer_bytes() {
+    let mut it = Interp::new();
+    let src = r#"
+        process.stdout.write(Buffer.from('héllo\n'));
+        process.stdout.write(new Uint8Array([104, 105, 10]));
+        process.stdout.write(new Uint8Array([0, 104, 105, 10, 9]).subarray(1, 4));
+        process.stdout.write(new Uint8Array([104, 105, 10]).buffer);
+        process.stdout.write('text\n');
+    "#;
+    it.run_main(src)
+        .unwrap_or_else(|_| panic!("script must run"));
+    assert_eq!(it.out, vec!["héllo", "hi", "hi", "hi", "text"]);
+}
+
+#[test]
+fn stdout_byte_write_calls_its_callback_after_the_sync_code() {
+    let mut it = Interp::new();
+    let src = r#"
+        let order = [];
+        process.stdout.write(Buffer.from('ok\n'), () => order.push('cb'));
+        order.push('sync');
+        process.on('exit', () => console.log('order=' + order.join(',')));
+    "#;
+    it.run_main(src)
+        .unwrap_or_else(|_| panic!("script must run"));
+    assert_eq!(it.out, vec!["ok", "order=sync,cb"]);
+}
