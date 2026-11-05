@@ -4011,3 +4011,15 @@ fn typed_call_result_marks_non_finite_numbers() {
     // finite numbers are unchanged
     assert_eq!(typed_call("nfn::num", "[1.5]").unwrap(), "1.5");
 }
+
+#[test]
+fn object_literal_anonymous_function_takes_its_key_as_name() {
+    assert_eq!(
+        one("var o = { describe: function(){}, go: () => 1, named: function inner(){}, paren: (function(){}), k: class {} }; console.log([o.describe.name, o.go.name, o.named.name, o.paren.name, o.k.name].join())"),
+        "describe,go,inner,paren,k"
+    );
+    assert_eq!(
+        one("var o = { describe: function(){} }; console.log(o.describe)"),
+        "[Function: describe]"
+    );
+}
