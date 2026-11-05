@@ -194,6 +194,7 @@ impl Package {
             return Err(HostError::Unsupported((*problem).to_string()));
         }
         let mut interp = Box::new(Interp::new());
+        interp.share_process_state(crate::procstate::host_shared());
         // console output goes straight to stdout: nothing in the host drains `Interp::out`
         interp.set_stream(true);
         if stack_bytes != 0 {
@@ -361,7 +362,10 @@ fn classify(it: &mut Interp, c: Ctl) -> HostError {
                 _ => text.to_string(),
             })
         }
-        Ctl::Exit(code) => HostError::Thrown(format!("process.exit({code})")),
+        Ctl::Exit(code) => {
+            terminate_process(it, code);
+            HostError::Thrown(format!("process.exit({code})"))
+        }
         Ctl::Return(_) | Ctl::Break(_) | Ctl::Continue(_) => {
             HostError::Thrown("stray completion".into())
         }
@@ -838,6 +842,7 @@ pub struct HandleResult {
 pub(crate) fn default_realm() -> usize {
     if PACKAGES.with(|ps| ps.borrow().is_empty()) {
         let mut interp = Box::new(Interp::new());
+        interp.share_process_state(crate::procstate::host_shared());
         // console output goes straight to stdout: nothing in the host drains `Interp::out`
         interp.set_stream(true);
         let stack = process_stack_bytes();
@@ -3857,6 +3862,76 @@ pub(crate) fn with_package<T>(
     result
 }
 
+thread_local! {
+    /// Tests only: called with the status instead of `_exit` in `terminate_process`.
+    static EXIT_HOOK: Cell<Option<fn(i32)>> = const { Cell::new(None) };
+}
+
+/// Tests only: replaces the `_exit` that ends the process on `process.exit` with `hook`.
+#[doc(hidden)]
+pub fn set_exit_hook(hook: Option<fn(i32)>) {
+    EXIT_HOOK.with(|h| h.set(hook));
+}
+
+/// The other loaded realms, as pointers (a realm up-stack of this call is reached through `RUNNING`).
+fn other_realms(me: *mut Interp) -> Vec<*mut Interp> {
+    let count = PACKAGES.with(|ps| ps.borrow().len());
+    let mut realms = Vec::new();
+    for handle in 0..count {
+        let loaded = PACKAGES.with(|ps| {
+            ps.borrow_mut()
+                .get_mut(handle)
+                .and_then(|slot| slot.as_mut().map(|p| &mut *p.interp as *mut Interp))
+        });
+        let ptr = loaded.or_else(|| {
+            RUNNING.with(|r| {
+                // SAFETY: a running package's pointer is a live stack local of its `with_package` frame.
+                r.borrow()
+                    .get(&handle)
+                    .map(|pk| unsafe { &mut *(**pk).interp as *mut Interp })
+            })
+        });
+        if let Some(ptr) = ptr.filter(|ptr| *ptr != me) {
+            realms.push(ptr);
+        }
+    }
+    realms
+}
+
+/// Ends the process with `code` as `process.exit` does: every realm's `exit` listeners run, output is flushed
+/// and the terminal restored, then the process ends at once (no unwinding, so no JS `catch`/`finally` runs).
+/// A worker's exit stays local to the worker, so this returns for one.
+fn terminate_process(it: &mut Interp, code: i32) {
+    if crate::worker::is_worker(it) || it.interrupt.is_some() {
+        return;
+    }
+    it.emit_exit_once(code);
+    for ptr in other_realms(&mut *it as *mut Interp) {
+        // SAFETY: the realm is loaded or up-stack of this call, and the process ends below; only its `exit`
+        // listeners run here.
+        let other = unsafe { &mut *ptr };
+        other.emit_exit_once(code);
+        other.flush_partial();
+    }
+    // exit listeners may have changed `process.exitCode`; every realm shares it
+    let status = it.rt.shared.exit_code.get().map_or(code, |n| n as i32);
+    it.flush_partial();
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    // SAFETY: flushes every C stdio stream; no pointer is passed.
+    unsafe {
+        libc::fflush(std::ptr::null_mut());
+    }
+    crate::sysio::restore_stdin_termios();
+    if let Some(hook) = EXIT_HOOK.with(Cell::get) {
+        hook(status);
+        return;
+    }
+    // SAFETY: `_exit` takes no pointers. Used instead of `std::process::exit` so TLS destructors do not tear down
+    // the packages while up-stack frames still hold them (as the QuickJS bridge does).
+    unsafe { libc::_exit(status) }
+}
+
 fn cstr(p: *const c_char) -> Option<String> {
     if p.is_null() {
         return None;
@@ -3994,6 +4069,7 @@ fn run_default_main(main: impl FnOnce(&mut Interp) -> R<i32>) -> i32 {
 #[no_mangle]
 pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
     let mut status = 0;
+    let mut exited = false;
     loop {
         let settled = pump_watches();
         // a settled watch resumes the compiled async code queued on the native side, which may watch new promises
@@ -4014,6 +4090,11 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
                     .run_event_loop()
                     .map_err(|c| classify(&mut p.interp, c));
                 p.interp.turn_hook = None;
+                // `process.exit` from a timer, immediate, tick or stdin handler ends the process here
+                if let (true, Ok(code)) = (p.interp.rt.shared.exit_requested.get(), &r) {
+                    terminate_process(&mut p.interp, *code);
+                    exited = true;
+                }
                 r
             });
             // `process.exit(n)` / `process.exitCode = n` inside a package (e.g. commander after a sub-command) is the program's status.
@@ -4028,10 +4109,20 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
         }
         // ponytail: a long timer keeps a package's loop alive, so a watch whose promise settles only through jobs
         // waits until that loop returns; pumping from inside the turn hook would re-enter `with_package`. Upgrade: pump there.
+        if exited {
+            break;
+        }
         let watching = WATCHES.with(|w| !w.borrow().is_empty());
         if settled == 0 && !drained && !(ran_any && watching) {
             break;
         }
+    }
+    // a natural end with `process.exitCode = n` and no pending work is the program's status too
+    if status == 0 {
+        status = crate::procstate::host_shared()
+            .exit_code
+            .get()
+            .map_or(0, |n| n as i32);
     }
     status
 }
