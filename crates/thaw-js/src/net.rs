@@ -794,22 +794,6 @@ pub(crate) fn install(it: &mut Interp) {
             Err(e) => it.throw_error("Error", &e.to_string()),
         }
     });
-    def!("__thaw_crypto_hash_hex", |it, _, a| {
-        use sha2::Digest;
-        let (alg, data) = (
-            s(it, a, 0).to_ascii_lowercase().replace('-', ""),
-            hex_decode(&s(it, a, 1)),
-        );
-        let sum = match alg.as_str() {
-            "md5" => md5::Md5::digest(&data).to_vec(),
-            "sha1" => sha1::Sha1::digest(&data).to_vec(),
-            "sha256" => sha2::Sha256::digest(&data).to_vec(),
-            "sha384" => sha2::Sha384::digest(&data).to_vec(),
-            "sha512" => sha2::Sha512::digest(&data).to_vec(),
-            _ => return it.throw_error("Error", &format!("Digest method not supported: {alg}")),
-        };
-        Ok(Value::str(&hex_encode(&sum)))
-    });
     let _ = it.run(
         "(function () {\n\
          Object.defineProperty(process, Symbol.toStringTag, { value: 'process', configurable: true });\n\
