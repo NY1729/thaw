@@ -250,3 +250,19 @@ fn thaw_js_plain_result_does_not_register_host_operations() {
     assert!(uses_thaw_js && !uses_quickjs, "{ir}");
     assert!(!ir.contains("call void @thaw_json_register_host_operations("), "{ir}");
 }
+
+#[test]
+fn a_void_callback_on_the_thaw_js_text_lane_returns_undefined_not_null() {
+    let source = "declare function __thaw_typed_tjs_6d733a3a6d73(f: Json): Json;
+         function main(): void { console.log(__thaw_typed_tjs_6d733a3a6d73((): void => {})); }";
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_void_callback_routed");
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(compiler.uses_thaw_js() && !compiler.uses_quickjs(), "{ir}");
+    assert!(ir.contains("@thaw_tjs_register_callback"), "{ir}");
+    assert!(ir.contains("$__thaw_napi_undefined$"), "{ir}");
+}
