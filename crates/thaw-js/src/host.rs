@@ -889,7 +889,7 @@ pub extern "C" fn thaw_tjs_call_graph_result(
             let mut out = WireOut {
                 owner,
                 plain: true,
-                live_functions: false,
+                live_functions: true,
                 copy_root: false,
                 receiver: None,
                 nodes: Vec::new(),
@@ -1080,13 +1080,13 @@ pub extern "C" fn thaw_tjs_exception_native_token(_handle: u64) -> u64 {
     0
 }
 
-/// Graph-wire builder for a result value. `plain` copies arrays and objects deeply (functions and
-/// symbols become `undefined`, `toJSON` is honored) like the QuickJS result lane; `receiver` is the
-/// value that stays a live handle wherever it recurs.
+/// Graph-wire builder for a result value. `plain` copies arrays and objects deeply (symbols become
+/// `undefined`, and functions too unless `live_functions`; `toJSON` is honored) like the QuickJS
+/// result lane; `receiver` is the value that stays a live handle wherever it recurs.
 struct WireOut {
     owner: usize,
     plain: bool,
-    /// Plain mode only: functions stay live handles instead of becoming `undefined`.
+    /// Plain mode only: functions stay live handles (`{"hdl":id}`) instead of becoming `undefined`.
     live_functions: bool,
     /// Not plain mode: the root container is copied, only what it holds stays live.
     copy_root: bool,
@@ -1124,7 +1124,7 @@ impl WireOut {
             }
         }
         // A plain result that compiled code already holds by handle stays that handle (same identity).
-        if self.plain && !v.is_callable() {
+        if self.plain && (!v.is_callable() || self.live_functions) {
             if let Some(id) = live_handle_of(&v) {
                 thaw_tjs_retain_handle(id as i64);
                 return Ok(self.lease(id));
@@ -1287,7 +1287,7 @@ pub extern "C" fn thaw_tjs_call_selected_method_graph_result(
             let mut out = WireOut {
                 owner,
                 plain: true,
-                live_functions: false,
+                live_functions: true,
                 copy_root: false,
                 receiver: Some((receiver, this)),
                 nodes: Vec::new(),
@@ -1555,7 +1555,7 @@ pub extern "C" fn thaw_tjs_call_method_graph_result(
             let mut out = WireOut {
                 owner,
                 plain: true,
-                live_functions: false,
+                live_functions: true,
                 copy_root: false,
                 receiver: Some((handle, this)),
                 nodes: Vec::new(),
@@ -2628,7 +2628,7 @@ pub extern "C" fn thaw_tjs_resolve_handle_graph_result(handle: u64) -> ThawResul
         let mut out = WireOut {
             owner,
             plain: true,
-            live_functions: false,
+            live_functions: true,
             copy_root: false,
             receiver: None,
             nodes: Vec::new(),
@@ -4397,6 +4397,67 @@ mod live_result_lease_tests {
         let (_, out) = token_of(&mut it, &live);
         assert!(out.leases.is_empty());
         assert!(out.nodes[0].starts_with("{\"a\":"), "{:?}", out.nodes);
+    }
+
+    fn plain_wire_live_functions() -> WireOut {
+        WireOut {
+            live_functions: true,
+            ..plain_wire()
+        }
+    }
+
+    #[test]
+    fn live_functions_keep_function_members_as_handles() {
+        let mut it = Interp::new();
+        let v = object(&mut it, "({f(){}, n: 1})");
+        let mut out = plain_wire_live_functions();
+        let Ok(token) = out.token(&mut it, &v) else {
+            panic!("token failed")
+        };
+        assert_eq!(token, "{\"r\":0}");
+        assert!(
+            out.nodes[0].contains("[\"f\",{\"r\":1},7]"),
+            "{:?}",
+            out.nodes
+        );
+        assert!(
+            out.nodes[0].contains("[\"n\",{\"v\":1},7]"),
+            "{:?}",
+            out.nodes
+        );
+        assert_eq!(out.leases.len(), 1, "{:?}", out.leases);
+        assert_eq!(out.nodes[1], format!("{{\"hdl\":{}}}", out.leases[0]));
+        thaw_tjs_release_handle(out.leases[0] as i64);
+    }
+
+    #[test]
+    fn plain_wire_still_turns_function_members_into_undefined() {
+        let mut it = Interp::new();
+        let v = object(&mut it, "({f(){}, n: 1})");
+        let (token, out) = token_of(&mut it, &v);
+        assert_eq!(token, "{\"r\":0}");
+        assert!(
+            out.nodes[0].contains("[\"f\",{\"u\":1},7]"),
+            "{:?}",
+            out.nodes
+        );
+        assert!(out.leases.is_empty());
+    }
+
+    #[test]
+    fn live_function_already_held_by_handle_reuses_it() {
+        let mut it = Interp::new();
+        let f = object(&mut it, "(function named() {})");
+        let id = store_handle(0, f.clone()) as u64;
+        let mut out = plain_wire_live_functions();
+        let Ok(token) = out.token(&mut it, &f) else {
+            panic!("token failed")
+        };
+        assert_eq!(token, "{\"r\":0}");
+        assert_eq!(out.leases, vec![id]);
+        // drop the wire's lease, then the handle itself
+        thaw_tjs_release_handle(id as i64);
+        thaw_tjs_release_handle(id as i64);
     }
 }
 
