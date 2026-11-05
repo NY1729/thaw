@@ -3802,6 +3802,44 @@ impl Native {
                     "-Infinity"
                 }
             ),
+            other => other.to_json_keeping_undefined(),
+        }
+    }
+
+    /// `to_json` for a typed-call result: an `undefined` OWN property of an object keeps the compiled side's
+    /// `undefined` marker instead of vanishing (Object.keys / console.log see it; JSON.stringify still omits it).
+    /// Array items and the top level are unchanged (`undefined` stays `null` there).
+    fn to_json_keeping_undefined(&self) -> String {
+        match self {
+            Native::Array(a) => format!(
+                "[{}]",
+                a.iter()
+                    .map(|v| {
+                        if *v == Native::Undefined {
+                            "null".to_string()
+                        } else {
+                            v.to_json_keeping_undefined()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Native::Object(o) => format!(
+                "{{{}}}",
+                o.iter()
+                    .map(|(k, v)| {
+                        let mut key = String::new();
+                        crate::builtins::json_quote(k, &mut key);
+                        let value = if *v == Native::Undefined {
+                            format!("{{\"{UNDEFINED_KEY}\":true}}")
+                        } else {
+                            v.to_json_keeping_undefined()
+                        };
+                        format!("{key}:{value}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             other => other.to_json(),
         }
     }
@@ -4394,7 +4432,7 @@ fn pump_watches() -> usize {
             };
             Ok(Some(match state {
                 Ok(v) => from_value(&mut p.interp, &v, 0)
-                    .map(|n| n.to_json())
+                    .map(|n| n.to_json_keeping_undefined())
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(match frame_error(&mut p.interp, &e) {
                     Some((_, framed)) => framed,
