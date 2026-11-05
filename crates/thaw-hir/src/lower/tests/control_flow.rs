@@ -1750,7 +1750,13 @@ fn thaw_rethrow_cleanup_expected_member_typeof(
         (HirType::F64, 0) => HirExpr::Lit(HirLit::Str("number".into())),
         (HirType::BigInt, 1) => HirExpr::Lit(HirLit::Str("bigint".into())),
         (HirType::Bool, 2) => HirExpr::Lit(HirLit::Str("boolean".into())),
-        (HirType::Str, 3) => HirExpr::Lit(HirLit::Str("string".into())),
+        (HirType::Str, 3) => HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+            vec![HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_receiver_string".into())),
+                vec![value],
+            )],
+        ),
         (HirType::Undefined, 4) => HirExpr::Lit(HirLit::Str("undefined".into())),
         (HirType::Null, 5) | (HirType::Object(_), 6) => {
             HirExpr::Lit(HirLit::Str("object".into()))
