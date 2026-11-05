@@ -2020,6 +2020,7 @@ pub extern "C" fn thaw_tjs_call_handle_handle_graph_args_result(
         let (_, args) = decode_wire(&args_json)?;
         on_handle(handle, |p, owner, f| {
             let it = &mut p.interp;
+            check_handle_callable(it, &f)?;
             let args = it.array_items(&args);
             let value = it
                 .call(&f, &Value::Undefined, &args)
@@ -2059,6 +2060,7 @@ fn call_handle_graph(handle: u64, args_json: *const c_char, with_this: bool) -> 
         let (_, args) = decode_wire(&args_json)?;
         on_handle(handle, |p, owner, f| {
             let it = &mut p.interp;
+            check_handle_callable(it, &f)?;
             let mut args = it.array_items(&args);
             let this = if with_this {
                 if args.is_empty() {
@@ -2142,6 +2144,7 @@ pub unsafe extern "C" fn thaw_tjs_call_handle_mixed_graph_result(
         }
         on_handle(handle, |p, owner, f| {
             let it = &mut p.interp;
+            check_handle_callable(it, &f)?;
             let mut args = it.array_items(&args);
             args.extend(values);
             let called = it
@@ -2193,6 +2196,7 @@ pub extern "C" fn thaw_tjs_call_handle_value_graph_result(
         let argument = on_handle(argument, |_, _, v| Ok(v))?;
         on_handle(handle, |p, owner, f| {
             let it = &mut p.interp;
+            check_handle_callable(it, &f)?;
             let result = it
                 .call(&f, &Value::Undefined, &[argument])
                 .map_err(|c| classify(it, c))?;
@@ -2266,6 +2270,7 @@ unsafe fn exact_call(
         }
         on_handle(handle, |p, owner, f| {
             let it = &mut p.interp;
+            check_handle_callable(it, &f)?;
             let mut args = it.array_items(&args);
             args.extend(values);
             let called = it.call(&f, &Value::Undefined, &args);
@@ -2338,6 +2343,7 @@ unsafe fn call_mixed_handle(
         }
         on_handle(handle, |p, owner, f| {
             let it = &mut p.interp;
+            check_handle_callable(it, &f)?;
             let mut args = it.array_items(&args);
             args.extend(values);
             let value = it
@@ -2685,6 +2691,15 @@ fn not_callable(it: &mut Interp, message: String) -> HostError {
         unreachable!("throw_error always returns Err")
     };
     classify(it, c)
+}
+
+/// A host-originated call of a handle: a value that is not a function fails naming its kind.
+fn check_handle_callable(it: &mut Interp, f: &Value) -> Result<(), HostError> {
+    if f.is_callable() {
+        return Ok(());
+    }
+    let message = format!("handle call: {}", it.not_callable_message(f));
+    Err(not_callable(it, message))
 }
 
 /// `await v` on a live value: a non-Promise object with a callable `then` is adopted like
@@ -4869,5 +4884,25 @@ mod class_symbol_thenable_tests {
             .unwrap()
             .to_owned();
         assert_eq!(text, "7");
+    }
+}
+
+#[cfg(test)]
+mod handle_call_kind_tests {
+    use super::*;
+
+    #[test]
+    fn handle_call_of_a_non_function_names_the_handle_and_its_kind() {
+        let mut it = Interp::new();
+        let value = it.run("({a: 1})").unwrap();
+        match check_handle_callable(&mut it, &value) {
+            Err(HostError::Thrown(msg)) => assert!(
+                msg.contains("handle call: object is not a function (constructor Object"),
+                "{msg}"
+            ),
+            other => panic!("expected a thrown TypeError, got {}", other.is_ok()),
+        }
+        let undefined = Value::Undefined;
+        assert!(check_handle_callable(&mut it, &undefined).is_err());
     }
 }
