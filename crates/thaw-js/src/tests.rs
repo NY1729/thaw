@@ -4530,3 +4530,145 @@ fn zlib_job_is_collected_only_by_the_realm_that_started_it() {
     assert!(size > 0, "deflate result must be non-empty");
     assert!(!crate::zlib::active());
 }
+
+/// The registry shim's zlib hook shape: one job table per realm, and a collected result with no waiting callback is
+/// taken so it cannot stay in DONE (keeps `zlib::active()` true for every package).
+const ZLIB_SHIM_HOOK: &str = r#"
+var jobs = globalThis.__thaw_zlib_jobs || (globalThis.__thaw_zlib_jobs = new Map());
+var prev = globalThis.__thaw_poll_platform_events;
+globalThis.__thaw_poll_platform_events = function () {
+  if (prev) prev();
+  JSON.parse(__thaw_zlib_async_poll()).forEach(function (r) {
+    var j = jobs.get(r.handle);
+    if (!j) { __thaw_zlib_async_take(r.handle); return; }
+    jobs.delete(r.handle);
+    j(r.ok ? new Uint8Array(__thaw_zlib_async_take(r.handle)) : null);
+  });
+};
+function zjob(op, bytes, cb) { jobs.set(__thaw_zlib_async_start(op, 'gzip', bytes, ''), cb); }
+"#;
+
+/// Loopback listen + connect + accept, polled with setTimeout; calls `then(l, conn, acc)` once accepted.
+const NET_OPEN_BODY: &str = r#"
+function netOpen(then) {
+  var l = __thaw_net_listen('127.0.0.1', 0).split(':');
+  var op = __thaw_net_connect_start('127.0.0.1', Number(l[2]));
+  var conn = null, acc = null;
+  (function connect() {
+    if (!conn) { var r = __thaw_async_poll(op); if (r === 'pending') return setTimeout(connect, 1); conn = r.split(':'); }
+    if (!acc) { var a = __thaw_net_poll_accept(Number(l[1])); if (a === 'err:pending') return setTimeout(connect, 1); acc = a.split(':'); }
+    then(l, conn, acc);
+  })();
+}
+"#;
+
+#[test]
+fn zlib_hook_gzip_callback_with_net_write_destroy_close_ends() {
+    let owner = format!(
+        "{ZLIB_SHIM_HOOK}{NET_OPEN_BODY}\n{}",
+        r#"exports.go = function () {
+  netOpen(function (l, conn, acc) {
+    var t = setInterval(function () {}, 2);
+    zjob('compress', new Uint8Array(4 << 20).fill(97), function (packed) {
+      zjob('decompress', packed, function (plain) {
+        __thaw_net_write(Number(conn[1]), Buffer.from('x').toString('hex'));
+        queueMicrotask(function () {
+          process.exitCode = plain && plain.length === 4 << 20 ? 0 : 5;
+          clearInterval(t);
+          __thaw_net_destroy(Number(conn[1]));
+          __thaw_net_destroy(Number(acc[1]));
+          __thaw_net_close_listener(Number(l[1]));
+        });
+      });
+    });
+  });
+};"#
+    );
+    let code = run_loop_or_fail(move || {
+        register_exit_package(
+            "t8b",
+            "exports.arm = function () { var t0 = Date.now(); var t = setInterval(function () {
+               if (Date.now() - t0 > 100) clearInterval(t); }, 1); };",
+        );
+        register_exit_package("t8a", &owner);
+        typed_call("t8b::arm", "[]").expect("arm");
+        typed_call("t8a::go", "[]").expect("go");
+    });
+    assert_eq!(code, 0);
+    assert!(!crate::zlib::active());
+}
+
+#[test]
+fn zlib_owner_and_net_in_separate_packages_end() {
+    let net = format!(
+        "{NET_OPEN_BODY}\n{}",
+        r#"exports.arm = function () { netOpen(function (l, conn, acc) {
+  setTimeout(function () {
+    __thaw_net_destroy(Number(conn[1]));
+    __thaw_net_destroy(Number(acc[1]));
+    __thaw_net_close_listener(Number(l[1]));
+  }, 300);
+}); };"#
+    );
+    let zlib = format!(
+        "{ZLIB_SHIM_HOOK}\n{}",
+        r#"exports.go = function () {
+  zjob('compress', new Uint8Array(1 << 20).fill(98), function (packed) {
+    zjob('decompress', packed, function (plain) { process.exitCode = plain ? 0 : 5; });
+  });
+};"#
+    );
+    let code = run_loop_or_fail(move || {
+        register_exit_package("t9n", &net);
+        register_exit_package("t9z", &zlib);
+        typed_call("t9n::arm", "[]").expect("arm");
+        typed_call("t9z::go", "[]").expect("go");
+    });
+    assert_eq!(code, 0);
+    assert!(!crate::zlib::active());
+}
+
+#[test]
+fn zlib_hook_without_registered_job_does_not_leak_done() {
+    // A result whose handle is in no callback table (a second shim instance) must still be taken, or DONE keeps
+    // `zlib::active()` true and the loop never ends.
+    let body = format!(
+        "{ZLIB_SHIM_HOOK}\n{}",
+        "exports.go = function () { globalThis.h = __thaw_zlib_async_start('compress', 'gzip', new Uint8Array(1 << 16), ''); };"
+    );
+    let code = run_loop_or_fail(move || {
+        register_exit_package("t8m", &body);
+        typed_call("t8m::go", "[]").expect("go");
+    });
+    assert_eq!(code, 0);
+    assert!(!crate::zlib::active());
+}
+
+#[test]
+fn zlib_active_for_ignores_foreign_realm_jobs() {
+    let mut owner = Interp::new();
+    let other = Interp::new();
+    owner
+        .run("globalThis.h = __thaw_zlib_async_start('compress', 'gzip', new Uint8Array([1, 2, 3]), '');")
+        .unwrap_or_else(|_| panic!("start"));
+    assert!(crate::zlib::active_for(owner.realm_id));
+    assert!(!crate::zlib::active_for(other.realm_id));
+    assert!(crate::zlib::active());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        owner
+            .run("console.log(__thaw_zlib_async_poll());")
+            .unwrap_or_else(|_| panic!("poll"));
+        if owner.out.last().is_some_and(|l| l.contains("\"ok\":true")) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "job never finished");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    // finished but not yet taken: still the owner's pending work
+    assert!(crate::zlib::active_for(owner.realm_id));
+    owner
+        .run("__thaw_zlib_async_take(h);")
+        .unwrap_or_else(|_| panic!("take"));
+    assert!(!crate::zlib::active_for(owner.realm_id));
+}
