@@ -403,6 +403,8 @@ impl Interp {
     pub(crate) fn install_sysio(&mut self) {
         self.run(DYNAMIC_HELPERS)
             .unwrap_or_else(|_| panic!("thaw-js dynamic helper prelude must evaluate"));
+        #[cfg(unix)]
+        ignore_sigpipe();
         let g = self.global.clone();
         self.install_child_process();
         let f = self.native(|it, _, a| it.report_uncaught(arg(a, 0)));
@@ -427,15 +429,22 @@ impl Interp {
             Err(message) => it.throw_error("Error", &message),
         });
         g.declare("__thaw_os_network_interfaces", f, true);
-        let f = self.native(|it, _, a| {
-            #[cfg(unix)]
-            let tty = unsafe { libc::isatty(it.num(&arg(a, 0)) as i32) } == 1;
-            #[cfg(not(unix))]
-            let tty = false;
-            let _ = (&it, &a);
-            Ok(Value::Bool(tty))
-        });
+        let f = self.native(|it, _, a| Ok(Value::Bool(fd_is_tty(it.num(&arg(a, 0)) as i32))));
         g.declare("__thaw_process_is_tty", f, true);
+        // process.stdin (process_stdin.js): the reader thread, its ref state, and terminal raw mode
+        let f = self.native(|it, _, _| {
+            start_stdin_fd(0);
+            it.rt.stdin_started = true;
+            Ok(Value::Undefined)
+        });
+        g.declare("__thaw_process_start_stdin", f, true);
+        let f = self.native(|_, _, a| {
+            set_stdin_ref(arg(a, 0).truthy());
+            Ok(Value::Undefined)
+        });
+        g.declare("__thaw_process_set_stdin_ref", f, true);
+        let f = self.native(|_, _, a| Ok(Value::Bool(set_stdin_raw_mode(arg(a, 0).truthy()))));
+        g.declare("__thaw_process_set_raw_mode", f, true);
         // (fd, hex) -> raw bytes to stdout/stderr, after any pending partial line
         let f = self.native(|it, _, a| {
             let fd = it.num(&arg(a, 0)) as i32;
@@ -492,6 +501,213 @@ impl Interp {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Whether `fd` is a terminal.
+pub(crate) fn fd_is_tty(fd: i32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::isatty(fd) == 1 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        false
+    }
+}
+
+// ----- process.stdin on the main thread: a reader thread feeds the loop through `poll_stdin` -----
+// Port of thaw-quickjs processes.rs (`start_host_stdin` / `poll_host_stdin`) and filesystem.rs state.
+
+enum StdinEvent {
+    Data(Vec<u8>),
+    End,
+}
+
+struct HostStdin {
+    events: std::sync::mpsc::Receiver<StdinEvent>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+thread_local! {
+    static HOST_STDIN: std::cell::RefCell<Option<HostStdin>> = const { std::cell::RefCell::new(None) };
+    /// `process.stdin.unref()`: stdin still delivers data but no longer keeps the loop alive.
+    static HOST_STDIN_UNREFED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Starts the reader thread for descriptor `fd` (once per thread).
+pub(crate) fn start_stdin_fd(fd: i32) {
+    HOST_STDIN.with(|slot| {
+        if slot.borrow().is_some() {
+            return;
+        }
+        let (sender, events) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                #[cfg(unix)]
+                let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+                #[cfg(not(unix))]
+                let read = {
+                    let _ = fd;
+                    std::io::Read::read(&mut std::io::stdin(), &mut buffer)
+                        .map_or(-1, |n| n as isize)
+                };
+                if read < 0 {
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+                if read == 0 {
+                    break;
+                }
+                let data = buffer[..read as usize].to_vec();
+                if sender.send(StdinEvent::Data(data)).is_err() {
+                    return;
+                }
+            }
+            let _ = sender.send(StdinEvent::End);
+        });
+        *slot.borrow_mut() = Some(HostStdin {
+            events,
+            thread: Some(thread),
+        });
+    });
+}
+
+/// The stdin events since the last poll, as a JSON array: `[{"type":"data","value":"<hex>"}, {"type":"end"}]`.
+/// The reader is joined and forgotten once it reports the end.
+pub(crate) fn poll_stdin() -> String {
+    HOST_STDIN.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(stdin) = slot.as_mut() else {
+            return "[]".into();
+        };
+        let mut items = Vec::new();
+        let mut finished = false;
+        loop {
+            match stdin.events.try_recv() {
+                Ok(StdinEvent::Data(value)) => {
+                    items.push(format!(r#"{{"type":"data","value":"{}"}}"#, hex(&value)));
+                }
+                Ok(StdinEvent::End) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    items.push(r#"{"type":"end"}"#.to_string());
+                    finished = true;
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            }
+        }
+        if finished {
+            if let Some(thread) = stdin.thread.take() {
+                let _ = thread.join();
+            }
+            *slot = None;
+        }
+        format!("[{}]", items.join(","))
+    })
+}
+
+/// stdin keeps the loop alive: started, and not unref'd.
+pub(crate) fn stdin_active() -> bool {
+    !HOST_STDIN_UNREFED.with(std::cell::Cell::get) && HOST_STDIN.with(|s| s.borrow().is_some())
+}
+
+fn set_stdin_ref(refed: bool) {
+    HOST_STDIN_UNREFED.with(|flag| flag.set(!refed));
+}
+
+/// Like Node (libuv), never die of SIGPIPE: a write to a pipe whose reader is gone must surface as EPIPE.
+#[cfg(unix)]
+pub(crate) fn ignore_sigpipe() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    });
+}
+
+/// Original terminal settings of every descriptor currently in raw mode (restored at exit).
+#[cfg(unix)]
+static ORIGINAL_STDIN_TERMIOS: std::sync::Mutex<Vec<(libc::c_int, libc::termios)>> =
+    std::sync::Mutex::new(Vec::new());
+#[cfg(unix)]
+static STDIN_RESTORE_REGISTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Puts the terminal settings of every raw-mode descriptor back. Called at exit (`atexit`, and by the host
+/// before `_exit`, which skips `atexit`).
+#[cfg(unix)]
+pub(crate) fn restore_stdin_termios() {
+    let saved = std::mem::take(
+        &mut *ORIGINAL_STDIN_TERMIOS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    for (fd, termios) in saved {
+        unsafe {
+            libc::tcsetattr(fd, libc::TCSANOW, &termios);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn restore_stdin_termios() {}
+
+#[cfg(unix)]
+extern "C" fn restore_stdin_termios_at_exit() {
+    restore_stdin_termios();
+}
+
+/// Switches a terminal descriptor into (or out of) raw mode; the original settings are restored at exit.
+#[cfg(unix)]
+pub(crate) fn set_fd_raw_mode(fd: libc::c_int, enabled: bool) -> bool {
+    if !enabled {
+        let saved = {
+            let mut originals = ORIGINAL_STDIN_TERMIOS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            originals
+                .iter()
+                .position(|(saved, _)| *saved == fd)
+                .map(|index| originals.remove(index).1)
+        };
+        return match saved {
+            Some(termios) => (unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) }) == 0,
+            None => true,
+        };
+    }
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
+        return false;
+    }
+    {
+        let mut originals = ORIGINAL_STDIN_TERMIOS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !originals.iter().any(|(saved, _)| *saved == fd) {
+            originals.push((fd, termios));
+        }
+    }
+    unsafe {
+        libc::cfmakeraw(&mut termios);
+    }
+    let changed = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } == 0;
+    if changed && !STDIN_RESTORE_REGISTERED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        unsafe {
+            libc::atexit(restore_stdin_termios_at_exit);
+        }
+    }
+    changed
+}
+
+#[cfg(not(unix))]
+pub(crate) fn set_fd_raw_mode(_fd: i32, _enabled: bool) -> bool {
+    false
+}
+
+fn set_stdin_raw_mode(enabled: bool) -> bool {
+    set_fd_raw_mode(0, enabled)
 }
 
 #[cfg(unix)]

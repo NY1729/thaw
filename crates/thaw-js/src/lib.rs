@@ -41,6 +41,7 @@ mod intl;
 mod json;
 mod net;
 mod numfmt;
+mod procstate;
 mod proxy;
 pub mod scan;
 mod sysio;
@@ -760,6 +761,7 @@ impl Interp {
         it.install_typed();
         it.install_buffer();
         it.install_sysio();
+        it.install_process_stdin();
         net::install(&mut it);
         worker::install(&mut it);
         dns::install(&mut it);
@@ -3546,5 +3548,7 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 mod fs_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod sysio_stdin_tests;
 #[cfg(test)]
 mod tests;
