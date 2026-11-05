@@ -44,3 +44,36 @@ fn shim_pruning_keeps_everything_when_reachability_is_unclear() {
         assert_eq!(pruned_names(source), all, "{source}");
     }
 }
+
+fn nested_chain_pruned_names(source: &str) -> Vec<String> {
+    let dts = "export declare function mid(): string;\n\
+        export declare namespace mid {\n\
+            export { leaf as member };\n\
+        }\n\
+        export declare function leaf(): string;\n\
+        export declare function other(): string;\n";
+    let filename = thaw_parser::common::FileName::Custom("pkg.d.ts".into());
+    let unpruned = thaw_bridge::parse_dts_named(dts, filename.clone()).unwrap();
+    let nested = thaw_bridge::nested_namespace_members_named(dts, &filename);
+    assert_eq!(nested["mid"]["member"], "leaf");
+    let mut functions = unpruned.clone();
+    prune_unused_functions(&mut functions, "pkg", source, true);
+    keep_nested_namespace_targets(unpruned, &mut functions, &nested, source);
+    functions.into_iter().map(|f| f.name).collect()
+}
+
+#[test]
+fn shim_pruning_keeps_a_nested_namespace_target_when_its_namespace_is_mentioned() {
+    assert_eq!(
+        nested_chain_pruned_names("import pkg from 'pkg';\npkg.mid.member();"),
+        ["mid", "leaf"]
+    );
+}
+
+#[test]
+fn shim_pruning_drops_a_nested_namespace_target_when_its_namespace_is_not_mentioned() {
+    assert_eq!(
+        nested_chain_pruned_names("import pkg from 'pkg';\npkg.other();"),
+        ["other"]
+    );
+}
