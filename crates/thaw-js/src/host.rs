@@ -2194,6 +2194,7 @@ pub unsafe extern "C" fn thaw_tjs_release_native_handle_array(handles: *const u8
 }
 
 /// `handle(argument)` where `argument` is itself a live handle (not consumed); the result is a plain graph wire.
+/// A returned Promise is awaited (a rejection throws).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_call_handle_value_graph_result(
     handle: u64,
@@ -2207,6 +2208,7 @@ pub extern "C" fn thaw_tjs_call_handle_value_graph_result(
             let result = it
                 .call(&f, &Value::Undefined, &[argument])
                 .map_err(|c| classify(it, c))?;
+            let result = awaited(it, result)?;
             let mut out = WireOut {
                 owner,
                 plain: true,
@@ -4930,5 +4932,40 @@ mod handle_call_kind_tests {
         }
         let undefined = Value::Undefined;
         assert!(check_handle_callable(&mut it, &undefined).is_err());
+    }
+}
+
+#[cfg(test)]
+mod handle_value_graph_await_tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    /// `function (a) { <body> }` as a handle.
+    fn function_handle(body: &str) -> u64 {
+        let args = std::ffi::CString::new(format!(r#"["a","{body}"]"#)).unwrap();
+        let result = thaw_tjs_new_function(args.as_ptr());
+        assert!(result.error.is_null());
+        result.value
+    }
+
+    #[test]
+    fn call_handle_value_graph_result_awaits_a_returned_promise() {
+        let f = function_handle("return Promise.resolve(5)");
+        let argument = function_handle("return 1");
+        let result = thaw_tjs_call_handle_value_graph_result(f, argument);
+        assert!(result.error.is_null());
+        let wire = unsafe { CStr::from_ptr(result.value) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(wire.contains(r#""root":{"v":5}"#), "{wire}");
+    }
+
+    #[test]
+    fn call_handle_value_graph_result_reports_a_rejected_promise_as_an_error() {
+        let f = function_handle("return Promise.reject(new Error('x'))");
+        let argument = function_handle("return 1");
+        let result = thaw_tjs_call_handle_value_graph_result(f, argument);
+        assert!(!result.error.is_null());
     }
 }
