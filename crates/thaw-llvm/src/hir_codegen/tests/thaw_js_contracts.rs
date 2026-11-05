@@ -228,3 +228,25 @@ fn thaw_js_union_with_a_resolved_promise_member_is_a_routed_call_not_a_stub() {
     assert!(uses_thaw_js && !uses_quickjs, "{ir}");
     assert!(!ir.contains("non-plain-data"), "{ir}");
 }
+
+#[test]
+fn thaw_js_jsvalue_result_registers_host_operations_for_console_log() {
+    // "x::after" returns a live handle; its only use is printing it, which needs the host operations.
+    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_program(
+        "declare function __thaw_typed_tjs_783a3a6166746572(value: string): JsValue;
+         function main(): void { const r = __thaw_typed_tjs_783a3a6166746572(\"hi\"); console.log(r); }",
+    );
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(ir.contains("call void @thaw_json_register_host_operations("), "{ir}");
+}
+
+#[test]
+fn thaw_js_plain_result_does_not_register_host_operations() {
+    // Control for the test above: the same call returning a string holds no handle.
+    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_program(
+        "declare function __thaw_typed_tjs_783a3a6166746572(value: string): string;
+         function main(): void { console.log(__thaw_typed_tjs_783a3a6166746572(\"hi\")); }",
+    );
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(!ir.contains("call void @thaw_json_register_host_operations("), "{ir}");
+}
