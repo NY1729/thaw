@@ -652,6 +652,11 @@ pub struct Interp {
     /// Run once per loop turn after the timers (host.rs sets it for the compiled terminal loop, which also
     /// drains native continuations). Returns true when it made progress, so the loop re-checks without sleeping.
     pub(crate) turn_hook: Option<fn(&mut Interp) -> bool>,
+    /// Host time slice for the terminal multi-package loop (host.rs): past this instant the loop yields when
+    /// another package has work. None (default) means run to quiescence.
+    pub(crate) slice_end: Option<std::time::Instant>,
+    /// Set by `loop_inner` when it returned because the slice ended, not because the loop went idle.
+    pub(crate) yielded: bool,
     /// Function values made for compiled callbacks, by callback id (host.rs `callback_value`): stable identity.
     pub(crate) callback_values: HashMap<usize, Value>,
 }
@@ -734,6 +739,8 @@ impl Interp {
             interrupt: None,
             worker: Default::default(),
             turn_hook: None,
+            slice_end: None,
+            yielded: false,
             callback_values: HashMap::new(),
         };
         it.install_builtins();
