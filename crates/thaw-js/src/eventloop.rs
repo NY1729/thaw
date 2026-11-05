@@ -890,23 +890,51 @@ impl Interp {
         });
     }
 
+    /// ref/unref/hasRef on a Timeout/Immediate. `Some(r)` sets, `None` reads. Here first, else in the realm that owns it.
     fn set_ref(&mut self, this: &Value, refd: Option<bool>) -> bool {
         let Some(id) = self.timer_id(this) else {
             return false;
         };
+        if let Some(r) = self.set_ref_local(id, refd) {
+            return r;
+        }
+        let mut out = false;
+        crate::host::for_other_realms(self, |other| {
+            if let Some(r) = other.set_ref_local(id, refd) {
+                out = r;
+            }
+        });
+        out
+    }
+
+    /// `None` when `id` is not in this realm's tables.
+    fn set_ref_local(&mut self, id: u64, refd: Option<bool>) -> Option<bool> {
         if let Some(t) = self.rt.timers.iter_mut().find(|t| t.id == id) {
             if let Some(r) = refd {
                 t.refd = r;
             }
-            return t.refd;
+            return Some(t.refd);
         }
-        if let Some(t) = self.rt.immediates.iter_mut().find(|t| t.id == id) {
-            if let Some(r) = refd {
-                t.refd = r;
+        let t = self.rt.immediates.iter_mut().find(|t| t.id == id)?;
+        if let Some(r) = refd {
+            t.refd = r;
+        }
+        Some(t.refd)
+    }
+
+    /// `Timeout.refresh`: restart the delay, in the owning realm (using its clock).
+    fn refresh_timer(&mut self, id: u64) {
+        let now = self.rt.now;
+        if let Some(t) = self.rt.timers.iter_mut().find(|t| t.id == id) {
+            t.expiry = now + t.delay;
+            return;
+        }
+        crate::host::for_other_realms(self, |other| {
+            let now = other.rt.now;
+            if let Some(t) = other.rt.timers.iter_mut().find(|t| t.id == id) {
+                t.expiry = now + t.delay;
             }
-            return t.refd;
-        }
-        false
+        });
     }
 
     fn run_timers(&mut self) -> R<()> {
@@ -1397,10 +1425,7 @@ impl Interp {
         }
         self.set_native(&timeout_proto, "refresh", |it, this, _| {
             if let Some(id) = it.timer_id(this) {
-                let now = it.rt.now;
-                if let Some(t) = it.rt.timers.iter_mut().find(|t| t.id == id) {
-                    t.expiry = now + t.delay;
-                }
+                it.refresh_timer(id);
             }
             Ok(this.clone())
         });

@@ -4808,3 +4808,148 @@ fn tj84_clear_timeout_and_immediate_across_packages() {
         );
     });
 }
+
+// TJ85: ref/unref/hasRef/refresh on a Timeout/Immediate created in another package realm.
+
+const TJ85_B: &str = "exports.unref = function (t) { t.unref(); };\n\
+exports.ref = function (t) { t.ref(); };\n\
+exports.hasRef = function (t) { return t.hasRef(); };\n\
+exports.refresh = function (t) { return t.refresh() === t; };";
+
+/// The string form of a result handle.
+fn tj85_text(handle: u64) -> String {
+    use crate::host::thaw_tjs_handle_to_string;
+    let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(handle)) };
+    text.to_str().unwrap().to_string()
+}
+
+#[test]
+fn tj85_foreign_unref_interval_ends_the_loop() {
+    use crate::host::thaw_tjs_run_event_loop;
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::start"), TJ84_EMPTY_ARGS);
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+    });
+}
+
+#[test]
+fn tj85_has_ref_tracks_a_foreign_unref_and_ref() {
+    use crate::host::thaw_tjs_run_event_loop;
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::start"), TJ84_EMPTY_ARGS);
+        let has_ref = tj84_export("b::hasRef");
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "true");
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "false");
+        tj84_call_with_handle(tj84_export("b::ref"), handle);
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "true");
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+    });
+}
+
+#[test]
+fn tj85_foreign_ref_after_unref_keeps_the_timer_alive() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::startTimeout"), TJ84_EMPTY_ARGS);
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        tj84_call_with_handle(tj84_export("b::ref"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let fired = tj84_call(tj84_export("a::fired"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(fired)) };
+        assert_eq!(
+            text.to_str().unwrap(),
+            "true",
+            "re-ref'd timeout did not run"
+        );
+    });
+}
+
+#[test]
+fn tj85_foreign_unref_timeout_does_not_block_the_loop() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::startTimeout"), TJ84_EMPTY_ARGS);
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let fired = tj84_call(tj84_export("a::fired"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(fired)) };
+        assert_eq!(text.to_str().unwrap(), "false", "unref'd timeout ran");
+    });
+}
+
+#[test]
+fn tj85_immediate_variants() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::startImmediate"), TJ84_EMPTY_ARGS);
+        let has_ref = tj84_export("b::hasRef");
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "true");
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "false");
+        tj84_call_with_handle(tj84_export("b::ref"), handle);
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "true");
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let fired = tj84_call(tj84_export("a::fired"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(fired)) };
+        assert_eq!(
+            text.to_str().unwrap(),
+            "true",
+            "re-ref'd immediate did not run"
+        );
+    });
+}
+
+#[test]
+fn tj85_foreign_refresh_returns_the_timeout_and_keeps_it_alive() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::startTimeout"), TJ84_EMPTY_ARGS);
+        let refreshed = tj84_call_with_handle(tj84_export("b::refresh"), handle);
+        assert_eq!(
+            tj85_text(refreshed),
+            "true",
+            "refresh did not return the timeout"
+        );
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let fired = tj84_call(tj84_export("a::fired"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(fired)) };
+        assert_eq!(
+            text.to_str().unwrap(),
+            "true",
+            "refreshed timeout did not run"
+        );
+    });
+}
+
+#[test]
+fn tj85_foreign_unref_does_not_touch_the_local_timer_in_the_caller() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        let b_body = format!("{TJ84_B}\n{TJ85_B}");
+        tj84_register("a", TJ84_A);
+        tj84_register("b", &b_body);
+        // a live ref'd timer owned by b, then a's interval: b's unref targets a's id
+        tj84_call(tj84_export("b::noise"), TJ84_EMPTY_ARGS);
+        let handle = tj84_call(tj84_export("a::start"), TJ84_EMPTY_ARGS);
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let noisy = tj84_call(tj84_export("b::noisy"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(noisy)) };
+        assert_eq!(text.to_str().unwrap(), "true", "b's timer was affected");
+    });
+}
