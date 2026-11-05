@@ -2,6 +2,7 @@
 //! `web/node_crypto.js`; the digest code is copied from thaw-quickjs (see `digest.rs`).
 
 mod digest;
+mod kdf;
 #[cfg(test)]
 mod tests;
 
@@ -9,6 +10,7 @@ use crate::net::{n, s};
 use crate::zlib::{hex_decode, hex_encode};
 use crate::*;
 use digest::{digest_bytes, hmac_bytes};
+use kdf::{pbkdf2_bytes, scrypt_bytes};
 
 const SOURCE: &str = include_str!("../web/node_crypto.js");
 
@@ -41,6 +43,31 @@ pub(crate) fn install(interp: &mut Interp) {
         crate::web_crypto::fill_os_random(&mut bytes);
         Ok(Value::str(&hex_encode(&bytes)))
     });
+    // `__thaw_crypto_pbkdf2_hex(alg, passwordhex, salthex, iterations, keylen)`; JS checks the numbers.
+    let pbkdf2 = interp.native(|it, _, a| {
+        let alg = canonical(&s(it, a, 0));
+        let (password, salt) = (hex_decode(&s(it, a, 1)), hex_decode(&s(it, a, 2)));
+        match pbkdf2_bytes(&alg, &password, &salt, n(it, a, 3), n(it, a, 4) as usize) {
+            Some(key) => Ok(Value::str(&hex_encode(&key))),
+            None => it.throw_error("Error", &format!("Digest method not supported: {alg}")),
+        }
+    });
+    // `__thaw_crypto_scrypt_hex(passwordhex, salthex, keylen, N, r, p)`; errors are TypeErrors.
+    let scrypt_hex = interp.native(|it, _, a| {
+        let (password, salt) = (hex_decode(&s(it, a, 0)), hex_decode(&s(it, a, 1)));
+        let (length, cost, block_size, parallelization) =
+            (n(it, a, 2), n(it, a, 3), n(it, a, 4), n(it, a, 5));
+        match scrypt_bytes(&password, &salt, length, cost, block_size, parallelization) {
+            Ok(key) => Ok(Value::str(&hex_encode(&key))),
+            Err(message) => it.throw_error("TypeError", &message),
+        }
+    });
+    interp
+        .global
+        .declare("__thaw_crypto_pbkdf2_hex", pbkdf2, true);
+    interp
+        .global
+        .declare("__thaw_crypto_scrypt_hex", scrypt_hex, true);
     interp.global.declare("__thaw_crypto_hash_hex", hash, true);
     interp.global.declare("__thaw_crypto_hmac_hex", hmac, true);
     interp
