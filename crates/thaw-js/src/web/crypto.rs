@@ -1,11 +1,11 @@
-//! `crypto.getRandomValues` / `crypto.randomUUID` and the random half of `node:crypto`
-//! (`randomBytes`, `randomFillSync`, `randomInt`), backed by the OS random source.
+//! `crypto.getRandomValues` / `crypto.randomUUID` / `subtle.digest` (the web half of crypto) and
+//! the OS random source. The `node:crypto` module lives in `node_crypto/` and `web/node_crypto.js`.
 
 use crate::*;
 
 const SOURCE: &str = include_str!("crypto.js");
 
-fn fill_os_random(buf: &mut [u8]) {
+pub(crate) fn fill_os_random(buf: &mut [u8]) {
     use std::io::Read;
     // ponytail: /dev/urandom only (Unix targets); getrandom(2) crate if other targets matter
     std::fs::File::open("/dev/urandom")

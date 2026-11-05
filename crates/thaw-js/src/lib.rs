@@ -40,6 +40,7 @@ pub mod host;
 mod intl;
 mod json;
 mod net;
+mod node_crypto;
 mod numfmt;
 mod procstate;
 mod proxy;
@@ -800,6 +801,7 @@ impl Interp {
         web_async_hooks::install(&mut it);
         web_wasm::install(&mut it);
         web_crypto::install(&mut it);
+        node_crypto::install(&mut it);
         it.install_url();
         #[cfg(feature = "intl")]
         {
