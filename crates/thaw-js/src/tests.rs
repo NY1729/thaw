@@ -4117,3 +4117,164 @@ fn object_literal_anonymous_function_takes_its_key_as_name() {
         "[Function: describe]"
     );
 }
+
+// ----- multi-package fairness (host.rs terminate loop time slices) -----
+
+#[test]
+fn package_with_endless_interval_does_not_starve_a_timer_in_another_package() {
+    use crate::host::thaw_tjs_run_event_loop;
+    // "rra" is registered first: before the fix it held the loop for its whole 2 s self-timeout, so "rrb" fired late
+    register_exit_package(
+        "rra",
+        "exports.arm = function () { var t0 = Date.now();
+         var t = setInterval(function () {
+           if (process.exitCode === 3) clearInterval(t);
+           else if (Date.now() - t0 > 2000) { clearInterval(t); process.exitCode = 99; } }, 1); };",
+    );
+    register_exit_package(
+        "rrb",
+        "exports.arm = function () { var t0 = Date.now();
+         setTimeout(function () { process.exitCode = Date.now() - t0 < 1000 ? 3 : 98; }, 10); };",
+    );
+    typed_call("rra::arm", "[]").expect("arm a");
+    typed_call("rrb::arm", "[]").expect("arm b");
+    assert_eq!(thaw_tjs_run_event_loop(), 3);
+}
+
+#[test]
+fn listening_server_shape_pending_work_does_not_starve_a_later_package() {
+    use crate::host::thaw_tjs_run_event_loop;
+    // a re-arming timer chain (the net pump shape) instead of an interval
+    register_exit_package(
+        "rsa",
+        "exports.arm = function () { var t0 = Date.now();
+         function pump() {
+           if (process.exitCode === 3) return;
+           if (Date.now() - t0 > 2000) { process.exitCode = 99; return; }
+           setTimeout(pump, 1);
+         }
+         setTimeout(pump, 1); };",
+    );
+    register_exit_package(
+        "rsb",
+        "exports.arm = function () { var t0 = Date.now();
+         setTimeout(function () { process.exitCode = Date.now() - t0 < 1000 ? 3 : 98; }, 10); };",
+    );
+    typed_call("rsa::arm", "[]").expect("arm a");
+    typed_call("rsb::arm", "[]").expect("arm b");
+    assert_eq!(thaw_tjs_run_event_loop(), 3);
+}
+
+#[test]
+fn process_exit_in_a_later_package_ends_the_run_while_another_loops_forever() {
+    use crate::host::thaw_tjs_run_event_loop;
+    register_exit_package(
+        "rxa",
+        "exports.arm = function () { var t0 = Date.now();
+         var t = setInterval(function () { if (Date.now() - t0 > 2000) clearInterval(t); }, 1);
+         process.on('exit', function (c) { globalThis.seen = c; }); };
+         exports.seen = function () { return globalThis.seen; };",
+    );
+    register_exit_package(
+        "rxb",
+        "exports.arm = function () { setTimeout(function () { process.exit(7); }, 10); };",
+    );
+    exit_hook_on();
+    typed_call("rxa::arm", "[]").expect("arm a");
+    typed_call("rxb::arm", "[]").expect("arm b");
+    assert_eq!(thaw_tjs_run_event_loop(), 7);
+    assert_eq!(HOOK_EXIT.with(std::cell::Cell::get), Some(7));
+    assert_eq!(typed_call("rxa::seen", "[]"), Ok("7".to_string()));
+}
+
+#[test]
+fn timers_within_a_package_keep_their_order_while_another_package_keeps_the_loop_busy() {
+    use crate::host::thaw_tjs_run_event_loop;
+    // "qtb" is registered first so it is sliced in front of "ptb" on every round
+    register_exit_package(
+        "qtb",
+        "exports.arm = function () { var t0 = Date.now();
+         var t = setInterval(function () { if (Date.now() - t0 > 60) clearInterval(t); }, 1); };",
+    );
+    register_exit_package(
+        "ptb",
+        "globalThis.log = [];
+         exports.log = function () { return globalThis.log.join(); };
+         exports.arm = function () {
+           process.nextTick(function () { globalThis.log.push('tick'); });
+           setTimeout(function () { globalThis.log.push('t30'); }, 30);
+           setTimeout(function () { globalThis.log.push('t10a'); }, 10);
+           setTimeout(function () { globalThis.log.push('t10b'); }, 10);
+           setTimeout(function () { globalThis.log.push('t20'); }, 20);
+         };",
+    );
+    typed_call("qtb::arm", "[]").expect("arm q");
+    typed_call("ptb::arm", "[]").expect("arm p");
+    assert_eq!(thaw_tjs_run_event_loop(), 0);
+    assert_eq!(
+        typed_call("ptb::log", "[]"),
+        Ok("\"tick,t10a,t10b,t20,t30\"".to_string())
+    );
+}
+
+#[test]
+fn promise_jobs_drain_between_timers_while_another_package_keeps_the_loop_busy() {
+    use crate::host::thaw_tjs_run_event_loop;
+    register_exit_package(
+        "qpj",
+        "exports.arm = function () { var t0 = Date.now();
+         var t = setInterval(function () { if (Date.now() - t0 > 60) clearInterval(t); }, 1); };",
+    );
+    register_exit_package(
+        "ppj",
+        "globalThis.log = [];
+         exports.log = function () { return globalThis.log.join(); };
+         exports.arm = function () {
+           setTimeout(function () { globalThis.log.push('a'); Promise.resolve().then(function () { globalThis.log.push('a micro'); }); }, 5);
+           setTimeout(function () { globalThis.log.push('b'); Promise.resolve().then(function () { globalThis.log.push('b micro'); }); }, 15);
+           setTimeout(function () { globalThis.log.push('c'); }, 25);
+         };",
+    );
+    typed_call("qpj::arm", "[]").expect("arm q");
+    typed_call("ppj::arm", "[]").expect("arm p");
+    assert_eq!(thaw_tjs_run_event_loop(), 0);
+    assert_eq!(
+        typed_call("ppj::log", "[]"),
+        Ok("\"a,a micro,b,b micro,c\"".to_string())
+    );
+}
+
+#[test]
+fn a_yielding_package_gets_no_early_before_exit_or_exit() {
+    use crate::host::thaw_tjs_run_event_loop;
+    // "qlv" keeps the loop busy so "elv" yields several times before its own 12 ms timer fires
+    register_exit_package(
+        "qlv",
+        "exports.arm = function () { var t0 = Date.now();
+         var t = setInterval(function () { if (Date.now() - t0 > 60) clearInterval(t); }, 1); };",
+    );
+    register_exit_package(
+        "elv",
+        "globalThis.b = 0; globalThis.e = 0;
+         process.on('beforeExit', function () { globalThis.b++; });
+         process.on('exit', function () { globalThis.e++; });
+         exports.counts = function () { return globalThis.b + ',' + globalThis.e; };
+         exports.arm = function () { setTimeout(function () {}, 12); };",
+    );
+    typed_call("qlv::arm", "[]").expect("arm q");
+    typed_call("elv::arm", "[]").expect("arm e");
+    assert_eq!(thaw_tjs_run_event_loop(), 0);
+    assert_eq!(typed_call("elv::counts", "[]"), Ok("\"1,1\"".to_string()));
+}
+
+#[test]
+fn a_realm_with_no_other_package_never_yields_its_slice() {
+    // white-box: a slice end with no other loaded package must not yield, so the run is unchanged
+    let mut it = Interp::new();
+    it.run("setTimeout(function () { console.log('done'); }, 20);")
+        .expect("schedules");
+    it.slice_end = Some(std::time::Instant::now());
+    assert_eq!(it.run_event_loop().expect("loop"), 0);
+    assert!(!it.yielded);
+    assert_eq!(it.out.join("|"), "done");
+}
