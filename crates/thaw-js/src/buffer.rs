@@ -330,5 +330,11 @@ const BUFFER_PRELUDE: &str = r#"
     def(P, 'writeUint' + n.slice(4), P['writeUInt' + n.slice(4)]);
   });
   globalThis.Buffer = Buffer;
+
+  // Deprecated Node global: an unpooled Buffer of `size`. Shares Buffer.prototype so
+  // `require('buffer').SlowBuffer.prototype.equal` resolves (buffer-equal-constant-time loads it).
+  function SlowBuffer(size) { return Buffer.alloc(size); }
+  SlowBuffer.prototype = Buffer.prototype;
+  globalThis.SlowBuffer = SlowBuffer;
 })();
 "#;
