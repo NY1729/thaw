@@ -3922,6 +3922,14 @@ fn other_realms(me: *mut Interp) -> Vec<*mut Interp> {
     realms
 }
 
+/// Run `f` on every other loaded realm (same safety argument as `terminate_process`).
+pub(crate) fn for_other_realms(me: &mut Interp, mut f: impl FnMut(&mut Interp)) {
+    for ptr in other_realms(me as *mut Interp) {
+        // SAFETY: a loaded realm, or a running one up-stack through `RUNNING`; `f` only edits its timer tables.
+        f(unsafe { &mut *ptr });
+    }
+}
+
 /// Ends the process with `code` as `process.exit` does: every realm's `exit` listeners run, output is flushed
 /// and the terminal restored, then the process ends at once (no unwinding, so no JS `catch`/`finally` runs).
 /// A worker's exit stays local to the worker, so this returns for one.
