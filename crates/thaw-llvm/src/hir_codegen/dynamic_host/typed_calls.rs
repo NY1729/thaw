@@ -1808,7 +1808,24 @@ impl<'ctx> HirCompiler<'ctx> {
         // `randomFillSync(buf)` returns the filled bytes; they are copied back into the caller's buffer
         // (the thaw-js side only ever sees a copy), as the QuickJS lane does.
         let mut returned_bytes_argument = None;
+        // Owner types of `__thaw_tjs_live_owner_arg` arguments: a returned handle of one of these types maps back to its owner.
+        let mut live_owner_types: Vec<HirType> = Vec::new();
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
+            if let HirExpr::Call(callee, call_args) = arg {
+                if let (HirExpr::Var(name), [projected, original]) = (callee.as_ref(), call_args.as_slice()) {
+                    if name == "__thaw_tjs_live_owner_arg" {
+                        self.uses_thaw_js_handles = true;
+                        self.js_mark_handles_used();
+                        let handle = self.compile_expr(projected)?.into_int_value();
+                        let marker = self.compile_thaw_js_handle_marker(handle)?;
+                        self.compile_json_array_push_owned(array, marker)?;
+                        if let Some(owner_type) = self.expr_hir_type(original) {
+                            live_owner_types.push(owner_type);
+                        }
+                        continue;
+                    }
+                }
+            }
             let reads_receiver = self.callback_expr_reads_receiver(arg) || self.closure_returns_promise(arg);
             let live_listener = self.live_json_listener(arg, ty);
             if thaw_js_callback_type(ty) && (reads_receiver || live_listener.is_some()) {
@@ -2011,7 +2028,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 .basic()
                 .ok_or("thaw_json_adopt_handle_marker returned no value")?;
         }
-        let result = self.compile_typed_dynamic_result(json, &signature.ret)?;
+        let result = match self.compile_live_owner_result(json, &signature.ret, &live_owner_types)? {
+            Some(owner) => owner,
+            None => self.compile_typed_dynamic_result(json, &signature.ret)?,
+        };
         if let Some((pending_promise, pending_end, merge_block)) = pending_edge {
             let resolved_end = self.builder.get_insert_block().unwrap();
             self.builder
@@ -2327,6 +2347,136 @@ impl<'ctx> HirCompiler<'ctx> {
         let object = self.compile_expr(literal);
         self.thaw_js_call_arguments = false;
         object
+    }
+
+    /// A result of the same object type as a live-owner argument that comes back as its handle marker
+    /// maps to the interned native owner; any other result decodes by value as before. Emits nothing
+    /// (returns None) unless a live-owner argument of this type was passed.
+    fn compile_live_owner_result(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        ret: &HirType,
+        live_owner_types: &[HirType],
+    ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+        let HirType::Object(fields) = ret else { return Ok(None) };
+        if live_owner_types.is_empty() || !live_owner_types.contains(ret) || thaw_js_date_type(ret) {
+            return Ok(None);
+        }
+        self.js_mark_handles_used();
+        let function = self.current_function();
+        let check_block = self.context.append_basic_block(function, "tjs_live_owner_check");
+        let owner_block = self.context.append_basic_block(function, "tjs_live_owner");
+        let decode_block = self.context.append_basic_block(function, "tjs_live_owner_decode");
+        let merge_block = self.context.append_basic_block(function, "tjs_live_owner_merge");
+        let key = self.intern_string("__thaw_tjs_handle__", "tjs_live_owner_key")
+            .map_err(|error| error.to_string())?;
+        let has = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_has_own").unwrap(),
+                &[json.into(), key.as_pointer_value().into()],
+                "tjs_live_owner_has",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_has_own returned no value")?
+            .into_int_value();
+        let is_marker = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::NE, has, self.context.i8_type().const_zero(), "tjs_live_owner_is_marker")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(is_marker, check_block, decode_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(check_block);
+        let marker = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_get").unwrap(),
+                &[json.into(), key.as_pointer_value().into()],
+                "tjs_live_owner_marker_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_get returned no value")?;
+        self.compile_check_json_host_error(marker, Some("thaw_json_destroy"))?;
+        let id = self.compile_json_as_value(marker, "thaw_json_as_number")?.into_float_value();
+        let id = self
+            .builder
+            .build_float_to_signed_int(id, self.context.i64_type(), "tjs_live_owner_id")
+            .map_err(|error| error.to_string())?;
+        let layout = self
+            .intern_string(&thaw_hir::native_object_layout_token(fields), "tjs_live_owner_layout")
+            .map_err(|error| error.to_string())?;
+        let lookup = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_js_native_object_pointer").unwrap(),
+                &[id.into(), layout.as_pointer_value().into()],
+                "tjs_live_owner_pointer",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_js_native_object_pointer returned no result")?
+            .into_struct_value();
+        let word = self
+            .builder
+            .build_extract_value(lookup, 0, "tjs_live_owner_word")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let error = self
+            .builder
+            .build_extract_value(lookup, 1, "tjs_live_owner_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
+        self.branch_on_pending_exception()?;
+        let present = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::NE, word, self.context.i64_type().const_zero(), "tjs_live_owner_present")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(present, owner_block, decode_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(owner_block);
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let owner = self
+            .builder
+            .build_int_to_ptr(word, ptr_type, "tjs_live_owner_value")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(self.module.get_function("thaw_json_destroy").unwrap(), &[json.into()], "destroy_tjs_live_owner_json")
+            .map_err(|error| error.to_string())?;
+        let owner_end = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(decode_block);
+        let decoded = self.compile_typed_dynamic_result(json, ret)?;
+        let decode_end = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(merge_block);
+        let phi = self
+            .builder
+            .build_phi(decoded.get_type(), "tjs_live_owner_result")
+            .map_err(|error| error.to_string())?;
+        phi.add_incoming(&[
+            (&owner as &dyn BasicValue<'ctx>, owner_end),
+            (&decoded as &dyn BasicValue<'ctx>, decode_end),
+        ]);
+        Ok(Some(phi.as_basic_value()))
     }
 
     /// `{"__thaw_tjs_handle__": id}` for an instance handle passed back into thaw-js.

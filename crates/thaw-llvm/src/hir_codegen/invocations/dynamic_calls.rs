@@ -164,6 +164,11 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_lookup_native_object" => self.compile_lookup_native_object(args),
             "__thaw_lookup_native_projector" => self.compile_lookup_native_projector(args),
             "__thaw_native_view_target" => self.compile_native_view_target(args),
+            // The live-owner marker passes its original value through; only the thaw-js typed call sends the handle.
+            "__thaw_tjs_live_owner_arg" => match args {
+                [_, original] => self.compile_expr(original),
+                _ => Err("live owner argument expects a handle and the original value".into()),
+            },
             "__thaw_json_link_native" | "__thaw_json_link_native_object" | "__thaw_json_link_native_tree" =>
                 self.compile_json_link_native(name, args),
             "__thaw_json_note_view_copy" => (|| {

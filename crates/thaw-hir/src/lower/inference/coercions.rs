@@ -533,6 +533,48 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// Coerces a value into its declared native layout.
+    /// `__thaw_tjs_live_owner_arg(projected, value)` for a NAMED (non-fresh) fixed object or class instance
+    /// passed to an `any`/generic slot of a thaw-js extern function, so the package receives the live
+    /// owner handle. None keeps the by-value path (literals, Dates, errors, decorated classes, ...).
+    pub(in crate::lower) fn thaw_js_live_owner_argument(
+        &mut self,
+        value: &HirExpr,
+        declared: &HirType,
+        generic: bool,
+    ) -> Result<Option<HirExpr>, String> {
+        let HirExpr::Var(name) = value else { return Ok(None) };
+        if self.fresh_object_bindings.contains(name) || !(generic || Self::type_holds_any(declared)) {
+            return Ok(None);
+        }
+        let actual = self.infer_expr_type(value)?;
+        let HirType::Object(fields) = &actual else { return Ok(None) };
+        let is_date = fields
+            .first()
+            .is_some_and(|(marker, _)| marker == "__thaw_class_identity_\u{1e}Date");
+        if is_date
+            || object_type_is_error_family(&actual)
+            || fields.first().is_some_and(|(marker, _)| {
+                DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow().contains_key(marker))
+            })
+        {
+            return Ok(None);
+        }
+        let is_class = fields.iter().any(|(n, _)| n.starts_with("__thaw_class_identity_\u{1e}"));
+        if !is_class && !self.live_projection_supported_with_classes(&actual) {
+            return Ok(None);
+        }
+        // A projection failure (recursive class, unsupported field) falls back to the by-value copy.
+        let Ok(projected) =
+            self.lower_fixed_object_as_dynamic_accessor_object(value.clone(), fields, false, true, is_class)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_tjs_live_owner_arg".into())),
+            vec![projected, value.clone()],
+        )))
+    }
+
     /// Whether a declared slot stores `any` values (directly or as an element).
     fn type_holds_any(declared: &HirType) -> bool {
         match declared {

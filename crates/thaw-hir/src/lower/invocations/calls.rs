@@ -4355,6 +4355,17 @@ impl<'a> FnLowerer<'a> {
                         && (symbol.starts_with("$method$") || symbol.starts_with("$methodvoid$"))
                 })
         });
+        // A thaw-js call to a plain extern FUNCTION (method/class symbols start with `$`) may take a live
+        // handle for a named object variable passed to an `any`/generic slot.
+        let thaw_js_live_owner_slot = signature.as_ref().is_some_and(|signature| {
+            signature.is_extern
+                && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)| {
+                    backend == DynamicBackend::ThawJs && !symbol.starts_with('$')
+                })
+        });
+        let generic_call = signature
+            .as_ref()
+            .is_some_and(|signature| !signature.generic_type_params.is_empty());
         let napi_constructor_typed_call = signature.as_ref().is_some_and(|signature| {
             signature.is_extern
                 && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)| {
@@ -4365,11 +4376,20 @@ impl<'a> FnLowerer<'a> {
             .into_iter()
             .enumerate()
             .map(|(i, value)| -> Result<HirExpr, String> {
-                match param_types
+                let declared_slot = param_types
                     .as_ref()
                     .and_then(|p| p.get(i))
-                    .or_else(|| signature.as_ref().and_then(|sig| sig.variadic.as_ref()))
-                {
+                    .or_else(|| signature.as_ref().and_then(|sig| sig.variadic.as_ref()));
+                if let Some(declared) = declared_slot.filter(|_| thaw_js_live_owner_slot) {
+                    if generic_call || Self::type_holds_any(declared) {
+                        if let Some(marked) =
+                            self.thaw_js_live_owner_argument(&value, declared, generic_call)?
+                        {
+                            return Ok(marked);
+                        }
+                    }
+                }
+                match declared_slot {
                     Some(_)
                         if signature
                             .as_ref()
