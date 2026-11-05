@@ -1369,7 +1369,8 @@ fn unsupported_text(what: &str) -> ThawResult {
 // package has not needed yet report an error instead of linking the QuickJS runtime.
 /// Introspection of the value behind `handle` for the Json host bridge (the numbering is the QuickJS
 /// `__thaw_json_host_query`'s). Kinds thaw-js has no value for (Date, Buffer, Map, Set, native
-/// wrappers) answer "no" to the copy queries; operation 29 says whether the value must stay a live handle.
+/// wrappers) answer "no" to the copy queries; operation 29 says whether the value must stay a live handle,
+/// and operation 30 whether a plain object or array must (a call argument keeps its identity).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> ThawResult {
     if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
@@ -1438,6 +1439,12 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
                 || matches!(&*o.kind.borrow(), Kind::Typed(t) if !matches!(t.ty, crate::typed::Ty::U8))
                 || (matches!(&*o.kind.borrow(), Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8))
                     && crate::find_in_chain(o, "__isBuffer").is_none()))),
+            // 30: a plain object or array (a promoted object literal, a native-class view) passed as a
+            // call argument keeps its identity as a live handle instead of a JSON copy. Kept apart from 29
+            // so `Json` slots that read 29 (structured clone) see no change.
+            30 => flag(
+                matches!(&v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Plain | Kind::Array(_))),
+            ),
             _ => {
                 return Err(HostError::Thrown(format!(
                     "TypeError: thaw-js does not support the host query {operation}"
@@ -4449,6 +4456,13 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             if is_live_value(&p.interp, &r) && !(want_date && p.interp.date_target(&r)) {
                 return Ok(handle_marker_json(store_handle(handle, r)));
             }
+            // A plain result that compiled code already holds by handle returns that handle (same identity).
+            if !(want_date && p.interp.date_target(&r)) {
+                if let Some(id) = live_handle_of(&r) {
+                    thaw_tjs_retain_handle(id as i64);
+                    return Ok(handle_marker_json(id as i64));
+                }
+            }
             from_value(&mut p.interp, &r, 0).map(|n| n.to_result_json())
         })
         .map_err(|e| e.to_string());
@@ -4818,6 +4832,18 @@ mod host_query_live_tests {
             query(construct("Proxy", "[{\"v\":{}},{\"v\":{}}]"), 29),
             "1"
         );
+    }
+
+    #[test]
+    fn host_query_plain_answers_one_for_plain_objects_and_arrays_only() {
+        assert_eq!(query(construct("Object", "[]"), 30), "1");
+        assert_eq!(query(construct("Array", "[]"), 30), "1");
+        assert_eq!(query(construct("Map", "[]"), 30), "0");
+        assert_eq!(query(construct("Float64Array", "[{\"v\":2}]"), 30), "0");
+        assert_eq!(query(construct("Buffer", "[{\"v\":3}]"), 30), "0");
+        assert_eq!(query(thaw_tjs_new_function_handle(), 30), "0");
+        // operation 29 keeps its meaning: a plain object is still copied by it
+        assert_eq!(query(construct("Object", "[]"), 29), "0");
     }
 
     #[test]

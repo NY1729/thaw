@@ -2874,11 +2874,13 @@ fn ordered_json(value: &Value) -> Value {
         }
     }
     // A thaw-js call argument that cannot survive a copy (a typed array other than Uint8Array, an
-    // ArrayBuffer, a Map or a Set held by thaw-js) stays a live handle: thaw-js resolves
-    // `{"__thaw_tjs_handle__": id}` back to the same object.
+    // ArrayBuffer, a Map or a Set held by thaw-js, or a plain object or array (op 30)) stays a live
+    // handle: thaw-js resolves `{"__thaw_tjs_handle__": id}` back to the same object.
     if DATE_WIRE.with(Cell::get) {
         if let Value::Host(lease) = value {
-            if host_query(lease, 29).as_deref() == Some("1") {
+            if host_query(lease, 29).as_deref() == Some("1")
+                || host_query(lease, 30).as_deref() == Some("1")
+            {
                 return Value::shared_object(indexmap::IndexMap::from([(
                     b"__thaw_tjs_handle__".to_vec(),
                     number_value(lease.handle as f64),
@@ -13499,6 +13501,58 @@ mod tests {
             assert_eq!(
                 read_c_string(thaw_json_stringify(root)),
                 r#"{"live":{"0":0,"1":0},"copied":{"0":0,"1":0}}"#
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn stringify_tjs_sends_a_live_plain_host_as_a_handle_marker() {
+        std::thread::spawn(|| {
+            // op 30 (plain object or array) answers "1" only for handle 9; handle 7 is a copyable Host
+            extern "C" fn query(handle: u64, operation: u8) -> HostTextResult {
+                let value: &[u8] = match (handle, operation) {
+                    (9, 30) => b"1",
+                    (7 | 9, 8) => b"{\"a\":1}",
+                    _ => b"0",
+                };
+                HostTextResult {
+                    value: thaw_arena::owned_string(value),
+                    error: std::ptr::null(),
+                }
+            }
+            HOST_OPERATIONS.with(|slot| {
+                slot.set(Some(HostOperations {
+                    retain: host_array_test_retain,
+                    release: host_array_test_release,
+                    get: host_array_test_get,
+                    query,
+                    date_set: unused_typed_scope_date,
+                    set: unused_typed_scope_set,
+                    predicate: unused_typed_scope_predicate,
+                    enumerate: unused_typed_scope_text,
+                }))
+            });
+            let plain = leak(Value::Host(Rc::new(HostLease {
+                handle: 9,
+                release: host_array_test_release,
+            })));
+            let copied = leak(Value::Host(Rc::new(HostLease {
+                handle: 7,
+                release: host_array_test_release,
+            })));
+            let root = thaw_json_object_new();
+            thaw_json_object_set_json(root, CString::new("plain").unwrap().as_ptr(), plain);
+            thaw_json_object_set_json(root, CString::new("copied").unwrap().as_ptr(), copied);
+            assert_eq!(
+                read_c_string(thaw_json_stringify_tjs(root)),
+                r#"{"plain":{"__thaw_tjs_handle__":9},"copied":{"a":1}}"#
+            );
+            // the ordinary stringifier does not ask op 30 at all
+            assert_eq!(
+                read_c_string(thaw_json_stringify(root)),
+                r#"{"plain":{"a":1},"copied":{"a":1}}"#
             );
         })
         .join()
