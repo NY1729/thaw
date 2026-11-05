@@ -3839,24 +3839,36 @@ pub extern "C" fn thaw_tjs_unload(handle: i64) {
 #[no_mangle]
 pub extern "C" fn thaw_tjs_run_cli() -> i32 {
     let arguments: Vec<String> = std::env::args().collect();
-    let Some(index) = crate::eventloop::cli_eval_index(&arguments) else {
-        return -1;
-    };
-    let Some(source) = arguments.get(index + 1) else {
-        eprintln!("{}: -e requires an argument", arguments[0]);
-        return 1;
-    };
-    run_eval_source(source)
+    if let Some(index) = crate::eventloop::cli_eval_index(&arguments) {
+        let Some(source) = arguments.get(index + 1) else {
+            eprintln!("{}: -e requires an argument", arguments[0]);
+            return 1;
+        };
+        return run_eval_source(source);
+    }
+    match crate::eventloop::cli_script_index(&arguments) {
+        Some(index) => run_script_file(&arguments[index]),
+        None => -1,
+    }
 }
 
 /// Runs `source` in the default realm the way `node -e` does, then drains the event loop; returns
 /// the exit status (an uncaught error is 1).
 pub(crate) fn run_eval_source(source: &str) -> i32 {
+    run_default_main(|it| it.run_main(source))
+}
+
+/// Runs a CommonJS script file as the main module (`node file.js`), then drains the event loop.
+fn run_script_file(path: &str) -> i32 {
+    run_default_main(|it| it.run_main_file(path))
+}
+
+fn run_default_main(main: impl FnOnce(&mut Interp) -> R<i32>) -> i32 {
     let handle = default_realm();
     let ran = with_package(handle, |p| {
-        p.interp
-            .run_main(source)
-            .map_err(|c| classify(&mut p.interp, c))
+        let code = main(&mut p.interp).map_err(|c| classify(&mut p.interp, c));
+        p.interp.flush_partial();
+        code
     });
     let status = match ran {
         Ok(code) => code,

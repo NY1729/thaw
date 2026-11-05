@@ -206,3 +206,26 @@ fn awaited_terminate_settles_through_await_settled() {
         .expect("await_settled settles the awaited terminate()");
     assert_eq!(text, "1");
 }
+
+#[test]
+fn file_worker_runs_a_commonjs_file_with_relative_require() {
+    let dir = std::env::temp_dir().join(format!("thaw-file-worker-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("helper.js"), "module.exports = 'from-helper';\n").unwrap();
+    std::fs::write(
+        dir.join("worker.js"),
+        "const { parentPort } = require('node:worker_threads');\nparentPort.postMessage(require('./helper'));\n",
+    )
+    .unwrap();
+    let file = dir.join("worker.js").display().to_string();
+    let src = format!(
+        "const wt = __thaw_worker_threads_exports;
+      (async () => {{
+        const worker = new wt.Worker({file:?});
+        await new Promise((resolve, reject) => {{ worker.once('message', (value) => {{ console.log(value); resolve(); }}); worker.once('error', reject); }});
+        await worker.terminate();
+      }})().catch((e) => console.log('failed ' + e));"
+    );
+    assert_eq!(run_main(&src), "from-helper");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -3791,3 +3791,91 @@ fn process_argv_starts_with_the_host_binary() {
         "true true string"
     );
 }
+
+/// A fresh fixture directory for the disk CommonJS loader tests (removed and recreated per run).
+fn main_file_fixture(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("thaw-main-file-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn main_file_loader_resolves_relative_json_and_index() {
+    let dir = main_file_fixture("resolve");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(
+        dir.join("main.js"),
+        "const h = require('./h');\nconst d = require('./d.json');\nconst i = require('./sub');\n\
+         console.log([h, d.k, i.name, __filename, __dirname, require.main === module, this === module.exports].join('|'));\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("h.js"), "module.exports = 'helper';\n").unwrap();
+    std::fs::write(dir.join("d.json"), "{\"k\": 1}").unwrap();
+    std::fs::write(dir.join("sub").join("index.js"), "exports.name = 'sub';\n").unwrap();
+    let main = dir.join("main.js").display().to_string();
+    let mut it = Interp::new();
+    assert_eq!(it.run_main_file(&main).ok(), Some(0));
+    let d = dir.display();
+    assert_eq!(
+        it.out.join("\n"),
+        format!("helper|1|sub|{d}/main.js|{d}|true|true")
+    );
+}
+
+#[test]
+fn main_file_loader_caches_cycles_and_reports_missing() {
+    let dir = main_file_fixture("cycle");
+    std::fs::write(
+        dir.join("main.js"),
+        "const a = require('./a');\n\
+         try { require('./nope'); } catch (e) { console.log(e.code, e.message); }\n\
+         console.log([a.before, a.fromB, a.done, require('./a') === a].join(','));\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("a.js"),
+        "exports.before = true;\nconst b = require('./b');\nexports.fromB = b.sawA;\nexports.done = true;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.js"),
+        "const a = require('./a');\nexports.sawA = a.before;\n",
+    )
+    .unwrap();
+    let mut it = Interp::new();
+    assert_eq!(
+        it.run_main_file(&dir.join("main.js").display().to_string())
+            .ok(),
+        Some(0)
+    );
+    assert_eq!(
+        it.out,
+        vec![
+            "MODULE_NOT_FOUND Cannot find module './nope'".to_string(),
+            "true,true,true,true".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn main_file_loader_strips_shebang_and_binds_this_to_exports() {
+    let dir = main_file_fixture("shebang");
+    std::fs::write(
+        dir.join("main.js"),
+        "console.log(require('./s').kind, require('./s').self);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("s.js"),
+        "#!/usr/bin/env node\nexports.kind = typeof module.exports;\nexports.self = this === module.exports;\n",
+    )
+    .unwrap();
+    let mut it = Interp::new();
+    assert_eq!(
+        it.run_main_file(&dir.join("main.js").display().to_string())
+            .ok(),
+        Some(0)
+    );
+    assert_eq!(it.out, vec!["object true".to_string()]);
+}
