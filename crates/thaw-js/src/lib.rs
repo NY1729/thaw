@@ -745,6 +745,7 @@ impl Interp {
         it.run(builtins::PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js prelude must evaluate"));
         it.run_promise_prelude();
+        it.install_main_file_loader();
         it.run(extras::EXTRAS).unwrap_or_else(|e| {
             let why = match &e {
                 Ctl::Throw(v) => {

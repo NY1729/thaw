@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 const TIMEOUT_MAX: f64 = 2147483647.0;
 const CO_STACK: usize = 64 << 20;
+const MAIN_FILE_LOADER: &str = include_str!("web/main_file.js");
 /// Per-thread evaluator state (depth, stack_limit, max_depth, run_id) carried across coroutine switches.
 type CoSnapshot = (usize, usize, usize, u32);
 
@@ -1117,7 +1118,21 @@ impl Interp {
 
     /// Run a script as a program: evaluate it, then run the event loop. Returns the exit code.
     pub fn run_main(&mut self, source: &str) -> R<i32> {
-        match self.run(source) {
+        let ran = self.run(source);
+        self.finish_main(ran)
+    }
+
+    /// Run a file as the main CommonJS module (`require`, relative paths, JSON, index files), then
+    /// the event loop. Returns the exit code.
+    pub fn run_main_file(&mut self, path: &str) -> R<i32> {
+        let mut quoted = String::new();
+        crate::builtins::json_quote(path, &mut quoted);
+        let ran = self.run(&format!("globalThis.__thaw_run_main_file({quoted})"));
+        self.finish_main(ran)
+    }
+
+    fn finish_main(&mut self, ran: R<Value>) -> R<i32> {
+        match ran {
             Ok(_) => self.run_event_loop(),
             Err(Ctl::Exit(c)) => {
                 if let Some(p) = self.rt.process.clone() {
@@ -1363,6 +1378,20 @@ impl Interp {
     pub(crate) fn run_promise_prelude(&mut self) {
         self.run(PROMISE_PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js promise prelude must evaluate"));
+    }
+
+    /// Defines `__thaw_run_main_file` (the disk CommonJS loader) and its file-read host primitive.
+    pub(crate) fn install_main_file_loader(&mut self) {
+        let read = self.native(|it, _, a| {
+            let path = it.to_str(&arg(a, 0)).to_string();
+            match std::fs::read_to_string(&path) {
+                Ok(source) => Ok(Value::str(&source)),
+                Err(e) => it.throw_error("Error", &format!("{e}: {path}")),
+            }
+        });
+        self.global.declare("__thaw_worker_read_source", read, true);
+        self.run(MAIN_FILE_LOADER)
+            .unwrap_or_else(|_| panic!("thaw-js main file loader must evaluate"));
     }
 
     fn install_process(&mut self) {
@@ -1684,8 +1713,27 @@ pub(crate) fn cli_eval_index(arguments: &[String]) -> Option<usize> {
         .find_map(|(index, argument)| (argument == "-e").then_some(index))
 }
 
+/// The script a `node [flags] file.js [args]` start runs: the first non-flag argument, when it is a
+/// `.js`/`.cjs` file that exists (the same rule as thaw-quickjs `cli_script`).
+pub(crate) fn cli_script_index(arguments: &[String]) -> Option<usize> {
+    let index = arguments
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, argument)| (!argument.starts_with('-')).then_some(index))?;
+    let script = arguments.get(index)?;
+    let path = std::path::Path::new(script);
+    matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("js" | "cjs")
+    )
+    .then_some(index)
+    .filter(|_| path.is_file())
+}
+
 /// `(process.argv, process.execArgv)` for the process arguments, matching thaw-quickjs context.rs:
-/// `-e SRC` keeps `-e SRC` in execArgv and drops it from argv; otherwise argv is every argument.
+/// `-e SRC` keeps `-e SRC` in execArgv and drops it from argv; a script keeps its path first in argv
+/// and the flags before it in execArgv; otherwise argv is every argument.
 pub(crate) fn node_argv_split(arguments: &[String]) -> (Vec<String>, Vec<String>) {
     match cli_eval_index(arguments) {
         Some(index) => {
@@ -1693,7 +1741,13 @@ pub(crate) fn node_argv_split(arguments: &[String]) -> (Vec<String>, Vec<String>
             argv.extend(arguments.iter().skip(index + 2).cloned());
             (argv, arguments[1..arguments.len().min(index + 2)].to_vec())
         }
-        None => (arguments.to_vec(), Vec::new()),
+        None => match cli_script_index(arguments) {
+            Some(index) => (
+                [&arguments[..1], &arguments[index..]].concat(),
+                arguments[1..index].to_vec(),
+            ),
+            None => (arguments.to_vec(), Vec::new()),
+        },
     }
 }
 
@@ -1720,6 +1774,25 @@ mod cli_argv_tests {
         // `-e` after a positional argument is not a flag, so it is not an eval.
         let (argv, _) = node_argv_split(&args(&["app", "a", "-e", "src"]));
         assert_eq!(argv, args(&["app", "a", "-e", "src"]));
+    }
+
+    #[test]
+    fn script_split_needs_an_existing_js_file_and_keeps_its_flags_in_exec_argv() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-script-split-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.js");
+        std::fs::write(&script, "").unwrap();
+        let script = script.display().to_string();
+        let (argv, exec) = node_argv_split(&args(&["app", "--no-warnings", &script, "tail"]));
+        assert_eq!(argv, args(&["app", &script, "tail"]));
+        assert_eq!(exec, args(&["--no-warnings"]));
+        // A missing file or a non-JS extension is not a script start.
+        let (argv, _) = node_argv_split(&args(&["app", "missing.js", "x"]));
+        assert_eq!(argv, args(&["app", "missing.js", "x"]));
+        let (argv, _) = node_argv_split(&args(&["app", "notes.txt"]));
+        assert_eq!(argv, args(&["app", "notes.txt"]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
