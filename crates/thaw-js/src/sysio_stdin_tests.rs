@@ -114,6 +114,31 @@ fn stdout_write_calls_its_trailing_callback_after_the_sync_code() {
     assert!(out.contains("order=sync,cb1,cb2"), "{out}");
 }
 
+#[test]
+fn stdout_write_of_a_buffer_shaped_object_writes_its_bytes() {
+    let mut it = Interp::new();
+    it.run_main("process.stdout.write({ type: 'Buffer', data: [104, 105, 10] });")
+        .unwrap_or_else(|_| panic!("script must run"));
+    let out = it.out.join("|");
+    assert!(
+        out.contains("hi") && !out.contains("[object Object]"),
+        "{out}"
+    );
+}
+
+#[test]
+fn stdout_write_of_a_non_byte_buffer_shaped_object_stays_text() {
+    let mut it = Interp::new();
+    it.run_main(
+        "process.stdout.write({ type: 'Buffer', data: [1.5] }); process.stdout.write('\\n'); \
+         process.stdout.write({ type: 'Buffer', data: [256] }); process.stdout.write('\\n'); \
+         process.stdout.write({ type: 'Buffer', data: [1], extra: 1 }); process.stdout.write('\\n');",
+    )
+    .unwrap_or_else(|_| panic!("script must run"));
+    let out = it.out.join("|");
+    assert_eq!(out.matches("[object Object]").count(), 3, "{out}");
+}
+
 #[cfg(unix)]
 #[test]
 fn unref_stdin_lets_the_loop_end() {

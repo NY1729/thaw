@@ -4672,3 +4672,122 @@ fn zlib_active_for_ignores_foreign_realm_jobs() {
         .unwrap_or_else(|_| panic!("take"));
     assert!(!crate::zlib::active_for(owner.realm_id));
 }
+
+// TJ84: a Timeout/Immediate created in one package realm must be clearable from another.
+
+/// A one-module bundle named `prefix` (the factory key is `{prefix}/index.js`), as `MINI` does.
+fn tj84_bundle(prefix: &str, body: &str) -> std::ffi::CString {
+    std::ffi::CString::new(format!(
+        "module.exports = (function(require){{\nvar __thaw_bundle_factories = {{\n\"{prefix}/index.js\": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {{\n{body}\n}},\n}};\nvar __thaw_bundle_require_maps = {{ \"{prefix}/index.js\": {{}}, }};\nvar __thaw_bundle_entry_key = \"{prefix}/index.js\";\n}})(globalThis.require);"
+    ))
+    .unwrap()
+}
+
+/// Run `f` on a fresh thread (its own package table); a hang or a panic in `f` fails instead of blocking.
+fn tj84_guarded(f: impl FnOnce() + Send + 'static) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        f();
+        let _ = tx.send(());
+    });
+    assert!(
+        matches!(rx.recv_timeout(std::time::Duration::from_secs(10)), Ok(())),
+        "hang (the timer was not cleared) or panic in the guarded body"
+    );
+}
+
+fn tj84_register(name: &str, body: &str) {
+    use crate::host::thaw_tjs_register;
+    let bundle = tj84_bundle(name, body);
+    let name = std::ffi::CString::new(name).unwrap();
+    assert_eq!(thaw_tjs_register(name.as_ptr(), bundle.as_ptr()), 1);
+}
+
+fn tj84_export(path: &str) -> u64 {
+    use crate::host::thaw_tjs_get_global;
+    let f = thaw_tjs_get_global(std::ffi::CString::new(path).unwrap().as_ptr());
+    assert!(f > 0, "{path}");
+    f as u64
+}
+
+/// Call the handle `f` with `args` (a wire JSON string) and return the result handle.
+fn tj84_call(f: u64, args: &str) -> u64 {
+    use crate::host::thaw_tjs_call_handle_handle_graph_args_result;
+    let args = std::ffi::CString::new(args).unwrap();
+    let r = thaw_tjs_call_handle_handle_graph_args_result(f, args.as_ptr(), false);
+    assert!(r.error.is_null(), "call failed");
+    r.value
+}
+
+/// Call `f` with the one argument `handle` (kept alive for the call).
+fn tj84_call_with_handle(f: u64, handle: u64) -> u64 {
+    use crate::host::thaw_tjs_retain_handle;
+    thaw_tjs_retain_handle(handle as i64);
+    tj84_call(
+        f,
+        &format!(r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{handle}}}]}}"#),
+    )
+}
+
+const TJ84_EMPTY_ARGS: &str = r#"{"root":{"r":0},"nodes":[{"a":[]}]}"#;
+
+const TJ84_A: &str = "exports.start = function () { globalThis.__n = 0; return setInterval(function () { globalThis.__n++; }, 1); };\n\
+exports.startTimeout = function () { return setTimeout(function () { globalThis.__fired = true; }, 50); };\n\
+exports.startImmediate = function () { return setImmediate(function () { globalThis.__fired = true; }); };\n\
+exports.fired = function () { return globalThis.__fired === true; };";
+
+const TJ84_B: &str = "exports.stop = function (t) { clearInterval(t); };\n\
+exports.stopTimeout = function (t) { clearTimeout(t); };\n\
+exports.stopImmediate = function (t) { clearImmediate(t); };\n\
+exports.noise = function () { setTimeout(function () { globalThis.__noise = true; }, 1); };\n\
+exports.noisy = function () { return globalThis.__noise === true; };";
+
+#[test]
+fn tj84_clear_interval_from_another_package_ends_the_loop() {
+    use crate::host::thaw_tjs_run_event_loop;
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ84_B);
+        let handle = tj84_call(tj84_export("a::start"), TJ84_EMPTY_ARGS);
+        tj84_call_with_handle(tj84_export("b::stop"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+    });
+}
+
+#[test]
+fn tj84_id_collision_does_not_clear_a_foreign_timer() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ84_B);
+        // a live timer in b, then the interval in a: both would have taken the same per-realm id
+        tj84_call(tj84_export("b::noise"), TJ84_EMPTY_ARGS);
+        let handle = tj84_call(tj84_export("a::start"), TJ84_EMPTY_ARGS);
+        tj84_call_with_handle(tj84_export("b::stop"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let noisy = tj84_call(tj84_export("b::noisy"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(noisy)) };
+        assert_eq!(text.to_str().unwrap(), "true", "b's timer was removed");
+    });
+}
+
+#[test]
+fn tj84_clear_timeout_and_immediate_across_packages() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ84_B);
+        let timeout = tj84_call(tj84_export("a::startTimeout"), TJ84_EMPTY_ARGS);
+        let immediate = tj84_call(tj84_export("a::startImmediate"), TJ84_EMPTY_ARGS);
+        tj84_call_with_handle(tj84_export("b::stopTimeout"), timeout);
+        tj84_call_with_handle(tj84_export("b::stopImmediate"), immediate);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let fired = tj84_call(tj84_export("a::fired"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(fired)) };
+        assert_eq!(
+            text.to_str().unwrap(),
+            "false",
+            "a cleared callback still ran"
+        );
+    });
+}
