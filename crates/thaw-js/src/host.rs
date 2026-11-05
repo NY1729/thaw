@@ -3878,6 +3878,11 @@ fn run_default_main(main: impl FnOnce(&mut Interp) -> R<i32>) -> i32 {
         }
     };
     let loop_status = thaw_tjs_run_event_loop();
+    // Output written during the loop (timers, then-callbacks) may end in a partial line too.
+    let _ = with_package(handle, |p| {
+        p.interp.flush_partial();
+        Ok(())
+    });
     if status != 0 {
         status
     } else {
