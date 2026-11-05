@@ -40,6 +40,7 @@ pub mod host;
 mod intl;
 mod json;
 mod napi_ops;
+mod napi_props;
 mod net;
 mod node_crypto;
 mod numfmt;
@@ -3640,6 +3641,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 mod fs_tests;
 #[cfg(test)]
 mod napi_ops_tests;
+#[cfg(test)]
+mod napi_props_tests;
 #[cfg(test)]
 mod net_tests;
 #[cfg(test)]
