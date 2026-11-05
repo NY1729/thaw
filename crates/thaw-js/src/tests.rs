@@ -4278,3 +4278,41 @@ fn a_realm_with_no_other_package_never_yields_its_slice() {
     assert!(!it.yielded);
     assert_eq!(it.out.join("|"), "done");
 }
+
+#[test]
+fn not_callable_error_names_the_value_kind() {
+    let mut it = Interp::new();
+    let cases = [
+        (Value::Undefined, "TypeError: undefined is not a function"),
+        (
+            Value::Null,
+            "TypeError: object is not a function (value null)",
+        ),
+        (
+            Value::str("abc"),
+            "TypeError: string is not a function (value 'abc')",
+        ),
+    ];
+    for (v, want) in cases {
+        match it.call(&v, &Value::Undefined, &[]) {
+            Err(Ctl::Throw(e)) => assert_eq!(it.to_str(&e).as_ref(), want),
+            _ => panic!("expected a TypeError throw for {want}"),
+        }
+    }
+}
+
+#[test]
+fn not_callable_error_names_the_constructor_of_an_object() {
+    let mut it = Interp::new();
+    let obj = it.run("({a: 1})").unwrap();
+    match it.call(&obj, &Value::Undefined, &[]) {
+        Err(Ctl::Throw(e)) => {
+            let msg = it.to_str(&e).to_string();
+            assert!(
+                msg.starts_with("TypeError: object is not a function (constructor Object, value "),
+                "{msg}"
+            );
+        }
+        _ => panic!("expected a TypeError throw"),
+    }
+}

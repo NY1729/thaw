@@ -1488,9 +1488,49 @@ impl Interp {
 
     // ----- calls -----
 
+    /// The text of a "not a function" error for `v`: its `typeof`, then the constructor name and
+    /// a short preview when they add something, e.g. `object is not a function (constructor Foo)`.
+    pub(crate) fn not_callable_message(&mut self, v: &Value) -> String {
+        let kind = match v {
+            Value::Undefined | Value::Hole => "undefined",
+            Value::Null => "object",
+            Value::Bool(_) => "boolean",
+            Value::Number(_) => "number",
+            Value::Str(_) => "string",
+            Value::BigInt(_) => "bigint",
+            Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Symbol { .. }) => "symbol",
+            Value::Object(_) => "object",
+        };
+        let mut detail = Vec::new();
+        if let Value::Object(o) = v {
+            if let Some(Slot::Data(Value::Object(c))) = find_in_chain(o, "constructor") {
+                if let Some((Slot::Data(Value::Str(name)), _)) = find_own(&c, "name") {
+                    if !name.is_empty() {
+                        detail.push(format!("constructor {name}"));
+                    }
+                }
+            }
+        }
+        let shown = self.inspect(v, false);
+        let shown = if shown.chars().count() > 60 {
+            format!("{}...", shown.chars().take(60).collect::<String>())
+        } else {
+            shown
+        };
+        if shown != kind {
+            detail.push(format!("value {shown}"));
+        }
+        if detail.is_empty() {
+            format!("{kind} is not a function")
+        } else {
+            format!("{kind} is not a function ({})", detail.join(", "))
+        }
+    }
+
     pub fn call(&mut self, f: &Value, this: &Value, args: &[Value]) -> R<Value> {
         let Value::Object(fo) = f else {
-            return self.throw_error("TypeError", "value is not a function");
+            let msg = self.not_callable_message(f);
+            return self.throw_error("TypeError", &msg);
         };
         enum Callee {
             Native(NativeFn),
@@ -1506,7 +1546,10 @@ impl Interp {
                 Callee::Class(def.name.clone().unwrap_or_else(|| "".into()))
             }
             Kind::Closure { def, scope } => Callee::Closure(def.clone(), scope.clone()),
-            _ => return self.throw_error("TypeError", "value is not a function"),
+            _ => {
+                let msg = self.not_callable_message(f);
+                return self.throw_error("TypeError", &msg);
+            }
         };
         if self.too_deep() {
             return self.throw_error("RangeError", "Maximum call stack size exceeded");
