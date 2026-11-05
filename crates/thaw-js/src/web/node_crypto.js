@@ -178,6 +178,110 @@ function hkdf(digest, ikm, salt, info, keylen, callback) {
   queueMicrotask(function () { callback(null, value); });
 }
 Object.assign(cryptoModule, { pbkdf2Sync: pbkdf2Sync, pbkdf2: pbkdf2, scryptSync: scryptSync, scrypt: scrypt, hkdfSync: hkdfSync, hkdf: hkdf });
+// Ciphers (AES cbc/ecb/ctr/gcm; natives in node_crypto/cipher.rs). Lifted from buffer_crypto.js with the
+// KeyObject branch dropped (KeyObject lands with the asymmetric PR). Stream (Transform) API is a known gap.
+function cryptoError(Type, code, message) { var e = new Type(message); e.code = code; return e; }
+// Natives return hex, or `!reason` on failure; map the reasons to the OpenSSL-style errors Node throws.
+function cipherChecked(result) {
+  if (result.charCodeAt(0) === 33) {
+    var reason = result.slice(1);
+    if (reason === 'bad decrypt') throw Object.assign(new Error('error:1C800064:Provider routines::bad decrypt'), { library: 'Provider routines', reason: 'bad decrypt', code: 'ERR_OSSL_BAD_DECRYPT' });
+    if (reason === 'wrong final block length' || reason === 'data not multiple of block length') throw Object.assign(new Error('error:1C80006B:Provider routines::wrong final block length'), { library: 'Provider routines', reason: 'wrong final block length', code: 'ERR_OSSL_WRONG_FINAL_BLOCK_LENGTH' });
+    throw new Error(reason);
+  }
+  return Buffer.from(result, 'hex');
+}
+class Cipheriv {
+  constructor(algorithm, key, iv, decrypt, options) {
+    var name = String(algorithm).toLowerCase().replace(/^(?:id-)?aes(\d+)$/, 'aes-$1-cbc').replace(/^id-/, '');
+    var match = /^aes-(128|192|256)-(cbc|ecb|ctr|gcm)$/.exec(name);
+    if (!match) throw cryptoError(Error, 'ERR_CRYPTO_UNKNOWN_CIPHER', 'Unknown cipher');
+    this.algorithm = name;
+    this.mode = match[2];
+    this.key = Buffer.from(key);
+    if (this.key.length * 8 !== Number(match[1])) throw cryptoError(RangeError, 'ERR_CRYPTO_INVALID_KEYLEN', 'Invalid key length');
+    this.iv = iv === null || iv === undefined ? Buffer.alloc(0) : Buffer.from(iv);
+    var ivOk = this.mode === 'ecb' ? this.iv.length === 0 : this.mode === 'gcm' ? this.iv.length > 0 : this.iv.length === 16;
+    if (!ivOk) throw cryptoError(TypeError, 'ERR_CRYPTO_INVALID_IV', 'Invalid initialization vector');
+    this.initialIv = this.iv;
+    this.decrypt = decrypt;
+    this.pending = Buffer.alloc(0);
+    this.finished = false;
+    this.autoPadding = true;
+    this.processed = 0;
+    this.aad = Buffer.alloc(0);
+    this.ciphertext = [];
+    this.tagLength = options && options.authTagLength !== undefined ? Number(options.authTagLength) : 16;
+    this.tag = null;
+  }
+  _out(value, outputEncoding) { return outputEncoding === undefined || outputEncoding === 'buffer' ? value : value.toString(outputEncoding); }
+  setAutoPadding(value) { this.autoPadding = value === undefined ? true : Boolean(value); return this; }
+  setAAD(buffer, options) {
+    if (this.mode !== 'gcm') throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation setAAD');
+    this.aad = Buffer.concat([this.aad, Buffer.from(buffer)]);
+    return this;
+  }
+  getAuthTag() {
+    if (this.decrypt || this.mode !== 'gcm' || this.tag === null) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation getAuthTag');
+    return Buffer.from(this.tag);
+  }
+  setAuthTag(tag) {
+    if (!this.decrypt || this.mode !== 'gcm' || this.finished) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation setAuthTag');
+    this.tag = Buffer.from(tag);
+    return this;
+  }
+  update(value, inputEncoding, outputEncoding) {
+    if (this.finished) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation update');
+    var input = Buffer.from(value, inputEncoding);
+    if (this.mode === 'ctr' || this.mode === 'gcm') {
+      var output = cipherChecked(__thaw_crypto_ctr_hex(this.mode === 'gcm', this.key.toString('hex'), this.iv.toString('hex'), this.processed, input.toString('hex')));
+      this.processed += input.length;
+      if (this.mode === 'gcm') this.ciphertext.push(this.decrypt ? input : output);
+      return this._out(output, outputEncoding);
+    }
+    this.pending = Buffer.concat([this.pending, input]);
+    var keepLast = this.decrypt && this.autoPadding;
+    var length = Math.max(0, Math.floor((this.pending.length - (keepLast ? 1 : 0)) / 16) * 16);
+    if (!length) return this._out(Buffer.alloc(0), outputEncoding);
+    var chunk = this.pending.subarray(0, length);
+    this.pending = Buffer.from(this.pending.subarray(length));
+    var blockOutput = cipherChecked(__thaw_crypto_cipher_hex(this.algorithm, this.key.toString('hex'), this.iv.toString('hex'), chunk.toString('hex'), this.decrypt, false, false));
+    this.iv = Buffer.from((this.decrypt ? chunk : blockOutput).subarray(length - 16, length));
+    return this._out(blockOutput, outputEncoding);
+  }
+  final(outputEncoding) {
+    if (this.finished) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation final');
+    this.finished = true;
+    if (this.mode === 'ctr') return this._out(Buffer.alloc(0), outputEncoding);
+    if (this.mode === 'gcm') {
+      var computed = cipherChecked(__thaw_crypto_gcm_tag_hex(this.key.toString('hex'), this.iv.toString('hex'), this.aad.toString('hex'), Buffer.concat(this.ciphertext).toString('hex')));
+      if (this.decrypt) {
+        if (this.tag === null || this.tag.length === 0 || !computed.subarray(0, this.tag.length).equals(this.tag)) throw new Error('Unsupported state or unable to authenticate data');
+      } else this.tag = computed.subarray(0, this.tagLength);
+      return this._out(Buffer.alloc(0), outputEncoding);
+    }
+    var value = cipherChecked(__thaw_crypto_cipher_hex(this.algorithm, this.key.toString('hex'), this.iv.toString('hex'), this.pending.toString('hex'), this.decrypt, true, this.autoPadding));
+    return this._out(value, outputEncoding);
+  }
+}
+function createCipheriv(algorithm, key, iv, options) { return new Cipheriv(algorithm, key, iv, false, options); }
+function createDecipheriv(algorithm, key, iv, options) { return new Cipheriv(algorithm, key, iv, true, options); }
+// timingSafeEqual: Node's messages and codes (the check is a plain XOR loop, as in QuickJS).
+function timingSafeBytes(value, name) {
+  // thaw-js's DataView is not an ArrayBuffer view (ArrayBuffer.isView is false for it), so test it explicitly.
+  if (ArrayBuffer.isView(value) || (typeof DataView === 'function' && value instanceof DataView)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  throw cryptoError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.');
+}
+function timingSafeEqual(left, right) {
+  var a = timingSafeBytes(left, 'buf1'), b = timingSafeBytes(right, 'buf2');
+  if (a.length !== b.length) throw cryptoError(RangeError, 'ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH', 'Input buffers must have the same byte length');
+  var difference = 0;
+  for (var i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
+  return difference === 0;
+}
+Object.assign(cryptoModule, { createCipheriv: createCipheriv, createDecipheriv: createDecipheriv, Cipheriv: Cipheriv, timingSafeEqual: timingSafeEqual });
 def(globalThis, '__thaw_Hash', Hash); // globals so the scan knows update/digest/copy
 def(globalThis, '__thaw_Hmac', Hmac);
+def(globalThis, '__thaw_Cipheriv', Cipheriv);
 def(globalThis, '__thaw_crypto_module', cryptoModule);
