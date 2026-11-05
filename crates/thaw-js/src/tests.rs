@@ -4011,3 +4011,97 @@ fn typed_call_result_marks_non_finite_numbers() {
     // finite numbers are unchanged
     assert_eq!(typed_call("nfn::num", "[1.5]").unwrap(), "1.5");
 }
+
+// ----- process.exit / exitCode across packages (host.rs terminate_process) -----
+
+thread_local! {
+    /// The status the exit hook received (the hook replaces `_exit` in these tests).
+    static HOOK_EXIT: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+fn record_hook_exit(code: i32) {
+    HOOK_EXIT.with(|c| c.set(Some(code)));
+}
+
+fn exit_hook_on() {
+    HOOK_EXIT.with(|c| c.set(None));
+    crate::host::set_exit_hook(Some(record_hook_exit));
+}
+
+/// Registers a package `name` whose entry module runs `body` (`exports` is in scope).
+fn register_exit_package(name: &str, body: &str) {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    let bundle = format!(
+        r#"module.exports = (function(require){{
+var __thaw_bundle_factories = {{ "{name}/index.js": function(module, exports, require) {{
+{body}
+}}, }};
+var __thaw_bundle_require_maps = {{ "{name}/index.js": {{}}, }};
+var __thaw_bundle_entry_key = "{name}/index.js";
+}})(globalThis.require);"#
+    );
+    let (name, source) = (CString::new(name).unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+}
+
+#[test]
+fn exit_from_another_package_uses_the_shared_exit_code() {
+    register_exit_package(
+        "xa",
+        "exports.setCode = function () { process.exitCode = 9; };",
+    );
+    register_exit_package("xb", "exports.quit = function () { process.exit(); };");
+    exit_hook_on();
+    typed_call("xa::setCode", "[]").expect("setCode");
+    assert!(typed_call("xb::quit", "[]").is_err());
+    assert_eq!(HOOK_EXIT.with(std::cell::Cell::get), Some(9));
+}
+
+#[test]
+fn exit_listener_in_another_realm_runs_with_the_exit_code() {
+    register_exit_package(
+        "ya",
+        "process.on('exit', function (c) { globalThis.seen = c; });
+         exports.seen = function () { return globalThis.seen; };",
+    );
+    register_exit_package("yb", "exports.quit = function () { process.exit(4); };");
+    exit_hook_on();
+    assert!(typed_call("yb::quit", "[]").is_err());
+    assert_eq!(HOOK_EXIT.with(std::cell::Cell::get), Some(4));
+    assert_eq!(typed_call("ya::seen", "[]"), Ok("4".to_string()));
+}
+
+#[test]
+fn exit_inside_a_timer_terminates_the_event_loop() {
+    use crate::host::thaw_tjs_run_event_loop;
+    register_exit_package(
+        "tm",
+        "exports.arm = function () { setTimeout(function () { process.exit(7); }, 1); };",
+    );
+    exit_hook_on();
+    typed_call("tm::arm", "[]").expect("arm");
+    assert_eq!(thaw_tjs_run_event_loop(), 7);
+    assert_eq!(HOOK_EXIT.with(std::cell::Cell::get), Some(7));
+}
+
+#[test]
+fn exit_is_not_catchable_by_js_try_catch() {
+    register_exit_package(
+        "ct",
+        "exports.guard = function () { try { process.exit(2); } catch (e) { globalThis.caught = 1; } };
+         exports.caught = function () { return globalThis.caught === 1; };",
+    );
+    exit_hook_on();
+    assert!(typed_call("ct::guard", "[]").is_err());
+    assert_eq!(HOOK_EXIT.with(std::cell::Cell::get), Some(2));
+    assert_eq!(typed_call("ct::caught", "[]"), Ok("false".to_string()));
+}
+
+#[test]
+fn natural_end_returns_the_shared_exit_code() {
+    use crate::host::thaw_tjs_run_event_loop;
+    register_exit_package("nt", "exports.set = function () { process.exitCode = 5; };");
+    typed_call("nt::set", "[]").expect("set");
+    assert_eq!(thaw_tjs_run_event_loop(), 5);
+}

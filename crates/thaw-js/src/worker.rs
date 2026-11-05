@@ -198,6 +198,11 @@ fn wire_of(it: &mut Interp, v: &Value) -> String {
     }
 }
 
+/// This interpreter runs as a worker thread (its exit stays local, its stdio is captured by the parent).
+pub(crate) fn is_worker(it: &Interp) -> bool {
+    it.worker.side.is_some()
+}
+
 /// Whether the loop must stay alive for workers: a referenced worker still running on the parent side, or
 /// (on a worker thread) a referenced parentPort listener.
 pub(crate) fn active(it: &Interp) -> bool {
