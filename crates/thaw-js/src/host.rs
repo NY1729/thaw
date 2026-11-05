@@ -824,6 +824,26 @@ fn graph_node(
             let items = graph_token(it, token, nodes, memo, busy)?;
             construct_global(it, if k == "m" { "Map" } else { "Set" }, &[items])?
         }
+        // `{"b":[0..255,...]}`: a branded Buffer/ArrayBuffer wrapper from compiled code, rebuilt as a `Buffer` exactly
+        // like the `__thaw_tjs_bytes__` arm of `to_value`.
+        [(k, Native::Array(items))] if k == "b" => {
+            let bytes: Vec<u8> = items
+                .iter()
+                .map(|item| match item {
+                    Native::Number(n) => *n as u8,
+                    _ => 0,
+                })
+                .collect();
+            let view = it.u8_from_vec(bytes);
+            let global = it.global.clone();
+            let proto = it
+                .lookup(&global, "Buffer")
+                .and_then(|b| it.get(&b, "prototype").ok());
+            if let (Value::Object(o), Some(Value::Object(p))) = (&view, proto) {
+                *o.proto.borrow_mut() = Some(p);
+            }
+            view
+        }
         _ => return Err("unsupported graph node (Buffer)".into()),
     };
     memo[index] = Some(value.clone());
@@ -3802,6 +3822,44 @@ impl Native {
                     "-Infinity"
                 }
             ),
+            other => other.to_json_keeping_undefined(),
+        }
+    }
+
+    /// `to_json` for a typed-call result: an `undefined` OWN property of an object keeps the compiled side's
+    /// `undefined` marker instead of vanishing (Object.keys / console.log see it; JSON.stringify still omits it).
+    /// Array items and the top level are unchanged (`undefined` stays `null` there).
+    fn to_json_keeping_undefined(&self) -> String {
+        match self {
+            Native::Array(a) => format!(
+                "[{}]",
+                a.iter()
+                    .map(|v| {
+                        if *v == Native::Undefined {
+                            "null".to_string()
+                        } else {
+                            v.to_json_keeping_undefined()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Native::Object(o) => format!(
+                "{{{}}}",
+                o.iter()
+                    .map(|(k, v)| {
+                        let mut key = String::new();
+                        crate::builtins::json_quote(k, &mut key);
+                        let value = if *v == Native::Undefined {
+                            format!("{{\"{UNDEFINED_KEY}\":true}}")
+                        } else {
+                            v.to_json_keeping_undefined()
+                        };
+                        format!("{key}:{value}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             other => other.to_json(),
         }
     }
@@ -4394,7 +4452,7 @@ fn pump_watches() -> usize {
             };
             Ok(Some(match state {
                 Ok(v) => from_value(&mut p.interp, &v, 0)
-                    .map(|n| n.to_json())
+                    .map(|n| n.to_json_keeping_undefined())
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(match frame_error(&mut p.interp, &e) {
                     Some((_, framed)) => framed,
@@ -4975,5 +5033,17 @@ mod handle_value_graph_await_tests {
         let argument = function_handle("return 1");
         let result = thaw_tjs_call_handle_value_graph_result(f, argument);
         assert!(!result.error.is_null());
+    }
+}
+
+#[cfg(test)]
+mod graph_bytes_node_tests {
+    use super::*;
+
+    #[test]
+    fn graph_b_node_decodes_to_a_buffer_over_its_bytes() {
+        let (_, v) = decode_wire(r#"{"root":{"r":0},"nodes":[{"b":[104,105]}]}"#).unwrap();
+        assert_eq!(Interp::view_bytes(&v), Some(vec![104, 105]));
+        assert!(Interp::typed_of(&v).is_some());
     }
 }

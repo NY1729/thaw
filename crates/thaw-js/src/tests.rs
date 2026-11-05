@@ -469,6 +469,38 @@ fn typed_arrays_wrap_values_and_share_their_buffer() {
 }
 
 #[test]
+fn typed_arrays_iterate_in_for_of_spread_array_from_and_entries() {
+    assert_eq!(
+        one("var u = new Uint8Array([7, 8]), out = [];
+             for (var x of u) out.push(x);
+             var f = new Float64Array([1.5, 2.5]);
+             console.log(out.join(), [...f].join(), Array.from(u).join(), Array.from(u.entries()).join(';'), [...u.keys()].join())"),
+        "7,8 1.5,2.5 7,8 0,7;1,8 0,1"
+    );
+}
+
+#[test]
+fn typed_array_symbol_iterator_is_the_values_function() {
+    assert_eq!(
+        one("var it = new Uint8Array([7, 8])[Symbol.iterator]();
+             var a = it.next(), b = it.next(), c = it.next();
+             var TP = Object.getPrototypeOf(Uint8Array.prototype);
+             console.log(a.value, b.value, c.done, TP[Symbol.iterator] === TP.values, Float32Array.prototype[Symbol.iterator] === TP.values)"),
+        "7 8 true true true"
+    );
+}
+
+#[test]
+fn buffer_iterates_like_a_uint8array() {
+    assert_eq!(
+        one("var b = Buffer.from([104, 105]), out = [];
+             for (var x of b) out.push(x);
+             console.log(out.join(), [...b].join(), Array.from(b).join())"),
+        "104,105 104,105 104,105"
+    );
+}
+
+#[test]
 fn url_parses_and_resolves_relative_references() {
     assert_eq!(
         one(
@@ -4041,6 +4073,68 @@ fn typed_call_result_marks_non_finite_numbers() {
     assert_eq!(typed_call("nfn::num", "[1.5]").unwrap(), "1.5");
 }
 
+#[test]
+fn typed_result_keeps_an_undefined_own_property_as_the_marker() {
+    register_exit_package(
+        "tjskeep",
+        "  exports.mk = function () { return { a: 1, gone: undefined, n: { z: undefined }, l: [undefined, { y: undefined }] }; };",
+    );
+    let marker = r#"{"$__thaw_napi_undefined$":true}"#;
+    assert_eq!(
+        typed_call("tjskeep::mk", "[]").unwrap(),
+        format!(r#"{{"a":1,"gone":{marker},"n":{{"z":{marker}}},"l":[null,{{"y":{marker}}}]}}"#)
+    );
+}
+
+#[test]
+fn typed_result_top_level_and_array_undefined_are_unchanged() {
+    register_exit_package(
+        "tjsku",
+        "  exports.u = function () { return undefined; };\n  exports.a = function () { return [undefined, 1]; };",
+    );
+    assert_eq!(
+        typed_call("tjsku::u", "[]").unwrap(),
+        r#"{"$__thaw_napi_undefined$":true}"#
+    );
+    assert_eq!(typed_call("tjsku::a", "[]").unwrap(), "[null,1]");
+}
+
+#[test]
+fn typed_arg_undefined_marker_round_trips_as_an_own_property() {
+    register_exit_package(
+        "tjsarg",
+        "  exports.k = function (o) { return Object.keys(o).join() + ':' + (o.a === undefined); };",
+    );
+    assert_eq!(
+        typed_call("tjsarg::k", r#"[{"a":{"$__thaw_napi_undefined$":true}}]"#).unwrap(),
+        "\"a:true\""
+    );
+}
+
+#[test]
+fn async_result_keeps_an_undefined_own_property() {
+    use crate::host::thaw_tjs_watch_promise;
+    register_exit_package(
+        "tjskpend",
+        "  exports.later = function () { return new Promise(function (r) { globalThis.fireObj = r; }); };\n  exports.fire = function () { globalThis.fireObj({ gone: undefined, a: 1 }); };",
+    );
+    let marker = typed_call("\u{4}tjskpend::later", "[]").expect("pending marker");
+    let id: i64 = marker
+        .strip_prefix(r#"{"__thaw_tjs_pending__":"#)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .expect("marker shape")
+        .parse()
+        .expect("handle id");
+    SETTLED.with(|s| s.borrow_mut().clear());
+    thaw_tjs_watch_promise(id, std::ptr::null_mut(), record_settle);
+    typed_call("tjskpend::fire", "[]").expect("fire");
+    let marker = r#"{"$__thaw_napi_undefined$":true}"#;
+    assert_eq!(
+        SETTLED.with(|s| s.borrow().clone()),
+        vec![(Some(format!(r#"{{"gone":{marker},"a":1}}"#)), None)]
+    );
+}
+
 // ----- process.exit / exitCode across packages (host.rs terminate_process) -----
 
 thread_local! {
@@ -4396,6 +4490,15 @@ fn run_loop_or_fail(setup: impl FnOnce() + Send + 'static) -> i32 {
     }
 }
 
+/// Serializes every test that starts a zlib job or reads the process-wide zlib tables (`zlib::active()`): those
+/// tables are shared by all threads, so a parallel test's pending job would otherwise leak into another's assertion.
+/// Held for the whole test body; a poisoned lock (an earlier panic) is recovered so later tests still run.
+pub(crate) static ZLIB_GLOBAL_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn zlib_global_guard() -> std::sync::MutexGuard<'static, ()> {
+    ZLIB_GLOBAL_TESTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Owner package: starts one gzip job and sets exitCode 3 once its own poll collects the result.
 const ZLIB_OWNER_BODY: &str = r#"exports.go = function () {
   var job = __thaw_zlib_async_start('compress', 'gzip', new Uint8Array(1 << 18), '');
@@ -4416,6 +4519,7 @@ const ZLIB_FOREIGN_POLLER_BODY: &str = r#"exports.arm = function () { var t0 = D
 
 #[test]
 fn zlib_job_completes_when_another_package_polls_the_table_first() {
+    let _zlib_guard = zlib_global_guard();
     let code = run_loop_or_fail(|| {
         register_exit_package("zfa", ZLIB_FOREIGN_POLLER_BODY);
         register_exit_package("zfo", ZLIB_OWNER_BODY);
@@ -4428,6 +4532,7 @@ fn zlib_job_completes_when_another_package_polls_the_table_first() {
 
 #[test]
 fn zlib_jobs_are_delivered_once_each_to_their_owner_despite_a_foreign_poller() {
+    let _zlib_guard = zlib_global_guard();
     // The owner starts two jobs; a foreign package polls the table; each owner callback must run exactly once.
     let owner = r#"exports.go = function () {
   var jobs = [__thaw_zlib_async_start('compress', 'gzip', new Uint8Array(1 << 18), ''),
@@ -4453,6 +4558,7 @@ fn zlib_jobs_are_delivered_once_each_to_their_owner_despite_a_foreign_poller() {
 
 #[test]
 fn zlib_chain_with_a_pending_net_connect_in_another_package_ends() {
+    let _zlib_guard = zlib_global_guard();
     // "tnb" (registered first) polls the zlib table and lives 100 ms; "tna" connects a loopback socket and runs a
     // gzip round trip whose second job starts inside the first job's callback, then tears everything down.
     let owner = r#"exports.go = function () {
@@ -4499,6 +4605,7 @@ fn zlib_chain_with_a_pending_net_connect_in_another_package_ends() {
 
 #[test]
 fn zlib_job_is_collected_only_by_the_realm_that_started_it() {
+    let _zlib_guard = zlib_global_guard();
     let mut owner = Interp::new();
     let mut other = Interp::new();
     owner
@@ -4564,6 +4671,7 @@ function netOpen(then) {
 
 #[test]
 fn zlib_hook_gzip_callback_with_net_write_destroy_close_ends() {
+    let _zlib_guard = zlib_global_guard();
     let owner = format!(
         "{ZLIB_SHIM_HOOK}{NET_OPEN_BODY}\n{}",
         r#"exports.go = function () {
@@ -4600,6 +4708,7 @@ fn zlib_hook_gzip_callback_with_net_write_destroy_close_ends() {
 
 #[test]
 fn zlib_owner_and_net_in_separate_packages_end() {
+    let _zlib_guard = zlib_global_guard();
     let net = format!(
         "{NET_OPEN_BODY}\n{}",
         r#"exports.arm = function () { netOpen(function (l, conn, acc) {
@@ -4630,6 +4739,7 @@ fn zlib_owner_and_net_in_separate_packages_end() {
 
 #[test]
 fn zlib_hook_without_registered_job_does_not_leak_done() {
+    let _zlib_guard = zlib_global_guard();
     // A result whose handle is in no callback table (a second shim instance) must still be taken, or DONE keeps
     // `zlib::active()` true and the loop never ends.
     let body = format!(
@@ -4646,6 +4756,7 @@ fn zlib_hook_without_registered_job_does_not_leak_done() {
 
 #[test]
 fn zlib_active_for_ignores_foreign_realm_jobs() {
+    let _zlib_guard = zlib_global_guard();
     let mut owner = Interp::new();
     let other = Interp::new();
     owner
@@ -4789,5 +4900,150 @@ fn tj84_clear_timeout_and_immediate_across_packages() {
             "false",
             "a cleared callback still ran"
         );
+    });
+}
+
+// TJ85: ref/unref/hasRef/refresh on a Timeout/Immediate created in another package realm.
+
+const TJ85_B: &str = "exports.unref = function (t) { t.unref(); };\n\
+exports.ref = function (t) { t.ref(); };\n\
+exports.hasRef = function (t) { return t.hasRef(); };\n\
+exports.refresh = function (t) { return t.refresh() === t; };";
+
+/// The string form of a result handle.
+fn tj85_text(handle: u64) -> String {
+    use crate::host::thaw_tjs_handle_to_string;
+    let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(handle)) };
+    text.to_str().unwrap().to_string()
+}
+
+#[test]
+fn tj85_foreign_unref_interval_ends_the_loop() {
+    use crate::host::thaw_tjs_run_event_loop;
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::start"), TJ84_EMPTY_ARGS);
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+    });
+}
+
+#[test]
+fn tj85_has_ref_tracks_a_foreign_unref_and_ref() {
+    use crate::host::thaw_tjs_run_event_loop;
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::start"), TJ84_EMPTY_ARGS);
+        let has_ref = tj84_export("b::hasRef");
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "true");
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "false");
+        tj84_call_with_handle(tj84_export("b::ref"), handle);
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "true");
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+    });
+}
+
+#[test]
+fn tj85_foreign_ref_after_unref_keeps_the_timer_alive() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::startTimeout"), TJ84_EMPTY_ARGS);
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        tj84_call_with_handle(tj84_export("b::ref"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let fired = tj84_call(tj84_export("a::fired"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(fired)) };
+        assert_eq!(
+            text.to_str().unwrap(),
+            "true",
+            "re-ref'd timeout did not run"
+        );
+    });
+}
+
+#[test]
+fn tj85_foreign_unref_timeout_does_not_block_the_loop() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::startTimeout"), TJ84_EMPTY_ARGS);
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let fired = tj84_call(tj84_export("a::fired"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(fired)) };
+        assert_eq!(text.to_str().unwrap(), "false", "unref'd timeout ran");
+    });
+}
+
+#[test]
+fn tj85_immediate_variants() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::startImmediate"), TJ84_EMPTY_ARGS);
+        let has_ref = tj84_export("b::hasRef");
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "true");
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "false");
+        tj84_call_with_handle(tj84_export("b::ref"), handle);
+        assert_eq!(tj85_text(tj84_call_with_handle(has_ref, handle)), "true");
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let fired = tj84_call(tj84_export("a::fired"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(fired)) };
+        assert_eq!(
+            text.to_str().unwrap(),
+            "true",
+            "re-ref'd immediate did not run"
+        );
+    });
+}
+
+#[test]
+fn tj85_foreign_refresh_returns_the_timeout_and_keeps_it_alive() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        tj84_register("a", TJ84_A);
+        tj84_register("b", TJ85_B);
+        let handle = tj84_call(tj84_export("a::startTimeout"), TJ84_EMPTY_ARGS);
+        let refreshed = tj84_call_with_handle(tj84_export("b::refresh"), handle);
+        assert_eq!(
+            tj85_text(refreshed),
+            "true",
+            "refresh did not return the timeout"
+        );
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let fired = tj84_call(tj84_export("a::fired"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(fired)) };
+        assert_eq!(
+            text.to_str().unwrap(),
+            "true",
+            "refreshed timeout did not run"
+        );
+    });
+}
+
+#[test]
+fn tj85_foreign_unref_does_not_touch_the_local_timer_in_the_caller() {
+    use crate::host::{thaw_tjs_handle_to_string, thaw_tjs_run_event_loop};
+    tj84_guarded(|| {
+        let b_body = format!("{TJ84_B}\n{TJ85_B}");
+        tj84_register("a", TJ84_A);
+        tj84_register("b", &b_body);
+        // a live ref'd timer owned by b, then a's interval: b's unref targets a's id
+        tj84_call(tj84_export("b::noise"), TJ84_EMPTY_ARGS);
+        let handle = tj84_call(tj84_export("a::start"), TJ84_EMPTY_ARGS);
+        tj84_call_with_handle(tj84_export("b::unref"), handle);
+        assert_eq!(thaw_tjs_run_event_loop(), 0);
+        let noisy = tj84_call(tj84_export("b::noisy"), TJ84_EMPTY_ARGS);
+        let text = unsafe { std::ffi::CStr::from_ptr(thaw_tjs_handle_to_string(noisy)) };
+        assert_eq!(text.to_str().unwrap(), "true", "b's timer was affected");
     });
 }
