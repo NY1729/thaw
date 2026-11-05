@@ -4063,6 +4063,20 @@ fn run_default_main(main: impl FnOnce(&mut Interp) -> R<i32>) -> i32 {
     }
 }
 
+/// Wall-clock time slice of one package's turn in the terminal loop (see `other_packages_have_work`).
+const SLICE_MS: u64 = 5;
+
+/// Another loaded package (not the one running; that one is taken out of its slot) has work: the running
+/// package's loop yields at its slice end so every package makes progress.
+pub(crate) fn other_packages_have_work() -> bool {
+    PACKAGES.with(|ps| {
+        ps.borrow()
+            .iter()
+            .flatten()
+            .any(|p| p.interp.work_pending())
+    })
+}
+
 /// Terminal event loop for a routed build that holds no QuickJS context: runs every loaded
 /// package's timers/immediates/jobs until idle. Returns 1 if a package ended with an uncaught
 /// error. (The codegen renames `thaw_js_run_event_loop` to this symbol for such builds.)
@@ -4076,6 +4090,7 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
         let drained = settled > 0 && drain_native();
         let count = PACKAGES.with(|ps| ps.borrow().len());
         let mut ran_any = false;
+        let mut yielded_any = false;
         for handle in 0..count {
             let ran = with_package(handle, |p| {
                 if !p.interp.work_pending() {
@@ -4085,11 +4100,28 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
                 // native continuations (compiled async code) run inside the loop, so a worker that keeps the loop
                 // alive does not starve a Promise a timer just resolved; re-entry into this package is `with_package`'s
                 p.interp.turn_hook = Some(drain_native_continuations);
+                p.interp.slice_end =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(SLICE_MS));
                 let r = p
                     .interp
                     .run_event_loop()
                     .map_err(|c| classify(&mut p.interp, c));
+                p.interp.slice_end = None;
                 p.interp.turn_hook = None;
+                // the slice ended with work left: not idle, so no exit handling; the next round re-enters this package
+                if std::mem::take(&mut p.interp.yielded) {
+                    yielded_any = true;
+                    // process.exit never yields, but stay safe if the flag is set
+                    if p.interp.rt.shared.exit_requested.get() {
+                        let code = crate::procstate::host_shared()
+                            .exit_code
+                            .get()
+                            .map_or(0, |n| n as i32);
+                        terminate_process(&mut p.interp, code);
+                        exited = true;
+                    }
+                    return Ok(0);
+                }
                 // `process.exit` from a timer, immediate, tick or stdin handler ends the process here
                 if let (true, Ok(code)) = (p.interp.rt.shared.exit_requested.get(), &r) {
                     terminate_process(&mut p.interp, *code);
@@ -4113,7 +4145,7 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
             break;
         }
         let watching = WATCHES.with(|w| !w.borrow().is_empty());
-        if settled == 0 && !drained && !(ran_any && watching) {
+        if settled == 0 && !drained && !(ran_any && watching) && !yielded_any {
             break;
         }
     }
