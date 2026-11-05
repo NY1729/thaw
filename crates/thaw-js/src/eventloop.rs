@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 const TIMEOUT_MAX: f64 = 2147483647.0;
 const CO_STACK: usize = 64 << 20;
 const MAIN_FILE_LOADER: &str = include_str!("web/main_file.js");
+const PROCESS_STDIN: &str = include_str!("web/process_stdin.js");
 /// Per-thread evaluator state (depth, stack_limit, max_depth, run_id) carried across coroutine switches.
 type CoSnapshot = (usize, usize, usize, u32);
 
@@ -216,6 +217,12 @@ pub(crate) struct Rt {
     /// Print console output as it happens instead of buffering it in `Interp::out`.
     pub(crate) stream: bool,
     partial: String,
+    /// The process state every realm of this host thread shares (`exitCode`, the exit request).
+    pub(crate) shared: std::rc::Rc<crate::procstate::ProcessShared>,
+    /// The `exit` event was emitted for this realm; it is emitted at most once.
+    pub(crate) exit_emitted: bool,
+    /// This realm started `process.stdin`, so its loop polls the stdin reader.
+    pub(crate) stdin_started: bool,
 }
 
 fn clock_ms() -> f64 {
@@ -290,6 +297,25 @@ impl Interp {
         } else {
             self.err.push(line.to_string());
         }
+    }
+
+    /// `process.stderr.write` on the main thread: the text as written (no added newline), after any partial stdout line.
+    pub(crate) fn emit_err_raw(&mut self, text: &str) {
+        self.flush_partial();
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), text.as_bytes());
+    }
+
+    /// Makes `shared` this realm's process state (`process.exitCode`, the exit request). Call before any script runs.
+    pub(crate) fn share_process_state(
+        &mut self,
+        shared: std::rc::Rc<crate::procstate::ProcessShared>,
+    ) {
+        self.rt.shared = shared;
+    }
+
+    /// `process.exitCode = code` (None is `undefined`), as every realm of the host sees it.
+    pub(crate) fn set_exit_code(&mut self, code: Option<f64>) {
+        self.rt.shared.exit_code.set(code);
     }
 
     // ----- promises -----
@@ -952,7 +978,10 @@ impl Interp {
                 if wait > 0.0 {
                     loop_idle_sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
-            } else if crate::child::active() || crate::zlib::active() || crate::worker::active(self)
+            } else if crate::child::active()
+                || crate::zlib::active()
+                || crate::worker::active(self)
+                || self.stdin_live()
             {
                 // nothing timed to wait for, but a platform event will arrive: poll again shortly
                 loop_idle_sleep(Duration::from_millis(2));
@@ -971,6 +1000,12 @@ impl Interp {
             || crate::child::active()
             || crate::zlib::active()
             || crate::worker::active(self)
+            || self.stdin_live()
+    }
+
+    /// This realm reads `process.stdin` and the reader is still open and referenced.
+    fn stdin_live(&self) -> bool {
+        self.rt.stdin_started && crate::sysio::stdin_active()
     }
 
     /// Call the shim-installed `globalThis.__thaw_poll_platform_events` (async zlib jobs, child process output and exits),
@@ -988,6 +1023,16 @@ impl Interp {
             if matches!(f, Value::Object(_)) {
                 self.call(&f, &g, &[Value::str(&events)])?;
                 self.run_jobs()?;
+            }
+        }
+        if self.rt.stdin_started {
+            let events = crate::sysio::poll_stdin();
+            if events != "[]" {
+                let f = self.get(&g, "__thaw_stdin_dispatch")?;
+                if matches!(f, Value::Object(_)) {
+                    self.call(&f, &g, &[Value::str(&events)])?;
+                    self.run_jobs()?;
+                }
             }
         }
         Ok(())
@@ -1026,6 +1071,7 @@ impl Interp {
                 if crate::child::active()
                     || crate::zlib::active()
                     || crate::worker::active(self)
+                    || self.stdin_live()
                     || self.interrupt.is_some()
                 {
                     wait = wait.min(2.0);
@@ -1036,6 +1082,7 @@ impl Interp {
             } else if crate::child::active()
                 || crate::zlib::active()
                 || crate::worker::active(self)
+                || self.stdin_live()
                 || self.interrupt.is_some()
             {
                 loop_idle_sleep(Duration::from_millis(2));
@@ -1071,14 +1118,26 @@ impl Interp {
             }
         }
         let code = code.unwrap_or_else(|| self.exit_code());
-        if let Some(p) = self.rt.process.clone() {
-            put(&p, "exitCode", Value::Number(code as f64));
+        self.set_exit_code(Some(code as f64));
+        self.emit_exit_event(code)?;
+        Ok(self.exit_code())
+    }
+
+    /// Emits `exit` with `code` unless this realm already did.
+    fn emit_exit_event(&mut self, code: i32) -> R<()> {
+        if std::mem::replace(&mut self.rt.exit_emitted, true) {
+            return Ok(());
         }
         match self.emit("exit", &[Value::Number(code as f64)]) {
-            Ok(_) | Err(Ctl::Exit(_)) => {}
-            Err(e) => return Err(e),
+            Ok(_) | Err(Ctl::Exit(_)) => Ok(()),
+            Err(e) => Err(e),
         }
-        Ok(self.exit_code())
+    }
+
+    /// Emits `exit` for a process ending with `code` from the host (`process.exit` in another realm, or a
+    /// terminal exit). Listeners may still change `process.exitCode`; the host reads it after this.
+    pub(crate) fn emit_exit_once(&mut self, code: i32) {
+        let _ = self.emit_exit_event(code);
     }
 
     /// Mark a promise as observed by the embedder (no unhandled-rejection report).
@@ -1106,14 +1165,8 @@ impl Interp {
         }
     }
 
-    fn exit_code(&mut self) -> i32 {
-        let Some(p) = self.rt.process.clone() else {
-            return 0;
-        };
-        match find_own(&p, "exitCode") {
-            Some((Slot::Data(Value::Number(n)), _)) => n as i32,
-            _ => 0,
-        }
+    fn exit_code(&self) -> i32 {
+        self.rt.shared.exit_code.get().map_or(0, |n| n as i32)
     }
 
     /// Run a script as a program: evaluate it, then run the event loop. Returns the exit code.
@@ -1135,13 +1188,9 @@ impl Interp {
         match ran {
             Ok(_) => self.run_event_loop(),
             Err(Ctl::Exit(c)) => {
-                if let Some(p) = self.rt.process.clone() {
-                    put(&p, "exitCode", Value::Number(c as f64));
-                }
-                match self.emit("exit", &[Value::Number(c as f64)]) {
-                    Ok(_) | Err(Ctl::Exit(_)) => Ok(self.exit_code()),
-                    Err(e) => Err(e),
-                }
+                self.set_exit_code(Some(c as f64));
+                self.emit_exit_event(c)?;
+                Ok(self.exit_code())
             }
             Err(e) => self.fatal(e),
         }
@@ -1149,10 +1198,8 @@ impl Interp {
 
     /// An uncaught exception: `exit` listeners still run, with code 1.
     fn fatal(&mut self, e: Ctl) -> R<i32> {
-        if let Some(p) = self.rt.process.clone() {
-            put(&p, "exitCode", Value::Number(1.0));
-        }
-        let _ = self.emit("exit", &[Value::Number(1.0)]);
+        self.set_exit_code(Some(1.0));
+        let _ = self.emit_exit_event(1);
         Err(e)
     }
 
@@ -1376,6 +1423,12 @@ impl Interp {
         self.install_process();
     }
 
+    /// `process.stdin` (web/process_stdin.js). Needs `__thaw_process_is_tty` from `install_sysio`.
+    pub(crate) fn install_process_stdin(&mut self) {
+        self.run(PROCESS_STDIN)
+            .unwrap_or_else(|_| panic!("thaw-js process.stdin must evaluate"));
+    }
+
     /// Promise combinators in JS; needs `Error`, so it runs after the main prelude.
     pub(crate) fn run_promise_prelude(&mut self) {
         self.run(PROMISE_PRELUDE)
@@ -1411,7 +1464,28 @@ impl Interp {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| arguments.first().cloned().unwrap_or_default());
         put(&p, "execPath", Value::str(&exec_path));
-        put(&p, "exitCode", Value::Undefined);
+        // `exitCode` lives in the realm-shared state, so every package's `process` agrees on it.
+        let exit_code_get = self.native(|it, _, _| {
+            Ok(match it.rt.shared.exit_code.get() {
+                Some(n) => Value::Number(n),
+                None => Value::Undefined,
+            })
+        });
+        let exit_code_set = self.native(|it, _, a| {
+            let code = match arg(a, 0) {
+                Value::Undefined | Value::Null => None,
+                v => Some(it.num(&v)),
+            };
+            it.set_exit_code(code);
+            Ok(Value::Undefined)
+        });
+        define_accessor(
+            &p,
+            "exitCode",
+            Some(exit_code_get),
+            Some(exit_code_set),
+            true,
+        );
         let versions = self.plain();
         put(&versions, "node", Value::str("22.23.1"));
         put(&versions, "v8", Value::str("12.4.254.21-node.33"));
@@ -1504,6 +1578,9 @@ impl Interp {
                 Value::Undefined => it.exit_code(),
                 v => it.num(&v) as i32,
             };
+            // The host ends the process at its boundary (host.rs), so every realm's exit listeners run.
+            it.set_exit_code(Some(code as f64));
+            it.rt.shared.exit_requested.set(true);
             Err(Ctl::Exit(code))
         });
         self.set_native(&p, "emitWarning", |it, _, a| {
@@ -1600,14 +1677,38 @@ impl Interp {
             let s = self.plain();
             self.set_native(&s, "write", move |it, _, a| {
                 let text = it.to_str(&arg(a, 0)).to_string();
+                // a main-thread stream writes its bytes as they come; a worker's output is captured by its parent
+                let direct = it.rt.stream && !crate::worker::is_worker(it);
                 if is_err {
-                    it.emit_err(text.trim_end_matches('\n'));
+                    if direct {
+                        it.emit_err_raw(&text);
+                    } else {
+                        it.emit_err(text.trim_end_matches('\n'));
+                    }
                 } else {
                     it.emit_out(&text, false);
+                    if direct {
+                        it.flush_partial();
+                    }
+                }
+                // Node: write(chunk[, encoding][, callback]) calls the trailing callback on a later tick
+                if let Some(cb) = a
+                    .get(1..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .rev()
+                    .find(|v| v.is_callable())
+                {
+                    it.rt
+                        .ticks
+                        .push_back((it.rt.actx.clone(), cb.clone(), vec![]));
                 }
                 Ok(Value::Bool(true))
             });
-            put(&s, "isTTY", Value::Bool(false));
+            // Node leaves isTTY undefined on a pipe or file
+            if crate::sysio::fd_is_tty(if is_err { 2 } else { 1 }) {
+                put(&s, "isTTY", Value::Bool(true));
+            }
             put(&p, name, Value::Object(s));
         }
         g.declare("process", Value::Object(p), true);
@@ -1748,7 +1849,14 @@ pub(crate) fn node_argv_split(arguments: &[String]) -> (Vec<String>, Vec<String>
                 [&arguments[..1], &arguments[index..]].concat(),
                 arguments[1..index].to_vec(),
             ),
-            None => (arguments.to_vec(), Vec::new()),
+            // Node's `[node, script, ...args]` shape: the executable stands for the script slot.
+            None => {
+                let mut argv = arguments.to_vec();
+                if let Some(exe) = arguments.first().cloned() {
+                    argv.insert(0, exe);
+                }
+                (argv, Vec::new())
+            }
         },
     }
 }
@@ -1771,11 +1879,11 @@ mod cli_argv_tests {
         assert_eq!(exec, args(&["--x", "-e", "src"]));
         // A script (no -e) keeps the plain argument list, as before.
         let (argv, exec) = node_argv_split(&args(&["app", "a", "b"]));
-        assert_eq!(argv, args(&["app", "a", "b"]));
+        assert_eq!(argv, args(&["app", "app", "a", "b"]));
         assert!(exec.is_empty());
         // `-e` after a positional argument is not a flag, so it is not an eval.
         let (argv, _) = node_argv_split(&args(&["app", "a", "-e", "src"]));
-        assert_eq!(argv, args(&["app", "a", "-e", "src"]));
+        assert_eq!(argv, args(&["app", "app", "a", "-e", "src"]));
     }
 
     #[test]
@@ -1791,9 +1899,9 @@ mod cli_argv_tests {
         assert_eq!(exec, args(&["--no-warnings"]));
         // A missing file or a non-JS extension is not a script start.
         let (argv, _) = node_argv_split(&args(&["app", "missing.js", "x"]));
-        assert_eq!(argv, args(&["app", "missing.js", "x"]));
+        assert_eq!(argv, args(&["app", "app", "missing.js", "x"]));
         let (argv, _) = node_argv_split(&args(&["app", "notes.txt"]));
-        assert_eq!(argv, args(&["app", "notes.txt"]));
+        assert_eq!(argv, args(&["app", "app", "notes.txt"]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1810,5 +1918,94 @@ mod cli_argv_tests {
         it.run("console.log(process.execPath)").unwrap();
         let expected = std::env::current_exe().unwrap().display().to_string();
         assert_eq!(it.out.join("").trim(), expected);
+    }
+}
+
+#[cfg(test)]
+mod process_state_tests {
+    use super::*;
+
+    fn output(it: &mut Interp, src: &str) -> String {
+        it.out.clear();
+        it.run(src)
+            .unwrap_or_else(|_| panic!("script must run: {src}"));
+        it.out.join("|")
+    }
+
+    #[test]
+    fn exit_code_is_an_accessor_over_shared_state() {
+        let mut it = Interp::new();
+        assert_eq!(
+            output(&mut it, "console.log(process.exitCode)"),
+            "undefined"
+        );
+        assert_eq!(
+            output(
+                &mut it,
+                "process.exitCode = 3; console.log(process.exitCode, typeof process.exitCode)"
+            ),
+            "3 number"
+        );
+        assert_eq!(it.rt.shared.exit_code.get(), Some(3.0));
+    }
+
+    #[test]
+    fn two_interps_sharing_state_see_one_exit_code() {
+        let shared = crate::procstate::host_shared();
+        let mut a = Interp::new();
+        let mut b = Interp::new();
+        a.share_process_state(shared.clone());
+        b.share_process_state(shared);
+        a.run("process.exitCode = 6").unwrap();
+        assert_eq!(output(&mut b, "console.log(process.exitCode)"), "6");
+    }
+
+    #[test]
+    fn process_exit_with_no_argument_uses_the_shared_exit_code() {
+        let mut it = Interp::new();
+        assert_eq!(
+            it.run_main("process.exitCode = 9; process.exit()").ok(),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn plain_argv_duplicates_the_executable() {
+        let words: Vec<String> = ["app", "a"].iter().map(|w| w.to_string()).collect();
+        let (argv, exec) = node_argv_split(&words);
+        assert_eq!(argv, ["app", "app", "a"]);
+        assert!(exec.is_empty());
+    }
+
+    #[test]
+    fn stdout_istty_is_absent_off_a_tty() {
+        let mut it = Interp::new();
+        let expected = if crate::sysio::fd_is_tty(1) {
+            "boolean"
+        } else {
+            "undefined"
+        };
+        assert_eq!(
+            output(&mut it, "console.log(typeof process.stdout.isTTY)"),
+            expected
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn stdin_object_exists_with_isTTY_undefined_off_a_tty() {
+        let mut it = Interp::new();
+        let expected = if crate::sysio::fd_is_tty(0) {
+            "boolean"
+        } else {
+            "undefined"
+        };
+        assert_eq!(
+            output(
+                &mut it,
+                "console.log(typeof process.stdin.on, typeof process.stdin.isTTY)"
+            ),
+            format!("function {expected}")
+        );
     }
 }
