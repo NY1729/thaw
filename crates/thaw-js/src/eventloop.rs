@@ -299,10 +299,18 @@ impl Interp {
         }
     }
 
-    /// `process.stderr.write` on the main thread: the text as written (no added newline), after any partial stdout line.
-    pub(crate) fn emit_err_raw(&mut self, text: &str) {
+    /// `process.stderr.write` on the main thread: the bytes as written (no added newline), after any partial stdout line.
+    pub(crate) fn emit_err_raw(&mut self, bytes: &[u8]) {
         self.flush_partial();
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), text.as_bytes());
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), bytes);
+    }
+
+    /// `process.stdout.write` of a typed array or ArrayBuffer on the main thread: the bytes as they are, flushed now.
+    pub(crate) fn emit_out_raw(&mut self, bytes: &[u8]) {
+        self.flush_partial();
+        let mut out = std::io::stdout().lock();
+        let _ = std::io::Write::write_all(&mut out, bytes)
+            .and_then(|()| std::io::Write::flush(&mut out));
     }
 
     /// Makes `shared` this realm's process state (`process.exitCode`, the exit request). Call before any script runs.
@@ -1694,15 +1702,23 @@ impl Interp {
         for (name, is_err) in [("stdout", false), ("stderr", true)] {
             let s = self.plain();
             self.set_native(&s, "write", move |it, _, a| {
-                let text = it.to_str(&arg(a, 0)).to_string();
+                // a typed array or ArrayBuffer carries bytes; anything else is text
+                let chunk = arg(a, 0);
+                let raw = Interp::view_bytes(&chunk);
+                let text = match &raw {
+                    Some(b) => String::from_utf8_lossy(b).into_owned(),
+                    None => it.to_str(&chunk).to_string(),
+                };
                 // a main-thread stream writes its bytes as they come; a worker's output is captured by its parent
                 let direct = it.rt.stream && !crate::worker::is_worker(it);
                 if is_err {
                     if direct {
-                        it.emit_err_raw(&text);
+                        it.emit_err_raw(raw.as_deref().unwrap_or(text.as_bytes()));
                     } else {
                         it.emit_err(text.trim_end_matches('\n'));
                     }
+                } else if let (true, Some(b)) = (direct, raw.as_deref()) {
+                    it.emit_out_raw(b);
                 } else {
                     it.emit_out(&text, false);
                     if direct {
