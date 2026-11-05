@@ -1964,7 +1964,7 @@ fn set_composition_keeps_jit_with_maplike_js_fallback() {
     )
     .unwrap();
     let output = dir.join("app");
-    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    build_quickjs_pinned(&entry, &output, &registry).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
@@ -2163,7 +2163,7 @@ fn map_get_set_use_typed_js_fallback() {
     )
     .unwrap();
     let output = dir.join("app");
-    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    build_quickjs_pinned(&entry, &output, &registry).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
@@ -2199,7 +2199,7 @@ fn map_keys_values_use_typed_js_fallback() {
     )
     .unwrap();
     let output = dir.join("app");
-    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    build_quickjs_pinned(&entry, &output, &registry).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
@@ -2235,7 +2235,7 @@ fn direct_map_entry_iteration_uses_typed_js_fallback() {
     )
     .unwrap();
     let output = dir.join("app");
-    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    build_quickjs_pinned(&entry, &output, &registry).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
@@ -2271,7 +2271,7 @@ fn map_and_set_for_each_keep_map_on_js_fallback() {
     )
     .unwrap();
     let output = dir.join("app");
-    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    build_quickjs_pinned(&entry, &output, &registry).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
@@ -2298,7 +2298,7 @@ fn mixed_map_key_types_use_js_fallback_with_same_value_zero() {
         "import { run } from 'map-key-kinds';\nfunction main(): void { console.log(run()); }\n"
     ).unwrap();
     let output = dir.join("app");
-    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    build_quickjs_pinned(&entry, &output, &registry).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
