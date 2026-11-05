@@ -4123,6 +4123,9 @@ impl<'a> FnLowerer<'a> {
                             self.next_binding += 1;
                             self.scope.insert(parameter.clone(), operand_type.clone());
                             let bound = HirExpr::Var(parameter.clone());
+                            // A `catch (e)` binding is the carrier: its String member can hold a
+                            // framed Error from a thaw-js call failure, which must read "object".
+                            let is_carrier = operand_type == crate::caught_exception_carrier_type();
                             let member_typeof = |index: usize, member: &HirType| {
                                 let projected = HirExpr::UnionValue(
                                     Box::new(bound.clone()),
@@ -4152,6 +4155,15 @@ impl<'a> FnLowerer<'a> {
                                         Box::new(HirExpr::Var("__thaw_exception_typeof".into())),
                                         vec![HirExpr::Call(
                                             Box::new(HirExpr::Var("__thaw_native_exception_tag".into())),
+                                            vec![projected],
+                                        )],
+                                    )),
+                                    HirType::Str if is_carrier => Ok(HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                                        vec![HirExpr::Call(
+                                            Box::new(HirExpr::Var(
+                                                "__thaw_json_receiver_string".into(),
+                                            )),
                                             vec![projected],
                                         )],
                                     )),
