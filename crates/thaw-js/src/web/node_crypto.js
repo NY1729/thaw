@@ -116,6 +116,68 @@ var cryptoModule = {
     return outputEncoding === 'buffer' ? value : value.toString(outputEncoding);
   }
 };
+// KDFs (lifted from buffer_crypto.js; same natives and messages as QuickJS).
+function checkedPbkdf2Number(value, minimum, name) {
+  var number = Number(value);
+  if (!Number.isInteger(number) || number < minimum || number > 0xffffffff) throw new RangeError(name + ' out of range');
+  return number;
+}
+function pbkdf2Sync(password, salt, iterations, keylen, digest) {
+  return Buffer.from(__thaw_crypto_pbkdf2_hex(
+    normalizeDigestAlgorithm(digest),
+    Buffer.from(password).toString('hex'),
+    Buffer.from(salt).toString('hex'),
+    checkedPbkdf2Number(iterations, 1, 'iterations'),
+    checkedPbkdf2Number(keylen, 0, 'keylen')
+  ), 'hex');
+}
+function scryptSync(password, salt, keylen, options) {
+  options = options || {};
+  return Buffer.from(__thaw_crypto_scrypt_hex(
+    Buffer.from(password).toString('hex'),
+    Buffer.from(salt).toString('hex'),
+    Number(keylen),
+    Number(options.N === undefined ? 16384 : options.N),
+    Number(options.r === undefined ? 8 : options.r),
+    Number(options.p === undefined ? 1 : options.p)
+  ), 'hex');
+}
+function pbkdf2(password, salt, iterations, keylen, digest, callback) {
+  if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+  var value;
+  try { value = pbkdf2Sync(password, salt, iterations, keylen, digest); } catch (error) { if (error.code === undefined && error instanceof TypeError) throw error; queueMicrotask(function () { callback(error); }); return; }
+  queueMicrotask(function () { callback(null, value); });
+}
+function scrypt(password, salt, keylen, options, callback) {
+  if (typeof options === 'function') { callback = options; options = {}; }
+  if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+  queueMicrotask(function () {
+    var value;
+    try { value = scryptSync(password, salt, keylen, options); }
+    catch (error) { callback(error); return; }
+    callback(null, value);
+  });
+}
+// ponytail: Node returns an ArrayBuffer; a Buffer (also a Uint8Array) keeps typed callers' Buffer.from/new Uint8Array working.
+function hkdfSync(digest, ikm, salt, info, keylen) {
+  var key = Buffer.from(ikm);
+  var hmac = function (k, d) { return new Hmac(digest, k).update(d).digest(); };
+  var prk = hmac(Buffer.from(salt), key);
+  var infoBuffer = Buffer.from(info), blocks = [];
+  var previous = Buffer.alloc(0), length = 0;
+  for (var counter = 1; length < keylen; counter++) {
+    previous = hmac(prk, Buffer.concat([previous, infoBuffer, Buffer.from([counter])]));
+    blocks.push(previous); length += previous.length;
+  }
+  return Buffer.concat(blocks).subarray(0, keylen);
+}
+function hkdf(digest, ikm, salt, info, keylen, callback) {
+  if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+  var value;
+  try { value = hkdfSync(digest, ikm, salt, info, keylen); } catch (error) { queueMicrotask(function () { callback(error); }); return; }
+  queueMicrotask(function () { callback(null, value); });
+}
+Object.assign(cryptoModule, { pbkdf2Sync: pbkdf2Sync, pbkdf2: pbkdf2, scryptSync: scryptSync, scrypt: scrypt, hkdfSync: hkdfSync, hkdf: hkdf });
 def(globalThis, '__thaw_Hash', Hash); // globals so the scan knows update/digest/copy
 def(globalThis, '__thaw_Hmac', Hmac);
 def(globalThis, '__thaw_crypto_module', cryptoModule);
