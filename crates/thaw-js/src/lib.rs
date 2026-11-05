@@ -708,6 +708,17 @@ impl Visit for ArgumentsFinder {
 
 impl Interp {
     pub fn new() -> Interp {
+        Self::build(true)
+    }
+
+    /// A `node:vm` context realm: the ECMAScript globals only. The host-only installers (process, sysio,
+    /// node/web modules, crypto, URL, Intl) are skipped; `vm.rs` would hide or discard them anyway.
+    pub(crate) fn new_vm_realm() -> Interp {
+        Self::build(false)
+    }
+
+    /// `host == false` builds a bare ECMAScript realm (see `new_vm_realm`).
+    fn build(host: bool) -> Interp {
         let object_proto = new_obj(None, Kind::Plain);
         let mk = |op: &Obj| new_obj(Some(op.clone()), Kind::Plain);
         let (function_proto, array_proto, string_proto, regexp_proto) = (
@@ -765,7 +776,9 @@ impl Interp {
         it.run(builtins::PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js prelude must evaluate"));
         it.run_promise_prelude();
-        it.install_main_file_loader();
+        if host {
+            it.install_main_file_loader();
+        }
         it.run(extras::EXTRAS).unwrap_or_else(|e| {
             let why = match &e {
                 Ctl::Throw(v) => {
@@ -779,38 +792,40 @@ impl Interp {
         it.install_array_iteration();
         it.install_typed();
         it.install_buffer();
-        it.install_sysio();
-        it.install_process_stdin();
-        net::install(&mut it);
-        worker::install(&mut it);
-        dns::install(&mut it);
-        vm::install(&mut it);
-        zlib::install(&mut it);
-        tls::install(&mut it);
-        it.install_fs_host();
-        web_dom_exception::install(&mut it);
-        web_text_codec::install(&mut it);
-        web_event_target::install(&mut it);
-        web_messaging::install(&mut it);
-        web_worker_stream::install(&mut it);
-        web_worker_wire::install(&mut it);
-        web_worker_threads::install(&mut it);
-        web_abort::install(&mut it);
-        web_blob::install(&mut it);
-        web_fetch::install(&mut it);
-        web_streams::install(&mut it);
-        web_async_hooks::install(&mut it);
-        web_wasm::install(&mut it);
-        web_crypto::install(&mut it);
-        node_crypto::install(&mut it);
-        it.install_url();
-        #[cfg(feature = "intl")]
-        {
-            // timers are scheduled against `rt.now`, which only the event loop advances: do not let the
-            // polyfill's evaluation time make a timer created by the program overdue at the first turn
-            let started = std::time::Instant::now();
-            it.install_intl();
-            it.skip_timer_clock(started.elapsed().as_secs_f64() * 1000.0);
+        if host {
+            it.install_sysio();
+            it.install_process_stdin();
+            net::install(&mut it);
+            worker::install(&mut it);
+            dns::install(&mut it);
+            vm::install(&mut it);
+            zlib::install(&mut it);
+            tls::install(&mut it);
+            it.install_fs_host();
+            web_dom_exception::install(&mut it);
+            web_text_codec::install(&mut it);
+            web_event_target::install(&mut it);
+            web_messaging::install(&mut it);
+            web_worker_stream::install(&mut it);
+            web_worker_wire::install(&mut it);
+            web_worker_threads::install(&mut it);
+            web_abort::install(&mut it);
+            web_blob::install(&mut it);
+            web_fetch::install(&mut it);
+            web_streams::install(&mut it);
+            web_async_hooks::install(&mut it);
+            web_wasm::install(&mut it);
+            web_crypto::install(&mut it);
+            node_crypto::install(&mut it);
+            it.install_url();
+            #[cfg(feature = "intl")]
+            {
+                // timers are scheduled against `rt.now`, which only the event loop advances: do not let the
+                // polyfill's evaluation time make a timer created by the program overdue at the first turn
+                let started = std::time::Instant::now();
+                it.install_intl();
+                it.skip_timer_clock(started.elapsed().as_secs_f64() * 1000.0);
+            }
         }
         it.run(extras::EXTRAS_LATE)
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
@@ -3646,3 +3661,6 @@ mod net_tests;
 mod sysio_stdin_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod vm_realm_tests;
