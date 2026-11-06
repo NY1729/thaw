@@ -80,7 +80,7 @@ impl Deref for JsStr {
     #[inline]
     fn deref(&self) -> &str {
         match &self.0 {
-            Repr::Plain(r) => &**r,
+            Repr::Plain(r) => r,
             Repr::Buf(b) => b.s.as_str(),
         }
     }
