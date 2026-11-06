@@ -4139,6 +4139,8 @@ fn terminate_process(it: &mut Interp, code: i32) {
         other.emit_exit_once(code);
         other.flush_partial();
     }
+    // the napi side retires before the process ends; its callbacks may run JS on this realm
+    crate::napi_bridge::shutdown_at_exit(it);
     // exit listeners may have changed `process.exitCode`; every realm shares it
     let status = it.rt.shared.exit_code.get().map_or(code, |n| n as i32);
     it.flush_partial();
@@ -4225,6 +4227,19 @@ pub extern "C" fn thaw_tjs_call(
 
 #[no_mangle]
 pub extern "C" fn thaw_tjs_unload(handle: i64) {
+    // The napi host is thread-local: it retires with the last package of this thread, before that realm is dropped.
+    let last = PACKAGES.with(|ps| {
+        ps.borrow()
+            .iter()
+            .enumerate()
+            .all(|(i, slot)| i as i64 == handle || slot.is_none())
+    });
+    if last && crate::napi_bridge::registered() {
+        let _ = with_package(handle as usize, |p| {
+            crate::napi_bridge::shutdown_at_exit(&mut p.interp);
+            Ok(())
+        });
+    }
     PACKAGES.with(|ps| {
         if let Some(slot) = ps.borrow_mut().get_mut(handle as usize) {
             *slot = None;
@@ -4389,13 +4404,13 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
 #[no_mangle]
 pub extern "C" fn thaw_tjs_terminal_work_pending() -> u8 {
     let count = PACKAGES.with(|ps| ps.borrow().len());
-    (0..count).any(|h| {
+    ((0..count).any(|h| {
         PACKAGES.with(|ps| {
             ps.borrow()
                 .get(h)
                 .is_some_and(|p| p.as_ref().is_some_and(|p| p.interp.work_pending()))
         })
-    }) as u8
+    }) || crate::napi_bridge::pending()) as u8
 }
 
 /// Free a string returned by this module.
