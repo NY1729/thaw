@@ -1,7 +1,8 @@
 //! The N-API side of the graph wire (PR 6a of the N-API seam). `decode_napi_wire` reads the wire thaw-napi
 //! writes: the shared token and node decoder of host.rs with `GraphCx::napi` set, plus the lease lists.
 //! The native tags (`TAGS`), the native pair proofs and the lone `nh`/`nfn`/`nsy` tokens are in the second half.
-//! ponytail: the encoder (6a-3) is below; the `nfn`/`nh` emission and `napiLeases` come in 6a-4.
+//! `NapiWireOut` (the encoder) is the other half: it emits `nfn`/`nh` for the tagged proxies and `nsy` for
+//! native Symbols, and fills `napiLeases` with the references it retains through the bridge.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -296,7 +297,7 @@ pub(crate) fn lone_symbol(it: &mut Interp, owner: usize, native: &str) -> Result
 }
 
 // ---- The N-API encoder (PR 6a-3): the data part of runtime.js `thawGraphEncode`, live mode. ----
-// ponytail: no `nfn`/`nh` tags and no `napiLeases` (PR 6a-4); no plain-result mode (6a-5 keeps it on WireOut).
+// ponytail: no plain-result mode (6a-5 keeps it on WireOut).
 // ponytail: a Proxy, Promise, Generator, wrapper or global object is a handle, not a copy (QuickJS copies its own keys).
 
 use crate::builtins::{json_quote, str_units};
@@ -318,6 +319,7 @@ pub(crate) struct NapiWireOut {
     live: bool,
     force: Option<Value>,
     leases: Vec<u64>,
+    napi_leases: Vec<u64>,
     sources: Vec<Source>,
     nodes: Vec<String>,
     ids: HashMap<*const ObjData, usize>,
@@ -328,6 +330,23 @@ pub(crate) struct NapiWireOut {
 /// The Error a value with no graph form raises (runtime.js `Unsupported native callback graph value`).
 fn unsupported_value() -> HostError {
     HostError::Thrown("TypeError: Unsupported native callback graph value".into())
+}
+
+fn cannot_retain() -> HostError {
+    HostError::Thrown("TypeError: Cannot retain native graph handle".into())
+}
+
+fn owner_unavailable() -> HostError {
+    HostError::Thrown("TypeError: Native Symbol owner is unavailable".into())
+}
+
+/// The native identity `tag` recorded for `o`, if any.
+fn tagged(o: &Obj) -> Option<(Tag, String)> {
+    TAGS.with(|t| {
+        t.borrow()
+            .get(&(Rc::as_ptr(o) as usize))
+            .map(|(_, kind, native)| (*kind, native.clone()))
+    })
 }
 
 /// The UTF-16 units of `s` when it holds an unpaired surrogate (`su` token), else `None`.
@@ -403,6 +422,7 @@ impl NapiWireOut {
             live,
             force,
             leases: Vec::new(),
+            napi_leases: Vec::new(),
             sources: Vec::new(),
             nodes: Vec::new(),
             ids: HashMap::new(),
@@ -423,6 +443,53 @@ impl NapiWireOut {
 
     fn hdl(&mut self, v: &Value) -> String {
         format!("{{\"hdl\":{}}}", self.lease(v))
+    }
+
+    /// The one host lease of Symbol `v` (runtime.js `retainSymbol`): every token and node shares it.
+    fn retain_symbol(&mut self, v: &Value) -> u64 {
+        let Value::Object(o) = v else {
+            return self.lease(v);
+        };
+        let key = Rc::as_ptr(o);
+        match self.symbol_handles.get(&key) {
+            Some(id) => *id,
+            None => {
+                let id = self.lease(v);
+                self.symbol_handles.insert(key, id);
+                id
+            }
+        }
+    }
+
+    /// One napi reference to the native handle `native` (runtime.js `retainNative`), kept in `napiLeases`.
+    /// Returns `native` as the wire spells it.
+    fn retain_native(&mut self, native: &str) -> Result<String, HostError> {
+        let reply = crate::napi_bridge::handle_op("retain_graph_handle", native, "", "[]")
+            .map_err(|_| cannot_retain())?;
+        let id = reply
+            .get("value")
+            .and_then(|v| v.as_str())
+            .filter(|v| is_decimal(v))
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or_else(cannot_retain)?;
+        self.napi_leases.push(id);
+        Ok(native.to_string())
+    }
+
+    /// `{"nsy","hdl"}` for Symbol `v` with native id `id`: the native handle through `symbol_handle`, then a
+    /// napi reference to it (runtime.js token, native Symbol branch).
+    fn native_symbol(&mut self, v: &Value, id: u64) -> Result<String, HostError> {
+        let reply = crate::napi_bridge::handle_op("symbol_handle", &id.to_string(), "", "[]")
+            .map_err(|_| owner_unavailable())?;
+        let native = reply
+            .get("value")
+            .and_then(|v| v.as_str())
+            .filter(|v| is_decimal(v))
+            .ok_or_else(owner_unavailable)?
+            .to_string();
+        let nsy = self.retain_native(&native)?;
+        let hdl = self.retain_symbol(v);
+        Ok(format!("{{\"nsy\":\"{nsy}\",\"hdl\":{hdl}}}"))
     }
 
     fn source(&mut self, s: Source) -> usize {
@@ -457,6 +524,12 @@ impl NapiWireOut {
             Value::BigInt(b) => format!("{{\"bi\":\"{b}\"}}"),
             Value::Object(o) => {
                 let symbol = is_symbol(v);
+                if symbol {
+                    if let Some(id) = crate::napi_symbols::native_id_of_value(self.owner as u64, v)
+                    {
+                        return self.native_symbol(v, id);
+                    }
+                }
                 if symbol && !self.live {
                     return Err(unsupported_value());
                 }
@@ -556,16 +629,21 @@ impl NapiWireOut {
             return Err(unsupported_value());
         };
         if is_symbol(&value) {
-            let key = Rc::as_ptr(o);
-            let id = match self.symbol_handles.get(&key) {
-                Some(id) => *id,
-                None => {
-                    let id = self.lease(&value);
-                    self.symbol_handles.insert(key, id);
-                    id
+            return Ok(format!("{{\"hdl\":{}}}", self.retain_symbol(&value)));
+        }
+        // A native-proxy object is named by its native handle, before the copy/handle decision below.
+        if let Some((kind, native)) = tagged(o) {
+            return match kind {
+                Tag::Function => {
+                    let nfn = self.retain_native(&native)?;
+                    let hdl = self.lease(&value);
+                    Ok(format!("{{\"nfn\":\"{nfn}\",\"hdl\":{hdl}}}"))
+                }
+                Tag::Handle => {
+                    let nh = self.retain_native(&native)?;
+                    Ok(format!("{{\"nh\":\"{nh}\"}}"))
                 }
             };
-            return Ok(format!("{{\"hdl\":{id}}}"));
         }
         // Only the root is copied in live mode: every other object stays behind its handle.
         if (self.live && index != 0) || value.is_callable() {
@@ -701,10 +779,16 @@ impl NapiWireOut {
             index += 1;
         }
         let leases: Vec<String> = self.leases.iter().map(u64::to_string).collect();
+        let napi_leases: Vec<String> = self
+            .napi_leases
+            .iter()
+            .map(|id| format!("\"{id}\""))
+            .collect();
         Ok(format!(
-            "{{\"root\":{root_token},\"nodes\":[{}],\"leases\":[{}],\"napiLeases\":[]}}",
+            "{{\"root\":{root_token},\"nodes\":[{}],\"leases\":[{}],\"napiLeases\":[{}]}}",
             self.nodes.join(","),
-            leases.join(",")
+            leases.join(","),
+            napi_leases.join(",")
         ))
     }
 }
@@ -727,6 +811,9 @@ pub(crate) fn encode_napi_graph(
         Err(e) => {
             for id in out.leases.drain(..) {
                 thaw_tjs_release_handle(id as i64);
+            }
+            for reference in out.napi_leases.drain(..) {
+                crate::napi_bridge::release_reference(reference);
             }
             Err(e)
         }
