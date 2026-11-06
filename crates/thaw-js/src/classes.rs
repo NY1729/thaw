@@ -253,6 +253,41 @@ impl Interp {
             _ => None,
         };
         let nt = self.rt.pending_nt.take();
+        // a Proxy parent is constructed with the derived newTarget, its result landing on the pre-allocated `this`
+        if let Some(po) = match ctor {
+            Value::Object(po) if matches!(&*po.kind.borrow(), Kind::Proxy(p) if p.callable) => {
+                Some(po.clone())
+            }
+            _ => None,
+        } {
+            let nt = match nt {
+                Some(v @ Value::Object(_)) => v,
+                _ => ctor.clone(),
+            };
+            let (target, handler, trap) = self
+                .proxy_trap(&po, "construct")?
+                .expect("init_instance on a non-proxy");
+            if !trap.is_callable() {
+                self.rt.pending_nt = Some(nt);
+                return self.init_instance(&target, this, args);
+            }
+            let arr = self.array(args.to_vec());
+            let r = self.call(&trap, &handler, &[target, arr, nt])?;
+            let (Value::Object(t), Value::Object(n)) = (this, &r) else {
+                return self.throw_error("TypeError", "proxy [[Construct]] must return an object");
+            };
+            if !Rc::ptr_eq(t, n) {
+                // the trap built a different object: `this` takes over its contents (the derived
+                // constructor keeps the pre-allocated identity)
+                *t.kind.borrow_mut() = std::mem::replace(&mut *n.kind.borrow_mut(), Kind::Plain);
+                *t.proto.borrow_mut() = n.proto.borrow_mut().take();
+                *t.props.borrow_mut() = std::mem::take(&mut *n.props.borrow_mut());
+                *t.index.borrow_mut() = n.index.borrow_mut().take();
+                t.ext.set(n.ext.get());
+                t.frozen.set(n.frozen.get());
+            }
+            return Ok(this.clone());
+        }
         let Some((def, scope)) = class_parts else {
             self.rt.pending_nt = nt;
             let r = self.call(ctor, this, args);

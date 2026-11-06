@@ -153,7 +153,7 @@ pub(crate) const EXTRAS: &str = r#"
   def(R, 'deleteProperty', function (o, k) { return delete o[k]; });
   def(R, 'getOwnPropertyDescriptor', Object.getOwnPropertyDescriptor);
   def(R, 'apply', function (f, t, a) { return Function.prototype.apply.call(f, t, a); });
-  def(R, 'construct', function (C, a) { return new C(...a); });
+  def(R, 'construct', function (C, a, nt) { return __thaw_reflect_construct(C, a, arguments.length > 2 ? nt : C); });
   Reflect = R;
   // WeakMap / WeakSet / WeakRef / FinalizationRegistry. ponytail: entries are held strongly (no GC is
   // observable from a short-lived process); only the key checks and the API surface matter.
@@ -324,7 +324,7 @@ impl crate::Interp {
         }
         for (o, name) in work {
             if find_own(&o, "name").is_none() && !name.starts_with("@@") {
-                put_hidden(&o, "name", Value::Str(name));
+                put_hidden(&o, "name", Value::Str(name.into()));
             }
         }
     }

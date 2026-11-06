@@ -255,9 +255,9 @@ fn regexp_string_index_ascii_and_non_ascii_subjects() {
 
 #[test]
 fn ascii_flag_cache_tracks_the_subject() {
-    let ascii: std::rc::Rc<str> = "a".repeat(300).into();
+    let ascii: crate::JsStr = "a".repeat(300).into();
     assert!(crate::builtins::ascii_of(&ascii));
-    let mixed: std::rc::Rc<str> = format!("{}é", "a".repeat(299)).into();
+    let mixed: crate::JsStr = format!("{}é", "a".repeat(299)).into();
     assert!(!crate::builtins::ascii_of(&mixed));
     // the cache now holds `mixed`; the ASCII subject must not inherit its answer
     assert!(crate::builtins::ascii_of(&ascii));
@@ -2322,7 +2322,7 @@ fn child_process_async_orders_output_before_close() {
     let src = format!(
         "{CHILD_SHIM}
 __thaw_child_process_spawn('/bin/sh', JSON.stringify(['-c', 'echo out; echo err >&2; exit 3']), JSON.stringify({{stdio: ['ignore','pipe','pipe']}}));
-setTimeout(function () {{ console.log(logs.join(',')); }}, 400);"
+process.on('exit', function () {{ console.log(logs.join(',')); }});"
     );
     let out = run_loop(&src);
     assert!(out.starts_with("spawn,"), "{out}");
@@ -5577,7 +5577,77 @@ fn rmw_operator_coercions_and_postfix_results() {
     );
 }
 
-// Guard tests for the call path (perf P7): they pin the behaviour the frame setup must keep.
+#[test]
+fn construct_new_target_is_the_constructor_for_functions_and_classes() {
+    assert_eq!(
+        one("function F(){ this.nt = new.target; } class C { constructor(){ this.nt = new.target; } } class D extends C {} console.log(new F().nt === F, new C().nt === C, new D().nt === D, F.call({}) === undefined)"),
+        "true true true true"
+    );
+}
+
+#[test]
+fn reflect_construct_new_target_picks_the_instance_prototype() {
+    assert_eq!(
+        one("function F(){ this.nt = new.target; } function Alt(){} Alt.prototype = { tag: 'alt' }; var r = Reflect.construct(F, [], Alt); console.log(Object.getPrototypeOf(r) === Alt.prototype, r.nt === Alt, r.tag)"),
+        "true true alt"
+    );
+    assert_eq!(
+        one("function Alt(){} Alt.prototype = Object.create(Map.prototype); var m = Reflect.construct(Map, [], Alt); console.log(m instanceof Alt, m.set(1, 2) === m, m.get(1))"),
+        "true true 2"
+    );
+}
+
+#[test]
+fn proxy_construct_trap_receives_new_target() {
+    assert_eq!(
+        one("var F = function(){ this.k = 1; }; var seen; var P = new Proxy(F, { construct(t, a, nt) { seen = nt; return Reflect.construct(t, a, nt); } }); var o = new P(); console.log(seen === P, o.k, o instanceof F)"),
+        "true 1 true"
+    );
+    assert_eq!(
+        one("class F2 { constructor(){ this.nt = new.target; } } var P2 = new Proxy(F2, {}); console.log(new P2().nt === P2)"),
+        "true"
+    );
+}
+
+#[test]
+fn derived_class_over_proxy_construct_trap_gets_derived_new_target() {
+    assert_eq!(
+        one("var F = function(){ this.k = 1; }; var seen; var P = new Proxy(F, { construct(t, a, nt) { seen = nt; return Reflect.construct(t, a, nt); } }); class D extends P {} var d = new D(); console.log(seen === D, d.k, Object.getPrototypeOf(d) === D.prototype, d instanceof D)"),
+        "true 1 true true"
+    );
+    assert_eq!(
+        one("var F = function(){ this.k = 1; }; var seen; var P = new Proxy(F, { construct(t, a, nt) { seen = nt; return Reflect.construct(t, a, nt); } }); class D extends P { constructor() { super(); this.z = 2; } } var d = new D(); console.log(seen === D, d.k, d.z)"),
+        "true 1 2"
+    );
+}
+
+#[test]
+fn bound_function_constructs_its_target_with_bound_arguments() {
+    assert_eq!(
+        one("function F(a, b){ this.s = a + b; this.isF = new.target === F; } var B = F.bind(null, 2); var o = new B(3); console.log(o.s, o.isF, o instanceof F)"),
+        "5 true true"
+    );
+}
+
+#[test]
+fn new_target_is_undefined_for_plain_calls_and_subclassed_builtins_keep_prototype() {
+    assert_eq!(
+        one("function F(){ return new.target === undefined } console.log(F(), new F() instanceof F)"),
+        "true true"
+    );
+    assert_eq!(
+        one("class A extends Array {} class M extends Map {} var a = new A(); a.push(1); console.log(a instanceof A, a.length, new M() instanceof M, new M().size)"),
+        "true 1 true 0"
+    );
+}
+
+#[test]
+fn derived_class_over_proxy_trap_result_object_is_adopted() {
+    assert_eq!(
+        one("var F = function(){ this.k = 1; }; var P = new Proxy(F, { construct(t, a, nt) { return { q: 9 }; } }); class D extends P {} var d = new D(); console.log(d.q, d.k, d instanceof D)"),
+        "9 undefined false"
+    );
+}
 
 #[test]
 fn call_guard_closure_capture_and_param_shadowing() {
