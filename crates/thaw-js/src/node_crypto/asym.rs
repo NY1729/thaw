@@ -1,11 +1,11 @@
 //! Asymmetric keys and signatures for `node:crypto`: PEM/DER/encrypted PKCS8/legacy PEM import
 //! (`crypto_import_key_json`), RSA PKCS1v15/PSS, ECDSA P-256/P-384/P-521 and Ed25519/Ed448
-//! sign/verify. Copied from thaw-quickjs (quickjs/asymmetric_crypto.rs, which stays the oracle
-//! until QuickJS is removed). Keygen, RSA encrypt/decrypt and DH are not here yet (PR6).
+//! sign/verify, RSA encrypt/decrypt, key generation, DH/ECDH. Copied from thaw-quickjs
+//! (quickjs/asymmetric_crypto.rs, which stays the oracle until QuickJS is removed).
 
-use crate::zlib::hex_decode;
+use crate::zlib::{hex_decode, hex_encode};
 use base64::Engine;
-use pkcs1::{DecodeRsaPrivateKey, DecodeRsaPublicKey};
+use pkcs1::{DecodeRsaPrivateKey, DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey};
 use pkcs8::{DecodePrivateKey, DecodePublicKey};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use sec1::DecodeEcPrivateKey;
@@ -196,6 +196,46 @@ fn ec_p521_public_to_pem(key: &p521::ecdsa::VerifyingKey) -> Option<String> {
     let public = p521::PublicKey::from_sec1_bytes(key.to_encoded_point(false).as_bytes()).ok()?;
     use pkcs8::EncodePublicKey;
     public.to_public_key_pem(pkcs8::LineEnding::LF).ok()
+}
+
+/// Same idea as `ec_private_pem`/`ec_public_pem`, for P-521 -- reuses
+/// the same scalar/point-byte round trip `ec_p521_private_to_pem`/
+/// `ec_p521_public_to_pem` already need (P-521's own newtypes
+/// implement neither `pkcs8`'s nor `sec1`'s encode traits directly),
+/// with a `"sec1"` branch alongside the existing `"pkcs8"` one.
+fn ec_p521_private_pem(
+    key: &p521::ecdsa::SigningKey,
+    requested_type: &str,
+) -> Result<String, String> {
+    let secret = p521::SecretKey::from_bytes(&key.to_bytes()).map_err(|error| error.to_string())?;
+    match requested_type {
+        "" | "pkcs8" => {
+            use pkcs8::EncodePrivateKey;
+            secret
+                .to_pkcs8_pem(pkcs8::LineEnding::LF)
+                .map(|pem| pem.to_string())
+                .map_err(|error| error.to_string())
+        }
+        "sec1" => sec1_private_pem_with_named_curve(&secret),
+        other => Err(format!("unsupported EC privateKeyEncoding.type: {other}")),
+    }
+}
+
+fn ec_p521_public_pem(
+    key: &p521::ecdsa::VerifyingKey,
+    requested_type: &str,
+) -> Result<String, String> {
+    if !matches!(requested_type, "" | "spki") {
+        return Err(format!(
+            "unsupported EC publicKeyEncoding.type: {requested_type}"
+        ));
+    }
+    let public = p521::PublicKey::from_sec1_bytes(key.to_encoded_point(false).as_bytes())
+        .map_err(|error| error.to_string())?;
+    use pkcs8::EncodePublicKey;
+    public
+        .to_public_key_pem(pkcs8::LineEnding::LF)
+        .map_err(|error| error.to_string())
 }
 
 /// X25519's OID (RFC 8410 -- `id-X25519`); `x25519-dalek` has no
@@ -1010,4 +1050,577 @@ fn verify_rsa_pss(
         "sha512" => rsa_pss_verify_for!(key, sha2::Sha512, data, signature),
         _ => unreachable!("checked by digest_size_matches"),
     }
+}
+
+/// RSA `publicEncrypt(key, buffer)` -- accepts either a public *or* a
+/// private key (real Node does too, encrypting with the private key's
+/// own public half), PKCS1v15 padding (Node's default) or OAEP
+/// (`oaep_digest` non-empty picks the hash). EC/Ed25519 keys don't
+/// support encryption at all, matching real Node's own error there.
+pub(crate) fn crypto_asymmetric_encrypt_hex(
+    pem: &str,
+    oaep_digest: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    let key = match parse_key(pem).ok_or("invalid or unsupported key")? {
+        ParsedKey::RsaPrivate(key) => key.to_public_key(),
+        ParsedKey::RsaPublic(key) => *key,
+        _ => return Err("encryption is only supported for RSA keys".to_string()),
+    };
+    let mut rng = rand_core::OsRng;
+    if oaep_digest.is_empty() {
+        return key
+            .encrypt(&mut rng, rsa::Pkcs1v15Encrypt, data)
+            .map_err(|error| error.to_string());
+    }
+    match oaep_digest {
+        "sha1" => key.encrypt(&mut rng, rsa::Oaep::new::<sha1::Sha1>(), data),
+        "sha256" => key.encrypt(&mut rng, rsa::Oaep::new::<sha2::Sha256>(), data),
+        "sha384" => key.encrypt(&mut rng, rsa::Oaep::new::<sha2::Sha384>(), data),
+        "sha512" => key.encrypt(&mut rng, rsa::Oaep::new::<sha2::Sha512>(), data),
+        _ => return Err(format!("unsupported OAEP digest: {oaep_digest}")),
+    }
+    .map_err(|error| error.to_string())
+}
+
+/// RSA `privateDecrypt(key, buffer)` -- requires a private key.
+/// Mirrors `crypto_asymmetric_encrypt_hex`'s padding choice.
+pub(crate) fn crypto_asymmetric_decrypt_hex(
+    pem: &str,
+    oaep_digest: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    let ParsedKey::RsaPrivate(key) = parse_key(pem).ok_or("invalid or unsupported key")? else {
+        return Err("decryption requires an RSA private key".to_string());
+    };
+    if oaep_digest.is_empty() {
+        return key
+            .decrypt(rsa::Pkcs1v15Encrypt, data)
+            .map_err(|error| error.to_string());
+    }
+    match oaep_digest {
+        "sha1" => key.decrypt(rsa::Oaep::new::<sha1::Sha1>(), data),
+        "sha256" => key.decrypt(rsa::Oaep::new::<sha2::Sha256>(), data),
+        "sha384" => key.decrypt(rsa::Oaep::new::<sha2::Sha384>(), data),
+        "sha512" => key.decrypt(rsa::Oaep::new::<sha2::Sha512>(), data),
+        _ => return Err(format!("unsupported OAEP digest: {oaep_digest}")),
+    }
+    .map_err(|error| error.to_string())
+}
+
+/// RSA `privateEncrypt(key, buffer)` -- Node's rarer "encrypt with the
+/// private key" raw primitive (real use: producing something only the
+/// matching public key can "decrypt", not confidentiality -- the
+/// private key is the one only its owner holds). Always PKCS#1 v1.5
+/// type-1 padding (real Node's own default and only supported padding
+/// for this pair of functions -- OAEP is not defined for this
+/// direction), with *no* digest-OID `DigestInfo` wrapper around the
+/// plaintext, unlike `createSign`'s PKCS1v15 signing -- exactly what
+/// `rsa::Pkcs1v15Sign::new_unprefixed()` already builds, matching real
+/// OpenSSL's own `openssl pkeyutl -sign` (the modern name for the
+/// deprecated `rsautl -sign`) byte-for-byte.
+pub(crate) fn crypto_asymmetric_private_encrypt_hex(
+    pem: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    let ParsedKey::RsaPrivate(key) = parse_key(pem).ok_or("invalid or unsupported key")? else {
+        return Err("privateEncrypt requires an RSA private key".to_string());
+    };
+    key.sign(rsa::Pkcs1v15Sign::new_unprefixed(), data)
+        .map_err(|error| error.to_string())
+}
+
+/// RSA `publicDecrypt(key, buffer)` -- the inverse of `privateEncrypt`
+/// above; recovers the original bytes from a `privateEncrypt`-produced
+/// blob. `rsa`'s own `Pkcs1v15Sign` only exposes a yes/no `verify`
+/// (compares a *recovered* message against one already known, never
+/// hands the recovered bytes back) -- by design, to keep textbook-RSA
+/// primitives from being casually available for misuse elsewhere in
+/// that crate's own API. This is exactly the "raw hazmat modexp + hand-
+/// rolled PKCS#1 type-1 unpadding" this project's own scope notes
+/// flagged as the highest-risk, lowest-value item still open here, so
+/// it stays intentionally minimal: one public-key modular
+/// exponentiation (`c^e mod n`, via `rsa`'s own re-exported `BigUint`,
+/// the same bignum type `crypto_generate_key_pair_json`'s custom-
+/// exponent path already uses) followed by validating and stripping
+/// the fixed `0x00 0x01 [0xFF...] 0x00` PKCS#1 v1.5 type-1 padding
+/// structure by hand (RFC 8017 section 9.2, encoding operation EMSA-
+/// PKCS1-v1_5, used here in reverse).
+pub(crate) fn crypto_asymmetric_public_decrypt_hex(
+    pem: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    use rsa::traits::PublicKeyParts;
+    let key = match parse_key(pem).ok_or("invalid or unsupported key")? {
+        ParsedKey::RsaPrivate(key) => key.to_public_key(),
+        ParsedKey::RsaPublic(key) => *key,
+        _ => return Err("publicDecrypt is only supported for RSA keys".to_string()),
+    };
+    let modulus_len = key.size();
+    if data.len() != modulus_len {
+        return Err("data length does not match the RSA modulus size".to_string());
+    }
+    let encoded = rsa::BigUint::from_bytes_be(data)
+        .modpow(key.e(), key.n())
+        .to_bytes_be();
+    let mut padded = vec![0u8; modulus_len - encoded.len()];
+    padded.extend_from_slice(&encoded);
+    if padded.len() < 11 || padded[0] != 0x00 || padded[1] != 0x01 {
+        return Err("invalid PKCS#1 v1.5 padding".to_string());
+    }
+    let mut index = 2;
+    while index < padded.len() && padded[index] == 0xFF {
+        index += 1;
+    }
+    if index < 2 + 8 || index >= padded.len() || padded[index] != 0x00 {
+        return Err("invalid PKCS#1 v1.5 padding".to_string());
+    }
+    Ok(padded[index + 1..].to_vec())
+}
+
+/// Normalizes an EC curve name to one of `"P-256"`/`"P-384"`/`"P-521"`
+/// -- accepts both Node/JOSE's own names and the common OpenSSL
+/// aliases (`prime256v1`/`secp384r1`/`secp521r1`), matching how real
+/// packages spell `namedCurve` either way.
+fn normalize_curve_name(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().replace(['-', '_'], "").as_str() {
+        "p256" | "prime256v1" | "secp256r1" => Some("P-256"),
+        "p384" | "secp384r1" => Some("P-384"),
+        "p521" | "secp521r1" => Some("P-521"),
+        _ => None,
+    }
+}
+
+/// Re-encodes an already-generated RSA private/public key as PEM in
+/// the requested output format: `""`/`"pkcs8"` (default) for the
+/// private half, `""`/`"spki"` (default) for the public half -- both
+/// the same normalized form `crypto_import_key_json` produces, so the
+/// JS side's PEM/DER/`KeyObject` encoding logic is shared with import
+/// -- or `"pkcs1"` for either half (RSA's own native format, what real
+/// OpenSSL calls `RSA PRIVATE KEY`/`RSA PUBLIC KEY`). Any other
+/// requested type is a build-time-visible `Err`, matching Node's own
+/// `ERR_INVALID_ARG_VALUE` for an unsupported `type`.
+fn rsa_private_pem(key: &RsaPrivateKey, requested_type: &str) -> Result<String, String> {
+    use pkcs8::{EncodePrivateKey, LineEnding};
+    match requested_type {
+        "" | "pkcs8" => key
+            .to_pkcs8_pem(LineEnding::LF)
+            .map(|pem| pem.to_string())
+            .map_err(|error| error.to_string()),
+        "pkcs1" => key
+            .to_pkcs1_pem(LineEnding::LF)
+            .map(|pem| pem.to_string())
+            .map_err(|error| error.to_string()),
+        other => Err(format!("unsupported RSA privateKeyEncoding.type: {other}")),
+    }
+}
+
+fn rsa_public_pem(key: &RsaPublicKey, requested_type: &str) -> Result<String, String> {
+    use pkcs8::{EncodePublicKey, LineEnding};
+    match requested_type {
+        "" | "spki" => key
+            .to_public_key_pem(LineEnding::LF)
+            .map_err(|error| error.to_string()),
+        "pkcs1" => key
+            .to_pkcs1_pem(LineEnding::LF)
+            .map_err(|error| error.to_string()),
+        other => Err(format!("unsupported RSA publicKeyEncoding.type: {other}")),
+    }
+}
+
+/// A SEC1 `ECPrivateKey` DER structure omitting its (technically
+/// optional, per RFC 5915) `parameters` field is *not* something real
+/// OpenSSL can load standalone -- unlike PKCS8, which always carries
+/// the curve OID in its outer `AlgorithmIdentifier`, a bare SEC1 key
+/// has nowhere else to name its curve, and `elliptic_curve::SecretKey`'s
+/// own `to_sec1_der`/`to_sec1_pem` leave `parameters: None` (confirmed
+/// against real OpenSSL: `openssl ec -in ... -text -noout` refuses a
+/// key encoded that way with "unsupported"). This builds the same
+/// `sec1::EcPrivateKey` structure by hand instead, with `parameters:
+/// Some(EcParameters::NamedCurve(C::OID))` filled in, matching what
+/// real OpenSSL itself emits for `openssl ecparam -genkey`.
+fn sec1_private_pem_with_named_curve<C>(
+    secret: &elliptic_curve::SecretKey<C>,
+) -> Result<String, String>
+where
+    C: elliptic_curve::CurveArithmetic + pkcs8::AssociatedOid,
+    elliptic_curve::AffinePoint<C>:
+        elliptic_curve::sec1::FromEncodedPoint<C> + elliptic_curve::sec1::ToEncodedPoint<C>,
+    elliptic_curve::FieldBytesSize<C>: elliptic_curve::sec1::ModulusSize,
+{
+    use elliptic_curve::sec1::ToEncodedPoint;
+    use sec1::der::pem::PemLabel;
+    let private_key_bytes = secret.to_bytes();
+    let public_point = secret.public_key().to_encoded_point(false);
+    let ec_private_key = sec1::EcPrivateKey {
+        private_key: &private_key_bytes,
+        parameters: Some(sec1::EcParameters::NamedCurve(C::OID)),
+        public_key: Some(public_point.as_bytes()),
+    };
+    let document: sec1::der::SecretDocument = (&ec_private_key)
+        .try_into()
+        .map_err(|_| "failed to encode SEC1 EC private key".to_string())?;
+    document
+        .to_pem(sec1::EcPrivateKey::PEM_LABEL, sec1::LineEnding::LF)
+        .map(|pem| pem.to_string())
+        .map_err(|error| error.to_string())
+}
+
+/// Same idea as `rsa_private_pem`, for an EC private key: `""`/
+/// `"pkcs8"` (default) or `"sec1"` (what real OpenSSL calls `EC
+/// PRIVATE KEY`, via `sec1_private_pem_with_named_curve` above).
+/// `"pkcs1"` is RSA-only and rejected here, matching Node. Both
+/// branches need the generic `elliptic_curve::SecretKey<C>` (not the
+/// curve-specific `ecdsa::SigningKey<C>` this crate otherwise works
+/// with) -- reuses the exact byte-round-trip idiom P-521's own pkcs8
+/// encode already needs for the same underlying reason (see
+/// `ec_p521_private_to_pem`), except here it applies to every curve,
+/// since neither `pkcs8`'s nor `sec1`'s encode traits are implemented
+/// on `SigningKey` directly for any of them.
+fn ec_private_pem<C>(key: &ecdsa::SigningKey<C>, requested_type: &str) -> Result<String, String>
+where
+    C: elliptic_curve::PrimeCurve + elliptic_curve::CurveArithmetic + pkcs8::AssociatedOid,
+    elliptic_curve::AffinePoint<C>:
+        elliptic_curve::sec1::FromEncodedPoint<C> + elliptic_curve::sec1::ToEncodedPoint<C>,
+    elliptic_curve::FieldBytesSize<C>: elliptic_curve::sec1::ModulusSize,
+    elliptic_curve::Scalar<C>: ecdsa::hazmat::SignPrimitive<C>
+        + elliptic_curve::ops::Invert<
+            Output = elliptic_curve::subtle::CtOption<elliptic_curve::Scalar<C>>,
+        >,
+    ecdsa::SignatureSize<C>: elliptic_curve::generic_array::ArrayLength<u8>,
+{
+    use pkcs8::{EncodePrivateKey, LineEnding};
+    match requested_type {
+        "" | "pkcs8" => key
+            .to_pkcs8_pem(LineEnding::LF)
+            .map(|pem| pem.to_string())
+            .map_err(|error| error.to_string()),
+        "sec1" => {
+            let secret = elliptic_curve::SecretKey::<C>::from_bytes(&key.to_bytes())
+                .map_err(|error| error.to_string())?;
+            sec1_private_pem_with_named_curve(&secret)
+        }
+        other => Err(format!("unsupported EC privateKeyEncoding.type: {other}")),
+    }
+}
+
+fn ec_public_pem<C>(key: &ecdsa::VerifyingKey<C>, requested_type: &str) -> Result<String, String>
+where
+    C: elliptic_curve::PrimeCurve
+        + elliptic_curve::CurveArithmetic
+        + pkcs8::AssociatedOid
+        + elliptic_curve::point::PointCompression,
+    elliptic_curve::AffinePoint<C>:
+        elliptic_curve::sec1::FromEncodedPoint<C> + elliptic_curve::sec1::ToEncodedPoint<C>,
+    elliptic_curve::FieldBytesSize<C>: elliptic_curve::sec1::ModulusSize,
+{
+    use pkcs8::{EncodePublicKey, LineEnding};
+    match requested_type {
+        "" | "spki" => key
+            .to_public_key_pem(LineEnding::LF)
+            .map_err(|error| error.to_string()),
+        other => Err(format!("unsupported EC publicKeyEncoding.type: {other}")),
+    }
+}
+
+/// Backs `generateKeyPairSync`/`generateKeyPair`: generates a fresh
+/// keypair for `key_type` (`"rsa"`/`"ec"`/`"ed25519"`/`"ed448"`).
+/// `modulus_bits_or_curve` is the RSA modulus length (as a string,
+/// parsed to `usize`) for `"rsa"`, or the EC curve name for `"ec"`
+/// (ignored for `"ed25519"`/`"ed448"`). `public_exponent` is the RSA
+/// `publicExponent` option (as a decimal string; empty defaults to the
+/// universal 65537, ignored for `"ec"`/`"ed25519"`/`"ed448"`).
+/// `private_key_type`/`public_key_type` are `privateKeyEncoding.type`/
+/// `publicKeyEncoding.type` (empty defaults to `"pkcs8"`/`"spki"`) --
+/// Ed25519/Ed448 have no PKCS1/SEC1 equivalent (RSA/EC only, matching
+/// real Node), so any non-default request there is an `Err`.
+pub(crate) fn crypto_generate_key_pair_json(
+    key_type: &str,
+    modulus_bits_or_curve: &str,
+    public_exponent: &str,
+    private_key_type: &str,
+    public_key_type: &str,
+) -> Result<String, String> {
+    use pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+    let mut rng = rand_core::OsRng;
+    let (private_pem, public_pem) = match key_type {
+        "rsa" => {
+            let bits: usize = modulus_bits_or_curve
+                .parse()
+                .map_err(|_| "modulusLength must be a positive integer".to_string())?;
+            let key = if public_exponent.is_empty() {
+                RsaPrivateKey::new(&mut rng, bits).map_err(|error| error.to_string())?
+            } else {
+                let exponent: u64 = public_exponent
+                    .parse()
+                    .map_err(|_| "publicExponent must be a positive integer".to_string())?;
+                RsaPrivateKey::new_with_exp(&mut rng, bits, &rsa::BigUint::from(exponent))
+                    .map_err(|error| error.to_string())?
+            };
+            let public = key.to_public_key();
+            (
+                rsa_private_pem(&key, private_key_type)?,
+                rsa_public_pem(&public, public_key_type)?,
+            )
+        }
+        "ec" => match normalize_curve_name(modulus_bits_or_curve) {
+            Some("P-256") => {
+                let key = p256::ecdsa::SigningKey::random(&mut rng);
+                let public = *key.verifying_key();
+                (
+                    ec_private_pem(&key, private_key_type)?,
+                    ec_public_pem(&public, public_key_type)?,
+                )
+            }
+            Some("P-384") => {
+                let key = p384::ecdsa::SigningKey::random(&mut rng);
+                let public = *key.verifying_key();
+                (
+                    ec_private_pem(&key, private_key_type)?,
+                    ec_public_pem(&public, public_key_type)?,
+                )
+            }
+            Some("P-521") => {
+                let key = p521::ecdsa::SigningKey::random(&mut rng);
+                let public = p521::ecdsa::VerifyingKey::from(&key);
+                (
+                    ec_p521_private_pem(&key, private_key_type)?,
+                    ec_p521_public_pem(&public, public_key_type)?,
+                )
+            }
+            _ => return Err(format!("unsupported EC curve: {modulus_bits_or_curve}")),
+        },
+        "ed25519" => {
+            if !matches!(private_key_type, "" | "pkcs8") {
+                return Err(format!(
+                    "unsupported Ed25519 privateKeyEncoding.type: {private_key_type}"
+                ));
+            }
+            if !matches!(public_key_type, "" | "spki") {
+                return Err(format!(
+                    "unsupported Ed25519 publicKeyEncoding.type: {public_key_type}"
+                ));
+            }
+            let key = ed25519_dalek::SigningKey::generate(&mut rng);
+            let public = key.verifying_key();
+            (
+                key.to_pkcs8_pem(LineEnding::LF)
+                    .map_err(|error| error.to_string())?
+                    .to_string(),
+                public
+                    .to_public_key_pem(LineEnding::LF)
+                    .map_err(|error| error.to_string())?,
+            )
+        }
+        "ed448" => {
+            if !matches!(private_key_type, "" | "pkcs8") {
+                return Err(format!(
+                    "unsupported Ed448 privateKeyEncoding.type: {private_key_type}"
+                ));
+            }
+            if !matches!(public_key_type, "" | "spki") {
+                return Err(format!(
+                    "unsupported Ed448 publicKeyEncoding.type: {public_key_type}"
+                ));
+            }
+            use ed448_goldilocks::elliptic_curve::Generate;
+            let key = ed448_goldilocks::SigningKey::generate();
+            let public = key.verifying_key();
+            (
+                ed448_private_to_pem(&key).ok_or("failed to encode Ed448 private key")?,
+                ed448_public_to_pem(&public).ok_or("failed to encode Ed448 public key")?,
+            )
+        }
+        "x25519" => {
+            if !matches!(private_key_type, "" | "pkcs8") {
+                return Err(format!(
+                    "unsupported X25519 privateKeyEncoding.type: {private_key_type}"
+                ));
+            }
+            if !matches!(public_key_type, "" | "spki") {
+                return Err(format!(
+                    "unsupported X25519 publicKeyEncoding.type: {public_key_type}"
+                ));
+            }
+            let secret = x25519_dalek::StaticSecret::random_from_rng(rng);
+            let public = x25519_dalek::PublicKey::from(&secret);
+            (
+                x25519_private_to_pem(&secret).ok_or("failed to encode X25519 private key")?,
+                x25519_public_to_pem(&public).ok_or("failed to encode X25519 public key")?,
+            )
+        }
+        _ => return Err(format!("unsupported key type: {key_type}")),
+    };
+    Ok(serde_json::json!({ "privatePem": private_pem, "publicPem": public_pem }).to_string())
+}
+
+/// Computes an (X25519 or P-256/P-384/P-521 EC) Diffie-Hellman shared
+/// secret from a private and a public PEM -- backs `crypto.
+/// diffieHellman({privateKey, publicKey})` and `ECDH.computeSecret`.
+/// Both keys must be the same key-agreement type (matching EC curve,
+/// or both X25519); RSA/Ed25519 keys are signing/encryption keys, not
+/// key-agreement keys, and are rejected, matching real Node. P-256/
+/// P-384 convert their parsed `ecdsa::SigningKey<C>`/`VerifyingKey<C>`
+/// straight to the generic `elliptic_curve::SecretKey<C>`/`PublicKey
+/// <C>` `diffie_hellman` itself needs, via the crate's own direct
+/// `From` impls; P-521 needs the same scalar/point-byte round trip
+/// its own PEM encode/decode already needs (see `ec_p521_private_
+/// to_pem`), since its newtype wrapper doesn't implement that `From`.
+pub(crate) fn crypto_diffie_hellman_hex(
+    private_pem: &str,
+    public_pem: &str,
+) -> Result<Vec<u8>, String> {
+    let private = parse_key(private_pem).ok_or("invalid or unsupported private key")?;
+    let public = parse_key(public_pem).ok_or("invalid or unsupported public key")?;
+    match (private, public) {
+        (ParsedKey::EcPrivateP256(key), ParsedKey::EcPublicP256(peer)) => {
+            let secret = elliptic_curve::SecretKey::<p256::NistP256>::from(&*key);
+            let public = elliptic_curve::PublicKey::<p256::NistP256>::from(&*peer);
+            let shared =
+                elliptic_curve::ecdh::diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+            Ok(shared.raw_secret_bytes().to_vec())
+        }
+        (ParsedKey::EcPrivateP384(key), ParsedKey::EcPublicP384(peer)) => {
+            let secret = elliptic_curve::SecretKey::<p384::NistP384>::from(&*key);
+            let public = elliptic_curve::PublicKey::<p384::NistP384>::from(&*peer);
+            let shared =
+                elliptic_curve::ecdh::diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+            Ok(shared.raw_secret_bytes().to_vec())
+        }
+        (ParsedKey::EcPrivateP521(key), ParsedKey::EcPublicP521(peer)) => {
+            let secret =
+                p521::SecretKey::from_bytes(&key.to_bytes()).map_err(|error| error.to_string())?;
+            let public = p521::PublicKey::from_sec1_bytes(peer.to_encoded_point(false).as_bytes())
+                .map_err(|error| error.to_string())?;
+            let shared =
+                elliptic_curve::ecdh::diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+            Ok(shared.raw_secret_bytes().to_vec())
+        }
+        (ParsedKey::X25519Private(secret), ParsedKey::X25519Public(peer)) => {
+            Ok(secret.diffie_hellman(&peer).as_bytes().to_vec())
+        }
+        _ => Err(
+            "diffieHellman requires both keys to be the same key-agreement type (matching EC curve, or both X25519)"
+                .to_string(),
+        ),
+    }
+}
+
+/// Backs `crypto.createECDH(curveName)`'s classic raw-byte API (`.
+/// generateKeys()`/`.getPublicKey()`/`.getPrivateKey()`/`.
+/// setPrivateKey()`/`.computeSecret()`) -- operates on the generic
+/// `elliptic_curve::SecretKey<C>`/`PublicKey<C>` directly (not the
+/// `ecdsa::SigningKey`/`VerifyingKey` wrapper the sign/verify/PEM-
+/// based code elsewhere in this module works with), since classic
+/// `ECDH` never PEM-encodes anything -- it exchanges raw scalar/SEC1-
+/// point bytes end to end, matching real Node's own raw-byte
+/// `computeSecret`. P-521 doesn't need its usual newtype-wrapper
+/// detour here for exactly that reason -- `p521::SecretKey`/
+/// `PublicKey` (unlike `p521::ecdsa::SigningKey`/`VerifyingKey`) are
+/// plain aliases of these same generic types Node's classic API only
+/// ever supports EC (never X25519), matching this implementation's own
+/// scope.
+fn ecdh_generate_raw<C>() -> (Vec<u8>, Vec<u8>)
+where
+    C: elliptic_curve::CurveArithmetic,
+    elliptic_curve::AffinePoint<C>:
+        elliptic_curve::sec1::FromEncodedPoint<C> + elliptic_curve::sec1::ToEncodedPoint<C>,
+    elliptic_curve::FieldBytesSize<C>: elliptic_curve::sec1::ModulusSize,
+{
+    use elliptic_curve::sec1::ToEncodedPoint;
+    let secret = elliptic_curve::SecretKey::<C>::random(&mut rand_core::OsRng);
+    let public = secret.public_key();
+    (
+        secret.to_bytes().to_vec(),
+        public.to_encoded_point(false).as_bytes().to_vec(),
+    )
+}
+
+fn ecdh_public_from_private_raw<C>(private_key: &[u8]) -> Result<Vec<u8>, String>
+where
+    C: elliptic_curve::CurveArithmetic,
+    elliptic_curve::AffinePoint<C>:
+        elliptic_curve::sec1::FromEncodedPoint<C> + elliptic_curve::sec1::ToEncodedPoint<C>,
+    elliptic_curve::FieldBytesSize<C>: elliptic_curve::sec1::ModulusSize,
+{
+    use elliptic_curve::sec1::ToEncodedPoint;
+    let secret = elliptic_curve::SecretKey::<C>::from_slice(private_key)
+        .map_err(|error| error.to_string())?;
+    Ok(secret
+        .public_key()
+        .to_encoded_point(false)
+        .as_bytes()
+        .to_vec())
+}
+
+fn ecdh_compute_secret_raw<C>(private_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>, String>
+where
+    C: elliptic_curve::CurveArithmetic,
+    elliptic_curve::AffinePoint<C>:
+        elliptic_curve::sec1::FromEncodedPoint<C> + elliptic_curve::sec1::ToEncodedPoint<C>,
+    elliptic_curve::FieldBytesSize<C>: elliptic_curve::sec1::ModulusSize,
+{
+    let secret = elliptic_curve::SecretKey::<C>::from_slice(private_key)
+        .map_err(|error| error.to_string())?;
+    let public = elliptic_curve::PublicKey::<C>::from_sec1_bytes(public_key)
+        .map_err(|error| error.to_string())?;
+    let shared =
+        elliptic_curve::ecdh::diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+    Ok(shared.raw_secret_bytes().to_vec())
+}
+
+/// `curveName` -> `(privateKeyHex, publicKeyHex)`, raw SEC1 bytes
+/// (uncompressed point, matching Node's own default `format:
+/// 'uncompressed'`).
+pub(crate) fn crypto_ecdh_generate_keys_hex(curve: &str) -> Result<String, String> {
+    let (private, public) = match normalize_curve_name(curve)
+        .ok_or_else(|| format!("unsupported EC curve: {curve}"))?
+    {
+        "P-256" => ecdh_generate_raw::<p256::NistP256>(),
+        "P-384" => ecdh_generate_raw::<p384::NistP384>(),
+        "P-521" => ecdh_generate_raw::<p521::NistP521>(),
+        _ => unreachable!(),
+    };
+    Ok(serde_json::json!({
+        "privateKeyHex": hex_encode(&private),
+        "publicKeyHex": hex_encode(&public),
+    })
+    .to_string())
+}
+
+/// Backs `ecdh.setPrivateKey(privateKey)`: derives the matching raw
+/// public key bytes for a caller-supplied raw private scalar.
+pub(crate) fn crypto_ecdh_public_from_private_hex(
+    curve: &str,
+    private_key_hex: &str,
+) -> Result<String, String> {
+    let private_key = hex_decode(private_key_hex);
+    let public = match normalize_curve_name(curve)
+        .ok_or_else(|| format!("unsupported EC curve: {curve}"))?
+    {
+        "P-256" => ecdh_public_from_private_raw::<p256::NistP256>(&private_key)?,
+        "P-384" => ecdh_public_from_private_raw::<p384::NistP384>(&private_key)?,
+        "P-521" => ecdh_public_from_private_raw::<p521::NistP521>(&private_key)?,
+        _ => unreachable!(),
+    };
+    Ok(hex_encode(&public))
+}
+
+/// Backs `ecdh.computeSecret(otherPublicKey)`.
+pub(crate) fn crypto_ecdh_compute_secret_hex(
+    curve: &str,
+    private_key_hex: &str,
+    public_key_hex: &str,
+) -> Result<String, String> {
+    let private_key = hex_decode(private_key_hex);
+    let public_key = hex_decode(public_key_hex);
+    let shared = match normalize_curve_name(curve)
+        .ok_or_else(|| format!("unsupported EC curve: {curve}"))?
+    {
+        "P-256" => ecdh_compute_secret_raw::<p256::NistP256>(&private_key, &public_key)?,
+        "P-384" => ecdh_compute_secret_raw::<p384::NistP384>(&private_key, &public_key)?,
+        "P-521" => ecdh_compute_secret_raw::<p521::NistP521>(&private_key, &public_key)?,
+        _ => unreachable!(),
+    };
+    Ok(hex_encode(&shared))
 }

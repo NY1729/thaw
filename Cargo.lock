@@ -3236,6 +3236,7 @@ dependencies = [
  "pbkdf2",
  "pkcs1",
  "pkcs8 0.10.2",
+ "rand_core 0.6.4",
  "regress",
  "rsa",
  "rustls",

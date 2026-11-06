@@ -918,3 +918,97 @@ console.log(JSON.stringify([signErr === CANNOT, verifyErr === VERIFY_CANNOT, x.a
         r#"[true,true,"x25519",true,"secret","secret-key",true,true]"#
     );
 }
+
+#[test]
+fn rsa_keygen_encrypt_decrypt_and_private_encrypt_round_trip() {
+    let program = [
+        r##"
+var m = __thaw_crypto_module;
+var pair = m.generateKeyPairSync('rsa', { modulusLength: 1024 });
+var msg = Buffer.from('hello rsa');
+var dec = m.privateDecrypt(pair.privateKey, m.publicEncrypt(pair.publicKey, msg));
+var oaep = m.privateDecrypt({ key: pair.privateKey, oaepHash: 'sha256' }, m.publicEncrypt({ key: pair.publicKey, oaepHash: 'sha256' }, msg));
+var pkcs1Options = { padding: m.constants.RSA_PKCS1_PADDING };
+var pkcs1 = m.privateDecrypt({ key: pair.privateKey, padding: m.constants.RSA_PKCS1_PADDING }, m.publicEncrypt({ key: pair.publicKey, padding: m.constants.RSA_PKCS1_PADDING }, msg));
+var viaPrivate = m.publicDecrypt(pair.publicKey, m.privateEncrypt(pair.privateKey, msg));
+var pkcs1Pem = m.generateKeyPairSync('rsa', { modulusLength: 1024, privateKeyEncoding: { type: 'pkcs1', format: 'pem' }, publicKeyEncoding: { type: 'pkcs1', format: 'pem' } });
+console.log(JSON.stringify([dec.toString(), oaep.toString(), pkcs1.toString(), viaPrivate.toString(),
+  pair.privateKey.type, pair.publicKey.type, pair.privateKey.asymmetricKeyType,
+  pkcs1Pem.privateKey.split('\n')[0], pkcs1Pem.publicKey.split('\n')[0]]));
+"##,
+    ]
+    .concat();
+    assert_eq!(
+        run(&program),
+        r#"["hello rsa","hello rsa","hello rsa","hello rsa","private","public","rsa","-----BEGIN RSA PRIVATE KEY-----","-----BEGIN RSA PUBLIC KEY-----"]"#
+    );
+}
+
+#[test]
+#[ignore = "RSA 2048 keygen is slow in debug builds"]
+fn rsa_2048_keygen_round_trip() {
+    let program = [
+        r##"
+var m = __thaw_crypto_module;
+var pair = m.generateKeyPairSync('rsa', { modulusLength: 2048 });
+var msg = Buffer.from('hello 2048');
+console.log(JSON.stringify([m.privateDecrypt({ key: pair.privateKey, oaepHash: 'sha256' }, m.publicEncrypt({ key: pair.publicKey, oaepHash: 'sha256' }, msg)).toString()]));
+"##,
+    ]
+    .concat();
+    assert_eq!(run(&program), r#"["hello 2048"]"#);
+}
+
+#[test]
+fn ec_keygen_export_formats_and_ecdh_agreement_match_node() {
+    let program = [
+        r##"
+var m = __thaw_crypto_module;
+var pair = m.generateKeyPairSync('ec', { namedCurve: 'P-256',
+  publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'sec1', format: 'pem' } });
+var a = m.createECDH('prime256v1');
+a.generateKeys();
+var b = m.createECDH('P-256');
+b.generateKeys();
+var c = m.createECDH('secp256r1');
+c.setPrivateKey(a.getPrivateKey());
+var secretsEqual = a.computeSecret(b.getPublicKey()).equals(b.computeSecret(a.getPublicKey()));
+var viaDiffieHellman = m.diffieHellman({ privateKey: m.createPrivateKey(pair.privateKey), publicKey: m.createPublicKey(pair.publicKey) }).length;
+console.log(JSON.stringify([pair.privateKey.split('\n')[0], pair.publicKey.split('\n')[0],
+  a.getPublicKey().length, a.getPublicKey(null, 'compressed').length, secretsEqual, c.getPublicKey('hex') === a.getPublicKey('hex'), viaDiffieHellman]));
+"##,
+    ]
+    .concat();
+    assert_eq!(
+        run(&program),
+        r#"["-----BEGIN EC PRIVATE KEY-----","-----BEGIN PUBLIC KEY-----",65,33,true,true,32]"#
+    );
+}
+
+#[test]
+fn x25519_rfc7748_vector_and_generated_diffie_hellman_match() {
+    let program = [
+        r##"
+var m = __thaw_crypto_module;
+function pem(label, prefix, hex) {
+  var b64 = Buffer.from(prefix + hex, 'hex').toString('base64');
+  return '-----BEGIN ' + label + '-----\n' + b64 + '\n-----END ' + label + '-----\n';
+}
+function privatePem(hex) { return pem('PRIVATE KEY', '302e020100300506032b656e04220420', hex); }
+function publicPem(hex) { return pem('PUBLIC KEY', '302a300506032b656e032100', hex); }
+var alice = m.createPrivateKey(privatePem('77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a'));
+var bob = m.createPublicKey(publicPem('de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f'));
+var shared = m.diffieHellman({ privateKey: alice, publicKey: bob }).toString('hex');
+var p1 = m.generateKeyPairSync('x25519');
+var p2 = m.generateKeyPairSync('x25519');
+var symmetric = m.diffieHellman({ privateKey: p1.privateKey, publicKey: p2.publicKey })
+  .equals(m.diffieHellman({ privateKey: p2.privateKey, publicKey: p1.publicKey }));
+console.log(JSON.stringify([shared, symmetric, p1.privateKey.asymmetricKeyType]));
+"##,
+    ]
+    .concat();
+    assert_eq!(
+        run(&program),
+        r#"["4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",true,"x25519"]"#
+    );
+}
