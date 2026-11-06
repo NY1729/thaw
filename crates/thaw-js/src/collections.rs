@@ -653,3 +653,42 @@ impl Interp {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hash::{Hash, Hasher};
+
+    #[test]
+    fn fx_hash_spreads_integer_keys_across_low_bits() {
+        let mut low = std::collections::HashSet::new();
+        for i in 0..1000 {
+            let mut h = FxHasher::default();
+            HKey::Number((i as f64).to_bits()).hash(&mut h);
+            low.insert(h.finish() & 0xFFFF);
+        }
+        assert!(
+            low.len() > 900,
+            "only {} distinct low-16-bit hashes",
+            low.len()
+        );
+    }
+
+    #[test]
+    fn map_with_20k_integer_keys_round_trips_in_insertion_order() {
+        let src = "const m = new Map();
+for (let i = 0; i < 20000; i++) m.set(i, i * 2);
+m.delete(5); m.delete(19999);
+let sum = 0;
+for (let i = 0; i < 20000; i++) if (m.has(i)) sum += m.get(i);
+let prev = -1, ordered = true, n = 0;
+m.forEach((v, k) => { if (k <= prev) ordered = false; prev = k; n++; });
+console.log(m.size, sum, m.has(5), m.get(19999), n, ordered);";
+        let mut it = Interp::new();
+        assert!(it.run(src).is_ok(), "script failed");
+        assert_eq!(
+            it.out.join("|"),
+            "19998 399939992 false undefined 19998 true"
+        );
+    }
+}
