@@ -635,7 +635,7 @@ pub extern "C" fn thaw_tjs_define_callback_property_key_handle_result(
 /// Define `key` on `target` with `slot`, as `Object.defineProperty` does for the descriptor these
 /// arguments describe. A frozen object refuses any change; a frozen or non-extensible one refuses a
 /// new property. An accessor merges with an existing accessor's other half.
-fn define_slot(
+pub(crate) fn define_slot(
     it: &mut Interp,
     target: &Value,
     key: &str,
