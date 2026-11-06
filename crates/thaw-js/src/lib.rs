@@ -391,10 +391,52 @@ impl Vars {
 
 /// One bit of a scope's name filter: a lookup skips every scope whose filter lacks the name's bit.
 fn name_bit(name: &str) -> u64 {
-    use std::hash::Hasher;
-    let mut h = FxHasher::default();
-    h.write(name.as_bytes());
-    1u64 << (h.finish() >> 58)
+    // ponytail: from (len, first byte, last byte) only; names that collide just cost a walk.
+    let b = name.as_bytes();
+    let first = b.first().copied().unwrap_or(0) as u32;
+    let last = b.last().copied().unwrap_or(0) as u32;
+    let h = (b.len() as u32).wrapping_mul(31) ^ (first << 5) ^ last;
+    1u64 << (h & 63)
+}
+
+/// One scope walk to the binding of `name` that runs `f` on it in place. `None` (with nothing
+/// changed) when `f` declines, when a `with` record comes first, or when no scope binds the name;
+/// callers then take the generic path.
+fn with_binding_mut<T>(
+    scope: &Rc<Scope>,
+    name: &str,
+    f: impl FnOnce(&mut Binding) -> Option<T>,
+) -> Option<T> {
+    let bit = name_bit(name);
+    let mut cur: &Scope = scope;
+    loop {
+        if cur.mask.get() & bit != 0 {
+            if cur.with.is_some() {
+                return None;
+            }
+            if let Some(b) = cur.vars.borrow_mut().get_mut(name) {
+                return f(b);
+            }
+        }
+        cur = cur.parent.as_deref()?;
+    }
+}
+
+/// Arithmetic and relational operators on two numbers, without `binary()`'s coercion chain.
+fn number_binop(op: a::BinaryOp, x: f64, y: f64) -> Option<Value> {
+    use a::BinaryOp as B;
+    Some(match op {
+        B::Add => Value::Number(x + y),
+        B::Sub => Value::Number(x - y),
+        B::Mul => Value::Number(x * y),
+        B::Div => Value::Number(x / y),
+        B::Mod => Value::Number(x % y),
+        B::Lt => Value::Bool(x < y),
+        B::LtEq => Value::Bool(x <= y),
+        B::Gt => Value::Bool(x > y),
+        B::GtEq => Value::Bool(x >= y),
+        _ => return None,
+    })
 }
 
 pub struct Scope {
@@ -2832,6 +2874,23 @@ impl Interp {
             }
             a::Expr::Unary(u) => self.eval_unary(u, scope),
             a::Expr::Update(u) => {
+                if let a::Expr::Ident(i) = &*u.arg {
+                    let inc = matches!(u.op, a::UpdateOp::PlusPlus);
+                    let fast = with_binding_mut(scope, &i.sym, |b| {
+                        if !b.mutable {
+                            return None;
+                        }
+                        let Value::Number(old) = b.value else {
+                            return None;
+                        };
+                        let new = if inc { old + 1.0 } else { old - 1.0 };
+                        b.value = Value::Number(new);
+                        Some(if u.prefix { new } else { old })
+                    });
+                    if let Some(v) = fast {
+                        return Ok(Value::Number(v));
+                    }
+                }
                 let loc = self.loc_of(&u.arg, scope)?;
                 let old = self.read_loc(&loc, scope)?;
                 if let Value::BigInt(b) = &old {
@@ -2891,6 +2950,11 @@ impl Interp {
                 op => {
                     let l = self.eval(&b.left, scope)?;
                     let r = self.eval(&b.right, scope)?;
+                    if let (Value::Number(x), Value::Number(y)) = (&l, &r) {
+                        if let Some(v) = number_binop(op, *x, *y) {
+                            return Ok(v);
+                        }
+                    }
                     self.binary(op, &l, &r)
                 }
             },
@@ -3071,6 +3135,55 @@ impl Interp {
         }
     }
 
+    /// The value of a right-hand side that is a number literal or a variable holding a number.
+    /// Reading it has no side effects, so it may be read before the left operand.
+    fn pure_number(&self, scope: &Rc<Scope>, e: &a::Expr) -> Option<f64> {
+        match e {
+            a::Expr::Lit(a::Lit::Num(n)) => Some(n.value),
+            a::Expr::Ident(i) => match self.lookup(scope, &i.sym)? {
+                Value::Number(n) => Some(n),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `x op= n` and `x = x op n` on a mutable number binding with a pure numeric `n`: one scope
+    /// walk, no `binary()`. `None` leaves everything untouched for the generic path.
+    fn ident_rmw_fast(&self, scope: &Rc<Scope>, name: &str, asg: &a::AssignExpr) -> Option<Value> {
+        use a::AssignOp as A;
+        use a::BinaryOp as B;
+        let (op, rhs) = match asg.op {
+            A::AddAssign => (B::Add, &*asg.right),
+            A::SubAssign => (B::Sub, &*asg.right),
+            A::MulAssign => (B::Mul, &*asg.right),
+            A::DivAssign => (B::Div, &*asg.right),
+            A::ModAssign => (B::Mod, &*asg.right),
+            A::Assign => match &*asg.right {
+                a::Expr::Bin(b)
+                    if matches!(b.op, B::Add | B::Sub | B::Mul | B::Div | B::Mod)
+                        && matches!(&*b.left, a::Expr::Ident(i) if &*i.sym == name) =>
+                {
+                    (b.op, &*b.right)
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let r = self.pure_number(scope, rhs)?;
+        with_binding_mut(scope, name, |b| {
+            if !b.mutable {
+                return None;
+            }
+            let Value::Number(l) = b.value else {
+                return None;
+            };
+            let v = number_binop(op, l, r)?;
+            b.value = v.clone();
+            Some(v)
+        })
+    }
+
     fn eval_assign(&mut self, asg: &a::AssignExpr, scope: &Rc<Scope>) -> R<Value> {
         use a::AssignOp as A;
         let target = match &asg.left {
@@ -3086,6 +3199,11 @@ impl Interp {
                 return Ok(value);
             }
         };
+        if let a::SimpleAssignTarget::Ident(i) = target {
+            if let Some(v) = self.ident_rmw_fast(scope, &i.id.sym, asg) {
+                return Ok(v);
+            }
+        }
         // the target's object and key are evaluated once, before the right-hand side
         let loc = match target {
             a::SimpleAssignTarget::Ident(i) => Loc::Ident(&i.id),

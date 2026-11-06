@@ -5452,3 +5452,127 @@ fn async_method_this_survives_await() {
     );
     assert_eq!(out.join("|"), "async 5");
 }
+
+/// Like `run`, but parsed as a sloppy-mode script (for `with`).
+fn run_sloppy(src: &str) -> Vec<String> {
+    let mut it = Interp::new();
+    match it.run_sloppy(src) {
+        Ok(_) => it.out,
+        Err(Ctl::Throw(v)) => {
+            let mut out = it.out.clone();
+            out.push(format!("Uncaught {}", it.to_str(&v)));
+            out
+        }
+        Err(_) => vec!["stray completion".into()],
+    }
+}
+
+// Guard tests for read-modify-write on identifiers (`i++`, `x += n`, `x = x op y`). They pin the
+// observable semantics the fast path must keep; expectations were checked against Node.
+
+#[test]
+fn rmw_scope_with_global_and_undeclared_targets() {
+    assert_eq!(
+        run("var i=0; i++; ++i; i--; console.log(i, i++ + ++i);"),
+        vec!["1 4"]
+    );
+    assert_eq!(
+        run_sloppy("var o={x:1}; with(o){ x++; x+=5; } console.log(o.x);"),
+        vec!["7"]
+    );
+    assert_eq!(
+        run("globalThis.g1=1; g1++; g1 += 1; console.log(g1, globalThis.g1);"),
+        vec!["3 3"]
+    );
+    assert_eq!(run("u = 5; u++; console.log(u);"), vec!["6"]);
+    assert_eq!(
+        run("try { zz += 1 } catch(e) { console.log(e.name, e.message) }"),
+        vec!["ReferenceError zz is not defined"]
+    );
+}
+
+#[test]
+fn rmw_closure_sees_updates_and_read_happens_before_rhs() {
+    assert_eq!(
+        run("function f(){ var n=1; var g=()=>n; n++; n+=2; return g(); } console.log(f());"),
+        vec!["4"]
+    );
+    assert_eq!(
+        run("var k=0; var inc=()=>k++; inc(); inc(); console.log(k);"),
+        vec!["2"]
+    );
+    // the left operand is read before the right-hand side runs, so the write back wins
+    assert_eq!(
+        run("var x=1; function s(){ x=10; return 1;} x += s(); console.log(x);"),
+        vec!["2"]
+    );
+    assert_eq!(
+        run("var x2=1; function s2(){ x2=10; return 1;} x2 = x2 + s2(); console.log(x2);"),
+        vec!["2"]
+    );
+    assert_eq!(run("var y=1; y += (y = 5); console.log(y);"), vec!["6"]);
+}
+
+#[test]
+fn rmw_const_assignments_throw_and_keep_value() {
+    assert_eq!(
+        run(
+            "const c=1; try { c++ } catch(e){ console.log(e.message) } try { c += 1 } catch(e){ console.log(e.message) } try { c = c + 1 } catch(e){ console.log(e.message) } console.log(c);"
+        ),
+        vec![
+            "Assignment to constant variable.",
+            "Assignment to constant variable.",
+            "Assignment to constant variable.",
+            "1"
+        ]
+    );
+}
+
+#[test]
+fn rmw_bigint_and_mixing_errors() {
+    assert_eq!(
+        run("let b=5n; b++; b += 2n; b = b * 2n; console.log(String(b), typeof b);"),
+        vec!["16 bigint"]
+    );
+    assert_eq!(
+        run("let m=1; try { m += 2n } catch(e) { console.log(e.name, e.message) }"),
+        vec!["TypeError Cannot mix BigInt and other types, use explicit conversions"]
+    );
+}
+
+#[test]
+fn rmw_operator_coercions_and_postfix_results() {
+    assert_eq!(
+        run("let s3='a'; s3 += 'b'; s3 += 1; console.log(s3); let n3=1; n3 = n3 + '2'; console.log(n3);"),
+        vec!["ab1", "12"]
+    );
+    assert_eq!(
+        run("var oo={valueOf(){ return 7 }}; var q=1; q += oo; console.log(q);"),
+        vec!["8"]
+    );
+    assert_eq!(
+        run("let o2={valueOf(){return 7}}; let p=o2++; console.log(p, o2); let pp=++o2; console.log(pp);"),
+        vec!["7 8", "9"]
+    );
+    assert_eq!(
+        run("let st='5'; st++; console.log(st, typeof st); let st2='5'; let r2=st2--; console.log(r2, st2);"),
+        vec!["6 number", "5 4"]
+    );
+    assert_eq!(
+        run("let un; un++; console.log(un); let nul=null; let rn=nul++; console.log(rn, nul);"),
+        vec!["NaN", "0 1"]
+    );
+    assert_eq!(run("let t=true; t+=1; console.log(t);"), vec!["2"]);
+    assert_eq!(
+        run("let d=7; d /= 2; d %= 2; d *= 3; d -= 0.5; console.log(d);"),
+        vec!["4"]
+    );
+    assert_eq!(
+        run("let z=1; z/=0; console.log(z); z=-1; z%=0; console.log(z); let nz=0; nz *= -1; console.log(Object.is(nz,-0));"),
+        vec!["Infinity", "NaN", "true"]
+    );
+    assert_eq!(
+        run("let a1=1; let b1='3'; a1 = a1 * b1; console.log(a1); let nan=NaN; nan = nan < 1; console.log(nan);"),
+        vec!["3", "false"]
+    );
+}
