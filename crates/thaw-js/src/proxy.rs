@@ -122,6 +122,91 @@ impl Interp {
         }))
     }
 
+    /// `[[SetPrototypeOf]]` of a proxy: its trap's answer, else set the target's prototype (`None`: not a proxy).
+    pub(crate) fn proxy_set_prototype_of(&mut self, o: &Obj, proto: &Value) -> R<Option<bool>> {
+        let Some((target, handler, trap)) = self.proxy_trap(o, "setPrototypeOf")? else {
+            return Ok(None);
+        };
+        if trap.is_callable() {
+            return Ok(Some(
+                self.call(&trap, &handler, &[target, proto.clone()])?
+                    .truthy(),
+            ));
+        }
+        if let Value::Object(t) = &target {
+            if self.proxy_set_prototype_of(t, proto)?.is_none() {
+                *t.proto.borrow_mut() = match proto {
+                    Value::Object(p) => Some(p.clone()),
+                    _ => None,
+                };
+            }
+        }
+        Ok(Some(true))
+    }
+
+    /// `[[IsExtensible]]` of a proxy: its trap's answer, else the target's (`None`: not a proxy).
+    pub(crate) fn proxy_is_extensible(&mut self, o: &Obj) -> R<Option<bool>> {
+        let Some((target, handler, trap)) = self.proxy_trap(o, "isExtensible")? else {
+            return Ok(None);
+        };
+        if trap.is_callable() {
+            return Ok(Some(self.call(&trap, &handler, &[target])?.truthy()));
+        }
+        Ok(Some(match &target {
+            Value::Object(t) => match self.proxy_is_extensible(t)? {
+                Some(b) => b,
+                None => t.ext.get() == 0 && !t.frozen.get(),
+            },
+            _ => false,
+        }))
+    }
+
+    /// `[[PreventExtensions]]` of a proxy: its trap's answer, else the target's (`None`: not a proxy).
+    pub(crate) fn proxy_prevent_extensions(&mut self, o: &Obj) -> R<Option<bool>> {
+        let Some((target, handler, trap)) = self.proxy_trap(o, "preventExtensions")? else {
+            return Ok(None);
+        };
+        if trap.is_callable() {
+            return Ok(Some(self.call(&trap, &handler, &[target])?.truthy()));
+        }
+        if let Value::Object(t) = &target {
+            if self.proxy_prevent_extensions(t)?.is_none() {
+                t.ext.set(t.ext.get().max(1));
+            }
+        }
+        Ok(Some(true))
+    }
+
+    /// The object an integrity or array check should inspect: `v` with every proxy layer
+    /// unwrapped to its target (throws on a revoked proxy); non-proxies come back unchanged.
+    pub(crate) fn proxy_unwrap(&mut self, v: &Value, name: &str) -> R<Value> {
+        let mut cur = v.clone();
+        loop {
+            let next = match &cur {
+                Value::Object(o) => match Self::proxy_data(o) {
+                    Some(p) => {
+                        // ponytail: revocation is read off the handler slot, no trap lookup
+                        if matches!(&*p.handler.borrow(), Value::Null) {
+                            return self.throw_error(
+                                "TypeError",
+                                &format!(
+                                    "Cannot perform '{name}' on a proxy that has been revoked"
+                                ),
+                            );
+                        }
+                        Some(p.target.clone())
+                    }
+                    None => None,
+                },
+                _ => None,
+            };
+            match next {
+                Some(t) => cur = t,
+                None => return Ok(cur),
+            }
+        }
+    }
+
     pub(crate) fn proxy_delete(&mut self, o: &Obj, key: &str) -> R<Option<bool>> {
         let Some((target, handler, trap)) = self.proxy_trap(o, "deleteProperty")? else {
             return Ok(None);

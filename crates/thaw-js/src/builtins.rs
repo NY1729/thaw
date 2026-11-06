@@ -1021,12 +1021,15 @@ impl Interp {
                 }
                 _ => Ok(Value::Object(it.object_proto.clone())),
             });
-            self.set_native(o, "setPrototypeOf", |_, _, args| {
+            self.set_native(o, "setPrototypeOf", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
-                    *o.proto.borrow_mut() = match arg(args, 1) {
-                        Value::Object(p) => Some(p),
-                        _ => None,
-                    };
+                    let proto = arg(args, 1);
+                    if it.proxy_set_prototype_of(&o, &proto)?.is_none() {
+                        *o.proto.borrow_mut() = match proto {
+                            Value::Object(p) => Some(p),
+                            _ => None,
+                        };
+                    }
                 }
                 Ok(arg(args, 0))
             });
@@ -1135,17 +1138,20 @@ impl Interp {
                 }
                 Ok(arg(args, 0))
             });
-            self.set_native(o, "isFrozen", |_, _, args| {
-                Ok(Value::Bool(match arg(args, 0) {
+            self.set_native(o, "isFrozen", |it, _, args| {
+                let subject = it.proxy_unwrap(&arg(args, 0), "isFrozen")?;
+                Ok(Value::Bool(match subject {
                     Value::Object(o) => {
                         o.frozen.get() || (o.ext.get() != 0 && o.props.borrow().is_empty())
                     }
                     _ => true,
                 }))
             });
-            self.set_native(o, "preventExtensions", |_, _, args| {
+            self.set_native(o, "preventExtensions", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
-                    o.ext.set(o.ext.get().max(1));
+                    if it.proxy_prevent_extensions(&o)?.is_none() {
+                        o.ext.set(o.ext.get().max(1));
+                    }
                 }
                 Ok(arg(args, 0))
             });
@@ -1155,14 +1161,18 @@ impl Interp {
                 }
                 Ok(arg(args, 0))
             });
-            self.set_native(o, "isExtensible", |_, _, args| {
+            self.set_native(o, "isExtensible", |it, _, args| {
                 Ok(Value::Bool(match arg(args, 0) {
-                    Value::Object(o) => o.ext.get() == 0 && !o.frozen.get(),
+                    Value::Object(o) => match it.proxy_is_extensible(&o)? {
+                        Some(b) => b,
+                        None => o.ext.get() == 0 && !o.frozen.get(),
+                    },
                     _ => false,
                 }))
             });
-            self.set_native(o, "isSealed", |_, _, args| {
-                Ok(Value::Bool(match arg(args, 0) {
+            self.set_native(o, "isSealed", |it, _, args| {
+                let subject = it.proxy_unwrap(&arg(args, 0), "isSealed")?;
+                Ok(Value::Bool(match subject {
                     Value::Object(o) => o.ext.get() == 2 || o.frozen.get(),
                     _ => true,
                 }))
@@ -1352,7 +1362,10 @@ impl Interp {
         if let Value::Object(o) = &array {
             put_hidden(o, "prototype", Value::Object(ap.clone()));
             put_hidden(&ap, "constructor", array.clone());
-            self.set_native(o, "isArray", |_, _, args| Ok(Value::Bool(matches!(arg(args, 0), Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_))))));
+            self.set_native(o, "isArray", |it, _, args| {
+                let subject = it.proxy_unwrap(&arg(args, 0), "isArray")?;
+                Ok(Value::Bool(matches!(subject, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)))))
+            });
             self.set_native(o, "of", |it, _, args| Ok(it.array(args.to_vec())));
             self.set_native(o, "from", |it, _, args| {
                 let src = arg(args, 0);
