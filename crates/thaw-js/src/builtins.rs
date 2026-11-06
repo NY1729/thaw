@@ -170,9 +170,38 @@ pub(crate) fn units_str(u: &[u16]) -> String {
         .collect()
 }
 
+thread_local! {
+    static ASCII_CACHE: std::cell::RefCell<Option<(Rc<str>, bool)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `s.is_ascii()` for a shared subject, memoised for the last long one. The cache holds a clone,
+/// so pointer equality means the same immutable text (no reuse of a freed address).
+pub(crate) fn ascii_of(s: &Rc<str>) -> bool {
+    if s.len() < 256 {
+        return s.is_ascii();
+    }
+    ASCII_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some((k, a)) = &*c {
+            if Rc::ptr_eq(k, s) {
+                return *a;
+            }
+        }
+        let a = s.is_ascii();
+        *c = Some((s.clone(), a));
+        a
+    })
+}
+
 /// `s.length` in UTF-16 code units.
 pub(crate) fn str_len(s: &str) -> usize {
-    if s.is_ascii() {
+    str_len_with(s, s.is_ascii())
+}
+
+/// [`str_len`] when the caller already knows `ascii == s.is_ascii()`.
+pub(crate) fn str_len_with(s: &str, ascii: bool) -> usize {
+    if ascii {
         s.len()
     } else {
         s.chars()
@@ -189,7 +218,12 @@ pub(crate) fn str_len(s: &str) -> usize {
 
 /// UTF-16 unit index -> byte offset (a unit inside a surrogate pair maps to the pair's start).
 pub(crate) fn unit_to_byte(s: &str, ui: usize) -> usize {
-    if s.is_ascii() {
+    unit_to_byte_with(s, s.is_ascii(), ui)
+}
+
+/// [`unit_to_byte`] when the caller already knows `ascii == s.is_ascii()`.
+pub(crate) fn unit_to_byte_with(s: &str, ascii: bool, ui: usize) -> usize {
+    if ascii {
         return ui.min(s.len());
     }
     let mut u = 0;
@@ -207,10 +241,15 @@ pub(crate) fn unit_to_byte(s: &str, ui: usize) -> usize {
 }
 
 pub(crate) fn byte_to_unit(s: &str, bi: usize) -> usize {
-    if s.is_ascii() {
+    byte_to_unit_with(s, s.is_ascii(), bi)
+}
+
+/// [`byte_to_unit`] when the caller already knows `ascii == s.is_ascii()`.
+pub(crate) fn byte_to_unit_with(s: &str, ascii: bool, bi: usize) -> usize {
+    if ascii {
         return bi;
     }
-    str_len(&s[..bi])
+    str_len_with(&s[..bi], false)
 }
 
 /// `s.slice(a, b)` by UTF-16 unit indices (already clamped to `0..=len`).
@@ -225,7 +264,30 @@ pub(crate) fn str_unit_at(s: &str, i: usize) -> Option<u16> {
     if s.is_ascii() {
         return s.as_bytes().get(i).map(|b| u16::from(*b));
     }
-    str_units(s).get(i).copied()
+    // Walk the chars to the owning one instead of building the whole UTF-16 vector.
+    let mut u = 0;
+    for c in s.chars() {
+        let cp = c as u32;
+        let n = if (0x10000..LONE).contains(&cp) { 2 } else { 1 };
+        if i < u + n {
+            if n == 1 {
+                return Some(if cp >= LONE {
+                    (cp - LONE + 0xD800) as u16
+                } else {
+                    cp as u16
+                });
+            }
+            let v = cp - 0x10000;
+            let unit = if i == u {
+                0xD800 + (v >> 10)
+            } else {
+                0xDC00 + (v & 0x3FF)
+            };
+            return Some(unit as u16);
+        }
+        u += n;
+    }
+    None
 }
 
 /// `s += t`, re-pairing a trailing lone high surrogate with a leading lone low surrogate.
@@ -335,11 +397,12 @@ impl Interp {
         } else {
             0
         };
-        if last > str_len(s) {
+        let ascii = ascii_of(s);
+        if last > str_len_with(s, ascii) {
             put_hidden(re_obj, "lastIndex", Value::Number(0.0));
             return Ok(Value::Null);
         }
-        let start = unit_to_byte(s, last);
+        let start = unit_to_byte_with(s, ascii, last);
         let found = re
             .find_from(s, start)
             .next()
@@ -354,7 +417,7 @@ impl Interp {
             put_hidden(
                 re_obj,
                 "lastIndex",
-                Value::Number(byte_to_unit(s, m.end()) as f64),
+                Value::Number(byte_to_unit_with(s, ascii, m.end()) as f64),
             );
         }
         let mut items = vec![Value::str(&s[m.range()])];
@@ -366,7 +429,7 @@ impl Interp {
             put(
                 ao,
                 "index",
-                Value::Number(byte_to_unit(s, m.start()) as f64),
+                Value::Number(byte_to_unit_with(s, ascii, m.start()) as f64),
             );
             put(ao, "input", Value::Str(s.clone()));
             let named: Vec<(String, Option<std::ops::Range<usize>>)> =
@@ -1600,15 +1663,14 @@ impl Interp {
         });
         self.set_native(&sp, "indexOf", |it, this, args| {
             let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
+            let ascii = ascii_of(&s);
             let from = match arg(args, 1) {
                 Value::Undefined => 0,
-                v => unit_to_byte(&s, it.num(&v).max(0.0) as usize),
+                v => unit_to_byte_with(&s, ascii, it.num(&v).max(0.0) as usize),
             };
-            Ok(Value::Number(
-                s[from..]
-                    .find(&*n)
-                    .map_or(-1.0, |b| byte_to_unit(&s, from + b) as f64),
-            ))
+            Ok(Value::Number(s[from..].find(&*n).map_or(-1.0, |b| {
+                byte_to_unit_with(&s, ascii, from + b) as f64
+            })))
         });
         self.set_native(&sp, "lastIndexOf", |it, this, args| {
             let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));

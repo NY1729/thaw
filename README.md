@@ -263,8 +263,9 @@ Known gaps against Node semantics:
 ## thaw-js (experimental)
 
 `thaw-js` is a Thaw-native JavaScript evaluator intended to replace the embedded
-QuickJS layer. It is opt-in: set `THAW_JS_RUNTIME=1` when running `thaw build`.
-Without it, QuickJS remains the default engine. With it, a package is served by
+QuickJS layer. It is opt-in: set `THAW_JS_ENGINE=thaw-js` when running `thaw build`
+(`THAW_JS_ENGINE=quickjs` selects QuickJS explicitly; the legacy `THAW_JS_RUNTIME=1` and `=0` still
+work, and `THAW_JS_ENGINE` wins when both are set). Without either, QuickJS remains the default engine. With it, a package is served by
 thaw-js only when its bundle passes the thaw-js feature scan and every call the
 program makes is a typed call of plain data; anything else stays on QuickJS.
 The routed Node built-in modules are `node:events`, `node:module`, `node:path` (with
@@ -288,7 +289,7 @@ Some routed modules still fall back to QuickJS when the program uses specific na
   `SharedArrayBuffer`, `Atomics`, `transferList`, `postMessageToThread`, `SHARE_ENV`, ...), or uses
   `process.stdin` without constructing a `Worker`.
 
-With `THAW_JS_RUNTIME=1`, the program's own `eval`/`new Function` is served on thaw-js by default;
+With `THAW_JS_ENGINE=thaw-js`, the program's own `eval`/`new Function` is served on thaw-js by default;
 `THAW_JS_USER_DYNAMIC=0` keeps `eval`/`new Function` on QuickJS. `THAW_JS_RUNTIME_DEBUG=1` prints, for each package that stayed
 on QuickJS, the reason (``thaw-js routing: package `x` stays on QuickJS: ...``), and names the
 compiled functions that still call into QuickJS. `thaw inspect <executable>` prints
