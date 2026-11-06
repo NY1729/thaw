@@ -21,7 +21,7 @@ fn build(
 }
 
 /// `build` with thaw-js routing forced off: for tests that assert QuickJS-specific manifest facts
-/// (`manifest["quickjs"]`, `quickjs_reasons`) and must not depend on `THAW_JS_RUNTIME` in the environment.
+/// (`manifest["quickjs"]`, `quickjs_reasons`) and must not depend on `THAW_JS_ENGINE` in the environment.
 #[cfg(test)]
 fn build_quickjs_pinned(input: &Path, output: &Path, registry_dir: &Path) -> Result<(), String> {
     build_with_thaw_js_routing(
@@ -855,7 +855,7 @@ fn build_with_native_mode_routed(
                 || shim_source.contains("loadNativeAddon(")
                 || shim_source.contains("embedExecutable("),
         });
-        if std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1") {
+        if thaw_js_routing {
             manifest["thaw_js"] = thaw_js_eligibility(registry_dir, &resolved_packages);
         }
         record_thaw_js_user_dynamic_blocker(&user_source, thaw_js_routing, thaw_js_user_dynamic_enabled());
@@ -1736,7 +1736,7 @@ fn source_uses_quickjs(source: &str) -> bool {
     .any(|marker| source.contains(marker))
 }
 
-/// Experimental, opt-in (`THAW_JS_RUNTIME=1`): for every resolved
+/// Experimental, opt-in (`THAW_JS_ENGINE=thaw-js`): for every resolved
 /// package with a JavaScript bundle, which constructs would keep the thaw-js evaluator from running it.
 /// Package names loaded through `loadThawJs("<name>", ...)` in the generated shim.
 fn thaw_js_routed_packages(shim_source: &str) -> Vec<String> {
