@@ -267,10 +267,26 @@ QuickJS layer. It is opt-in: set `THAW_JS_RUNTIME=1` when running `thaw build`.
 Without it, QuickJS remains the default engine. With it, a package is served by
 thaw-js only when its bundle passes the thaw-js feature scan and every call the
 program makes is a typed call of plain data; anything else stays on QuickJS.
-Of the Node built-in modules, only `node:events`, `node:module`, `node:path` (and
-`path/posix`, `path/win32`), `node:assert` (and `assert/strict`), `node:os`, `node:util`,
-`node:constants`, `node:url`, `node:fs`, `node:fs/promises` and `node:timers/promises` are
-routed; other `node:*` modules keep using QuickJS.
+The routed Node built-in modules are `node:events`, `node:module`, `node:path` (with
+`path/posix` and `path/win32`), `node:assert` (with `assert/strict`), `node:os`, `node:util`
+(with `util/types`), `node:constants`, `node:url`, `node:fs` (with `fs/promises`),
+`node:timers` (with `timers/promises`), `node:vm`, `node:async_hooks`, `node:querystring`,
+`node:worker_threads`, `node:stream` (with `stream/web`), `node:readline` (with
+`readline/promises`), `node:dns` (with `dns/promises`), `node:inspector` (with
+`inspector/promises`), `node:string_decoder`, `node:tty`, `node:dgram`, `node:tls`,
+`node:buffer`, `node:process`, `node:http`, `node:https`, `node:http2`, `node:child_process`,
+`node:perf_hooks`, `node:zlib`, `node:net` and `node:crypto`. Other `node:*` modules, including
+`node:cluster`, keep using QuickJS.
+
+Some routed modules still fall back to QuickJS when the program uses specific names:
+
+- `node:async_hooks`: the program names `createHook` (object-literal callbacks are not marshalled yet).
+- `node:perf_hooks`: the program names `mark`, `measure`, `PerformanceObserver`, `timerify`,
+  `getEntries`, `PerformanceEntry` or `clearMarks`.
+- `node:child_process`: the program also uses `node:http`.
+- `node:worker_threads`: the program names an unsupported option (`resourceLimits`,
+  `SharedArrayBuffer`, `Atomics`, `transferList`, `postMessageToThread`, `SHARE_ENV`, ...), or uses
+  `process.stdin` without constructing a `Worker`.
 
 With `THAW_JS_RUNTIME=1`, the program's own `eval`/`new Function` is served on thaw-js by default;
 `THAW_JS_USER_DYNAMIC=0` keeps `eval`/`new Function` on QuickJS. `THAW_JS_RUNTIME_DEBUG=1` prints, for each package that stayed
@@ -278,6 +294,16 @@ on QuickJS, the reason (``thaw-js routing: package `x` stays on QuickJS: ...``),
 compiled functions that still call into QuickJS. `thaw inspect <executable>` prints
 `quickjs: true|false`, `quickjs-reason:` lines, a `thaw-js-routed:` list of packages served by
 thaw-js, and `thaw-js: package=... eligible=true|false blockers=...` lines.
+
+Known thaw-js limitations on current main:
+
+- Packages with a native N-API add-on stay on QuickJS.
+- `node:cluster` is not routed and stays on QuickJS.
+- `node:crypto` covers hashing, HMAC, random bytes and AES-CBC/ECB/CTR/GCM ciphers. Other
+  ciphers, including those listed by `getCiphers()` (CCM, OCB, ChaCha20), are rejected with
+  `ERR_CRYPTO_UNKNOWN_CIPHER`. Cipher streams (the Transform API) are missing, KeyObject
+  export is PEM only, `crypto.subtle` provides only `digest`, and `generatePrime` and `X509`
+  are not implemented.
 
 ## Examples
 
