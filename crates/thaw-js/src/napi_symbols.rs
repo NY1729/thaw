@@ -212,7 +212,7 @@ pub extern "C" fn thaw_tjs_napi_symbol_abstract_to_string_units_result(
         units: std::ptr::null_mut(),
         exception_handle: 0,
         exception_object_like: 0,
-        error: thaw_arena::owned_string(message.to_string()),
+        error: thaw_arena::owned_string(message),
     };
     if !known_owner(owner) || id == 0 {
         return fail("invalid native Symbol owner");
