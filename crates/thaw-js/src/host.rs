@@ -380,7 +380,9 @@ const DATE_KEY: &str = "__thaw_tjs_date__";
 const BIGINT_KEY: &str = "__thaw_tjs_bigint__";
 /// `{"__thaw_tjs_num__": "-0"}`: a compiled negative zero, which JSON integers lose; also `"NaN"`/`"Infinity"`/`"-Infinity"`.
 const NUM_KEY: &str = "__thaw_tjs_num__";
-/// `{"__thaw_tjs_bytes__": {"k": "Buffer", "b64": "..."}}`: compiled `Bytes` crossing as base64 text.
+/// `{"__thaw_tjs_bytes__": {"k": "Buffer" | "Uint8Array" | "ArrayBuffer" | "DataView", "b64": "..."}}`:
+/// compiled `Bytes` crossing as base64 text. `k` selects the JS kind; a missing or unknown `k` is a Buffer.
+/// ArrayBuffer and DataView cross by copy (a DataView over a fresh ArrayBuffer of exactly its window).
 const BYTES_KEY: &str = "__thaw_tjs_bytes__";
 const MAP_KEY: &str = "__thaw_tjs_map__";
 const SET_KEY: &str = "__thaw_tjs_set__";
@@ -1387,6 +1389,12 @@ fn unsupported_text(what: &str) -> ThawResult {
 
 // The Json host-operation table (`thaw_json_register_host_operations`) names these; the ones a thaw-js
 // package has not needed yet report an error instead of linking the QuickJS runtime.
+/// A Buffer: a Uint8Array with `__isBuffer` in its prototype chain (what op 11 and op 29 test).
+fn is_buffer_value(v: &Value) -> bool {
+    matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8))
+        && crate::find_in_chain(o, "__isBuffer").is_some())
+}
+
 /// Introspection of the value behind `handle` for the Json host bridge (the numbering is the QuickJS
 /// `__thaw_json_host_query`'s). Kinds thaw-js has no value for (Date, Buffer, Map, Set, native
 /// wrappers) answer "no" to the copy queries; operation 29 says whether the value must stay a live handle,
@@ -1453,7 +1461,8 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
                 _ => return Err(HostError::Thrown("TypeError: Expected string".into())),
             },
             26 => flag(matches!(&v, Value::Object(o) if o.proto.borrow().is_none())),
-            11 | 25 => "0".to_string(),
+            11 => flag(is_buffer_value(&v)),
+            25 => "0".to_string(),
             12 => flag(it.date_target(&v)),
             13 => crate::number_to_string(it.date_time(&v).map_err(|c| classify(it, c))?),
             17..=20 | 22..=24 => prelude_call(it, "__thaw_json_host_query", &v, operation)?,
@@ -1468,7 +1477,7 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
                 Kind::ArrayBuffer(_) | Kind::Map(_) | Kind::Set(_) | Kind::Proxy(_))
                 || matches!(&*o.kind.borrow(), Kind::Typed(t) if !matches!(t.ty, crate::typed::Ty::U8))
                 || (matches!(&*o.kind.borrow(), Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8))
-                    && crate::find_in_chain(o, "__isBuffer").is_none()))),
+                    && !is_buffer_value(&v)))),
             // 30: a plain object or array (a promoted object literal, a native-class view) passed as a
             // call argument keeps its identity as a live handle instead of a JSON copy. Kept apart from 29
             // so `Json` slots that read 29 (structured clone) see no change.
@@ -2019,6 +2028,13 @@ pub extern "C" fn thaw_tjs_get_global(name: *const c_char) -> i64 {
             let it = &mut p.interp;
             if name.starts_with("__thaw_") {
                 default_realm_prelude_check(it)?;
+            }
+            // A global whose literal name holds a `.` (a package name) wins over the nested walk.
+            if let Some(value) = it
+                .lookup(&it.global.clone(), &name)
+                .filter(|v| !matches!(v, Value::Undefined))
+            {
+                return Ok(value);
             }
             let mut parts = name.split('.');
             let first = parts.next().unwrap_or("");
@@ -2751,7 +2767,7 @@ fn not_callable(it: &mut Interp, message: String) -> HostError {
 }
 
 /// A host-originated call of a handle: a value that is not a function fails naming its kind.
-fn check_handle_callable(it: &mut Interp, f: &Value) -> Result<(), HostError> {
+pub(crate) fn check_handle_callable(it: &mut Interp, f: &Value) -> Result<(), HostError> {
     if f.is_callable() {
         return Ok(());
     }
@@ -2776,7 +2792,7 @@ fn adopt_thenable(it: &mut Interp, v: Value) -> Result<Value, HostError> {
 }
 
 /// A call result with a returned Promise awaited (the event loop runs until it settles); a rejection throws.
-fn awaited(it: &mut Interp, v: Value) -> Result<Value, HostError> {
+pub(crate) fn awaited(it: &mut Interp, v: Value) -> Result<Value, HostError> {
     match it.await_settled(&v).map_err(|c| classify(it, c))? {
         Some(Ok(v)) => Ok(v),
         Some(Err(e)) => Err(classify(it, Ctl::Throw(e))),
@@ -3668,10 +3684,19 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
                     _ => Vec::new(),
                 },
             };
-            let is_u8 = matches!(
-                parts.iter().find(|(k, _)| k == "k"),
-                Some((_, Native::Str(s))) if s == "Uint8Array"
-            );
+            let kind = match parts.iter().find(|(k, _)| k == "k") {
+                Some((_, Native::Str(s))) => s.as_str(),
+                _ => "Buffer",
+            };
+            match kind {
+                "ArrayBuffer" => return it.array_buffer_from_vec(bytes),
+                "DataView" => {
+                    let ab = it.array_buffer_from_vec(bytes);
+                    return construct_global(it, "DataView", &[ab]).unwrap_or(Value::Undefined);
+                }
+                _ => {}
+            }
+            let is_u8 = kind == "Uint8Array";
             let view = it.u8_from_vec(bytes);
             // Buffer is a Uint8Array whose prototype is `Buffer.prototype` (see buffer.rs `wrap`)
             if !is_u8 {
@@ -3857,7 +3882,7 @@ impl Native {
     /// `to_json` for a typed-call result: an `undefined` OWN property of an object keeps the compiled side's
     /// `undefined` marker instead of vanishing (Object.keys / console.log see it; JSON.stringify still omits it).
     /// Array items and the top level are unchanged (`undefined` stays `null` there).
-    fn to_json_keeping_undefined(&self) -> String {
+    pub(crate) fn to_json_keeping_undefined(&self) -> String {
         match self {
             Native::Array(a) => format!(
                 "[{}]",
@@ -4358,6 +4383,7 @@ pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) 
 #[no_mangle]
 pub extern "C" fn thaw_tjs_load_script(source: *const c_char) -> u8 {
     let Some(source) = cstr(source) else { return 0 };
+    let source = crate::napi_eval::unpack_script(source);
     let owner = default_realm();
     let result = with_package(owner, |p| {
         p.interp
@@ -4903,6 +4929,15 @@ mod host_query_live_tests {
         ] {
             assert_eq!(query(construct(global, args), 29), "1", "{global}");
         }
+    }
+
+    #[test]
+    fn host_query_is_buffer_answers_one_only_for_buffers() {
+        assert_eq!(query(construct("Buffer", "[{\"v\":3}]"), 11), "1");
+        assert_eq!(query(construct("Uint8Array", "[{\"v\":3}]"), 11), "0");
+        assert_eq!(query(construct("Float64Array", "[{\"v\":2}]"), 11), "0");
+        assert_eq!(query(construct("Object", "[]"), 11), "0");
+        assert_eq!(query(construct("Buffer", "[{\"v\":3}]"), 25), "0");
     }
 
     #[test]

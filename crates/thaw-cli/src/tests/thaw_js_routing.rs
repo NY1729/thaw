@@ -509,3 +509,30 @@ fn node_perf_hooks_thaw_js_bundle_scans_clean() {
     assert!(report.is_clean(), "{:?}", report.blockers);
     assert_eq!(report.entry, "node:perf_hooks");
 }
+
+#[test]
+fn random_fill_sync_declaration_keeps_bytes_only_when_thaw_js_routes_node_crypto() {
+    // The QuickJS-lane override declares randomFillSync as JsValue; thaw-js keeps the Bytes signature.
+    let dir = std::env::temp_dir().join(format!("thaw-cli-random-fill-decl-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let packages = ["node:crypto".to_string()];
+    let active = packages.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let source = "import { randomFillSync } from \"node:crypto\";\nfunction main(): void {\n    const value = Buffer.alloc(8);\n    randomFillSync(value, 2, 3);\n}\n";
+    let declaration = |routed: &ThawJsPackages| {
+        let (shims, _) = generate_registry_shims_pass(
+            &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
+            &thaw_parser::common::FileName::Custom("random fill.ts".into()),
+            false, &dir.join("app"), Some(&dir.join("staging")),
+            &std::collections::HashSet::new(), true, routed,
+        ).unwrap();
+        shims.0.lines()
+            .find(|line| thaw_js_declared_function(line, "node:crypto").as_deref() == Some("randomFillSync"))
+            .unwrap_or_else(|| panic!("no randomFillSync declaration"))
+            .to_string()
+    };
+    let unrouted = declaration(&ThawJsPackages::new());
+    assert!(unrouted.contains("JsValue") && !unrouted.contains("Uint8Array"), "{unrouted}");
+    let routed = declaration(&std::iter::once("node:crypto".to_string()).collect());
+    assert!(routed.contains("Uint8Array") && !routed.contains("JsValue"), "{routed}");
+    let _ = std::fs::remove_dir_all(dir);
+}

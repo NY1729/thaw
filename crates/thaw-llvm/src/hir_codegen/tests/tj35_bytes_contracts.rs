@@ -86,3 +86,15 @@ fn tj35_random_fill_sync_copies_the_result_back_into_the_argument() {
     ));
     assert!(!tj35_calls(&ir, "thaw_bytes_copy"), "{ir}");
 }
+
+#[test]
+fn tj93_bare_buffer_argument_selects_array_buffer_and_data_view_kinds() {
+    // ArrayBuffer (code 1) and DataView (code 2) get their own `k` names, not "Buffer"
+    let f = tj35_symbol("m::shape");
+    let (_, _, ir) = compile_thaw_js_program(&format!(
+        "declare function {f}(value: ArrayBuffer): Json;
+         function main(): void {{ console.log({f}(new ArrayBuffer(1))); }}"
+    ));
+    assert!(ir.contains("thaw_js_bytes_kind_ab"), "{ir}");
+    assert!(ir.contains("thaw_js_bytes_kind_dv"), "{ir}");
+}

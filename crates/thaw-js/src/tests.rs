@@ -469,6 +469,47 @@ fn typed_arrays_wrap_values_and_share_their_buffer() {
 }
 
 #[test]
+fn dataview_is_an_array_buffer_view() {
+    assert_eq!(
+        one("var b = new ArrayBuffer(4), d = new DataView(b, 1, 2);
+             console.log(ArrayBuffer.isView(d), ArrayBuffer.isView(new Uint8Array(1)), ArrayBuffer.isView(b), ArrayBuffer.isView({}), ArrayBuffer.isView(null), ArrayBuffer.isView.name, ArrayBuffer.isView.length)"),
+        "true true false false false isView 1"
+    );
+}
+
+#[test]
+fn dataview_util_types_agree_with_is_view() {
+    assert_eq!(
+        one(
+            "var d = new DataView(new ArrayBuffer(4), 1, 2), t = globalThis.__thaw_util_types;
+             console.log(t.isArrayBufferView(d), t.isTypedArray(d), t.isDataView(d))"
+        ),
+        "true false true"
+    );
+}
+
+#[test]
+fn dataview_structured_clone_keeps_window_and_shares_cloned_buffer() {
+    assert_eq!(
+        one("var b = new ArrayBuffer(8), d = new DataView(b, 2, 4); d.setUint8(0, 9);
+             var c = structuredClone(d);
+             console.log(c instanceof DataView, c.byteOffset, c.byteLength, c.getUint8(0), c.buffer !== b, c.buffer.byteLength)"),
+        "true 2 4 9 true 8"
+    );
+}
+
+#[test]
+fn dataview_constructor_nan_offset_is_zero_and_ranges_throw() {
+    assert_eq!(
+        one("var b = new ArrayBuffer(8);
+             console.log(new DataView(b, NaN).byteOffset, new DataView(b, NaN, NaN).byteLength);
+             try { new DataView(b, 9); } catch (e) { console.log(e.message); }
+             try { new DataView(b, 0, 20); } catch (e) { console.log(e.message); }"),
+        "0 0|Start offset 9 is outside the bounds of the buffer|Invalid DataView length 20"
+    );
+}
+
+#[test]
 fn typed_arrays_iterate_in_for_of_spread_array_from_and_entries() {
     assert_eq!(
         one("var u = new Uint8Array([7, 8]), out = [];
@@ -5091,5 +5132,90 @@ fn buffer_equal_constant_time_load_shape_does_not_throw() {
              }
              console.log(typeof origSlowBufEqual, bufferEq(Buffer.from('secret'), Buffer.from('secret')), bufferEq(Buffer.from('secret'), Buffer.from('secrex')));"),
         "undefined true false"
+    );
+}
+
+/// Bundle whose `shape`/`view`/`buf` report how a tagged `Bytes` argument was revived.
+const BYTES_REVIVE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"r/index.js": function(module, exports, require) {
+  exports.shape = function (v) { return Object.prototype.toString.call(v) + "," + (v instanceof ArrayBuffer) + "," + (v instanceof Uint8Array) + "," + v.byteLength; };
+  exports.view = function (v) { return Object.prototype.toString.call(v) + "," + (v instanceof DataView) + "," + v.byteLength + "," + v.getUint8(0); };
+  exports.buf = function (v) { return Buffer.isBuffer(v) + "," + v.length; };
+},
+};
+var __thaw_bundle_require_maps = { "r/index.js": {}, };
+var __thaw_bundle_entry_key = "r/index.js";
+})(globalThis.require);"#;
+
+/// `{"__thaw_tjs_bytes__": {"k": kind, "b64": ...}}` for `data`; `kind: None` omits `k`.
+fn tj93_bytes_arg_kind(kind: Option<&str>, data: &[u8]) -> String {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+    match kind {
+        Some(k) => format!(r#"{{"__thaw_tjs_bytes__":{{"k":"{k}","b64":"{b64}"}}}}"#),
+        None => format!(r#"{{"__thaw_tjs_bytes__":{{"b64":"{b64}"}}}}"#),
+    }
+}
+
+#[test]
+fn tj93_array_buffer_kind_node_revives_as_array_buffer() {
+    use std::ffi::CString;
+    let bundle = CString::new(BYTES_REVIVE).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"tj93ab".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    assert_eq!(
+        typed_call(
+            "tj93ab::shape",
+            &format!("[{}]", tj93_bytes_arg_kind(Some("ArrayBuffer"), &[1, 2, 3]))
+        )
+        .unwrap(),
+        "\"[object ArrayBuffer],true,false,3\""
+    );
+}
+
+#[test]
+fn tj93_data_view_kind_node_revives_as_data_view() {
+    use std::ffi::CString;
+    let bundle = CString::new(BYTES_REVIVE).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"tj93dv".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    assert_eq!(
+        typed_call(
+            "tj93dv::view",
+            &format!("[{}]", tj93_bytes_arg_kind(Some("DataView"), &[1, 2, 3]))
+        )
+        .unwrap(),
+        "\"[object DataView],true,3,1\""
+    );
+}
+
+#[test]
+fn tj93_unknown_or_missing_kind_still_revives_as_buffer() {
+    use std::ffi::CString;
+    let bundle = CString::new(BYTES_REVIVE).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"tj93bf".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    assert_eq!(
+        typed_call(
+            "tj93bf::buf",
+            &format!("[{}]", tj93_bytes_arg_kind(None, &[1, 2, 3]))
+        )
+        .unwrap(),
+        "\"true,3\""
+    );
+    assert_eq!(
+        typed_call(
+            "tj93bf::buf",
+            &format!("[{}]", tj93_bytes_arg_kind(Some("Weird"), &[1, 2, 3]))
+        )
+        .unwrap(),
+        "\"true,3\""
     );
 }
