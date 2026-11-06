@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::ffi::{c_char, CStr, CString};
 use std::sync::Mutex;
 
-use crate::host::classify;
+use crate::host::{classify, thaw_tjs_release_handle};
 use crate::napi_graph;
 use crate::{arg, Interp, Value, R};
 
@@ -110,6 +110,21 @@ pub(crate) fn release_reference(token: u64) -> bool {
     }
 }
 
+/// The raw reply text of one `handle` operation, or None when no bridge is registered.
+fn handle_text(op: &str, target: &str, extra: &str, graph: &str) -> Option<String> {
+    let b = bridge()?;
+    let parts = [op, target, extra, graph].map(cstring);
+    // SAFETY: the parts are live NUL-terminated strings for the duration of the call.
+    Some(unsafe {
+        take_text((b.handle)(
+            parts[0].as_ptr(),
+            parts[1].as_ptr(),
+            parts[2].as_ptr(),
+            parts[3].as_ptr(),
+        ))
+    })
+}
+
 /// One `handle` operation of the bridge (`retain_graph_handle`, `symbol_handle`, `symbol_metadata`): its
 /// JSON reply, or the error text the reply carries.
 pub(crate) fn handle_op(
@@ -118,19 +133,8 @@ pub(crate) fn handle_op(
     extra: &str,
     graph: &str,
 ) -> Result<serde_json::Value, String> {
-    let Some(b) = bridge() else {
-        return Err("native addon bridge is not registered".into());
-    };
-    let parts = [op, target, extra, graph].map(cstring);
-    // SAFETY: the parts are live NUL-terminated strings for the duration of the call.
-    let reply = unsafe {
-        take_text((b.handle)(
-            parts[0].as_ptr(),
-            parts[1].as_ptr(),
-            parts[2].as_ptr(),
-            parts[3].as_ptr(),
-        ))
-    };
+    let reply = handle_text(op, target, extra, graph)
+        .ok_or_else(|| "native addon bridge is not registered".to_string())?;
     let reply: serde_json::Value =
         serde_json::from_str(&reply).map_err(|_| "malformed native bridge reply".to_string())?;
     match reply.get("__thaw_error__") {
@@ -315,6 +319,73 @@ pub(crate) fn install(it: &mut Interp) {
         // `globalThis`'s object, so `Object.keys` skips it, and an immutable binding.
         it.global.declare(name, value, false);
     }
+    crate::web_napi_proxy::enable_if_requested(it);
+}
+
+/// Releases the references a packet names in `leases` (handles) and `napiLeases` (bridge references), for a
+/// packet no bridge call will consume (`release_unconsumed_graph_leases` of thaw-quickjs).
+fn release_packet_leases(graph: &str) {
+    let Ok(packet) = serde_json::from_str::<serde_json::Value>(graph) else {
+        return;
+    };
+    let handles = packet.get("leases").and_then(|v| v.as_array());
+    for handle in handles.into_iter().flatten().filter_map(|v| v.as_i64()) {
+        if handle != 0 {
+            thaw_tjs_release_handle(handle);
+        }
+    }
+    let references = packet.get("napiLeases").and_then(|v| v.as_array());
+    for reference in references
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str()?.parse::<u64>().ok())
+    {
+        if reference != 0 {
+            release_reference(reference);
+        }
+    }
+}
+
+/// `__thaw_napi_graph_invoker`: a factory from a native Function handle to a closure `(graph, construct)` that
+/// calls it with the captured graph packet and returns the bridge's reply text. The factory retains the handle
+/// once; that retain is never released (ponytail: no weak root until thaw-js has real weakness). A packet that
+/// cannot reach the bridge releases the leases it names.
+pub(crate) fn graph_invoker_factory(it: &mut Interp) -> Value {
+    it.native(|it, _, args| {
+        let target = text(args, 0);
+        let retained = handle_op("retain_graph_handle", &target, "", "[]")
+            .ok()
+            .and_then(|reply| reply.get("value")?.as_str()?.parse::<u64>().ok())
+            .filter(|token| *token != 0);
+        if retained.is_none() {
+            return it.throw_error("TypeError", "Cannot retain native Function");
+        }
+        Ok(it.native(move |_, _, args| {
+            let graph = text(args, 0);
+            let operation = if arg(args, 1).truthy() {
+                "construct_captured_graph"
+            } else {
+                "call_captured_graph"
+            };
+            // The bridge consumes the packet's leases when it runs; otherwise they are released here.
+            let reply = if graph.contains('\0') {
+                None
+            } else {
+                handle_text(operation, &target, "", &graph)
+            };
+            match reply {
+                Some(reply) => Ok(Value::str(&reply)),
+                None => {
+                    release_packet_leases(&graph);
+                    Ok(Value::str(if graph.contains('\0') {
+                        "{\"__thaw_error__\":\"Invalid callback graph\"}"
+                    } else {
+                        "{\"__thaw_error__\":\"Native addon bridge is unavailable\"}"
+                    }))
+                }
+            }
+        }))
+    })
 }
 
 /// One poll of the napi side's pending completions (run on every loop turn).
