@@ -317,7 +317,9 @@ impl std::hash::Hasher for FxHasher {
         }
     }
     fn finish(&self) -> u64 {
-        self.0
+        // Rotate so the high (well-mixed) bits reach the low bits hashbrown uses for buckets;
+        // f64 bits of small integers have zero low words, which otherwise collide.
+        self.0.rotate_left(26)
     }
 }
 
