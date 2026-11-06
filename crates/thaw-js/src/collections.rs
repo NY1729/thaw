@@ -38,6 +38,8 @@ pub(crate) struct MapData {
 }
 
 impl MapData {
+    // JsStr only mutates a cached ASCII flag; its Hash/Eq go through the string contents.
+    #[allow(clippy::mutable_key_type)]
     fn find(&mut self, key: &Value) -> Option<usize> {
         if self.entries.len() < HASH_MIN {
             return self
@@ -94,6 +96,8 @@ pub(crate) struct SetData {
 }
 
 impl SetData {
+    // JsStr only mutates a cached ASCII flag; its Hash/Eq go through the string contents.
+    #[allow(clippy::mutable_key_type)]
     fn find(&mut self, key: &Value) -> Option<usize> {
         if self.items.len() < HASH_MIN {
             return self.items.iter().position(|k| same_value_zero(k, key));

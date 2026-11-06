@@ -256,12 +256,12 @@ fn regexp_string_index_ascii_and_non_ascii_subjects() {
 #[test]
 fn ascii_flag_cache_tracks_the_subject() {
     let ascii: crate::JsStr = "a".repeat(300).into();
-    assert!(crate::builtins::ascii_of(&ascii));
+    assert!(ascii.is_ascii_cached());
     let mixed: crate::JsStr = format!("{}é", "a".repeat(299)).into();
-    assert!(!crate::builtins::ascii_of(&mixed));
+    assert!(!mixed.is_ascii_cached());
     // the cache now holds `mixed`; the ASCII subject must not inherit its answer
-    assert!(crate::builtins::ascii_of(&ascii));
-    assert!(!crate::builtins::ascii_of(&mixed));
+    assert!(ascii.is_ascii_cached());
+    assert!(!mixed.is_ascii_cached());
 }
 
 #[test]

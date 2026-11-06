@@ -1,25 +1,77 @@
-//! `JsStr`: the immutable string payload of `Value::Str`. Step 1 is a plain newtype over
-//! `Rc<str>`; the representation may grow later without changing this API.
+//! `JsStr`: the immutable string payload of `Value::Str`. Short strings are a plain shared
+//! `Rc<str>`; long strings own a `String` (spare capacity for later appends) plus a cached
+//! ASCII flag. The representation is private, so the API does not change with it.
 
 use std::borrow::Borrow;
+use std::cell::Cell;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::rc::Rc;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct JsStr(Rc<str>);
+/// Strings at or above this many bytes use the `Buf` representation.
+const BUF_MIN: usize = 256;
+
+#[derive(Clone)]
+enum Repr {
+    /// `len < BUF_MIN`, or a long string that arrived as an `Rc<str>` (no way to take its slack).
+    Plain(Rc<str>),
+    Buf(Rc<BufStr>),
+}
+
+struct BufStr {
+    /// 0 = not yet computed, 1 = ASCII, 2 = not ASCII.
+    ascii: Cell<u8>,
+    s: String,
+}
+
+#[derive(Clone)]
+pub struct JsStr(Repr);
 
 impl JsStr {
+    #[inline]
+    fn buf(s: String) -> Self {
+        JsStr(Repr::Buf(Rc::new(BufStr {
+            ascii: Cell::new(0),
+            s,
+        })))
+    }
+
     /// The shared `Rc<str>` for this string (used for property keys and names).
+    /// A `Buf` is copied here: its `String` may have spare capacity and an `Rc<str>` cannot share it.
     #[inline]
     pub fn into_rc(&self) -> Rc<str> {
-        self.0.clone()
+        match &self.0 {
+            Repr::Plain(r) => r.clone(),
+            Repr::Buf(b) => Rc::from(b.s.as_str()),
+        }
     }
 
     /// True when both handles share one allocation (a fast path only; equality is by content).
     #[inline]
     pub fn ptr_eq(a: &Self, b: &Self) -> bool {
-        Rc::ptr_eq(&a.0, &b.0)
+        match (&a.0, &b.0) {
+            (Repr::Plain(x), Repr::Plain(y)) => Rc::ptr_eq(x, y),
+            (Repr::Buf(x), Repr::Buf(y)) => Rc::ptr_eq(x, y),
+            _ => false,
+        }
+    }
+
+    /// `str::is_ascii`, memoised on the string for a long `Buf` (computed once, then O(1)).
+    #[inline]
+    pub(crate) fn is_ascii_cached(&self) -> bool {
+        match &self.0 {
+            Repr::Plain(r) => r.is_ascii(),
+            Repr::Buf(b) => match b.ascii.get() {
+                1 => true,
+                2 => false,
+                _ => {
+                    let a = b.s.is_ascii();
+                    b.ascii.set(if a { 1 } else { 2 });
+                    a
+                }
+            },
+        }
     }
 }
 
@@ -27,53 +79,203 @@ impl Deref for JsStr {
     type Target = str;
     #[inline]
     fn deref(&self) -> &str {
-        &self.0
+        match &self.0 {
+            Repr::Plain(r) => r,
+            Repr::Buf(b) => b.s.as_str(),
+        }
+    }
+}
+
+impl PartialEq for JsStr {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        JsStr::ptr_eq(self, other) || **self == **other
+    }
+}
+
+impl Eq for JsStr {}
+
+impl Hash for JsStr {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Must hash exactly like `str` for the `Borrow<str>` lookups to work.
+        Hash::hash(&**self, state)
     }
 }
 
 impl AsRef<str> for JsStr {
     #[inline]
     fn as_ref(&self) -> &str {
-        &self.0
+        self
     }
 }
 
 impl Borrow<str> for JsStr {
     #[inline]
     fn borrow(&self) -> &str {
-        &self.0
+        self
     }
 }
 
 impl fmt::Display for JsStr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&*self.0, f)
+        fmt::Display::fmt(&**self, f)
     }
 }
 
 impl fmt::Debug for JsStr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&*self.0, f)
+        fmt::Debug::fmt(&**self, f)
     }
 }
 
 impl From<&str> for JsStr {
     #[inline]
     fn from(s: &str) -> Self {
-        JsStr(Rc::from(s))
+        if s.len() < BUF_MIN {
+            JsStr(Repr::Plain(Rc::from(s)))
+        } else {
+            JsStr::buf(s.to_owned())
+        }
     }
 }
 
 impl From<String> for JsStr {
+    /// A long string is moved in, not copied.
     #[inline]
     fn from(s: String) -> Self {
-        JsStr(Rc::from(s))
+        if s.len() < BUF_MIN {
+            JsStr(Repr::Plain(Rc::from(s)))
+        } else {
+            JsStr::buf(s)
+        }
     }
 }
 
 impl From<Rc<str>> for JsStr {
     #[inline]
     fn from(s: Rc<str>) -> Self {
-        JsStr(s)
+        JsStr(Repr::Plain(s))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashMap;
+
+    fn is_plain(s: &JsStr) -> bool {
+        matches!(s.0, Repr::Plain(_))
+    }
+
+    fn hash_of<T: Hash + ?Sized>(t: &T) -> u64 {
+        let mut h = DefaultHasher::new();
+        t.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn jsstr_thresholds_pick_the_representation() {
+        let short = "a".repeat(BUF_MIN - 1);
+        let long = "a".repeat(BUF_MIN);
+        assert!(is_plain(&JsStr::from(short.as_str())));
+        assert!(is_plain(&JsStr::from(short.clone())));
+        assert!(!is_plain(&JsStr::from(long.as_str())));
+        assert!(!is_plain(&JsStr::from(long.clone())));
+        // an Rc<str> is always Plain, even when long
+        assert!(is_plain(&JsStr::from(Rc::<str>::from(long.as_str()))));
+    }
+
+    #[test]
+    fn jsstr_deref_and_views_agree_for_both_reprs() {
+        for text in ["", "abc", "é😀", &"xé".repeat(200)] {
+            let plain = JsStr::from(Rc::<str>::from(text));
+            let owned = JsStr::from(text.to_owned());
+            for s in [&plain, &owned] {
+                assert_eq!(&**s, text);
+                assert_eq!(s.len(), text.len());
+                assert_eq!(s.to_string(), text);
+                assert_eq!(format!("{s:?}"), format!("{text:?}"));
+                assert_eq!(&*s.into_rc(), text);
+            }
+        }
+    }
+
+    #[test]
+    fn jsstr_eq_hash_borrow_match_str() {
+        let long = "k".repeat(300);
+        let a = JsStr::from(long.clone());
+        let b = JsStr::from(Rc::<str>::from(long.as_str()));
+        let c = JsStr::from(format!("{long}!"));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert!(!JsStr::ptr_eq(&a, &b));
+        assert_eq!(hash_of(&a), hash_of(long.as_str()));
+        assert_eq!(hash_of(&b), hash_of(long.as_str()));
+        assert_eq!(hash_of(&JsStr::from("x")), hash_of("x"));
+
+        // the cached ASCII flag is the only interior state; Hash/Eq use the contents
+        #[allow(clippy::mutable_key_type)]
+        let mut map: HashMap<JsStr, u32> = HashMap::new();
+        map.insert(a.clone(), 7);
+        assert_eq!(map.get(long.as_str()), Some(&7));
+        assert_eq!(map.get(&b), Some(&7));
+        assert_eq!(map.get(&c), None);
+        let short: JsStr = "hi".into();
+        map.insert(short, 1);
+        assert_eq!(map.get("hi"), Some(&1));
+    }
+
+    #[test]
+    fn jsstr_ptr_eq_is_identity_within_a_repr() {
+        let a = JsStr::from("x".repeat(300));
+        let a2 = a.clone();
+        assert!(JsStr::ptr_eq(&a, &a2));
+        let other = JsStr::from("x".repeat(300));
+        assert!(!JsStr::ptr_eq(&a, &other));
+        assert_eq!(a, other);
+    }
+
+    #[test]
+    fn jsstr_ascii_flag_is_correct_for_ascii_bmp_astral() {
+        let short_ascii: JsStr = "abc".into();
+        let short_bmp: JsStr = "é".into();
+        assert!(short_ascii.is_ascii_cached());
+        assert!(!short_bmp.is_ascii_cached());
+
+        let ascii = JsStr::from("a".repeat(300));
+        let bmp = JsStr::from(format!("{}é", "a".repeat(299)));
+        let astral = JsStr::from(format!("{}😀", "a".repeat(299)));
+        let lone_at_end = JsStr::from(format!("{}z", "a".repeat(299)));
+        // repeated calls answer from the cache and stay correct
+        for _ in 0..2 {
+            assert!(ascii.is_ascii_cached());
+            assert!(!bmp.is_ascii_cached());
+            assert!(!astral.is_ascii_cached());
+            assert!(lone_at_end.is_ascii_cached());
+        }
+        assert_eq!(ascii.is_ascii_cached(), ascii.is_ascii());
+        assert_eq!(bmp.is_ascii_cached(), bmp.is_ascii());
+    }
+
+    #[test]
+    fn jsstr_ascii_flag_is_per_string() {
+        let ascii = JsStr::from("a".repeat(300));
+        let mixed = JsStr::from(format!("{}é", "a".repeat(299)));
+        assert!(ascii.is_ascii_cached());
+        assert!(!mixed.is_ascii_cached());
+        assert!(ascii.clone().is_ascii_cached());
+    }
+
+    #[test]
+    fn jsstr_from_string_moves_the_buffer() {
+        let mut s = String::with_capacity(1024);
+        s.push_str(&"m".repeat(300));
+        let p = s.as_ptr();
+        let j = JsStr::from(s);
+        assert_eq!(j.as_ptr(), p);
+        assert_eq!(j.len(), 300);
+        assert!(!is_plain(&j));
     }
 }

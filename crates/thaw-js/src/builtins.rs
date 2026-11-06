@@ -163,30 +163,6 @@ pub(crate) fn units_str(u: &[u16]) -> String {
         .collect()
 }
 
-thread_local! {
-    static ASCII_CACHE: std::cell::RefCell<Option<(JsStr, bool)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// `s.is_ascii()` for a shared subject, memoised for the last long one. The cache holds a clone,
-/// so pointer equality means the same immutable text (no reuse of a freed address).
-pub(crate) fn ascii_of(s: &JsStr) -> bool {
-    if s.len() < 256 {
-        return s.is_ascii();
-    }
-    ASCII_CACHE.with(|c| {
-        let mut c = c.borrow_mut();
-        if let Some((k, a)) = &*c {
-            if JsStr::ptr_eq(k, s) {
-                return *a;
-            }
-        }
-        let a = s.is_ascii();
-        *c = Some((s.clone(), a));
-        a
-    })
-}
-
 /// `s.length` in UTF-16 code units.
 pub(crate) fn str_len(s: &str) -> usize {
     str_len_with(s, s.is_ascii())
@@ -390,7 +366,7 @@ impl Interp {
         } else {
             0
         };
-        let ascii = ascii_of(s);
+        let ascii = s.is_ascii_cached();
         if last > str_len_with(s, ascii) {
             put_hidden(re_obj, "lastIndex", Value::Number(0.0));
             return Ok(Value::Null);
@@ -1665,7 +1641,7 @@ impl Interp {
         });
         self.set_native(&sp, "indexOf", |it, this, args| {
             let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
-            let ascii = ascii_of(&s);
+            let ascii = s.is_ascii_cached();
             let from = match arg(args, 1) {
                 Value::Undefined => 0,
                 v => unit_to_byte_with(&s, ascii, it.num(&v).max(0.0) as usize),
