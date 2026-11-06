@@ -227,8 +227,8 @@ pub(crate) fn install(it: &mut Interp) {
             return it.throw_error("TypeError", "Invalid native graph tag");
         };
         let kind = match arg(args, 1) {
-            Value::Number(n) if n == 1.0 => napi_graph::Tag::Function,
-            Value::Number(n) if n == 2.0 => napi_graph::Tag::Handle,
+            Value::Number(1.0) => napi_graph::Tag::Function,
+            Value::Number(2.0) => napi_graph::Tag::Handle,
             _ => return it.throw_error("TypeError", "Invalid native graph tag"),
         };
         if !napi_graph::is_decimal(&native) {
