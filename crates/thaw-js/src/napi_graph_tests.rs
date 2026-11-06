@@ -130,7 +130,7 @@ fn napi_graph_wire_without_leases_releases_handles_in_node() {
 // ---- Native tags, pair proofs and lone tokens (PR 6a-2) ----
 
 use crate::napi_bridge::{clear_for_tests, thaw_tjs_register_napi_bridge};
-use crate::napi_graph::{native_pair_matches, tag, Tag};
+use crate::napi_graph::{encode_napi_graph, native_pair_matches, tag, Tag};
 use std::ffi::{c_char, CStr};
 
 fn read(ptr: *const c_char) -> String {
@@ -162,6 +162,7 @@ unsafe extern "C" fn fake_handle(
     let reply = match (operation.as_str(), target.as_str()) {
         (_, "7") => r#"{"__thaw_error__":"boom"}"#.to_string(),
         ("retain_graph_handle", _) => r#"{"value":"73"}"#.to_string(),
+        ("symbol_handle", t) => format!(r#"{{"value":"{t}"}}"#),
         ("symbol_metadata", t) => {
             let id = if t == "5" { "5" } else { "99" };
             format!(
@@ -374,4 +375,97 @@ fn napi_graph_tag_global_refuses_bad_kinds_and_owner_alias_answers() {
         ),
         "TypeError|function"
     );
+}
+
+// ---- Encoder native tags and napi leases (PR 6a-4) ----
+
+/// Encode the default-realm global `name` as a live root, with the fake bridge already registered.
+fn encode_named(name: &str) -> Result<String, String> {
+    let owner = default_realm();
+    with_package(owner, |p| {
+        let it = &mut p.interp;
+        let global = it.global.clone();
+        let root = it.lookup(&global, name).unwrap_or(Value::Undefined);
+        encode_napi_graph(it, owner, &root, 0, true, None)
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// Tag the default-realm global `name` as the native `kind` of `native`.
+fn tag_global(name: &str, kind: Tag, native: &str) {
+    let value = global_value(default_realm(), name);
+    let Value::Object(object) = &value else {
+        panic!("{name} is not an object")
+    };
+    tag(object, kind, native);
+}
+
+#[test]
+fn napi_graph_encode_tagged_function_root_is_nfn_with_a_napi_lease() {
+    let _bridge = fake_bridge();
+    load("globalThis.native_fn = function() {};");
+    tag_global("native_fn", Tag::Function, "9");
+    let wire = encode_named("native_fn").unwrap();
+    let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    let h = v["leases"][0].as_u64().unwrap();
+    assert_eq!(v["root"], serde_json::json!({"r": 0}));
+    assert_eq!(v["nodes"], serde_json::json!([{"nfn": "9", "hdl": h}]));
+    assert_eq!(v["leases"], serde_json::json!([h]));
+    assert_eq!(v["napiLeases"], serde_json::json!(["73"]));
+    // The wire decodes back to the same function: the pair is proven by the tag.
+    let (_, back) = decode_napi_wire(&wire).unwrap();
+    let original = global_value(default_realm(), "native_fn");
+    let (Value::Object(a), Value::Object(b)) = (&original, &back) else {
+        panic!("functions expected")
+    };
+    assert!(std::rc::Rc::ptr_eq(a, b));
+}
+
+#[test]
+fn napi_graph_encode_tagged_handle_is_nh_and_takes_no_host_lease() {
+    let _bridge = fake_bridge();
+    load("globalThis.proxy = {};");
+    tag_global("proxy", Tag::Handle, "9");
+    assert_eq!(
+        encode_named("proxy").unwrap(),
+        r#"{"root":{"r":0},"nodes":[{"nh":"9"}],"leases":[],"napiLeases":["73"]}"#
+    );
+    // Inside a copied object the tagged handle is its own node.
+    load("globalThis.holder = { p: proxy };");
+    assert_eq!(
+        encode_named("holder").unwrap(),
+        r#"{"root":{"r":0},"nodes":[{"o":[["p",{"r":1},7]]},{"nh":"9"}],"leases":[],"napiLeases":["73"]}"#
+    );
+}
+
+#[test]
+fn napi_graph_encode_native_symbol_key_is_nsy_with_handle_and_napi_lease() {
+    let _bridge = fake_bridge();
+    load("globalThis.hi = Symbol('hi'); globalThis.keyed = { [hi]: 1 };");
+    let symbol = global_value(default_realm(), "hi");
+    let Value::Object(object) = &symbol else {
+        panic!("hi is not an object")
+    };
+    crate::napi_symbols::bind(default_realm() as u64, 5, object);
+    let wire = encode_named("keyed").unwrap();
+    let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    let h = v["leases"][0].as_u64().unwrap();
+    assert_eq!(v["leases"], serde_json::json!([h]));
+    assert_eq!(v["napiLeases"], serde_json::json!(["73"]));
+    assert_eq!(
+        v["nodes"][0]["o"][0][0],
+        serde_json::json!({"nsy": "5", "hdl": h})
+    );
+    assert_eq!(v["nodes"][0]["o"][0][1], serde_json::json!({"v": 1}));
+}
+
+#[test]
+fn napi_graph_encode_failed_retain_is_an_error_and_names_no_tag() {
+    let _bridge = fake_bridge();
+    // Target 7 fails in the fake bridge: the second tagged function cannot be retained.
+    load("globalThis.good_fn = function() {}; globalThis.bad_fn = function() {}; globalThis.pair = { f: good_fn, g: bad_fn };");
+    tag_global("good_fn", Tag::Function, "9");
+    tag_global("bad_fn", Tag::Function, "7");
+    let err = encode_named("pair").unwrap_err();
+    assert!(err.contains("Cannot retain native graph handle"), "{err}");
 }
