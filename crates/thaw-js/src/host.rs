@@ -1387,6 +1387,12 @@ fn unsupported_text(what: &str) -> ThawResult {
 
 // The Json host-operation table (`thaw_json_register_host_operations`) names these; the ones a thaw-js
 // package has not needed yet report an error instead of linking the QuickJS runtime.
+/// A Buffer: a Uint8Array with `__isBuffer` in its prototype chain (what op 11 and op 29 test).
+fn is_buffer_value(v: &Value) -> bool {
+    matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8))
+        && crate::find_in_chain(o, "__isBuffer").is_some())
+}
+
 /// Introspection of the value behind `handle` for the Json host bridge (the numbering is the QuickJS
 /// `__thaw_json_host_query`'s). Kinds thaw-js has no value for (Date, Buffer, Map, Set, native
 /// wrappers) answer "no" to the copy queries; operation 29 says whether the value must stay a live handle,
@@ -1453,7 +1459,8 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
                 _ => return Err(HostError::Thrown("TypeError: Expected string".into())),
             },
             26 => flag(matches!(&v, Value::Object(o) if o.proto.borrow().is_none())),
-            11 | 25 => "0".to_string(),
+            11 => flag(is_buffer_value(&v)),
+            25 => "0".to_string(),
             12 => flag(it.date_target(&v)),
             13 => crate::number_to_string(it.date_time(&v).map_err(|c| classify(it, c))?),
             17..=20 | 22..=24 => prelude_call(it, "__thaw_json_host_query", &v, operation)?,
@@ -1468,7 +1475,7 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
                 Kind::ArrayBuffer(_) | Kind::Map(_) | Kind::Set(_) | Kind::Proxy(_))
                 || matches!(&*o.kind.borrow(), Kind::Typed(t) if !matches!(t.ty, crate::typed::Ty::U8))
                 || (matches!(&*o.kind.borrow(), Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8))
-                    && crate::find_in_chain(o, "__isBuffer").is_none()))),
+                    && !is_buffer_value(&v)))),
             // 30: a plain object or array (a promoted object literal, a native-class view) passed as a
             // call argument keeps its identity as a live handle instead of a JSON copy. Kept apart from 29
             // so `Json` slots that read 29 (structured clone) see no change.
@@ -4911,6 +4918,15 @@ mod host_query_live_tests {
         ] {
             assert_eq!(query(construct(global, args), 29), "1", "{global}");
         }
+    }
+
+    #[test]
+    fn host_query_is_buffer_answers_one_only_for_buffers() {
+        assert_eq!(query(construct("Buffer", "[{\"v\":3}]"), 11), "1");
+        assert_eq!(query(construct("Uint8Array", "[{\"v\":3}]"), 11), "0");
+        assert_eq!(query(construct("Float64Array", "[{\"v\":2}]"), 11), "0");
+        assert_eq!(query(construct("Object", "[]"), 11), "0");
+        assert_eq!(query(construct("Buffer", "[{\"v\":3}]"), 25), "0");
     }
 
     #[test]
