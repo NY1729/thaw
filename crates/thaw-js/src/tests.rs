@@ -692,6 +692,26 @@ fn typed_abi_marks_null_prototype_objects_on_the_wire() {
 }
 
 #[test]
+fn value_op_skips_a_namespace_segment_that_module_exports_lacks() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    // `export = NS`: module.exports is the namespace, so `NS.enc.Hex` must read `enc.Hex`
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "ns/index.js": function(module, exports, require) {
+  module.exports = { enc: { Hex: { x: 1 } } };
+}, };
+var __thaw_bundle_require_maps = { "ns/index.js": {}, };
+var __thaw_bundle_entry_key = "ns/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("ns").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    assert_eq!(
+        class_call("$value$ns::NS.enc.Hex$arity0", "[]", 0, false).unwrap(),
+        r#"{"x":1}"#
+    );
+}
+
+#[test]
 fn error_wire_framed_strings_revive_as_error_objects() {
     use crate::host::thaw_tjs_register;
     use std::ffi::CString;
