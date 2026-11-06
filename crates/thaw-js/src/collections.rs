@@ -667,7 +667,11 @@ mod tests {
             HKey::Number((i as f64).to_bits()).hash(&mut h);
             low.insert(h.finish() & 0xFFFF);
         }
-        assert!(low.len() > 900, "only {} distinct low-16-bit hashes", low.len());
+        assert!(
+            low.len() > 900,
+            "only {} distinct low-16-bit hashes",
+            low.len()
+        );
     }
 
     #[test]
@@ -682,6 +686,9 @@ m.forEach((v, k) => { if (k <= prev) ordered = false; prev = k; n++; });
 console.log(m.size, sum, m.has(5), m.get(19999), n, ordered);";
         let mut it = Interp::new();
         assert!(it.run(src).is_ok(), "script failed");
-        assert_eq!(it.out.join("|"), "19998 399939992 false undefined 19998 true");
+        assert_eq!(
+            it.out.join("|"),
+            "19998 399939992 false undefined 19998 true"
+        );
     }
 }
