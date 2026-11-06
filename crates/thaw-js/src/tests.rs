@@ -3846,6 +3846,98 @@ fn reflect_get_inherited_getter_sees_proxy_receiver() {
 }
 
 #[test]
+fn reflect_set_writes_through_the_receiver() {
+    assert_eq!(
+        one("var t = { set x(v) { this.y = v; } }; var r = {}; console.log(Reflect.set(t, 'x', 1, r), r.y, t.y);"),
+        "true 1 undefined"
+    );
+}
+
+#[test]
+fn reflect_set_returns_false_instead_of_writing_when_refused() {
+    assert_eq!(
+        one("console.log(Reflect.set(Object.freeze({ a: 1 }), 'a', 2), Reflect.set({ get g() { return 1; } }, 'g', 2), Reflect.set({}, 'x', 1));"),
+        "false false true"
+    );
+    assert_eq!(
+        one("var r = Object.preventExtensions({}); console.log(Reflect.set({}, 'z', 1, r), r.z);"),
+        "false undefined"
+    );
+    assert_eq!(
+        one("try { Reflect.set(1, 'a', 2); console.log('no'); } catch (e) { console.log(e.constructor.name); }"),
+        "TypeError"
+    );
+}
+
+#[test]
+fn reflect_define_property_returns_the_trap_boolean() {
+    assert_eq!(
+        one("console.log(Reflect.defineProperty(Object.freeze({}), 'a', { value: 1 }), Reflect.defineProperty({}, 'a', { value: 1 }), Reflect.defineProperty(new Proxy({}, { defineProperty() { return false; } }), 'a', { value: 1 }));"),
+        "false true false"
+    );
+}
+
+#[test]
+fn reflect_delete_property_reports_the_result() {
+    assert_eq!(
+        one("console.log(Reflect.deleteProperty(Object.seal({ s: 1 }), 's'), Reflect.deleteProperty({ a: 1 }, 'a'), Reflect.deleteProperty({}, 'missing'));"),
+        "false true true"
+    );
+}
+
+#[test]
+fn reflect_set_prototype_of_returns_false_instead_of_throwing() {
+    assert_eq!(
+        one("console.log(Reflect.setPrototypeOf(Object.preventExtensions({}), {}), Reflect.setPrototypeOf({}, null));"),
+        "false true"
+    );
+    assert_eq!(
+        one("var a = {}; var b = Object.create(a); console.log(Reflect.setPrototypeOf(a, b));"),
+        "false"
+    );
+}
+
+#[test]
+fn reflect_is_extensible_and_prevent_extensions_exist() {
+    assert_eq!(
+        one("var q = {}; console.log(Reflect.isExtensible(q), Reflect.preventExtensions(q), Reflect.isExtensible(q));"),
+        "true true false"
+    );
+}
+
+#[test]
+fn reflect_construct_takes_the_prototype_from_new_target() {
+    assert_eq!(
+        one("function F() { this.x = 1; } function A() {} A.prototype.hi = 1; var inst = Reflect.construct(F, [], A); console.log(Object.getPrototypeOf(inst) === A.prototype, inst.x, inst instanceof A);"),
+        "true 1 true"
+    );
+}
+
+#[test]
+fn reflect_non_object_arguments_throw_type_error() {
+    assert_eq!(
+        one("function F() {} try { Reflect.construct(F, 1); console.log('no'); } catch (e) { console.log(e.constructor.name); } try { Reflect.getPrototypeOf(1); console.log('no'); } catch (e) { console.log(e.constructor.name); } try { Reflect.apply(Math.max, null, 1); console.log('no'); } catch (e) { console.log(e.constructor.name); }"),
+        "TypeError|TypeError|TypeError"
+    );
+}
+
+#[test]
+fn reflect_set_through_a_proxy_receiver_reaches_the_target() {
+    assert_eq!(
+        one("var log = []; var p = new Proxy({}, { set(t, k, v, r) { log.push(k); return Reflect.set(t, k, v, r); } }); p.a = 5; console.log(log.join(), p.a);"),
+        "a 5"
+    );
+}
+
+#[test]
+fn reflect_set_array_index_and_length() {
+    assert_eq!(
+        one("var arr = [1, 2]; console.log(Reflect.set(arr, 1, 9), arr[1], Reflect.set(arr, 'length', 1), arr.length);"),
+        "true 9 true 1"
+    );
+}
+
+#[test]
 fn process_emit_warning_emits_warning_event_on_next_tick() {
     let out = run_loop(
         "process.on('warning', function (w) { console.log(w.name, w.code, w.count, w.type); });

@@ -52,6 +52,7 @@ mod node_crypto;
 mod numfmt;
 mod procstate;
 mod proxy;
+mod reflect;
 pub mod scan;
 mod sysio;
 mod tls;
@@ -831,19 +832,13 @@ impl Interp {
         it.install_bigint();
         it.install_numfmt();
         it.install_proxy();
+        it.install_reflect();
         it.run(builtins::PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js prelude must evaluate"));
         it.run_promise_prelude();
         if host {
             it.install_main_file_loader();
         }
-        // private native behind `Reflect.construct` (extras.rs): [[Construct]] with an explicit newTarget
-        let reflect_construct = it.native(|it, _, args| {
-            let list = it.array_items(&arg(args, 1));
-            it.construct_with(&arg(args, 0), &list, &arg(args, 2))
-        });
-        it.global
-            .declare("__thaw_reflect_construct", reflect_construct, false);
         it.run(extras::EXTRAS).unwrap_or_else(|e| {
             let why = match &e {
                 Ctl::Throw(v) => {
