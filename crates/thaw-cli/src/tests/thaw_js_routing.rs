@@ -385,11 +385,13 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:zlib",
         "node:net",
         "node:crypto",
+        "node:https",
+        "node:http2",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
-    // modules not yet validated on thaw-js (e.g. node:https) stay on QuickJS
-    assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:https"), "node:https");
+    // modules not yet validated on thaw-js (e.g. node:repl) stay on QuickJS
+    assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:repl"), "node:repl");
 }
 
 #[test]
