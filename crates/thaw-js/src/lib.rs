@@ -1329,7 +1329,8 @@ impl Interp {
     // ----- property access -----
 
     pub fn get(&mut self, target: &Value, key: &str) -> R<Value> {
-        let start = match target {
+        let holder: Obj;
+        let start: &ObjData = match target {
             Value::Undefined | Value::Hole | Value::Null => {
                 let what = if matches!(target, Value::Null) {
                     "null"
@@ -1345,96 +1346,109 @@ impl Interp {
                 if key == "length" {
                     return Ok(Value::Number(builtins::str_len(s) as f64));
                 }
-                if let Ok(i) = key.parse::<usize>() {
+                if let Some(i) = index_key(key) {
                     return Ok(builtins::str_unit_at(s, i).map_or(Value::Undefined, |u| {
                         Value::Str(builtins::units_str(&[u]).into())
                     }));
                 }
-                self.string_proto.clone()
+                holder = self.string_proto.clone();
+                &holder
             }
-            Value::Number(_) => self.number_proto.clone(),
-            Value::Bool(_) => self.bool_proto.clone(),
-            Value::BigInt(_) => self
-                .rt
-                .bigint_proto
-                .clone()
-                .unwrap_or_else(|| self.object_proto.clone()),
+            Value::Number(_) => {
+                holder = self.number_proto.clone();
+                &holder
+            }
+            Value::Bool(_) => {
+                holder = self.bool_proto.clone();
+                &holder
+            }
+            Value::BigInt(_) => {
+                holder = self
+                    .rt
+                    .bigint_proto
+                    .clone()
+                    .unwrap_or_else(|| self.object_proto.clone());
+                &holder
+            }
             Value::Object(o) => {
-                if matches!(&*o.kind.borrow(), Kind::Global) {
-                    if let Some(v) = self.lookup(&self.global.clone(), key) {
-                        return Ok(v);
-                    }
-                    if let Some(sb) = &self.vm_sandbox {
-                        if let Some(Slot::Data(v)) = find_in_chain(sb, key) {
-                            return Ok(v);
+                // One kind inspection picks the special case; the borrow is dropped before any
+                // JS (proxy traps, global lookups) runs.
+                let fast = match &*o.kind.borrow() {
+                    Kind::Global => Fast::Global,
+                    Kind::Proxy(_) => Fast::Proxy,
+                    Kind::Array(items) => {
+                        if key == "length" {
+                            Fast::Hit(Value::Number(items.len() as f64))
+                        } else {
+                            index_key(key).map_or(Fast::Chain, |i| Fast::Hit(unhole(items.get(i))))
                         }
                     }
-                }
-                if let Some(v) = self.proxy_get(o, key, target)? {
-                    return Ok(v);
-                }
-                if let Kind::Array(items) = &*o.kind.borrow() {
-                    if key == "length" {
-                        return Ok(Value::Number(items.len() as f64));
+                    Kind::Wrapper(Value::Str(s)) => {
+                        if key == "length" {
+                            Fast::Hit(Value::Number(builtins::str_len(s) as f64))
+                        } else {
+                            index_key(key)
+                                .and_then(|i| builtins::str_unit_at(s, i))
+                                .map_or(Fast::Chain, |u| {
+                                    Fast::Hit(Value::Str(builtins::units_str(&[u]).into()))
+                                })
+                        }
                     }
-                    if let Ok(i) = key.parse::<usize>() {
-                        return Ok(unhole(items.get(i)));
+                    Kind::Typed(t) => match key {
+                        "length" => Fast::Hit(Value::Number(t.len as f64)),
+                        "byteLength" => Fast::Hit(Value::Number((t.len * t.ty.size()) as f64)),
+                        "byteOffset" => Fast::Hit(Value::Number(t.off as f64)),
+                        "buffer" => Fast::Hit(Value::Object(t.abuf.clone())),
+                        _ => index_key(key).map_or(Fast::Chain, |i| {
+                            Fast::Hit(t.get(i).map_or(Value::Undefined, Value::Number))
+                        }),
+                    },
+                    Kind::ArrayBuffer(b) if key == "byteLength" => {
+                        Fast::Hit(Value::Number(b.borrow().len() as f64))
                     }
-                }
-                if let Kind::Wrapper(Value::Str(s)) = &*o.kind.borrow() {
-                    if key == "length" {
-                        return Ok(Value::Number(builtins::str_len(s) as f64));
-                    }
-                    if let Some(u) = key
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|i| builtins::str_unit_at(s, i))
+                    Kind::Closure { def, .. }
+                        if (key == "name" || key == "length") && find_own(o, key).is_none() =>
                     {
-                        return Ok(Value::Str(builtins::units_str(&[u]).into()));
+                        Fast::Hit(if key == "name" {
+                            def.name.clone().map_or(Value::str(""), Value::Str)
+                        } else {
+                            Value::Number(
+                                def.params
+                                    .iter()
+                                    .take_while(|p| matches!(p, a::Pat::Ident(_)))
+                                    .count() as f64,
+                            )
+                        })
                     }
-                }
-                if let Kind::Typed(t) = &*o.kind.borrow() {
-                    match key {
-                        "length" => return Ok(Value::Number(t.len as f64)),
-                        "byteLength" => return Ok(Value::Number((t.len * t.ty.size()) as f64)),
-                        "byteOffset" => return Ok(Value::Number(t.off as f64)),
-                        "buffer" => return Ok(Value::Object(t.abuf.clone())),
-                        _ => {
-                            if let Ok(i) = key.parse::<usize>() {
-                                return Ok(t.get(i).map_or(Value::Undefined, Value::Number));
+                    _ => Fast::Chain,
+                };
+                match fast {
+                    Fast::Hit(v) => return Ok(v),
+                    Fast::Global => {
+                        if let Some(v) = self.lookup(&self.global.clone(), key) {
+                            return Ok(v);
+                        }
+                        if let Some(sb) = &self.vm_sandbox {
+                            if let Some(Slot::Data(v)) = find_in_chain(sb, key) {
+                                return Ok(v);
                             }
                         }
                     }
-                }
-                if key == "byteLength" {
-                    if let Kind::ArrayBuffer(b) = &*o.kind.borrow() {
-                        return Ok(Value::Number(b.borrow().len() as f64));
-                    }
-                }
-                if key == "name" || key == "length" {
-                    if let Kind::Closure { def, .. } = &*o.kind.borrow() {
-                        if find_own(o, key).is_none() {
-                            return Ok(if key == "name" {
-                                def.name.clone().map_or(Value::str(""), Value::Str)
-                            } else {
-                                Value::Number(
-                                    def.params
-                                        .iter()
-                                        .take_while(|p| matches!(p, a::Pat::Ident(_)))
-                                        .count() as f64,
-                                )
-                            });
+                    Fast::Proxy => {
+                        if let Some(v) = self.proxy_get(o, key, target)? {
+                            return Ok(v);
                         }
                     }
+                    Fast::Chain => {}
                 }
-                o.clone()
+                o
             }
         };
-        match find_in_chain(&start, key) {
+        match read_in_chain(start, key) {
             None => Ok(Value::Undefined),
-            Some(Slot::Data(v)) => Ok(v),
-            Some(Slot::Accessor { get: Some(g), .. }) => self.call(&g, target, &[]),
-            Some(Slot::Accessor { .. }) => Ok(Value::Undefined),
+            Some(Read::Data(v)) => Ok(v),
+            Some(Read::Getter(g)) => self.call(&g, target, &[]),
+            Some(Read::NoGetter) => Ok(Value::Undefined),
         }
     }
 
@@ -3439,6 +3453,57 @@ fn find_own(o: &Obj, key: &str) -> Option<(Slot, bool)> {
     Some((p.slot.clone(), p.enumerable))
 }
 
+/// What a property read needs from the first holder that has the key. Data clones only the
+/// value and an accessor clones only its getter.
+enum Read {
+    Data(Value),
+    Getter(Value),
+    NoGetter,
+}
+
+/// Outcome of a `get` special case decided under one kind borrow.
+enum Fast {
+    Hit(Value),
+    Global,
+    Proxy,
+    Chain,
+}
+
+/// Array-index key for a property read. Only keys starting with a digit or `+` reach `parse`,
+/// the same accepted set as the old unconditional parse.
+#[inline]
+fn index_key(key: &str) -> Option<usize> {
+    match key.as_bytes().first() {
+        Some(b) if b.is_ascii_digit() || *b == b'+' => key.parse::<usize>().ok(),
+        _ => None,
+    }
+}
+
+fn read_own(o: &ObjData, key: &str) -> Option<Read> {
+    let i = o.position(key)?;
+    let props = o.props.borrow();
+    Some(match &props[i].slot {
+        Slot::Data(v) => Read::Data(v.clone()),
+        Slot::Accessor { get: Some(g), .. } => Read::Getter(g.clone()),
+        Slot::Accessor { .. } => Read::NoGetter,
+    })
+}
+
+/// Read `key` along the prototype chain of `o`, cloning one hop's Rc only when it moves up.
+fn read_in_chain(o: &ObjData, key: &str) -> Option<Read> {
+    if let Some(r) = read_own(o, key) {
+        return Some(r);
+    }
+    let mut cur: Obj = o.proto.borrow().clone()?;
+    loop {
+        if let Some(r) = read_own(&cur, key) {
+            return Some(r);
+        }
+        let next = cur.proto.borrow().clone()?;
+        cur = next;
+    }
+}
+
 fn find_in_chain(o: &Obj, key: &str) -> Option<Slot> {
     let mut cur = Some(o.clone());
     while let Some(c) = cur {
@@ -3686,6 +3751,8 @@ mod napi_props_tests;
 mod napi_symbols_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod prop_get_tests;
 #[cfg(test)]
 mod sysio_stdin_tests;
 #[cfg(test)]
