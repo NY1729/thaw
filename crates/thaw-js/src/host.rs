@@ -730,6 +730,49 @@ fn new_date(it: &mut Interp, ms: &Native) -> Result<Value, String> {
     construct_global(it, "Date", &[Value::Number(ms)])
 }
 
+/// The Symbol of a `{"nsy","hdl"}` token: the handle it names (the wire's reference is released, as for `hdl`).
+fn native_symbol_pair(fields: &[(String, Native)]) -> Result<Value, String> {
+    let Some(Native::Number(id)) = graph_field(fields, "hdl") else {
+        return Err("invalid paired native Symbol graph token".into());
+    };
+    let value = HANDLES.with(|h| {
+        h.borrow()
+            .get((*id as usize).wrapping_sub(1))
+            .map(|(_, v)| v.clone())
+    });
+    let Some(value) = value.filter(crate::napi_symbols::is_symbol) else {
+        return Err("invalid paired native Symbol graph token".into());
+    };
+    thaw_tjs_release_handle(*id as i64);
+    Ok(value)
+}
+
+/// A property key of a graph object: a string, or a Symbol token (`{"nsy","hdl"}`, a node reference, or a handle).
+fn graph_key(
+    it: &mut Interp,
+    key: &Native,
+    nodes: &[Native],
+    memo: &mut Vec<Option<Value>>,
+    busy: &mut Vec<bool>,
+) -> Result<String, String> {
+    if let Native::Str(name) = key {
+        return Ok(name.clone());
+    }
+    let value = match key {
+        Native::Object(fields) if graph_field(fields, "nsy").is_some() => {
+            native_symbol_pair(fields)?
+        }
+        _ => graph_token(it, key, nodes, memo, busy)?,
+    };
+    if let Some(name) = crate::napi_symbols::symbol_key(&value) {
+        return Ok(name);
+    }
+    if matches!(value, Value::Str(_)) {
+        return Ok(it.to_str(&value).to_string());
+    }
+    Err("malformed graph property key".into())
+}
+
 /// Node `index` of a graph wire; shared nodes decode to one value (identity kept).
 fn graph_node(
     it: &mut Interp,
@@ -789,14 +832,16 @@ fn graph_node(
                 let Native::Array(kv) = pair else {
                     return Err("malformed graph property".into());
                 };
-                let [Native::Str(name), token, ..] = kv.as_slice() else {
+                let [key, token, ..] = kv.as_slice() else {
                     return Err("malformed graph property".into());
                 };
+                let name = graph_key(it, key, nodes, memo, busy)?;
                 let v = graph_token(it, token, nodes, memo, busy)?;
-                crate::put(&o, name, v);
+                crate::put(&o, &name, v);
             }
             Value::Object(o)
         }
+        [_, _] if graph_field(fields, "nsy").is_some() => native_symbol_pair(fields)?,
         [(k, Native::Number(id))] if k == "hdl" => {
             let v = HANDLES
                 .with(|h| {
@@ -1148,6 +1193,14 @@ impl WireOut {
         format!("{{\"r\":{}}}", self.nodes.len() - 1)
     }
 
+    /// A registered native Symbol: its native id and a handle to it (`{"nsy","hdl"}`, as the QuickJS wire).
+    fn lease_symbol(&mut self, id: u64, native: u64) -> String {
+        self.leases.push(id);
+        self.nodes
+            .push(format!("{{\"nsy\":\"{native}\",\"hdl\":{id}}}"));
+        format!("{{\"r\":{}}}", self.nodes.len() - 1)
+    }
+
     pub(crate) fn token(&mut self, it: &mut Interp, v: &Value) -> Result<String, HostError> {
         let mut v = v.clone();
         if let Some((id, r)) = &self.receiver {
@@ -1156,6 +1209,10 @@ impl WireOut {
                 thaw_tjs_retain_handle(id as i64);
                 return Ok(self.lease(id));
             }
+        }
+        if let Some(native) = crate::napi_symbols::native_id_of_value(self.owner as u64, &v) {
+            let id = store_handle(self.owner, v.clone()) as u64;
+            return Ok(self.lease_symbol(id, native));
         }
         // A Buffer/Uint8Array result crosses as the branded `{"b":[bytes]}` node, which thaw-std rebuilds
         // as a Buffer-shaped wrapper (json.rs:4378) instead of a graph-plain {type,data} copy it will not read as bytes.
@@ -2183,7 +2240,7 @@ fn call_handle_graph(handle: u64, args_json: *const c_char, with_this: bool) -> 
 
 /// A native string (or `null`) as a thaw-js handle: the counterpart of QuickJS's
 /// `thaw_js_event_key_handle_result`. `value_json` is a one-element JSON array; `is_symbol` marks a
-/// native Symbol token, which the thaw-js wire cannot carry yet.
+/// native Symbol token: its string is a wire key text, resolved by `napi_symbols::key_text_symbol`.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_event_key_handle_result(
     value_json: *const c_char,
@@ -2193,13 +2250,16 @@ pub extern "C" fn thaw_tjs_event_key_handle_result(
         if is_symbol > 1 {
             return Err("invalid native scalar kind".to_string());
         }
-        if is_symbol == 1 {
-            return Err("native Symbol keys are not supported by the thaw-js runtime".to_string());
-        }
         let wire = cstr(value_json).ok_or("invalid native scalar wire")?;
         let Native::Array(items) = Native::from_json(&wire).map_err(|e| e.to_string())? else {
             return Err("native scalar wire value must be an array".to_string());
         };
+        if is_symbol == 1 {
+            let [Native::Str(text)] = items.as_slice() else {
+                return Err("native Symbol wire array must contain one string".to_string());
+            };
+            return crate::napi_symbols::key_text_symbol(default_realm(), text);
+        }
         let value = match items.as_slice() {
             [Native::Str(s)] => Value::str(s),
             [Native::Null] => Value::Null,
