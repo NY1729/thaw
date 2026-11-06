@@ -251,7 +251,7 @@ fn predicate(it: &mut Interp, target: &Value, key: &str, operation: u8) -> R<boo
 /// are `1` writable, `2` enumerable, `4` configurable. Per-property configurability is not kept: a
 /// frozen or sealed object's properties are non-configurable, the rest configurable.
 // ponytail: configurability is per object, not per property.
-fn own_entries(o: &Obj) -> Vec<(Rc<str>, u32)> {
+pub(crate) fn own_entries(o: &Obj) -> Vec<(Rc<str>, u32)> {
     let frozen = o.frozen.get();
     let configurable = if frozen || o.ext.get() == 2 { 0 } else { 4 };
     let writable = if frozen { 0 } else { 1 };

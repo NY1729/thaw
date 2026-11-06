@@ -471,7 +471,7 @@ fn object_key(v: &Value) -> Option<usize> {
 }
 
 /// A live handle id that holds exactly this object, if compiled code has one.
-fn live_handle_of(v: &Value) -> Option<u64> {
+pub(crate) fn live_handle_of(v: &Value) -> Option<u64> {
     let key = object_key(v)?;
     LIVE_BY_OBJECT.with(|m| m.borrow().get(&key).and_then(|ids| ids.first().copied()))
 }
