@@ -164,20 +164,20 @@ pub(crate) fn units_str(u: &[u16]) -> String {
 }
 
 thread_local! {
-    static ASCII_CACHE: std::cell::RefCell<Option<(Rc<str>, bool)>> =
+    static ASCII_CACHE: std::cell::RefCell<Option<(JsStr, bool)>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// `s.is_ascii()` for a shared subject, memoised for the last long one. The cache holds a clone,
 /// so pointer equality means the same immutable text (no reuse of a freed address).
-pub(crate) fn ascii_of(s: &Rc<str>) -> bool {
+pub(crate) fn ascii_of(s: &JsStr) -> bool {
     if s.len() < 256 {
         return s.is_ascii();
     }
     ASCII_CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if let Some((k, a)) = &*c {
-            if Rc::ptr_eq(k, s) {
+            if JsStr::ptr_eq(k, s) {
                 return *a;
             }
         }
@@ -313,7 +313,7 @@ pub(crate) fn lossy_out(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-fn this_str(it: &mut Interp, this: &Value) -> Rc<str> {
+fn this_str(it: &mut Interp, this: &Value) -> JsStr {
     it.to_str(this)
 }
 
@@ -378,7 +378,7 @@ impl Interp {
     }
 
     /// One `exec`: returns the match array (with `index`/`input`) and updates `lastIndex`.
-    fn regexp_exec(&mut self, re_obj: &Obj, re: &regress::Regex, s: &Rc<str>) -> R<Value> {
+    fn regexp_exec(&mut self, re_obj: &Obj, re: &regress::Regex, s: &JsStr) -> R<Value> {
         let flags = match find_own(re_obj, "flags") {
             Some((Slot::Data(Value::Str(f)), _)) => f,
             _ => "".into(),
@@ -441,7 +441,7 @@ impl Interp {
     }
 
     /// All matches of a (global) regexp over `s` as match arrays.
-    fn regexp_all(&mut self, re_obj: &Obj, re: &regress::Regex, s: &Rc<str>) -> R<Vec<Value>> {
+    fn regexp_all(&mut self, re_obj: &Obj, re: &regress::Regex, s: &JsStr) -> R<Vec<Value>> {
         put_hidden(re_obj, "lastIndex", Value::Number(0.0));
         let mut out = Vec::new();
         loop {
@@ -968,7 +968,7 @@ impl Interp {
             put_hidden(&op, "constructor", object.clone());
             self.set_native(o, "keys", |it, _, args| {
                 let keys = it.own_keys(&arg(args, 0));
-                Ok(it.array(keys.into_iter().map(Value::Str).collect()))
+                Ok(it.array(keys.into_iter().map(|k| Value::Str(k.into())).collect()))
             });
             self.set_native(o, "values", |it, _, args| {
                 let t = arg(args, 0);
@@ -983,7 +983,7 @@ impl Interp {
                 let mut out = Vec::new();
                 for k in it.own_keys(&t) {
                     let v = it.get(&t, &k)?;
-                    out.push(it.array(vec![Value::Str(k), v]));
+                    out.push(it.array(vec![Value::Str(k.into()), v]));
                 }
                 Ok(it.array(out))
             });
@@ -1065,7 +1065,11 @@ impl Interp {
                         return Ok(it.array(names));
                     }
                 }
-                let mut names: Vec<Value> = it.own_keys(&t).into_iter().map(Value::Str).collect();
+                let mut names: Vec<Value> = it
+                    .own_keys(&t)
+                    .into_iter()
+                    .map(|k| Value::Str(k.into()))
+                    .collect();
                 if matches!(t, Value::Str(_)) {
                     names.push(Value::str("length"));
                 }
@@ -1075,7 +1079,7 @@ impl Interp {
                             .borrow()
                             .iter()
                             .filter(|p| !p.enumerable && !p.key.starts_with("@@"))
-                            .map(|p| Value::Str(p.key.clone())),
+                            .map(|p| Value::Str(p.key.clone().into())),
                     );
                     if matches!(&*o.kind.borrow(), Kind::Array(_)) {
                         names.push(Value::str("length"));
@@ -1722,7 +1726,7 @@ impl Interp {
             self.set_native(&sp, name, move |it, this, args| {
                 let s = this_str(it, this);
                 let target = it.num(&arg(args, 0)).max(0.0) as usize;
-                let fill: Rc<str> = match arg(args, 1) {
+                let fill: JsStr = match arg(args, 1) {
                     Value::Undefined => " ".into(),
                     v => it.to_str(&v),
                 };

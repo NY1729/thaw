@@ -324,7 +324,7 @@ impl crate::Interp {
         }
         for (o, name) in work {
             if find_own(&o, "name").is_none() && !name.starts_with("@@") {
-                put_hidden(&o, "name", Value::Str(name));
+                put_hidden(&o, "name", Value::Str(name.into()));
             }
         }
     }

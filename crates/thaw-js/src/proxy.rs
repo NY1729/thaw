@@ -154,7 +154,10 @@ impl Interp {
             let r = self.call(&trap, &handler, std::slice::from_ref(&target))?;
             self.array_items(&r)
         } else if enumerable_only {
-            self.own_keys(&target).into_iter().map(Value::Str).collect()
+            self.own_keys(&target)
+                .into_iter()
+                .map(|k| Value::Str(k.into()))
+                .collect()
         } else {
             let object = self
                 .lookup(&self.global.clone(), "Object")
@@ -169,7 +172,7 @@ impl Interp {
         let allowed = self.own_keys(&target);
         Ok(Some(
             all.into_iter()
-                .filter(|k| matches!(k, Value::Str(s) if allowed.contains(s)))
+                .filter(|k| matches!(k, Value::Str(s) if allowed.contains(&s.into_rc())))
                 .collect(),
         ))
     }
