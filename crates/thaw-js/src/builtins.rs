@@ -135,13 +135,6 @@ pub(crate) fn civil_to_ms(n: &[f64]) -> f64 {
         + get(6, 0.0)
 }
 
-fn byte_to_char(s: &str, bi: usize) -> usize {
-    if s.is_ascii() {
-        return bi;
-    }
-    s[..bi].chars().count()
-}
-
 /// Strings are stored as UTF-8 but behave as UTF-16 sequences. A lone surrogate (which `str`
 /// cannot hold) is kept as the private-use char `U+10F800 + (unit - 0xD800)`.
 const LONE: u32 = 0x10F800;
@@ -434,12 +427,14 @@ impl Interp {
                         continue;
                     }
                     '`' => {
-                        out.extend(input.chars().take(index));
+                        out.push_str(&str_slice(input, 0, index.min(str_len(input))));
                         i += 2;
                         continue;
                     }
                     '\'' => {
-                        out.extend(input.chars().skip(index + matched.chars().count()));
+                        let len = str_len(input);
+                        let end = (index + str_len(&matched)).min(len);
+                        out.push_str(&str_slice(input, end, len));
                         i += 2;
                         continue;
                     }
@@ -517,7 +512,7 @@ impl Interp {
             while let Some(pos) = s[from..].find(&*needle) {
                 let b = from + pos;
                 matches.push((
-                    byte_to_char(&s, b),
+                    byte_to_unit(&s, b),
                     vec![Value::str(&needle)],
                     Value::Undefined,
                 ));
@@ -530,21 +525,19 @@ impl Interp {
                 }
             }
         }
-        let chars: Vec<char> = s.chars().collect();
+        // match indices are UTF-16 units, so slice the subject by units too
+        let units = str_units(&s);
         let mut out = String::new();
         let mut pos = 0usize;
         for (idx, groups, named) in matches {
             if idx < pos {
                 continue;
             }
-            out.extend(&chars[pos..idx]);
-            let matched_len = groups.first().map_or(0, |v| {
-                if let Value::Str(x) = v {
-                    x.chars().count()
-                } else {
-                    0
-                }
-            });
+            out.push_str(&units_str(&units[pos..idx]));
+            let matched_len =
+                groups
+                    .first()
+                    .map_or(0, |v| if let Value::Str(x) = v { str_len(x) } else { 0 });
             let text = if repl.is_callable() {
                 let mut call_args = groups.clone();
                 call_args.push(Value::Number(idx as f64));
@@ -561,7 +554,7 @@ impl Interp {
             out.push_str(&text);
             pos = idx + matched_len;
         }
-        out.extend(&chars[pos.min(chars.len())..]);
+        out.push_str(&units_str(&units[pos.min(units.len())..]));
         Ok(Value::Str(out.into()))
     }
 

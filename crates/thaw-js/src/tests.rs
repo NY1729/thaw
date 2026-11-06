@@ -194,6 +194,46 @@ fn regexp_and_string_methods() {
 }
 
 #[test]
+fn string_replace_uses_utf16_units_with_astral() {
+    // match indices and $` $' offsets are UTF-16 units; an astral char before/inside/after shifts nothing
+    assert_eq!(
+        one("console.log('x😀y1'.replace(/\\d/, '[$&]'))"),
+        "x😀y[1]"
+    );
+    assert_eq!(one("console.log('a😀b'.replace(/😀/, '<$&>'))"), "a<😀>b");
+    assert_eq!(
+        one("console.log('1😀'.replace(/1/, \"[$'$&]\"))"),
+        "[😀1]😀"
+    );
+    assert_eq!(
+        one("console.log('😀1😀2'.replace(/\\d/g, '<$&>'))"),
+        "😀<1>😀<2>"
+    );
+    assert_eq!(one("console.log('😀a'.replace(/a/, '[$`]'))"), "😀[😀]");
+    assert_eq!(
+        one("console.log('😀a1'.replace(/(?<d>\\d)/, '[$<d>]'))"),
+        "😀a[1]"
+    );
+    // function replacer receives the UTF-16 offset (and the subject)
+    assert_eq!(one("console.log('😀a'.replace(/a/, (m, o) => o))"), "😀2");
+    assert_eq!(
+        one("console.log('😀ab'.replace(/b/g, (m, o, s) => '' + o + s.length))"),
+        "😀a34"
+    );
+    // string pattern (replace and replaceAll) and global regexp with $`
+    assert_eq!(
+        one("console.log('😀a😀a'.replaceAll('a', \"[$`]\"))"),
+        "😀[😀]😀[😀a😀]"
+    );
+    assert_eq!(
+        one("console.log('😀a😀a'.replace(/a/g, \"[$`]\"))"),
+        "😀[😀]😀[😀a😀]"
+    );
+    // empty matches at the end of an astral subject
+    assert_eq!(one("console.log('a😀'.replace(/$/g, '-'))"), "a😀-");
+}
+
+#[test]
 fn json_dates_and_misc_builtins() {
     assert_eq!(one("console.log(JSON.stringify({a: [1, 'x', null, undefined, function(){}], b: undefined, c: {d: true}}), JSON.stringify([1, {a: 2}], null, 2).split('\\n').length, JSON.stringify('a\"b\\n'))"), "{\"a\":[1,\"x\",null,null,null],\"c\":{\"d\":true}} 6 \"a\\\"b\\n\"");
     assert_eq!(one("var v = JSON.parse('{\"a\":[1,2,{\"b\":null}],\"s\":\"x\\\\u0041\",\"n\":-1.5e2}'); console.log(v.a[2].b, v.s, v.n, JSON.stringify(v))"), "null xA -150 {\"a\":[1,2,{\"b\":null}],\"s\":\"xA\",\"n\":-150}");
