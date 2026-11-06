@@ -39,6 +39,7 @@ pub mod host;
 #[cfg(feature = "intl")]
 mod intl;
 mod json;
+mod napi_bridge;
 mod napi_eval;
 mod napi_ops;
 mod napi_props;
@@ -317,7 +318,9 @@ impl std::hash::Hasher for FxHasher {
         }
     }
     fn finish(&self) -> u64 {
-        self.0
+        // Rotate so the high (well-mixed) bits reach the low bits hashbrown uses for buckets;
+        // f64 bits of small integers have zero low words, which otherwise collide.
+        self.0.rotate_left(26)
     }
 }
 
@@ -798,6 +801,7 @@ impl Interp {
         if host {
             it.install_sysio();
             it.install_process_stdin();
+            napi_bridge::install(&mut it);
             net::install(&mut it);
             worker::install(&mut it);
             dns::install(&mut it);
@@ -3656,6 +3660,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 
 #[cfg(all(test, unix))]
 mod fs_tests;
+#[cfg(test)]
+mod napi_bridge_tests;
 #[cfg(test)]
 mod napi_eval_tests;
 #[cfg(test)]

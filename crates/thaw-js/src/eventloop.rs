@@ -1040,7 +1040,11 @@ impl Interp {
                 .map(|t| t.expiry)
                 .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             {
-                let wait = next - clock_ms();
+                let mut wait = next - clock_ms();
+                // a pending napi completion is polled every 2 ms, not only at the next timer
+                if crate::napi_bridge::pending() {
+                    wait = wait.min(2.0);
+                }
                 if wait > 0.0 {
                     loop_idle_sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
@@ -1048,6 +1052,7 @@ impl Interp {
                 || crate::zlib::active_for(self.realm_id)
                 || crate::worker::active(self)
                 || self.stdin_live()
+                || crate::napi_bridge::pending()
             {
                 // nothing timed to wait for, but a platform event will arrive: poll again shortly
                 loop_idle_sleep(Duration::from_millis(2));
@@ -1067,6 +1072,7 @@ impl Interp {
             || crate::zlib::active_for(self.realm_id)
             || crate::worker::active(self)
             || self.stdin_live()
+            || crate::napi_bridge::pending()
     }
 
     /// This realm reads `process.stdin` and the reader is still open and referenced.
@@ -1077,6 +1083,7 @@ impl Interp {
     /// Call the shim-installed `globalThis.__thaw_poll_platform_events` (async zlib jobs, child process output and exits),
     /// then hand pending worker events to `globalThis.__thaw_worker_dispatch`.
     fn poll_platform_events(&mut self) -> R<()> {
+        crate::napi_bridge::poll();
         let g = Value::Object(self.global_object.clone());
         let f = self.get(&g, "__thaw_poll_platform_events")?;
         if matches!(f, Value::Object(_)) {

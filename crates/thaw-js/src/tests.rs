@@ -234,6 +234,37 @@ fn string_replace_uses_utf16_units_with_astral() {
 }
 
 #[test]
+fn regexp_string_index_ascii_and_non_ascii_subjects() {
+    // indexOf over non-ASCII text (BMP and astral), with and without a start index
+    assert_eq!(one("var a='héllo wörld é'; var b='a😀b'; console.log(a.indexOf('ö'), a.indexOf('é', 2), b.indexOf('b'), b.indexOf('b', 2), a.indexOf('zz'), a.lastIndexOf('l'))"), "7 12 3 3 -1 9");
+    // long subjects (over the ASCII-cache threshold): ASCII and non-ASCII, same shapes
+    assert_eq!(one("var big='x'.repeat(300)+'é'+'y'.repeat(10); var big2='abc'.repeat(100); console.log(big.indexOf('y'), big.indexOf('é'), big2.indexOf('c', 250), big.indexOf('y', 302), big.lastIndexOf('x'))"), "301 300 251 302 299");
+    assert_eq!(one("var s='ab'.repeat(200)+'c'; console.log(s.indexOf('c'), s.indexOf('b', 399), s.match(/c/).index, s.replace(/b/g,'').length)"), "400 399 400 201");
+    // global exec loop with lastIndex over non-ASCII text
+    assert_eq!(one("var r=/b/g; var out=[]; var m; var t='é b ébé b'; while((m=r.exec(t))!==null) out.push(m.index+':'+r.lastIndex); console.log(out.join(','), r.lastIndex)"), "2:3,5:6,8:9 0");
+    // astral char: index/lastIndex in UTF-16 units, and a lastIndex inside a surrogate pair
+    assert_eq!(one("var r2=/x/g; var m2=r2.exec('a😀x'); console.log(m2.index, r2.lastIndex); r2.lastIndex=2; console.log(r2.exec('a😀x').index, r2.lastIndex)"), "3 4|3 4");
+    // sticky with lastIndex, ASCII and non-ASCII
+    assert_eq!(one("var sy=/b/y; sy.lastIndex=1; console.log(sy.exec('ab')!==null, sy.lastIndex); var sy2=/b/y; sy2.lastIndex=2; console.log(sy2.exec('éb')===null, sy2.lastIndex)"), "true 2|true 0");
+    // match / replace / search over non-ASCII subjects
+    assert_eq!(one("console.log('é1 é22'.match(/\\d+/g).join(), 'ü-ö-ü'.replace(/-/g, '+'), 'é1 é22'.match(/\\d+/).index, 'ü1ö'.replace(/\\d/, '[$&]'), 'ü1ö'.search(/1/))"), "1,22 ü+ö+ü 1 ü[1]ö 1");
+    assert_eq!(one("var rep='é-'.repeat(150)+'z'; console.log(rep.replace(/-/g,'+').length, rep.match(/z/).index, rep.replaceAll('é','e').indexOf('e-'))"), "301 300 0");
+    // charCodeAt walks UTF-16 units of a non-ASCII string (surrogate halves, out of range)
+    assert_eq!(one("var u='é😀x'; console.log(u.charCodeAt(0), u.charCodeAt(1), u.charCodeAt(2), u.charCodeAt(3), u.charCodeAt(4))"), "233 55357 56832 120 NaN");
+}
+
+#[test]
+fn ascii_flag_cache_tracks_the_subject() {
+    let ascii: std::rc::Rc<str> = "a".repeat(300).into();
+    assert!(crate::builtins::ascii_of(&ascii));
+    let mixed: std::rc::Rc<str> = format!("{}é", "a".repeat(299)).into();
+    assert!(!crate::builtins::ascii_of(&mixed));
+    // the cache now holds `mixed`; the ASCII subject must not inherit its answer
+    assert!(crate::builtins::ascii_of(&ascii));
+    assert!(!crate::builtins::ascii_of(&mixed));
+}
+
+#[test]
 fn json_dates_and_misc_builtins() {
     assert_eq!(one("console.log(JSON.stringify({a: [1, 'x', null, undefined, function(){}], b: undefined, c: {d: true}}), JSON.stringify([1, {a: 2}], null, 2).split('\\n').length, JSON.stringify('a\"b\\n'))"), "{\"a\":[1,\"x\",null,null,null],\"c\":{\"d\":true}} 6 \"a\\\"b\\n\"");
     assert_eq!(one("var v = JSON.parse('{\"a\":[1,2,{\"b\":null}],\"s\":\"x\\\\u0041\",\"n\":-1.5e2}'); console.log(v.a[2].b, v.s, v.n, JSON.stringify(v))"), "null xA -150 {\"a\":[1,2,{\"b\":null}],\"s\":\"xA\",\"n\":-150}");
