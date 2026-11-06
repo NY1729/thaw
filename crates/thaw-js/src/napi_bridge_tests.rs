@@ -19,18 +19,38 @@ thread_local! {
     static EVENTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
     static SHUTDOWN_POLLS: Cell<usize> = const { Cell::new(0) };
     static ERROR_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// Only the test's own thread drives the fakes. Other threads (the rest of the suite) share the
+    /// process-wide registration while it is in place, and must see an idle bridge.
+    static ARMED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Takes the test lock and forgets every registration and per-thread fake state.
-fn setup() -> MutexGuard<'static, ()> {
-    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+/// Holds the test lock. Dropping it (also on panic) clears the registration and the fake state.
+struct Guard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        ARMED.with(|c| c.set(false));
+        clear_for_tests();
+    }
+}
+
+/// Takes the test lock, forgets every registration and per-thread fake state, and arms the fakes.
+fn setup() -> Guard {
+    let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     clear_for_tests();
     CALLS.with(|c| c.borrow_mut().clear());
     POLLS.with(|c| c.set(0));
     EVENTS.with(|e| e.borrow_mut().clear());
     SHUTDOWN_POLLS.with(|c| c.set(0));
     ERROR_PENDING.with(|c| c.set(false));
-    guard
+    ARMED.with(|c| c.set(true));
+    Guard { _lock: lock }
+}
+
+fn armed() -> bool {
+    ARMED.with(Cell::get)
 }
 
 fn owned(text: &str) -> *mut c_char {
@@ -42,7 +62,9 @@ unsafe fn read(ptr: *const c_char) -> String {
 }
 
 fn event(name: &'static str) {
-    EVENTS.with(|e| e.borrow_mut().push(name));
+    if armed() {
+        EVENTS.with(|e| e.borrow_mut().push(name));
+    }
 }
 
 unsafe extern "C" fn fake_exports() -> *const c_char {
@@ -83,7 +105,7 @@ extern "C" fn fake_poll() -> usize {
 
 /// Work stays pending until the third poll.
 extern "C" fn fake_pending() -> u8 {
-    (POLLS.with(Cell::get) < 3) as u8
+    (armed() && POLLS.with(Cell::get) < 3) as u8
 }
 
 unsafe extern "C" fn fake_owner(handle: u64) -> *mut c_char {
@@ -104,6 +126,9 @@ extern "C" fn refuse_begin() -> u8 {
 }
 
 extern "C" fn fake_shutdown_poll() -> u8 {
+    if !armed() {
+        return 1;
+    }
     event("poll");
     SHUTDOWN_POLLS.with(|c| {
         c.set(c.get() + 1);
