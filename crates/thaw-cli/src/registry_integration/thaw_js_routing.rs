@@ -411,6 +411,8 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:zlib",
     "node:net",
     "node:crypto",
+    "node:https",
+    "node:http2",
 ];
 
 /// `node:perf_hooks` marks, measures, observers, timerify and entries exist only on QuickJS's performance.js.
