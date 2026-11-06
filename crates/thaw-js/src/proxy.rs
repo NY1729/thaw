@@ -188,19 +188,24 @@ impl Interp {
         self.call(&target, this, args)
     }
 
-    pub(crate) fn proxy_construct(&mut self, o: &Obj, f: &Value, args: &[Value]) -> R<Value> {
+    pub(crate) fn proxy_construct(
+        &mut self,
+        o: &Obj,
+        args: &[Value],
+        new_target: &Value,
+    ) -> R<Value> {
         let (target, handler, trap) = self
             .proxy_trap(o, "construct")?
             .expect("proxy_construct on a non-proxy");
         if trap.is_callable() {
             let arr = self.array(args.to_vec());
-            let r = self.call(&trap, &handler, &[target, arr, f.clone()])?;
+            let r = self.call(&trap, &handler, &[target, arr, new_target.clone()])?;
             if !matches!(r, Value::Object(_)) {
                 return self.throw_error("TypeError", "proxy [[Construct]] must return an object");
             }
             return Ok(r);
         }
-        self.construct(&target, args)
+        self.construct_with(&target, args, new_target)
     }
 
     pub(crate) fn install_proxy(&mut self) {
