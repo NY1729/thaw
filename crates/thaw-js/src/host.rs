@@ -2020,6 +2020,13 @@ pub extern "C" fn thaw_tjs_get_global(name: *const c_char) -> i64 {
             if name.starts_with("__thaw_") {
                 default_realm_prelude_check(it)?;
             }
+            // A global whose literal name holds a `.` (a package name) wins over the nested walk.
+            if let Some(value) = it
+                .lookup(&it.global.clone(), &name)
+                .filter(|v| !matches!(v, Value::Undefined))
+            {
+                return Ok(value);
+            }
             let mut parts = name.split('.');
             let first = parts.next().unwrap_or("");
             let mut value = it
@@ -2751,7 +2758,7 @@ fn not_callable(it: &mut Interp, message: String) -> HostError {
 }
 
 /// A host-originated call of a handle: a value that is not a function fails naming its kind.
-fn check_handle_callable(it: &mut Interp, f: &Value) -> Result<(), HostError> {
+pub(crate) fn check_handle_callable(it: &mut Interp, f: &Value) -> Result<(), HostError> {
     if f.is_callable() {
         return Ok(());
     }
@@ -2776,7 +2783,7 @@ fn adopt_thenable(it: &mut Interp, v: Value) -> Result<Value, HostError> {
 }
 
 /// A call result with a returned Promise awaited (the event loop runs until it settles); a rejection throws.
-fn awaited(it: &mut Interp, v: Value) -> Result<Value, HostError> {
+pub(crate) fn awaited(it: &mut Interp, v: Value) -> Result<Value, HostError> {
     match it.await_settled(&v).map_err(|c| classify(it, c))? {
         Some(Ok(v)) => Ok(v),
         Some(Err(e)) => Err(classify(it, Ctl::Throw(e))),
@@ -3857,7 +3864,7 @@ impl Native {
     /// `to_json` for a typed-call result: an `undefined` OWN property of an object keeps the compiled side's
     /// `undefined` marker instead of vanishing (Object.keys / console.log see it; JSON.stringify still omits it).
     /// Array items and the top level are unchanged (`undefined` stays `null` there).
-    fn to_json_keeping_undefined(&self) -> String {
+    pub(crate) fn to_json_keeping_undefined(&self) -> String {
         match self {
             Native::Array(a) => format!(
                 "[{}]",
@@ -4358,6 +4365,7 @@ pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) 
 #[no_mangle]
 pub extern "C" fn thaw_tjs_load_script(source: *const c_char) -> u8 {
     let Some(source) = cstr(source) else { return 0 };
+    let source = crate::napi_eval::unpack_script(source);
     let owner = default_realm();
     let result = with_package(owner, |p| {
         p.interp
