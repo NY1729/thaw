@@ -239,6 +239,8 @@ struct FuncDef {
     hoisted: Vec<Rc<str>>,
     /// Name of each plain-identifier parameter (`None` for patterns / rest), allocated once.
     param_names: Vec<Option<Rc<str>>>,
+    /// Union of `name_bit` over `param_names`, so a call frame never re-hashes its parameters.
+    param_mask: u64,
     strict: bool,
     class: Option<ClassInfo>,
 }
@@ -942,6 +944,7 @@ impl Interp {
         r
     }
 
+    #[inline]
     pub(crate) fn too_deep(&self) -> bool {
         if self.depth >= self.max_depth {
             return true;
@@ -1726,6 +1729,12 @@ impl Interp {
     ) -> R<Value> {
         let new_target = self.rt.pending_nt.take();
         let frame = Scope::new(Some(scope.clone()));
+        // the parameters are the bulk of a frame's bindings: size the list once and seed the filter
+        frame.mask.set(def.param_mask);
+        let n = def.params.len() + def.hoisted.len();
+        if n > 0 {
+            frame.vars.borrow_mut().list.reserve(n);
+        }
         if def.strict {
             frame.strict.set(true);
         }
@@ -1751,7 +1760,15 @@ impl Interp {
         for (i, p) in def.params.iter().enumerate() {
             if let Some(Some(name)) = def.param_names.get(i) {
                 let value = args.get(i).cloned().unwrap_or(Value::Undefined);
-                frame.declare_rc(name.clone(), value, true);
+                // the filter already holds every parameter bit: no hash, and a duplicate name
+                // (sloppy `function f(a, a)`) still overwrites its slot through `insert`
+                frame.vars.borrow_mut().insert(
+                    name.clone(),
+                    Binding {
+                        value,
+                        mutable: true,
+                    },
+                );
             } else if let a::Pat::Rest(r) = p {
                 let rest = self.array(args.get(i..).unwrap_or(&[]).to_vec());
                 self.bind_pattern(&r.arg, rest, &frame, true)?;
@@ -1874,7 +1891,8 @@ impl Interp {
                     Body::Expr(_) => Vec::new(),
                 };
                 let param_names = simple_param_names(&params);
-                Rc::new(FuncDef { name, params, body, arrow, is_async, is_gen, bind_self, uses_arguments: finder.found && !arrow, uses_new_target: finder.new_target && !arrow, uses_this: finder.uses_this, src: (self_run_id, lo, hi), hoisted, param_names, strict, class: None })
+                let param_mask = param_mask(&param_names);
+                Rc::new(FuncDef { name, params, body, arrow, is_async, is_gen, bind_self, uses_arguments: finder.found && !arrow, uses_new_target: finder.new_target && !arrow, uses_this: finder.uses_this, src: (self_run_id, lo, hi), hoisted, param_names, param_mask, strict, class: None })
             })
             .clone();
         self.closure_from_def(def, scope)
@@ -3831,6 +3849,10 @@ fn simple_param_names(params: &[a::Pat]) -> Vec<Option<Rc<str>>> {
             _ => None,
         })
         .collect()
+}
+
+fn param_mask(names: &[Option<Rc<str>>]) -> u64 {
+    names.iter().flatten().fold(0, |m, n| m | name_bit(n))
 }
 
 fn hoisted_names(stmts: &[a::Stmt]) -> Vec<Rc<str>> {
