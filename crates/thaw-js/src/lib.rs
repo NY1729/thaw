@@ -3867,6 +3867,8 @@ mod napi_bridge_tests;
 #[cfg(test)]
 mod napi_eval_tests;
 #[cfg(test)]
+mod napi_globals_tests;
+#[cfg(test)]
 mod napi_graph_encode_tests;
 #[cfg(test)]
 mod napi_graph_tests;
