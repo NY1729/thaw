@@ -126,3 +126,252 @@ fn napi_graph_wire_without_leases_releases_handles_in_node() {
     assert!(decode_napi_wire(&wire).is_ok());
     assert_one_reference_left(h);
 }
+
+// ---- Native tags, pair proofs and lone tokens (PR 6a-2) ----
+
+use crate::napi_bridge::{clear_for_tests, thaw_tjs_register_napi_bridge};
+use crate::napi_graph::{native_pair_matches, tag, Tag};
+use std::ffi::{c_char, CStr};
+
+fn read(ptr: *const c_char) -> String {
+    unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn owned(text: &str) -> *const c_char {
+    CString::new(text).unwrap().into_raw() as *const c_char
+}
+
+unsafe extern "C" fn fake_exports() -> *const c_char {
+    owned("{\"names\":[]}")
+}
+
+unsafe extern "C" fn fake_call(_: *const c_char, _: *const c_char) -> *const c_char {
+    owned("")
+}
+
+/// `symbol_metadata` names the Symbol id 5 for target 5 and id 99 otherwise; target 7 fails.
+unsafe extern "C" fn fake_handle(
+    operation: *const c_char,
+    target: *const c_char,
+    _: *const c_char,
+    _: *const c_char,
+) -> *const c_char {
+    let (operation, target) = (read(operation), read(target));
+    let reply = match (operation.as_str(), target.as_str()) {
+        (_, "7") => r#"{"__thaw_error__":"boom"}"#.to_string(),
+        ("retain_graph_handle", _) => r#"{"value":"73"}"#.to_string(),
+        ("symbol_metadata", t) => {
+            let id = if t == "5" { "5" } else { "99" };
+            format!(
+                r#"{{"value":{{"id":"{id}","handle":"{t}","units":[104,105],"registered":false,"jsOrigin":false}}}}"#
+            )
+        }
+        _ => "{}".to_string(),
+    };
+    owned(&reply)
+}
+
+extern "C" fn fake_poll() -> usize {
+    0
+}
+
+extern "C" fn fake_pending() -> u8 {
+    0
+}
+
+unsafe extern "C" fn fake_owner(_: u64) -> *mut c_char {
+    CString::new("").unwrap().into_raw()
+}
+
+extern "C" fn fake_release(_: u64) -> u8 {
+    1
+}
+
+/// Holds the bridge test lock with the fake bridge registered; dropping it clears the registration.
+struct FakeBridge {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for FakeBridge {
+    fn drop(&mut self) {
+        clear_for_tests();
+    }
+}
+
+fn fake_bridge() -> FakeBridge {
+    let lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    clear_for_tests();
+    thaw_tjs_register_napi_bridge(
+        fake_exports,
+        fake_call,
+        fake_handle,
+        fake_poll,
+        fake_pending,
+        fake_owner,
+        fake_release,
+    );
+    FakeBridge { _lock: lock }
+}
+
+/// A global of the default realm, by name.
+fn global_value(owner: usize, name: &str) -> Value {
+    with_package(owner, |p| {
+        let it = &mut p.interp;
+        let global = it.global.clone();
+        Ok(it.lookup(&global, name).unwrap_or(Value::Undefined))
+    })
+    .unwrap()
+}
+
+#[test]
+fn native_pair_matches_proves_tagged_functions_and_bridge_confirmed_symbols() {
+    let _bridge = fake_bridge();
+    let owner = default_realm();
+    load("globalThis.tagged = function() {}; globalThis.named = Symbol('hi');");
+    let function = global_value(owner, "tagged");
+    let Value::Object(object) = &function else {
+        panic!("tagged is not an object")
+    };
+    tag(object, Tag::Function, "9");
+    assert!(native_pair_matches(Some(owner as u64), &function, "9", 1));
+    assert!(!native_pair_matches(Some(owner as u64), &function, "8", 1));
+    assert!(!native_pair_matches(None, &function, "9", 2));
+
+    let symbol = global_value(owner, "named");
+    let Value::Object(symbol_object) = &symbol else {
+        panic!("named is not an object")
+    };
+    crate::napi_symbols::bind(owner as u64, 5, symbol_object);
+    assert!(native_pair_matches(Some(owner as u64), &symbol, "5", 2));
+    // The reply names another id for target 6, and fails for target 7.
+    assert!(!native_pair_matches(Some(owner as u64), &symbol, "6", 2));
+    assert!(!native_pair_matches(Some(owner as u64), &symbol, "7", 2));
+    assert!(!native_pair_matches(Some(owner as u64), &function, "9", 2));
+}
+
+#[test]
+fn handle_op_returns_the_reply_or_the_bridge_error() {
+    let _bridge = fake_bridge();
+    let reply = crate::napi_bridge::handle_op("retain_graph_handle", "9", "", "[]").unwrap();
+    assert_eq!(reply["value"], "73");
+    assert_eq!(
+        crate::napi_bridge::handle_op("symbol_metadata", "7", "", "[]").unwrap_err(),
+        "boom"
+    );
+}
+
+#[test]
+fn napi_function_pair_releases_its_lease_and_decodes_only_when_proven() {
+    let _bridge = fake_bridge();
+    let owner = default_realm();
+    load("globalThis.plain = function() {}; globalThis.tagged2 = function() {};");
+    let plain = global_value(owner, "plain");
+    let h = store_handle(owner, plain);
+    assert_eq!(thaw_tjs_retain_handle(h), 1);
+    let wire = format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"nfn":"9","hdl":{h}}}],"leases":[{h}],"napiLeases":[]}}"#
+    );
+    let err = decode_napi_wire(&wire).err().expect("wire rejected");
+    assert!(
+        err.contains("Mismatched native Function graph node"),
+        "{err}"
+    );
+    assert_one_reference_left(h);
+
+    let tagged = global_value(owner, "tagged2");
+    let Value::Object(object) = &tagged else {
+        panic!("tagged2 is not an object")
+    };
+    tag(object, Tag::Function, "9");
+    let h = store_handle(owner, tagged.clone());
+    assert_eq!(thaw_tjs_retain_handle(h), 1);
+    let wire = format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"nfn":"9","hdl":{h}}}],"leases":[{h}],"napiLeases":[]}}"#
+    );
+    let (_, decoded) = decode_napi_wire(&wire).unwrap();
+    let Value::Object(decoded) = decoded else {
+        panic!("decoded value is not a function")
+    };
+    let Value::Object(original) = &tagged else {
+        unreachable!()
+    };
+    assert!(std::rc::Rc::ptr_eq(&decoded, original));
+    assert_one_reference_left(h);
+}
+
+#[test]
+fn napi_symbol_tokens_create_pin_and_prove_their_native_id() {
+    let _bridge = fake_bridge();
+    let owner = default_realm();
+    // A lone `{"nsy"}` creates the Symbol the bridge describes ("hi") and pins it.
+    let wire = r#"{"root":{"nsy":"5"},"nodes":[],"leases":[],"napiLeases":[]}"#;
+    assert_eq!(
+        probe(
+            wire,
+            "function __probe(s) { return [typeof s, s.description].join('|'); }"
+        ),
+        "symbol|hi"
+    );
+    assert_eq!(
+        crate::napi_symbols::thaw_tjs_napi_symbol_weak_live(owner as u64, 5),
+        1
+    );
+    let (_, first) = decode_napi_wire(wire).unwrap();
+
+    // The pair proves the id against the handle's Symbol, and releases the handle's lease.
+    let h = store_handle(owner, first.clone());
+    assert_eq!(thaw_tjs_retain_handle(h), 1);
+    let pair =
+        format!(r#"{{"root":{{"nsy":"5","hdl":{h}}},"nodes":[],"leases":[{h}],"napiLeases":[]}}"#);
+    let (_, again) = decode_napi_wire(&pair).unwrap();
+    let (Value::Object(a), Value::Object(b)) = (&first, &again) else {
+        panic!("symbols expected")
+    };
+    assert!(std::rc::Rc::ptr_eq(a, b));
+    assert_one_reference_left(h);
+
+    // Another id names no Symbol of this handle: rejected, and the lease still released.
+    let h = store_handle(owner, first);
+    assert_eq!(thaw_tjs_retain_handle(h), 1);
+    let forged =
+        format!(r#"{{"root":{{"nsy":"6","hdl":{h}}},"nodes":[],"leases":[{h}],"napiLeases":[]}}"#);
+    let err = decode_napi_wire(&forged).err().expect("wire rejected");
+    assert!(
+        err.contains("Mismatched native Symbol graph token"),
+        "{err}"
+    );
+    assert_one_reference_left(h);
+}
+
+#[test]
+fn lone_native_handle_and_function_tokens_need_the_proxy_layer() {
+    let _bridge = fake_bridge();
+    let wire = r#"{"root":{"r":0},"nodes":[{"nfn":"9"}],"leases":[],"napiLeases":[]}"#;
+    let err = decode_napi_wire(wire).err().expect("wire rejected");
+    assert!(
+        err.contains("Native addon proxy layer is not installed"),
+        "{err}"
+    );
+    load("globalThis.__thaw_json_graph_proxy_for_handle = n => ({ n });");
+    let wire = r#"{"root":{"r":0},"nodes":[{"nh":"9"}],"leases":[],"napiLeases":[]}"#;
+    assert_eq!(probe(wire, "function __probe(o) { return o.n; }"), "9");
+}
+
+#[test]
+fn napi_graph_tag_global_refuses_bad_kinds_and_owner_alias_answers() {
+    let _bridge = fake_bridge();
+    let wire = r#"{"root":{"v":1},"nodes":[],"leases":[],"napiLeases":[]}"#;
+    assert_eq!(
+        probe(
+            wire,
+            "function __probe(x) { const f = function() {}; \
+             let refused = ''; try { __thaw_napi_graph_tag(f, 3, '9'); } catch (e) { refused = e.name; } \
+             return [refused, typeof __thaw_json_graph_owner_of_handle].join('|'); }"
+        ),
+        "TypeError|function"
+    );
+}
