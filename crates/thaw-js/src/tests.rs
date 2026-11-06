@@ -2322,7 +2322,7 @@ fn child_process_async_orders_output_before_close() {
     let src = format!(
         "{CHILD_SHIM}
 __thaw_child_process_spawn('/bin/sh', JSON.stringify(['-c', 'echo out; echo err >&2; exit 3']), JSON.stringify({{stdio: ['ignore','pipe','pipe']}}));
-setTimeout(function () {{ console.log(logs.join(',')); }}, 400);"
+process.on('exit', function () {{ console.log(logs.join(',')); }});"
     );
     let out = run_loop(&src);
     assert!(out.starts_with("spawn,"), "{out}");
