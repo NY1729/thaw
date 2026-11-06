@@ -39,6 +39,7 @@ pub mod host;
 #[cfg(feature = "intl")]
 mod intl;
 mod json;
+mod napi_eval;
 mod napi_ops;
 mod napi_props;
 mod net;
@@ -3654,6 +3655,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 
 #[cfg(all(test, unix))]
 mod fs_tests;
+#[cfg(test)]
+mod napi_eval_tests;
 #[cfg(test)]
 mod napi_ops_tests;
 #[cfg(test)]
