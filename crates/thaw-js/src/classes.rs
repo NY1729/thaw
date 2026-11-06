@@ -130,7 +130,7 @@ impl Interp {
         cscope.declare("%class", ctor.clone(), false);
         let static_scope = Scope::new(Some(cscope.clone()));
         static_scope.declare("%home", ctor.clone(), false);
-        static_scope.declare("this", ctor.clone(), false);
+        static_scope.set_this(ctor.clone());
         static_scope.declare("%class", ctor.clone(), false);
 
         for m in &class.body {
@@ -221,7 +221,7 @@ impl Interp {
             _ => return Ok(()),
         };
         let frame = Scope::new(Some(scope));
-        frame.declare("this", this.clone(), false);
+        frame.set_this(this.clone());
         for (key, init) in fields {
             let v = match init {
                 Some(e) => self.eval(&e, &frame)?,
@@ -301,7 +301,7 @@ impl Interp {
     /// `super(...args)` inside a derived constructor.
     pub(crate) fn super_call(&mut self, args: &[Value], scope: &Rc<Scope>) -> R<Value> {
         let class = self.lookup(scope, "%class").unwrap_or(Value::Undefined);
-        let this = self.lookup(scope, "this").unwrap_or(Value::Undefined);
+        let this = self.this_of(scope);
         let parent = match &class {
             Value::Object(co) => match &*co.kind.borrow() {
                 Kind::Closure { def, .. } => def.class.as_ref().and_then(|i| i.parent.clone()),
