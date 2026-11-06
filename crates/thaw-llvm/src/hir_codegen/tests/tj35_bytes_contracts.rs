@@ -88,6 +88,22 @@ fn tj35_random_fill_sync_copies_the_result_back_into_the_argument() {
 }
 
 #[test]
+fn tj35_random_fill_sync_copy_back_passes_array_data_not_handles() {
+    // `thaw_bytes_copy` reads ByteView data pointers, so both operands must be unwrapped
+    // with `compile_array_data` first; the raw 16-byte array handles would be misread.
+    let fill = tj35_symbol("m::randomFillSync");
+    let (_, _, ir) = compile_thaw_js_program(&format!(
+        "declare function {fill}(buf: Buffer): Buffer;
+         function main(): void {{ const b = Buffer.alloc(4); if (b.length > 5) {{ console.log({fill}(b).length); }} }}"
+    ));
+    let call = ir
+        .lines()
+        .find(|line| line.contains("call ") && line.contains("@thaw_bytes_copy("))
+        .unwrap_or_else(|| panic!("no thaw_bytes_copy call:\n{ir}"));
+    assert!(call.contains("%array_data"), "{call}\n{ir}");
+}
+
+#[test]
 fn tj93_bare_buffer_argument_selects_array_buffer_and_data_view_kinds() {
     // ArrayBuffer (code 1) and DataView (code 2) get their own `k` names, not "Buffer"
     let f = tj35_symbol("m::shape");

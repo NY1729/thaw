@@ -1749,12 +1749,14 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_typed_dynamic_result(json, &signature.ret)?
         };
         if let Some(argument) = returned_bytes_argument {
+            let source = self.compile_array_data(result.into_pointer_value())?;
+            let target = self.compile_array_data(argument)?;
             self.builder
                 .build_call(
                     self.module.get_function("thaw_bytes_copy").unwrap(),
                     &[
-                        result.into_pointer_value().into(),
-                        argument.into(),
+                        source.into(),
+                        target.into(),
                         self.context.f64_type().const_zero().into(),
                         self.context.f64_type().const_zero().into(),
                         self.context.f64_type().const_float(-1.0).into(),
@@ -2049,12 +2051,14 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(phi.as_basic_value());
         }
         if let Some(argument) = returned_bytes_argument {
+            let source = self.compile_array_data(result.into_pointer_value())?;
+            let target = self.compile_array_data(argument)?;
             self.builder
                 .build_call(
                     self.module.get_function("thaw_bytes_copy").unwrap(),
                     &[
-                        result.into_pointer_value().into(),
-                        argument.into(),
+                        source.into(),
+                        target.into(),
                         self.context.f64_type().const_zero().into(),
                         self.context.f64_type().const_zero().into(),
                         self.context.f64_type().const_float(-1.0).into(),
