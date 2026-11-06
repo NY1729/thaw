@@ -13,7 +13,7 @@ use crate::host::{
 use crate::{builtins, strict_equals, Interp, Kind, Obj, Value, R};
 
 /// The value behind a handle id, for a read that is not an operation on it.
-fn handle_value(handle: u64) -> Result<Value, String> {
+pub(crate) fn handle_value(handle: u64) -> Result<Value, String> {
     HANDLES
         .with(|h| {
             h.borrow()
@@ -24,7 +24,7 @@ fn handle_value(handle: u64) -> Result<Value, String> {
 }
 
 /// `[[GetPrototypeOf]]`, honouring a proxy's trap.
-fn prototype_of(it: &mut Interp, object: &Obj) -> R<Value> {
+pub(crate) fn prototype_of(it: &mut Interp, object: &Obj) -> R<Value> {
     Ok(match it.proxy_get_prototype_of(object)? {
         Some(proto) => proto,
         None => object
