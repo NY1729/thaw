@@ -380,7 +380,9 @@ const DATE_KEY: &str = "__thaw_tjs_date__";
 const BIGINT_KEY: &str = "__thaw_tjs_bigint__";
 /// `{"__thaw_tjs_num__": "-0"}`: a compiled negative zero, which JSON integers lose; also `"NaN"`/`"Infinity"`/`"-Infinity"`.
 const NUM_KEY: &str = "__thaw_tjs_num__";
-/// `{"__thaw_tjs_bytes__": {"k": "Buffer", "b64": "..."}}`: compiled `Bytes` crossing as base64 text.
+/// `{"__thaw_tjs_bytes__": {"k": "Buffer" | "Uint8Array" | "ArrayBuffer" | "DataView", "b64": "..."}}`:
+/// compiled `Bytes` crossing as base64 text. `k` selects the JS kind; a missing or unknown `k` is a Buffer.
+/// ArrayBuffer and DataView cross by copy (a DataView over a fresh ArrayBuffer of exactly its window).
 const BYTES_KEY: &str = "__thaw_tjs_bytes__";
 const MAP_KEY: &str = "__thaw_tjs_map__";
 const SET_KEY: &str = "__thaw_tjs_set__";
@@ -3668,10 +3670,19 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
                     _ => Vec::new(),
                 },
             };
-            let is_u8 = matches!(
-                parts.iter().find(|(k, _)| k == "k"),
-                Some((_, Native::Str(s))) if s == "Uint8Array"
-            );
+            let kind = match parts.iter().find(|(k, _)| k == "k") {
+                Some((_, Native::Str(s))) => s.as_str(),
+                _ => "Buffer",
+            };
+            match kind {
+                "ArrayBuffer" => return it.array_buffer_from_vec(bytes),
+                "DataView" => {
+                    let ab = it.array_buffer_from_vec(bytes);
+                    return construct_global(it, "DataView", &[ab]).unwrap_or(Value::Undefined);
+                }
+                _ => {}
+            }
+            let is_u8 = kind == "Uint8Array";
             let view = it.u8_from_vec(bytes);
             // Buffer is a Uint8Array whose prototype is `Buffer.prototype` (see buffer.rs `wrap`)
             if !is_u8 {
