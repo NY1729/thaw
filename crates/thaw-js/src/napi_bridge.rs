@@ -100,6 +100,16 @@ pub(crate) fn registered() -> bool {
     bridge().is_some()
 }
 
+/// Releases one reference the napi side retained for a graph wire (what `__thaw_napi_graph_release` does);
+/// false when no bridge is registered.
+#[allow(dead_code)] // used by the napi graph decoder callers in PR 6a-5
+pub(crate) fn release_reference(token: u64) -> bool {
+    match bridge() {
+        Some(b) => (b.release)(token) != 0,
+        None => false,
+    }
+}
+
 /// Copies a string the napi side returned and frees it; null is the empty string.
 ///
 /// # Safety

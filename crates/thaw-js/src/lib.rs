@@ -41,6 +41,7 @@ mod intl;
 mod json;
 mod napi_bridge;
 mod napi_eval;
+mod napi_graph;
 mod napi_ops;
 mod napi_props;
 mod napi_symbols;
@@ -3662,6 +3663,8 @@ mod fs_tests;
 mod napi_bridge_tests;
 #[cfg(test)]
 mod napi_eval_tests;
+#[cfg(test)]
+mod napi_graph_tests;
 #[cfg(test)]
 mod napi_ops_tests;
 #[cfg(test)]
