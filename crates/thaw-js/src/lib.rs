@@ -74,6 +74,8 @@ mod web_event_target;
 mod web_fetch;
 #[path = "web/messaging.rs"]
 mod web_messaging;
+#[path = "web/napi_proxy.rs"]
+mod web_napi_proxy;
 #[path = "web/streams.rs"]
 mod web_streams;
 #[path = "web/text_codec.rs"]
@@ -3874,6 +3876,8 @@ mod napi_graph_tests;
 mod napi_ops_tests;
 #[cfg(test)]
 mod napi_props_tests;
+#[cfg(test)]
+mod napi_proxy_tests;
 #[cfg(test)]
 mod napi_symbols_tests;
 #[cfg(test)]
