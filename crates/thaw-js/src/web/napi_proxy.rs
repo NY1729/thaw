@@ -90,8 +90,8 @@ fn cap_object(it: &mut Interp) -> Value {
 fn native_pair_matches_global(it: &mut Interp) -> Value {
     it.native(|_, _, args| -> R<Value> {
         let kind = match arg(args, 2) {
-            Value::Number(n) if n == 1.0 => 1,
-            Value::Number(n) if n == 2.0 => 2,
+            Value::Number(1.0) => 1,
+            Value::Number(2.0) => 2,
             _ => return Ok(Value::Bool(false)),
         };
         let native = match arg(args, 1) {
