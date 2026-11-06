@@ -27,8 +27,11 @@ fn native_payload(source: &str) -> Option<(String, bool)> {
     } else {
         source.find(CALL)? + CALL.len()
     };
-    // a JavaScript string literal: find the closing quote, honouring backslash escapes
-    let rest = source.get(start..)?;
+    string_literal_at(source.get(start..)?).map(|lit| (lit.to_string(), pure))
+}
+
+/// The JavaScript string literal at the head of `rest` (quotes included), honouring backslash escapes.
+fn string_literal_at(rest: &str) -> Option<&str> {
     let mut chars = rest.char_indices();
     let (_, quote) = chars.next()?;
     if quote != '"' && quote != '\'' {
@@ -41,10 +44,57 @@ fn native_payload(source: &str) -> Option<(String, bool)> {
         } else if c == '\\' {
             escaped = true;
         } else if c == quote {
-            return Some((rest[..=i].to_string(), pure));
+            return Some(&rest[..=i]);
         }
     }
     None
+}
+
+/// Indirect re-exports per module key, from the bundle's `var __thaw_bundle_export_graphs =
+/// JSON.parse("...")`: `(exported name, specifier, imported name)`. Namespace (`*`) re-exports are
+/// not included.
+// ponytail: namespace re-exports (`export * as X`) of an indirect graph are skipped; add when a package needs it.
+fn indirect_exports(source: &str) -> BTreeMap<String, Vec<(String, String, String)>> {
+    const VAR: &str = "var __thaw_bundle_export_graphs = JSON.parse(";
+    let mut out = BTreeMap::new();
+    let Some(literal) = source
+        .find(VAR)
+        .and_then(|at| source.get(at + VAR.len()..))
+        .and_then(string_literal_at)
+    else {
+        return out;
+    };
+    let Ok(Native::Array(mut wrapped)) = crate::json::parse_native(&format!("[{literal}]")) else {
+        return out;
+    };
+    let Some(Native::Str(json)) = wrapped.pop() else {
+        return out;
+    };
+    let Ok(Native::Object(graphs)) = crate::json::parse_native(&json) else {
+        return out;
+    };
+    for (key, graph) in graphs {
+        let Native::Object(graph) = graph else {
+            continue;
+        };
+        let Some(Native::Object(indirect)) = field(&graph, "indirect") else {
+            continue;
+        };
+        let mut names = Vec::new();
+        for (name, entry) in indirect {
+            if let Native::Array(parts) = entry {
+                if let [Native::Str(spec), Native::Str(remote), ..] = parts.as_slice() {
+                    if remote != "*" {
+                        names.push((name.clone(), spec.clone(), remote.clone()));
+                    }
+                }
+            }
+        }
+        if !names.is_empty() {
+            out.insert(key, names);
+        }
+    }
+    out
 }
 
 fn field<'a>(fields: &'a [(String, Native)], name: &str) -> Option<&'a Native> {
@@ -130,7 +180,13 @@ fn reassigned_names(module: &a::Module) -> BTreeSet<String> {
     v.0
 }
 
-fn convert(source: &str, public_specs: &[String]) -> Result<Converted, String> {
+/// `indirect`: `(exported name, specifier, imported name)` re-exports that the registry removed from
+/// `source` and kept only in the export graph.
+fn convert(
+    source: &str,
+    public_specs: &[String],
+    indirect: &[(String, String, String)],
+) -> Result<Converted, String> {
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(source)?;
     let snippet = |span| cm.span_to_snippet(span).unwrap_or_default();
     let mut head = String::from(
@@ -329,6 +385,18 @@ fn convert(source: &str, public_specs: &[String]) -> Result<Converted, String> {
             },
         }
     }
+    // Indirect getters go in the head so an `export *` in the body skips their names.
+    for (name, spec, remote) in indirect {
+        let (mut qs, mut qr) = (String::new(), String::new());
+        json_quote(spec, &mut qs);
+        json_quote(remote, &mut qr);
+        let expr = if remote == "default" {
+            format!("__thaw_esm_default(require({qs}))")
+        } else {
+            format!("require({qs})[{qr}]")
+        };
+        head.push_str(&getter(name, &expr));
+    }
     if uses_origin {
         head.push_str(
             "function __thaw_esm_origin_obj(t) { return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, \
@@ -388,6 +456,7 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
     let mut maps = String::new();
     let mut problems: BTreeSet<&'static str> = BTreeSet::new();
     let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let indirects = indirect_exports(source);
     for m in modules {
         let Native::Object(fields) = m else { continue };
         let key = text(field(fields, "key"))
@@ -408,7 +477,8 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
             }
         }
         let public: Vec<String> = imports.iter().map(|(s, _)| s.clone()).collect();
-        let converted = convert(src, &public)?;
+        let indirect = indirects.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+        let converted = convert(src, &public, indirect)?;
         problems.extend(converted.problems);
         graph.insert(
             key.clone(),
@@ -481,7 +551,7 @@ mod origin_vocabulary_tests {
     fn origin_object_has_the_registry_vocabulary() {
         let source = "import { __thaw_esm_origin_0 } from '__thaw_private_origin_spec/k';\n\
                       export const x = __thaw_esm_origin_0.readImport('dep', 'a');\n";
-        let converted = convert(source, &["dep".to_string()]).expect("convert");
+        let converted = convert(source, &["dep".to_string()], &[]).expect("convert");
         for method in [
             "readImport",
             "namespaceImport",
@@ -494,5 +564,33 @@ mod origin_vocabulary_tests {
                 converted.body
             );
         }
+    }
+
+    // `export { EventEmitter } from "./index.js"` in an `.mjs` whose source the registry rewrote:
+    // the name exists only as an indirect entry of the export graph, and must still be readable.
+    #[test]
+    fn indirect_cjs_default_reexport_is_readable_from_native_module() {
+        use crate::builtins::json_quote;
+        use crate::host::{Native, Package};
+        let payload = r#"{"main":"m/e.mjs","modules":[{"key":"m/e.mjs","source":"import \"./index.js\";\nexport {};","imports":{"./index.js":"m/cjs.js"}}],"opaqueEdges":[]}"#;
+        let graphs = r#"{"m/e.mjs":{"local":{},"indirect":{"EventEmitter":["./index.js","default",true]},"stars":[]}}"#;
+        let (mut literal, mut graph_literal) = (String::new(), String::new());
+        json_quote(payload, &mut literal);
+        json_quote(graphs, &mut graph_literal);
+        let bundle = format!(
+            r#"module.exports = (function(require) {{
+var __thaw_bundle_factories = {{
+"m/index.js": function(module, exports, require) {{ var e = require("./e.mjs"); exports.tag = function () {{ return new (e.EventEmitter)().tag; }}; }},
+"m/cjs.js": function(module, exports) {{ module.exports = function EventEmitter() {{ this.tag = "ok"; }}; }},
+"m/e.mjs": function() {{ throw new TypeError('Native ESM must be loaded by its registered entry'); }},
+}};
+var __thaw_bundle_require_maps = {{ "m/index.js": {{"./e.mjs": "m/e.mjs"}}, "m/cjs.js": {{}}, "m/e.mjs": {{}}, }};
+var __thaw_bundle_export_graphs = JSON.parse({graph_literal});
+var __thaw_bundle_entry_key = "m/index.js";
+var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal});
+}})(globalThis.require);"#
+        );
+        let mut p = Package::load(&bundle).expect("loads");
+        assert_eq!(p.call("tag", &[]).unwrap(), Native::Str("ok".into()));
     }
 }
