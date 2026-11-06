@@ -39,6 +39,7 @@ pub mod host;
 #[cfg(feature = "intl")]
 mod intl;
 mod json;
+mod napi_bridge;
 mod napi_eval;
 mod napi_ops;
 mod napi_props;
@@ -798,6 +799,7 @@ impl Interp {
         if host {
             it.install_sysio();
             it.install_process_stdin();
+            napi_bridge::install(&mut it);
             net::install(&mut it);
             worker::install(&mut it);
             dns::install(&mut it);
@@ -3656,6 +3658,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 
 #[cfg(all(test, unix))]
 mod fs_tests;
+#[cfg(test)]
+mod napi_bridge_tests;
 #[cfg(test)]
 mod napi_eval_tests;
 #[cfg(test)]
