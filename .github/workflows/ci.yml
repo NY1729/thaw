@@ -317,7 +317,7 @@ jobs:
           echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
       - name: Run node-compat with thaw-js (${{ matrix.mode }})
         env:
-          THAW_JS_RUNTIME: "1"
+          THAW_JS_ENGINE: thaw-js
           THAW_JS_USER_DYNAMIC: ${{ matrix.dynamic }}
           THAW_NODE_COMPAT_JOBS: "4"
         run: |
@@ -432,9 +432,9 @@ jobs:
           echo "$prefix/bin" >> "$GITHUB_PATH"
           echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
-      - name: Run others with thaw-js (THAW_JS_RUNTIME=1, THAW_JS_USER_DYNAMIC=1)
+      - name: Run others with thaw-js (THAW_JS_ENGINE=thaw-js, THAW_JS_USER_DYNAMIC=1)
         env:
-          THAW_JS_RUNTIME: "1"
+          THAW_JS_ENGINE: thaw-js
           THAW_JS_USER_DYNAMIC: "1"
           THAW_NODE_COMPAT_JOBS: "4"
         run: |
@@ -459,7 +459,7 @@ jobs:
         run: |
           reports="$RUNNER_TEMP/reports"
           {
-            echo "### thaw-js node-compat others (THAW_JS_RUNTIME=1, THAW_JS_USER_DYNAMIC=1)"
+            echo "### thaw-js node-compat others (THAW_JS_ENGINE=thaw-js, THAW_JS_USER_DYNAMIC=1)"
             for f in "$reports"/*.exit-status; do
               [ -e "$f" ] || continue
               label=$(basename "$f" .exit-status)
@@ -1025,7 +1025,7 @@ jobs:
     # running for the 6-hour default.
     timeout-minutes: 90
     env:
-      THAW_JS_RUNTIME: "1"
+      THAW_JS_ENGINE: thaw-js
       THAW_JS_USER_DYNAMIC: "1"
       THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
       CARGO_BUILD_JOBS: "4"
@@ -1143,7 +1143,7 @@ jobs:
     # Observed shards take 15-26 minutes.
     timeout-minutes: 75
     env:
-      THAW_JS_RUNTIME: "1"
+      THAW_JS_ENGINE: thaw-js
       THAW_JS_USER_DYNAMIC: "1"
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
@@ -1276,7 +1276,7 @@ jobs:
     # max). A single lost shard ran 53 minutes with no log before this cap existed.
     timeout-minutes: 75
     env:
-      THAW_JS_RUNTIME: "1"
+      THAW_JS_ENGINE: thaw-js
       THAW_JS_USER_DYNAMIC: "1"
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
@@ -1455,7 +1455,7 @@ jobs:
     # Observed runs take 14-17 minutes.
     timeout-minutes: 45
     env:
-      THAW_JS_RUNTIME: "1"
+      THAW_JS_ENGINE: thaw-js
       THAW_JS_USER_DYNAMIC: "1"
       CARGO_BUILD_JOBS: "1"
       CARGO_INCREMENTAL: "0"

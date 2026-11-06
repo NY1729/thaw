@@ -95,7 +95,7 @@ pub struct FfiSignature {
 pub enum DynamicBackend {
     Jit,
     QuickJs,
-    /// Experimental Thaw-native JavaScript runtime (`thaw-js`), selected by `THAW_JS_RUNTIME=1`.
+    /// Experimental Thaw-native JavaScript runtime (`thaw-js`), selected by `THAW_JS_ENGINE=thaw-js`.
     ThawJs,
     Napi,
 }

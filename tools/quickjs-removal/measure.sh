@@ -76,9 +76,9 @@ MEASURE_ROWS="$SCRATCH/out/rows.tsv"
 : > "$MEASURE_ROWS"
 row() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> "$MEASURE_ROWS"; }
 
-# Engine selection: quickjs = routing flag unset (default); thaw-js = THAW_JS_RUNTIME=1.
+# Engine selection: THAW_JS_ENGINE=quickjs|thaw-js; the legacy THAW_JS_RUNTIME is always unset.
 engine_env() {
-  if [ "$1" = thaw-js ]; then echo "THAW_JS_RUNTIME=1"; else echo "-u THAW_JS_RUNTIME"; fi
+  echo "-u THAW_JS_RUNTIME THAW_JS_ENGINE=$1"
 }
 
 measure_program() {

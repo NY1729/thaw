@@ -1,9 +1,39 @@
-// Experimental thaw-js routing (`THAW_JS_RUNTIME=1`): which packages the Thaw-native JavaScript
+// Experimental thaw-js routing (`THAW_JS_ENGINE=thaw-js`): which packages the Thaw-native JavaScript
 // runtime can serve for a given program. Everything else keeps the QuickJS path unchanged.
 
-/// Only a bare `1` turns thaw-js routing on.
+/// The engine when no env var selects one. QuickJS until thaw-js is made the default.
+const THAW_JS_DEFAULT: bool = false;
+
+/// Whether thaw-js routing is on. `THAW_JS_ENGINE` (`thaw-js` or `quickjs`) wins over
+/// `THAW_JS_RUNTIME`, which stays a legacy alias: `1` is thaw-js, `0` is QuickJS.
+/// Unset, empty and unknown values fall through to the next rule.
+fn thaw_js_engine_from(engine: Option<&str>, runtime: Option<&str>, default_thaw_js: bool) -> bool {
+    match engine {
+        Some("thaw-js") => true,
+        Some("quickjs") => false,
+        _ => match runtime {
+            Some("1") => true,
+            Some("0") => false,
+            _ => default_thaw_js,
+        },
+    }
+}
+
+/// Warns once on stderr about a `THAW_JS_ENGINE` value that is neither `thaw-js` nor `quickjs`.
+fn warn_unknown_thaw_js_engine(engine: Option<&str>) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if let Some(other) = engine.filter(|v| !matches!(*v, "" | "thaw-js" | "quickjs")) {
+        WARNED.call_once(|| {
+            eprintln!("thaw: unknown THAW_JS_ENGINE `{other}`, using the default engine");
+        });
+    }
+}
+
 fn thaw_js_routing_enabled() -> bool {
-    std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1")
+    let engine = std::env::var("THAW_JS_ENGINE").ok();
+    let runtime = std::env::var("THAW_JS_RUNTIME").ok();
+    warn_unknown_thaw_js_engine(engine.as_deref());
+    thaw_js_engine_from(engine.as_deref(), runtime.as_deref(), THAW_JS_DEFAULT)
 }
 
 thread_local! {

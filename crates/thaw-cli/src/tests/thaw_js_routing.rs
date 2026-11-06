@@ -470,6 +470,31 @@ fn thaw_js_user_dynamic_is_on_unless_set_to_zero() {
 }
 
 #[test]
+fn thaw_js_engine_env_selects_engine() {
+    assert!(thaw_js_engine_from(Some("thaw-js"), None, false));
+    assert!(!thaw_js_engine_from(Some("quickjs"), None, true));
+    // THAW_JS_ENGINE wins over a conflicting THAW_JS_RUNTIME
+    assert!(!thaw_js_engine_from(Some("quickjs"), Some("1"), false));
+    assert!(thaw_js_engine_from(Some("thaw-js"), Some("0"), false));
+}
+
+#[test]
+fn thaw_js_runtime_alias_still_works() {
+    assert!(thaw_js_engine_from(None, Some("1"), false));
+    assert!(!thaw_js_engine_from(None, Some("0"), true));
+    assert!(!thaw_js_engine_from(None, Some("2"), false));
+    assert!(thaw_js_engine_from(None, Some(""), true));
+}
+
+#[test]
+fn thaw_js_engine_default_applies_when_unset() {
+    assert_eq!(thaw_js_engine_from(None, None, THAW_JS_DEFAULT), THAW_JS_DEFAULT);
+    // unknown THAW_JS_ENGINE values fall through to the RUNTIME alias, then the default
+    assert!(thaw_js_engine_from(Some("bogus"), Some("1"), false));
+    assert_eq!(thaw_js_engine_from(Some("bogus"), None, THAW_JS_DEFAULT), THAW_JS_DEFAULT);
+}
+
+#[test]
 fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
     clear_thaw_js_blockers();
     record_thaw_js_fallback_blocker("thaw-js routing needs QuickJS");
