@@ -490,6 +490,15 @@ pub extern "C" fn thaw_tjs_retain_handle(handle: i64) -> u8 {
     )
 }
 
+/// Whether `handle` names a live handle (one with a reference left).
+pub(crate) fn handle_is_live(handle: i64) -> bool {
+    HANDLE_REFS.with(|r| {
+        r.borrow()
+            .get((handle as usize).wrapping_sub(1))
+            .is_some_and(|refs| *refs > 0)
+    })
+}
+
 /// Drop a reference on a handle (the value is released with the last one); returns 1 when it was live.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_release_handle(handle: i64) -> u8 {
@@ -697,15 +706,18 @@ pub(crate) struct GraphCx {
     pub(crate) busy: Vec<bool>,
     pub(crate) napi: bool,
     pub(crate) release_in_node: bool,
+    /// The package the wire's native names (Symbol registry, pair proofs) belong to.
+    pub(crate) owner: usize,
 }
 
 impl GraphCx {
-    pub(crate) fn new(nodes: usize, napi: bool, release_in_node: bool) -> Self {
+    pub(crate) fn new(nodes: usize, napi: bool, release_in_node: bool, owner: usize) -> Self {
         GraphCx {
             memo: vec![None; nodes],
             busy: vec![false; nodes],
             napi,
             release_in_node,
+            owner,
         }
     }
 }
@@ -720,6 +732,9 @@ pub(crate) fn graph_token(
     let Native::Object(fields) = token else {
         return Err("malformed graph token".into());
     };
+    if cx.napi && fields.len() <= 2 && graph_field(fields, "nsy").is_some() {
+        return native_symbol_pair(it, fields, cx);
+    }
     let [(key, payload)] = fields.as_slice() else {
         return Err("malformed graph token".into());
     };
@@ -770,7 +785,21 @@ fn new_date(it: &mut Interp, ms: &Native) -> Result<Value, String> {
 }
 
 /// The Symbol of a `{"nsy","hdl"}` token: the handle it names (the wire's reference is released, as for `hdl`).
-fn native_symbol_pair(fields: &[(String, Native)], release: bool) -> Result<Value, String> {
+/// Under the N-API wire the pair is proven first, and a lone `{"nsy"}` names a Symbol of the owner.
+fn native_symbol_pair(
+    it: &mut Interp,
+    fields: &[(String, Native)],
+    cx: &GraphCx,
+) -> Result<Value, String> {
+    if cx.napi {
+        return match (graph_field(fields, "nsy"), graph_field(fields, "hdl")) {
+            (Some(Native::Str(native)), None) => {
+                crate::napi_graph::lone_symbol(it, cx.owner, native)
+            }
+            _ => crate::napi_graph::native_pair(cx.owner, fields, 2, cx.release_in_node),
+        };
+    }
+    let release = cx.release_in_node;
     let Some(Native::Number(id)) = graph_field(fields, "hdl") else {
         return Err("invalid paired native Symbol graph token".into());
     };
@@ -800,7 +829,7 @@ fn graph_key(
     }
     let value = match key {
         Native::Object(fields) if graph_field(fields, "nsy").is_some() => {
-            native_symbol_pair(fields, cx.release_in_node)?
+            native_symbol_pair(it, fields, cx)?
         }
         _ => graph_token(it, key, nodes, cx)?,
     };
@@ -955,8 +984,14 @@ fn graph_node(
             }
             Value::Object(o)
         }
-        [_, _] if graph_field(fields, "nsy").is_some() => {
-            native_symbol_pair(fields, cx.release_in_node)?
+        [_, _] if graph_field(fields, "nsy").is_some() => native_symbol_pair(it, fields, cx)?,
+        [_, _] if cx.napi && graph_field(fields, "nfn").is_some() => {
+            crate::napi_graph::native_pair(cx.owner, fields, 1, cx.release_in_node)?
+        }
+        [(k, Native::Str(native))]
+            if cx.napi && (k == "nh" || k == "nfn") && crate::napi_graph::is_decimal(native) =>
+        {
+            crate::napi_graph::lone_handle(it, k, native)?
         }
         [(k, Native::Number(id))] if k == "hdl" => {
             let v = HANDLES
@@ -1127,7 +1162,7 @@ pub(crate) fn decode_wire(wire: &str) -> Result<(usize, Value), String> {
     };
     let owner = wire_owner(nodes);
     with_package(owner, |p| {
-        let mut cx = GraphCx::new(nodes.len(), false, true);
+        let mut cx = GraphCx::new(nodes.len(), false, true, owner);
         graph_token(&mut p.interp, root, nodes, &mut cx).map_err(HostError::Bundle)
     })
     .map(|v| (owner, v))
