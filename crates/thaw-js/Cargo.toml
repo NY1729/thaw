@@ -36,6 +36,7 @@ p384 = { version = "0.13", features = ["ecdsa", "pem", "ecdh"] }
 p521 = { version = "0.13", features = ["ecdsa", "pem", "ecdh"] }
 pkcs1 = { version = "0.7", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 rsa = { version = "0.9", features = ["sha2", "pem", "getrandom"] }
 sec1 = { version = "0.7", features = ["pem"] }
 signature = "2"

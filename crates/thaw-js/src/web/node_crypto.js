@@ -441,8 +441,155 @@ const createSign = algorithm => new Sign(algorithm);
 const createVerify = algorithm => new Verify(algorithm);
 const sign = (algorithm, data, key) => new Sign(algorithm || 'sha256').update(data).sign(key);
 const verify = (algorithm, data, key, signature) => new Verify(algorithm || 'sha256').update(data).verify(key, signature);
+  // `publicEncrypt(key, buffer)` / `privateDecrypt(key, buffer)` --
+  // real Node's default padding for *these* (unlike `Sign`/`Verify`'s
+  // own PKCS1v15 default) is OAEP, defaulting to a SHA-1 `oaepHash`
+  // (OpenSSL's own long-standing default) unless `padding:
+  // RSA_PKCS1_PADDING` is explicitly requested. RSA only -- an EC/
+  // Ed25519 key throws a clear error, matching real Node.
+  const resolveEncryptionPadding = key => (key && key.padding === RSA_PKCS1_PADDING)
+    ? '' : normalizeDigestAlgorithm((key && key.oaepHash) || 'sha1');
+  const publicEncrypt = (key, buffer) => {
+    const { pem } = parseAsymmetricKeyMaterial(key);
+    const oaepDigest = resolveEncryptionPadding(key);
+    return Buffer.from(__thaw_crypto_asymmetric_encrypt_hex(pem, oaepDigest, Buffer.from(buffer).toString('hex')), 'hex');
+  };
+  const privateDecrypt = (key, buffer) => {
+    const { pem } = parseAsymmetricKeyMaterial(key);
+    const oaepDigest = resolveEncryptionPadding(key);
+    return Buffer.from(__thaw_crypto_asymmetric_decrypt_hex(pem, oaepDigest, Buffer.from(buffer).toString('hex')), 'hex');
+  };
+  // `privateEncrypt(key, buffer)` / `publicDecrypt(key, buffer)` --
+  // Node's rarer raw-RSA pair (real use: producing something only the
+  // matching *public* key can recover, not confidentiality). Always
+  // PKCS#1 v1.5 padding (real Node's own default and only supported
+  // choice for this direction -- OAEP is not defined for it, and
+  // there is no `oaepHash`/`padding` option to resolve). RSA only,
+  // same as `publicEncrypt`/`privateDecrypt` above.
+  const privateEncrypt = (key, buffer) => {
+    const { pem } = parseAsymmetricKeyMaterial(key);
+    return Buffer.from(__thaw_crypto_asymmetric_private_encrypt_hex(pem, Buffer.from(buffer).toString('hex')), 'hex');
+  };
+  const publicDecrypt = (key, buffer) => {
+    const { pem } = parseAsymmetricKeyMaterial(key);
+    return Buffer.from(__thaw_crypto_asymmetric_public_decrypt_hex(pem, Buffer.from(buffer).toString('hex')), 'hex');
+  };
+  // A PEM block is just base64(DER) wrapped in `-----BEGIN/END-----`
+  // header/footer lines with fixed-width line wrapping -- no crypto
+  // needed to recover the raw DER bytes, just strip the non-base64
+  // lines and decode.
+  const pemToDer = pem => Buffer.from(
+    pem.split('\n').filter(line => line && !line.startsWith('-----')).join(''),
+    'base64'
+  );
+  // `generateKeyPairSync(type, options)` / `generateKeyPair(type,
+  // options, callback)` -- `type` is `'rsa'`/`'ec'`/`'ed25519'`;
+  // `options.modulusLength` (RSA) or `options.namedCurve` (EC, either
+  // Node/JOSE's own names or the common OpenSSL aliases) picks the key
+  // size/curve; `options.publicExponent` (RSA only, default 65537)
+  // picks a custom public exponent. `options.privateKeyEncoding`/
+  // `publicKeyEncoding` (`{type, format}`) control the return shape per
+  // half: omitted -> a real `KeyObject` (matching real Node's own
+  // default, always normalized as PKCS8/SPKI internally regardless of
+  // `type` below); `format: 'pem'` -> the PEM string as-is; `format:
+  // 'der'` -> raw DER bytes as a `Buffer`. `type` is `'pkcs8'`/`'spki'`
+  // (the default) or `'pkcs1'` (RSA)/`'sec1'` (EC) for the native
+  // format real OpenSSL itself would produce; Ed25519 has no PKCS1/SEC1
+  // equivalent (RSA/EC only, matching real Node).
+  const encodeGeneratedKeyHalf = (pem, isPrivate, encoding) => {
+    if (!encoding) {
+      const info = JSON.parse(__thaw_crypto_import_key_json(Buffer.from(pem).toString('hex'), false, ''));
+      return new KeyObject(isPrivate ? 'private' : 'public', pem, info);
+    }
+    return encoding.format === 'der' ? pemToDer(pem) : pem;
+  };
+  const generateKeyPairSync = (type, options) => {
+    options = options || {};
+    const arg = type === 'rsa' ? String(options.modulusLength)
+      : type === 'ec' ? options.namedCurve
+      : '';
+    const publicExponent = type === 'rsa' && options.publicExponent != null ? String(options.publicExponent) : '';
+    const privateEncoding = options.privateKeyEncoding;
+    const publicEncoding = options.publicKeyEncoding;
+    rejectEncryptedPrivateKeyOutput(privateEncoding);
+    const privateType = (privateEncoding && privateEncoding.type) || '';
+    const publicType = (publicEncoding && publicEncoding.type) || '';
+    const generated = JSON.parse(__thaw_crypto_generate_key_pair_json(type, arg || '', publicExponent, privateType, publicType));
+    return {
+      publicKey: encodeGeneratedKeyHalf(generated.publicPem, false, publicEncoding),
+      privateKey: encodeGeneratedKeyHalf(generated.privatePem, true, privateEncoding)
+    };
+  };
+  const generateKeyPair = (type, options, callback) => {
+    if (typeof options === 'function') { callback = options; options = {}; }
+    queueMicrotask(() => {
+      let result;
+      try { result = generateKeyPairSync(type, options); }
+      catch (error) { callback(error); return; }
+      callback(null, result.publicKey, result.privateKey);
+    });
+  };
+  // `crypto.diffieHellman({privateKey, publicKey})` -- the modern,
+  // `KeyObject`-based one-shot key-agreement API real Node itself
+  // recommends over the classic `ECDH` class below. Both keys must be
+  // the same key-agreement type: a matching EC curve, or both X25519
+  // (`generateKeyPairSync('x25519')`); RSA/Ed25519 keys aren't
+  // key-agreement keys and are rejected (see `crypto_diffie_hellman_
+  // hex`, `asymmetric_crypto.rs`).
+  const diffieHellman = ({ privateKey, publicKey }) => {
+    const { pem: privatePem } = parseAsymmetricKeyMaterial(privateKey);
+    const { pem: publicPem } = parseAsymmetricKeyMaterial(publicKey);
+    return Buffer.from(__thaw_crypto_diffie_hellman_hex(privatePem, publicPem), 'hex');
+  };
+  // `crypto.createECDH(curveName)` -- the classic, raw-byte EC-only
+  // key-agreement API (no `KeyObject`/PEM involved at all, unlike
+  // `diffieHellman` above -- it exchanges raw SEC1 point/scalar bytes
+  // end to end, matching real Node exactly). `curveName` accepts both
+  // Node/JOSE's own names and the common OpenSSL aliases (see
+  // `normalize_curve_name`, `asymmetric_crypto.rs`). X25519 has no
+  // classic `ECDH` form in real Node either -- use `diffieHellman` +
+  // `generateKeyPairSync('x25519')` for that.
+  class ECDH {
+    constructor(curveName) { this.curveName = curveName; }
+    generateKeys(encoding, format) {
+      const generated = JSON.parse(__thaw_crypto_ecdh_generate_keys_hex(this.curveName));
+      this._privateKeyHex = generated.privateKeyHex;
+      this._publicKeyHex = generated.publicKeyHex;
+      return this.getPublicKey(encoding, format);
+    }
+    setPrivateKey(privateKey, encoding) {
+      this._privateKeyHex = Buffer.from(privateKey, encoding).toString('hex');
+      this._publicKeyHex = __thaw_crypto_ecdh_public_from_private_hex(this.curveName, this._privateKeyHex);
+    }
+    getPrivateKey(encoding) {
+      const value = Buffer.from(this._privateKeyHex, 'hex');
+      return !encoding ? value : value.toString(encoding);
+    }
+    getPublicKey(encoding, format = 'uncompressed') {
+      const value = Buffer.from(this._publicKeyHex, 'hex');
+      if (format !== 'uncompressed') {
+        if (format !== 'compressed' && format !== 'hybrid') throw new TypeError('invalid public key format');
+        const coordinateLength = (value.length - 1) / 2;
+        const odd = value[value.length - 1] & 1;
+        value[0] = (format === 'compressed' ? 2 : 6) + odd;
+        if (format === 'compressed') return !encoding ? value.subarray(0, coordinateLength + 1) : value.subarray(0, coordinateLength + 1).toString(encoding);
+      }
+      return !encoding ? value : value.toString(encoding);
+    }
+    computeSecret(otherPublicKey, inputEncoding, outputEncoding) {
+      const publicKeyHex = Buffer.from(otherPublicKey, inputEncoding).toString('hex');
+      const value = Buffer.from(
+        __thaw_crypto_ecdh_compute_secret_hex(this.curveName, this._privateKeyHex, publicKeyHex),
+        'hex'
+      );
+      return !outputEncoding ? value : value.toString(outputEncoding);
+    }
+  }
+  const createECDH = curveName => new ECDH(curveName);
 Object.assign(cryptoModule, { KeyObject: KeyObject, createSecretKey: createSecretKey, createPrivateKey: createPrivateKey, createPublicKey: createPublicKey,
   Sign: Sign, Verify: Verify, createSign: createSign, createVerify: createVerify, sign: sign, verify: verify,
+  publicEncrypt: publicEncrypt, privateDecrypt: privateDecrypt, privateEncrypt: privateEncrypt, publicDecrypt: publicDecrypt,
+  generateKeyPairSync: generateKeyPairSync, generateKeyPair: generateKeyPair, diffieHellman: diffieHellman, ECDH: ECDH, createECDH: createECDH,
   constants: { RSA_PKCS1_PADDING: RSA_PKCS1_PADDING, RSA_PKCS1_PSS_PADDING: RSA_PKCS1_PSS_PADDING, RSA_PKCS1_OAEP_PADDING: RSA_PKCS1_OAEP_PADDING } });
 def(globalThis, '__thaw_Hash', Hash); // globals so the scan knows update/digest/copy
 def(globalThis, '__thaw_Hmac', Hmac);
