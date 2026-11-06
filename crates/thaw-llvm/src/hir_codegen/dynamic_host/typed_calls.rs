@@ -2067,9 +2067,9 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(result)
     }
 
-    /// A `Bytes` argument for thaw-js: `{"__thaw_tjs_bytes__": {"k": "Buffer" | "Uint8Array", "b64": "<base64>"}}`,
+    /// A `Bytes` argument for thaw-js: `{"__thaw_tjs_bytes__": {"k": "Buffer" | "Uint8Array" | "ArrayBuffer" | "DataView", "b64": "<base64>"}}`,
     /// base64 text rather than number slots. `k` follows the runtime kind (`thaw_bytes_console_info`
-    /// is `3` for a plain `Uint8Array`). A plain `{"type":"Buffer"}` object is not used here, since
+    /// is `1` for an ArrayBuffer, `2` for a DataView, `3` for a plain `Uint8Array`). A plain `{"type":"Buffer"}` object is not used here, since
     /// thaw-js would have no way to tell it from user data of that shape.
     fn compile_thaw_js_bytes_argument(
         &mut self,
@@ -2120,9 +2120,38 @@ impl<'ctx> HirCompiler<'ctx> {
         let kind_key = self.intern_string("k", "thaw_js_bytes_kind_key").map_err(|error| error.to_string())?;
         let buffer_name = self.intern_string("Buffer", "thaw_js_bytes_kind").map_err(|error| error.to_string())?;
         let u8_name = self.intern_string("Uint8Array", "thaw_js_bytes_kind_u8").map_err(|error| error.to_string())?;
+        // Kind codes from `thaw_bytes_console_info`: 1 ArrayBuffer, 2 DataView, 3 Uint8Array, else Buffer.
+        let ab_name = self.intern_string("ArrayBuffer", "thaw_js_bytes_kind_ab").map_err(|error| error.to_string())?;
+        let dv_name = self.intern_string("DataView", "thaw_js_bytes_kind_dv").map_err(|error| error.to_string())?;
+        let is_ab = self
+            .builder
+            .build_float_compare(
+                inkwell::FloatPredicate::OEQ,
+                kind_code,
+                self.context.f64_type().const_float(1.0),
+                "thaw_js_bytes_is_ab",
+            )
+            .map_err(|error| error.to_string())?;
+        let is_dv = self
+            .builder
+            .build_float_compare(
+                inkwell::FloatPredicate::OEQ,
+                kind_code,
+                self.context.f64_type().const_float(2.0),
+                "thaw_js_bytes_is_dv",
+            )
+            .map_err(|error| error.to_string())?;
+        let buffer_or_ab = self
+            .builder
+            .build_select(is_ab, ab_name.as_pointer_value(), buffer_name.as_pointer_value(), "thaw_js_bytes_kind_ab_select")
+            .map_err(|error| error.to_string())?.into_pointer_value();
+        let not_dv = self
+            .builder
+            .build_select(is_dv, dv_name.as_pointer_value(), buffer_or_ab, "thaw_js_bytes_kind_dv_select")
+            .map_err(|error| error.to_string())?.into_pointer_value();
         let kind = self
             .builder
-            .build_select(is_u8, u8_name.as_pointer_value(), buffer_name.as_pointer_value(), "thaw_js_bytes_kind_select")
+            .build_select(is_u8, u8_name.as_pointer_value(), not_dv, "thaw_js_bytes_kind_select")
             .map_err(|error| error.to_string())?;
         let b64_key = self.intern_string("b64", "thaw_js_bytes_b64_key").map_err(|error| error.to_string())?;
         for (key, value) in [(kind_key, kind), (b64_key, text)] {
