@@ -3944,19 +3944,21 @@ impl Native {
     fn to_result_json(&self) -> String {
         match self {
             Native::Undefined => format!("{{\"{UNDEFINED_KEY}\":true}}"),
-            // NaN and the infinities cannot be JSON numbers: the sentinel object decodes back to them
-            Native::Number(n) if !n.is_finite() => format!(
-                "{{\"$__thaw_non_finite$\":\"{}\"}}",
-                if n.is_nan() {
-                    "NaN"
-                } else if *n > 0.0 {
-                    "Infinity"
-                } else {
-                    "-Infinity"
-                }
-            ),
+            Native::Number(n) if !n.is_finite() => Native::non_finite_sentinel(*n),
             other => other.to_json_keeping_undefined(),
         }
+    }
+
+    /// NaN and the infinities cannot be JSON numbers: std decodes this sentinel back to the number at any depth.
+    fn non_finite_sentinel(n: f64) -> String {
+        let word = if n.is_nan() {
+            "NaN"
+        } else if n > 0.0 {
+            "Infinity"
+        } else {
+            "-Infinity"
+        };
+        format!("{{\"$__thaw_non_finite$\":\"{word}\"}}")
     }
 
     /// `to_json` for a typed-call result: an `undefined` OWN property of an object keeps the compiled side's
@@ -3964,6 +3966,7 @@ impl Native {
     /// Array items and the top level are unchanged (`undefined` stays `null` there).
     pub(crate) fn to_json_keeping_undefined(&self) -> String {
         match self {
+            Native::Number(n) if !n.is_finite() => Native::non_finite_sentinel(*n),
             Native::Array(a) => format!(
                 "[{}]",
                 a.iter()

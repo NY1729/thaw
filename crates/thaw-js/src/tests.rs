@@ -4115,6 +4115,27 @@ fn typed_call_result_marks_non_finite_numbers() {
 }
 
 #[test]
+fn typed_result_nested_non_finite_numbers_use_the_std_sentinel() {
+    register_exit_package(
+        "tjsnf2",
+        "  exports.mk = function () { return { a: NaN, b: Infinity, c: -Infinity, ok: 1, l: [NaN, Infinity], n: { z: -Infinity } }; };",
+    );
+    let s = |name: &str| format!("{{\"$__thaw_non_finite$\":\"{name}\"}}");
+    assert_eq!(
+        typed_call("tjsnf2::mk", "[]").unwrap(),
+        format!(
+            r#"{{"a":{},"b":{},"c":{},"ok":1,"l":[{},{}],"n":{{"z":{}}}}}"#,
+            s("NaN"),
+            s("Infinity"),
+            s("-Infinity"),
+            s("NaN"),
+            s("Infinity"),
+            s("-Infinity"),
+        )
+    );
+}
+
+#[test]
 fn typed_result_keeps_an_undefined_own_property_as_the_marker() {
     register_exit_package(
         "tjskeep",
