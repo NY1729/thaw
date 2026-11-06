@@ -41,6 +41,7 @@ mod intl;
 mod json;
 mod napi_eval;
 mod napi_ops;
+mod napi_props;
 mod net;
 mod node_crypto;
 mod numfmt;
@@ -3658,6 +3659,8 @@ mod fs_tests;
 mod napi_eval_tests;
 #[cfg(test)]
 mod napi_ops_tests;
+#[cfg(test)]
+mod napi_props_tests;
 #[cfg(test)]
 mod net_tests;
 #[cfg(test)]

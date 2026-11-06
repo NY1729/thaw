@@ -20,11 +20,26 @@ regress = "0.11.1"
 num-bigint = "=0.4.8"
 num-traits = "0.2"
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
-sha1 = "0.10"
-sha2 = "0.10"
+sha1 = { version = "0.10", features = ["oid"] }
+sha2 = { version = "0.10", features = ["oid"] }
 md-5 = "0.10"
 scrypt = "0.11"
 aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+des = "0.8"
+ecdsa = "0.16"
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core", "signature", "alloc"] }
+ed448-goldilocks = { version = "=0.14.0-pre.15", default-features = false, features = ["std", "signing"] }
+elliptic-curve = { version = "0.13", features = ["sec1", "pem", "arithmetic", "ecdh"] }
+p256 = { version = "0.13", features = ["ecdsa", "pem", "ecdh"] }
+p384 = { version = "0.13", features = ["ecdsa", "pem", "ecdh"] }
+p521 = { version = "0.13", features = ["ecdsa", "pem", "ecdh"] }
+pkcs1 = { version = "0.7", features = ["pem"] }
+pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
+rsa = { version = "0.9", features = ["sha2", "pem", "getrandom"] }
+sec1 = { version = "0.7", features = ["pem"] }
+signature = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 pbkdf2 = "0.12"
 libc = "0.2"
 flate2 = { version = "1", features = ["zlib-rs"] }

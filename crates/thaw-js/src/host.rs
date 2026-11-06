@@ -1125,17 +1125,17 @@ pub extern "C" fn thaw_tjs_exception_native_token(_handle: u64) -> u64 {
 /// Graph-wire builder for a result value. `plain` copies arrays and objects deeply (symbols become
 /// `undefined`, and functions too unless `live_functions`; `toJSON` is honored) like the QuickJS
 /// result lane; `receiver` is the value that stays a live handle wherever it recurs.
-struct WireOut {
-    owner: usize,
-    plain: bool,
+pub(crate) struct WireOut {
+    pub(crate) owner: usize,
+    pub(crate) plain: bool,
     /// Plain mode only: functions stay live handles (`{"hdl":id}`) instead of becoming `undefined`.
-    live_functions: bool,
+    pub(crate) live_functions: bool,
     /// Not plain mode: the root container is copied, only what it holds stays live.
-    copy_root: bool,
-    receiver: Option<(u64, Value)>,
-    nodes: Vec<String>,
-    seen: Vec<(*const crate::ObjData, usize)>,
-    leases: Vec<u64>,
+    pub(crate) copy_root: bool,
+    pub(crate) receiver: Option<(u64, Value)>,
+    pub(crate) nodes: Vec<String>,
+    pub(crate) seen: Vec<(*const crate::ObjData, usize)>,
+    pub(crate) leases: Vec<u64>,
 }
 
 impl WireOut {
@@ -1146,7 +1146,7 @@ impl WireOut {
         format!("{{\"r\":{}}}", self.nodes.len() - 1)
     }
 
-    fn token(&mut self, it: &mut Interp, v: &Value) -> Result<String, HostError> {
+    pub(crate) fn token(&mut self, it: &mut Interp, v: &Value) -> Result<String, HostError> {
         let mut v = v.clone();
         if let Some((id, r)) = &self.receiver {
             if matches!((&v, r), (Value::Object(a), Value::Object(b)) if Rc::ptr_eq(a, b)) {
@@ -1240,7 +1240,7 @@ impl WireOut {
         })
     }
 
-    fn finish(self, root: String) -> String {
+    pub(crate) fn finish(self, root: String) -> String {
         let leases: Vec<String> = self.leases.iter().map(u64::to_string).collect();
         format!(
             "{{\"root\":{root},\"nodes\":[{}],\"leases\":[{}],\"napiLeases\":[]}}",
@@ -1270,7 +1270,7 @@ fn graph_ok(wire: String) -> ThawResult {
     }
 }
 
-fn graph_result(r: Result<String, String>) -> ThawResult {
+pub(crate) fn graph_result(r: Result<String, String>) -> ThawResult {
     match r {
         Ok(wire) => graph_ok(wire),
         Err(e) => ThawResult {
@@ -1526,7 +1526,7 @@ pub extern "C" fn thaw_tjs_host_enumerate_result(handle: u64, operation: u8) -> 
 }
 
 /// A property key from the compiler's JSON key text (a JSON string or number).
-fn json_key(key_json: *const c_char) -> Result<String, String> {
+pub(crate) fn json_key(key_json: *const c_char) -> Result<String, String> {
     match Native::from_json(&cstr(key_json).ok_or("invalid property key")?) {
         Ok(Native::Str(s)) => Ok(s),
         Ok(Native::Number(n)) => Ok(crate::number_to_string(n)),
