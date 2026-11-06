@@ -382,8 +382,9 @@ fn generate_registry_shims_pass(
         );
         let mut functions = thaw_bridge::parse_dts_named(&package.dts_source, dts_filename.clone())
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts: {e}"))?;
-        // This mutating API returns the exact Buffer handle it receives.
-        if name == "node:crypto" {
+        // This mutating API returns the exact Buffer handle it receives. thaw-js serves it through
+        // the Bytes path instead (the filled buffer is copied back), so keep the Bytes signature there.
+        if name == "node:crypto" && !thaw_js_routed.contains(name) {
             if let Some(function) = functions.iter_mut().find(|f| f.name == "randomFillSync") {
                 function.params[0].1 = thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue);
                 function.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue);
