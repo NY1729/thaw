@@ -11,7 +11,7 @@ use crate::host::thaw_tjs_terminal_work_pending;
 use crate::napi_bridge::*;
 use crate::Interp;
 
-static LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static LOCK: Mutex<()> = Mutex::new(());
 
 thread_local! {
     static CALLS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };

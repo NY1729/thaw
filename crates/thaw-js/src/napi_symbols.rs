@@ -62,7 +62,7 @@ pub(crate) fn is_symbol(value: &Value) -> bool {
 }
 
 /// Name `symbol` (a Symbol object) by `id` in `owner`, replacing any earlier name of it.
-fn bind(owner: u64, id: u64, symbol: &Obj) {
+pub(crate) fn bind(owner: u64, id: u64, symbol: &Obj) {
     let Some(symbol_id) = (match &*symbol.kind.borrow() {
         Kind::Symbol { id, .. } => Some(*id),
         _ => None,
@@ -87,7 +87,7 @@ pub(crate) fn native_id_of_value(owner: u64, value: &Value) -> Option<u64> {
 }
 
 /// The Symbol that native id `id` names in `owner`, while it is alive (pinned or still referenced).
-fn symbol_of(owner: u64, id: u64) -> Option<Value> {
+pub(crate) fn symbol_of(owner: u64, id: u64) -> Option<Value> {
     REGISTRY.with(|r| {
         let r = r.borrow();
         let entry = r.by_native.get(&(owner, id))?;
