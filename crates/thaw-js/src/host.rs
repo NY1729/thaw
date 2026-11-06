@@ -321,8 +321,15 @@ impl Package {
             .split('.')
             .filter(|p| !p.is_empty())
             .collect::<Vec<_>>();
-        for part in &parts {
-            value = it.get(&value, part).map_err(|c| classify(it, c))?;
+        for (i, part) in parts.iter().enumerate() {
+            let next = it.get(&value, part).map_err(|c| classify(it, c))?;
+            // `export = NS` makes `module.exports` the namespace itself, so a leading `NS.` segment
+            // that is not a property there is skipped (`NS.enc.Hex` reads `enc.Hex`)
+            value = if i == 0 && parts.len() > 1 && matches!(next, Value::Undefined) {
+                value
+            } else {
+                next
+            };
         }
         if parts.len() == 1 && matches!(value, Value::Undefined) {
             let default = it
