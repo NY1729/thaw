@@ -5576,3 +5576,102 @@ fn rmw_operator_coercions_and_postfix_results() {
         vec!["3", "false"]
     );
 }
+
+// Guard tests for the call path (perf P7): they pin the behaviour the frame setup must keep.
+
+#[test]
+fn call_guard_closure_capture_and_param_shadowing() {
+    assert_eq!(
+        one("function mk(a){ return function(){ a++; return a; }; } var c = mk(5); c(); console.log(c(), mk(1)())"),
+        "7 2"
+    );
+    assert_eq!(
+        one("function s(a){ var a; return a } function t(a){ function a(){} return typeof a } function d(a, a){ return a } console.log(s(5), t(5), d(1, 2))"),
+        "5 function 2"
+    );
+}
+
+#[test]
+fn call_guard_arguments_length_and_values() {
+    assert_eq!(
+        one("function f(){ return arguments.length + ':' + [].slice.call(arguments).join('-') } console.log(f(), f(1, 2, 3))"),
+        "0: 3:1-2-3"
+    );
+    assert_eq!(
+        one("function g(a){ return arguments.length } console.log(g(), g(1, 2, 3, 4, 5, 6))"),
+        "0 6"
+    );
+}
+
+#[test]
+fn call_guard_default_and_rest_params_with_arguments() {
+    assert_eq!(
+        one("function f(a, b = a + 1, ...r){ return [a, b, r.length, arguments.length].join() } console.log(f(1), f(1, 5, 6, 7))"),
+        "1,2,0,1 1,5,2,4"
+    );
+}
+
+#[test]
+fn call_guard_recursion_depth_range_error_then_recovers() {
+    let src = "function r(n){ return r(n + 1); } try { r(0) } catch (e) { console.log(e instanceof RangeError, e.message) }
+      const g = (n) => g(n + 1); try { g(0) } catch (e) { console.log('arrow', e instanceof RangeError) }
+      class K { m(n){ return this.m(n + 1) } } try { new K().m(0) } catch (e) { console.log('method', e.message) }
+      function fib(n){ return n < 2 ? n : fib(n - 1) + fib(n - 2) } console.log(fib(10));";
+    let out = std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || one(src))
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(
+        out,
+        "true Maximum call stack size exceeded|arrow true|method Maximum call stack size exceeded|55"
+    );
+}
+
+#[test]
+fn call_guard_construct_bound_and_this() {
+    assert_eq!(
+        one("function P(a, b){ this.s = a + b } var Q = P.bind(null, 1); console.log(new P(3, 4).s, Q.call(null, 5) === undefined)"),
+        "7 true"
+    );
+    assert_eq!(
+        one("var o = { v: 3, get d(){ return this.v * 2 }, m(k){ return this.v + k } }; console.log(o.d, o.m(1), o.m.call({ v: 10 }, 1))"),
+        "6 4 11"
+    );
+}
+
+#[test]
+fn call_guard_class_constructor_and_methods() {
+    assert_eq!(
+        one("class A { constructor(x){ this.x = x } get y(){ return this.x + 1 } static mk(...a){ return new A(a.length) } } console.log(A.mk(1, 2, 3).x, new A(4).y)"),
+        "3 5"
+    );
+}
+
+#[test]
+fn call_guard_generator_and_async_params() {
+    assert_eq!(
+        one("function* g(a, ...r){ yield a; yield r.length; } console.log([...g(7, 8, 9)].join())"),
+        "7,2"
+    );
+    let (out, _) = main_run(
+        "async function h(a = 2){ return a * 3 }
+         (async () => {
+           console.log(await h(), await h(5), await h(undefined, 1));
+         })();",
+    );
+    assert_eq!(out.join("|"), "6 15 6");
+}
+
+#[test]
+fn call_guard_deadline_interrupts_recursive_calls() {
+    let src = include_str!("../../thaw-registry/src/registry/builtins/system/vm_context.js").to_string() + "
+      function f(n){ return n < 0 ? 0 : f(n - 1) }
+      try { runInThisContext('while (true) { f(3) }', { timeout: 30 }); } catch (e) { console.log(e.code, e.message); }
+      console.log(runInThisContext('f(5)'));";
+    assert_eq!(
+        one(&src),
+        "ERR_SCRIPT_EXECUTION_TIMEOUT Script execution timed out after 30ms|0"
+    );
+}

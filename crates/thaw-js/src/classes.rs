@@ -92,6 +92,7 @@ impl Interp {
         };
         let hoisted = hoisted_names(&body);
         let param_names = simple_param_names(&params);
+        let param_mask = param_mask(&param_names);
         let def = Rc::new(FuncDef {
             name: name.clone(),
             params,
@@ -106,6 +107,7 @@ impl Interp {
             src: (self.run_id, class.span.lo.0, class.span.hi.0),
             hoisted,
             param_names,
+            param_mask,
             strict: true,
             class: Some(info),
         });
