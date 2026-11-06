@@ -648,7 +648,9 @@ impl Interp {
         let existing = o.position(key);
         // array index / length writes go through the element storage
         if value.is_some() {
-            if let Kind::Array(_) = &*o.kind.borrow() {
+            // the kind borrow ends before `self.set`, which borrows it mutably
+            let is_array = matches!(&*o.kind.borrow(), Kind::Array(_));
+            if is_array {
                 if key.parse::<usize>().is_ok() || key == "length" {
                     drop(self.set(target, key, value.clone().unwrap()));
                     return Ok(());

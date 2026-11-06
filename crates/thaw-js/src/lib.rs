@@ -52,6 +52,7 @@ mod node_crypto;
 mod numfmt;
 mod procstate;
 mod proxy;
+mod reflect;
 pub mod scan;
 mod sysio;
 mod tls;
@@ -827,6 +828,7 @@ impl Interp {
         it.install_bigint();
         it.install_numfmt();
         it.install_proxy();
+        it.install_reflect();
         it.run(builtins::PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js prelude must evaluate"));
         it.run_promise_prelude();

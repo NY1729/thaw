@@ -133,28 +133,6 @@ pub(crate) const EXTRAS: &str = r#"
     }
     return out;
   };
-  var R = {};
-  def(R, 'ownKeys', function (o) { return Object.getOwnPropertyNames(o).concat(Object.getOwnPropertySymbols(o)); });
-  def(R, 'has', function (o, k) { return k in o; });
-  def(R, 'get', function (o, k, r) {
-    // Receiver-aware only for accessors: a getter found on the chain runs with `this` = r.
-    if (arguments.length > 2 && r !== o && (typeof o === 'object' || typeof o === 'function') && o !== null) {
-      for (var p = o; p !== null && p !== undefined; p = Object.getPrototypeOf(p)) {
-        var d = Object.getOwnPropertyDescriptor(p, k);
-        if (d) return 'value' in d ? d.value : (d.get ? d.get.call(r) : undefined);
-      }
-    }
-    return o[k];
-  });
-  def(R, 'set', function (o, k, v) { o[k] = v; return true; });
-  def(R, 'getPrototypeOf', Object.getPrototypeOf);
-  def(R, 'setPrototypeOf', function (o, p) { Object.setPrototypeOf(o, p); return true; });
-  def(R, 'defineProperty', function (o, k, d) { try { Object.defineProperty(o, k, d); return true; } catch (e) { return false; } });
-  def(R, 'deleteProperty', function (o, k) { return delete o[k]; });
-  def(R, 'getOwnPropertyDescriptor', Object.getOwnPropertyDescriptor);
-  def(R, 'apply', function (f, t, a) { return Function.prototype.apply.call(f, t, a); });
-  def(R, 'construct', function (C, a) { return new C(...a); });
-  Reflect = R;
   // WeakMap / WeakSet / WeakRef / FinalizationRegistry. ponytail: entries are held strongly (no GC is
   // observable from a short-lived process); only the key checks and the API surface matter.
   function isObject(v) { return (typeof v === 'object' && v !== null) || typeof v === 'function'; }
