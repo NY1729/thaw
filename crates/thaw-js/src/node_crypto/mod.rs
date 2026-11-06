@@ -12,8 +12,12 @@ use crate::net::{n, s};
 use crate::zlib::{hex_decode, hex_encode};
 use crate::*;
 use asym::{
+    crypto_asymmetric_decrypt_hex, crypto_asymmetric_encrypt_hex,
+    crypto_asymmetric_private_encrypt_hex, crypto_asymmetric_public_decrypt_hex,
     crypto_asymmetric_sign_hex, crypto_asymmetric_sign_pss_hex, crypto_asymmetric_verify,
-    crypto_asymmetric_verify_pss, crypto_import_key_json,
+    crypto_asymmetric_verify_pss, crypto_diffie_hellman_hex, crypto_ecdh_compute_secret_hex,
+    crypto_ecdh_generate_keys_hex, crypto_ecdh_public_from_private_hex,
+    crypto_generate_key_pair_json, crypto_import_key_json,
 };
 use cipher::{sym_block_cipher, sym_ctr_xor, sym_gcm_tag, sym_gcm_xor};
 use digest::{digest_bytes, hmac_bytes};
@@ -168,6 +172,108 @@ pub(crate) fn install(interp: &mut Interp) {
             Err(message) => it.throw_error("Error", &message),
         }
     });
+    // `__thaw_crypto_asymmetric_encrypt_hex(pem, oaepDigest, datahex)` / `_decrypt_hex`: RSA;
+    // an empty digest means PKCS1v15, otherwise OAEP with that hash.
+    let encrypt = interp.native(|it, _, a| {
+        match crypto_asymmetric_encrypt_hex(&s(it, a, 0), &s(it, a, 1), &hex_decode(&s(it, a, 2))) {
+            Ok(value) => Ok(Value::str(&hex_encode(&value))),
+            Err(message) => it.throw_error("Error", &message),
+        }
+    });
+    let decrypt = interp.native(|it, _, a| {
+        match crypto_asymmetric_decrypt_hex(&s(it, a, 0), &s(it, a, 1), &hex_decode(&s(it, a, 2))) {
+            Ok(value) => Ok(Value::str(&hex_encode(&value))),
+            Err(message) => it.throw_error("Error", &message),
+        }
+    });
+    // `__thaw_crypto_asymmetric_private_encrypt_hex(pem, datahex)` / `_public_decrypt_hex`.
+    let private_encrypt = interp.native(|it, _, a| {
+        match crypto_asymmetric_private_encrypt_hex(&s(it, a, 0), &hex_decode(&s(it, a, 1))) {
+            Ok(value) => Ok(Value::str(&hex_encode(&value))),
+            Err(message) => it.throw_error("Error", &message),
+        }
+    });
+    let public_decrypt = interp.native(|it, _, a| {
+        match crypto_asymmetric_public_decrypt_hex(&s(it, a, 0), &hex_decode(&s(it, a, 1))) {
+            Ok(value) => Ok(Value::str(&hex_encode(&value))),
+            Err(message) => it.throw_error("Error", &message),
+        }
+    });
+    // `__thaw_crypto_generate_key_pair_json(type, modulusOrCurve, publicExponent, privType, pubType)`
+    let generate = interp.native(|it, _, a| {
+        let result = crypto_generate_key_pair_json(
+            &s(it, a, 0),
+            &s(it, a, 1),
+            &s(it, a, 2),
+            &s(it, a, 3),
+            &s(it, a, 4),
+        );
+        match result {
+            Ok(json) => Ok(Value::str(&json)),
+            Err(message) => it.throw_error("Error", &message),
+        }
+    });
+    // `__thaw_crypto_diffie_hellman_hex(privatePem, publicPem)`: shared secret as hex.
+    let diffie_hellman =
+        interp.native(
+            |it, _, a| match crypto_diffie_hellman_hex(&s(it, a, 0), &s(it, a, 1)) {
+                Ok(secret) => Ok(Value::str(&hex_encode(&secret))),
+                Err(message) => it.throw_error("Error", &message),
+            },
+        );
+    // ECDH (classic raw-byte API): `_generate_keys_hex(curve)` returns JSON, the others hex.
+    let ecdh_generate =
+        interp.native(
+            |it, _, a| match crypto_ecdh_generate_keys_hex(&s(it, a, 0)) {
+                Ok(json) => Ok(Value::str(&json)),
+                Err(message) => it.throw_error("Error", &message),
+            },
+        );
+    let ecdh_public = interp.native(|it, _, a| {
+        match crypto_ecdh_public_from_private_hex(&s(it, a, 0), &s(it, a, 1)) {
+            Ok(public) => Ok(Value::str(&public)),
+            Err(message) => it.throw_error("Error", &message),
+        }
+    });
+    let ecdh_secret = interp.native(|it, _, a| {
+        match crypto_ecdh_compute_secret_hex(&s(it, a, 0), &s(it, a, 1), &s(it, a, 2)) {
+            Ok(secret) => Ok(Value::str(&secret)),
+            Err(message) => it.throw_error("Error", &message),
+        }
+    });
+    interp
+        .global
+        .declare("__thaw_crypto_asymmetric_encrypt_hex", encrypt, true);
+    interp
+        .global
+        .declare("__thaw_crypto_asymmetric_decrypt_hex", decrypt, true);
+    interp.global.declare(
+        "__thaw_crypto_asymmetric_private_encrypt_hex",
+        private_encrypt,
+        true,
+    );
+    interp.global.declare(
+        "__thaw_crypto_asymmetric_public_decrypt_hex",
+        public_decrypt,
+        true,
+    );
+    interp
+        .global
+        .declare("__thaw_crypto_generate_key_pair_json", generate, true);
+    interp
+        .global
+        .declare("__thaw_crypto_diffie_hellman_hex", diffie_hellman, true);
+    interp
+        .global
+        .declare("__thaw_crypto_ecdh_generate_keys_hex", ecdh_generate, true);
+    interp.global.declare(
+        "__thaw_crypto_ecdh_public_from_private_hex",
+        ecdh_public,
+        true,
+    );
+    interp
+        .global
+        .declare("__thaw_crypto_ecdh_compute_secret_hex", ecdh_secret, true);
     interp
         .global
         .declare("__thaw_crypto_import_key_json", import_key, true);
