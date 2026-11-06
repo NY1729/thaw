@@ -384,11 +384,12 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:perf_hooks",
         "node:zlib",
         "node:net",
+        "node:crypto",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
-    // modules whose cases do not match Node on thaw-js yet stay on QuickJS
-    assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:crypto"), "node:crypto");
+    // modules not yet validated on thaw-js (e.g. node:https) stay on QuickJS
+    assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:https"), "node:https");
 }
 
 #[test]
@@ -533,5 +534,28 @@ fn random_fill_sync_declaration_keeps_bytes_only_when_thaw_js_routes_node_crypto
     assert!(unrouted.contains("JsValue") && !unrouted.contains("Uint8Array"), "{unrouted}");
     let routed = declaration(&std::iter::once("node:crypto".to_string()).collect());
     assert!(routed.contains("Uint8Array") && !routed.contains("JsValue"), "{routed}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn imported_buffer_stays_native_when_thaw_js_routes_node_buffer() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-imported-buffer-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let packages = ["node:buffer".to_string(), "node:crypto".to_string()];
+    let active = packages.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let source = "import { Buffer } from \"node:buffer\";\nimport { randomFillSync } from \"node:crypto\";\nfunction main(): void {\n    const value = Buffer.alloc(8);\n    randomFillSync(value, 2, 3);\n}\n";
+    let shim_text = |routed: &ThawJsPackages| {
+        let (shims, _) = generate_registry_shims_pass(
+            &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
+            &thaw_parser::common::FileName::Custom("imported buffer.ts".into()),
+            false, &dir.join("app"), Some(&dir.join("staging")),
+            &std::collections::HashSet::new(), true, routed,
+        ).unwrap();
+        shims.0
+    };
+    let routed = shim_text(&packages.iter().cloned().collect());
+    assert!(!routed.contains("__thaw_type_node_buffer_Buffer"), "{routed}");
+    let unrouted = shim_text(&ThawJsPackages::new());
+    assert!(unrouted.contains("__thaw_type_node_buffer_Buffer"), "{unrouted}");
     let _ = std::fs::remove_dir_all(dir);
 }

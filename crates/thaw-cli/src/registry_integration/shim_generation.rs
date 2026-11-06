@@ -392,6 +392,11 @@ fn generate_registry_shims_pass(
         }
         let mut classes = thaw_bridge::parse_dts_classes_named(&package.dts_source, &dts_filename)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts classes: {e}"))?;
+        // thaw-js serves node:buffer's `Buffer` as the global native Bytes Buffer: an imported JsValue
+        // handle would be copied, not mutated, when passed to a Bytes parameter such as randomFillSync.
+        if name == "node:buffer" && thaw_js_routed.contains(name) {
+            classes.retain(|class| class.name != "Buffer");
+        }
         let mut values = thaw_bridge::parse_dts_values_named(&package.dts_source, &dts_filename)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts values: {e}"))?;
         if path_builtin.is_some() && !values.iter().any(|value| value.name == "default") {
@@ -2566,6 +2571,9 @@ fn generate_registry_shims_pass(
             external_nested_namespaces.insert(pkg.name.clone(), pkg.nested_namespaces.clone());
         }
         let mut package_exports = std::collections::HashMap::new();
+        if pkg.name == "node:buffer" && thaw_js_routed.contains(&pkg.name) {
+            package_exports.insert("Buffer".to_string(), "Buffer".to_string());
+        }
         for name in &pkg.type_only_exports {
             // ponytail: external type-only imports are erased to JsValue;
             // preserve their structure only when native layout is required.
