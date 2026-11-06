@@ -561,3 +561,48 @@ fn imported_buffer_stays_native_when_thaw_js_routes_node_buffer() {
     assert!(unrouted.contains("__thaw_type_node_buffer_Buffer"), "{unrouted}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `crypto-kit` is shaped like crypto-js: `export = CryptoKit` where the object itself is not one of
+/// its own exports, plus a top-level function and a nested namespace. With thaw-js routing, pruning
+/// keeps only `SHA256` (the one name the program mentions), so the `export = X` default must still
+/// be bound as the whole namespace, not as that lone function.
+#[test]
+fn thaw_js_routing_binds_an_export_assignment_namespace_default_after_pruning() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-thaw-js-crypto-kit-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("crypto-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "declare const CryptoKit: unknown;\n\
+         export = CryptoKit;\n\
+         export declare function SHA256(m: string): string;\n\
+         export declare namespace enc {\n\
+         \x20\x20\x20\x20const Hex: { stringify(d: string): string };\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.SHA256 = function (m) { return 'sha:' + m; };\n\
+         module.exports.enc = { Hex: { stringify: function (d) { return 'deadbeef'; } } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import CryptoKit from 'crypto-kit';\n\
+         function main(): void { console.log(CryptoKit.SHA256('x')); console.log(CryptoKit.enc.Hex.stringify('d')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["crypto-kit"]));
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run(&output), "sha:x\ndeadbeef\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

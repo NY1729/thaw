@@ -2643,7 +2643,7 @@ fn generate_registry_shims_pass(
             .cloned()
         {
             package_exports.insert("default".to_string(), target);
-        } else if package_exports.len() == 1 {
+        } else if package_exports.len() == 1 && pkg.commonjs_export_name.is_none() {
             let target = package_exports.values().next().unwrap().clone();
             package_exports.insert("default".to_string(), target);
         } else if pkg
