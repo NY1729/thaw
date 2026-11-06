@@ -13,19 +13,11 @@ use crate::host::{
     from_value, handle_result, on_handle, store_handle, thaw_tjs_call_graph_result, to_value,
     with_package, HandleResult, HostError, Native, ThawResult,
 };
+use crate::napi_props::ThawCallWithExceptionResult;
 use crate::{Ctl, Interp, Value};
 
 /// The JSON text an `undefined` result takes (the marker the N-API side decodes as `undefined`).
 const UNDEFINED_MARKER: &str = r#"{"$__thaw_napi_undefined$":true}"#;
-
-/// The result of a call that may have thrown: a live value handle, or the thrown value's handle.
-#[repr(C)]
-pub struct ThawCallWithExceptionResult {
-    pub value: u64,
-    pub exception_handle: u64,
-    pub exception_object_like: u8,
-    pub error: *const c_char,
-}
 
 enum Outcome {
     Value(u64),
@@ -189,13 +181,13 @@ pub extern "C" fn thaw_tjs_call_handle_with_this_graph_result(
             value,
             exception_handle: 0,
             exception_object_like: 0,
-            error: ptr::null(),
+            error: ptr::null_mut(),
         },
         Ok(Outcome::Thrown(exception_handle, object_like)) => ThawCallWithExceptionResult {
             value: 0,
             exception_handle,
             exception_object_like: u8::from(object_like),
-            error: ptr::null(),
+            error: ptr::null_mut(),
         },
         Err(error) => ThawCallWithExceptionResult {
             value: 0,

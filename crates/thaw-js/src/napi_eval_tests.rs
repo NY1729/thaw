@@ -6,6 +6,7 @@ use crate::napi_eval::*;
 use crate::napi_ops::{
     thaw_tjs_handle_is_promise_result, thaw_tjs_strict_equal_handle_scalar_result,
 };
+use crate::napi_props::ThawCallWithExceptionResult;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::io::Write;
 
