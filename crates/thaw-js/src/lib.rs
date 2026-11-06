@@ -3936,6 +3936,8 @@ mod net_tests;
 #[cfg(test)]
 mod prop_get_tests;
 #[cfg(test)]
+mod proxy_trap_tests;
+#[cfg(test)]
 mod sysio_stdin_tests;
 #[cfg(test)]
 mod tests;
