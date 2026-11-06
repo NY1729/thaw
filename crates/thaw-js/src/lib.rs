@@ -406,6 +406,8 @@ pub struct Scope {
     with: Option<Obj>,
     /// Some scope on the chain (self included) is a `with` record.
     in_with: bool,
+    /// The `this` bound by a non-arrow call frame, the global scope, or a class scope.
+    this_val: RefCell<Option<Value>>,
 }
 
 impl Scope {
@@ -419,6 +421,7 @@ impl Scope {
             strict: Cell::new(strict),
             with: None,
             in_with,
+            this_val: RefCell::new(None),
         })
     }
     fn new_with(parent: Rc<Scope>, obj: Obj) -> Rc<Scope> {
@@ -429,10 +432,14 @@ impl Scope {
             parent: Some(parent),
             with: Some(obj),
             in_with: true,
+            this_val: RefCell::new(None),
         })
     }
     fn declare(&self, name: &str, value: Value, mutable: bool) {
         self.declare_rc(name.into(), value, mutable);
+    }
+    fn set_this(&self, value: Value) {
+        *self.this_val.borrow_mut() = Some(value);
     }
     fn declare_rc(&self, name: Rc<str>, value: Value, mutable: bool) {
         let bit = name_bit(&name);
@@ -479,13 +486,9 @@ impl Scope {
             parent: Some(parent),
             strict: Cell::new(self.strict.get()),
             with: self.with.clone(),
+            this_val: RefCell::new(self.this_val.borrow().clone()),
         })
     }
-}
-
-thread_local! {
-    /// The name of the per-call `this` binding, allocated once.
-    static THIS_NAME: Rc<str> = "this".into();
 }
 
 /// Process-wide run counter: every realm draws from it, so `(run_id, span)` cache keys never collide.
@@ -1668,7 +1671,7 @@ impl Interp {
                 this.clone()
             };
             if def.uses_this {
-                frame.declare_rc(THIS_NAME.with(Rc::clone), this, false);
+                frame.set_this(this);
             }
             if let Some(name) = def.name.as_ref().filter(|_| def.bind_self) {
                 frame.declare(name, f.clone(), true);
@@ -1815,6 +1818,20 @@ impl Interp {
     }
 
     // ----- scopes -----
+
+    /// The `this` of the nearest scope that binds one. `with` records never supply it.
+    fn this_of(&self, scope: &Rc<Scope>) -> Value {
+        let mut cur: &Scope = scope;
+        loop {
+            if let Some(v) = cur.this_val.borrow().as_ref() {
+                return v.clone();
+            }
+            match cur.parent.as_deref() {
+                Some(p) => cur = p,
+                None => return Value::Undefined,
+            }
+        }
+    }
 
     fn lookup(&self, scope: &Rc<Scope>, name: &str) -> Option<Value> {
         let bit = name_bit(name);
@@ -2632,7 +2649,7 @@ impl Interp {
                 _ => return unsupported("bigint"),
             }),
             a::Expr::Ident(i) => self.eval_ident(i, scope),
-            a::Expr::This(_) => Ok(self.lookup(scope, "this").unwrap_or(Value::Undefined)),
+            a::Expr::This(_) => Ok(self.this_of(scope)),
             a::Expr::Paren(p) => self.eval(&p.expr, scope),
             a::Expr::Seq(s) => {
                 let mut last = Value::Undefined;
@@ -2755,10 +2772,7 @@ impl Interp {
                     return unsupported("import()");
                 };
                 let (f, this) = match &**callee {
-                    a::Expr::SuperProp(_) => (
-                        self.eval(callee, scope)?,
-                        self.lookup(scope, "this").unwrap_or(Value::Undefined),
-                    ),
+                    a::Expr::SuperProp(_) => (self.eval(callee, scope)?, self.this_of(scope)),
                     a::Expr::Member(m) => {
                         let obj = self.eval(&m.obj, scope)?;
                         let key = self.member_key(&m.prop, scope)?;
@@ -2878,7 +2892,7 @@ impl Interp {
                     }
                 };
                 // accessors on the base run with the current `this`
-                let this = self.lookup(scope, "this").unwrap_or(Value::Undefined);
+                let this = self.this_of(scope);
                 match &base {
                     Value::Object(o) => match find_in_chain(o, &key) {
                         Some(Slot::Data(v)) => Ok(v),

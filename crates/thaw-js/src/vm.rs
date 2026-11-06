@@ -61,7 +61,7 @@ fn new_realm(id: u32, host: &Interp) -> Box<Interp> {
         }
     }
     let global = Value::Object(sub.global_object.clone());
-    sub.global.declare("this", global, false);
+    sub.global.set_this(global);
     sub
 }
 /// A context's realm plus what persists between runs of a sandboxed context.

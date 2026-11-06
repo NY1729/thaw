@@ -5291,3 +5291,124 @@ fn tj93_unknown_or_missing_kind_still_revives_as_buffer() {
         "\"true,3\""
     );
 }
+
+// P4 guards: `this` resolution must match the JS spec before and after the per-scope `this` field.
+
+#[test]
+fn this_method_call_and_sloppy_nested_default_to_global() {
+    assert_eq!(
+        one("var o = { v: 7, m() { return this.v; }, n() { return function () { return this === globalThis; }(); } }; console.log(o.m(), o.n());"),
+        "7 true"
+    );
+}
+
+#[test]
+fn this_getter_callback_thisarg_and_super_method() {
+    assert_eq!(
+        one("var o = { _v: 2, get v() { return this._v * 2; } }; console.log(o.v, [1].map(function () { return this; }, o)[0] === o);"),
+        "4 true"
+    );
+    assert_eq!(
+        one("class P { who() { return this.n; } } class Q extends P { n = 'q'; who() { return super.who() + '!'; } } console.log(new Q().who());"),
+        "q!"
+    );
+}
+
+#[test]
+fn arrow_this_is_lexical_through_nested_arrows() {
+    assert_eq!(
+        one("var o = { v: 1, m() { var a = () => () => this.v; return a()(); } }; var p = { v: 2 }; console.log(o.m.call(p), (() => this)() === this);"),
+        "2 true"
+    );
+    assert_eq!(
+        one("var o = { n: 3, m() { var r = []; for (let i = 0; i < this.n; i++) r.push(() => this.n + i); return r.map(f => f()).join(); } }; console.log(o.m());"),
+        "3,4,5"
+    );
+}
+
+#[test]
+fn class_field_initializers_and_static_this() {
+    assert_eq!(
+        one("class C { x = 5; y = this.x + 1; f = () => this.y; static s = this.name; } var c = new C(); console.log(c.x, c.y, c.f(), C.s);"),
+        "5 6 6 C"
+    );
+}
+
+#[test]
+fn class_strict_method_extraction_this_is_undefined() {
+    assert_eq!(
+        one("class D { m() { return this; } } var m = new D().m; console.log(m() === undefined);"),
+        "true"
+    );
+}
+
+#[test]
+fn class_derived_constructor_this_after_super() {
+    assert_eq!(
+        one("class A { constructor() { this.a = 1; } } class B extends A { constructor() { super(); this.b = this.a + 1; } } var b = new B(); console.log(b.a, b.b, b instanceof B);"),
+        "1 2 true"
+    );
+}
+
+#[test]
+fn this_with_statement_does_not_resolve_this_as_a_property() {
+    // `this` is not an identifier reference: a `with` object's `this` property must not shadow it.
+    // `with` needs sloppy code, so the body runs inside `new Function`.
+    assert_eq!(
+        one(
+            r#"console.log(new Function("var o = { m: 1 }; var t = { id: 3, get() { with (o) { return this.id; } } }; return t.get();")());"#
+        ),
+        "3"
+    );
+    assert_eq!(
+        one(
+            r#"console.log(new Function("var w = { this: 99 }; var u = { r() { with (w) { return this === u; } } }; return u.r();")());"#
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn this_bound_call_apply() {
+    assert_eq!(
+        one("function f(a) { return [this.k, a].join(); } var o = { k: 'K' }; console.log(f.call(o, 1), f.apply(o, [2]), f.bind(o, 3)());"),
+        "K,1 K,2 K,3"
+    );
+    assert_eq!(
+        one("function f(a) { return [this.k, a].join(); } var g = f.bind({ k: 'K' }); console.log(g.call({ k: 'X' }, 4));"),
+        "K,4"
+    );
+}
+
+#[test]
+fn this_global_sloppy_vs_strict_and_null_receiver() {
+    assert_eq!(
+        one("function sl() { return this; } function st() { 'use strict'; return this; } console.log(sl() === globalThis, st() === undefined, sl.call(null) === globalThis);"),
+        "true true true"
+    );
+}
+
+#[test]
+fn this_eval_and_new_function_global() {
+    assert_eq!(
+        one("console.log(new Function('return this')() === globalThis);"),
+        "true"
+    );
+}
+
+#[test]
+fn generator_this_in_body_and_yield() {
+    assert_eq!(
+        one("var o = { v: 4, *g() { yield this.v; yield this === o; } }; console.log([...o.g()].join(','));"),
+        "4,true"
+    );
+}
+
+#[test]
+fn async_method_this_survives_await() {
+    let (out, _) = main_run(
+        "var o = { v: 5, async m() { await null; return this.v; } };
+         o.m().then(v => console.log('async', v));",
+    );
+    assert_eq!(out.join("|"), "async 5");
+}
