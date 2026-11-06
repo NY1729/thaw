@@ -214,17 +214,21 @@ pub(crate) fn install(interp: &mut Interp) {
         }
     });
     // `__thaw_crypto_diffie_hellman_hex(privatePem, publicPem)`: shared secret as hex.
-    let diffie_hellman = interp.native(|it, _, a| {
-        match crypto_diffie_hellman_hex(&s(it, a, 0), &s(it, a, 1)) {
-            Ok(secret) => Ok(Value::str(&hex_encode(&secret))),
-            Err(message) => it.throw_error("Error", &message),
-        }
-    });
+    let diffie_hellman =
+        interp.native(
+            |it, _, a| match crypto_diffie_hellman_hex(&s(it, a, 0), &s(it, a, 1)) {
+                Ok(secret) => Ok(Value::str(&hex_encode(&secret))),
+                Err(message) => it.throw_error("Error", &message),
+            },
+        );
     // ECDH (classic raw-byte API): `_generate_keys_hex(curve)` returns JSON, the others hex.
-    let ecdh_generate = interp.native(|it, _, a| match crypto_ecdh_generate_keys_hex(&s(it, a, 0)) {
-        Ok(json) => Ok(Value::str(&json)),
-        Err(message) => it.throw_error("Error", &message),
-    });
+    let ecdh_generate =
+        interp.native(
+            |it, _, a| match crypto_ecdh_generate_keys_hex(&s(it, a, 0)) {
+                Ok(json) => Ok(Value::str(&json)),
+                Err(message) => it.throw_error("Error", &message),
+            },
+        );
     let ecdh_public = interp.native(|it, _, a| {
         match crypto_ecdh_public_from_private_hex(&s(it, a, 0), &s(it, a, 1)) {
             Ok(public) => Ok(Value::str(&public)),
@@ -243,12 +247,16 @@ pub(crate) fn install(interp: &mut Interp) {
     interp
         .global
         .declare("__thaw_crypto_asymmetric_decrypt_hex", decrypt, true);
-    interp
-        .global
-        .declare("__thaw_crypto_asymmetric_private_encrypt_hex", private_encrypt, true);
-    interp
-        .global
-        .declare("__thaw_crypto_asymmetric_public_decrypt_hex", public_decrypt, true);
+    interp.global.declare(
+        "__thaw_crypto_asymmetric_private_encrypt_hex",
+        private_encrypt,
+        true,
+    );
+    interp.global.declare(
+        "__thaw_crypto_asymmetric_public_decrypt_hex",
+        public_decrypt,
+        true,
+    );
     interp
         .global
         .declare("__thaw_crypto_generate_key_pair_json", generate, true);
@@ -258,9 +266,11 @@ pub(crate) fn install(interp: &mut Interp) {
     interp
         .global
         .declare("__thaw_crypto_ecdh_generate_keys_hex", ecdh_generate, true);
-    interp
-        .global
-        .declare("__thaw_crypto_ecdh_public_from_private_hex", ecdh_public, true);
+    interp.global.declare(
+        "__thaw_crypto_ecdh_public_from_private_hex",
+        ecdh_public,
+        true,
+    );
     interp
         .global
         .declare("__thaw_crypto_ecdh_compute_secret_hex", ecdh_secret, true);
