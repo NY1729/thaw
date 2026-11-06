@@ -1157,6 +1157,26 @@ impl WireOut {
                 return Ok(self.lease(id));
             }
         }
+        // A Buffer/Uint8Array result crosses as the branded `{"b":[bytes]}` node, which thaw-std rebuilds
+        // as a Buffer-shaped wrapper (json.rs:4378) instead of a graph-plain {type,data} copy it will not read as bytes.
+        if self.plain {
+            let bytes = match &v {
+                Value::Object(o) => match &*o.kind.borrow() {
+                    Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8) => Some(
+                        t.data.borrow()[t.off..t.off + t.len]
+                            .iter()
+                            .map(u8::to_string)
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(items) = bytes {
+                self.nodes.push(format!("{{\"b\":[{}]}}", items.join(",")));
+                return Ok(format!("{{\"r\":{}}}", self.nodes.len() - 1));
+            }
+        }
         // (A class instance keeps its identity and methods even when it defines `toJSON`.)
         if self.plain && matches!(v, Value::Object(_)) && !v.is_callable() && !is_live_value(it, &v)
         {
@@ -4792,6 +4812,25 @@ mod live_result_lease_tests {
             panic!("script failed")
         };
         v
+    }
+
+    #[test]
+    fn plain_wire_emits_bytes_as_b_node_and_keeps_buffer_shaped_literal_as_object() {
+        let mut it = Interp::new();
+        let buf = object(&mut it, "Buffer.from([1, 2])");
+        let (token, out) = token_of(&mut it, &buf);
+        assert_eq!(token, "{\"r\":0}");
+        assert_eq!(out.nodes, vec!["{\"b\":[1,2]}".to_string()]);
+
+        let u8 = object(&mut it, "new Uint8Array([1, 2])");
+        let (token, out) = token_of(&mut it, &u8);
+        assert_eq!(token, "{\"r\":0}");
+        assert_eq!(out.nodes, vec!["{\"b\":[1,2]}".to_string()]);
+
+        // a plain user object with the Buffer shape is still an object node, not bytes
+        let literal = object(&mut it, "({type: 'Buffer', data: [1, 2]})");
+        let (_, out) = token_of(&mut it, &literal);
+        assert!(out.nodes[0].starts_with("{\"o\":"), "{:?}", out.nodes);
     }
 
     #[test]
