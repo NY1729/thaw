@@ -1,0 +1,231 @@
+name: jsengine-bench
+
+# Non-gating measurement of thaw-js against QuickJS (plan-tj103 section 3). Nothing here fails the
+# build or belongs in a required-checks list: the go/no-go is the human read of the step summary.
+# Runs on demand, or on a PR that carries the `thaw-js-measure` label.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jsengine-bench-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  microbench:
+    name: jsengine microbenchmarks (thaw-js vs QuickJS)
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure')
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QuickJS build dependencies
+        run: |
+          sudo timeout 300 apt-get -o Acquire::Retries=3 update
+          sudo timeout 600 apt-get -o Acquire::Retries=3 install -y cmake
+      - name: Build QuickJS reference (qjs)
+        # vendor/rquickjs-sys/quickjs is quickjs-ng; the CLI is the qjs_exe target with OUTPUT_NAME qjs.
+        # Fall back to the distro package if the vendored build fails.
+        run: |
+          if cmake -S vendor/rquickjs-sys/quickjs -B "$RUNNER_TEMP/qjsb" -DCMAKE_BUILD_TYPE=Release &&
+             cmake --build "$RUNNER_TEMP/qjsb" -j4 --target qjs_exe; then
+            qjs=$(find "$RUNNER_TEMP/qjsb" -type f -name qjs -perm -u+x | head -n 1)
+          else
+            echo "vendored QuickJS build failed; falling back to apt quickjs" >&2
+            sudo timeout 600 apt-get -o Acquire::Retries=3 install -y quickjs
+            qjs=/usr/bin/qjs
+          fi
+          [ -x "$qjs" ] || { echo "no qjs binary found" >&2; exit 1; }
+          echo "QJS=$qjs" >> "$GITHUB_ENV"
+          echo "qjs reference: $qjs" >> "$GITHUB_STEP_SUMMARY"
+      - name: Cache cargo registry and release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+          key: jsengine-bench-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-arena/**') }}
+          restore-keys: |
+            jsengine-bench-${{ runner.os }}-
+      - name: Run benchmarks (thaw-js and qjs)
+        # run.sh builds thaw-js-node in release itself. Best of 5 runs per script.
+        run: |
+          benchmarks/jsengine/run.sh -n 5 -o "$RUNNER_TEMP/jsengine.tsv" 2> "$RUNNER_TEMP/jsengine.err" || true
+          cat "$RUNNER_TEMP/jsengine.err" || true
+          test -s "$RUNNER_TEMP/jsengine.tsv" || { echo "run.sh produced no TSV" >&2; exit 1; }
+      - name: Print benchmark summary
+        # Informational only: prints geomean, max ratio, rows over 4x, and the strict fib(20) <= 1.2x line.
+        run: |
+          tsv="$RUNNER_TEMP/jsengine.tsv"
+          {
+            echo "## jsengine microbenchmarks (thaw-js / QuickJS, best of 5)"
+            echo
+            echo "| benchmark | thaw-js ms | quickjs ms | ratio |"
+            echo "|---|---|---|---|"
+            awk -F'\t' 'NR > 1 && $1 != "geomean" { printf "| %s | %s | %s | %s |\n", $1, $2, $3, $4 }' "$tsv"
+            echo
+            awk -F'\t' '
+              NR == 1 { next }
+              $1 == "geomean" { geo = $4; next }
+              { n++; if ($4 + 0 > max + 0 || n == 1) { max = $4; maxname = $1 }
+                if ($4 + 0 > 4.0) { over = over sprintf("- %s: %s\n", $1, $4) } }
+              END {
+                printf "- geomean: %s (reference 2.5, not gated)\n", geo
+                printf "- max ratio: %s (%s) (reference 4.0, not gated)\n", max, maxname
+                printf "- rows over 4.0x:\n%s", (over == "" ? "  none\n" : over)
+              }' "$tsv"
+            awk -F'\t' '$1 == "fib" { printf "- strict fib(20) <= 1.2x: fib ratio %s (printed, not gated)\n", $4 }' "$tsv"
+            if grep -q "checksum mismatch" "$RUNNER_TEMP/jsengine.err"; then
+              echo
+              echo "**Checksum mismatches:**"
+              grep "checksum mismatch" "$RUNNER_TEMP/jsengine.err" | sed 's/^/- /'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsengine-bench-tsv
+          path: ${{ runner.temp }}/jsengine.tsv
+          if-no-files-found: ignore
+
+  corpus-ratio:
+    name: corpus per-program ratio (thaw-js vs quickjs, limit 1.5x)
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure')
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      THAW_JS_RUNTIME: "1"
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev time; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - uses: actions/setup-node@v4
+        with:
+          # measure.sh runs the reference with node --experimental-strip-types (Node 22.6+).
+          node-version: "22"
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-${{ runner.arch }}-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Cache cargo registry and release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: jsengine-corpus-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            jsengine-corpus-${{ runner.os }}-
+      - name: Build thaw CLI and thaw-js-scan (release)
+        run: |
+          cargo build --release -p thaw-cli
+          cargo build --release -p thaw-js --bin thaw-js-scan
+      - name: Check for corpus programs
+        id: corpus
+        run: |
+          # The 24-program corpus lives outside the repo today (measure.sh defaults to thaw-tmp paths).
+          # Point PK_DIR/JS_DIR at a committed copy; without it, report and skip rather than fail.
+          pk="$GITHUB_WORKSPACE/tools/quickjs-removal/corpus/pk"
+          if [ -d "$pk" ]; then
+            echo "present=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=0" >> "$GITHUB_OUTPUT"
+            echo "corpus programs not found at $pk; corpus ratio not measured" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Run corpus measurement
+        if: steps.corpus.outputs.present == '1'
+        env:
+          THAW: ${{ github.workspace }}/target/release/thaw
+          THAW_SCAN: ${{ github.workspace }}/target/release/thaw-js-scan
+          SCRATCH: ${{ runner.temp }}/qjsq1-measure
+          PK_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/pk
+          JS_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/bundles
+        run: |
+          tools/quickjs-removal/measure.sh --skip-node-compat -o "$RUNNER_TEMP/corpus.tsv"
+      - name: Print corpus ratios
+        if: steps.corpus.outputs.present == '1'
+        run: |
+          tsv="$RUNNER_TEMP/corpus.tsv"
+          # Long-format rows: section subject engine metric value. Ratio = run_ms(thaw-js) / run_ms(quickjs).
+          awk -F'\t' '
+            NR == 1 { next }
+            $1 == "program" && $4 == "run_ms" { ms[$2, $3] = $5; progs[$2] = 1 }
+            END {
+              for (p in progs) {
+                q = ms[p, "quickjs"]; t = ms[p, "thaw-js"]
+                if (q + 0 > 0 && t != "") {
+                  r = t / q
+                  printf "%s\t%s\t%s\t%.3f\t%s\n", p, q, t, r, (r > 1.5 ? "OVER" : "ok")
+                } else {
+                  printf "%s\t%s\t%s\t-\tno run\n", p, q, t
+                }
+              }
+            }' "$tsv" | sort > "$RUNNER_TEMP/corpus-ratios.tsv"
+          {
+            echo "## corpus per-program ratio (run_ms thaw-js / quickjs, limit 1.5x)"
+            echo
+            echo "| program | quickjs ms | thaw-js ms | ratio | status |"
+            echo "|---|---|---|---|---|"
+            awk -F'\t' '{ printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5 }' "$RUNNER_TEMP/corpus-ratios.tsv"
+            echo
+            awk -F'\t' '$4 != "-" { n++; s += log($4); if ($4 + 0 > max + 0 || n == 1) { max = $4; maxname = $1 } if ($4 + 0 > 1.5) over++ }
+              END { if (n) printf "- geomean: %.3f over %d programs\n- max ratio: %s (%s)\n- programs over 1.5x: %d\n", exp(s / n), n, max, maxname, over + 0 }' "$RUNNER_TEMP/corpus-ratios.tsv"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jsengine-corpus-tsv
+          path: ${{ runner.temp }}/corpus.tsv
+          if-no-files-found: ignore
