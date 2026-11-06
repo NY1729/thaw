@@ -215,6 +215,8 @@ mod tests {
         assert_eq!(hash_of(&b), hash_of(long.as_str()));
         assert_eq!(hash_of(&JsStr::from("x")), hash_of("x"));
 
+        // the cached ASCII flag is the only interior state; Hash/Eq use the contents
+        #[allow(clippy::mutable_key_type)]
         let mut map: HashMap<JsStr, u32> = HashMap::new();
         map.insert(a.clone(), 7);
         assert_eq!(map.get(long.as_str()), Some(&7));
