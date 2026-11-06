@@ -12,7 +12,7 @@ use std::ptr;
 use std::rc::Rc;
 
 use crate::scan::{parse_bundle, BundleParts};
-use crate::{Ctl, Interp, Kind, Obj, Value, R};
+use crate::{array_index, Ctl, Interp, Kind, Obj, Slot, Value, R};
 
 /// Plain data crossing the compiled-code / thaw-js boundary.
 #[derive(Debug, Clone, PartialEq)]
@@ -685,17 +685,37 @@ pub extern "C" fn thaw_tjs_class_call(
     })())
 }
 
-fn graph_field<'a>(fields: &'a [(String, Native)], key: &str) -> Option<&'a Native> {
+pub(crate) fn graph_field<'a>(fields: &'a [(String, Native)], key: &str) -> Option<&'a Native> {
     fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
+/// Decoder state of one graph wire. `napi` selects the N-API wire rules (`su`, property attributes,
+/// `p`, cycles); `release_in_node` is false when the wire lists its leases, which `decode_napi_wire`
+/// releases once, after decoding.
+pub(crate) struct GraphCx {
+    pub(crate) memo: Vec<Option<Value>>,
+    pub(crate) busy: Vec<bool>,
+    pub(crate) napi: bool,
+    pub(crate) release_in_node: bool,
+}
+
+impl GraphCx {
+    pub(crate) fn new(nodes: usize, napi: bool, release_in_node: bool) -> Self {
+        GraphCx {
+            memo: vec![None; nodes],
+            busy: vec![false; nodes],
+            napi,
+            release_in_node,
+        }
+    }
+}
+
 /// One graph-wire token (`{"v":..}`, `{"r":i}`, `{"nf":..}`, `{"u":1}`) as a value.
-fn graph_token(
+pub(crate) fn graph_token(
     it: &mut Interp,
     token: &Native,
     nodes: &[Native],
-    memo: &mut Vec<Option<Value>>,
-    busy: &mut Vec<bool>,
+    cx: &mut GraphCx,
 ) -> Result<Value, String> {
     let Native::Object(fields) = token else {
         return Err("malformed graph token".into());
@@ -713,7 +733,19 @@ fn graph_token(
             "-Infinity" => f64::NEG_INFINITY,
             _ => return Err("malformed graph number".into()),
         })),
-        ("r", Native::Number(i)) => graph_node(it, *i as usize, nodes, memo, busy),
+        ("su", Native::Array(units)) if cx.napi => {
+            let units = units
+                .iter()
+                .map(|u| match u {
+                    Native::Number(n) if (0.0..=65535.0).contains(n) && n.fract() == 0.0 => {
+                        Ok(*n as u16)
+                    }
+                    _ => Err("malformed graph string".to_string()),
+                })
+                .collect::<Result<Vec<u16>, String>>()?;
+            Ok(Value::str(&crate::builtins::units_str(&units)))
+        }
+        ("r", Native::Number(i)) => graph_node(it, *i as usize, nodes, cx),
         _ => Err(format!("unsupported graph token `{key}`")),
     }
 }
@@ -738,7 +770,7 @@ fn new_date(it: &mut Interp, ms: &Native) -> Result<Value, String> {
 }
 
 /// The Symbol of a `{"nsy","hdl"}` token: the handle it names (the wire's reference is released, as for `hdl`).
-fn native_symbol_pair(fields: &[(String, Native)]) -> Result<Value, String> {
+fn native_symbol_pair(fields: &[(String, Native)], release: bool) -> Result<Value, String> {
     let Some(Native::Number(id)) = graph_field(fields, "hdl") else {
         return Err("invalid paired native Symbol graph token".into());
     };
@@ -750,7 +782,9 @@ fn native_symbol_pair(fields: &[(String, Native)]) -> Result<Value, String> {
     let Some(value) = value.filter(crate::napi_symbols::is_symbol) else {
         return Err("invalid paired native Symbol graph token".into());
     };
-    thaw_tjs_release_handle(*id as i64);
+    if release {
+        thaw_tjs_release_handle(*id as i64);
+    }
     Ok(value)
 }
 
@@ -759,17 +793,16 @@ fn graph_key(
     it: &mut Interp,
     key: &Native,
     nodes: &[Native],
-    memo: &mut Vec<Option<Value>>,
-    busy: &mut Vec<bool>,
+    cx: &mut GraphCx,
 ) -> Result<String, String> {
     if let Native::Str(name) = key {
         return Ok(name.clone());
     }
     let value = match key {
         Native::Object(fields) if graph_field(fields, "nsy").is_some() => {
-            native_symbol_pair(fields)?
+            native_symbol_pair(fields, cx.release_in_node)?
         }
-        _ => graph_token(it, key, nodes, memo, busy)?,
+        _ => graph_token(it, key, nodes, cx)?,
     };
     if let Some(name) = crate::napi_symbols::symbol_key(&value) {
         return Ok(name);
@@ -780,35 +813,105 @@ fn graph_key(
     Err("malformed graph property key".into())
 }
 
+/// The attribute flags of an `o` or `p` entry (`1` writable, `2` enumerable, `4` configurable): its third
+/// element under the N-API wire, all attributes when absent. The plain wire ignores the element.
+fn graph_attributes(rest: &[Native], napi: bool) -> Result<u8, String> {
+    match rest.first() {
+        Some(Native::Number(n)) if napi && n.fract() == 0.0 && (0.0..=7.0).contains(n) => {
+            Ok(*n as u8)
+        }
+        None => Ok(7),
+        Some(_) if !napi => Ok(7),
+        _ => Err("Invalid native JSON graph property attributes".into()),
+    }
+}
+
+/// Set `name` on the object `target` with `flags`. All attributes is a plain put; the others go through
+/// `define_slot`, which keeps only writable and enumerable (configurability is per object in thaw-js).
+fn graph_put(it: &mut Interp, target: &Obj, name: &str, v: Value, flags: u8) -> Result<(), String> {
+    if flags == 7 {
+        crate::put(target, name, v);
+        return Ok(());
+    }
+    crate::napi_props::define_slot(
+        it,
+        &Value::Object(target.clone()),
+        name,
+        Slot::Data(v),
+        flags & 2 != 0,
+        flags & 1 != 0,
+    )
+    .map_err(|c| classify(it, c).to_string())
+}
+
+/// An `a` node: its elements, then (N-API wire) the own properties `p` as `[key, token, flags]`. Under the
+/// N-API wire the array is memoized before its elements decode, so a cycle back to it resolves.
+fn graph_array(
+    it: &mut Interp,
+    index: usize,
+    items: &[Native],
+    props: &[Native],
+    nodes: &[Native],
+    cx: &mut GraphCx,
+) -> Result<Value, String> {
+    let arr = it.array(Vec::new());
+    let Value::Object(obj) = arr.clone() else {
+        return Err("malformed graph array".into());
+    };
+    if cx.napi {
+        cx.memo[index] = Some(arr.clone());
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(match item {
+            Native::Object(f) if graph_field(f, "h").is_some() => Value::Hole,
+            _ => graph_token(it, item, nodes, cx)?,
+        });
+    }
+    *obj.kind.borrow_mut() = Kind::Array(out);
+    for pair in props {
+        let Native::Array(kv) = pair else {
+            return Err("malformed graph property".into());
+        };
+        let [key, token, rest @ ..] = kv.as_slice() else {
+            return Err("malformed graph property".into());
+        };
+        let name = graph_key(it, key, nodes, cx)?;
+        // Elements came with `a`; `length` is the element count. Neither has its own attributes here.
+        if name == "length" || array_index(&name).is_some() {
+            continue;
+        }
+        let flags = graph_attributes(rest, true)?;
+        let v = graph_token(it, token, nodes, cx)?;
+        graph_put(it, &obj, &name, v, flags)?;
+    }
+    Ok(arr)
+}
+
 /// Node `index` of a graph wire; shared nodes decode to one value (identity kept).
 fn graph_node(
     it: &mut Interp,
     index: usize,
     nodes: &[Native],
-    memo: &mut Vec<Option<Value>>,
-    busy: &mut Vec<bool>,
+    cx: &mut GraphCx,
 ) -> Result<Value, String> {
-    if let Some(Some(v)) = memo.get(index) {
+    if let Some(Some(v)) = cx.memo.get(index) {
         return Ok(v.clone());
     }
     let node = nodes.get(index).ok_or("graph node out of range")?;
     // ponytail: cyclic graphs are rejected (containers are built whole); fill-after-create if a package needs them.
-    if std::mem::replace(&mut busy[index], true) {
+    if std::mem::replace(&mut cx.busy[index], true) {
         return Err("cyclic graph is not supported".into());
     }
     let Native::Object(fields) = node else {
         return Err("malformed graph node".into());
     };
     let value = match fields.as_slice() {
-        [(k, Native::Array(items))] if k == "a" => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                out.push(match item {
-                    Native::Object(f) if graph_field(f, "h").is_some() => Value::Hole,
-                    _ => graph_token(it, item, nodes, memo, busy)?,
-                });
-            }
-            it.array(out)
+        [(k, Native::Array(items))] if k == "a" => graph_array(it, index, items, &[], nodes, cx)?,
+        [(k, Native::Array(items)), (pk, Native::Array(props))]
+            if cx.napi && k == "a" && pk == "p" =>
+        {
+            graph_array(it, index, items, props, nodes, cx)?
         }
         [(k, Native::Array(pairs))] if k == "o" => {
             // The one-key markers compiled code puts in a `Json` (a live thaw-js value, a compiled callback,
@@ -829,26 +932,32 @@ fn graph_node(
                         _ => None,
                     };
                     if let Some(found) = found {
-                        memo[index] = Some(found.clone());
+                        cx.memo[index] = Some(found.clone());
                         return Ok(found);
                     }
                 }
             }
             let o = it.plain();
+            if cx.napi {
+                cx.memo[index] = Some(Value::Object(o.clone()));
+            }
             for pair in pairs {
                 let Native::Array(kv) = pair else {
                     return Err("malformed graph property".into());
                 };
-                let [key, token, ..] = kv.as_slice() else {
+                let [key, token, rest @ ..] = kv.as_slice() else {
                     return Err("malformed graph property".into());
                 };
-                let name = graph_key(it, key, nodes, memo, busy)?;
-                let v = graph_token(it, token, nodes, memo, busy)?;
-                crate::put(&o, &name, v);
+                let flags = graph_attributes(rest, cx.napi)?;
+                let name = graph_key(it, key, nodes, cx)?;
+                let v = graph_token(it, token, nodes, cx)?;
+                graph_put(it, &o, &name, v, flags)?;
             }
             Value::Object(o)
         }
-        [_, _] if graph_field(fields, "nsy").is_some() => native_symbol_pair(fields)?,
+        [_, _] if graph_field(fields, "nsy").is_some() => {
+            native_symbol_pair(fields, cx.release_in_node)?
+        }
         [(k, Native::Number(id))] if k == "hdl" => {
             let v = HANDLES
                 .with(|h| {
@@ -858,7 +967,9 @@ fn graph_node(
                 })
                 .unwrap_or(Value::Undefined);
             // The encoder retained this reference for the wire; the decoded value holds its own.
-            thaw_tjs_release_handle(*id as i64);
+            if cx.release_in_node {
+                thaw_tjs_release_handle(*id as i64);
+            }
             v
         }
         [(k, ms)] if k == "d" => new_date(it, ms)?,
@@ -875,7 +986,7 @@ fn graph_node(
                 .map_err(|c| classify(it, c).to_string())?
         }
         [(k, token)] if k == "m" || k == "s" => {
-            let items = graph_token(it, token, nodes, memo, busy)?;
+            let items = graph_token(it, token, nodes, cx)?;
             construct_global(it, if k == "m" { "Map" } else { "Set" }, &[items])?
         }
         // `{"b":[0..255,...]}`: a branded Buffer/ArrayBuffer wrapper from compiled code, rebuilt as a `Buffer` exactly
@@ -900,7 +1011,7 @@ fn graph_node(
         }
         _ => return Err("unsupported graph node (Buffer)".into()),
     };
-    memo[index] = Some(value.clone());
+    cx.memo[index] = Some(value.clone());
     Ok(value)
 }
 
@@ -1014,7 +1125,18 @@ pub(crate) fn decode_wire(wire: &str) -> Result<(usize, Value), String> {
         Some(Native::Array(nodes)) => nodes.as_slice(),
         _ => &[],
     };
-    let owner = nodes
+    let owner = wire_owner(nodes);
+    with_package(owner, |p| {
+        let mut cx = GraphCx::new(nodes.len(), false, true);
+        graph_token(&mut p.interp, root, nodes, &mut cx).map_err(HostError::Bundle)
+    })
+    .map(|v| (owner, v))
+    .map_err(|e| e.to_string())
+}
+
+/// The package that owns a handle a graph wire's nodes reference, else the package last entered.
+pub(crate) fn wire_owner(nodes: &[Native]) -> usize {
+    nodes
         .iter()
         .find_map(|n| match n {
             Native::Object(f) => match graph_field(f, "hdl") {
@@ -1025,14 +1147,7 @@ pub(crate) fn decode_wire(wire: &str) -> Result<(usize, Value), String> {
             },
             _ => None,
         })
-        .unwrap_or_else(default_realm);
-    with_package(owner, |p| {
-        let mut memo = vec![None; nodes.len()];
-        let mut busy = vec![false; nodes.len()];
-        graph_token(&mut p.interp, root, nodes, &mut memo, &mut busy).map_err(HostError::Bundle)
-    })
-    .map(|v| (owner, v))
-    .map_err(|e| e.to_string())
+        .unwrap_or_else(default_realm)
 }
 
 pub(crate) fn handle_result(result: Result<i64, String>) -> HandleResult {
