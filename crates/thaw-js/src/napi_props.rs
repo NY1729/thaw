@@ -13,6 +13,7 @@ use crate::host::{
     classify, cstr, decode_wire, graph_result, handle_result, json_key, on_handle, store_handle,
     HandleResult, HostError, Native, ThawResult, WireOut,
 };
+use crate::napi_graph::{decode_napi_wire, encode_napi_graph};
 use crate::napi_ops::{handle_value, prototype_of};
 use crate::{
     array_index, builtins, find_own, order_keys, push_prop, Ctl, Interp, Kind, Obj, Prop, Slot,
@@ -366,7 +367,7 @@ fn write_with_exception(
 ) -> ThawCallWithExceptionResult {
     let value = match cstr(graph)
         .ok_or_else(|| "invalid graph".to_string())
-        .and_then(|wire| decode_wire(&wire))
+        .and_then(|wire| decode_napi_wire(&wire))
     {
         Ok((_, value)) => value,
         Err(e) => return failure(e),
@@ -527,18 +528,8 @@ fn invoke_callback(
     let mut items = vec![this.clone()];
     items.extend(args.iter().cloned());
     let packet = it.array(items);
-    let mut out = WireOut {
-        owner,
-        plain: false,
-        live_functions: false,
-        copy_root: true,
-        receiver: None,
-        nodes: Vec::new(),
-        seen: Vec::new(),
-        leases: Vec::new(),
-    };
-    let wire = match out.token(it, &packet) {
-        Ok(root) => out.finish(root),
+    let wire = match encode_napi_graph(it, owner, &packet, 0, true, None) {
+        Ok(wire) => wire,
         Err(e) => {
             let text = e.to_string();
             return it.throw_error("TypeError", text.trim_start_matches("TypeError: "));

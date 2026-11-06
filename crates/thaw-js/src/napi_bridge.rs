@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use crate::host::classify;
 use crate::napi_graph;
-use crate::{arg, Interp, Value};
+use crate::{arg, Interp, Value, R};
 
 pub type BridgeCallback = unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char;
 pub type BridgeExports = unsafe extern "C" fn() -> *const c_char;
@@ -169,6 +169,47 @@ fn cstring(text: &str) -> CString {
     CString::new(text).unwrap_or_default()
 }
 
+/// Throws `text` as a TypeError (a host failure of a graph operation).
+fn throw_text<T>(it: &mut Interp, text: &str) -> R<T> {
+    it.throw_error("TypeError", text.trim_start_matches("TypeError: "))
+}
+
+/// `__thaw_json_graph_encode_js(root, handleMask, live, plainResult, forceHandle)`: the JSON text of the graph
+/// wire. `plainResult` is the copy lane (`WireOut` plain mode): its handle mask and forced root are not
+/// applied (ponytail: the napi encoder has no plain mode of its own).
+fn graph_encode(it: &mut Interp, args: &[Value]) -> R<Value> {
+    let owner = crate::host::default_realm();
+    let root = arg(args, 0);
+    let mask = match arg(args, 1) {
+        Value::Number(n) if n >= 0.0 => n as u32,
+        _ => 0,
+    };
+    let live = arg(args, 2).truthy();
+    let force = match arg(args, 4) {
+        Value::Undefined => None,
+        value => Some(value),
+    };
+    let encoded = if arg(args, 3).truthy() {
+        let mut out = crate::host::WireOut {
+            owner,
+            plain: true,
+            live_functions: false,
+            copy_root: false,
+            receiver: None,
+            nodes: Vec::new(),
+            seen: Vec::new(),
+            leases: Vec::new(),
+        };
+        out.token(it, &root).map(|token| out.finish(token))
+    } else {
+        napi_graph::encode_napi_graph(it, owner, &root, mask, live, force)
+    };
+    match encoded {
+        Ok(text) => Ok(Value::str(&text)),
+        Err(e) => throw_text(it, &e.to_string()),
+    }
+}
+
 /// Installs the `__thaw_napi_bridge_*` and `__thaw_napi_graph_*` globals of a realm as immutable
 /// bindings: non-enumerable, and an assignment from user code throws.
 pub(crate) fn install(it: &mut Interp) {
@@ -237,6 +278,26 @@ pub(crate) fn install(it: &mut Interp) {
         napi_graph::tag(&object, kind, &native);
         Ok(Value::Undefined)
     });
+    let encode = it.native(|it, _, args| graph_encode(it, args));
+    let decode = it.native(|it, _, args| {
+        let Some(text) = crate::napi_eval::json_stringify(it, &arg(args, 0))
+            .ok()
+            .flatten()
+        else {
+            return throw_text(it, "Invalid native JSON graph");
+        };
+        match napi_graph::decode_napi_in(it, &text, false) {
+            Ok(value) => Ok(value),
+            Err(e) => throw_text(it, &e),
+        }
+    });
+    let decode_owned =
+        it.native(
+            |it, _, args| match napi_graph::decode_napi_in(it, &text(args, 0), true) {
+                Ok(value) => Ok(value),
+                Err(e) => throw_text(it, &e),
+            },
+        );
     for (name, value) in [
         ("__thaw_napi_bridge_available", available),
         ("__thaw_napi_bridge_exports", exports),
@@ -246,6 +307,9 @@ pub(crate) fn install(it: &mut Interp) {
         ("__thaw_napi_graph_release", release),
         ("__thaw_json_graph_owner_of_handle", owner),
         ("__thaw_napi_graph_tag", tag),
+        ("__thaw_json_graph_encode_js", encode),
+        ("__thaw_json_graph_decode", decode),
+        ("__thaw_json_graph_decode_owned", decode_owned),
     ] {
         // Declared in the global scope, as the other host globals are: not an own property of
         // `globalThis`'s object, so `Object.keys` skips it, and an immutable binding.
