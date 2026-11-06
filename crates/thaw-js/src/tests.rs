@@ -194,6 +194,46 @@ fn regexp_and_string_methods() {
 }
 
 #[test]
+fn string_replace_uses_utf16_units_with_astral() {
+    // match indices and $` $' offsets are UTF-16 units; an astral char before/inside/after shifts nothing
+    assert_eq!(
+        one("console.log('x😀y1'.replace(/\\d/, '[$&]'))"),
+        "x😀y[1]"
+    );
+    assert_eq!(one("console.log('a😀b'.replace(/😀/, '<$&>'))"), "a<😀>b");
+    assert_eq!(
+        one("console.log('1😀'.replace(/1/, \"[$'$&]\"))"),
+        "[😀1]😀"
+    );
+    assert_eq!(
+        one("console.log('😀1😀2'.replace(/\\d/g, '<$&>'))"),
+        "😀<1>😀<2>"
+    );
+    assert_eq!(one("console.log('😀a'.replace(/a/, '[$`]'))"), "😀[😀]");
+    assert_eq!(
+        one("console.log('😀a1'.replace(/(?<d>\\d)/, '[$<d>]'))"),
+        "😀a[1]"
+    );
+    // function replacer receives the UTF-16 offset (and the subject)
+    assert_eq!(one("console.log('😀a'.replace(/a/, (m, o) => o))"), "😀2");
+    assert_eq!(
+        one("console.log('😀ab'.replace(/b/g, (m, o, s) => '' + o + s.length))"),
+        "😀a34"
+    );
+    // string pattern (replace and replaceAll) and global regexp with $`
+    assert_eq!(
+        one("console.log('😀a😀a'.replaceAll('a', \"[$`]\"))"),
+        "😀[😀]😀[😀a😀]"
+    );
+    assert_eq!(
+        one("console.log('😀a😀a'.replace(/a/g, \"[$`]\"))"),
+        "😀[😀]😀[😀a😀]"
+    );
+    // empty matches at the end of an astral subject
+    assert_eq!(one("console.log('a😀'.replace(/$/g, '-'))"), "a😀-");
+}
+
+#[test]
 fn regexp_string_index_ascii_and_non_ascii_subjects() {
     // indexOf over non-ASCII text (BMP and astral), with and without a start index
     assert_eq!(one("var a='héllo wörld é'; var b='a😀b'; console.log(a.indexOf('ö'), a.indexOf('é', 2), b.indexOf('b'), b.indexOf('b', 2), a.indexOf('zz'), a.lastIndexOf('l'))"), "7 12 3 3 -1 9");
