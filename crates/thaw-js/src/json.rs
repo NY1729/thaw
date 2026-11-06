@@ -28,7 +28,7 @@ impl Interp {
                     let mut keys: Vec<Rc<str>> = Vec::new();
                     for item in it.array_items(&Value::Object(o.clone())) {
                         if matches!(item, Value::Str(_) | Value::Number(_)) {
-                            let k = it.to_str(&item);
+                            let k = it.to_str(&item).into_rc();
                             if !keys.contains(&k) {
                                 keys.push(k);
                             }

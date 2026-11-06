@@ -28,6 +28,8 @@ mod buffer;
 mod builtins;
 mod child;
 mod classes;
+mod jsstr;
+pub use jsstr::JsStr;
 mod collections;
 mod date;
 mod dns;
@@ -116,7 +118,7 @@ pub enum Value {
     Null,
     Bool(bool),
     Number(f64),
-    Str(Rc<str>),
+    Str(JsStr),
     BigInt(Rc<num_bigint::BigInt>),
     Object(Obj),
     /// An empty array slot (`[1,,3]`, `new Array(3)`, `delete a[i]`). Only ever stored inside
@@ -1083,7 +1085,7 @@ impl Interp {
 
     // ----- conversions -----
 
-    pub fn to_str(&mut self, v: &Value) -> Rc<str> {
+    pub fn to_str(&mut self, v: &Value) -> JsStr {
         match v {
             Value::Undefined | Value::Hole => "undefined".into(),
             Value::Null => "null".into(),
@@ -1122,7 +1124,7 @@ impl Interp {
         }
     }
 
-    pub(crate) fn join(&mut self, this: &Value, sep: &str) -> Rc<str> {
+    pub(crate) fn join(&mut self, this: &Value, sep: &str) -> JsStr {
         let items = match this {
             Value::Object(o) => match &*o.kind.borrow() {
                 Kind::Array(v) => v.clone(),
@@ -1317,7 +1319,7 @@ impl Interp {
                         Ok(Some(keys)) => keys
                             .into_iter()
                             .filter_map(|k| match k {
-                                Value::Str(s) => Some(s),
+                                Value::Str(s) => Some(s.into_rc()),
                                 _ => None,
                             })
                             .collect(),
@@ -1453,7 +1455,9 @@ impl Interp {
                         if (key == "name" || key == "length") && find_own(o, key).is_none() =>
                     {
                         Fast::Hit(if key == "name" {
-                            def.name.clone().map_or(Value::str(""), Value::Str)
+                            def.name
+                                .clone()
+                                .map_or(Value::str(""), |n| Value::Str(n.into()))
                         } else {
                             Value::Number(
                                 def.params
@@ -2633,7 +2637,7 @@ impl Interp {
                 for key in keys {
                     self.check_deadline()?;
                     let iter = Scope::new(Some(scope.clone()));
-                    self.bind_for_head(&f.left, Value::Str(key), &iter)?;
+                    self.bind_for_head(&f.left, Value::Str(key.into()), &iter)?;
                     if step(self.exec(&f.body, &iter))? {
                         break;
                     }

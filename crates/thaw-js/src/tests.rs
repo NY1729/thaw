@@ -255,9 +255,9 @@ fn regexp_string_index_ascii_and_non_ascii_subjects() {
 
 #[test]
 fn ascii_flag_cache_tracks_the_subject() {
-    let ascii: std::rc::Rc<str> = "a".repeat(300).into();
+    let ascii: crate::JsStr = "a".repeat(300).into();
     assert!(crate::builtins::ascii_of(&ascii));
-    let mixed: std::rc::Rc<str> = format!("{}é", "a".repeat(299)).into();
+    let mixed: crate::JsStr = format!("{}é", "a".repeat(299)).into();
     assert!(!crate::builtins::ascii_of(&mixed));
     // the cache now holds `mixed`; the ASCII subject must not inherit its answer
     assert!(crate::builtins::ascii_of(&ascii));

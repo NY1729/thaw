@@ -9,7 +9,7 @@ enum HKey {
     Null,
     Bool(bool),
     Number(u64),
-    Str(Rc<str>),
+    Str(JsStr),
     Big(Rc<num_bigint::BigInt>),
     Object(usize),
 }
@@ -274,7 +274,7 @@ impl Interp {
                 return format!("@@sym:{id}").into();
             }
         }
-        self.to_str(v)
+        self.to_str(v).into_rc()
     }
 
     pub(crate) fn install_collections(&mut self) {
@@ -287,7 +287,7 @@ impl Interp {
                 it.next_symbol += 1;
                 let desc = match arg(args, 0) {
                     Value::Undefined => None,
-                    v => Some(it.to_str(&v)),
+                    v => Some(it.to_str(&v).into_rc()),
                 };
                 let o = new_obj(
                     Some(sp.clone()),
@@ -296,7 +296,11 @@ impl Interp {
                         desc: desc.clone(),
                     },
                 );
-                put_hidden(&o, "description", desc.map_or(Value::Undefined, Value::Str));
+                put_hidden(
+                    &o,
+                    "description",
+                    desc.map_or(Value::Undefined, |d| Value::Str(d.into())),
+                );
                 let id = it.next_symbol;
                 it.rt.symbols.insert(id, o.clone());
                 Ok(Value::Object(o))
@@ -319,7 +323,7 @@ impl Interp {
                         Slot::Data(Value::Object(o)) if Rc::ptr_eq(o, &sym) => Some(p.key.clone()),
                         _ => None,
                     });
-                Ok(found.map_or(Value::Undefined, Value::Str))
+                Ok(found.map_or(Value::Undefined, |k| Value::Str(k.into())))
             });
             let sp = sym_proto.clone();
             self.set_native(s, "for", move |it, _, args| {
@@ -332,7 +336,7 @@ impl Interp {
                     Some(sp.clone()),
                     Kind::Symbol {
                         id: it.next_symbol,
-                        desc: Some(key.clone()),
+                        desc: Some(key.into_rc()),
                     },
                 );
                 put_hidden(&o, "description", Value::Str(key.clone()));
@@ -367,7 +371,7 @@ impl Interp {
                         desc: Some(desc.clone()),
                     },
                 );
-                put_hidden(&o, "description", Value::Str(desc));
+                put_hidden(&o, "description", Value::Str(desc.into()));
                 self.rt.symbols.insert(self.next_symbol, o.clone());
                 put_hidden(s, name, Value::Object(o));
             }
