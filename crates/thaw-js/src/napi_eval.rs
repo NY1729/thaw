@@ -9,10 +9,11 @@ use std::ptr;
 use base64::Engine;
 
 use crate::host::{
-    awaited, check_handle_callable, classify, cstr, decode_wire, default_realm, error_text,
-    from_value, handle_result, on_handle, store_handle, thaw_tjs_call_graph_result, to_value,
-    with_package, HandleResult, HostError, Native, ThawResult,
+    awaited, check_handle_callable, classify, cstr, default_realm, error_text, from_value,
+    handle_result, on_handle, store_handle, thaw_tjs_call_graph_result, to_value, with_package,
+    HandleResult, HostError, Native, ThawResult,
 };
+use crate::napi_graph::{decode_napi_wire, encode_napi_graph};
 use crate::napi_props::ThawCallWithExceptionResult;
 use crate::{Ctl, Interp, Value};
 
@@ -44,7 +45,7 @@ pub(crate) fn unpack_script(source: String) -> String {
 }
 
 /// `JSON.stringify(value)`: `None` when the value has no JSON form (`undefined`, functions).
-fn json_stringify(it: &mut Interp, value: &Value) -> Result<Option<String>, HostError> {
+pub(crate) fn json_stringify(it: &mut Interp, value: &Value) -> Result<Option<String>, HostError> {
     let global = Value::Object(it.global_object.clone());
     let json = it.get(&global, "JSON").map_err(|c| classify(it, c))?;
     let stringify = it.get(&json, "stringify").map_err(|c| classify(it, c))?;
@@ -169,6 +170,51 @@ pub unsafe extern "C" fn thaw_tjs_call_reference_graph(
     thaw_arena::owned_string(reference_error(&message)) as *const c_char
 }
 
+/// Napi-mode counterpart of [`thaw_tjs_call_reference_graph`]: the arguments decode with the N-API rules
+/// and the result is a live N-API wire.
+///
+/// # Safety
+///
+/// Same contract as [`thaw_tjs_call_reference`].
+#[no_mangle]
+pub unsafe extern "C" fn thaw_tjs_napi_call_reference_graph(
+    context: *mut c_void,
+    args_json: *const c_char,
+) -> *const c_char {
+    let name = reference_name(context);
+    let text = cstr(args_json)
+        .ok_or_else(|| "invalid arguments".to_string())
+        .and_then(|args_json| napi_call_graph(&name, &args_json));
+    match text {
+        Ok(text) => thaw_arena::owned_string(text) as *const c_char,
+        Err(message) => thaw_arena::owned_string(reference_error(&message)) as *const c_char,
+    }
+}
+
+/// Calls the global `name` with the N-API wire `args_json` (`[this, ...arguments]`, the first element
+/// the receiver); the result is a live N-API wire.
+fn napi_call_graph(name: &str, args_json: &str) -> Result<String, String> {
+    let (owner, args) = decode_napi_wire(args_json)?;
+    with_package(owner, |p| {
+        let it = &mut p.interp;
+        let target = it
+            .lookup(&it.global.clone(), name)
+            .unwrap_or(Value::Undefined);
+        if !target.is_callable() {
+            return Err(HostError::Bundle(format!(
+                "no such function `{name}` (was it loaded via loadScript?)"
+            )));
+        }
+        let args = it.array_items(&args);
+        let result = it
+            .call(&target, &Value::Undefined, &args)
+            .map_err(|c| classify(it, c))?;
+        let result = awaited(it, result)?;
+        encode_napi_graph(it, owner, &result, 0, true, None)
+    })
+    .map_err(error_text)
+}
+
 /// Calls `handle` with `args_json` a graph wire of `[thisArg, ...arguments]`. The result stays a live
 /// handle (a returned Promise is not assimilated); a throw is returned as the thrown value's handle.
 #[no_mangle]
@@ -200,7 +246,7 @@ pub extern "C" fn thaw_tjs_call_handle_with_this_graph_result(
 
 fn call_with_this(handle: u64, args_json: *const c_char) -> Result<Outcome, String> {
     let args_json = cstr(args_json).ok_or("invalid arguments")?;
-    let (_, args) = decode_wire(&args_json)?;
+    let (_, args) = decode_napi_wire(&args_json)?;
     on_handle(handle, |p, owner, f| {
         let it = &mut p.interp;
         check_handle_callable(it, &f)?;

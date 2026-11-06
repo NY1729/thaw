@@ -18,8 +18,17 @@ use crate::{Interp, Obj, Value};
 /// references are released once decoding ends, on success and on error; a wire without the list (the
 /// plain wire's shape) releases its `hdl` references in-node, as `decode_wire` does. `napiLeases`
 /// references are released through the bridge in both cases.
-#[allow(dead_code)] // wired up by the JS-visible globals in PR 6a-5
 pub(crate) fn decode_napi_wire(wire: &str) -> Result<(usize, Value), String> {
+    decode_napi(wire, None, true)
+}
+
+/// `__thaw_json_graph_decode_owned` (`owned`) and `__thaw_json_graph_decode` (not owned) in `it`, the realm
+/// running the call. Only the owned form releases the wire's references.
+pub(crate) fn decode_napi_in(it: &mut Interp, wire: &str, owned: bool) -> Result<Value, String> {
+    decode_napi(wire, Some(it), owned).map(|(_, value)| value)
+}
+
+fn decode_napi(wire: &str, it: Option<&mut Interp>, owned: bool) -> Result<(usize, Value), String> {
     let Native::Object(top) = Native::from_json(wire).map_err(|e| e.to_string())? else {
         return Err("malformed graph wire".into());
     };
@@ -55,17 +64,24 @@ pub(crate) fn decode_napi_wire(wire: &str) -> Result<(usize, Value), String> {
         Some(_) => return Err("malformed graph napi leases".into()),
     };
     let owner = wire_owner(nodes);
-    let decoded = with_package(owner, |p| {
-        let mut cx = GraphCx::new(nodes.len(), true, leases.is_none(), owner);
-        graph_token(&mut p.interp, root, nodes, &mut cx).map_err(HostError::Bundle)
-    });
-    for id in leases.iter().flatten() {
-        thaw_tjs_release_handle(*id);
+    let run = |it: &mut Interp| {
+        let mut cx = GraphCx::new(nodes.len(), true, owned && leases.is_none(), owner);
+        graph_token(it, root, nodes, &mut cx)
+    };
+    let decoded = match it {
+        Some(it) => run(it),
+        None => with_package(owner, |p| run(&mut p.interp).map_err(HostError::Bundle))
+            .map_err(|e| e.to_string()),
+    };
+    if owned {
+        for id in leases.iter().flatten() {
+            thaw_tjs_release_handle(*id);
+        }
+        for reference in napi_leases {
+            crate::napi_bridge::release_reference(reference);
+        }
     }
-    for reference in napi_leases {
-        crate::napi_bridge::release_reference(reference);
-    }
-    decoded.map(|v| (owner, v)).map_err(|e| e.to_string())
+    decoded.map(|v| (owner, v))
 }
 
 // ---- Native tags, native pair proofs and lone tokens (PR 6a-2) ----
@@ -297,7 +313,7 @@ pub(crate) fn lone_symbol(it: &mut Interp, owner: usize, native: &str) -> Result
 }
 
 // ---- The N-API encoder (PR 6a-3): the data part of runtime.js `thawGraphEncode`, live mode. ----
-// ponytail: no plain-result mode (6a-5 keeps it on WireOut).
+// ponytail: no plain-result mode here; `__thaw_json_graph_encode_js` (plainResult) uses the plain WireOut.
 // ponytail: a Proxy, Promise, Generator, wrapper or global object is a handle, not a copy (QuickJS copies its own keys).
 
 use crate::builtins::{json_quote, str_units};
@@ -415,7 +431,6 @@ fn symbol_of_key(it: &Interp, key: &str) -> Result<Value, HostError> {
 }
 
 impl NapiWireOut {
-    #[allow(dead_code)] // wired up in PR 6a-5
     fn new(owner: usize, live: bool, force: Option<Value>) -> Self {
         NapiWireOut {
             owner,
@@ -796,7 +811,6 @@ impl NapiWireOut {
 /// Encode `root` as an N-API graph wire (live: the result keeps its objects behind handles). `handle_mask`
 /// carries root array items by handle; `force` is the value that must stay a handle (the call's receiver).
 /// On error every lease taken so far is released.
-#[allow(dead_code)] // wired up in PR 6a-5
 pub(crate) fn encode_napi_graph(
     it: &mut Interp,
     owner: usize,

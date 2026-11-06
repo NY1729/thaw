@@ -7,9 +7,10 @@ use std::ffi::c_char;
 use std::rc::Rc;
 
 use crate::host::{
-    classify, cstr, decode_wire, default_realm, error_text, handle_result, on_handle, store_handle,
+    classify, cstr, default_realm, error_text, handle_result, on_handle, store_handle,
     with_package, HandleResult, HostError, HANDLES,
 };
+use crate::napi_graph::decode_napi_wire;
 use crate::{builtins, strict_equals, Interp, Kind, Obj, Value, R};
 
 /// The value behind a handle id, for a read that is not an operation on it.
@@ -191,7 +192,7 @@ pub extern "C" fn thaw_tjs_instanceof_handles_result(
 pub extern "C" fn thaw_tjs_instanceof_graph_result(arguments_graph: *const c_char) -> HandleResult {
     handle_result((|| {
         let wire = cstr(arguments_graph).ok_or("invalid graph")?;
-        let (owner, arguments) = decode_wire(&wire)?;
+        let (owner, arguments) = decode_napi_wire(&wire)?;
         with_package(owner, |p| {
             let it = &mut p.interp;
             let object = it.get(&arguments, "0").map_err(|c| classify(it, c))?;
@@ -200,6 +201,25 @@ pub extern "C" fn thaw_tjs_instanceof_graph_result(arguments_graph: *const c_cha
             Ok(i64::from(answer))
         })
         .map_err(error_text)
+    })())
+}
+
+/// Napi-mode counterpart of `thaw_tjs_construct_handle_graph_args_result`: the arguments decode with the
+/// N-API rules; the instance is kept as a new handle.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_napi_construct_handle_graph_args_result(
+    handle: u64,
+    args_json: *const c_char,
+) -> HandleResult {
+    handle_result((|| {
+        let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let (_, args) = decode_napi_wire(&args_json)?;
+        on_handle(handle, |p, owner, ctor| {
+            let it = &mut p.interp;
+            let args = it.array_items(&args);
+            let value = it.construct(&ctor, &args).map_err(|c| classify(it, c))?;
+            Ok(store_handle(owner, value))
+        })
     })())
 }
 
@@ -237,7 +257,7 @@ pub extern "C" fn thaw_tjs_set_prototype_graph_result(
 ) -> HandleResult {
     handle_result((|| {
         let wire = cstr(prototype_graph).ok_or("invalid graph")?;
-        let (_, arguments) = decode_wire(&wire)?;
+        let (_, arguments) = decode_napi_wire(&wire)?;
         on_handle(handle, |p, _, object| {
             let it = &mut p.interp;
             let prototype = it.get(&arguments, "0").map_err(|c| classify(it, c))?;
