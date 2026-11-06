@@ -317,3 +317,294 @@ fn invoker_factory_needs_a_bridge_and_an_unsent_packet_releases_its_leases() {
     .expect("factory without a bridge");
     assert!(err.contains("Cannot retain native Function"), "{err}");
 }
+
+// ---- Object and array proxies (PR 6b-2): a table-driven fake bridge. ----
+
+thread_local! {
+    /// The fake's replies: `(operation, needle, reply)`. The first entry whose operation matches and whose
+    /// packet text contains `needle` answers (an empty needle matches any packet); an unlisted call gets `{}`.
+    static TABLE: RefCell<Vec<(String, String, String)>> = const { RefCell::new(Vec::new()) };
+    /// Every handle operation the table fake got on this thread: `(operation, target, packet)`.
+    static OPS: RefCell<Vec<(String, String, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+unsafe extern "C" fn table_handle(
+    operation: *const c_char,
+    target: *const c_char,
+    _: *const c_char,
+    graph: *const c_char,
+) -> *const c_char {
+    let (operation, target, graph) = (read(operation), read(target), read(graph));
+    OPS.with(|o| {
+        o.borrow_mut()
+            .push((operation.clone(), target, graph.clone()))
+    });
+    let reply = TABLE.with(|t| {
+        t.borrow()
+            .iter()
+            .find(|(op, needle, _)| *op == operation && graph.contains(needle.as_str()))
+            .map(|(_, _, reply)| reply.clone())
+    });
+    owned(&reply.unwrap_or_else(|| "{}".to_string()))
+}
+
+/// The owner of every handle is live Symbol owner 7 (the proxy's owner must be a positive decimal).
+unsafe extern "C" fn owner_seven(_: u64) -> *mut c_char {
+    CString::new("7").unwrap().into_raw()
+}
+
+/// The wire text of a graph with `root` and `nodes` (the JSON text of each).
+fn wire(root: &str, nodes: &str) -> String {
+    format!(r#"{{"root":{root},"nodes":[{nodes}],"leases":[],"napiLeases":[]}}"#)
+}
+
+/// A `graph` reply carrying the wire.
+fn graph(root: &str, nodes: &str) -> String {
+    serde_json::json!({ "kind": "graph", "value": wire(root, nodes) }).to_string()
+}
+
+fn reply(operation: &str, needle: &str, text: &str) {
+    TABLE.with(|t| {
+        t.borrow_mut()
+            .push((operation.into(), needle.into(), text.into()))
+    });
+}
+
+/// Holds the bridge test lock with the table fake registered, owner 7; dropping it clears the registration.
+fn table_bridge() -> FakeBridge {
+    let lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    clear_for_tests();
+    TABLE.with(|t| t.borrow_mut().clear());
+    OPS.with(|o| o.borrow_mut().clear());
+    reply("retain_graph_handle", "", r#"{"value":"73"}"#);
+    thaw_tjs_register_napi_bridge(
+        fake_exports,
+        fake_call,
+        table_handle,
+        fake_poll,
+        fake_pending,
+        owner_seven,
+        fake_release,
+    );
+    FakeBridge { _lock: lock }
+}
+
+/// How many times the table fake got `operation`.
+fn op_count(operation: &str) -> usize {
+    OPS.with(|o| {
+        o.borrow()
+            .iter()
+            .filter(|(op, _, _)| op == operation)
+            .count()
+    })
+}
+
+/// The operation names the table fake got, in order.
+fn op_names() -> Vec<String> {
+    OPS.with(|o| o.borrow().iter().map(|(op, _, _)| op.clone()).collect())
+}
+
+#[test]
+fn proxy_for_handle_is_an_immutable_global_and_each_handle_has_one_proxy() {
+    let _bridge = table_bridge();
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval(
+            "[typeof __thaw_json_graph_proxy_for_handle, (() => { let r; \
+             try { __thaw_json_graph_proxy_for_handle = 1; r = 'written'; } catch (e) { r = e.name; } \
+             return r; })()].join('|')"
+        ),
+        "function|TypeError"
+    );
+    assert_eq!(
+        eval("__thaw_json_graph_proxy_for_handle('9') === __thaw_json_graph_proxy_for_handle('9')"),
+        "true"
+    );
+    assert_eq!(op_count("renew_handle"), 1);
+    assert_eq!(
+        eval("(() => { try { __thaw_json_graph_proxy_for_handle('0'); return 'made'; } catch (e) { return e.name; } })()"),
+        "TypeError"
+    );
+}
+
+#[test]
+fn proxy_of_a_native_handle_encodes_as_its_handle() {
+    let _bridge = table_bridge();
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    thaw_tjs_napi_enable_proxy_layer();
+    let encoded = eval(
+        "__thaw_json_graph_encode_js(__thaw_json_graph_proxy_for_handle('9'), 0, true, false, undefined)",
+    );
+    assert!(encoded.contains(r#""nh":"9""#), "{encoded}");
+}
+
+#[test]
+fn object_proxy_reads_has_keys_and_descriptors_through_the_bridge() {
+    let _bridge = table_bridge();
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    reply("has_graph", r#"{"v":"x"}"#, r#"{"value":true}"#);
+    reply("get_graph", r#"{"v":"x"}"#, &graph(r#"{"v":42}"#, ""));
+    reply(
+        "own_keys_graph",
+        "",
+        &graph(r#"{"r":0}"#, r#"{"a":[{"v":"x"},{"v":"y"}]}"#),
+    );
+    reply(
+        "descriptor_graph",
+        r#"{"v":"x"}"#,
+        r#"{"value":{"accessor":false,"configurable":true,"enumerable":true,"writable":true}}"#,
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval(
+            "(() => { const p = __thaw_json_graph_proxy_for_handle('9'); return [p.x, 'x' in p, \
+             Reflect.ownKeys(p).join(','), Object.getOwnPropertyDescriptor(p, 'x').enumerable, \
+             Object.getPrototypeOf(p) === Object.prototype, Array.isArray(p)].join('|'); })()"
+        ),
+        "42|true|x,y|true|true|false"
+    );
+}
+
+#[test]
+fn array_proxy_syncs_length_and_hides_holes() {
+    let _bridge = table_bridge();
+    reply("array_kind_graph", "", r#"{"value":true}"#);
+    reply(
+        "descriptor_graph",
+        r#"{"v":"length"}"#,
+        r#"{"value":{"accessor":false,"configurable":false,"enumerable":false,"writable":true}}"#,
+    );
+    reply("get_graph", r#"{"v":"length"}"#, &graph(r#"{"v":3}"#, ""));
+    reply("has_graph", r#"{"v":"1"}"#, r#"{"value":false}"#);
+    reply("descriptor_graph", r#"{"v":"1"}"#, r#"{"value":null}"#);
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval(
+            "(() => { const p = __thaw_json_graph_proxy_for_handle('9'); return [Array.isArray(p), \
+             p.length, 1 in p, Object.getOwnPropertyDescriptor(p, 'length').writable].join('|'); })()"
+        ),
+        "true|3|false|true"
+    );
+}
+
+#[test]
+fn accessor_descriptor_keeps_one_getter_identity_across_reads() {
+    let _bridge = table_bridge();
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    reply(
+        "descriptor_graph",
+        r#"{"v":"computed"}"#,
+        r#"{"value":{"accessor":true,"configurable":true,"enumerable":true,"getter":true,"setter":false}}"#,
+    );
+    reply("has_graph", r#"{"v":"computed"}"#, r#"{"value":true}"#);
+    reply("get_graph", r#"{"v":"computed"}"#, &graph(r#"{"v":5}"#, ""));
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval(
+            "(() => { const p = __thaw_json_graph_proxy_for_handle('9'); \
+             return [Reflect.getOwnPropertyDescriptor(p, 'computed').get === \
+             Reflect.getOwnPropertyDescriptor(p, 'computed').get, \
+             typeof Reflect.getOwnPropertyDescriptor(p, 'computed').get, p.computed].join('|'); })()"
+        ),
+        "true|function|5"
+    );
+}
+
+#[test]
+fn defining_an_accessor_sends_define_accessor_graph_with_the_key() {
+    let _bridge = table_bridge();
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    reply("descriptor_graph", r#"{"v":"acc"}"#, r#"{"value":null}"#);
+    reply("define_accessor_graph", "", r#"{"value":true}"#);
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval(
+            "(() => { const p = __thaw_json_graph_proxy_for_handle('9'); \
+             Object.defineProperty(p, 'acc', { get() { return 1; }, configurable: true }); return 'done'; })()"
+        ),
+        "done"
+    );
+    OPS.with(|o| {
+        let o = o.borrow();
+        let defined: Vec<&(String, String, String)> = o
+            .iter()
+            .filter(|(op, _, _)| op == "define_accessor_graph")
+            .collect();
+        assert_eq!(defined.len(), 1);
+        assert_eq!(defined[0].1, "9");
+        assert!(defined[0].2.contains(r#"{"v":"acc"}"#), "{}", defined[0].2);
+    });
+}
+
+#[test]
+fn delete_and_failed_set_are_the_native_answers() {
+    let _bridge = table_bridge();
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    reply("delete_graph", r#"{"v":"x"}"#, r#"{"value":true}"#);
+    reply("set_graph", r#"{"v":"x"}"#, r#"{"value":false}"#);
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval(
+            "(() => { const p = __thaw_json_graph_proxy_for_handle('9'); \
+             return [Reflect.deleteProperty(p, 'x'), Reflect.set(p, 'x', 1)].join('|'); })()"
+        ),
+        "true|false"
+    );
+    assert_eq!(op_count("delete_graph"), 1);
+    assert_eq!(op_count("set_graph"), 1);
+}
+
+#[test]
+fn prevent_extensions_materializes_native_keys_before_the_native_call() {
+    let _bridge = table_bridge();
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    reply(
+        "own_keys_graph",
+        "",
+        &graph(r#"{"r":0}"#, r#"{"a":[{"v":"x"}]}"#),
+    );
+    reply(
+        "descriptor_graph",
+        r#"{"v":"x"}"#,
+        r#"{"value":{"accessor":false,"configurable":true,"enumerable":true,"writable":true}}"#,
+    );
+    reply("has_graph", r#"{"v":"x"}"#, r#"{"value":true}"#);
+    reply("get_graph", r#"{"v":"x"}"#, &graph(r#"{"v":42}"#, ""));
+    reply("prevent_extensions_graph", "", r#"{"value":true}"#);
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval(
+            "(() => { const p = __thaw_json_graph_proxy_for_handle('9'); \
+             return [Object.preventExtensions(p) === p, Object.isExtensible(p), p.x].join('|'); })()"
+        ),
+        "true|false|42"
+    );
+    let names = op_names();
+    let keys_at = names.iter().position(|op| op == "own_keys_graph").unwrap();
+    let prevent_at = names
+        .iter()
+        .position(|op| op == "prevent_extensions_graph")
+        .unwrap();
+    assert!(keys_at < prevent_at, "{names:?}");
+}
+
+#[test]
+fn native_exception_reply_is_thrown_as_its_decoded_value() {
+    let _bridge = table_bridge();
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    reply("has_graph", r#"{"v":"bad"}"#, r#"{"value":true}"#);
+    let thrown =
+        serde_json::json!({ "__thaw_exception_graph__": wire(r#"{"v":"boom"}"#, "") }).to_string();
+    reply("get_graph", r#"{"v":"bad"}"#, &thrown);
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval(
+            "(() => { const p = __thaw_json_graph_proxy_for_handle('9'); let caught; \
+             try { p.bad; } catch (e) { caught = e; } return caught === 'boom'; })()"
+        ),
+        "true"
+    );
+}

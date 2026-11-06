@@ -56,6 +56,7 @@ pub(crate) fn enable(it: &mut Interp) {
     for (name, field) in [
         ("__thaw_json_graph_napi_exports", "exports"),
         ("__thaw_json_graph_napi_each_export", "eachExport"),
+        ("__thaw_json_graph_proxy_for_handle", "proxyForHandle"),
     ] {
         let value = it
             .get(&api, field)
