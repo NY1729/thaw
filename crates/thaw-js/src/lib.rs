@@ -391,10 +391,52 @@ impl Vars {
 
 /// One bit of a scope's name filter: a lookup skips every scope whose filter lacks the name's bit.
 fn name_bit(name: &str) -> u64 {
-    use std::hash::Hasher;
-    let mut h = FxHasher::default();
-    h.write(name.as_bytes());
-    1u64 << (h.finish() >> 58)
+    // ponytail: from (len, first byte, last byte) only; names that collide just cost a walk.
+    let b = name.as_bytes();
+    let first = b.first().copied().unwrap_or(0) as u32;
+    let last = b.last().copied().unwrap_or(0) as u32;
+    let h = (b.len() as u32).wrapping_mul(31) ^ (first << 5) ^ last;
+    1u64 << (h & 63)
+}
+
+/// One scope walk to the binding of `name` that runs `f` on it in place. `None` (with nothing
+/// changed) when `f` declines, when a `with` record comes first, or when no scope binds the name;
+/// callers then take the generic path.
+fn with_binding_mut<T>(
+    scope: &Rc<Scope>,
+    name: &str,
+    f: impl FnOnce(&mut Binding) -> Option<T>,
+) -> Option<T> {
+    let bit = name_bit(name);
+    let mut cur: &Scope = scope;
+    loop {
+        if cur.mask.get() & bit != 0 {
+            if cur.with.is_some() {
+                return None;
+            }
+            if let Some(b) = cur.vars.borrow_mut().get_mut(name) {
+                return f(b);
+            }
+        }
+        cur = cur.parent.as_deref()?;
+    }
+}
+
+/// Arithmetic and relational operators on two numbers, without `binary()`'s coercion chain.
+fn number_binop(op: a::BinaryOp, x: f64, y: f64) -> Option<Value> {
+    use a::BinaryOp as B;
+    Some(match op {
+        B::Add => Value::Number(x + y),
+        B::Sub => Value::Number(x - y),
+        B::Mul => Value::Number(x * y),
+        B::Div => Value::Number(x / y),
+        B::Mod => Value::Number(x % y),
+        B::Lt => Value::Bool(x < y),
+        B::LtEq => Value::Bool(x <= y),
+        B::Gt => Value::Bool(x > y),
+        B::GtEq => Value::Bool(x >= y),
+        _ => return None,
+    })
 }
 
 pub struct Scope {
@@ -1330,7 +1372,8 @@ impl Interp {
     // ----- property access -----
 
     pub fn get(&mut self, target: &Value, key: &str) -> R<Value> {
-        let start = match target {
+        let holder: Obj;
+        let start: &ObjData = match target {
             Value::Undefined | Value::Hole | Value::Null => {
                 let what = if matches!(target, Value::Null) {
                     "null"
@@ -1346,96 +1389,109 @@ impl Interp {
                 if key == "length" {
                     return Ok(Value::Number(builtins::str_len(s) as f64));
                 }
-                if let Ok(i) = key.parse::<usize>() {
+                if let Some(i) = index_key(key) {
                     return Ok(builtins::str_unit_at(s, i).map_or(Value::Undefined, |u| {
                         Value::Str(builtins::units_str(&[u]).into())
                     }));
                 }
-                self.string_proto.clone()
+                holder = self.string_proto.clone();
+                &holder
             }
-            Value::Number(_) => self.number_proto.clone(),
-            Value::Bool(_) => self.bool_proto.clone(),
-            Value::BigInt(_) => self
-                .rt
-                .bigint_proto
-                .clone()
-                .unwrap_or_else(|| self.object_proto.clone()),
+            Value::Number(_) => {
+                holder = self.number_proto.clone();
+                &holder
+            }
+            Value::Bool(_) => {
+                holder = self.bool_proto.clone();
+                &holder
+            }
+            Value::BigInt(_) => {
+                holder = self
+                    .rt
+                    .bigint_proto
+                    .clone()
+                    .unwrap_or_else(|| self.object_proto.clone());
+                &holder
+            }
             Value::Object(o) => {
-                if matches!(&*o.kind.borrow(), Kind::Global) {
-                    if let Some(v) = self.lookup(&self.global.clone(), key) {
-                        return Ok(v);
-                    }
-                    if let Some(sb) = &self.vm_sandbox {
-                        if let Some(Slot::Data(v)) = find_in_chain(sb, key) {
-                            return Ok(v);
+                // One kind inspection picks the special case; the borrow is dropped before any
+                // JS (proxy traps, global lookups) runs.
+                let fast = match &*o.kind.borrow() {
+                    Kind::Global => Fast::Global,
+                    Kind::Proxy(_) => Fast::Proxy,
+                    Kind::Array(items) => {
+                        if key == "length" {
+                            Fast::Hit(Value::Number(items.len() as f64))
+                        } else {
+                            index_key(key).map_or(Fast::Chain, |i| Fast::Hit(unhole(items.get(i))))
                         }
                     }
-                }
-                if let Some(v) = self.proxy_get(o, key, target)? {
-                    return Ok(v);
-                }
-                if let Kind::Array(items) = &*o.kind.borrow() {
-                    if key == "length" {
-                        return Ok(Value::Number(items.len() as f64));
+                    Kind::Wrapper(Value::Str(s)) => {
+                        if key == "length" {
+                            Fast::Hit(Value::Number(builtins::str_len(s) as f64))
+                        } else {
+                            index_key(key)
+                                .and_then(|i| builtins::str_unit_at(s, i))
+                                .map_or(Fast::Chain, |u| {
+                                    Fast::Hit(Value::Str(builtins::units_str(&[u]).into()))
+                                })
+                        }
                     }
-                    if let Ok(i) = key.parse::<usize>() {
-                        return Ok(unhole(items.get(i)));
+                    Kind::Typed(t) => match key {
+                        "length" => Fast::Hit(Value::Number(t.len as f64)),
+                        "byteLength" => Fast::Hit(Value::Number((t.len * t.ty.size()) as f64)),
+                        "byteOffset" => Fast::Hit(Value::Number(t.off as f64)),
+                        "buffer" => Fast::Hit(Value::Object(t.abuf.clone())),
+                        _ => index_key(key).map_or(Fast::Chain, |i| {
+                            Fast::Hit(t.get(i).map_or(Value::Undefined, Value::Number))
+                        }),
+                    },
+                    Kind::ArrayBuffer(b) if key == "byteLength" => {
+                        Fast::Hit(Value::Number(b.borrow().len() as f64))
                     }
-                }
-                if let Kind::Wrapper(Value::Str(s)) = &*o.kind.borrow() {
-                    if key == "length" {
-                        return Ok(Value::Number(builtins::str_len(s) as f64));
-                    }
-                    if let Some(u) = key
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|i| builtins::str_unit_at(s, i))
+                    Kind::Closure { def, .. }
+                        if (key == "name" || key == "length") && find_own(o, key).is_none() =>
                     {
-                        return Ok(Value::Str(builtins::units_str(&[u]).into()));
+                        Fast::Hit(if key == "name" {
+                            def.name.clone().map_or(Value::str(""), Value::Str)
+                        } else {
+                            Value::Number(
+                                def.params
+                                    .iter()
+                                    .take_while(|p| matches!(p, a::Pat::Ident(_)))
+                                    .count() as f64,
+                            )
+                        })
                     }
-                }
-                if let Kind::Typed(t) = &*o.kind.borrow() {
-                    match key {
-                        "length" => return Ok(Value::Number(t.len as f64)),
-                        "byteLength" => return Ok(Value::Number((t.len * t.ty.size()) as f64)),
-                        "byteOffset" => return Ok(Value::Number(t.off as f64)),
-                        "buffer" => return Ok(Value::Object(t.abuf.clone())),
-                        _ => {
-                            if let Ok(i) = key.parse::<usize>() {
-                                return Ok(t.get(i).map_or(Value::Undefined, Value::Number));
+                    _ => Fast::Chain,
+                };
+                match fast {
+                    Fast::Hit(v) => return Ok(v),
+                    Fast::Global => {
+                        if let Some(v) = self.lookup(&self.global.clone(), key) {
+                            return Ok(v);
+                        }
+                        if let Some(sb) = &self.vm_sandbox {
+                            if let Some(Slot::Data(v)) = find_in_chain(sb, key) {
+                                return Ok(v);
                             }
                         }
                     }
-                }
-                if key == "byteLength" {
-                    if let Kind::ArrayBuffer(b) = &*o.kind.borrow() {
-                        return Ok(Value::Number(b.borrow().len() as f64));
-                    }
-                }
-                if key == "name" || key == "length" {
-                    if let Kind::Closure { def, .. } = &*o.kind.borrow() {
-                        if find_own(o, key).is_none() {
-                            return Ok(if key == "name" {
-                                def.name.clone().map_or(Value::str(""), Value::Str)
-                            } else {
-                                Value::Number(
-                                    def.params
-                                        .iter()
-                                        .take_while(|p| matches!(p, a::Pat::Ident(_)))
-                                        .count() as f64,
-                                )
-                            });
+                    Fast::Proxy => {
+                        if let Some(v) = self.proxy_get(o, key, target)? {
+                            return Ok(v);
                         }
                     }
+                    Fast::Chain => {}
                 }
-                o.clone()
+                o
             }
         };
-        match find_in_chain(&start, key) {
+        match read_in_chain(start, key) {
             None => Ok(Value::Undefined),
-            Some(Slot::Data(v)) => Ok(v),
-            Some(Slot::Accessor { get: Some(g), .. }) => self.call(&g, target, &[]),
-            Some(Slot::Accessor { .. }) => Ok(Value::Undefined),
+            Some(Read::Data(v)) => Ok(v),
+            Some(Read::Getter(g)) => self.call(&g, target, &[]),
+            Some(Read::NoGetter) => Ok(Value::Undefined),
         }
     }
 
@@ -2818,6 +2874,23 @@ impl Interp {
             }
             a::Expr::Unary(u) => self.eval_unary(u, scope),
             a::Expr::Update(u) => {
+                if let a::Expr::Ident(i) = &*u.arg {
+                    let inc = matches!(u.op, a::UpdateOp::PlusPlus);
+                    let fast = with_binding_mut(scope, &i.sym, |b| {
+                        if !b.mutable {
+                            return None;
+                        }
+                        let Value::Number(old) = b.value else {
+                            return None;
+                        };
+                        let new = if inc { old + 1.0 } else { old - 1.0 };
+                        b.value = Value::Number(new);
+                        Some(if u.prefix { new } else { old })
+                    });
+                    if let Some(v) = fast {
+                        return Ok(Value::Number(v));
+                    }
+                }
                 let loc = self.loc_of(&u.arg, scope)?;
                 let old = self.read_loc(&loc, scope)?;
                 if let Value::BigInt(b) = &old {
@@ -2877,6 +2950,11 @@ impl Interp {
                 op => {
                     let l = self.eval(&b.left, scope)?;
                     let r = self.eval(&b.right, scope)?;
+                    if let (Value::Number(x), Value::Number(y)) = (&l, &r) {
+                        if let Some(v) = number_binop(op, *x, *y) {
+                            return Ok(v);
+                        }
+                    }
                     self.binary(op, &l, &r)
                 }
             },
@@ -3057,6 +3135,55 @@ impl Interp {
         }
     }
 
+    /// The value of a right-hand side that is a number literal or a variable holding a number.
+    /// Reading it has no side effects, so it may be read before the left operand.
+    fn pure_number(&self, scope: &Rc<Scope>, e: &a::Expr) -> Option<f64> {
+        match e {
+            a::Expr::Lit(a::Lit::Num(n)) => Some(n.value),
+            a::Expr::Ident(i) => match self.lookup(scope, &i.sym)? {
+                Value::Number(n) => Some(n),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `x op= n` and `x = x op n` on a mutable number binding with a pure numeric `n`: one scope
+    /// walk, no `binary()`. `None` leaves everything untouched for the generic path.
+    fn ident_rmw_fast(&self, scope: &Rc<Scope>, name: &str, asg: &a::AssignExpr) -> Option<Value> {
+        use a::AssignOp as A;
+        use a::BinaryOp as B;
+        let (op, rhs) = match asg.op {
+            A::AddAssign => (B::Add, &*asg.right),
+            A::SubAssign => (B::Sub, &*asg.right),
+            A::MulAssign => (B::Mul, &*asg.right),
+            A::DivAssign => (B::Div, &*asg.right),
+            A::ModAssign => (B::Mod, &*asg.right),
+            A::Assign => match &*asg.right {
+                a::Expr::Bin(b)
+                    if matches!(b.op, B::Add | B::Sub | B::Mul | B::Div | B::Mod)
+                        && matches!(&*b.left, a::Expr::Ident(i) if &*i.sym == name) =>
+                {
+                    (b.op, &*b.right)
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let r = self.pure_number(scope, rhs)?;
+        with_binding_mut(scope, name, |b| {
+            if !b.mutable {
+                return None;
+            }
+            let Value::Number(l) = b.value else {
+                return None;
+            };
+            let v = number_binop(op, l, r)?;
+            b.value = v.clone();
+            Some(v)
+        })
+    }
+
     fn eval_assign(&mut self, asg: &a::AssignExpr, scope: &Rc<Scope>) -> R<Value> {
         use a::AssignOp as A;
         let target = match &asg.left {
@@ -3072,6 +3199,11 @@ impl Interp {
                 return Ok(value);
             }
         };
+        if let a::SimpleAssignTarget::Ident(i) = target {
+            if let Some(v) = self.ident_rmw_fast(scope, &i.id.sym, asg) {
+                return Ok(v);
+            }
+        }
         // the target's object and key are evaluated once, before the right-hand side
         let loc = match target {
             a::SimpleAssignTarget::Ident(i) => Loc::Ident(&i.id),
@@ -3440,6 +3572,57 @@ fn find_own(o: &Obj, key: &str) -> Option<(Slot, bool)> {
     Some((p.slot.clone(), p.enumerable))
 }
 
+/// What a property read needs from the first holder that has the key. Data clones only the
+/// value and an accessor clones only its getter.
+enum Read {
+    Data(Value),
+    Getter(Value),
+    NoGetter,
+}
+
+/// Outcome of a `get` special case decided under one kind borrow.
+enum Fast {
+    Hit(Value),
+    Global,
+    Proxy,
+    Chain,
+}
+
+/// Array-index key for a property read. Only keys starting with a digit or `+` reach `parse`,
+/// the same accepted set as the old unconditional parse.
+#[inline]
+fn index_key(key: &str) -> Option<usize> {
+    match key.as_bytes().first() {
+        Some(b) if b.is_ascii_digit() || *b == b'+' => key.parse::<usize>().ok(),
+        _ => None,
+    }
+}
+
+fn read_own(o: &ObjData, key: &str) -> Option<Read> {
+    let i = o.position(key)?;
+    let props = o.props.borrow();
+    Some(match &props[i].slot {
+        Slot::Data(v) => Read::Data(v.clone()),
+        Slot::Accessor { get: Some(g), .. } => Read::Getter(g.clone()),
+        Slot::Accessor { .. } => Read::NoGetter,
+    })
+}
+
+/// Read `key` along the prototype chain of `o`, cloning one hop's Rc only when it moves up.
+fn read_in_chain(o: &ObjData, key: &str) -> Option<Read> {
+    if let Some(r) = read_own(o, key) {
+        return Some(r);
+    }
+    let mut cur: Obj = o.proto.borrow().clone()?;
+    loop {
+        if let Some(r) = read_own(&cur, key) {
+            return Some(r);
+        }
+        let next = cur.proto.borrow().clone()?;
+        cur = next;
+    }
+}
+
 fn find_in_chain(o: &Obj, key: &str) -> Option<Slot> {
     let mut cur = Some(o.clone());
     while let Some(c) = cur {
@@ -3680,6 +3863,8 @@ mod napi_bridge_tests;
 #[cfg(test)]
 mod napi_eval_tests;
 #[cfg(test)]
+mod napi_graph_encode_tests;
+#[cfg(test)]
 mod napi_graph_tests;
 #[cfg(test)]
 mod napi_ops_tests;
@@ -3689,6 +3874,8 @@ mod napi_props_tests;
 mod napi_symbols_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod prop_get_tests;
 #[cfg(test)]
 mod sysio_stdin_tests;
 #[cfg(test)]
