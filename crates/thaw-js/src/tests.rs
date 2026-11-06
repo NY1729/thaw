@@ -5909,10 +5909,9 @@ fn str_append_const_tdz_and_with_targets() {
 #[test]
 fn str_append_with_target_in_sloppy_script() {
     let mut it = Interp::new();
-    assert!(matches!(
-        it.run_sloppy(r"var w = {s: 'x'.repeat(300)}; var s = 'o'; with (w) { s += 'y'; } console.log(w.s.length, s)"),
-        Ok(_)
-    ));
+    assert!(it
+        .run_sloppy(r"var w = {s: 'x'.repeat(300)}; var s = 'o'; with (w) { s += 'y'; } console.log(w.s.length, s)")
+        .is_ok());
     assert_eq!(it.out.join("|"), "301 o");
 }
 
