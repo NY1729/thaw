@@ -1773,11 +1773,21 @@ impl Interp {
     }
 
     pub fn construct(&mut self, f: &Value, args: &[Value]) -> R<Value> {
+        self.construct_with(f, args, f)
+    }
+
+    /// [[Construct]](f, args, newTarget): the instance takes its prototype from `new_target.prototype`.
+    pub(crate) fn construct_with(
+        &mut self,
+        f: &Value,
+        args: &[Value],
+        new_target: &Value,
+    ) -> R<Value> {
         let Value::Object(fo) = f else {
             return self.throw_error("TypeError", "value is not a constructor");
         };
         if matches!(&*fo.kind.borrow(), Kind::Proxy(p) if p.callable) {
-            return self.proxy_construct(fo, f, args);
+            return self.proxy_construct(fo, args, new_target);
         }
         let (is_closure, is_native) = (
             matches!(&*fo.kind.borrow(), Kind::Closure { def, .. } if !def.arrow),
@@ -1788,7 +1798,7 @@ impl Interp {
         if !is_closure && !is_native {
             return self.throw_error("TypeError", "value is not a constructor");
         }
-        let proto = match self.get(f, "prototype")? {
+        let proto = match self.get(new_target, "prototype")? {
             Value::Object(p) => p,
             _ => self.object_proto.clone(),
         };
@@ -1801,10 +1811,20 @@ impl Interp {
             if !matches!(r, Value::Object(_)) && find_own(fo, "@@wrap").is_some() {
                 return Ok(Value::Object(new_obj(Some(proto), Kind::Wrapper(r))));
             }
+            // a subclass or Reflect.construct(native, args, other): the fresh object takes the new target's
+            // prototype. ponytail: an object passed in by the caller is returned as-is and left alone.
+            if let Value::Object(ro) = &r {
+                let is_arg = args
+                    .iter()
+                    .any(|a| matches!(a, Value::Object(x) if Rc::ptr_eq(x, ro)));
+                if !is_arg && !matches!(new_target, Value::Object(n) if Rc::ptr_eq(n, fo)) {
+                    *ro.proto.borrow_mut() = Some(proto);
+                }
+            }
             return Ok(r);
         }
         let this = Value::Object(new_obj(Some(proto), Kind::Plain));
-        self.rt.pending_nt = Some(f.clone());
+        self.rt.pending_nt = Some(new_target.clone());
         let result = if is_class {
             self.init_instance(f, &this, args)
         } else {
@@ -3868,6 +3888,8 @@ mod fs_tests;
 mod napi_bridge_tests;
 #[cfg(test)]
 mod napi_eval_tests;
+#[cfg(test)]
+mod napi_globals_tests;
 #[cfg(test)]
 mod napi_graph_encode_tests;
 #[cfg(test)]

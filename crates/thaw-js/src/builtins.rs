@@ -1305,6 +1305,11 @@ impl Interp {
             Ok(it.native(move |it, _, call_args| {
                 let mut all = bound_args.clone();
                 all.extend_from_slice(call_args);
+                // `new bound(...)` constructs the target. ponytail: newTarget is the target itself, not the bound
+                // function, so `bound.prototype` is not consulted.
+                if std::mem::take(&mut it.rt.constructing) {
+                    return it.construct_with(&target, &all, &target);
+                }
                 it.call(&target, &bound_this, &all)
             }))
         });

@@ -413,24 +413,18 @@ impl Interp {
         self.set_native(&r, "construct", |it, _, args| {
             let target = arg(args, 0);
             if !target.is_callable() {
-                return it.throw_error("TypeError", "Reflect.construct target is not a constructor");
+                return it
+                    .throw_error("TypeError", "Reflect.construct target is not a constructor");
             }
             let list = list_from(it, &arg(args, 1))?;
             let nt = args.get(2).cloned().unwrap_or_else(|| target.clone());
             if !nt.is_callable() {
-                return it.throw_error("TypeError", "Reflect.construct newTarget is not a constructor");
+                return it.throw_error(
+                    "TypeError",
+                    "Reflect.construct newTarget is not a constructor",
+                );
             }
-            let made = it.construct(&target, &list)?;
-            // ponytail: newTarget is applied after the call, so the constructor body still sees
-            // `target.prototype`; a real [[Construct]] with newTarget needs the engine change (E2)
-            if let (Value::Object(m), Value::Object(_)) = (&made, &nt) {
-                if !matches!((&target, &nt), (Value::Object(a), Value::Object(b)) if Rc::ptr_eq(a, b)) {
-                    if let Value::Object(p) = it.get(&nt, "prototype")? {
-                        *m.proto.borrow_mut() = Some(p);
-                    }
-                }
-            }
-            Ok(made)
+            it.construct_with(&target, &list, &nt)
         });
         self.global.declare("Reflect", Value::Object(r), true);
     }
