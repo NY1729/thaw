@@ -650,11 +650,9 @@ impl Interp {
         if value.is_some() {
             // the kind borrow ends before `self.set`, which borrows it mutably
             let is_array = matches!(&*o.kind.borrow(), Kind::Array(_));
-            if is_array {
-                if key.parse::<usize>().is_ok() || key == "length" {
-                    drop(self.set(target, key, value.clone().unwrap()));
-                    return Ok(());
-                }
+            if is_array && (key.parse::<usize>().is_ok() || key == "length") {
+                drop(self.set(target, key, value.clone().unwrap()));
+                return Ok(());
             }
         }
         let flag = |v: &Option<Value>, default: bool| v.as_ref().map_or(default, |v| v.truthy());
