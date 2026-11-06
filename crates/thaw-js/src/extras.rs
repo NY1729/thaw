@@ -403,9 +403,9 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   function DataView(buffer, byteOffset, byteLength) {
     if (!(this instanceof DataView)) throw new TypeError("Constructor DataView requires 'new'");
     if (!(buffer instanceof ArrayBuffer)) throw new TypeError('First argument to DataView constructor must be an ArrayBuffer');
-    var off = byteOffset === undefined ? 0 : Math.trunc(byteOffset), total = buffer.byteLength;
+    var off = byteOffset === undefined ? 0 : (Math.trunc(byteOffset) || 0), total = buffer.byteLength;
     if (off < 0 || off > total) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
-    var len = byteLength === undefined ? total - off : Math.trunc(byteLength);
+    var len = byteLength === undefined ? total - off : (Math.trunc(byteLength) || 0);
     if (len < 0 || off + len > total) throw new RangeError('Invalid DataView length ' + len);
     def(this, 'buffer', buffer);
     def(this, 'byteOffset', off);
@@ -451,6 +451,9 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   def(DataView.prototype, Symbol.toStringTag, 'DataView');
   def(DataView.prototype, 'constructor', DataView);
   globalThis.DataView = DataView;
+  // ArrayBuffer.isView is native (typed arrays only); DataView is a JS class, so widen it here.
+  var nativeIsView = ArrayBuffer.isView;
+  def(ArrayBuffer, 'isView', function isView(v) { return nativeIsView(v) || v instanceof DataView; });
 
   // ----- structuredClone (plain data, Map, Set, Date, RegExp, typed arrays, Error; cycles preserved) -----
   globalThis.structuredClone = function structuredClone(value) {
@@ -472,6 +475,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       if (v instanceof Map) { out = new Map(); seen.set(v, out); v.forEach(function (x, k) { out.set(clone(k), clone(x)); }); return out; }
       if (v instanceof Set) { out = new Set(); seen.set(v, out); v.forEach(function (x) { out.add(clone(x)); }); return out; }
       if (v instanceof ArrayBuffer) { out = v.slice(0); seen.set(v, out); return out; }
+      if (v instanceof DataView) { var cb = clone(v.buffer); out = new DataView(cb, v.byteOffset, v.byteLength); seen.set(v, out); return out; }
       if (ArrayBuffer.isView(v)) { out = new v.constructor(v); seen.set(v, out); return out; }
       if (v instanceof Error) {
         out = Object.create(Object.getPrototypeOf(v)); seen.set(v, out);

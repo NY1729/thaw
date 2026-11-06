@@ -469,6 +469,47 @@ fn typed_arrays_wrap_values_and_share_their_buffer() {
 }
 
 #[test]
+fn dataview_is_an_array_buffer_view() {
+    assert_eq!(
+        one("var b = new ArrayBuffer(4), d = new DataView(b, 1, 2);
+             console.log(ArrayBuffer.isView(d), ArrayBuffer.isView(new Uint8Array(1)), ArrayBuffer.isView(b), ArrayBuffer.isView({}), ArrayBuffer.isView(null), ArrayBuffer.isView.name, ArrayBuffer.isView.length)"),
+        "true true false false false isView 1"
+    );
+}
+
+#[test]
+fn dataview_util_types_agree_with_is_view() {
+    assert_eq!(
+        one(
+            "var d = new DataView(new ArrayBuffer(4), 1, 2), t = globalThis.__thaw_util_types;
+             console.log(t.isArrayBufferView(d), t.isTypedArray(d), t.isDataView(d))"
+        ),
+        "true false true"
+    );
+}
+
+#[test]
+fn dataview_structured_clone_keeps_window_and_shares_cloned_buffer() {
+    assert_eq!(
+        one("var b = new ArrayBuffer(8), d = new DataView(b, 2, 4); d.setUint8(0, 9);
+             var c = structuredClone(d);
+             console.log(c instanceof DataView, c.byteOffset, c.byteLength, c.getUint8(0), c.buffer !== b, c.buffer.byteLength)"),
+        "true 2 4 9 true 8"
+    );
+}
+
+#[test]
+fn dataview_constructor_nan_offset_is_zero_and_ranges_throw() {
+    assert_eq!(
+        one("var b = new ArrayBuffer(8);
+             console.log(new DataView(b, NaN).byteOffset, new DataView(b, NaN, NaN).byteLength);
+             try { new DataView(b, 9); } catch (e) { console.log(e.message); }
+             try { new DataView(b, 0, 20); } catch (e) { console.log(e.message); }"),
+        "0 0|Start offset 9 is outside the bounds of the buffer|Invalid DataView length 20"
+    );
+}
+
+#[test]
 fn typed_arrays_iterate_in_for_of_spread_array_from_and_entries() {
     assert_eq!(
         one("var u = new Uint8Array([7, 8]), out = [];
