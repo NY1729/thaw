@@ -268,25 +268,48 @@ fn a_void_callback_on_the_thaw_js_text_lane_returns_undefined_not_null() {
 }
 
 #[test]
-fn discarded_jsvalue_argument_call_releases_only_when_result_is_not_the_argument() {
+fn discarded_call_with_borrowed_jsvalue_arg_guards_release() {
     // `mark(token)` may return `token` itself (decorator shape): the discarded result is released only if it differs from `token`
     let (_, _, ir) = compile_thaw_js_program(
         "function mark(value: JsValue): JsValue { return value; }
          function main(): void { const token: JsValue = {a: 1}; mark(token); }",
     );
-    assert!(ir.contains("icmp eq"), "{ir}");
+    assert!(ir.contains("discarded_result_is_argument"), "{ir}");
     assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
 }
 
 #[test]
-fn discarded_jsvalue_call_with_non_variable_jsvalue_argument_does_not_release() {
-    // `mark(make())` cannot re-read its argument without re-evaluating `make()`, so the discarded result is kept (leak fallback)
+fn discarded_call_with_fresh_call_arg_releases_unconditionally() {
+    // `mark(make())`: the argument is a fresh +1 owned by nobody else and `mark` returns it unretained, so the release is correct
     let (_, _, ir) = compile_thaw_js_program(
         "function make(): JsValue { return {a: 1}; }
          function mark(value: JsValue): JsValue { return value; }
          function main(): void { mark(make()); }",
     );
-    assert!(!ir.contains("release_discarded_dynamic_value"), "{ir}");
+    assert!(!ir.contains("discarded_result_is_argument"), "{ir}");
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+}
+
+#[test]
+fn discarded_call_with_non_jsvalue_arg_releases_unconditionally() {
+    let (_, _, ir) = compile_thaw_js_program(
+        "function mark(n: number): JsValue { return {a: n}; }
+         function main(): void { mark(1); }",
+    );
+    assert!(!ir.contains("discarded_result_is_argument"), "{ir}");
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+}
+
+#[test]
+fn discarded_nested_call_arg_is_not_guarded_by_inner_record() {
+    // `mark(mark2(token))`: the outer argument is a fresh call result, so the inner call's recorded borrowed argument must not guard the outer release
+    let (_, _, ir) = compile_thaw_js_program(
+        "function mark2(value: JsValue): JsValue { return value; }
+         function mark(value: JsValue): JsValue { return value; }
+         function main(): void { const token: JsValue = {a: 1}; mark(mark2(token)); }",
+    );
+    assert!(!ir.contains("discarded_result_is_argument"), "{ir}");
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
 }
 
 #[test]

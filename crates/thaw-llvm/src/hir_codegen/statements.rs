@@ -510,6 +510,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.compile_and_discard_promise_expression(expr)?;
                     return Ok(false);
                 }
+                self.last_call_borrowed_jsvalue_args = None;
                 let discard_frame_depth = self.owned_json_discard_frames.len();
                 self.begin_owned_json_discard_frame();
                 let value = match self.compile_expr(expr) {
@@ -524,64 +525,69 @@ impl<'ctx> HirCompiler<'ctx> {
                 if matches!(expr, HirExpr::Call(..) | HirExpr::DynamicCall(..))
                     && result_type == Some(HirType::JsValue)
                 {
-                    // The result may be one of its own JsValue arguments (a decorator `Mark(token)`
-                    // returning its parameter); releasing it would drop the only reference. Only
-                    // plain variable arguments are re-read here (side-effect free), so the alias
-                    // check is a runtime compare of the result against each of them.
-                    let jsvalue_args: Vec<&HirExpr> = match expr {
-                        HirExpr::Call(_, args) | HirExpr::DynamicCall(_, args) => args
-                            .iter()
-                            .filter(|arg| self.expr_hir_type(arg) == Some(HirType::JsValue))
-                            .collect(),
-                        _ => Vec::new(),
+                    // A discarded result that aliases a borrowed JsValue argument (a decorator
+                    // `Mark(token)` returning its parameter) must not be released: the caller still
+                    // owns that reference. The borrowed arguments are the exact SSA values recorded
+                    // when the call was built (see `build_call_with`), so no argument is re-evaluated.
+                    let recorded = match expr {
+                        HirExpr::Call(_, args) => self
+                            .last_call_borrowed_jsvalue_args
+                            .take()
+                            .filter(|(ptr, len, _)| *ptr == args.as_ptr() && *len == args.len())
+                            .map(|(_, _, values)| values),
+                        _ => None,
                     };
-                    // ponytail: a non-variable JsValue argument is not re-evaluated, so its discarded
-                    // result is skipped and leaks one handle per call; proper fix = the callee retains
-                    // a returned JsValue parameter, then release here.
-                    if jsvalue_args
-                        .iter()
-                        .all(|arg| matches!(arg, HirExpr::Var(_)))
-                    {
-                        let function = self.current_function();
-                        let release_bb = self
-                            .context
-                            .append_basic_block(function, "release_discarded_dynamic_value_block");
-                        let skip_bb = self
-                            .context
-                            .append_basic_block(function, "discarded_dynamic_value_aliased");
-                        let result_bits = value.into_int_value();
-                        let mut aliased = self.context.bool_type().const_zero();
-                        for arg in jsvalue_args {
-                            let arg_bits = self.compile_expr(arg)?.into_int_value();
-                            let same = self
-                                .builder
-                                .build_int_compare(
-                                    inkwell::IntPredicate::EQ,
-                                    result_bits,
-                                    arg_bits,
-                                    "discarded_result_is_argument",
+                    match recorded {
+                        None => {
+                            self.builder
+                                .build_call(
+                                    self.module.get_function("thaw_js_release_handle").unwrap(),
+                                    &[value.into()],
+                                    "release_discarded_dynamic_value",
                                 )
                                 .map_err(|error| error.to_string())?;
-                            aliased = self
-                                .builder
-                                .build_or(aliased, same, "discarded_result_aliases_argument")
-                                .map_err(|error| error.to_string())?;
                         }
-                        self.builder
-                            .build_conditional_branch(aliased, skip_bb, release_bb)
-                            .map_err(|error| error.to_string())?;
-                        self.builder.position_at_end(release_bb);
-                        self.builder
-                            .build_call(
-                                self.module.get_function("thaw_js_release_handle").unwrap(),
-                                &[value.into()],
-                                "release_discarded_dynamic_value",
-                            )
-                            .map_err(|error| error.to_string())?;
-                        self.builder
-                            .build_unconditional_branch(skip_bb)
-                            .map_err(|error| error.to_string())?;
-                        self.builder.position_at_end(skip_bb);
+                        Some(arg_values) => {
+                            let function = self.current_function();
+                            let release_bb = self
+                                .context
+                                .append_basic_block(function, "release_discarded_dynamic_value_block");
+                            let skip_bb = self
+                                .context
+                                .append_basic_block(function, "discarded_dynamic_value_aliased");
+                            let result_bits = value.into_int_value();
+                            let mut aliased = self.context.bool_type().const_zero();
+                            for arg_bits in arg_values {
+                                let same = self
+                                    .builder
+                                    .build_int_compare(
+                                        inkwell::IntPredicate::EQ,
+                                        result_bits,
+                                        arg_bits,
+                                        "discarded_result_is_argument",
+                                    )
+                                    .map_err(|error| error.to_string())?;
+                                aliased = self
+                                    .builder
+                                    .build_or(aliased, same, "discarded_result_aliases_argument")
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            self.builder
+                                .build_conditional_branch(aliased, skip_bb, release_bb)
+                                .map_err(|error| error.to_string())?;
+                            self.builder.position_at_end(release_bb);
+                            self.builder
+                                .build_call(
+                                    self.module.get_function("thaw_js_release_handle").unwrap(),
+                                    &[value.into()],
+                                    "release_discarded_dynamic_value",
+                                )
+                                .map_err(|error| error.to_string())?;
+                            self.builder
+                                .build_unconditional_branch(skip_bb)
+                                .map_err(|error| error.to_string())?;
+                            self.builder.position_at_end(skip_bb);
+                        }
                     }
                 }
                 Ok(false)
