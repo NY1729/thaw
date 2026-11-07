@@ -144,6 +144,8 @@ pub struct ObjData {
     proto: RefCell<Option<Obj>>,
     kind: RefCell<Kind>,
     frozen: Cell<bool>,
+    /// An array's `length` made non-writable (`defineProperty(a, 'length', {writable: false})`).
+    len_ro: Cell<bool>,
     /// 0 extensible, 1 non-extensible (`preventExtensions`), 2 sealed.
     ext: Cell<u8>,
     /// Key -> position in `props`, built lazily for objects with many properties (`None` = stale).
@@ -154,6 +156,11 @@ pub struct ObjData {
 const INDEX_MIN: usize = 10;
 
 impl ObjData {
+    /// Writability of an array's `length`: frozen or made read-only both clear it.
+    fn len_writable(&self) -> bool {
+        !self.frozen.get() && !self.len_ro.get()
+    }
+
     /// Position of own property `key`.
     fn position(&self, key: &str) -> Option<usize> {
         let props = self.props.borrow();
@@ -663,6 +670,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         proto: RefCell::new(proto),
         kind: RefCell::new(kind),
         frozen: Cell::new(false),
+        len_ro: Cell::new(false),
         ext: Cell::new(0),
         index: RefCell::new(None),
     })
@@ -1615,8 +1623,12 @@ impl Interp {
             }
             return self.assign_var(&self.global.clone(), key, value);
         }
+        let len_ro = o.len_ro.get();
         if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
             if let Some(i) = array_index(key) {
+                if len_ro && i >= items.len() {
+                    return Ok(()); // sloppy mode: silently ignored (read-only `length` blocks growth)
+                }
                 if i >= items.len() {
                     items.resize(i + 1, Value::Hole);
                 }
@@ -1624,6 +1636,9 @@ impl Interp {
                 return Ok(());
             }
             if key == "length" {
+                if len_ro {
+                    return Ok(()); // sloppy mode: silently ignored
+                }
                 let n = match value {
                     Value::Number(n) if n >= 0.0 => n as usize,
                     _ => 0,
@@ -4109,6 +4124,8 @@ mod napi_proxy_tests;
 mod napi_symbols_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod prop_array_length_tests;
 #[cfg(test)]
 mod prop_configurable_tests;
 #[cfg(test)]
