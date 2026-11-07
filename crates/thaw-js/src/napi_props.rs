@@ -251,12 +251,12 @@ fn predicate(it: &mut Interp, target: &Value, key: &str, operation: u8) -> R<boo
 }
 
 /// Own properties of a non-proxy object as `(key, attributes)` in `Reflect.ownKeys` order. Attributes
-/// are `1` writable, `2` enumerable, `4` configurable. Per-property configurability is not kept: a
-/// frozen or sealed object's properties are non-configurable, the rest configurable.
-// ponytail: configurability is per object, not per property.
+/// are `1` writable, `2` enumerable, `4` configurable. Array elements and `length` take their bits
+/// from the object; ordinary properties take `writable` and `configurable` from their own `Prop`.
 pub(crate) fn own_entries(o: &Obj) -> Vec<(Rc<str>, u32)> {
     let frozen = o.frozen.get();
-    let configurable = if frozen || o.ext.get() == 2 { 0 } else { 4 };
+    let sealed = frozen || o.ext.get() == 2;
+    let configurable = if sealed { 0 } else { 4 };
     let writable = if frozen { 0 } else { 1 };
     let mut out: Vec<(Rc<str>, u32)> = Vec::new();
     match &*o.kind.borrow() {
@@ -285,8 +285,9 @@ pub(crate) fn own_entries(o: &Obj) -> Vec<(Rc<str>, u32)> {
     let mut symbols: Vec<(Rc<str>, u32)> = Vec::new();
     for p in props.iter() {
         let accessor = matches!(p.slot, Slot::Accessor { .. });
-        let attributes =
-            (if accessor { 0 } else { writable }) | (u32::from(p.enumerable) << 1) | configurable;
+        let data_writable = u32::from(!accessor && p.writable && !frozen);
+        let prop_configurable = if p.configurable && !sealed { 4 } else { 0 };
+        let attributes = data_writable | (u32::from(p.enumerable) << 1) | prop_configurable;
         if p.key.starts_with("@@sym:") {
             symbols.push((p.key.clone(), attributes));
         } else {
