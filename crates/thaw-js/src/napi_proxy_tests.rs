@@ -608,3 +608,175 @@ fn native_exception_reply_is_thrown_as_its_decoded_value() {
         "true"
     );
 }
+
+// ---- Plain typed ABI, structured part (PR 6b-4a): thaw-napi's handles.rs wire cases as pure JS in and out. ----
+
+/// A fresh realm with the layer's API (a separate factory instance with its own caches) declared as `api`.
+fn plain_realm() -> Interp {
+    let mut it = Interp::new();
+    let api = crate::web_napi_proxy::factory_api(&mut it);
+    it.global.declare("api", api, false);
+    it
+}
+
+/// Runs `source` in `it` and returns its value as text.
+fn run_in(it: &mut Interp, source: &str) -> String {
+    let value = it
+        .run(source)
+        .map_err(|c| classify(it, c))
+        .map_err(|e| e.to_string())
+        .unwrap();
+    it.to_str(&value).to_string()
+}
+
+#[test]
+fn plain_argument_snapshots_objects_and_arrays_and_their_cycles_are_references() {
+    let mut it = plain_realm();
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const o = { a: 1 }; o.self = o; return JSON.stringify(api.argument(o)); })()"
+        ),
+        r#"{"__thaw_napi_object__":1,"value":{"a":1,"self":{"__thaw_napi_ref__":1}}}"#
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const a = []; a.push(a); return JSON.stringify(api.argument(a)); })()"
+        ),
+        r#"{"__thaw_napi_array__":2,"value":[{"__thaw_napi_ref__":2}]}"#
+    );
+    assert_eq!(
+        run_in(&mut it, "JSON.stringify(api.arguments([1, 'x', null]))"),
+        r#"[1,"x",null]"#
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "[api.argument(undefined) === undefined, api.argument(3), api.argument('s')].join(',')"
+        ),
+        "true,3,s"
+    );
+    assert_eq!(
+        run_in(&mut it, "(() => { try { api.argument(new Uint8Array(1)); return 'passed'; } catch (e) { return e.name; } })()"),
+        "TypeError"
+    );
+}
+
+#[test]
+fn plain_function_argument_is_a_marker_whose_callback_global_the_reference_lookup_finds() {
+    let mut it = plain_realm();
+    assert_eq!(
+        run_in(&mut it, "JSON.stringify(api.argument((a, b) => a + b))"),
+        r#"{"__thaw_napi_function__":1}"#
+    );
+    // thaw-js has no `configurable` attribute (every property reports true), so only `writable` is checked.
+    assert_eq!(
+        run_in(&mut it, "Object.getOwnPropertyDescriptor(globalThis, '__thaw_napi_reference_1').writable === false"),
+        "true"
+    );
+    // The lookup that napi_eval's call_reference makes on the realm global.
+    let global = it.global.clone();
+    let callback = it
+        .lookup(&global, "__thaw_napi_reference_1")
+        .expect("the callback global is found by name");
+    assert!(callback.is_callable());
+    let result = it.call(
+        &callback,
+        &Value::Undefined,
+        &[Value::Null, Value::Number(2.0), Value::Number(3.0)],
+    );
+    assert!(matches!(result, Ok(Value::Number(n)) if n == 5.0));
+}
+
+#[test]
+fn plain_decode_maps_error_undefined_reference_symbol_and_origin_markers() {
+    let mut it = plain_realm();
+    assert_eq!(
+        run_in(&mut it, "(() => { const e = api.decode({ __thaw_napi_error__: 'boom', name: 'TypeError' }); return [e instanceof TypeError, e.message, e.name].join(','); })()"),
+        "true,boom,TypeError"
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "api.decode({ '$__thaw_napi_undefined$': true }) === undefined"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run_in(&mut it, "(() => { const o = { x: 1 }; api.argument(o); return api.decode({ __thaw_napi_ref__: 1 }) === o; })()"),
+        "true"
+    );
+    assert_eq!(
+        run_in(&mut it, "api.decode({ __thaw_napi_symbol__: '5', description: 'k', global: true }) === Symbol.for('k')"),
+        "true"
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "api.decode({ d: 0 }, [[['d'], 'date', 0]]).d.getTime()"
+        ),
+        "0"
+    );
+    assert_eq!(
+        run_in(&mut it, "String(api.decode(0, [[[], 'nonfinite', 'NaN']]))"),
+        "NaN"
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "JSON.stringify(api.decode({ __thaw_napi_ref__: 9 }, [[[], 'plain']]))"
+        ),
+        r#"{"__thaw_napi_ref__":9}"#
+    );
+}
+
+#[test]
+fn plain_handle_marker_of_an_unowned_native_object_is_refused() {
+    let _bridge = table_bridge();
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    let mut it = plain_realm();
+    assert_eq!(
+        run_in(&mut it, "(() => { const p = api.decode({ __thaw_napi_handle__: '9' }); try { api.argument(p); return 'passed'; } catch (e) { return e.name + ':' + e.message; } })()"),
+        "TypeError:native object belongs to another addon"
+    );
+}
+
+#[test]
+fn plain_handle_wrapper_encodes_the_arguments_and_throws_the_error_reply() {
+    let _bridge = table_bridge();
+    reply("op_fail", "", r#"{"__thaw_error__":"nope"}"#);
+    reply("op_ok", "", r#"{"value":[1,{"a":2}]}"#);
+    let mut it = plain_realm();
+    assert_eq!(
+        run_in(&mut it, "(() => { try { api.handle('op_fail', 1, '', []); return 'no'; } catch (e) { return e.message; } })()"),
+        "nope"
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "JSON.stringify(api.handle('op_ok', 1, '', [{ k: 1 }]).value)"
+        ),
+        r#"[1,{"a":2}]"#
+    );
+    let last = OPS.with(|o| o.borrow().last().map(|(_, _, packet)| packet.clone()));
+    assert_eq!(
+        last.as_deref(),
+        Some(r#"[{"__thaw_napi_object__":1,"value":{"k":1}}]"#)
+    );
+}
+
+#[test]
+fn plain_sync_arguments_writes_the_native_values_back_into_the_js_objects() {
+    let _bridge = table_bridge();
+    reply(
+        "sync_reference",
+        "",
+        r#"{"value":{"a":2,"b":{"c":3}},"origins":[]}"#,
+    );
+    let mut it = plain_realm();
+    assert_eq!(
+        run_in(&mut it, "(() => { const o = { a: 1, gone: 1 }; api.argument(o); api.syncArguments([o]); return JSON.stringify(o); })()"),
+        r#"{"a":2,"b":{"c":3}}"#
+    );
+}
