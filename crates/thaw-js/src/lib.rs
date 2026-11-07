@@ -752,6 +752,11 @@ pub struct Interp {
     pub(crate) yielded: bool,
     /// Function values made for compiled callbacks, by callback id (host.rs `callback_value`): stable identity.
     pub(crate) callback_values: HashMap<usize, Value>,
+    /// The intrinsic `Symbol` constructor, its `Symbol.for` registry and the well-known symbols, captured at
+    /// realm setup (collections.rs `install_collections`), so Rust never looks `Symbol` up in the global scope.
+    pub(crate) symbol_ctor: Option<Obj>,
+    pub(crate) symbol_registry: Option<Obj>,
+    pub(crate) well_known: Vec<Obj>,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -847,6 +852,9 @@ impl Interp {
             slice_end: None,
             yielded: false,
             callback_values: HashMap::new(),
+            symbol_ctor: None,
+            symbol_registry: None,
+            well_known: Vec::new(),
         };
         it.install_builtins();
         it.install_collections();

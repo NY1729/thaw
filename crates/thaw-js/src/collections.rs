@@ -281,6 +281,46 @@ impl Interp {
         self.to_str(v).into_rc()
     }
 
+    /// A new symbol with `desc`, made by the intrinsic `Symbol` constructor (not the global `Symbol`).
+    pub(crate) fn new_symbol(&mut self, desc: Option<Rc<str>>) -> R<Value> {
+        let ctor = self
+            .symbol_ctor
+            .clone()
+            .expect("Symbol is installed at realm setup");
+        let arg = desc.map_or(Value::Undefined, |d| Value::Str(d.into()));
+        self.call(&Value::Object(ctor), &Value::Undefined, &[arg])
+    }
+
+    /// `Symbol.for(key)`: the registered symbol for `key`, created and registered on first use.
+    pub(crate) fn symbol_for(&mut self, key: Rc<str>) -> R<Value> {
+        let registry = self
+            .symbol_registry
+            .clone()
+            .expect("Symbol is installed at realm setup");
+        if let Some((Slot::Data(v), _)) = find_own(&registry, &key) {
+            return Ok(v);
+        }
+        let sym = self.new_symbol(Some(key.clone()))?;
+        put_hidden(&registry, &key, sym.clone());
+        Ok(sym)
+    }
+
+    /// `Symbol.keyFor(sym)`: the key `sym` is registered under by `Symbol.for`, if any.
+    pub(crate) fn symbol_key_for(&self, sym: &Obj) -> Option<Rc<str>> {
+        let registry = self.symbol_registry.as_ref()?;
+        registry.props.borrow().iter().find_map(|p| match &p.slot {
+            Slot::Data(Value::Object(o)) if Rc::ptr_eq(o, sym) => Some(p.key.clone()),
+            _ => None,
+        })
+    }
+
+    /// Whether `sym` is one of the intrinsic well-known symbols (`Symbol.iterator`, ...).
+    // ponytail: no non-test caller yet; the napi symbol bridge will use it.
+    #[allow(dead_code)]
+    pub(crate) fn is_well_known(&self, sym: &Obj) -> bool {
+        self.well_known.iter().any(|w| Rc::ptr_eq(w, sym))
+    }
+
     pub(crate) fn install_collections(&mut self) {
         let g = self.global.clone();
         // ----- Symbol -----
@@ -312,42 +352,20 @@ impl Interp {
         });
         if let Value::Object(s) = &symbol {
             put_hidden(s, "prototype", Value::Object(sym_proto.clone()));
-            let registry = self.plain();
-            let reg_for_key = registry.clone();
+            self.symbol_ctor = Some(s.clone());
+            self.symbol_registry = Some(self.plain());
             self.set_native(s, "keyFor", move |it, _, args| {
                 let Value::Object(sym) = arg(args, 0) else {
                     let shown = it.inspect(&arg(args, 0), false);
                     return it.throw_error("TypeError", &format!("{shown} is not a symbol"));
                 };
-                let found = reg_for_key
-                    .props
-                    .borrow()
-                    .iter()
-                    .find_map(|p| match &p.slot {
-                        Slot::Data(Value::Object(o)) if Rc::ptr_eq(o, &sym) => Some(p.key.clone()),
-                        _ => None,
-                    });
-                Ok(found.map_or(Value::Undefined, |k| Value::Str(k.into())))
+                Ok(it
+                    .symbol_key_for(&sym)
+                    .map_or(Value::Undefined, |k| Value::Str(k.into())))
             });
-            let sp = sym_proto.clone();
             self.set_native(s, "for", move |it, _, args| {
-                let key = it.to_str(&arg(args, 0));
-                if let Some((Slot::Data(v), _)) = find_own(&registry, &key) {
-                    return Ok(v);
-                }
-                it.next_symbol += 1;
-                let o = new_obj(
-                    Some(sp.clone()),
-                    Kind::Symbol {
-                        id: it.next_symbol,
-                        desc: Some(key.into_rc()),
-                    },
-                );
-                put_hidden(&o, "description", Value::Str(key.clone()));
-                put_hidden(&registry, &key, Value::Object(o.clone()));
-                let id = it.next_symbol;
-                it.rt.symbols.insert(id, o.clone());
-                Ok(Value::Object(o))
+                let key = it.to_str(&arg(args, 0)).into_rc();
+                it.symbol_for(key)
             });
             for name in [
                 "iterator",
@@ -377,6 +395,7 @@ impl Interp {
                 );
                 put_hidden(&o, "description", Value::Str(desc.into()));
                 self.rt.symbols.insert(self.next_symbol, o.clone());
+                self.well_known.push(o.clone());
                 put_hidden(s, name, Value::Object(o));
             }
         }
@@ -698,5 +717,57 @@ console.log(m.size, sum, m.has(5), m.get(19999), n, ordered);";
             it.out.join("|"),
             "19998 399939992 false undefined 19998 true"
         );
+    }
+}
+
+#[cfg(test)]
+mod symbol_helper_tests {
+    use super::*;
+
+    fn ok<T>(r: R<T>) -> T {
+        match r {
+            Ok(v) => v,
+            Err(_) => panic!("helper or script threw"),
+        }
+    }
+
+    fn obj(v: Value) -> Obj {
+        match v {
+            Value::Object(o) => o,
+            _ => panic!("expected a symbol object"),
+        }
+    }
+
+    #[test]
+    fn symbol_helpers_still_work_after_script_replaces_global_symbol() {
+        let mut it = Interp::new();
+        assert!(it
+            .run("globalThis.Symbol = () => 17; Symbol.for = () => 0;")
+            .is_ok());
+        let sym = obj(ok(it.new_symbol(Some("d".into()))));
+        assert!(matches!(&*sym.kind.borrow(), Kind::Symbol { desc: Some(d), .. } if &**d == "d"));
+        let reg = obj(ok(it.symbol_for("k".into())));
+        assert!(matches!(&*reg.kind.borrow(), Kind::Symbol { .. }));
+    }
+
+    #[test]
+    fn symbol_for_returns_same_symbol_and_key_for_round_trips() {
+        let mut it = Interp::new();
+        let a = obj(ok(it.symbol_for("k".into())));
+        let b = obj(ok(it.symbol_for("k".into())));
+        assert!(Rc::ptr_eq(&a, &b));
+        assert_eq!(it.symbol_key_for(&a).as_deref(), Some("k"));
+        let fresh = obj(ok(it.new_symbol(None)));
+        assert_eq!(it.symbol_key_for(&fresh), None);
+    }
+
+    #[test]
+    fn is_well_known_is_true_for_iterator_and_false_for_fresh_symbol() {
+        let mut it = Interp::new();
+        let ctor = Value::Object(it.symbol_ctor.clone().expect("installed"));
+        let iterator = obj(ok(it.get(&ctor, "iterator")));
+        assert!(it.is_well_known(&iterator));
+        let fresh = obj(ok(it.new_symbol(Some("iterator".into()))));
+        assert!(!it.is_well_known(&fresh));
     }
 }
