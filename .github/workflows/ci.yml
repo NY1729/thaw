@@ -1627,22 +1627,31 @@ jobs:
           restore-keys: |
             thaw-napi-tjs-cargo-${{ runner.os }}-
       - name: Run each thaw-napi test in its own process
+        env:
+          RUST_BACKTRACE: "1"
         run: |
           set -u
           feat=(-p thaw-napi --no-default-features --features engine-thaw-js --lib)
           results="$RUNNER_TEMP/thaw-napi-engine-thaw-js.tsv"
           : > "$results"
+          logdir="$RUNNER_TEMP/thaw-napi-engine-thaw-js-logs"
+          mkdir -p "$logdir"
           # --list builds the test binary once; the per-test runs below reuse it.
           cargo test "${feat[@]}" -- --list --format terse 2>/dev/null \
             | grep ': test$' | sed 's/: test$//' > "$RUNNER_TEMP/names.txt"
           while IFS= read -r name; do
             status=0
-            timeout 300 cargo test "${feat[@]}" -- --exact "$name" --test-threads=1 >/dev/null 2>&1 || status=$?
+            timeout 300 cargo test "${feat[@]}" -- --exact "$name" --test-threads=1 > "$RUNNER_TEMP/current-test.log" 2>&1 || status=$?
             case "$status" in
               0) verdict=pass ;;
               124) verdict=timeout ;;
               *) verdict=fail ;;
             esac
+            if [ "$verdict" = pass ]; then
+              rm -f "$RUNNER_TEMP/current-test.log"
+            else
+              mv "$RUNNER_TEMP/current-test.log" "$logdir/${name//::/__}.log"
+            fi
             printf '%s\t%s\n' "$verdict" "$name" >> "$results"
           done < "$RUNNER_TEMP/names.txt"
           total=$(wc -l < "$results")
@@ -1664,4 +1673,11 @@ jobs:
         with:
           name: thaw-napi-engine-thaw-js
           path: ${{ runner.temp }}/thaw-napi-engine-thaw-js.tsv
+          if-no-files-found: ignore
+      - name: Upload logs of non-passing tests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: thaw-napi-engine-thaw-js-logs
+          path: ${{ runner.temp }}/thaw-napi-engine-thaw-js-logs
           if-no-files-found: ignore
