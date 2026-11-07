@@ -197,6 +197,7 @@ fn reflect_set(
                     slot: Slot::Data(value),
                     enumerable: true,
                     writable: true,
+                    configurable: true,
                 },
             );
             Ok(true)
@@ -502,6 +503,7 @@ pub extern "C" fn thaw_tjs_define_data_property_key_handle_graph_result(
                 Slot::Data(value),
                 attributes & 2 != 0,
                 attributes & 1 != 0,
+                attributes & 4 != 0,
             )
             .map_err(|c| classify(it, c))?;
             Ok(1)
@@ -604,6 +606,7 @@ pub extern "C" fn thaw_tjs_define_callback_property_key_handle_result(
                     Slot::Data(method),
                     enumerable,
                     attributes & 1 != 0,
+                    attributes & 4 != 0,
                 )
             } else {
                 let get = (getter_id != 0).then(|| callback_function(it, owner, getter_id));
@@ -615,6 +618,7 @@ pub extern "C" fn thaw_tjs_define_callback_property_key_handle_result(
                     Slot::Accessor { get, set },
                     enumerable,
                     false,
+                    attributes & 4 != 0,
                 )
             };
             result.map_err(|c| classify(it, c))?;
@@ -633,6 +637,7 @@ pub(crate) fn define_slot(
     slot: Slot,
     enumerable: bool,
     writable: bool,
+    configurable: bool,
 ) -> R<()> {
     let Value::Object(o) = target else {
         return it.throw_error("TypeError", "Object.defineProperty called on non-object");
@@ -658,7 +663,7 @@ pub(crate) fn define_slot(
             it.call(&trap, &handler, &[inner, k, Value::Object(desc)])?;
             return Ok(());
         }
-        return define_slot(it, &inner, key, slot, enumerable, writable);
+        return define_slot(it, &inner, key, slot, enumerable, writable, configurable);
     }
     let frozen = o.frozen.get();
     // array elements and length live in the element storage, written through `set`
@@ -720,6 +725,7 @@ pub(crate) fn define_slot(
             props[i].slot = merged;
             props[i].enumerable = enumerable;
             props[i].writable = writable;
+            props[i].configurable = configurable;
         }
         None => push_prop(
             o,
@@ -729,6 +735,7 @@ pub(crate) fn define_slot(
                 slot,
                 enumerable,
                 writable,
+                configurable,
             },
         ),
     }

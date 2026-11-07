@@ -124,7 +124,14 @@ impl Interp {
                 *ctor_obj.proto.borrow_mut() = Some(p.clone()); // static inheritance
             }
         }
-        put_hidden(&ctor_obj, "prototype", Value::Object(proto.clone()));
+        put_with(
+            &ctor_obj,
+            "prototype",
+            Value::Object(proto.clone()),
+            true,
+            false,
+            false,
+        );
         put_hidden(&proto, "constructor", ctor.clone());
         if let Some(n) = &name {
             cscope.declare(n, ctor.clone(), false);

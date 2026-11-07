@@ -609,10 +609,11 @@ impl Interp {
             }
             Ok(None)
         };
-        let (value, writable, enumerable, getter, setter) = (
+        let (value, writable, enumerable, configurable, getter, setter) = (
             has(self, "value")?,
             has(self, "writable")?,
             has(self, "enumerable")?,
+            has(self, "configurable")?,
             has(self, "get")?,
             has(self, "set")?,
         );
@@ -658,6 +659,7 @@ impl Interp {
                 p.slot = slot;
                 p.enumerable = flag(&enumerable, p.enumerable);
                 p.writable = flag(&writable, p.writable);
+                p.configurable = flag(&configurable, p.configurable);
             }
             None => crate::push_prop(
                 o,
@@ -667,6 +669,7 @@ impl Interp {
                     slot,
                     enumerable: flag(&enumerable, false),
                     writable: flag(&writable, false),
+                    configurable: flag(&configurable, false),
                 },
             ),
         }
@@ -920,8 +923,22 @@ impl Interp {
                 }
             })))
         });
-        put_hidden(&math, "PI", Value::Number(std::f64::consts::PI));
-        put_hidden(&math, "E", Value::Number(std::f64::consts::E));
+        put_with(
+            &math,
+            "PI",
+            Value::Number(std::f64::consts::PI),
+            false,
+            false,
+            false,
+        );
+        put_with(
+            &math,
+            "E",
+            Value::Number(std::f64::consts::E),
+            false,
+            false,
+            false,
+        );
         g.declare("Math", Value::Object(math), true);
 
         // ----- Object -----
@@ -1109,10 +1126,17 @@ impl Interp {
                     if matches!(&*o.kind.borrow(), Kind::Array(_)) && !matches!(v, Value::Undefined)
                     {
                         let d = it.plain();
+                        // elements are derived from the object-wide flags; `length` is never configurable
+                        let frozen = o.frozen.get();
+                        let is_length = key.as_ref() == "length";
                         put(&d, "value", v);
-                        put(&d, "writable", Value::Bool(true));
-                        put(&d, "enumerable", Value::Bool(key.as_ref() != "length"));
-                        put(&d, "configurable", Value::Bool(true));
+                        put(&d, "writable", Value::Bool(!frozen));
+                        put(&d, "enumerable", Value::Bool(!is_length));
+                        put(
+                            &d,
+                            "configurable",
+                            Value::Bool(!is_length && !frozen && o.ext.get() != 2),
+                        );
                         return Ok(Value::Object(d));
                     }
                     return Ok(Value::Undefined);
@@ -1129,12 +1153,22 @@ impl Interp {
                     }
                 }
                 put(&d, "enumerable", Value::Bool(p.enumerable));
-                put(&d, "configurable", Value::Bool(!o.frozen.get()));
+                put(
+                    &d,
+                    "configurable",
+                    Value::Bool(p.configurable && !o.frozen.get()),
+                );
                 Ok(Value::Object(d))
             });
             self.set_native(o, "freeze", |_, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
                     o.frozen.set(true);
+                    for p in o.props.borrow_mut().iter_mut() {
+                        p.configurable = false;
+                        if matches!(p.slot, Slot::Data(_)) {
+                            p.writable = false;
+                        }
+                    }
                 }
                 Ok(arg(args, 0))
             });
@@ -1158,6 +1192,9 @@ impl Interp {
             self.set_native(o, "seal", |_, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
                     o.ext.set(2);
+                    for p in o.props.borrow_mut().iter_mut() {
+                        p.configurable = false;
+                    }
                 }
                 Ok(arg(args, 0))
             });
@@ -1957,13 +1994,48 @@ impl Interp {
             }))
         });
         if let Value::Object(o) = &number {
-            put_hidden(o, "MAX_SAFE_INTEGER", Value::Number(9007199254740991.0));
-            put_hidden(o, "MIN_SAFE_INTEGER", Value::Number(-9007199254740991.0));
-            put_hidden(o, "EPSILON", Value::Number(f64::EPSILON));
-            put_hidden(o, "MAX_VALUE", Value::Number(f64::MAX));
-            put_hidden(o, "POSITIVE_INFINITY", Value::Number(f64::INFINITY));
-            put_hidden(o, "NEGATIVE_INFINITY", Value::Number(f64::NEG_INFINITY));
-            put_hidden(o, "NaN", Value::Number(f64::NAN));
+            put_with(
+                o,
+                "MAX_SAFE_INTEGER",
+                Value::Number(9007199254740991.0),
+                false,
+                false,
+                false,
+            );
+            put_with(
+                o,
+                "MIN_SAFE_INTEGER",
+                Value::Number(-9007199254740991.0),
+                false,
+                false,
+                false,
+            );
+            put_with(
+                o,
+                "EPSILON",
+                Value::Number(f64::EPSILON),
+                false,
+                false,
+                false,
+            );
+            put_with(o, "MAX_VALUE", Value::Number(f64::MAX), false, false, false);
+            put_with(
+                o,
+                "POSITIVE_INFINITY",
+                Value::Number(f64::INFINITY),
+                false,
+                false,
+                false,
+            );
+            put_with(
+                o,
+                "NEGATIVE_INFINITY",
+                Value::Number(f64::NEG_INFINITY),
+                false,
+                false,
+                false,
+            );
+            put_with(o, "NaN", Value::Number(f64::NAN), false, false, false);
             self.set_native(o, "isInteger", |_, _, args| {
                 Ok(Value::Bool(
                     matches!(arg(args, 0), Value::Number(n) if n.is_finite() && n.fract() == 0.0),
