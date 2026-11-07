@@ -1104,6 +1104,13 @@ fn extract_const_call_signature_decls<'a>(
                                     let Expr::Ident(key) = property.key.as_ref() else {
                                         continue;
                                     };
+                                    // A fluent `=> this` member (chalk's `rgb`,
+                                    // `hex`, `ansi256`) returns the receiver, not a
+                                    // typed value; emitted as a package-level
+                                    // function it became a bogus `void` one.
+                                    if matches!(function.type_ann.type_ann.as_ref(), TsType::TsThisType(_)) {
+                                        continue;
+                                    }
                                     signatures.push((
                                         key.sym.to_string(),
                                         CallableConstSignature::Direct(function),

@@ -124,6 +124,7 @@ impl<'a> FnLowerer<'a> {
             class_method_view_made: false,
             accessor_projection_depth: 0,
             member_receiver_bindings: HashSet::new(),
+            called_bindings: HashSet::new(),
             assigned_later: HashSet::new(),
             awaited_bindings: HashSet::new(),
             catch_bindings: HashSet::new(),

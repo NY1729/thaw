@@ -224,6 +224,40 @@ fn extracts_a_callable_const_export_from_its_interfaces_call_signatures() {
     assert!(funcs.iter().any(|f| f.name == "plain"));
 }
 
+/// chalk's `ChalkInstance`: fluent `=> this` function properties must not
+/// become package-level functions (they were emitted as `void` ones), while
+/// a callable interface's non-`this` function property (`debug`'s
+/// `enable`) still is.
+#[test]
+fn callable_interface_this_returning_properties_are_not_package_functions() {
+    let chalk = r#"
+            export interface ChalkInstance {
+                (...text: unknown[]): string;
+                rgb: (red: number, green: number, blue: number) => this;
+                hex: (color: string) => this;
+                ansi256: (index: number) => this;
+                readonly red: this;
+            }
+            export const chalk: ChalkInstance;
+            export const Chalk: new (options?: { level?: number }) => ChalkInstance;
+        "#;
+    let funcs = parse_dts(chalk).unwrap();
+    for name in ["rgb", "hex", "ansi256"] {
+        assert!(funcs.iter().all(|f| f.name != name), "{name}: {funcs:?}");
+    }
+    assert!(funcs.iter().any(|f| f.name == "chalk"), "{funcs:?}");
+
+    let debug = r#"
+            export interface Debugger {
+                (ns: string): boolean;
+                enable: (ns: string) => void;
+            }
+            export declare const createDebug: Debugger;
+        "#;
+    let funcs = parse_dts(debug).unwrap();
+    assert!(funcs.iter().any(|f| f.name == "enable"), "{funcs:?}");
+}
+
 #[test]
 fn namespace_callable_consts_use_their_own_interface_and_type_scope() {
     // Unrun regression: identical bare names in two namespaces must keep

@@ -900,7 +900,9 @@ impl<'a> FnLowerer<'a> {
                 } else if annotated.is_none() && dynamic_call {
                     if self.awaited_bindings.contains(&name) {
                         Some(HirType::Dynamic)
-                    } else if self.member_receiver_bindings.contains(&name) {
+                    } else if self.member_receiver_bindings.contains(&name)
+                        || self.called_bindings.contains(&name)
+                    {
                         Some(HirType::JsValue)
                     } else {
                         None
