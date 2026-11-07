@@ -608,3 +608,145 @@ fn native_exception_reply_is_thrown_as_its_decoded_value() {
         "true"
     );
 }
+
+// ---- Function proxies (PR 6b-3). ----
+
+/// Evaluates `expr` over `d`, the decoded graph packet of the last `operation` call the table fake got.
+fn decoded_packet(operation: &str, expr: &str) -> String {
+    let packet = OPS
+        .with(|o| {
+            o.borrow()
+                .iter()
+                .rev()
+                .find(|(op, _, _)| op == operation)
+                .map(|(_, _, graph)| graph.clone())
+        })
+        .unwrap_or_else(|| panic!("no {operation} call"));
+    eval(&format!(
+        "(() => {{ const d = __thaw_json_graph_decode_owned({}); return {expr}; }})()",
+        serde_json::to_string(&packet).unwrap()
+    ))
+}
+
+/// The graph packet of the last `operation` call the table fake got, parsed.
+fn packet_of(operation: &str) -> serde_json::Value {
+    let packet = OPS
+        .with(|o| {
+            o.borrow()
+                .iter()
+                .rev()
+                .find(|(op, _, _)| op == operation)
+                .map(|(_, _, graph)| graph.clone())
+        })
+        .unwrap_or_else(|| panic!("no {operation} call"));
+    serde_json::from_str(&packet).unwrap()
+}
+
+#[test]
+fn function_for_handle_is_an_immutable_global_declared_only_when_enabled() {
+    let _bridge = table_bridge();
+    assert_eq!(
+        eval("typeof __thaw_napi_graph_function_for_handle"),
+        "undefined"
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval(
+            "[typeof __thaw_napi_graph_function_for_handle, (() => { let r; \
+             try { __thaw_napi_graph_function_for_handle = 1; r = 'written'; } catch (e) { r = e.name; } \
+             return r; })(), __thaw_napi_graph_function_for_handle('9') === __thaw_napi_graph_function_for_handle('9'), \
+             typeof __thaw_napi_graph_function_for_handle('9')].join('|')"
+        ),
+        "function|TypeError|true|function"
+    );
+    assert_eq!(
+        eval("(() => { try { __thaw_napi_graph_function_for_handle('0'); return 'made'; } catch (e) { return e.name; } })()"),
+        "TypeError"
+    );
+}
+
+#[test]
+fn calling_a_function_proxy_sends_the_receiver_first_and_returns_the_decoded_reply() {
+    let _bridge = table_bridge();
+    reply("call_captured_graph", "", &graph(r#"{"v":7}"#, ""));
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval("__thaw_napi_graph_function_for_handle('9').call('recv', 2)"),
+        "7"
+    );
+    assert_eq!(
+        decoded_packet("call_captured_graph", "[d[0], d[1], d.length].join('|')"),
+        "recv|2|2"
+    );
+}
+
+#[test]
+fn constructing_a_function_proxy_sends_new_target_fallback_and_the_arguments() {
+    let _bridge = table_bridge();
+    reply(
+        "construct_captured_graph",
+        "",
+        &graph(r#"{"r":0}"#, r#"{"o":[]}"#),
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval("(() => { const f = __thaw_napi_graph_function_for_handle('9'); globalThis.__f = f; return typeof new f(5); })()"),
+        "object"
+    );
+    // The values are [new.target, fallback, 5]: new.target is the tagged function's nfn node (node 1), the
+    // fallback prototype travels as a forced handle, the argument by value.
+    let packet = packet_of("construct_captured_graph");
+    let root = &packet["nodes"][0]["a"];
+    assert_eq!(root.as_array().map(Vec::len), Some(3), "{packet}");
+    assert_eq!(root[0], serde_json::json!({ "r": 1 }), "{packet}");
+    assert_eq!(packet["nodes"][1]["nfn"], "9", "{packet}");
+    assert!(root[1].get("hdl").is_some(), "{packet}");
+    assert_eq!(root[2], serde_json::json!({ "v": 5 }), "{packet}");
+}
+
+#[test]
+fn a_derived_class_reaches_the_native_constructor_with_its_own_new_target() {
+    let _bridge = table_bridge();
+    reply(
+        "construct_captured_graph",
+        "",
+        &graph(r#"{"r":0}"#, r#"{"o":[]}"#),
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval("(() => { const f = __thaw_napi_graph_function_for_handle('9'); class Derived extends f {} globalThis.__D = Derived; return typeof new Derived(1); })()"),
+        "object"
+    );
+    // new.target is the class itself: a live function, so a plain handle rather than an nfn node.
+    let packet = packet_of("construct_captured_graph");
+    let root = &packet["nodes"][0]["a"];
+    assert_eq!(root.as_array().map(Vec::len), Some(3), "{packet}");
+    let target = root[0]["r"].as_u64().map(|k| &packet["nodes"][k as usize]);
+    assert!(target.is_some_and(|n| n.get("hdl").is_some()), "{packet}");
+    assert_eq!(root[2], serde_json::json!({ "v": 1 }), "{packet}");
+}
+
+#[test]
+fn function_proxy_hides_prototype_and_reports_only_native_keys() {
+    let _bridge = table_bridge();
+    reply(
+        "own_keys_graph",
+        "",
+        &graph(r#"{"r":0}"#, r#"{"a":[{"v":"x"}]}"#),
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval("(() => { const f = __thaw_napi_graph_function_for_handle('9'); return [Reflect.ownKeys(f).join(','), 'prototype' in f, typeof f].join('|'); })()"),
+        "x|false|function"
+    );
+}
+
+#[test]
+fn a_nfn_token_decodes_to_the_function_proxy_and_encodes_back_as_its_handle() {
+    let _bridge = table_bridge();
+    thaw_tjs_napi_enable_proxy_layer();
+    let out = eval(
+        r#"(() => { const g = __thaw_json_graph_decode({"root":{"r":0},"nodes":[{"nfn":"9"}],"leases":[],"napiLeases":[]}); const back = JSON.parse(__thaw_json_graph_encode_js(g, 0, true)); return [g === __thaw_napi_graph_function_for_handle('9'), typeof g, back.nodes[0].nfn, back.nodes[0].hdl !== undefined].join('|'); })()"#,
+    );
+    assert_eq!(out, "true|function|9|true");
+}
