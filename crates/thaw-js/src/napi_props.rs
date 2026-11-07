@@ -757,6 +757,53 @@ pub(crate) fn define_slot(
     Ok(())
 }
 
+/// The own keys of `target` as a JS array of key values, filtered and ordered as
+/// `thaw_tjs_host_property_names_result` documents.
+fn own_property_names(
+    it: &mut Interp,
+    target: &Value,
+    key_mode: i32,
+    key_filter: u32,
+    key_conversion: i32,
+) -> Result<Value, HostError> {
+    let Value::Object(first) = target else {
+        return Err(HostError::Thrown(
+            "TypeError: Reflect.ownKeys called on non-object".into(),
+        ));
+    };
+    let mut out: Vec<Value> = Vec::new();
+    let mut seen: HashSet<Rc<str>> = HashSet::new();
+    let mut current = Some(first.clone());
+    while let Some(node) = current {
+        for (key, attributes) in own_keys_with_attributes(it, &node).map_err(|c| classify(it, c))? {
+            let symbol = key.starts_with("@@sym:");
+            if (symbol && key_filter & 16 != 0) || (!symbol && key_filter & 8 != 0) {
+                continue;
+            }
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let required = key_filter & 7;
+            if attributes & required != required {
+                continue;
+            }
+            let item = match (symbol, key_conversion, array_index(&key)) {
+                (false, 0, Some(n)) => Value::Number(n as f64),
+                _ => it.key_value(&key),
+            };
+            out.push(item);
+        }
+        if key_mode == 1 {
+            break;
+        }
+        current = match prototype_of(it, &node).map_err(|c| classify(it, c))? {
+            Value::Object(parent) => Some(parent),
+            _ => None,
+        };
+    }
+    Ok(it.array(out))
+}
+
 /// The own keys of the value behind `handle` as a graph wire of the array of key strings (numbers
 /// for canonical integer keys when `key_conversion` is 0; Symbol keys stay Symbol handles).
 /// `key_mode` 1 stops at the object itself, 0 walks the prototype chain. `key_filter`: 8 skips string
@@ -770,44 +817,7 @@ pub extern "C" fn thaw_tjs_host_property_names_result(
 ) -> ThawResult {
     graph_result(on_handle(handle, |p, owner, target| {
         let it = &mut p.interp;
-        let Value::Object(first) = &target else {
-            return Err(HostError::Thrown(
-                "TypeError: Reflect.ownKeys called on non-object".into(),
-            ));
-        };
-        let mut out: Vec<Value> = Vec::new();
-        let mut seen: HashSet<Rc<str>> = HashSet::new();
-        let mut current = Some(first.clone());
-        while let Some(node) = current {
-            for (key, attributes) in
-                own_keys_with_attributes(it, &node).map_err(|c| classify(it, c))?
-            {
-                let symbol = key.starts_with("@@sym:");
-                if (symbol && key_filter & 16 != 0) || (!symbol && key_filter & 8 != 0) {
-                    continue;
-                }
-                if !seen.insert(key.clone()) {
-                    continue;
-                }
-                let required = key_filter & 7;
-                if attributes & required != required {
-                    continue;
-                }
-                let item = match (symbol, key_conversion, array_index(&key)) {
-                    (false, 0, Some(n)) => Value::Number(n as f64),
-                    _ => it.key_value(&key),
-                };
-                out.push(item);
-            }
-            if key_mode == 1 {
-                break;
-            }
-            current = match prototype_of(it, &node).map_err(|c| classify(it, c))? {
-                Value::Object(parent) => Some(parent),
-                _ => None,
-            };
-        }
-        let array = it.array(out);
+        let array = own_property_names(it, &target, key_mode, key_filter, key_conversion)?;
         let mut wire = WireOut {
             owner,
             plain: false,
@@ -820,6 +830,22 @@ pub extern "C" fn thaw_tjs_host_property_names_result(
         };
         let root = wire.token(it, &array)?;
         Ok(wire.finish(root))
+    }))
+}
+
+/// `thaw_tjs_host_property_names_result` answering with the napi live graph encoder
+/// (`encode_napi_graph`): lone-surrogate keys stay UTF-16 units, Symbol keys stay handles.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_napi_host_property_names_result(
+    handle: u64,
+    key_mode: i32,
+    key_filter: u32,
+    key_conversion: i32,
+) -> ThawResult {
+    graph_result(on_handle(handle, |p, owner, target| {
+        let it = &mut p.interp;
+        let array = own_property_names(it, &target, key_mode, key_filter, key_conversion)?;
+        encode_napi_graph(it, owner, &array, 0, true, None)
     }))
 }
 
