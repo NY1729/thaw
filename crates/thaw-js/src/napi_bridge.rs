@@ -5,7 +5,7 @@
 //! Registration is by function pointer, so no link-time export is needed.
 //! ponytail: the callbacks are process-wide while the napi host is thread-local; a worker thread's end has no shutdown hook yet.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, CStr, CString};
 use std::sync::Mutex;
 
@@ -51,6 +51,8 @@ static SHUTDOWN: Mutex<Option<Shutdown>> = Mutex::new(None);
 thread_local! {
     /// Set when `shutdown` has begun on this thread; not reset (a second shutdown is a no-op).
     static SHUTDOWN_DONE: Cell<bool> = const { Cell::new(false) };
+    /// Bridge references this thread keeps until `shutdown` releases them.
+    static RETAINED: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Registers the napi side's callbacks. Registering again replaces them.
@@ -108,6 +110,20 @@ pub(crate) fn release_reference(token: u64) -> bool {
         Some(b) => (b.release)(token) != 0,
         None => false,
     }
+}
+
+/// The owner the napi side reports for native handle `handle` (what `__thaw_json_graph_owner_of_handle`
+/// returns), `None` when no bridge is registered or the reply is not a number.
+pub(crate) fn owner_of_handle(handle: u64) -> Option<u64> {
+    let b = bridge()?;
+    // SAFETY: the registered callback returns a string this bridge owns.
+    let text = unsafe { take_text((b.owner)(handle)) };
+    text.parse::<u64>().ok()
+}
+
+/// Keeps a bridge reference (a token from `retain_graph_handle`) until `shutdown` releases it.
+pub(crate) fn keep_until_shutdown(token: u64) {
+    RETAINED.with(|r| r.borrow_mut().push(token));
 }
 
 /// The raw reply text of one `handle` operation, or None when no bridge is registered.
@@ -434,6 +450,9 @@ pub(crate) fn shutdown(it: &mut Interp) -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
+    for token in RETAINED.with(|r| std::mem::take(&mut *r.borrow_mut())) {
+        release_reference(token);
+    }
     if errors.is_empty() {
         Ok(())
     } else {
@@ -447,6 +466,7 @@ pub(crate) fn clear_for_tests() {
     *BRIDGE.lock().unwrap() = None;
     *SHUTDOWN.lock().unwrap() = None;
     SHUTDOWN_DONE.with(|done| done.set(false));
+    RETAINED.with(|r| r.borrow_mut().clear());
 }
 
 /// Shutdown for the process end: `terminate_process` calls it before the process exits.

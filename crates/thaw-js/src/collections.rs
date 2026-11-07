@@ -315,8 +315,6 @@ impl Interp {
     }
 
     /// Whether `sym` is one of the intrinsic well-known symbols (`Symbol.iterator`, ...).
-    // ponytail: no non-test caller yet; the napi symbol bridge will use it.
-    #[allow(dead_code)]
     pub(crate) fn is_well_known(&self, sym: &Obj) -> bool {
         self.well_known.iter().any(|w| Rc::ptr_eq(w, sym))
     }
