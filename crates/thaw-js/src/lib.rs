@@ -1398,7 +1398,7 @@ impl Interp {
                 if key == "length" {
                     return Ok(Value::Number(builtins::str_len(s) as f64));
                 }
-                if let Some(i) = index_key(key) {
+                if let Some(i) = array_index(key) {
                     return Ok(builtins::str_unit_at(s, i).map_or(Value::Undefined, |u| {
                         Value::Str(builtins::units_str(&[u]).into())
                     }));
@@ -1432,14 +1432,15 @@ impl Interp {
                         if key == "length" {
                             Fast::Hit(Value::Number(items.len() as f64))
                         } else {
-                            index_key(key).map_or(Fast::Chain, |i| Fast::Hit(unhole(items.get(i))))
+                            array_index(key)
+                                .map_or(Fast::Chain, |i| Fast::Hit(unhole(items.get(i))))
                         }
                     }
                     Kind::Wrapper(Value::Str(s)) => {
                         if key == "length" {
                             Fast::Hit(Value::Number(builtins::str_len(s) as f64))
                         } else {
-                            index_key(key)
+                            array_index(key)
                                 .and_then(|i| builtins::str_unit_at(s, i))
                                 .map_or(Fast::Chain, |u| {
                                     Fast::Hit(Value::Str(builtins::units_str(&[u]).into()))
@@ -1451,7 +1452,7 @@ impl Interp {
                         "byteLength" => Fast::Hit(Value::Number((t.len * t.ty.size()) as f64)),
                         "byteOffset" => Fast::Hit(Value::Number(t.off as f64)),
                         "buffer" => Fast::Hit(Value::Object(t.abuf.clone())),
-                        _ => index_key(key).map_or(Fast::Chain, |i| {
+                        _ => array_index(key).map_or(Fast::Chain, |i| {
                             Fast::Hit(t.get(i).map_or(Value::Undefined, Value::Number))
                         }),
                     },
@@ -1539,7 +1540,7 @@ impl Interp {
             return self.assign_var(&self.global.clone(), key, value);
         }
         if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
-            if let Ok(i) = key.parse::<usize>() {
+            if let Some(i) = array_index(key) {
                 if i >= items.len() {
                     items.resize(i + 1, Value::Hole);
                 }
@@ -1556,7 +1557,7 @@ impl Interp {
             }
         }
         if let Kind::Typed(t) = &*o.kind.borrow() {
-            if let Ok(i) = key.parse::<usize>() {
+            if let Some(i) = array_index(key) {
                 let t = t.clone();
                 let n = self.num(&value);
                 t.set(i, n);
@@ -3148,8 +3149,7 @@ impl Interp {
                         return Ok(Value::Bool(false));
                     }
                     if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
-                        if let Some(slot) = key.parse::<usize>().ok().and_then(|i| items.get_mut(i))
-                        {
+                        if let Some(slot) = array_index(&key).and_then(|i| items.get_mut(i)) {
                             *slot = Value::Hole;
                         }
                     }
@@ -3634,16 +3634,6 @@ enum Fast {
     Chain,
 }
 
-/// Array-index key for a property read. Only keys starting with a digit or `+` reach `parse`,
-/// the same accepted set as the old unconditional parse.
-#[inline]
-fn index_key(key: &str) -> Option<usize> {
-    match key.as_bytes().first() {
-        Some(b) if b.is_ascii_digit() || *b == b'+' => key.parse::<usize>().ok(),
-        _ => None,
-    }
-}
-
 fn read_own(o: &ObjData, key: &str) -> Option<Read> {
     let i = o.position(key)?;
     let props = o.props.borrow();
@@ -3692,13 +3682,18 @@ pub(crate) fn push_prop(o: &ObjData, props: &mut Vec<Prop>, p: Prop) {
     }
 }
 
-/// An array-index property key (`"0"`, `"17"`, not `"01"`).
-fn array_index(k: &str) -> Option<u32> {
+/// Canonical array-index property key (`"0"`, `"17"`; not `"01"`, `"+1"`, `"1.0"`, `" 1"`, `"-0"`),
+/// below 2^32 - 1. Every index-keyed site uses this one function.
+#[inline]
+pub(crate) fn array_index(k: &str) -> Option<usize> {
     let b = k.as_bytes();
     if b.is_empty() || !b[0].is_ascii_digit() || (b[0] == b'0' && b.len() > 1) || b.len() > 10 {
         return None;
     }
-    k.parse::<u32>().ok().filter(|n| *n != u32::MAX)
+    k.parse::<u32>()
+        .ok()
+        .filter(|n| *n != u32::MAX)
+        .map(|n| n as usize)
 }
 
 /// Enumeration order of own keys: array indices ascending, then the rest in insertion order.

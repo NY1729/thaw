@@ -12,7 +12,7 @@ use crate::host::{
     classify, graph_field, graph_token, handle_is_live, thaw_tjs_release_handle, wire_owner,
     with_package, GraphCx, HostError, Native,
 };
-use crate::{Interp, Obj, Value};
+use crate::{array_index, Interp, Obj, Value};
 
 /// Decode an N-API graph wire into `(owning package, value)`. With a `leases` list, exactly those handle
 /// references are released once decoding ends, on success and on error; a wire without the list (the
@@ -397,7 +397,7 @@ fn units_json(units: &[u16]) -> String {
 /// The current value of own data property `key`: an array slot, `length`, or a stored slot.
 fn own_value(o: &Obj, key: &str) -> Value {
     if let Kind::Array(items) = &*o.kind.borrow() {
-        if let Ok(slot) = key.parse::<usize>() {
+        if let Some(slot) = array_index(key) {
             return unhole(items.get(slot));
         }
         if key == "length" {
@@ -598,10 +598,7 @@ impl NapiWireOut {
         let mut parts = Vec::new();
         for (key, flags) in own_entries(o) {
             let key_token = self.key_token(it, &key)?;
-            let masked = key
-                .parse::<usize>()
-                .ok()
-                .and_then(|slot| masks.get(&slot).map(|h| (slot, *h)));
+            let masked = array_index(&key).and_then(|slot| masks.get(&slot).map(|h| (slot, *h)));
             let value = match masked {
                 Some((slot, handle)) => self.carrier(slot, handle, carriers),
                 None => self.token(&own_value(o, &key))?,
