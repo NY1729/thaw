@@ -57,6 +57,22 @@ MEASURE_ROWS="$SCRATCH/out/rows.tsv"
 : > "$MEASURE_ROWS"
 row() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> "$MEASURE_ROWS"; }
 
+# Failure diagnostics: on any non-success (build_ok, run_exit, stdout_eq_node) print the first 8 lines
+# of that engine's .build and .stderr to the job log. Args: name engine logprefix build_ok run_exit eq.
+diagnose() {
+  local name="$1" engine="$2" log="$3" build_ok="$4" run_exit="$5" eq="$6" f
+  if [ "$build_ok" = 1 ] && [ "$run_exit" = 0 ] && [ "$eq" = 1 ]; then return 0; fi
+  echo "[measure] FAIL $name/$engine: build_ok=$build_ok run_exit=$run_exit stdout_eq_node=$eq" >&2
+  for f in "$log.build" "$log.stderr"; do
+    if [ -s "$f" ]; then
+      echo "[measure]   == $f (first 8 lines)" >&2
+      head -n 8 "$f" | sed 's/^/[measure]     /' >&2
+    else
+      echo "[measure]   == $f: empty or absent" >&2
+    fi
+  done
+}
+
 # Engine selection: THAW_JS_ENGINE=quickjs|thaw-js; the legacy THAW_JS_RUNTIME is always unset.
 engine_env() {
   echo "-u THAW_JS_RUNTIME THAW_JS_ENGINE=$1"
@@ -126,6 +142,7 @@ measure_program() {
       row program "$name" "$engine" F ""
       row program "$name" "$engine" links_quickjs ""
       row program "$name" "$engine" stdout_eq_node 0
+      diagnose "$name" "$engine" "$log" 0 na 0
       continue
     fi
     "$THAW" inspect "$bin" > "$log.inspect" 2>&1
@@ -146,8 +163,10 @@ measure_program() {
       e=$(date +%s%N)
       runs+=( $(( (e - s) / 1000000 )) )
       [ "$status" = 0 ] || run_status=$status
-      read -r _ rrss < "$log.time"
-      [ "${rrss:-0}" -gt "$rss" ] && rss=$rrss
+      read -r _ rrss < "$log.time" 2>/dev/null
+      # /usr/bin/time prints "Command terminated by signal N" instead of "<sec> <kB>" when the child dies.
+      case "$rrss" in ''|*[!0-9]*) rrss=0 ;; esac
+      [ "$rrss" -gt "$rss" ] && rss=$rrss
       cmp -s "$log.stdout" "$SCRATCH/out/$name.node" || ok=0
     done
     local median
@@ -156,6 +175,7 @@ measure_program() {
     row program "$name" "$engine" run_ms "$median"
     row program "$name" "$engine" rss_kb "$rss"
     row program "$name" "$engine" stdout_eq_node "$ok"
+    diagnose "$name" "$engine" "$log" "$build_ok" "$run_status" "$ok"
   done
 }
 

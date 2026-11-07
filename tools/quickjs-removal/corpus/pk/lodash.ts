@@ -1,10 +1,10 @@
 import { chunk, groupBy, merge, get, sortBy, uniq } from "lodash";
-// N = 18k loop iterations of small lodash calls (estimate, see ms.ts).
+// N = 389 loop iterations of small lodash calls (estimate, see ms.ts).
 function line(label: string, v: unknown): void {
   console.log(label + ":" + (typeof v === "string" ? v : JSON.stringify(v)));
 }
 async function main(): Promise<void> {
-  const N = 18000;
+  const N = 389;
   line("chunk", chunk([1, 2, 3, 4, 5, 6, 7], 3));
   line("groupBy", groupBy(["one", "two", "three", "four"], (s: string) => s.length));
   line("merge", merge({ a: { x: 1, y: [1, 2] } }, { a: { y: [3] }, b: 2 }));

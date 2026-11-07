@@ -1,6 +1,6 @@
 import { nanoid, customAlphabet, customRandom } from "nanoid";
 // Random output is never printed: only lengths and charset shape. The workload uses customRandom
-// with a deterministic byte source, so its values are fixed. N = 40k (estimate, see ms.ts).
+// with a deterministic byte source, so its values are fixed. N = 239 (calibrated, see ms.ts).
 function line(label: string, v: unknown): void {
   console.log(label + ":" + (typeof v === "string" ? v : JSON.stringify(v)));
 }
@@ -11,7 +11,7 @@ const det = (n: number): Uint8Array => {
   return b;
 };
 async function main(): Promise<void> {
-  const N = 25000;
+  const N = 239;
   line("len", nanoid().length);
   line("shape", /^[A-Za-z0-9_-]+$/.test(nanoid(64)));
   line("customLen", customAlphabet("abc", 9)().length);

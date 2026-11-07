@@ -18,8 +18,8 @@ async function main(): Promise<void> {
   line("valid", validate({ name: "Al", age: 3, tags: ["x"] }));
   line("invalid", validate({ name: "A", age: -1, tags: [1], extra: true }));
   line("errors", validate.errors);
-  // WORKLOAD: N=5000 validations of a compiled schema (estimate).
-  const N = 5000;
+  // WORKLOAD: N=954 validations of a compiled schema (estimate).
+  const N = 954;
   let acc = 0;
   for (let i = 0; i < N; i++) {
     const ok = validate({ name: "n" + i, age: (i % 50) - 5, tags: [i % 3 === 0 ? 1 : "t"] });

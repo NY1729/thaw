@@ -1,11 +1,11 @@
 import dayjs from "dayjs";
 // default import (dayjs is default-only). UTC only: ISO strings with Z, hour/minute units only
-// (day/month arithmetic is local-calendar and would be TZ-sensitive). N = 50k (estimate, see ms.ts).
+// (day/month arithmetic is local-calendar and would be TZ-sensitive). N = 1408 (calibrated, see ms.ts).
 function line(label: string, v: unknown): void {
   console.log(label + ":" + (typeof v === "string" ? v : JSON.stringify(v)));
 }
 async function main(): Promise<void> {
-  const N = 7000;
+  const N = 1408;
   const base = dayjs("2024-02-28T12:00:00Z");
   line("add36h", base.add(36, "hour").toISOString());
   line("unix", dayjs.unix(1700000000).toISOString());

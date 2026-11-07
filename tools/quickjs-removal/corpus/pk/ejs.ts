@@ -8,9 +8,9 @@ async function main(): Promise<void> {
   line("render", ejs.render(TPL, { title: "A & B", items: [{ name: "x" }, { name: "<y>" }] }));
   line("escaped", ejs.render("<%= s %>|<%- s %>", { s: "<&>'\"" }));
   line("empty", ejs.render("[<%= missing || 'dflt' %>]", { missing: null }));
-  // WORKLOAD: N=2000 renders of one compiled template (estimate).
+  // WORKLOAD: N=31 renders of one compiled template (estimate).
   const fn = ejs.compile("<%= n %>:<%= s.length %>|<% for (var k = 0; k < n % 3; k++) { %>*<% } %>");
-  const N = 2000;
+  const N = 31;
   let acc = 0;
   for (let i = 0; i < N; i++) {
     acc = (acc * 31 + fn({ n: i, s: "ab" + i }).length) | 0;

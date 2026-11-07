@@ -14,8 +14,8 @@ async function main(): Promise<void> {
   line("weekday", d.weekday);
   line("invalid", DateTime.fromISO("not-a-date", { zone: "utc" }).isValid);
   line("duration", Duration.fromObject({ hours: 1, minutes: 30 }).toISO());
-  // WORKLOAD: N=3000 (estimate). Folds ordinal/weekday/hour numerically; the template's string-length fold is constant here.
-  const N = 3000;
+  // WORKLOAD: N=345 (calibrated). Folds ordinal/weekday/hour numerically; the template's string-length fold is constant here.
+  const N = 345;
   const base = Date.UTC(2024, 0, 1);
   let acc = 0;
   for (let i = 0; i < N; i++) {

@@ -1,5 +1,5 @@
 import { z } from "zod";
-// N = 8k safeParse calls (estimate, see ms.ts).
+// N = 954 safeParse calls (estimate, see ms.ts).
 function line(label: string, v: unknown): void {
   console.log(label + ":" + (typeof v === "string" ? v : JSON.stringify(v)));
 }
@@ -9,7 +9,7 @@ const User = z.object({
   tags: z.array(z.string()).default([]),
 });
 async function main(): Promise<void> {
-  const N = 8000;
+  const N = 954;
   const ok = User.safeParse({ name: "Ada", age: 36, tags: ["x"] });
   line("ok", ok.success ? ok.data : null);
   const bad = User.safeParse({ name: "A", age: -1 });

@@ -10,8 +10,8 @@ async function main(): Promise<void> {
   line("attr", $("a").attr("href"));
   line("dataN", $("li.item").last().attr("data-n"));
   line("inner", $("#list").children().first().html());
-  // WORKLOAD: N=500 small documents parsed and queried (estimate).
-  const N = 500;
+  // WORKLOAD: N=271 small documents parsed and queried (estimate).
+  const N = 271;
   let acc = 0;
   for (let i = 0; i < N; i++) {
     const d = load('<div id="x' + i + '"><span class="v">' + i + "</span></div>");
