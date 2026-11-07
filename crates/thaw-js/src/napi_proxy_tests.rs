@@ -828,9 +828,10 @@ fn plain_function_argument_is_a_marker_whose_callback_global_the_reference_looku
         run_in(&mut it, "JSON.stringify(api.argument((a, b) => a + b))"),
         r#"{"__thaw_napi_function__":1}"#
     );
-    // thaw-js has no `configurable` attribute (every property reports true), so only `writable` is checked.
+    // The callback global is installed by `defineCallback` with a bare `Object.defineProperty`, so it is
+    // both non-writable and non-configurable.
     assert_eq!(
-        run_in(&mut it, "Object.getOwnPropertyDescriptor(globalThis, '__thaw_napi_reference_1').writable === false"),
+        run_in(&mut it, "Object.getOwnPropertyDescriptor(globalThis, '__thaw_napi_reference_1').writable === false && Object.getOwnPropertyDescriptor(globalThis, '__thaw_napi_reference_1').configurable === false"),
         "true"
     );
     // The lookup that napi_eval's call_reference makes on the realm global.
