@@ -856,7 +856,7 @@ fn graph_attributes(rest: &[Native], napi: bool) -> Result<u8, String> {
 }
 
 /// Set `name` on the object `target` with `flags`. All attributes is a plain put; the others go through
-/// `define_slot`, which keeps only writable and enumerable (configurability is per object in thaw-js).
+/// `define_slot`.
 fn graph_put(it: &mut Interp, target: &Obj, name: &str, v: Value, flags: u8) -> Result<(), String> {
     if flags == 7 {
         crate::put(target, name, v);
@@ -869,6 +869,7 @@ fn graph_put(it: &mut Interp, target: &Obj, name: &str, v: Value, flags: u8) -> 
         Slot::Data(v),
         flags & 2 != 0,
         flags & 1 != 0,
+        flags & 4 != 0,
     )
     .map_err(|c| classify(it, c).to_string())
 }
