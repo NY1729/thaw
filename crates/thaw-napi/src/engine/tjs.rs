@@ -123,7 +123,7 @@ extern "C" {
     ) -> ThawHandleResult;
     fn thaw_tjs_handle_is_promise_result(handle: u64) -> ThawHandleResult;
     fn thaw_tjs_host_object_integrity_result(handle: u64, freeze: u8) -> ThawHandleResult;
-    fn thaw_tjs_host_property_names_result(
+    fn thaw_tjs_napi_host_property_names_result(
         handle: u64,
         key_mode: i32,
         key_filter: u32,
@@ -367,7 +367,9 @@ pub extern "C" fn thaw_js_host_property_names_result(
     key_filter: u32,
     key_conversion: i32,
 ) -> ThawResult {
-    unsafe { thaw_tjs_host_property_names_result(handle, key_mode, key_filter, key_conversion) }
+    unsafe {
+        thaw_tjs_napi_host_property_names_result(handle, key_mode, key_filter, key_conversion)
+    }
 }
 pub extern "C" fn thaw_js_host_query_result(handle: u64, operation: u8) -> ThawResult {
     unsafe { thaw_tjs_host_query_result(handle, operation) }
