@@ -278,9 +278,9 @@ pub extern "C" fn thaw_tjs_host_object_integrity_result(handle: u64, freeze: u8)
             )));
         };
         if freeze != 0 {
-            object.frozen.set(true);
+            builtins::freeze_obj(object);
         } else {
-            object.ext.set(2);
+            builtins::seal_obj(object);
         }
         Ok(1)
     }))

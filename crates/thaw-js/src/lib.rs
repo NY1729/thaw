@@ -3211,11 +3211,11 @@ impl Interp {
                         let strings = self.array(cooked);
                         if let Value::Object(o) = &strings {
                             let raw = self.array(raw);
+                            put_hidden(o, "raw", raw.clone());
                             if let Value::Object(r) = &raw {
-                                r.frozen.set(true);
+                                crate::builtins::freeze_obj(r);
                             }
-                            put_hidden(o, "raw", raw);
-                            o.frozen.set(true);
+                            crate::builtins::freeze_obj(o);
                         }
                         self.tpl_cache.insert(site, strings.clone());
                         strings
