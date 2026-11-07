@@ -432,3 +432,30 @@ fn host_query_15_gives_string_units_and_21_the_native_owner() {
         .unwrap_err()
         .contains("invalid JavaScript handle"));
 }
+
+#[test]
+fn integrity_export_sets_the_per_prop_flags() {
+    load(FIXTURES);
+    load("__napi.c2dSealed = { a: 1 }; __napi.c2dFrozen = { b: 2 };");
+    assert_eq!(
+        value(thaw_tjs_host_object_integrity_result(
+            global("__napi.c2dSealed"),
+            0
+        )),
+        1
+    );
+    assert_eq!(
+        value(thaw_tjs_host_object_integrity_result(
+            global("__napi.c2dFrozen"),
+            1
+        )),
+        1
+    );
+    // Each check throws on mismatch, so `load` reports a failed script as a failed assertion.
+    load("{ const s = __napi.c2dSealed, f = __napi.c2dFrozen; \
+          if (!Object.isSealed(s) || Object.isFrozen(s)) throw new Error('sealed flags'); \
+          if (Object.getOwnPropertyDescriptor(s, 'a').configurable) throw new Error('sealed prop'); \
+          if (!Object.isFrozen(f)) throw new Error('frozen flags'); \
+          const d = Object.getOwnPropertyDescriptor(f, 'b'); \
+          if (d.configurable || d.writable) throw new Error('frozen prop'); }");
+}
