@@ -285,9 +285,15 @@ impl Interp {
             };
             if !Rc::ptr_eq(t, n) {
                 // the trap built a different object: `this` takes over its contents (the derived
-                // constructor keeps the pre-allocated identity)
+                // constructor keeps the pre-allocated identity). A proxy result's prototype comes from
+                // its getPrototypeOf trap, which must be asked before `n` loses its kind.
+                let proto = match self.proxy_get_prototype_of(n)? {
+                    Some(Value::Object(p)) => Some(p),
+                    Some(_) => None,
+                    None => n.proto.borrow_mut().take(),
+                };
                 *t.kind.borrow_mut() = std::mem::replace(&mut *n.kind.borrow_mut(), Kind::Plain);
-                *t.proto.borrow_mut() = n.proto.borrow_mut().take();
+                *t.proto.borrow_mut() = proto;
                 *t.props.borrow_mut() = std::mem::take(&mut *n.props.borrow_mut());
                 *t.index.borrow_mut() = n.index.borrow_mut().take();
                 t.ext.set(n.ext.get());

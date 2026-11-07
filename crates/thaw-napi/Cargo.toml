@@ -12,7 +12,7 @@ default = ["quickjs-brotli", "quickjs-tls", "quickjs-wasm"]
 # `js-engine` = "some engine backend is present"; all existing cfg(feature="js-engine") gates keep working.
 js-engine = []
 engine-quickjs = ["js-engine", "dep:thaw-quickjs"]
-# Stage-1 placeholder: no backend yet (compile_error in engine.rs); thaw-js is reached via extern "C" later, never a Cargo dep.
+# thaw-js is reached via extern "C" only (src/engine/tjs.rs), never a normal Cargo dep.
 engine-thaw-js = ["js-engine"]
 quickjs = ["engine-quickjs"]
 quickjs-brotli = ["engine-quickjs", "thaw-quickjs/brotli"]
@@ -31,6 +31,10 @@ tempfile = "3"
 thaw-quickjs = { path = "../thaw-quickjs", optional = true, default-features = false }
 
 [dev-dependencies]
+# Test-only, same device as thaw-std/thaw-runtime below: `use thaw_js as _;` in lib.rs (cfg test +
+# engine-thaw-js) makes the test binary link thaw-js's rlib so the `extern "C"` thaw_tjs_* imports
+# in src/engine/tjs.rs resolve. No normal dependency edge; the lib never calls thaw-js from Rust.
+thaw-js = { path = "../thaw-js" }
 # Test-only: with the `js-engine` feature (on by default), this crate
 # transitively needs thaw-quickjs's `thaw_js_dynamic_object_query`, which
 # calls thaw-std's `thaw_json_parse` as an `extern "C"` declaration
