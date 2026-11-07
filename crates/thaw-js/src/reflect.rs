@@ -230,13 +230,18 @@ fn define(it: &mut Interp, o: &Obj, key: &str, desc: &Value, intr: &Intrinsics) 
     Ok(true)
 }
 
-fn delete(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
+/// `[[Delete]]` of own property `key`, shared by the `delete` operator, `Reflect.deleteProperty`,
+/// the proxy fallthrough and the native property predicates. A refused delete is `false`.
+// ponytail: sloppy semantics only; strict-mode code should throw a TypeError on a refused delete, but
+// strictness is not tracked, so it never does.
+pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
     if is_proxy(o) {
         return Ok(it.proxy_delete(o, key)?.unwrap_or(true));
     }
     if own_prop(o, key).is_none() {
         return Ok(true);
     }
+    // array elements have no Prop: they are configurable unless the object is frozen or sealed
     if o.frozen.get() || o.ext.get() == 2 {
         return Ok(false);
     }
@@ -246,6 +251,11 @@ fn delete(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
         }
         if let Some(slot) = array_index(key).and_then(|i| items.get_mut(i)) {
             *slot = Value::Hole;
+        }
+    }
+    if let Some(i) = o.position(key) {
+        if !o.props.borrow()[i].configurable {
+            return Ok(false);
         }
     }
     o.remove_prop(key);
@@ -374,7 +384,7 @@ impl Interp {
         self.set_native(&r, "deleteProperty", |it, _, args| {
             let o = obj(it, "deleteProperty", &arg(args, 0))?;
             let key = it.key_of(&arg(args, 1));
-            Ok(Value::Bool(delete(it, &o, &key)?))
+            Ok(Value::Bool(delete_own(it, &o, &key)?))
         });
         self.set_native(&r, "getPrototypeOf", |it, _, args| {
             let o = obj(it, "getPrototypeOf", &arg(args, 0))?;

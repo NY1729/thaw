@@ -591,6 +591,8 @@
       return values;
     };
     const target = function () {};
+    // A function's own `prototype` is non-configurable; this target must lose it.
+    Object.defineProperty(target, 'prototype', { configurable: true });
     delete target.prototype;
     const initialTargetOwn = new Map();
     reflectOwnKeys(target).forEach(key => { initialTargetOwn.set(key, reflectGetOwn(target, key)); });

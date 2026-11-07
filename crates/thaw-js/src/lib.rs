@@ -3172,18 +3172,7 @@ impl Interp {
                 let obj = self.eval(&m.obj, scope)?;
                 let key = self.member_key(&m.prop, scope)?;
                 if let Value::Object(o) = obj {
-                    if let Some(r) = self.proxy_delete(&o, &key)? {
-                        return Ok(Value::Bool(r));
-                    }
-                    if o.frozen.get() || o.ext.get() == 2 {
-                        return Ok(Value::Bool(false));
-                    }
-                    if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
-                        if let Some(slot) = array_index(&key).and_then(|i| items.get_mut(i)) {
-                            *slot = Value::Hole;
-                        }
-                    }
-                    o.remove_prop(&key);
+                    return Ok(Value::Bool(crate::reflect::delete_own(self, &o, &key)?));
                 }
                 Ok(Value::Bool(true))
             }
