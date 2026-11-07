@@ -219,6 +219,11 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
     if is_proxy(o) {
         return Ok(it.proxy_delete(o, key)?.unwrap_or(true));
     }
+    if matches!(&*o.kind.borrow(), Kind::Global) {
+        if let Some(deleted) = it.delete_global_binding(key) {
+            return Ok(deleted);
+        }
+    }
     if own_prop(o, key).is_none() {
         return Ok(true);
     }

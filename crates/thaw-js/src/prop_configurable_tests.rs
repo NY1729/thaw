@@ -361,6 +361,87 @@ fn array_index_define_on_non_extensible_throws() {
     );
 }
 
+/// Like `one`, but parsed as a sloppy-mode script (where `delete` on an identifier is legal).
+fn one_sloppy(src: &str) -> String {
+    let mut it = Interp::new();
+    match it.run_parsed(src, thaw_parser::parse_javascript_script(src), true) {
+        Ok(_) => it.out.join("|"),
+        Err(Ctl::Throw(v)) => format!("Uncaught {}", it.to_str(&v)),
+        Err(_) => "stray completion".into(),
+    }
+}
+
+// Global `delete`: the expectations mirror Node 22 run as a global script (`vm.runInThisContext`).
+// `node file.js` is a CommonJS wrapper, where a top-level `var` is not on globalThis at all.
+
+#[test]
+fn global_var_and_function_are_not_deletable() {
+    // mirrors: var v = 1; console.log(delete globalThis.v, v)
+    assert_eq!(
+        one_sloppy("var v = 1; console.log(delete globalThis.v, v);"),
+        "false 1"
+    );
+    // mirrors: function f() {}; console.log(delete globalThis.f, typeof f)
+    assert_eq!(
+        one_sloppy("function f() {} console.log(delete globalThis.f, typeof f);"),
+        "false function"
+    );
+    assert_eq!(
+        one_sloppy("var v = 1; console.log(delete v, v);"),
+        "false 1"
+    );
+    assert_eq!(
+        one_sloppy("var v = 1; console.log(Reflect.deleteProperty(globalThis, 'v'), v);"),
+        "false 1"
+    );
+    assert_eq!(
+        one_sloppy("var v = 1; console.log(delete globalThis.v, globalThis.v);"),
+        "false 1"
+    );
+}
+
+#[test]
+fn global_implicit_properties_are_deletable() {
+    // mirrors: globalThis.w = 1; console.log(delete globalThis.w, typeof w)
+    assert_eq!(
+        one_sloppy("globalThis.w = 1; console.log(delete globalThis.w, typeof w);"),
+        "true undefined"
+    );
+    assert_eq!(
+        one_sloppy("x = 1; console.log(delete x, typeof x);"),
+        "true undefined"
+    );
+    // removal keeps the other globals (the name index is rebuilt)
+    assert_eq!(
+        one_sloppy("globalThis.a1 = 1; globalThis.a2 = 2; console.log(delete globalThis.a1, typeof a1, a2);"),
+        "true undefined 2"
+    );
+    // mirrors: console.log(delete globalThis.nope)
+    assert_eq!(one_sloppy("console.log(delete globalThis.nope);"), "true");
+}
+
+#[test]
+fn global_lexical_bindings_are_not_removed_by_delete() {
+    // mirrors: let l = 1; console.log(delete globalThis.l, l)
+    assert_eq!(
+        one_sloppy("let l = 1; console.log(delete globalThis.l, l);"),
+        "true 1"
+    );
+    assert_eq!(
+        one_sloppy("const c = 1; console.log(delete globalThis.c, c);"),
+        "true 1"
+    );
+}
+
+#[test]
+fn eval_declared_global_var_is_deletable() {
+    // an indirect eval declares a configurable binding (mirrors (0, eval)('var q = 1') in Node)
+    assert_eq!(
+        one_sloppy("(0, eval)('var q = 1'); console.log(delete globalThis.q, typeof q);"),
+        "true undefined"
+    );
+}
+
 // `Object.isFrozen` / `Object.isSealed` derive from the object flags and per-Prop attributes.
 // Expectations are Node 22 output.
 
