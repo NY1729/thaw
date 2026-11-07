@@ -5746,6 +5746,14 @@ fn proxy_construct_trap_receives_new_target() {
 }
 
 #[test]
+fn derived_class_over_proxy_construct_trap_result_uses_its_get_prototype_of_trap() {
+    assert_eq!(
+        one("var P = new Proxy(function(){}, { construct(t, a, nt) { return new Proxy({}, { getPrototypeOf() { return nt.prototype; } }); } }); class D extends P {} console.log(new D() instanceof D)"),
+        "true"
+    );
+}
+
+#[test]
 fn derived_class_over_proxy_construct_trap_gets_derived_new_target() {
     assert_eq!(
         one("var F = function(){ this.k = 1; }; var seen; var P = new Proxy(F, { construct(t, a, nt) { seen = nt; return Reflect.construct(t, a, nt); } }); class D extends P {} var d = new D(); console.log(seen === D, d.k, Object.getPrototypeOf(d) === D.prototype, d instanceof D)"),
