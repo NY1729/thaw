@@ -605,7 +605,7 @@ impl Interp {
         if self.try_define(o, key, desc)? {
             return Ok(());
         }
-        if (o.ext.get() != 0 || o.frozen.get())
+        if (o.ext.get() != 0 || o.frozen.get() || o.len_ro.get())
             && o.position(key).is_none()
             && !own_array_elem(o, key)
         {
@@ -643,7 +643,7 @@ impl Interp {
                 key: key.into(),
                 slot: Slot::Data(Value::Number(items.len() as f64)),
                 enumerable: false,
-                writable: !frozen,
+                writable: o.len_writable(),
                 configurable: false,
             }),
             Kind::Array(items) => array_index(key)
@@ -662,6 +662,9 @@ impl Interp {
             || (matches!(&*o.kind.borrow(), Kind::Array(_))
                 && array_index(key).is_some()
                 && d.value.is_some());
+        // a read-only `length` also refuses new elements past it
+        let len_blocks = o.len_ro.get()
+            && matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(key).is_some_and(|i| i >= items.len()));
         let current = if is_array_elem {
             arr_current
         } else {
@@ -669,7 +672,7 @@ impl Interp {
         };
         match &current {
             Some(cur) if !cur.configurable && !redefine_allowed(cur, &d) => return Ok(false),
-            None if o.ext.get() != 0 || frozen => return Ok(false),
+            None if o.ext.get() != 0 || frozen || len_blocks => return Ok(false),
             _ => {}
         }
         if is_array_elem {
@@ -677,6 +680,10 @@ impl Interp {
             // (or an accessor) on an element is accepted without applying them
             if let Some(v) = d.value {
                 self.set(&Value::Object(o.clone()), key, v)?;
+            }
+            // the value applies before the flag: `{value: 1, writable: false}` truncates, then freezes
+            if key == "length" && d.writable.as_ref().is_some_and(|w| !w.truthy()) {
+                o.len_ro.set(true);
             }
             return Ok(true);
         }
@@ -1187,7 +1194,8 @@ impl Interp {
                         let frozen = o.frozen.get();
                         let is_length = key.as_ref() == "length";
                         put(&d, "value", v);
-                        put(&d, "writable", Value::Bool(!frozen));
+                        let writable = if is_length { o.len_writable() } else { !frozen };
+                        put(&d, "writable", Value::Bool(writable));
                         put(&d, "enumerable", Value::Bool(!is_length));
                         put(
                             &d,
@@ -1513,6 +1521,9 @@ impl Interp {
                 it.set(this, "length", Value::Number(n as f64))?;
                 return Ok(Value::Number(n as f64));
             }
+            if o.len_ro.get() {
+                return it.throw_error("TypeError", RO_LENGTH);
+            }
             let mut kind = o.kind.borrow_mut();
             let Kind::Array(items) = &mut *kind else {
                 drop(kind);
@@ -1526,6 +1537,10 @@ impl Interp {
         });
         self.set_native(&ap, "pop", |it, this, _| {
             if let Value::Object(o) = this {
+                // ponytail: throws before mutating; Node pops the element first, then its length Set throws
+                if o.len_ro.get() {
+                    return it.throw_error("TypeError", RO_LENGTH);
+                }
                 if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
                     let len = it.get(this, "length")?;
                     let n = it.num(&len).max(0.0) as usize;
@@ -1545,8 +1560,12 @@ impl Interp {
             }
             Ok(Value::Undefined)
         });
-        self.set_native(&ap, "shift", |_, this, _| {
+        self.set_native(&ap, "shift", |it, this, _| {
             if let Value::Object(o) = this {
+                // ponytail: throws before mutating; Node shifts the element first, then its length Set throws
+                if o.len_ro.get() {
+                    return it.throw_error("TypeError", RO_LENGTH);
+                }
                 if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
                     return Ok(if items.is_empty() {
                         Value::Undefined
@@ -1557,8 +1576,11 @@ impl Interp {
             }
             Ok(Value::Undefined)
         });
-        self.set_native(&ap, "unshift", |_, this, args| {
+        self.set_native(&ap, "unshift", |it, this, args| {
             if let Value::Object(o) = this {
+                if o.len_ro.get() {
+                    return it.throw_error("TypeError", RO_LENGTH);
+                }
                 if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
                     items.splice(0..0, args.iter().cloned());
                     return Ok(Value::Number(items.len() as f64));
@@ -1578,6 +1600,10 @@ impl Interp {
             let Value::Object(o) = this else {
                 return Ok(Value::Undefined);
             };
+            // ponytail: throws before mutating; Node splices the elements first, then its length Set throws
+            if o.len_ro.get() {
+                return it.throw_error("TypeError", RO_LENGTH);
+            }
             let len = it.array_items(this).len();
             let start = match arg(args, 0) {
                 Value::Undefined => 0,
@@ -2689,6 +2715,9 @@ fn same_value(a: &Value, b: &Value) -> bool {
 }
 
 /// An array's `length`, or an element that is present (not a hole), is own.
+/// The TypeError an array mutator raises when it must set a read-only `length`.
+const RO_LENGTH: &str = "Cannot assign to read only property 'length' of object '[object Array]'";
+
 fn own_array_elem(o: &Obj, key: &str) -> bool {
     match &*o.kind.borrow() {
         Kind::Array(items) => {

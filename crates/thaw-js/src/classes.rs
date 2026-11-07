@@ -298,6 +298,7 @@ impl Interp {
                 *t.index.borrow_mut() = n.index.borrow_mut().take();
                 t.ext.set(n.ext.get());
                 t.frozen.set(n.frozen.get());
+                t.len_ro.set(n.len_ro.get());
             }
             return Ok(this.clone());
         }

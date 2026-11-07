@@ -38,7 +38,10 @@ fn own_prop(o: &Obj, key: &str) -> Option<(Slot, bool)> {
     let writable = !o.frozen.get();
     if let Kind::Array(items) = &*o.kind.borrow() {
         if key == "length" {
-            return Some((Slot::Data(Value::Number(items.len() as f64)), writable));
+            return Some((
+                Slot::Data(Value::Number(items.len() as f64)),
+                o.len_writable(),
+            ));
         }
         if let Some(v) = array_index(key).and_then(|i| items.get(i)) {
             if !matches!(v, Value::Hole) {
