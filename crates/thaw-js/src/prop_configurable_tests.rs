@@ -360,3 +360,70 @@ fn array_index_define_on_non_extensible_throws() {
         "TypeError Cannot define property 1, object is not extensible"
     );
 }
+
+// `Object.isFrozen` / `Object.isSealed` derive from the object flags and per-Prop attributes.
+// Expectations are Node 22 output.
+
+#[test]
+fn integrity_of_non_extensible_objects_follows_prop_flags() {
+    assert_eq!(
+        one("console.log(Object.isFrozen(Object.preventExtensions({})), Object.isSealed(Object.preventExtensions({})));"),
+        "true true"
+    );
+    assert_eq!(
+        one("{ const o = Object.preventExtensions({ a: 1 }); Object.defineProperty(o, 'a', { writable: false, configurable: false }); console.log(Object.isFrozen(o), Object.isSealed(o)); }"),
+        "true true"
+    );
+    assert_eq!(
+        one("{ const o = Object.preventExtensions({ a: 1 }); console.log(Object.isFrozen(o), Object.isSealed(o)); }"),
+        "false false"
+    );
+}
+
+#[test]
+fn integrity_of_sealed_objects_follows_prop_flags() {
+    assert_eq!(
+        one("{ const o = { a: 1 }; Object.seal(o); Object.defineProperty(o, 'a', { writable: false }); console.log(Object.isFrozen(o), Object.isSealed(o)); }"),
+        "true true"
+    );
+    assert_eq!(
+        one("{ const o = Object.seal({ a: 1, b: 2 }); Object.defineProperty(o, 'a', { writable: false }); console.log(Object.isFrozen(o), Object.isSealed(o)); }"),
+        "false true"
+    );
+    assert_eq!(
+        one("console.log(Object.isFrozen(Object.seal({ a: 1 })), Object.isSealed(Object.seal({ a: 1 })));"),
+        "false true"
+    );
+    assert_eq!(
+        one("console.log(Object.isFrozen(Object.seal({ get a() { return 1; } })), Object.isSealed(Object.seal({ get a() { return 1; } })));"),
+        "true true"
+    );
+}
+
+#[test]
+fn integrity_of_arrays_follows_element_state() {
+    assert_eq!(
+        one("console.log(Object.isFrozen(Object.freeze([1])), Object.isSealed(Object.freeze([1])), Object.isFrozen(Object.seal([1])), Object.isSealed(Object.seal([1])));"),
+        "true true false true"
+    );
+    assert_eq!(
+        one("console.log(Object.isFrozen(Object.preventExtensions([])), Object.isSealed(Object.preventExtensions([1])), Object.isFrozen(Object.preventExtensions([1])));"),
+        "true false false"
+    );
+    assert_eq!(
+        one("console.log(Object.isFrozen(Object.preventExtensions([,])), Object.isSealed(Object.preventExtensions([,])));"),
+        "true true"
+    );
+}
+
+#[test]
+fn integrity_of_primitives_and_empty_objects() {
+    assert_eq!(
+        one("console.log(Object.isFrozen(1), Object.isSealed('s'), Object.isFrozen(null));"),
+        "true true true"
+    );
+    assert_eq!(
+        one("console.log(Object.isFrozen({}), Object.isSealed({}), Object.isFrozen(Object.seal({})), Object.isSealed(Object.freeze({})));"),
+        "false false true true"
+    );
+}
