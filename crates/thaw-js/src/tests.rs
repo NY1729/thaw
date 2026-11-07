@@ -6044,3 +6044,20 @@ fn str_append_in_a_loop_copies_only_when_promoting() {
     let copies = crate::jsstr::copies_made() - base;
     assert!(copies <= 130, "copies: {copies}");
 }
+
+// ----- a non-iterable object in destructuring, for...of, spread is a catchable TypeError (not unsupported) -----
+
+#[test]
+fn non_iterable_object_in_destructuring_for_of_and_spread_throws_type_error() {
+    assert_eq!(
+        one("function t(g) { try { g(); return 'no'; } catch (e) { return e.name + ':' + (e instanceof TypeError) + ':' + e.message; } }
+             function f() {}
+             console.log(
+               t(function () { var [a] = {}; }),
+               t(function () { for (var x of {}) {} }),
+               t(function () { f(...{}); }),
+               t(function () { [...{}]; })
+             );"),
+        "TypeError:true:value is not iterable TypeError:true:value is not iterable TypeError:true:Spread syntax requires ...iterable[Symbol.iterator] to be a function TypeError:true:value is not iterable"
+    );
+}
