@@ -5837,3 +5837,158 @@ fn call_guard_deadline_interrupts_recursive_calls() {
         "ERR_SCRIPT_EXECUTION_TIMEOUT Script execution timed out after 30ms|0"
     );
 }
+
+// `s += x` appends in place only for a uniquely owned string; these pin the JS value semantics the
+// in-place path must keep (aliasing, re-entrancy, const/TDZ/with, surrogates, flag, key uses).
+#[test]
+fn str_append_keeps_aliases_and_closures_unchanged() {
+    assert_eq!(
+        one(r"var a='x'.repeat(300); var b=a; a+='y'; console.log(a.length, b.length)"),
+        "301 300"
+    );
+    assert_eq!(
+        one(
+            r"var a2='x'.repeat(300); var arr=[a2]; a2+='y'; console.log(arr[0].length, a2.length)"
+        ),
+        "300 301"
+    );
+    assert_eq!(
+        one(
+            r"function mk(){ var s='x'.repeat(300); var f=function(){return s.length}; s+='y'; return f; } console.log(mk()())"
+        ),
+        "301"
+    );
+    assert_eq!(
+        one(r"var s='ab'.repeat(150); s+=s; console.log(s.length, s.slice(-3))"),
+        "600 bab"
+    );
+    assert_eq!(
+        one(r"var s='x'.repeat(300); var r = (s += 'a'); console.log(r.length, r === s)"),
+        "301 true"
+    );
+}
+
+#[test]
+fn str_append_rhs_reentrancy_and_object_rhs() {
+    assert_eq!(
+        one(r"var s='x'.repeat(300); s += (s = 'q', 'z'); console.log(s.length, s.slice(-1))"),
+        "301 z"
+    );
+    assert_eq!(
+        one(
+            r"var s='x'.repeat(300); function f(){ s += 'k'; return 'z'; } s += f(); console.log(s.length, s.slice(-2))"
+        ),
+        "301 xz"
+    );
+    assert_eq!(
+        one(
+            r"var s='x'.repeat(300); s += {toString(){ s='q'; return 'T'}}; console.log(s.length, s.slice(-1))"
+        ),
+        "301 T"
+    );
+}
+
+#[test]
+fn str_append_const_tdz_and_with_targets() {
+    assert_eq!(
+        one(
+            r"const c='x'.repeat(300); try { c += 'y' } catch(e) { console.log(e.name, c.length) }"
+        ),
+        "TypeError 300"
+    );
+    assert_eq!(
+        one(r"try { q += 'a'; let q = 'x'.repeat(300); } catch (e) { console.log(e.name) }"),
+        "ReferenceError"
+    );
+    assert_eq!(
+        one(r"var g = 'x'.repeat(300); g += 'y'; console.log(g.length, g.slice(-2))"),
+        "301 xy"
+    );
+}
+
+#[test]
+fn str_append_with_target_in_sloppy_script() {
+    let mut it = Interp::new();
+    assert!(it
+        .run_sloppy(r"var w = {s: 'x'.repeat(300)}; var s = 'o'; with (w) { s += 'y'; } console.log(w.s.length, s)")
+        .is_ok());
+    assert_eq!(it.out.join("|"), "301 o");
+}
+
+#[test]
+fn str_append_keeps_surrogate_seams_paired() {
+    assert_eq!(
+        one(
+            r"var x0 = 'x'.repeat(300) + '\uD83D'; x0 += '\uDE00'; console.log(x0.length, x0.codePointAt(300).toString(16), x0.charCodeAt(301))"
+        ),
+        "302 1f600 56832"
+    );
+    assert_eq!(
+        one(
+            r"var t='x'.repeat(300)+'\uD83D'; t+='a'; console.log(t.length, t.charCodeAt(300), t.charCodeAt(301))"
+        ),
+        "302 55357 97"
+    );
+    assert_eq!(
+        one(r"var u='\uD83D'; u+='\uDE00'; console.log(u.length, u.codePointAt(0).toString(16))"),
+        "2 1f600"
+    );
+}
+
+#[test]
+fn str_append_ascii_flag_follows_the_contents() {
+    assert_eq!(
+        one(
+            r"var s5='a'.repeat(300); console.log(s5.indexOf('a'), s5.length); s5 += 'é'; s5 += 'z'; console.log(s5.length, s5.indexOf('é'), s5.indexOf('z'), s5.charAt(300), s5.slice(299, 302), s5.charCodeAt(300), s5.lastIndexOf('a'))"
+        ),
+        "0 300|302 300 301 é aéz 233 299"
+    );
+    assert_eq!(
+        one(
+            r"var t5='b'.repeat(300); t5+='c'; t5+='d'; console.log(t5.indexOf('d'), t5.charAt(301), t5.length, /d$/.test(t5))"
+        ),
+        "301 d 302 true"
+    );
+}
+
+#[test]
+fn str_append_result_works_as_map_json_regexp_and_key() {
+    assert_eq!(
+        one(
+            r"var k=''; for (var i=0;i<100;i++) k+='ab'; k += 'c'; var m=new Map(); m.set(k,1); var lit='ab'.repeat(100)+'c'; console.log(m.get(lit), m.has(k), ({[lit]: 5})[k], JSON.parse(JSON.stringify({v:k})).v === k, /^(ab)+c$/.test(k), k.length)"
+        ),
+        "1 true 5 true true 201"
+    );
+    assert_eq!(
+        one(
+            r"var o={}; var kk='ab'.repeat(100); kk += 'c'; o[kk]=7; console.log(Object.keys(o)[0].length, o['ab'.repeat(100)+'c'], new Set([kk, 'ab'.repeat(100)+'c']).size, kk.split('c').length, kk === 'ab'.repeat(100)+'c')"
+        ),
+        "201 7 1 2 true"
+    );
+}
+
+#[test]
+fn str_build_prepend_and_binary_add_forms() {
+    assert_eq!(
+        one(r"var p=''; for(var i2=0;i2<300;i2++){ p = 'x' + p; } console.log(p.length)"),
+        "300"
+    );
+    assert_eq!(
+        one(r"var q2='x'.repeat(300); q2 = q2 + 'y'; console.log(q2.length, q2.slice(-1))"),
+        "301 y"
+    );
+}
+
+#[test]
+fn str_append_in_a_loop_copies_only_when_promoting() {
+    let mut it = Interp::new();
+    let base = crate::jsstr::copies_made();
+    assert!(it
+        .run(r"var s=''; for (var i=0;i<100000;i++) s+='ab'; console.log(s.length)")
+        .is_ok());
+    assert_eq!(it.out.join("|"), "200000");
+    // 128 appends build the sub-256-byte Plain string (one copy each); after promotion to a Buf the
+    // 1e5-append loop copies nothing. A copy per append would make this ~1e5.
+    let copies = crate::jsstr::copies_made() - base;
+    assert!(copies <= 130, "copies: {copies}");
+}
