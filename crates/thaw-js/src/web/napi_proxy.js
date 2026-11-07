@@ -590,10 +590,8 @@
       for (let index = 0; index < args.length; index++) values.push(args[index]);
       return values;
     };
-    const target = function () {};
-    // A function's own `prototype` is non-configurable; this target must lose it.
-    Object.defineProperty(target, 'prototype', { configurable: true });
-    delete target.prototype;
+    // An arrow function has no own `prototype` (a `function` one is non-configurable and cannot lose it).
+    const target = () => {};
     const initialTargetOwn = new Map();
     reflectOwnKeys(target).forEach(key => { initialTargetOwn.set(key, reflectGetOwn(target, key)); });
     const fallbackGetters = new Map();

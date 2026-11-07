@@ -195,7 +195,7 @@ fn set_via_proxy(
     }
 }
 
-fn define(it: &mut Interp, o: &Obj, key: &str, desc: &Value, intr: &Intrinsics) -> R<bool> {
+fn define(it: &mut Interp, o: &Obj, key: &str, desc: &Value) -> R<bool> {
     if let Some((target, handler, trap)) = it.proxy_trap(o, "defineProperty")? {
         if trap.is_callable() {
             let k = it.key_value(key);
@@ -204,30 +204,11 @@ fn define(it: &mut Interp, o: &Obj, key: &str, desc: &Value, intr: &Intrinsics) 
                 .truthy());
         }
         return match &target {
-            Value::Object(t) => define(it, t, key, desc, intr),
+            Value::Object(t) => define(it, t, key, desc),
             _ => Ok(false),
         };
     }
-    let k = Value::Str(key.into());
-    let existing = it.call(
-        &intr.gopd,
-        &Value::Undefined,
-        &[Value::Object(o.clone()), k.clone()],
-    )?;
-    if let Value::Object(_) = existing {
-        // ponytail: the engine keeps no `configurable` flag, so a frozen object refuses every change
-        if o.frozen.get() {
-            return Ok(false);
-        }
-    } else if !is_extensible(it, o)? {
-        return Ok(false);
-    }
-    it.call(
-        &intr.define,
-        &Value::Undefined,
-        &[Value::Object(o.clone()), k, desc.clone()],
-    )?;
-    Ok(true)
+    it.try_define(o, key, desc)
 }
 
 /// `[[Delete]]` of own property `key`, shared by the `delete` operator, `Reflect.deleteProperty`,
@@ -360,18 +341,15 @@ impl Interp {
                 Ok(it.array(keys))
             });
         }
-        {
-            let i = intr.clone();
-            self.set_native(&r, "defineProperty", move |it, _, args| {
-                let o = obj(it, "defineProperty", &arg(args, 0))?;
-                let key = it.key_of(&arg(args, 1));
-                let desc = arg(args, 2);
-                if !matches!(desc, Value::Object(_)) {
-                    return it.throw_error("TypeError", "Property description must be an object");
-                }
-                Ok(Value::Bool(define(it, &o, &key, &desc, &i)?))
-            });
-        }
+        self.set_native(&r, "defineProperty", |it, _, args| {
+            let o = obj(it, "defineProperty", &arg(args, 0))?;
+            let key = it.key_of(&arg(args, 1));
+            let desc = arg(args, 2);
+            if !matches!(desc, Value::Object(_)) {
+                return it.throw_error("TypeError", "Property description must be an object");
+            }
+            Ok(Value::Bool(define(it, &o, &key, &desc)?))
+        });
         {
             let i = intr.clone();
             self.set_native(&r, "getOwnPropertyDescriptor", move |it, _, args| {
