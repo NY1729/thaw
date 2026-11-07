@@ -895,6 +895,45 @@ function main(): void {
 }
 
 #[test]
+fn registry_add_calls_chalk_const_hex_and_rgb_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-chalk-const-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "chalk@6.0.1").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r##"import { Chalk } from "chalk";
+function main(): void {
+    const chalk = new Chalk({ level: 1 });
+    const h = chalk.hex("#ff8800");
+    console.log(h("x"));
+    const r = chalk.rgb(1, 2, 3);
+    console.log(r("y"));
+    console.log(chalk.hex("#ff8800")("z"));
+}"##,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        strip_ansi(&String::from_utf8_lossy(&result.stdout)),
+        "x\ny\nz\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registry_add_runs_real_safe_buffer_string_conversions_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;

@@ -1647,6 +1647,12 @@ impl<'a> FnLowerer<'a> {
             if matches!(callee_ty, HirType::JsValue | HirType::Dynamic) {
                 return self.lower_dynamic_value_call_on(callee, &call.args);
             }
+            // A call-result callee lowered as `Json` (un-hinted dynamic method
+            // snapshot) is dynamically callable like the identifier `Json` path.
+            if callee_ty == HirType::Json && matches!(callee_expr.as_ref(), Expr::Call(_)) {
+                let callee = self.coerce_to_declared(&HirType::JsValue, callee)?;
+                return self.lower_dynamic_value_call_on(callee, &call.args);
+            }
             let (public_overloads, physical_ty) = match callee_ty {
                 HirType::OverloadedFunction(public, physical) => (Some(public), *physical),
                 other => (None, other),
@@ -1658,7 +1664,11 @@ impl<'a> FnLowerer<'a> {
                 HirType::CallableFunction(params, optional, rest, ret) => {
                     (params, optional, rest.map(|element| *element), *ret)
                 }
-                _ => return Err("call target is not a function value".into()),
+                other => {
+                    return Err(format!(
+                        "call target is not a function value (callee type: {other:?})"
+                    ))
+                }
             };
             let selected_public_signature = public_overloads
                 .as_deref()
