@@ -1,6 +1,9 @@
 //! `JsStr`: the immutable string payload of `Value::Str`. Short strings are a plain shared
 //! `Rc<str>`; long strings own a `String` (spare capacity for later appends) plus a cached
 //! ASCII flag. The representation is private, so the API does not change with it.
+//!
+//! `push_joined` (`s += t`) appends in place only when the `Rc` is unique, so an aliased string is
+//! never mutated: a shared value is copied once, into a fresh buffer with slack.
 
 use std::borrow::Borrow;
 use std::cell::Cell;
@@ -72,6 +75,45 @@ impl JsStr {
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Full-buffer copies made by `push_joined` on this thread (a test-only work counter).
+    static COPIES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Full-buffer copies `push_joined` has made on this thread (test builds only).
+#[cfg(test)]
+pub(crate) fn copies_made() -> usize {
+    COPIES.with(Cell::get)
+}
+
+impl JsStr {
+    /// `self += t`, with the lone-surrogate seam rule. A uniquely owned `Buf` grows in place
+    /// (amortised O(t)); any other string is copied once into a buffer with slack and owned here.
+    pub(crate) fn push_joined(&mut self, t: &str) {
+        let unique = match &mut self.0 {
+            Repr::Buf(rc) => Rc::get_mut(rc),
+            Repr::Plain(_) => None,
+        };
+        if let Some(b) = unique {
+            crate::builtins::push_joined(&mut b.s, t);
+            // appending can only turn an ASCII string into a non-ASCII one, never the reverse
+            b.ascii.set(match b.ascii.get() {
+                1 if !t.is_ascii() => 2,
+                other => other,
+            });
+            return;
+        }
+        #[cfg(test)]
+        COPIES.with(|c| c.set(c.get() + 1));
+        let len = self.len() + t.len();
+        let mut s = String::with_capacity(if len < BUF_MIN { len } else { 2 * len });
+        s.push_str(self);
+        crate::builtins::push_joined(&mut s, t);
+        *self = JsStr::from(s);
     }
 }
 
@@ -277,5 +319,45 @@ mod tests {
         assert_eq!(j.as_ptr(), p);
         assert_eq!(j.len(), 300);
         assert!(!is_plain(&j));
+    }
+
+    #[test]
+    fn jsstr_push_joined_copies_only_when_shared() {
+        let base = copies_made();
+        let mut a = JsStr::from("a".repeat(300));
+        a.push_joined("b");
+        assert_eq!(copies_made(), base, "a unique buffer grows in place");
+        let keep = a.clone();
+        a.push_joined("c");
+        assert_eq!(copies_made(), base + 1, "a shared buffer is copied once");
+        assert_eq!(&*keep, format!("{}b", "a".repeat(300)));
+        assert_eq!(&*a, format!("{}bc", "a".repeat(300)));
+        assert!(!is_plain(&keep) && !is_plain(&a));
+    }
+
+    #[test]
+    fn jsstr_push_joined_keeps_the_ascii_flag_exact() {
+        let mut a = JsStr::from("a".repeat(300));
+        assert!(a.is_ascii_cached());
+        a.push_joined("bc");
+        assert!(a.is_ascii_cached());
+        a.push_joined("é");
+        assert!(!a.is_ascii_cached());
+        a.push_joined("d");
+        assert!(!a.is_ascii_cached());
+        assert_eq!(&*a, format!("{}bcéd", "a".repeat(300)));
+
+        // a flag that was never computed stays unknown and is answered correctly later
+        let mut b = JsStr::from("a".repeat(300));
+        b.push_joined("é");
+        assert!(!b.is_ascii_cached());
+    }
+
+    #[test]
+    fn jsstr_push_joined_keeps_a_buffer_across_the_threshold() {
+        let mut t = JsStr::from("x".repeat(299));
+        t.push_joined("é");
+        assert_eq!(t.len(), 301);
+        assert!(!is_plain(&t));
     }
 }

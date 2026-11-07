@@ -429,6 +429,28 @@ fn with_binding_mut<T>(
     }
 }
 
+/// `name += rhs` for a string binding, appended in place. `cur` is the caller's snapshot of the
+/// binding, taken before the right-hand side ran. It is released only after the binding is known
+/// to still hold that same string, so a binding that is the sole owner can grow without a copy.
+/// Returns `None` with `cur` untouched when the generic path must run (const, `with`, missing
+/// binding, or the right-hand side reassigned the binding).
+fn append_in_place(scope: &Rc<Scope>, name: &str, cur: &mut Value, rhs: &JsStr) -> Option<Value> {
+    with_binding_mut(scope, name, |b| {
+        if !b.mutable {
+            return None;
+        }
+        let (Value::Str(js), Value::Str(snap)) = (&mut b.value, &*cur) else {
+            return None;
+        };
+        if !JsStr::ptr_eq(js, snap) {
+            return None;
+        }
+        *cur = Value::Undefined;
+        js.push_joined(rhs);
+        Some(b.value.clone())
+    })
+}
+
 /// Arithmetic and relational operators on two numbers, without `binary()`'s coercion chain.
 fn number_binop(op: a::BinaryOp, x: f64, y: f64) -> Option<Value> {
     use a::BinaryOp as B;
@@ -3274,8 +3296,26 @@ impl Interp {
                 self.eval(&asg.right, scope)?
             }
             op => {
-                let cur = self.read_loc(&loc, scope)?;
+                let mut cur = self.read_loc(&loc, scope)?;
                 let rhs = self.eval(&asg.right, scope)?;
+                // `s += x` with a primitive `x` (no user code can run in ToPrimitive)
+                let append = matches!(op, A::AddAssign)
+                    && matches!(cur, Value::Str(_))
+                    && matches!(
+                        rhs,
+                        Value::Str(_)
+                            | Value::Number(_)
+                            | Value::Bool(_)
+                            | Value::Null
+                            | Value::Undefined
+                            | Value::BigInt(_)
+                    );
+                if let (true, Loc::Ident(id)) = (append, &loc) {
+                    let rs = self.to_str(&rhs);
+                    if let Some(v) = append_in_place(scope, &id.sym, &mut cur, &rs) {
+                        return Ok(v);
+                    }
+                }
                 let bop = match op {
                     A::AddAssign => a::BinaryOp::Add,
                     A::SubAssign => a::BinaryOp::Sub,
@@ -3440,9 +3480,10 @@ impl Interp {
             B::Add => {
                 let (lp, rp) = (l.clone(), r.clone());
                 if matches!(lp, Value::Str(_)) || matches!(rp, Value::Str(_)) {
-                    let mut s = self.to_str(&lp).to_string();
-                    builtins::push_joined(&mut s, &self.to_str(&rp));
-                    Value::Str(s.into())
+                    // the operand is borrowed, so this is one copy into a buffer with slack
+                    let mut s = self.to_str(&lp);
+                    s.push_joined(&self.to_str(&rp));
+                    Value::Str(s)
                 } else {
                     Value::Number(self.num(&lp) + self.num(&rp))
                 }
