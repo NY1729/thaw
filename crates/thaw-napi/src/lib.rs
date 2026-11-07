@@ -40,6 +40,9 @@ use thaw_std as _;
 // `thaw_string_to_number`/the `fetch`/`http` event-loop hooks).
 #[cfg(test)]
 use thaw_runtime as _;
+// Under the thaw-js engine, the same test-link marker for thaw-js's `thaw_tjs_*` natives.
+#[cfg(all(test, feature = "engine-thaw-js"))]
+use thaw_js as _;
 
 type NapiEnv = *mut Env;
 type NapiValue = *mut Value;
