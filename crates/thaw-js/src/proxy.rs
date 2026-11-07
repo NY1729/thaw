@@ -216,12 +216,7 @@ impl Interp {
             return Ok(Some(self.call(&trap, &handler, &[target, k])?.truthy()));
         }
         if let Value::Object(t) = &target {
-            if let Some(r) = self.proxy_delete(t, key)? {
-                return Ok(Some(r));
-            }
-            if !t.frozen.get() {
-                t.remove_prop(key);
-            }
+            return Ok(Some(crate::reflect::delete_own(self, t, key)?));
         }
         Ok(Some(true))
     }

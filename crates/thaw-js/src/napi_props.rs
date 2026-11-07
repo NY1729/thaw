@@ -236,14 +236,7 @@ fn predicate(it: &mut Interp, target: &Value, key: &str, operation: u8) -> R<boo
             let Value::Object(o) = target else {
                 return it.throw_error("TypeError", "Reflect.deleteProperty called on non-object");
             };
-            match it.proxy_delete(o, key)? {
-                Some(done) => Ok(done),
-                None if o.frozen.get() => Ok(false),
-                None => {
-                    o.remove_prop(key);
-                    Ok(true)
-                }
-            }
+            crate::reflect::delete_own(it, o, key)
         }
         _ => it.throw_error("TypeError", "Invalid native property operation"),
     }
