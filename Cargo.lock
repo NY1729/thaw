@@ -3283,6 +3283,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thaw-arena",
+ "thaw-js",
  "thaw-quickjs",
  "thaw-runtime",
  "thaw-std",
