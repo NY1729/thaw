@@ -746,6 +746,9 @@ pub extern "C" fn thaw_json_from_borrowed_handle(handle: u64) -> *mut Value {
         return std::ptr::null_mut();
     };
     if handle == 0 || without_typed_decode_scope(|| (ops.retain)(handle)) == 0 {
+        if trace_wire() {
+            eprintln!("from_borrowed: retain failed handle={handle}");
+        }
         set_host_error("Unable to retain host JSON value".into());
         return std::ptr::null_mut();
     }
@@ -3926,6 +3929,12 @@ fn write_graph_token(
     }
 }
 
+/// `THAW_JS_TRACE_WIRE` is read once; off, a trace point costs one load.
+fn trace_wire() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("THAW_JS_TRACE_WIRE").is_some())
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
     begin_stringify();
@@ -3969,6 +3978,9 @@ pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
                     output_leases.push(handle);
                     out.extend_from_slice(format!("{{\"hdl\":{handle}}}").as_bytes());
                 } else {
+                    if trace_wire() {
+                        eprintln!("graph_encode: lease retain failed handle={handle}");
+                    }
                     lease_error = true;
                 }
                 index += 1;
@@ -3988,6 +4000,12 @@ pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
                     napi_output_leases.push(reference);
                     out.extend_from_slice(format!("{{\"nh\":\"{}\"}}", lease.handle).as_bytes());
                 } else {
+                    if trace_wire() {
+                        eprintln!(
+                            "graph_encode: napi lease retain failed handle={}",
+                            lease.handle
+                        );
+                    }
                     lease_error = true;
                 }
                 index += 1;
@@ -4042,6 +4060,12 @@ pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
                     output_leases.push(lease.handle);
                     out.extend_from_slice(format!("{{\"hdl\":{}}}", lease.handle).as_bytes());
                 } else {
+                    if trace_wire() {
+                        eprintln!(
+                            "graph_encode: host lease retain failed handle={}",
+                            lease.handle
+                        );
+                    }
                     lease_error = true;
                 }
             }
