@@ -2207,7 +2207,7 @@ impl Interp {
                     Some(ap.elems.len())
                 };
                 let Some(items) = self.iter_protocol_limit(&value, wanted)? else {
-                    return unsupported("iterator-protocol");
+                    return self.throw_error("TypeError", "value is not iterable");
                 };
                 for (i, el) in ap.elems.iter().enumerate() {
                     match el {
@@ -2782,7 +2782,7 @@ impl Interp {
                 }
                 // a user-defined iterable or a generator: pulled one value at a time, closed on early exit
                 let Some((iterator, next)) = self.get_iterator(&iterable)? else {
-                    return unsupported("iterator-protocol");
+                    return self.throw_error("TypeError", "value is not iterable");
                 };
                 loop {
                     self.check_deadline()?;
@@ -2870,7 +2870,12 @@ impl Interp {
             if arg.spread.is_some() {
                 match self.iter_protocol(&v)? {
                     Some(items) => out.extend(items),
-                    None => return unsupported("iterator-protocol"),
+                    None => {
+                        return self.throw_error(
+                            "TypeError",
+                            "Spread syntax requires ...iterable[Symbol.iterator] to be a function",
+                        )
+                    }
                 }
             } else {
                 out.push(v);
@@ -2936,7 +2941,16 @@ impl Interp {
                 let mut items = Vec::new();
                 for el in &arr.elems {
                     match el {
-                        Some(el) => items.extend(self.eval_args(std::slice::from_ref(el), scope)?),
+                        Some(el) if el.spread.is_some() => {
+                            let v = self.eval(&el.expr, scope)?;
+                            match self.iter_protocol(&v)? {
+                                Some(vals) => items.extend(vals),
+                                None => {
+                                    return self.throw_error("TypeError", "value is not iterable")
+                                }
+                            }
+                        }
+                        Some(el) => items.push(self.eval(&el.expr, scope)?),
                         None => items.push(Value::Hole),
                     }
                 }
