@@ -4121,6 +4121,8 @@ mod napi_props_tests;
 #[cfg(test)]
 mod napi_proxy_tests;
 #[cfg(test)]
+mod napi_symbol_protocol_tests;
+#[cfg(test)]
 mod napi_symbols_tests;
 #[cfg(test)]
 mod net_tests;

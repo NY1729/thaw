@@ -157,14 +157,14 @@ pub(crate) fn native_pair_matches(
 }
 
 /// The reply's `value` of a `symbol_metadata` operation, checked as runtime.js:372-384 checks it.
-struct SymbolMeta {
-    id: String,
-    units: Vec<u16>,
-    registered: bool,
-    js_origin: bool,
+pub(crate) struct SymbolMeta {
+    pub(crate) id: String,
+    pub(crate) units: Vec<u16>,
+    pub(crate) registered: bool,
+    pub(crate) js_origin: bool,
 }
 
-fn symbol_metadata(native: &str) -> Result<SymbolMeta, String> {
+pub(crate) fn symbol_metadata(native: &str) -> Result<SymbolMeta, String> {
     const INVALID: &str = "Invalid native Symbol metadata";
     let reply = crate::napi_bridge::handle_op("symbol_metadata", native, "", "[]")?;
     let v = reply.get("value").ok_or(INVALID)?;
@@ -264,50 +264,59 @@ pub(crate) fn lone_handle(it: &mut Interp, field: &str, native: &str) -> Result<
         .map_err(|c| classify(it, c).to_string())
 }
 
-/// A lone `{"nsy"}` token: the Symbol native id `native` names in `owner`, created from the bridge's metadata
-/// when it is not known yet (`Symbol.for` for a registered one). Pinned unless it has a JavaScript origin or
-/// is registered (runtime.js:2042-2050, 1244-1262).
+/// A lone `{"nsy"}` token: the Symbol the native handle `native` names in `owner`, from the bridge's metadata
+/// (see `symbol_from_metadata`). `native` is a handle, not the Symbol id: the metadata's id may differ
+/// (runtime.js `thawGraphNapiSymbolForNative` -> `thawHostNativeSymbolMake` makes the same call).
 pub(crate) fn lone_symbol(it: &mut Interp, owner: usize, native: &str) -> Result<Value, String> {
-    let id = match native.parse::<u64>() {
-        Ok(id) if is_decimal(native) => id,
-        _ => return Err("Invalid native JSON graph token".into()),
-    };
-    let meta = symbol_metadata(native)?;
-    if meta.id != native {
-        return Err("Invalid native Symbol metadata".into());
+    if !is_decimal(native) {
+        return Err("Invalid native JSON graph token".into());
     }
-    let symbol = match crate::napi_symbols::symbol_of(owner as u64, id) {
+    let meta = symbol_metadata(native)?;
+    // The handle names its graph owner (runtime.js `thawGraphNapiOwnerOfHandle`); a wire with no handle node
+    // decodes under the package fallback, which is not the owner the Symbol was named in.
+    let owner = native
+        .parse::<u64>()
+        .ok()
+        .and_then(crate::napi_bridge::owner_of_handle)
+        .unwrap_or(owner as u64);
+    symbol_from_metadata(it, owner, &meta)
+}
+
+/// The Symbol the bridge metadata `meta` describes in `owner`: the one already named by its id, else a new one
+/// (a JavaScript-origin Symbol has no new one: its original is gone; a registered one is `Symbol.for(units)`, any
+/// other `Symbol(units)`), named by the id. Pinned unless it has a JavaScript origin or is registered
+/// (runtime.js:2042-2050, 1244-1262).
+pub(crate) fn symbol_from_metadata(
+    it: &mut Interp,
+    owner: u64,
+    meta: &SymbolMeta,
+) -> Result<Value, String> {
+    let id: u64 = meta
+        .id
+        .parse()
+        .map_err(|_| "Invalid native Symbol metadata".to_string())?;
+    let symbol = match crate::napi_symbols::symbol_of(owner, id) {
         Some(symbol) => symbol,
+        None if meta.js_origin => {
+            return Err("Original JavaScript Symbol is no longer live".into());
+        }
         None => {
-            // ponytail: a JavaScript-origin Symbol needs the proxy layer (PR 6b).
-            if meta.js_origin {
-                return Err(
-                    "native Symbol with a JavaScript origin needs the N-API proxy layer".into(),
-                );
-            }
-            let global = it.global.clone();
-            let ctor = it
-                .lookup(&global, "Symbol")
-                .ok_or("Symbol is not defined")?;
-            let description = Value::str(&crate::builtins::units_str(&meta.units));
-            let symbol = if meta.registered {
-                let symbol_for = it
-                    .get(&ctor, "for")
-                    .map_err(|c| classify(it, c).to_string())?;
-                it.call(&symbol_for, &Value::Undefined, &[description])
+            let description = crate::builtins::units_str(&meta.units);
+            let created = if meta.registered {
+                it.symbol_for(description.into())
             } else {
-                it.call(&ctor, &Value::Undefined, &[description])
-            }
-            .map_err(|c| classify(it, c).to_string())?;
+                it.new_symbol(Some(description.into()))
+            };
+            let symbol = created.map_err(|c| classify(it, c).to_string())?;
             let Value::Object(object) = &symbol else {
                 return Err("native Symbol did not create a Symbol".into());
             };
-            crate::napi_symbols::bind(owner as u64, id, object);
+            crate::napi_symbols::bind(owner, id, object);
             symbol
         }
     };
     if !meta.js_origin && !meta.registered {
-        crate::napi_symbols::thaw_tjs_napi_symbol_set_pin(owner as u64, id, 1);
+        crate::napi_symbols::thaw_tjs_napi_symbol_set_pin(owner, id, 1);
     }
     Ok(symbol)
 }
