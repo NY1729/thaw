@@ -1582,3 +1582,86 @@ jobs:
           name: diagnostics-${{ github.job }}-${{ strategy.job-index }}
           path: ${{ runner.temp }}/diagnostics
           if-no-files-found: ignore
+
+  thaw-napi-engine-thaw-js:
+    # Non-gating per-test run of the thaw-napi unit tests with the thaw-js engine (plan-tj90 PR 7).
+    # Each test runs in its own process, one at a time, under a timeout; the job always exits 0
+    # and reports pass/fail per test as an artifact and in the step summary.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure')
+    continue-on-error: true
+    name: thaw-napi engine-thaw-js
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: thaw-napi-tjs-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            thaw-napi-tjs-cargo-${{ runner.os }}-
+      - name: Run each thaw-napi test in its own process
+        run: |
+          set -u
+          feat=(-p thaw-napi --no-default-features --features engine-thaw-js --lib)
+          results="$RUNNER_TEMP/thaw-napi-engine-thaw-js.tsv"
+          : > "$results"
+          # --list builds the test binary once; the per-test runs below reuse it.
+          cargo test "${feat[@]}" -- --list --format terse 2>/dev/null \
+            | grep ': test$' | sed 's/: test$//' > "$RUNNER_TEMP/names.txt"
+          while IFS= read -r name; do
+            status=0
+            timeout 300 cargo test "${feat[@]}" -- --exact "$name" --test-threads=1 >/dev/null 2>&1 || status=$?
+            case "$status" in
+              0) verdict=pass ;;
+              124) verdict=timeout ;;
+              *) verdict=fail ;;
+            esac
+            printf '%s\t%s\n' "$verdict" "$name" >> "$results"
+          done < "$RUNNER_TEMP/names.txt"
+          total=$(wc -l < "$results")
+          passed=$(grep -c '^pass' "$results" || true)
+          timed_out=$(grep -c '^timeout' "$results" || true)
+          failed=$(grep -c '^fail' "$results" || true)
+          {
+            echo "## thaw-napi engine-thaw-js (non-gating)"
+            echo "- total: $total, pass: $passed, fail: $failed, timeout: $timed_out"
+            if [ $((failed + timed_out)) -gt 0 ]; then
+              echo "### Failing tests"
+              grep -v '^pass' "$results" | sed 's/^/- /'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: thaw-napi-engine-thaw-js
+          path: ${{ runner.temp }}/thaw-napi-engine-thaw-js.tsv
+          if-no-files-found: ignore
