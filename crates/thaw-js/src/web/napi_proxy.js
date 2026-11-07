@@ -1,11 +1,13 @@
 // The native addon proxy layer (plan tj107 sections 2 and 4, PRs 6b-1, 6b-2 and 6b-4a): the export listing, the owner
 // lookup, and the object and array proxies of native handles. napi_proxy.rs runs this file as a script; its
 // completion value is the factory below, called once per realm with `cap`, the private natives (exports, owner,
-// invoker). The function proxies are a stub until PR 6b-3.
+// invoker). Object, array and function proxies of the native handles (PR 6b-2 and 6b-3).
 (function (cap) {
   'use strict';
   // The intrinsics the proxies use, captured before user code runs. ponytail: the Reflect and Object methods are
   // captured as functions, so a later replacement of the owning object does not change them.
+  const intrinsicObject = Object;
+  const reflectConstruct = Reflect.construct;
   const reflectGet = Reflect.get;
   const reflectSet = Reflect.set;
   const reflectHas = Reflect.has;
@@ -48,13 +50,8 @@
 
   const ownerOf = handle => cap.owner(handle);
 
-  const notImplemented = name => () => {
-    throw new TypeError(`Native addon ${name} is not implemented`);
-  };
-
-  // One bridge operation's reply, with its exception graph thrown and its error raised (RJ bridgeReply).
-  const bridgeReply = (operation, handle, packet, message) => {
-    const response = jsonParse(bridgeHandle(operation, handle, '', packet));
+  // A parsed bridge reply, with its exception graph thrown and its error raised (RJ bridgeReply).
+  const checkReply = (response, message) => {
     if (response && hasOwn(response, '__thaw_exception_graph__')) {
       if (typeof response.__thaw_exception_graph__ !== 'string')
         throw new TypeError('Invalid native exception graph');
@@ -64,6 +61,10 @@
       throw new TypeError(response && response.__thaw_error__ ? response.__thaw_error__ : message);
     return response;
   };
+
+  // One bridge operation's reply.
+  const bridgeReply = (operation, handle, packet, message) =>
+    checkReply(jsonParse(bridgeHandle(operation, handle, '', packet)), message);
 
   // The value of a bridge reply: a graph is decoded (and its leases released), anything else is its value.
   const replyValue = (operation, handle, packet, message) => {
@@ -562,12 +563,200 @@
     args.forEach(sync);
   };
 
+  // The function proxy of the native Function handle `handle`. Its target is a plain function without `prototype`
+  // (ponytail: thaw-js enforces no Proxy invariants, so the bound target of the QuickJS runtime is not needed).
+  // apply and construct send the captured graph to the native Function through the invoker.
+  const functions = new Map();
+
+  const functionForHandle = handle => {
+    if (typeof handle !== 'string' || !positiveDecimal.test(handle))
+      throw new TypeError('Invalid native addon graph handle');
+    const owner = ownerOf(handle);
+    if (typeof owner !== 'string' || !positiveDecimal.test(owner))
+      throw new TypeError('Invalid native addon graph owner');
+    const existing = functions.get(handle);
+    if (existing !== undefined) return existing;
+    // The invoker factory retains the native Function root for the process lifetime (summary 3 of the plan).
+    const invoke = cap.invoker(handle);
+    const invokeNative = (values, construct, forceHandle) => {
+      const packet = encodeGraph(values, 0, true, false, forceHandle);
+      const result = checkReply(jsonParse(invoke(packet, construct)), 'Native Function call failed');
+      if (result.kind !== 'graph' || typeof result.value !== 'string')
+        throw new TypeError('Invalid native Function graph result');
+      return decodeOwned(result.value);
+    };
+    // Appends `args` to `values` (the engine's argument list is not iterated through a user-replaceable method).
+    const pack = (args, values) => {
+      for (let index = 0; index < args.length; index++) values.push(args[index]);
+      return values;
+    };
+    const target = function () {};
+    delete target.prototype;
+    const initialTargetOwn = new Map();
+    reflectOwnKeys(target).forEach(key => { initialTargetOwn.set(key, reflectGetOwn(target, key)); });
+    const fallbackGetters = new Map();
+    const fallbackSetters = new Map();
+    const sourceFunctions = new Map();
+
+    // A native key that is missing again: an intrinsic target key the native side deleted is restored to its
+    // initial descriptor, a native-only shadow is removed.
+    const reconcileMissingNativeKey = key => {
+      const own = reflectGetOwn(target, key);
+      if (own && own.configurable) {
+        const initial = initialTargetOwn.get(key);
+        const restored = initial ? reflectDefine(target, key, initial) : reflectDelete(target, key);
+        if (!restored) throw new TypeError('Cannot synchronize deleted native Function property');
+      }
+      fallbackGetters.delete(key);
+      fallbackSetters.delete(key);
+    };
+    const sourceFunction = source => {
+      const cacheKey = jsonStringify(source);
+      const cached = sourceFunctions.get(cacheKey);
+      if (cached !== undefined) return cached;
+      const decoded = decodeGraph({ root: { r: 0 }, nodes: [source] });
+      if (typeof decoded === 'function') sourceFunctions.set(cacheKey, decoded);
+      return decoded;
+    };
+    const read = (name, receiver) => graphProperty(handle, 'get_graph', [name, receiver]);
+    const nativeHas = key => graphProperty(handle, 'has_graph', [key]);
+
+    const proxy = new Proxy(target, {
+      apply(shadow, thisArg, args) {
+        return invokeNative(pack(args, [thisArg]), false);
+      },
+      construct(shadow, args, newTarget) {
+        // The engine supplies the actual new.target; it travels in the same graph as the arguments.
+        const realmObject = reflectConstruct(intrinsicObject, [], newTarget);
+        const fallback = reflectGetProto(realmObject);
+        return invokeNative(pack(args, [newTarget, fallback]), true, fallback);
+      },
+      get(shadow, key, receiver) {
+        const native = nativeHas(key);
+        if (!native) reconcileMissingNativeKey(key);
+        const own = reflectGetOwn(shadow, key);
+        if (own && !own.configurable && hasOwn(own, 'value') && !own.writable) return own.value;
+        // A nonconfigurable target accessor without a getter fixes the Get result, as in proxyForHandle.
+        if (own && !own.configurable && hasOwn(own, 'get') && own.get === undefined) return undefined;
+        return native ? read(key, receiver) : reflectGet(shadow, key, receiver);
+      },
+      set(shadow, key, value, receiver) {
+        if (!nativeHas(key)) reconcileMissingNativeKey(key);
+        const own = reflectGetOwn(shadow, key);
+        // A callable target already owns immutable function properties: a Proxy cannot report a successful write
+        // to one, and the native mutation must not happen first.
+        if (own && !own.configurable
+          && ((hasOwn(own, 'value') && !own.writable) || (hasOwn(own, 'set') && own.set === undefined)))
+          return false;
+        if (graphProperty(handle, 'set_graph', [key, value, receiver]) !== true) return false;
+        if (own && !own.configurable && own.writable) reflectDefine(shadow, key, { value: read(key) });
+        return true;
+      },
+      has(shadow, key) {
+        const native = nativeHas(key);
+        if (!native) reconcileMissingNativeKey(key);
+        return native || reflectHas(shadow, key);
+      },
+      ownKeys(shadow) {
+        const keys = graphProperty(handle, 'own_keys_graph', []);
+        if (!isArrayOf(keys)) throw new TypeError('Invalid native Function ownKeys result');
+        reflectOwnKeys(shadow).forEach(key => {
+          if (keys.indexOf(key) < 0) {
+            reconcileMissingNativeKey(key);
+            if (reflectGetOwn(shadow, key)) keys.push(key);
+          }
+        });
+        return keys;
+      },
+      getOwnPropertyDescriptor(shadow, key) {
+        const own = reflectGetOwn(shadow, key);
+        const meta = graphProperty(handle, 'descriptor_graph', [key]);
+        if (!meta) {
+          reconcileMissingNativeKey(key);
+          return reflectGetOwn(shadow, key);
+        }
+        if (own && !own.configurable) return own;
+        let getter = meta.getter_source ? sourceFunction(meta.getter_source) : undefined;
+        let setter = meta.setter_source ? sourceFunction(meta.setter_source) : undefined;
+        if (meta.accessor && meta.getter && !getter) {
+          getter = fallbackGetters.get(key);
+          if (!getter) {
+            getter = function () { return read(key, this); };
+            fallbackGetters.set(key, getter);
+          }
+        }
+        if (meta.accessor && meta.setter && !setter) {
+          setter = fallbackSetters.get(key);
+          if (!setter) {
+            setter = function (next) { graphProperty(handle, 'set_graph', [key, next, this]); };
+            fallbackSetters.set(key, setter);
+          }
+        }
+        const descriptor = meta.accessor
+          ? { configurable: !!meta.configurable, enumerable: !!meta.enumerable, get: getter, set: setter }
+          : { configurable: !!meta.configurable, enumerable: !!meta.enumerable,
+            writable: !!meta.writable, value: read(key) };
+        if (!meta.configurable) {
+          // A nonconfigurable native descriptor must be on the target before a Proxy may report it.
+          if (!reflectDefine(shadow, key, descriptor))
+            throw new TypeError('Cannot materialize native Function descriptor');
+          return reflectGetOwn(shadow, key);
+        }
+        return descriptor;
+      },
+      defineProperty(shadow, key, description) {
+        if (!nativeHas(key)) reconcileMissingNativeKey(key);
+        return defineNativeProperty(handle, shadow, key, description);
+      },
+      deleteProperty(shadow, key) {
+        if (!nativeHas(key)) reconcileMissingNativeKey(key);
+        const own = reflectGetOwn(shadow, key);
+        if (own && !own.configurable) return false;
+        if (graphProperty(handle, 'delete_graph', [key]) !== true) return false;
+        fallbackGetters.delete(key);
+        fallbackSetters.delete(key);
+        return reflectDelete(shadow, key);
+      },
+      getPrototypeOf(shadow) {
+        const native = graphProperty(handle, 'get_prototype_graph', []);
+        // Undefined: no explicit native prototype, so the target keeps its own (Function.prototype).
+        return native === undefined ? reflectGetProto(shadow) : native;
+      },
+      setPrototypeOf(shadow, next) {
+        if (!reflectIsExt(shadow)) return reflectGetProto(shadow) === next;
+        const previous = reflectGetProto(shadow);
+        if (!reflectSetProto(shadow, next)) return false;
+        try {
+          if (graphProperty(handle, 'set_prototype_graph', [next]) === true) return true;
+        } catch (error) {
+          reflectSetProto(shadow, previous);
+          throw error;
+        }
+        reflectSetProto(shadow, previous);
+        return false;
+      },
+      isExtensible(shadow) {
+        if (graphProperty(handle, 'is_extensible_graph', []) === false && reflectIsExt(shadow)
+          && !preventNativeExtensions(handle, proxy, shadow))
+          throw new TypeError('Cannot synchronize native integrity');
+        return reflectIsExt(shadow);
+      },
+      preventExtensions(shadow) {
+        return preventNativeExtensions(handle, proxy, shadow);
+      },
+    });
+    handleOf.set(proxy, handle);
+    tagNative(proxy, 1, handle);
+    functions.set(handle, proxy);
+    return proxy;
+  };
+
   return {
     exports,
     eachExport,
     ownerOf,
     proxyForHandle,
-    functionForHandle: notImplemented('functions'),
+    functionForHandle,
     argument,
     arguments: argumentsOf,
     decode: decodeValue,
