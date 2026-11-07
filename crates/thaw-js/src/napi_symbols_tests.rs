@@ -57,6 +57,9 @@ fn wire_of(owner: usize, handle: u64) -> String {
 
 #[test]
 fn register_is_stable_and_pin_controls_liveness() {
+    let _lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     load("globalThis.napiSym = Symbol('napi');");
     let owner = default_realm() as u64;
     let h = global("napiSym");
@@ -79,6 +82,9 @@ fn register_is_stable_and_pin_controls_liveness() {
 
 #[test]
 fn unknown_ids_and_owners_are_unknown_not_dead() {
+    let _lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let owner = default_realm() as u64;
     assert_eq!(thaw_tjs_napi_symbol_weak_live(999, 1), 2);
     assert_eq!(thaw_tjs_napi_symbol_weak_live(owner, 999_999), 0);
@@ -92,6 +98,9 @@ fn unknown_ids_and_owners_are_unknown_not_dead() {
 
 #[test]
 fn native_symbol_handle_is_created_once_per_native_id() {
+    let _lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let a = ok(thaw_tjs_native_symbol_handle_result(4242));
     let b = ok(thaw_tjs_native_symbol_handle_result(4242));
     assert_eq!(thaw_tjs_napi_handle_is_symbol(a), 1);
@@ -103,6 +112,9 @@ fn native_symbol_handle_is_created_once_per_native_id() {
 
 #[test]
 fn key_text_resolves_unique_and_well_known_symbols() {
+    let _lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     load("globalThis.keySym = Symbol('k');");
     let h = global("keySym");
     let key = symbol_key(&handle_value(h).unwrap()).unwrap();
@@ -122,6 +134,9 @@ fn key_text_resolves_unique_and_well_known_symbols() {
 
 #[test]
 fn registered_symbol_round_trips_through_the_wire_by_identity() {
+    let _lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     load("globalThis.wireSym = Symbol('wire');");
     let owner = default_realm();
     let h = global("wireSym");
@@ -134,6 +149,9 @@ fn registered_symbol_round_trips_through_the_wire_by_identity() {
 
 #[test]
 fn unregistered_symbol_keeps_the_plain_handle_token() {
+    let _lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     load("globalThis.plainSym = Symbol('plain');");
     let owner = default_realm();
     let wire = wire_of(owner, global("plainSym"));
@@ -143,6 +161,9 @@ fn unregistered_symbol_keeps_the_plain_handle_token() {
 
 #[test]
 fn graph_object_symbol_key_decodes_to_the_symbol_property() {
+    let _lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     load("globalThis.keyedSym = Symbol('key');");
     let owner = default_realm();
     let h = global("keyedSym");
@@ -167,6 +188,9 @@ fn graph_object_symbol_key_decodes_to_the_symbol_property() {
 
 #[test]
 fn symbol_string_coercion_is_a_type_error_exception() {
+    let _lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     ok(thaw_tjs_native_symbol_handle_result(5150));
     let owner = default_realm() as u64;
     let r = thaw_tjs_napi_symbol_abstract_to_string_units_result(owner, 5150);
