@@ -2639,9 +2639,8 @@ fn redefine_allowed(cur: &Prop, d: &PropDesc) -> bool {
                 return false;
             }
             let same = |want: &Option<Value>, have: &Option<Value>| {
-                want.as_ref().map_or(true, |w| {
-                    same_value(w, have.as_ref().unwrap_or(&Value::Undefined))
-                })
+                want.as_ref()
+                    .is_none_or(|w| same_value(w, have.as_ref().unwrap_or(&Value::Undefined)))
             };
             same(&d.get, get) && same(&d.set, set)
         }
@@ -2655,7 +2654,7 @@ fn redefine_allowed(cur: &Prop, d: &PropDesc) -> bool {
             if d.writable.as_ref().is_some_and(Value::truthy) {
                 return false;
             }
-            d.value.as_ref().map_or(true, |nv| same_value(nv, v))
+            d.value.as_ref().is_none_or(|nv| same_value(nv, v))
         }
     }
 }
