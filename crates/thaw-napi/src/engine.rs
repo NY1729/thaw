@@ -5,7 +5,10 @@
 compile_error!("features `engine-quickjs` and `engine-thaw-js` are mutually exclusive");
 
 #[cfg(all(feature = "engine-thaw-js", not(feature = "engine-quickjs")))]
-compile_error!("engine-thaw-js backend is not implemented yet (napi port stage 2)");
+mod tjs;
+#[allow(unused_imports)]
+#[cfg(all(feature = "engine-thaw-js", not(feature = "engine-quickjs")))]
+pub use tjs::*;
 
 #[allow(unused_imports)]
 #[cfg(feature = "engine-quickjs")]
