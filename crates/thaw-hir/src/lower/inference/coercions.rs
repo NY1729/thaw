@@ -555,6 +555,7 @@ impl<'a> FnLowerer<'a> {
             || object_type_is_error_family(&actual)
             || fields.first().is_some_and(|(marker, _)| {
                 DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow().contains_key(marker))
+                    && !marker_is_decorated(marker)
             })
         {
             return Ok(None);
@@ -564,9 +565,11 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         }
         // A projection failure (recursive class, unsupported field) falls back to the by-value copy.
-        let Ok(projected) =
-            self.lower_fixed_object_as_dynamic_accessor_object(value.clone(), fields, false, true, is_class)
-        else {
+        let outer = std::mem::replace(&mut self.live_owner_constructor_token, true);
+        let projected =
+            self.lower_fixed_object_as_dynamic_accessor_object(value.clone(), fields, false, true, is_class);
+        self.live_owner_constructor_token = outer;
+        let Ok(projected) = projected else {
             return Ok(None);
         };
         Ok(Some(HirExpr::Call(

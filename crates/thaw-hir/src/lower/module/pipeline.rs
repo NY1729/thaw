@@ -37,6 +37,15 @@ thread_local! {
     static DECORATED_CLASS_NAMES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
+/// Whether a class identity marker belongs to a decorated class (or a class deriving from one).
+fn marker_is_decorated(marker: &str) -> bool {
+    marker.strip_prefix("__thaw_class_identity_\u{1e}").is_some_and(|ancestry|
+        DECORATED_CLASS_NAMES.with(|names| {
+            let names = names.borrow();
+            ancestry.split('\u{1f}').any(|class| names.contains(class))
+        }))
+}
+
 fn class_has_decorators(class: &swc_ecma_ast::Class) -> bool {
     !class.decorators.is_empty()
         || class.body.iter().any(|member| match member {
