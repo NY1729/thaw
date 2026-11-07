@@ -184,6 +184,7 @@ struct Prop {
     slot: Slot,
     enumerable: bool,
     writable: bool,
+    configurable: bool,
 }
 
 #[derive(Clone)]
@@ -1911,11 +1912,18 @@ impl Interp {
             } else {
                 self.rt.generator_proto.clone()
             };
-            put_hidden(&f, "prototype", Value::Object(new_obj(parent, Kind::Plain)));
+            put_with(
+                &f,
+                "prototype",
+                Value::Object(new_obj(parent, Kind::Plain)),
+                true,
+                false,
+                false,
+            );
         } else if !arrow {
             let proto = new_obj(Some(self.object_proto.clone()), Kind::Plain);
             put_hidden(&proto, "constructor", Value::Object(f.clone()));
-            put_hidden(&f, "prototype", Value::Object(proto));
+            put_with(&f, "prototype", Value::Object(proto), true, false, false);
         }
         Value::Object(f)
     }
@@ -3749,6 +3757,7 @@ pub(crate) fn put(o: &Obj, key: &str, value: Value) {
                 slot: Slot::Data(value),
                 enumerable: true,
                 writable: true,
+                configurable: true,
             },
         ),
     }
@@ -3780,6 +3789,39 @@ fn name_anonymous_fn(v: &Value, key: &str) {
     }
 }
 
+/// Create or overwrite a data property with explicit attributes (the general form of `put` and
+/// `put_hidden`; overwrites every attribute of an existing property).
+pub(crate) fn put_with(
+    o: &Obj,
+    key: &str,
+    value: Value,
+    writable: bool,
+    enumerable: bool,
+    configurable: bool,
+) {
+    let pos = o.position(key);
+    let mut props = o.props.borrow_mut();
+    match pos.map(|i| &mut props[i]) {
+        Some(p) => {
+            p.slot = Slot::Data(value);
+            p.writable = writable;
+            p.enumerable = enumerable;
+            p.configurable = configurable;
+        }
+        None => push_prop(
+            o,
+            &mut props,
+            Prop {
+                key: key.into(),
+                slot: Slot::Data(value),
+                enumerable,
+                writable,
+                configurable,
+            },
+        ),
+    }
+}
+
 /// Create or overwrite a non-enumerable, writable data property (builtins).
 pub(crate) fn put_hidden(o: &Obj, key: &str, value: Value) {
     let pos = o.position(key);
@@ -3797,6 +3839,7 @@ pub(crate) fn put_hidden(o: &Obj, key: &str, value: Value) {
                 slot: Slot::Data(value),
                 enumerable: false,
                 writable: true,
+                configurable: true,
             },
         ),
     }
@@ -3833,6 +3876,7 @@ pub(crate) fn define_accessor(
                 slot: Slot::Accessor { get, set },
                 enumerable,
                 writable: true,
+                configurable: true,
             },
         ),
     }
@@ -3928,6 +3972,8 @@ mod napi_proxy_tests;
 mod napi_symbols_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod prop_configurable_tests;
 #[cfg(test)]
 mod prop_get_tests;
 #[cfg(test)]
