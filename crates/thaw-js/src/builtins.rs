@@ -1673,9 +1673,28 @@ impl Interp {
             Ok(Value::Bool(items.iter().skip(from).any(same_zero)))
         });
         self.set_native(&ap, "slice", |it, this, args| {
-            let items = it.array_items_raw(this);
-            let (from, to) = it.range(args, items.len());
-            Ok(it.array(items[from..to].to_vec()))
+            let is_array =
+                matches!(this, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)));
+            if is_array {
+                let items = it.array_items_raw(this);
+                let (from, to) = it.range(args, items.len());
+                return Ok(it.array(items[from..to].to_vec()));
+            }
+            // any other array-like (typed array, arguments, `{length, 0: ..}`, string, proxy): generic
+            // Get of `length` then each index. Holes read as `undefined` here.
+            let l = it.get(this, "length")?;
+            let n = it.num(&l);
+            let len = if n.is_nan() {
+                0
+            } else {
+                n.trunc().clamp(0.0, 9e15) as usize
+            };
+            let (from, to) = it.range(args, len);
+            let mut out = Vec::with_capacity(to.saturating_sub(from));
+            for i in from..to {
+                out.push(it.get_index(this, i)?);
+            }
+            Ok(it.array(out))
         });
         self.set_native(&ap, "concat", |it, this, args| {
             let mut items = it.array_items_raw(this);

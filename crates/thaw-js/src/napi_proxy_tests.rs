@@ -2,7 +2,7 @@
 //! globals, the export listing, the native pair global and the invoker factory. The bridge is the fake of
 //! napi_graph_tests: it answers the handle operations these tests make and records the graph calls.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, CStr, CString};
 
 use crate::host::{
@@ -326,6 +326,8 @@ thread_local! {
     static TABLE: RefCell<Vec<(String, String, String)>> = const { RefCell::new(Vec::new()) };
     /// Every handle operation the table fake got on this thread: `(operation, target, packet)`.
     static OPS: RefCell<Vec<(String, String, String)>> = const { RefCell::new(Vec::new()) };
+    /// How many `promise_state` polls of the table fake still answer `pending` before the next one resolves.
+    static PENDING_POLLS: Cell<usize> = const { Cell::new(0) };
 }
 
 unsafe extern "C" fn table_handle(
@@ -339,6 +341,19 @@ unsafe extern "C" fn table_handle(
         o.borrow_mut()
             .push((operation.clone(), target, graph.clone()))
     });
+    if operation == "promise_state" {
+        let left = PENDING_POLLS.with(|p| {
+            let n = p.get();
+            p.set(n.saturating_sub(1));
+            n
+        });
+        let text = if left > 0 {
+            r#"{"kind":"pending"}"#
+        } else {
+            r#"{"kind":"resolved","value":"done","origins":[]}"#
+        };
+        return owned(text);
+    }
     let reply = TABLE.with(|t| {
         t.borrow()
             .iter()
@@ -378,6 +393,7 @@ fn table_bridge() -> FakeBridge {
     clear_for_tests();
     TABLE.with(|t| t.borrow_mut().clear());
     OPS.with(|o| o.borrow_mut().clear());
+    PENDING_POLLS.with(|p| p.set(0));
     reply("retain_graph_handle", "", r#"{"value":"73"}"#);
     thaw_tjs_register_napi_bridge(
         fake_exports,
@@ -921,4 +937,92 @@ fn plain_sync_arguments_writes_the_native_values_back_into_the_js_objects() {
         run_in(&mut it, "(() => { const o = { a: 1, gone: 1 }; api.argument(o); api.syncArguments([o]); return JSON.stringify(o); })()"),
         r#"{"a":2,"b":{"c":3}}"#
     );
+}
+
+// ---- Binary values and promises (PR 6b-4b). ----
+
+#[test]
+fn plain_buffer_and_array_buffer_arguments_cross_by_value_and_a_plain_view_is_still_refused() {
+    let mut it = plain_realm();
+    assert_eq!(
+        run_in(&mut it, "JSON.stringify(api.argument(Buffer.from([1, 2])))"),
+        r#"{"__thaw_napi_buffer__":1,"value":[1,2]}"#
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "JSON.stringify(api.argument(new Uint8Array([3]).buffer))"
+        ),
+        r#"{"__thaw_napi_arraybuffer__":2,"shared":false,"value":[3]}"#
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const ab = new ArrayBuffer(1); return [api.argument(ab).__thaw_napi_arraybuffer__ === api.argument(ab).__thaw_napi_arraybuffer__, api.argument(ab).__thaw_napi_arraybuffer__].join('|'); })()"
+        ),
+        "true|3"
+    );
+}
+
+#[test]
+fn native_binaries_decode_to_one_value_per_id_and_renew_each_handle_once() {
+    let _bridge = table_bridge();
+    let mut it = plain_realm();
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const ab = api.decode({ __thaw_napi_binary__: '93', kind: 'ArrayBuffer', data: [1, 2, 3] }); \
+             const view = api.decode({ __thaw_napi_binary__: '94', buffer: { __thaw_napi_binary__: '93', \
+             kind: 'ArrayBuffer', data: [1, 2, 3] }, array_type: 1, byte_offset: 1, length: 2 }); \
+             return [ab instanceof ArrayBuffer, view instanceof Uint8Array, view.buffer === ab, view.join(','), \
+             new Uint8Array(ab).join(','), api.decode({ __thaw_napi_binary__: '93', kind: 'ArrayBuffer', data: [9] }) === ab, \
+             api.decode({ __thaw_napi_binary__: '94', buffer: { __thaw_napi_binary__: '93' }, array_type: 1, byte_offset: 0, length: 1 }) === view].join('|'); })()"
+        ),
+        "true|true|true|2,3|1,2,3|true|true"
+    );
+    assert_eq!(op_count("renew_handle"), 2);
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { try { api.decode({ __thaw_napi_binary__: '95', kind: 'DataView', buffer: { __thaw_napi_binary__: '96', kind: 'ArrayBuffer', data: [] }, array_type: 1, byte_offset: 0, length: 0 }); return 'made'; } catch (e) { return e.name + ':' + e.message; } })()"
+        ),
+        "TypeError:unsupported native binary kind"
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { try { api.decode({ __thaw_napi_binary__: '97', buffer: { __thaw_napi_binary__: '98', kind: 'ArrayBuffer', data: [] }, array_type: 5, byte_offset: 0, length: 0 }); return 'made'; } catch (e) { return e.name + ':' + e.message; } })()"
+        ),
+        "TypeError:unsupported native typed array kind"
+    );
+}
+
+#[test]
+fn native_array_buffer_bytes_are_written_back_by_sync_arguments() {
+    let _bridge = table_bridge();
+    reply("sync_reference", "", r#"{"value":[7,7,7],"origins":[]}"#);
+    let mut it = plain_realm();
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const ab = new Uint8Array([1, 2, 3]).buffer; api.argument(ab); api.syncArguments([ab]); return new Uint8Array(ab).join(','); })()"
+        ),
+        "7,7,7"
+    );
+}
+
+#[test]
+fn native_promise_resolves_once_promise_state_stops_reporting_pending() {
+    let _bridge = table_bridge();
+    PENDING_POLLS.with(|p| p.set(3));
+    let mut it = plain_realm();
+    run_in(
+        &mut it,
+        "globalThis.settled = []; globalThis.same = api.decode({ __thaw_napi_promise__: '5' }) === api.decode({ __thaw_napi_promise__: '5' }); \
+         api.decode({ __thaw_napi_promise__: '5' }).then(v => settled.push(v));",
+    );
+    assert_eq!(run_in(&mut it, "settled.length + '|' + same"), "0|true");
+    it.run_event_loop().unwrap_or_else(|_| panic!("event loop"));
+    assert_eq!(run_in(&mut it, "settled.join(',')"), "done");
+    assert_eq!(op_count("promise_state"), 4);
 }
