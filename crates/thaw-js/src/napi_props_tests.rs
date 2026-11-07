@@ -751,3 +751,46 @@ fn property_names_wire_encodes_a_symbol_key_as_a_handle_node() {
     let wire = names_wire(global("__pnSy"), 8);
     assert!(wire.contains(r#""hdl""#), "{wire}");
 }
+
+/// The napi attribute bits of own key `key` of `object` (`1` writable, `2` enumerable, `4`
+/// configurable), probed one bit at a time through the key-list filter.
+fn attr_bits(object: u64, key: &str) -> u32 {
+    [1u32, 2, 4]
+        .into_iter()
+        .filter(|bit| {
+            names(object, 1, *bit, 0)
+                .unwrap()
+                .contains(&format!("\"{key}\""))
+        })
+        .sum()
+}
+
+#[test]
+fn own_entries_keep_each_property_writable_and_configurable_bits() {
+    load("globalThis.__c3aDp = {}; Object.defineProperty(__c3aDp, 'x', { value: 1, writable: false, enumerable: true, configurable: true });");
+    assert_eq!(attr_bits(global("__c3aDp"), "x"), 6);
+}
+
+#[test]
+fn own_entries_default_property_has_no_attribute_bits() {
+    load("globalThis.__c3aDef = {}; Object.defineProperty(__c3aDef, 'x', { value: 1 });");
+    assert_eq!(attr_bits(global("__c3aDef"), "x"), 0);
+}
+
+#[test]
+fn own_entries_accessor_bit_is_configurable_only() {
+    load("globalThis.__c3aAcc = {}; Object.defineProperty(__c3aAcc, 'x', { get() { return 1; }, configurable: true });");
+    assert_eq!(attr_bits(global("__c3aAcc"), "x"), 4);
+}
+
+#[test]
+fn own_entries_sealed_object_drops_only_configurable() {
+    load("globalThis.__c3aSealed = Object.seal({ a: 1 });");
+    assert_eq!(attr_bits(global("__c3aSealed"), "a"), 3);
+}
+
+#[test]
+fn own_entries_frozen_object_drops_writable_and_configurable() {
+    load("globalThis.__c3aFrozen = Object.freeze({ a: 1 });");
+    assert_eq!(attr_bits(global("__c3aFrozen"), "a"), 2);
+}
