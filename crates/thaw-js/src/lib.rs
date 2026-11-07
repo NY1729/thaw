@@ -430,6 +430,28 @@ fn with_binding_mut<T>(
     }
 }
 
+/// `name += rhs` for a string binding, appended in place. `cur` is the caller's snapshot of the
+/// binding, taken before the right-hand side ran. It is released only after the binding is known
+/// to still hold that same string, so a binding that is the sole owner can grow without a copy.
+/// Returns `None` with `cur` untouched when the generic path must run (const, `with`, missing
+/// binding, or the right-hand side reassigned the binding).
+fn append_in_place(scope: &Rc<Scope>, name: &str, cur: &mut Value, rhs: &JsStr) -> Option<Value> {
+    with_binding_mut(scope, name, |b| {
+        if !b.mutable {
+            return None;
+        }
+        let (Value::Str(js), Value::Str(snap)) = (&mut b.value, &*cur) else {
+            return None;
+        };
+        if !JsStr::ptr_eq(js, snap) {
+            return None;
+        }
+        *cur = Value::Undefined;
+        js.push_joined(rhs);
+        Some(b.value.clone())
+    })
+}
+
 /// Arithmetic and relational operators on two numbers, without `binary()`'s coercion chain.
 fn number_binop(op: a::BinaryOp, x: f64, y: f64) -> Option<Value> {
     use a::BinaryOp as B;
@@ -1399,7 +1421,7 @@ impl Interp {
                 if key == "length" {
                     return Ok(Value::Number(builtins::str_len(s) as f64));
                 }
-                if let Some(i) = index_key(key) {
+                if let Some(i) = array_index(key) {
                     return Ok(builtins::str_unit_at(s, i).map_or(Value::Undefined, |u| {
                         Value::Str(builtins::units_str(&[u]).into())
                     }));
@@ -1433,14 +1455,15 @@ impl Interp {
                         if key == "length" {
                             Fast::Hit(Value::Number(items.len() as f64))
                         } else {
-                            index_key(key).map_or(Fast::Chain, |i| Fast::Hit(unhole(items.get(i))))
+                            array_index(key)
+                                .map_or(Fast::Chain, |i| Fast::Hit(unhole(items.get(i))))
                         }
                     }
                     Kind::Wrapper(Value::Str(s)) => {
                         if key == "length" {
                             Fast::Hit(Value::Number(builtins::str_len(s) as f64))
                         } else {
-                            index_key(key)
+                            array_index(key)
                                 .and_then(|i| builtins::str_unit_at(s, i))
                                 .map_or(Fast::Chain, |u| {
                                     Fast::Hit(Value::Str(builtins::units_str(&[u]).into()))
@@ -1452,7 +1475,7 @@ impl Interp {
                         "byteLength" => Fast::Hit(Value::Number((t.len * t.ty.size()) as f64)),
                         "byteOffset" => Fast::Hit(Value::Number(t.off as f64)),
                         "buffer" => Fast::Hit(Value::Object(t.abuf.clone())),
-                        _ => index_key(key).map_or(Fast::Chain, |i| {
+                        _ => array_index(key).map_or(Fast::Chain, |i| {
                             Fast::Hit(t.get(i).map_or(Value::Undefined, Value::Number))
                         }),
                     },
@@ -1540,7 +1563,7 @@ impl Interp {
             return self.assign_var(&self.global.clone(), key, value);
         }
         if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
-            if let Ok(i) = key.parse::<usize>() {
+            if let Some(i) = array_index(key) {
                 if i >= items.len() {
                     items.resize(i + 1, Value::Hole);
                 }
@@ -1557,7 +1580,7 @@ impl Interp {
             }
         }
         if let Kind::Typed(t) = &*o.kind.borrow() {
-            if let Ok(i) = key.parse::<usize>() {
+            if let Some(i) = array_index(key) {
                 let t = t.clone();
                 let n = self.num(&value);
                 t.set(i, n);
@@ -3156,8 +3179,7 @@ impl Interp {
                         return Ok(Value::Bool(false));
                     }
                     if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
-                        if let Some(slot) = key.parse::<usize>().ok().and_then(|i| items.get_mut(i))
-                        {
+                        if let Some(slot) = array_index(&key).and_then(|i| items.get_mut(i)) {
                             *slot = Value::Hole;
                         }
                     }
@@ -3282,8 +3304,26 @@ impl Interp {
                 self.eval(&asg.right, scope)?
             }
             op => {
-                let cur = self.read_loc(&loc, scope)?;
+                let mut cur = self.read_loc(&loc, scope)?;
                 let rhs = self.eval(&asg.right, scope)?;
+                // `s += x` with a primitive `x` (no user code can run in ToPrimitive)
+                let append = matches!(op, A::AddAssign)
+                    && matches!(cur, Value::Str(_))
+                    && matches!(
+                        rhs,
+                        Value::Str(_)
+                            | Value::Number(_)
+                            | Value::Bool(_)
+                            | Value::Null
+                            | Value::Undefined
+                            | Value::BigInt(_)
+                    );
+                if let (true, Loc::Ident(id)) = (append, &loc) {
+                    let rs = self.to_str(&rhs);
+                    if let Some(v) = append_in_place(scope, &id.sym, &mut cur, &rs) {
+                        return Ok(v);
+                    }
+                }
                 let bop = match op {
                     A::AddAssign => a::BinaryOp::Add,
                     A::SubAssign => a::BinaryOp::Sub,
@@ -3448,9 +3488,10 @@ impl Interp {
             B::Add => {
                 let (lp, rp) = (l.clone(), r.clone());
                 if matches!(lp, Value::Str(_)) || matches!(rp, Value::Str(_)) {
-                    let mut s = self.to_str(&lp).to_string();
-                    builtins::push_joined(&mut s, &self.to_str(&rp));
-                    Value::Str(s.into())
+                    // the operand is borrowed, so this is one copy into a buffer with slack
+                    let mut s = self.to_str(&lp);
+                    s.push_joined(&self.to_str(&rp));
+                    Value::Str(s)
                 } else {
                     Value::Number(self.num(&lp) + self.num(&rp))
                 }
@@ -3642,16 +3683,6 @@ enum Fast {
     Chain,
 }
 
-/// Array-index key for a property read. Only keys starting with a digit or `+` reach `parse`,
-/// the same accepted set as the old unconditional parse.
-#[inline]
-fn index_key(key: &str) -> Option<usize> {
-    match key.as_bytes().first() {
-        Some(b) if b.is_ascii_digit() || *b == b'+' => key.parse::<usize>().ok(),
-        _ => None,
-    }
-}
-
 fn read_own(o: &ObjData, key: &str) -> Option<Read> {
     let i = o.position(key)?;
     let props = o.props.borrow();
@@ -3700,13 +3731,18 @@ pub(crate) fn push_prop(o: &ObjData, props: &mut Vec<Prop>, p: Prop) {
     }
 }
 
-/// An array-index property key (`"0"`, `"17"`, not `"01"`).
-fn array_index(k: &str) -> Option<u32> {
+/// Canonical array-index property key (`"0"`, `"17"`; not `"01"`, `"+1"`, `"1.0"`, `" 1"`, `"-0"`),
+/// below 2^32 - 1. Every index-keyed site uses this one function.
+#[inline]
+pub(crate) fn array_index(k: &str) -> Option<usize> {
     let b = k.as_bytes();
     if b.is_empty() || !b[0].is_ascii_digit() || (b[0] == b'0' && b.len() > 1) || b.len() > 10 {
         return None;
     }
-    k.parse::<u32>().ok().filter(|n| *n != u32::MAX)
+    k.parse::<u32>()
+        .ok()
+        .filter(|n| *n != u32::MAX)
+        .map(|n| n as usize)
 }
 
 /// Enumeration order of own keys: array indices ascending, then the rest in insertion order.

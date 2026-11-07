@@ -671,7 +671,7 @@ pub(crate) fn define_slot(
         Kind::Array(items) => {
             let index = array_index(key);
             if index.is_some() || key == "length" {
-                let exists = index.is_some_and(|i| (i as usize) < items.len()) || key == "length";
+                let exists = index.is_some_and(|i| i < items.len()) || key == "length";
                 Some(exists)
             } else {
                 None
@@ -779,7 +779,7 @@ pub extern "C" fn thaw_tjs_host_property_names_result(
                     continue;
                 }
                 let item = match (symbol, key_conversion, array_index(&key)) {
-                    (false, 0, Some(n)) => Value::Number(f64::from(n)),
+                    (false, 0, Some(n)) => Value::Number(n as f64),
                     _ => it.key_value(&key),
                 };
                 out.push(item);

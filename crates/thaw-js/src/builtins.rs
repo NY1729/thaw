@@ -627,7 +627,7 @@ impl Interp {
         if value.is_some() {
             // the kind borrow ends before `self.set`, which borrows it mutably
             let is_array = matches!(&*o.kind.borrow(), Kind::Array(_));
-            if is_array && (key.parse::<usize>().is_ok() || key == "length") {
+            if is_array && (array_index(key).is_some() || key == "length") {
                 drop(self.set(target, key, value.clone().unwrap()));
                 return Ok(());
             }
@@ -1227,8 +1227,8 @@ impl Interp {
                 }
             }
             Ok(Value::Bool(match this {
-                Value::Object(o) => find_own(o, &key).is_some() || matches!(&*o.kind.borrow(), Kind::Array(items) if key.parse::<usize>().is_ok_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))) || *key == *"length"),
-                Value::Str(s) => key.parse::<usize>().is_ok_and(|i| i < str_len(s)),
+                Value::Object(o) => find_own(o, &key).is_some() || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))) || *key == *"length"),
+                Value::Str(s) => array_index(&key).is_some_and(|i| i < str_len(s)),
                 _ => false,
             }))
         });
@@ -1260,7 +1260,7 @@ impl Interp {
             }
             let key = it.to_str(&arg(args, 0));
             Ok(Value::Bool(match this {
-                Value::Object(o) => find_own(o, &key).is_some_and(|(_, e)| e) || matches!(&*o.kind.borrow(), Kind::Array(items) if key.parse::<usize>().is_ok_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole)))),
+                Value::Object(o) => find_own(o, &key).is_some_and(|(_, e)| e) || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole)))),
                 _ => false,
             }))
         });
