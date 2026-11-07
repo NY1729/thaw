@@ -40,7 +40,7 @@ fn own_prop(o: &Obj, key: &str) -> Option<(Slot, bool)> {
         if key == "length" {
             return Some((Slot::Data(Value::Number(items.len() as f64)), writable));
         }
-        if let Some(v) = key.parse::<usize>().ok().and_then(|i| items.get(i)) {
+        if let Some(v) = array_index(key).and_then(|i| items.get(i)) {
             if !matches!(v, Value::Hole) {
                 return Some((Slot::Data(v.clone()), writable));
             }
@@ -244,7 +244,7 @@ fn delete(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
         if key == "length" {
             return Ok(false);
         }
-        if let Some(slot) = key.parse::<usize>().ok().and_then(|i| items.get_mut(i)) {
+        if let Some(slot) = array_index(key).and_then(|i| items.get_mut(i)) {
             *slot = Value::Hole;
         }
     }

@@ -197,3 +197,23 @@ fn prop_get_globals_closures_and_errors() {
         "Cannot read properties of undefined (reading 'y')"
     );
 }
+
+#[test]
+fn canonical_index_keys_on_array_string_and_typed() {
+    assert_eq!(
+        one("var a = [10, 20]; console.log(a['1'] === 20, a['01'] === undefined, a['+1'] === undefined, a['1.0'] === undefined, a[1] === 20, a['-0'] === undefined, a.length === 2);"),
+        "true true true true true true true"
+    );
+    assert_eq!(
+        one("console.log('ab'['01'] === undefined, 'ab'['1'] === 'b', 'ab'['+1'] === undefined);"),
+        "true true true"
+    );
+    assert_eq!(
+        one("var t = new Uint8Array([1, 2]); console.log(t['01'] === undefined, t['1'] === 2, t['+1'] === undefined);"),
+        "true true true"
+    );
+    assert_eq!(
+        one("var a = [10, 20]; var before = '01' in a; a['01'] = 5; console.log(before, '01' in a, a.length, a['01']);"),
+        "false true 2 5"
+    );
+}
