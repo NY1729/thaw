@@ -597,10 +597,29 @@ impl Interp {
         Ok(Value::Str(out.into()))
     }
 
+    /// `Object.defineProperty`: a refused definition throws.
     fn define_property(&mut self, target: &Value, key: &str, desc: &Value) -> R<()> {
         let Value::Object(o) = target else {
             return self.throw_error("TypeError", "Object.defineProperty called on non-object");
         };
+        if self.try_define(o, key, desc)? {
+            return Ok(());
+        }
+        if (o.ext.get() != 0 || o.frozen.get())
+            && o.position(key).is_none()
+            && !own_array_elem(o, key)
+        {
+            return self.throw_error(
+                "TypeError",
+                &format!("Cannot define property {key}, object is not extensible"),
+            );
+        }
+        self.throw_error("TypeError", &format!("Cannot redefine property: {key}"))
+    }
+
+    /// `[[DefineOwnProperty]]` with `ValidateAndApplyPropertyDescriptor`: `Ok(false)` refuses the
+    /// descriptor and applies nothing. `Reflect.defineProperty` returns this directly.
+    pub(crate) fn try_define(&mut self, o: &Obj, key: &str, desc: &Value) -> R<bool> {
         let has = |it: &mut Interp, k: &str| -> R<Option<Value>> {
             if let Value::Object(d) = desc {
                 if find_in_chain(d, k).is_some() {
@@ -609,45 +628,83 @@ impl Interp {
             }
             Ok(None)
         };
-        let (value, writable, enumerable, configurable, getter, setter) = (
-            has(self, "value")?,
-            has(self, "writable")?,
-            has(self, "enumerable")?,
-            has(self, "configurable")?,
-            has(self, "get")?,
-            has(self, "set")?,
-        );
+        let d = PropDesc {
+            value: has(self, "value")?,
+            writable: has(self, "writable")?,
+            enumerable: has(self, "enumerable")?,
+            configurable: has(self, "configurable")?,
+            get: has(self, "get")?,
+            set: has(self, "set")?,
+        };
+        let frozen = o.frozen.get();
+        // array elements and `length` have no Prop: their attributes derive from the object flags
+        let arr_current = match &*o.kind.borrow() {
+            Kind::Array(items) if key == "length" => Some(Prop {
+                key: key.into(),
+                slot: Slot::Data(Value::Number(items.len() as f64)),
+                enumerable: false,
+                writable: !frozen,
+                configurable: false,
+            }),
+            Kind::Array(items) => array_index(key)
+                .and_then(|i| items.get(i))
+                .filter(|v| !matches!(v, Value::Hole))
+                .map(|v| Prop {
+                    key: key.into(),
+                    slot: Slot::Data(v.clone()),
+                    enumerable: true,
+                    writable: !frozen,
+                    configurable: !(frozen || o.ext.get() == 2),
+                }),
+            _ => None,
+        };
+        let is_array_elem = arr_current.is_some()
+            || (matches!(&*o.kind.borrow(), Kind::Array(_))
+                && array_index(key).is_some()
+                && d.value.is_some());
+        let current = if is_array_elem {
+            arr_current
+        } else {
+            o.position(key).map(|i| o.props.borrow()[i].clone())
+        };
+        match &current {
+            Some(cur) if !cur.configurable && !redefine_allowed(cur, &d) => return Ok(false),
+            None if o.ext.get() != 0 || frozen => return Ok(false),
+            _ => {}
+        }
+        if is_array_elem {
+            // ponytail: an element keeps its data attributes; a descriptor asking for other attributes
+            // (or an accessor) on an element is accepted without applying them
+            if let Some(v) = d.value {
+                self.set(&Value::Object(o.clone()), key, v)?;
+            }
+            return Ok(true);
+        }
         // globals are scope bindings: a defined data property must be visible as an identifier
-        if let (Kind::Global, Some(v)) = (&*o.kind.borrow(), &value) {
-            self.global
-                .declare(key, v.clone(), writable.as_ref().is_some_and(Value::truthy));
+        if let (Kind::Global, Some(v)) = (&*o.kind.borrow(), &d.value) {
+            self.global.declare(
+                key,
+                v.clone(),
+                d.writable.as_ref().is_some_and(Value::truthy),
+            );
         }
         let existing = o.position(key);
-        // array index / length writes go through the element storage
-        if value.is_some() {
-            // the kind borrow ends before `self.set`, which borrows it mutably
-            let is_array = matches!(&*o.kind.borrow(), Kind::Array(_));
-            if is_array && (array_index(key).is_some() || key == "length") {
-                drop(self.set(target, key, value.clone().unwrap()));
-                return Ok(());
-            }
-        }
         let flag = |v: &Option<Value>, default: bool| v.as_ref().map_or(default, |v| v.truthy());
         let mut props = o.props.borrow_mut();
-        let slot = if getter.is_some() || setter.is_some() {
+        let slot = if d.get.is_some() || d.set.is_some() {
             let (mut g, mut s) = match existing.map(|i| props[i].slot.clone()) {
                 Some(Slot::Accessor { get, set }) => (get, set),
                 _ => (None, None),
             };
-            if let Some(v) = getter.filter(|v| v.is_callable()) {
+            if let Some(v) = d.get.clone().filter(|v| v.is_callable()) {
                 g = Some(v);
             }
-            if let Some(v) = setter.filter(|v| v.is_callable()) {
+            if let Some(v) = d.set.clone().filter(|v| v.is_callable()) {
                 s = Some(v);
             }
             Slot::Accessor { get: g, set: s }
         } else {
-            match (&value, existing.map(|i| props[i].slot.clone())) {
+            match (&d.value, existing.map(|i| props[i].slot.clone())) {
                 (Some(v), _) => Slot::Data(v.clone()),
                 (None, Some(old)) => old,
                 (None, None) => Slot::Data(Value::Undefined),
@@ -657,9 +714,9 @@ impl Interp {
             Some(i) => {
                 let p = &mut props[i];
                 p.slot = slot;
-                p.enumerable = flag(&enumerable, p.enumerable);
-                p.writable = flag(&writable, p.writable);
-                p.configurable = flag(&configurable, p.configurable);
+                p.enumerable = flag(&d.enumerable, p.enumerable);
+                p.writable = flag(&d.writable, p.writable);
+                p.configurable = flag(&d.configurable, p.configurable);
             }
             None => crate::push_prop(
                 o,
@@ -667,13 +724,13 @@ impl Interp {
                 Prop {
                     key: key.into(),
                     slot,
-                    enumerable: flag(&enumerable, false),
-                    writable: flag(&writable, false),
-                    configurable: flag(&configurable, false),
+                    enumerable: flag(&d.enumerable, false),
+                    writable: flag(&d.writable, false),
+                    configurable: flag(&d.configurable, false),
                 },
             ),
         }
-        Ok(())
+        Ok(true)
     }
 
     fn range(&mut self, args: &[Value], len: usize) -> (usize, usize) {
@@ -2571,5 +2628,75 @@ impl Interp {
             }
             Ok(acc)
         });
+    }
+}
+
+/// The descriptor fields that were present (`Some`), as `Object.defineProperty` reads them.
+struct PropDesc {
+    value: Option<Value>,
+    writable: Option<Value>,
+    enumerable: Option<Value>,
+    configurable: Option<Value>,
+    get: Option<Value>,
+    set: Option<Value>,
+}
+
+/// `ValidateAndApplyPropertyDescriptor` for a non-configurable `cur`: whether `d` may still apply.
+fn redefine_allowed(cur: &Prop, d: &PropDesc) -> bool {
+    if d.configurable.as_ref().is_some_and(Value::truthy) {
+        return false;
+    }
+    if d.enumerable
+        .as_ref()
+        .is_some_and(|e| e.truthy() != cur.enumerable)
+    {
+        return false;
+    }
+    match &cur.slot {
+        Slot::Accessor { get, set } => {
+            if d.value.is_some() || d.writable.is_some() {
+                return false;
+            }
+            let same = |want: &Option<Value>, have: &Option<Value>| {
+                want.as_ref()
+                    .is_none_or(|w| same_value(w, have.as_ref().unwrap_or(&Value::Undefined)))
+            };
+            same(&d.get, get) && same(&d.set, set)
+        }
+        Slot::Data(v) => {
+            if d.get.is_some() || d.set.is_some() {
+                return false;
+            }
+            if cur.writable {
+                return true;
+            }
+            if d.writable.as_ref().is_some_and(Value::truthy) {
+                return false;
+            }
+            d.value.as_ref().is_none_or(|nv| same_value(nv, v))
+        }
+    }
+}
+
+/// `SameValue` (`Object.is`): `===` except NaN equals NaN and `+0` differs from `-0`.
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            (x.is_nan() && y.is_nan()) || (x == y && x.is_sign_negative() == y.is_sign_negative())
+        }
+        _ => strict_equals(a, b),
+    }
+}
+
+/// An array's `length`, or an element that is present (not a hole), is own.
+fn own_array_elem(o: &Obj, key: &str) -> bool {
+    match &*o.kind.borrow() {
+        Kind::Array(items) => {
+            key == "length"
+                || array_index(key)
+                    .and_then(|i| items.get(i))
+                    .is_some_and(|v| !matches!(v, Value::Hole))
+        }
+        _ => false,
     }
 }

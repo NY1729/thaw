@@ -173,3 +173,190 @@ fn reflect_delete_missing_and_configurable_return_true() {
         "true true true false"
     );
 }
+
+// `Object.defineProperty` / `Reflect.defineProperty` against non-configurable props, frozen and sealed
+// objects, non-extensible objects and array `length`/elements. Expected values match Node 22.
+
+#[test]
+fn redefine_value_change_on_writable_non_configurable_is_allowed() {
+    assert_eq!(
+        one("const o = {}; Object.defineProperty(o, 'x', { value: 1, writable: true }); Object.defineProperty(o, 'x', { value: 2 }); console.log(o.x);"),
+        "2"
+    );
+}
+
+#[test]
+fn redefine_writable_true_to_false_is_allowed() {
+    assert_eq!(
+        one("const o = {}; Object.defineProperty(o, 'x', { value: 1, writable: true }); Object.defineProperty(o, 'x', { writable: false }); console.log(o.x, Object.getOwnPropertyDescriptor(o, 'x').writable);"),
+        "1 false"
+    );
+}
+
+#[test]
+fn redefine_writable_false_to_true_throws() {
+    assert_eq!(
+        one("const o = {}; Object.defineProperty(o, 'x', { value: 1 }); try { Object.defineProperty(o, 'x', { writable: true }); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError Cannot redefine property: x"
+    );
+}
+
+#[test]
+fn redefine_enumerable_change_throws() {
+    assert_eq!(
+        one("const o = {}; Object.defineProperty(o, 'x', { value: 1, enumerable: true }); try { Object.defineProperty(o, 'x', { enumerable: false }); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError Cannot redefine property: x"
+    );
+}
+
+#[test]
+fn redefine_data_to_accessor_throws() {
+    assert_eq!(
+        one("const o = {}; Object.defineProperty(o, 'x', { value: 1 }); try { Object.defineProperty(o, 'x', { get() { return 1; } }); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError Cannot redefine property: x"
+    );
+}
+
+#[test]
+fn redefine_accessor_to_data_throws() {
+    assert_eq!(
+        one("const o = {}; Object.defineProperty(o, 'x', { get() { return 1; } }); try { Object.defineProperty(o, 'x', { value: 1 }); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError Cannot redefine property: x"
+    );
+}
+
+#[test]
+fn redefine_same_value_is_allowed() {
+    assert_eq!(
+        one("const o = {}; Object.defineProperty(o, 'x', { value: 1 }); Object.defineProperty(o, 'x', { value: 1 }); Object.defineProperty(o, 'n', { value: NaN }); Object.defineProperty(o, 'n', { value: NaN }); console.log(o.x, o.n);"),
+        "1 NaN"
+    );
+}
+
+#[test]
+fn redefine_negative_zero_to_zero_throws() {
+    assert_eq!(
+        one("const o = {}; Object.defineProperty(o, 'z', { value: -0 }); try { Object.defineProperty(o, 'z', { value: 0 }); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError Cannot redefine property: z"
+    );
+}
+
+#[test]
+fn redefine_accessor_get_change_throws() {
+    assert_eq!(
+        one("const g = function () {}; const o = {}; Object.defineProperty(o, 'a', { get: g }); Object.defineProperty(o, 'a', { get: g }); try { Object.defineProperty(o, 'a', { get: function () {} }); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError Cannot redefine property: a"
+    );
+}
+
+#[test]
+fn redefine_same_accessor_getter_is_allowed() {
+    assert_eq!(
+        one("const g = function () {}; const o = {}; Object.defineProperty(o, 'a', { get: g }); Object.defineProperty(o, 'a', { get: g }); console.log(typeof Object.getOwnPropertyDescriptor(o, 'a').get);"),
+        "function"
+    );
+}
+
+#[test]
+fn redefine_configurable_true_on_non_configurable_throws() {
+    assert_eq!(
+        one("const o = {}; Object.defineProperty(o, 'x', { value: 1 }); try { Object.defineProperty(o, 'x', { configurable: true }); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError Cannot redefine property: x"
+    );
+}
+
+#[test]
+fn reflect_define_property_returns_false_instead_of_throwing() {
+    assert_eq!(
+        one("const o = {}; Object.defineProperty(o, 'x', { value: 1 }); console.log(Reflect.defineProperty(o, 'x', { value: 2 }), Reflect.defineProperty(o, 'x', { value: 1 }), o.x);"),
+        "false true 1"
+    );
+}
+
+#[test]
+fn reflect_define_property_on_frozen_compares_values() {
+    assert_eq!(
+        one("const f = Object.freeze({ a: 1 }); console.log(Reflect.defineProperty(f, 'a', { value: 1 }), Reflect.defineProperty(f, 'a', { value: 2 }), f.a);"),
+        "true false 1"
+    );
+}
+
+#[test]
+fn reflect_define_new_property_on_non_extensible_is_false() {
+    assert_eq!(
+        one("console.log(Reflect.defineProperty(Object.preventExtensions({}), 'n', { value: 1 }), Reflect.defineProperty(Object.freeze({}), 'n', { value: 1 }));"),
+        "false false"
+    );
+}
+
+#[test]
+fn define_new_property_on_non_extensible_throws() {
+    assert_eq!(
+        one("try { Object.defineProperty(Object.preventExtensions({}), 'n', { value: 1 }); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError Cannot define property n, object is not extensible"
+    );
+}
+
+#[test]
+fn define_configurable_property_on_non_extensible_is_allowed() {
+    assert_eq!(
+        one("const o = Object.preventExtensions({ a: 1 }); Object.defineProperty(o, 'a', { value: 2 }); console.log(o.a);"),
+        "2"
+    );
+}
+
+#[test]
+fn array_length_configurable_true_throws() {
+    assert_eq!(
+        one("try { Object.defineProperty([1, 2], 'length', { configurable: true }); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError Cannot redefine property: length"
+    );
+}
+
+#[test]
+fn array_length_value_truncates() {
+    assert_eq!(
+        one("const a = [1, 2, 3]; Object.defineProperty(a, 'length', { value: 1 }); console.log(a.length, a[1]);"),
+        "1 undefined"
+    );
+}
+
+#[test]
+fn array_length_enumerable_true_throws() {
+    assert_eq!(
+        one("try { Object.defineProperty([1], 'length', { enumerable: true }); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError Cannot redefine property: length"
+    );
+}
+
+#[test]
+fn frozen_array_length_compares_value() {
+    assert_eq!(
+        one("const f = Object.freeze([1, 2]); console.log(Reflect.defineProperty(f, 'length', { value: 2 }), Reflect.defineProperty(f, 'length', { value: 5 }), f.length);"),
+        "true false 2"
+    );
+}
+
+#[test]
+fn frozen_array_element_compares_value() {
+    assert_eq!(
+        one("const f = Object.freeze([1]); console.log(Reflect.defineProperty(f, 0, { value: 1 }), Reflect.defineProperty(f, 0, { value: 2 }), f[0]);"),
+        "true false 1"
+    );
+}
+
+#[test]
+fn sealed_array_element_value_change_is_allowed() {
+    assert_eq!(
+        one("const s = Object.seal([1]); Object.defineProperty(s, 0, { value: 9 }); console.log(s[0]);"),
+        "9"
+    );
+}
+
+#[test]
+fn array_index_define_on_non_extensible_throws() {
+    assert_eq!(
+        one("try { Object.defineProperty(Object.preventExtensions([1]), 1, { value: 2 }); console.log('no'); } catch (e) { console.log(e.name, e.message); }"),
+        "TypeError Cannot define property 1, object is not extensible"
+    );
+}
