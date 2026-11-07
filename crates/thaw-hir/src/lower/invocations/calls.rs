@@ -1636,7 +1636,13 @@ impl<'a> FnLowerer<'a> {
             }
             let quickjs_function_value = self
                 .validate_quickjs_function_value_arguments(callee_expr, &call.args)?;
-            let callee = self.lower_expr(callee_expr)?;
+            // `chalk.hex("#f80")("x")`: a dynamic method call only yields a
+            // handle when hinted `JsValue`; unhinted it snapshots to `Json`.
+            let callee = if matches!(callee_expr.as_ref(), Expr::Call(_)) {
+                self.lower_expr_with_expected_type(callee_expr, Some(&HirType::JsValue))?
+            } else {
+                self.lower_expr(callee_expr)?
+            };
             let callee_ty = self.infer_expr_type(&callee)?;
             if matches!(callee_ty, HirType::JsValue | HirType::Dynamic) {
                 return self.lower_dynamic_value_call_on(callee, &call.args);

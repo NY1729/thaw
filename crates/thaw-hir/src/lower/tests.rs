@@ -74,3 +74,5 @@ include!("tests/object_literal_marker.rs");
 
 include!("tests/thaw_js_live_args.rs");
 include!("tests/thaw_js_live_owner_args.rs");
+
+include!("tests/dynamic_callee_chain.rs");
