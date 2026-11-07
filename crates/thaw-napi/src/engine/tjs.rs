@@ -76,7 +76,7 @@ extern "C" {
         args_json: *const c_char,
     ) -> ThawCallWithExceptionResult;
     fn thaw_tjs_call_reference(context: *mut c_void, args_json: *const c_char) -> *const c_char;
-    fn thaw_tjs_call_reference_graph(
+    fn thaw_tjs_napi_call_reference_graph(
         context: *mut c_void,
         args_json: *const c_char,
     ) -> *const c_char;
@@ -270,7 +270,7 @@ pub unsafe extern "C" fn thaw_js_call_reference_graph(
     context: *mut std::ffi::c_void,
     args_json: *const c_char,
 ) -> *const c_char {
-    unsafe { thaw_tjs_call_reference_graph(context, args_json) }
+    unsafe { thaw_tjs_napi_call_reference_graph(context, args_json) }
 }
 pub extern "C" fn thaw_js_construct_handle_graph_args_result(
     handle: u64,
