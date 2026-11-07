@@ -4646,8 +4646,7 @@ fn release_from_thread_local_destructor_after_callback_cache_teardown_does_not_a
         }
     }
     thread_local! {
-        static RELEASE_ON_THREAD_EXIT: ReleaseOnThreadExit =
-            ReleaseOnThreadExit(std::cell::Cell::new(0));
+        static RELEASE_ON_THREAD_EXIT: ReleaseOnThreadExit = const { ReleaseOnThreadExit(std::cell::Cell::new(0)) };
     }
     std::thread::spawn(|| {
         // Destructors run in reverse registration order: JS is registered first,
@@ -4657,7 +4656,7 @@ fn release_from_thread_local_destructor_after_callback_cache_teardown_does_not_a
         assert_ne!(thaw_js_get_global(name.as_ptr()), 0);
         RELEASE_ON_THREAD_EXIT.with(|_| ());
         let result = thaw_js_register_native_callback(
-            1usize as *const std::ffi::c_void,
+            std::ptr::dangling::<std::ffi::c_void>(),
             std::ptr::null(),
             0,
             0,
