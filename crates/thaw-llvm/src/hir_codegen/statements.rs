@@ -510,6 +510,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.compile_and_discard_promise_expression(expr)?;
                     return Ok(false);
                 }
+                self.last_call_borrowed_jsvalue_args = None;
                 let discard_frame_depth = self.owned_json_discard_frames.len();
                 self.begin_owned_json_discard_frame();
                 let value = match self.compile_expr(expr) {
@@ -524,13 +525,70 @@ impl<'ctx> HirCompiler<'ctx> {
                 if matches!(expr, HirExpr::Call(..) | HirExpr::DynamicCall(..))
                     && result_type == Some(HirType::JsValue)
                 {
-                    self.builder
-                        .build_call(
-                            self.module.get_function("thaw_js_release_handle").unwrap(),
-                            &[value.into()],
-                            "release_discarded_dynamic_value",
-                        )
-                        .map_err(|error| error.to_string())?;
+                    // A discarded result that aliases a borrowed JsValue argument (a decorator
+                    // `Mark(token)` returning its parameter) must not be released: the caller still
+                    // owns that reference. The borrowed arguments are the exact SSA values recorded
+                    // when the call was built (see `build_call_with`), so no argument is re-evaluated.
+                    let recorded = match expr {
+                        HirExpr::Call(_, args) => self
+                            .last_call_borrowed_jsvalue_args
+                            .take()
+                            .filter(|(ptr, len, _)| *ptr == args.as_ptr() && *len == args.len())
+                            .map(|(_, _, values)| values),
+                        _ => None,
+                    };
+                    match recorded {
+                        None => {
+                            self.builder
+                                .build_call(
+                                    self.module.get_function("thaw_js_release_handle").unwrap(),
+                                    &[value.into()],
+                                    "release_discarded_dynamic_value",
+                                )
+                                .map_err(|error| error.to_string())?;
+                        }
+                        Some(arg_values) => {
+                            let function = self.current_function();
+                            let release_bb = self
+                                .context
+                                .append_basic_block(function, "release_discarded_dynamic_value_block");
+                            let skip_bb = self
+                                .context
+                                .append_basic_block(function, "discarded_dynamic_value_aliased");
+                            let result_bits = value.into_int_value();
+                            let mut aliased = self.context.bool_type().const_zero();
+                            for arg_bits in arg_values {
+                                let same = self
+                                    .builder
+                                    .build_int_compare(
+                                        inkwell::IntPredicate::EQ,
+                                        result_bits,
+                                        arg_bits,
+                                        "discarded_result_is_argument",
+                                    )
+                                    .map_err(|error| error.to_string())?;
+                                aliased = self
+                                    .builder
+                                    .build_or(aliased, same, "discarded_result_aliases_argument")
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            self.builder
+                                .build_conditional_branch(aliased, skip_bb, release_bb)
+                                .map_err(|error| error.to_string())?;
+                            self.builder.position_at_end(release_bb);
+                            self.builder
+                                .build_call(
+                                    self.module.get_function("thaw_js_release_handle").unwrap(),
+                                    &[value.into()],
+                                    "release_discarded_dynamic_value",
+                                )
+                                .map_err(|error| error.to_string())?;
+                            self.builder
+                                .build_unconditional_branch(skip_bb)
+                                .map_err(|error| error.to_string())?;
+                            self.builder.position_at_end(skip_bb);
+                        }
+                    }
                 }
                 Ok(false)
             }

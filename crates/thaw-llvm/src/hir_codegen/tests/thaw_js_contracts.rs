@@ -266,3 +266,57 @@ fn a_void_callback_on_the_thaw_js_text_lane_returns_undefined_not_null() {
     assert!(ir.contains("@thaw_tjs_register_callback"), "{ir}");
     assert!(ir.contains("$__thaw_napi_undefined$"), "{ir}");
 }
+
+#[test]
+fn discarded_call_with_borrowed_jsvalue_arg_guards_release() {
+    // `mark(token)` may return `token` itself (decorator shape): the discarded result is released only if it differs from `token`
+    let (_, _, ir) = compile_thaw_js_program(
+        "function mark(value: JsValue): JsValue { return value; }
+         function main(): void { const token: JsValue = {a: 1}; mark(token); }",
+    );
+    assert!(ir.contains("discarded_result_is_argument"), "{ir}");
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+}
+
+#[test]
+fn discarded_call_with_fresh_call_arg_releases_unconditionally() {
+    // `mark(make())`: the argument is a fresh +1 owned by nobody else and `mark` returns it unretained, so the release is correct
+    let (_, _, ir) = compile_thaw_js_program(
+        "function make(): JsValue { return {a: 1}; }
+         function mark(value: JsValue): JsValue { return value; }
+         function main(): void { mark(make()); }",
+    );
+    assert!(!ir.contains("discarded_result_is_argument"), "{ir}");
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+}
+
+#[test]
+fn discarded_call_with_non_jsvalue_arg_releases_unconditionally() {
+    let (_, _, ir) = compile_thaw_js_program(
+        "function mark(n: number): JsValue { return {a: n}; }
+         function main(): void { mark(1); }",
+    );
+    assert!(!ir.contains("discarded_result_is_argument"), "{ir}");
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+}
+
+#[test]
+fn discarded_nested_call_arg_is_not_guarded_by_inner_record() {
+    // `mark(mark2(token))`: the outer argument is a fresh call result, so the inner call's recorded borrowed argument must not guard the outer release
+    let (_, _, ir) = compile_thaw_js_program(
+        "function mark2(value: JsValue): JsValue { return value; }
+         function mark(value: JsValue): JsValue { return value; }
+         function main(): void { const token: JsValue = {a: 1}; mark(mark2(token)); }",
+    );
+    assert!(!ir.contains("discarded_result_is_argument"), "{ir}");
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+}
+
+#[test]
+fn discarded_jsvalue_result_call_without_jsvalue_arguments_still_releases() {
+    let (_, _, ir) = compile_thaw_js_program(
+        "function make(): JsValue { return {a: 1}; }
+         function main(): void { make(); }",
+    );
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+}
