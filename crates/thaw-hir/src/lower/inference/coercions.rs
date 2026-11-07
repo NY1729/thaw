@@ -535,7 +535,7 @@ impl<'a> FnLowerer<'a> {
     /// Coerces a value into its declared native layout.
     /// `__thaw_tjs_live_owner_arg(projected, value)` for a NAMED (non-fresh) fixed object or class instance
     /// passed to an `any`/generic slot of a thaw-js extern function, so the package receives the live
-    /// owner handle. None keeps the by-value path (literals, Dates, errors, decorated classes, ...).
+    /// owner handle. None keeps the by-value path (literals, Dates, errors, ...).
     pub(in crate::lower) fn thaw_js_live_owner_argument(
         &mut self,
         value: &HirExpr,
@@ -551,12 +551,7 @@ impl<'a> FnLowerer<'a> {
         let is_date = fields
             .first()
             .is_some_and(|(marker, _)| marker == "__thaw_class_identity_\u{1e}Date");
-        if is_date
-            || object_type_is_error_family(&actual)
-            || fields.first().is_some_and(|(marker, _)| {
-                DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow().contains_key(marker))
-            })
-        {
+        if is_date || object_type_is_error_family(&actual) {
             return Ok(None);
         }
         let is_class = fields.iter().any(|(n, _)| n.starts_with("__thaw_class_identity_\u{1e}"));

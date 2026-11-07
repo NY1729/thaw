@@ -5471,6 +5471,13 @@ impl<'a> FnLowerer<'a> {
         } else {
             Vec::new()
         };
+        // A class with a decorator token exposes its `constructor` as the live token, as the
+        // by-value path (`coerce_to_declared`'s Json branch) does, so metadata keyed by it matches.
+        let decorator_token = match &source_type {
+            HirType::Object(fields) if class_methods => fields.first().and_then(|(marker, _)|
+                DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow().get(marker).cloned())),
+            _ => None,
+        };
         let source_name = format!("__thaw_dynamic_accessor_object_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(source_name.clone(), source_type.clone());
@@ -5720,6 +5727,15 @@ impl<'a> FnLowerer<'a> {
                 push(&methods_name, HirExpr::Lit(HirLit::Str("method".into()))),
             ]);
         }
+        if decorator_token.is_some() {
+            body.extend([
+                push(&keys_name, HirExpr::Lit(HirLit::Str("constructor".into()))),
+                push(&readable_name, HirExpr::Lit(HirLit::Bool(true))),
+                push(&writable_name, HirExpr::Lit(HirLit::Bool(false))),
+                push(&accessor_name, HirExpr::Lit(HirLit::Bool(true))),
+                push(&methods_name, HirExpr::Lit(HirLit::Str(String::new()))),
+            ]);
+        }
         // One entry past the last key: the wrapper is a live reference to a native owner
         // (not the projection of a fresh `any` literal, which converts to a mutable copy).
         body.push(HirStmt::Expr(HirExpr::Call(
@@ -5900,6 +5916,16 @@ impl<'a> FnLowerer<'a> {
                 )));
             }
         }
+        if let Some(token) = &decorator_token {
+            let getter = self.projected_read_callback(
+                HirExpr::Var(token.clone()), HirType::JsValue, &source_type, this_name,
+            )?;
+            body.push(push(&callbacks_name, getter));
+            body.push(push(&callbacks_name, HirExpr::Call(
+                Box::new(HirExpr::Var("getDynamicValue".into())),
+                vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+            )));
+        }
         // These callbacks read the same pointer-keyed integrity state used by
         // direct native Object/Reflect operations. The JS wrapper must never
         // infer native extensibility from its own shadow target alone.
@@ -5970,7 +5996,9 @@ impl<'a> FnLowerer<'a> {
         body.extend(self.lower_ordered_fixed_field_statements(
             HirExpr::Var(source_name.clone()), fields, define_actions,
         )?);
-        for _ in proto_methods.iter().map(|_| ()).chain(private_slots.iter().map(|_| ())) {
+        for _ in proto_methods.iter().map(|_| ()).chain(private_slots.iter().map(|_| ()))
+            .chain(decorator_token.iter().map(|_| ()))
+        {
             body.push(push(&callbacks_name, HirExpr::Call(
                 Box::new(HirExpr::Var("getDynamicValue".into())),
                 vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
