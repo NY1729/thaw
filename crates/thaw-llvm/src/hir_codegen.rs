@@ -573,6 +573,10 @@ pub struct HirCompiler<'ctx> {
     /// statement. Only an exact final SSA result in the same LLVM function is
     /// eligible for discard cleanup.
     owned_json_discard_frames: Vec<OwnedJsonDiscardFrame<'ctx>>,
+    /// Borrowed JsValue argument SSA values of the most recent `build_call_with`
+    /// call, keyed by its HIR argument slice, so a discarded result can be
+    /// compared against them without re-evaluating the arguments.
+    last_call_borrowed_jsvalue_args: Option<(*const HirExpr, usize, Vec<IntValue<'ctx>>)>,
     library_exports: Vec<LibraryExport>,
     pic: bool,
 }
@@ -986,6 +990,7 @@ impl<'ctx> HirCompiler<'ctx> {
             fresh_event_key_argument_scopes: Vec::new(),
             live_native_projection: None,
             owned_json_discard_frames: Vec::new(),
+            last_call_borrowed_jsvalue_args: None,
             codegen_opt: OptimizationLevel::Default,
             library_exports: Vec::new(),
             pic: false,
@@ -2881,6 +2886,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(BasicMetadataValueEnum::from(value))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        // Borrowed JsValue arguments (not fresh call results, which are +1 and owned by nobody else).
+        let borrowed_jsvalue_args: Vec<IntValue<'ctx>> = args
+            .iter()
+            .zip(&compiled_args)
+            .filter_map(|(arg, value)| match value {
+                BasicMetadataValueEnum::IntValue(bits)
+                    if self.expr_hir_type(arg) == Some(HirType::JsValue)
+                        && !matches!(arg, HirExpr::Call(..) | HirExpr::DynamicCall(..)) =>
+                {
+                    Some(*bits)
+                }
+                _ => None,
+            })
+            .collect();
 
         let call_site = self
             .builder
@@ -2888,6 +2907,10 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
 
         self.branch_on_pending_exception()?;
+        if !borrowed_jsvalue_args.is_empty() {
+            self.last_call_borrowed_jsvalue_args =
+                Some((args.as_ptr(), args.len(), borrowed_jsvalue_args));
+        }
 
         if function.get_type().get_return_type().is_none() {
             Ok(self.context.f64_type().const_zero().into())
