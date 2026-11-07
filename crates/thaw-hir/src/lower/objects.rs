@@ -5186,13 +5186,7 @@ impl<'a> FnLowerer<'a> {
     /// whose fields cannot all be projected keep the snapshot path.
     pub(super) fn class_instance_supports_live_methods(&self, ty: &HirType) -> bool {
         let HirType::Object(fields) = ty else { return false };
-        let decorated = fields.first().is_some_and(|(marker, _)| {
-            marker.strip_prefix("__thaw_class_identity_\u{1e}").is_some_and(|ancestry|
-                DECORATED_CLASS_NAMES.with(|names| {
-                    let names = names.borrow();
-                    ancestry.split('\u{1f}').any(|class| names.contains(class))
-                }))
-        });
+        let decorated = fields.first().is_some_and(|(marker, _)| marker_is_decorated(marker));
         let carries_identity = class_name_from_type(ty).is_some() && *ty != date_object_type();
         // A decorated instance's `constructor` must stay the registered class token, which the
         // live view's prototype provides; only values handed to ambient/npm code keep the snapshot.
@@ -5471,6 +5465,15 @@ impl<'a> FnLowerer<'a> {
         } else {
             Vec::new()
         };
+        // Only the live owner argument (`thaw_js_live_owner_argument`) exposes a decorated class's
+        // decorator token as `constructor`; other live views keep their established key list.
+        let decorator_token = match &source_type {
+            HirType::Object(fields) if class_methods && self.live_owner_constructor_token =>
+                fields.first()
+                    .filter(|(marker, _)| marker_is_decorated(marker))
+                    .and_then(|(marker, _)| DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow().get(marker).cloned())),
+            _ => None,
+        };
         let source_name = format!("__thaw_dynamic_accessor_object_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(source_name.clone(), source_type.clone());
@@ -5722,6 +5725,15 @@ impl<'a> FnLowerer<'a> {
         }
         // One entry past the last key: the wrapper is a live reference to a native owner
         // (not the projection of a fresh `any` literal, which converts to a mutable copy).
+        if decorator_token.is_some() {
+            body.extend([
+                push(&keys_name, HirExpr::Lit(HirLit::Str("constructor".into()))),
+                push(&readable_name, HirExpr::Lit(HirLit::Bool(true))),
+                push(&writable_name, HirExpr::Lit(HirLit::Bool(false))),
+                push(&accessor_name, HirExpr::Lit(HirLit::Bool(true))),
+                push(&methods_name, HirExpr::Lit(HirLit::Str(String::new()))),
+            ]);
+        }
         body.push(HirStmt::Expr(HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_array_push".into())),
             vec![HirExpr::Var(accessor_name.clone()), HirExpr::Lit(HirLit::Bool(live))],
@@ -5900,6 +5912,16 @@ impl<'a> FnLowerer<'a> {
                 )));
             }
         }
+        if let Some(token) = &decorator_token {
+            let getter = self.projected_read_callback(
+                HirExpr::Var(token.clone()), HirType::JsValue, &source_type, this_name,
+            )?;
+            body.push(push(&callbacks_name, getter));
+            body.push(push(&callbacks_name, HirExpr::Call(
+                Box::new(HirExpr::Var("getDynamicValue".into())),
+                vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+            )));
+        }
         // These callbacks read the same pointer-keyed integrity state used by
         // direct native Object/Reflect operations. The JS wrapper must never
         // infer native extensibility from its own shadow target alone.
@@ -5970,7 +5992,9 @@ impl<'a> FnLowerer<'a> {
         body.extend(self.lower_ordered_fixed_field_statements(
             HirExpr::Var(source_name.clone()), fields, define_actions,
         )?);
-        for _ in proto_methods.iter().map(|_| ()).chain(private_slots.iter().map(|_| ())) {
+        for _ in proto_methods.iter().map(|_| ()).chain(private_slots.iter().map(|_| ()))
+            .chain(decorator_token.iter().map(|_| ()))
+        {
             body.push(push(&callbacks_name, HirExpr::Call(
                 Box::new(HirExpr::Var("getDynamicValue".into())),
                 vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
