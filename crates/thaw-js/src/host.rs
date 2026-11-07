@@ -448,6 +448,21 @@ thread_local! {
     static LAST_PACKAGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// `THAW_JS_TRACE_WIRE` is read once; off, a trace point costs one load.
+fn trace_wire() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("THAW_JS_TRACE_WIRE").is_some())
+}
+
+/// Trace one handle operation with its outstanding reference count (no-op unless tracing).
+/// Must not be called while `HANDLE_REFS` is borrowed.
+fn trace_h(op: &str, handle: i64) {
+    if trace_wire() {
+        let refs = HANDLE_REFS.with(|r| r.borrow().get((handle as usize).wrapping_sub(1)).copied());
+        eprintln!("tjs {op} id={handle} refs={refs:?}");
+    }
+}
+
 pub(crate) fn store_handle(package: usize, value: Value) -> i64 {
     HANDLE_REFS.with(|r| r.borrow_mut().push(1));
     let object = object_key(&value);
@@ -459,6 +474,7 @@ pub(crate) fn store_handle(package: usize, value: Value) -> i64 {
     if let Some(key) = object {
         LIVE_BY_OBJECT.with(|m| m.borrow_mut().entry(key).or_default().push(id as u64));
     }
+    trace_h("store", id);
     id
 }
 
@@ -479,15 +495,22 @@ pub(crate) fn live_handle_of(v: &Value) -> Option<u64> {
 /// Take another reference on a handle; returns 1 when it is live.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_retain_handle(handle: i64) -> u8 {
-    HANDLE_REFS.with(
-        |r| match r.borrow_mut().get_mut((handle as usize).wrapping_sub(1)) {
-            Some(refs) if *refs > 0 => {
-                *refs += 1;
-                1
-            }
-            _ => 0,
-        },
-    )
+    let ok =
+        HANDLE_REFS.with(
+            |r| match r.borrow_mut().get_mut((handle as usize).wrapping_sub(1)) {
+                Some(refs) if *refs > 0 => {
+                    *refs += 1;
+                    1
+                }
+                _ => 0,
+            },
+        );
+    if ok == 1 {
+        trace_h("retain", handle);
+    } else if trace_wire() {
+        eprintln!("RETAIN-FAILED id={handle}");
+    }
+    ok
 }
 
 /// Whether `handle` names a live handle (one with a reference left).
@@ -512,6 +535,13 @@ pub extern "C" fn thaw_tjs_release_handle(handle: i64) -> u8 {
     });
     match last {
         Some(true) => {
+            trace_h("release", handle);
+            if trace_wire() {
+                eprintln!(
+                    "release->0 id={handle}\n{}",
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
             // Take the value out before dropping it: its drop may release other handles.
             let value = HANDLES.with(|h| {
                 h.borrow_mut()
@@ -532,8 +562,16 @@ pub extern "C" fn thaw_tjs_release_handle(handle: i64) -> u8 {
             drop(value);
             1
         }
-        Some(false) => 1,
-        None => 0,
+        Some(false) => {
+            trace_h("release", handle);
+            1
+        }
+        None => {
+            if trace_wire() {
+                eprintln!("RELEASE-OF-DEAD id={handle}");
+            }
+            0
+        }
     }
 }
 
