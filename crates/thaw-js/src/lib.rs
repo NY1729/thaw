@@ -284,6 +284,18 @@ pub type R<T> = Result<T, Ctl>;
 struct Binding {
     value: Value,
     mutable: bool,
+    origin: Origin,
+}
+
+/// How a global-scope binding relates to the `globalThis` object, for `delete`.
+#[derive(Clone, Copy, PartialEq)]
+enum Origin {
+    /// let/const/class, parameters, builtins: never removed by `delete`.
+    Decl,
+    /// top-level `var` or function of a script: non-configurable, `delete` returns false.
+    Var,
+    /// implicit global (assigned without a declaration): configurable, `delete` removes it.
+    Prop,
 }
 
 /// A resolved assignment / update / read-modify-write target.
@@ -368,6 +380,19 @@ impl Vars {
             return;
         }
         self.push_new(key, binding);
+    }
+    fn remove(&mut self, key: &str) {
+        let Some(i) = self.position(key) else { return };
+        self.list.remove(i);
+        if self.index.is_some() {
+            self.index = Some(
+                self.list
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (k, _))| (k.clone(), i))
+                    .collect(),
+            );
+        }
     }
     /// Append a key known to be absent.
     fn push_new(&mut self, key: Rc<str>, binding: Binding) {
@@ -518,7 +543,11 @@ impl Scope {
         let bit = name_bit(&name);
         let maybe_present = self.mask.get() & bit != 0;
         self.mask.set(self.mask.get() | bit);
-        let binding = Binding { value, mutable };
+        let binding = Binding {
+            value,
+            mutable,
+            origin: Origin::Decl,
+        };
         let mut vars = self.vars.borrow_mut();
         if maybe_present {
             vars.insert(name, binding);
@@ -538,8 +567,23 @@ impl Scope {
             Binding {
                 value: Value::Undefined,
                 mutable: true,
+                origin: Origin::Decl,
             },
         );
+    }
+    /// A hoisted global `var` with `origin`: `undefined` unless the global already has `name`
+    /// (an existing global keeps its origin).
+    fn declare_global_var(&self, name: &Rc<str>, origin: Origin) {
+        if self.vars.borrow().contains_key(name) {
+            return;
+        }
+        self.declare_if_absent(name);
+        self.set_origin(name, origin);
+    }
+    fn set_origin(&self, name: &str, origin: Origin) {
+        if let Some(b) = self.vars.borrow_mut().get_mut(name) {
+            b.origin = origin;
+        }
     }
     fn copy_of(&self, parent: Rc<Scope>) -> Rc<Scope> {
         let mut vars = Vars::default();
@@ -549,6 +593,7 @@ impl Scope {
                 Binding {
                     value: b.value.clone(),
                     mutable: b.mutable,
+                    origin: b.origin,
                 },
             );
         }
@@ -1788,6 +1833,7 @@ impl Interp {
                     Binding {
                         value,
                         mutable: true,
+                        origin: Origin::Decl,
                     },
                 );
             } else if let a::Pat::Rest(r) = p {
@@ -2027,6 +2073,40 @@ impl Interp {
         }
     }
 
+    /// Global-scope binding `name` for `delete`: `Some(false)` for a var or function, `Some(true)`
+    /// after removing an implicit global, `None` when it is not one of those (lexical or absent).
+    pub(crate) fn delete_global_binding(&mut self, name: &str) -> Option<bool> {
+        let g = self.global.clone();
+        let origin = g.vars.borrow().get(name)?.origin;
+        match origin {
+            Origin::Decl => None,
+            Origin::Var => Some(false),
+            Origin::Prop => {
+                g.vars.borrow_mut().remove(name);
+                Some(true)
+            }
+        }
+    }
+
+    /// `delete name` (sloppy): only a global binding can be refused or removed.
+    fn delete_ident(&mut self, scope: &Rc<Scope>, name: &str) -> bool {
+        let bit = name_bit(name);
+        let mut cur: Option<&Scope> = Some(scope);
+        while let Some(s) = cur {
+            if s.with.is_some() {
+                return true;
+            }
+            if s.mask.get() & bit != 0 && s.vars.borrow().contains_key(name) {
+                if !std::ptr::eq(s, &*self.global) {
+                    return true;
+                }
+                return self.delete_global_binding(name).unwrap_or(true);
+            }
+            cur = s.parent.as_deref();
+        }
+        true
+    }
+
     fn assign_var(&mut self, scope: &Rc<Scope>, name: &str, value: Value) -> R<()> {
         let bit = name_bit(name);
         let mut cur: Option<&Scope> = Some(scope);
@@ -2059,6 +2139,7 @@ impl Interp {
         }
         // sloppy-mode implicit global
         self.global.declare(name, value, true);
+        self.global.set_origin(name, Origin::Prop);
         Ok(())
     }
 
@@ -2168,7 +2249,7 @@ impl Interp {
 
     /// Evaluate a script in the global scope; the value is that of the last expression statement.
     pub fn run(&mut self, source: &str) -> R<Value> {
-        self.run_parsed(source, thaw_parser::parse_javascript(source))
+        self.run_parsed(source, thaw_parser::parse_javascript(source), true)
     }
 
     /// Like [`run`](Self::run) for `eval` / `new Function` text: parsed as a sloppy-mode script.
@@ -2177,10 +2258,17 @@ impl Interp {
         if let Err(msg) = &parsed {
             return self.throw_error("SyntaxError", msg);
         }
-        self.run_parsed(source, parsed)
+        self.run_parsed(source, parsed, false)
     }
 
-    fn run_parsed(&mut self, source: &str, parsed: Result<a::Module, String>) -> R<Value> {
+    /// `script`: a top-level script, whose vars and functions are non-configurable globals; an
+    /// indirect `eval` declares configurable ones.
+    fn run_parsed(
+        &mut self,
+        source: &str,
+        parsed: Result<a::Module, String>,
+        script: bool,
+    ) -> R<Value> {
         let module = parsed.map_err(|e| Ctl::Throw(Value::str(&e)))?;
         self.run_id = next_run_id();
         self.sources.insert(self.run_id, Rc::from(source));
@@ -2192,14 +2280,29 @@ impl Interp {
             }
         }
         let global = self.global.clone();
-        hoist_vars(&stmts, &global);
-        self.run_stmts(&stmts, &global)
+        let origin = if script { Origin::Var } else { Origin::Prop };
+        for name in &hoisted_names(&stmts) {
+            global.declare_global_var(name, origin);
+        }
+        self.hoist_functions(&stmts, &global)?;
+        for s in &stmts {
+            if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
+                global.set_origin(&f.ident.sym, origin);
+            }
+        }
+        self.run_hoisted(&stmts, &global)
     }
 
     /// Hoists the functions of `stmts` into `scope`, then runs them; the value is that of the last
     /// expression statement.
     fn run_stmts(&mut self, stmts: &[a::Stmt], scope: &Rc<Scope>) -> R<Value> {
         self.hoist_functions(stmts, scope)?;
+        self.run_hoisted(stmts, scope)
+    }
+
+    /// Runs `stmts` whose functions are already hoisted; the value is that of the last expression
+    /// statement.
+    fn run_hoisted(&mut self, stmts: &[a::Stmt], scope: &Rc<Scope>) -> R<Value> {
         let mut last = Value::Undefined;
         for s in stmts {
             if let a::Stmt::Expr(e) = s {
@@ -3165,17 +3268,18 @@ impl Interp {
                     Value::Object(_) => "object",
                 }))
             }
-            a::UnaryOp::Delete => {
-                let a::Expr::Member(m) = &*u.arg else {
-                    return Ok(Value::Bool(true));
-                };
-                let obj = self.eval(&m.obj, scope)?;
-                let key = self.member_key(&m.prop, scope)?;
-                if let Value::Object(o) = obj {
-                    return Ok(Value::Bool(crate::reflect::delete_own(self, &o, &key)?));
+            a::UnaryOp::Delete => match &*u.arg {
+                a::Expr::Member(m) => {
+                    let obj = self.eval(&m.obj, scope)?;
+                    let key = self.member_key(&m.prop, scope)?;
+                    if let Value::Object(o) = obj {
+                        return Ok(Value::Bool(crate::reflect::delete_own(self, &o, &key)?));
+                    }
+                    Ok(Value::Bool(true))
                 }
-                Ok(Value::Bool(true))
-            }
+                a::Expr::Ident(i) => Ok(Value::Bool(self.delete_ident(scope, &i.sym))),
+                _ => Ok(Value::Bool(true)),
+            },
             _ => {
                 let v = self.eval(&u.arg, scope)?;
                 Ok(match u.op {
