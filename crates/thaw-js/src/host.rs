@@ -1815,14 +1815,7 @@ pub extern "C" fn thaw_tjs_property_predicate_json_key_result(
                 1 => matches!(&target, Value::Object(o) if crate::find_own(o, &key).is_some()),
                 2 => match &target {
                     Value::Object(o) => {
-                        match it.proxy_delete(o, &key).map_err(|c| classify(it, c))? {
-                            Some(done) => done,
-                            None if o.frozen.get() => false,
-                            None => {
-                                o.remove_prop(&key);
-                                true
-                            }
-                        }
+                        crate::reflect::delete_own(it, o, &key).map_err(|c| classify(it, c))?
                     }
                     _ => true,
                 },
@@ -1897,14 +1890,7 @@ fn property_predicate(handle: u64, name: *const c_char, delete: bool) -> HandleR
             let result = if delete {
                 match &target {
                     Value::Object(o) => {
-                        match it.proxy_delete(o, &name).map_err(|c| classify(it, c))? {
-                            Some(done) => done,
-                            None if o.frozen.get() => false,
-                            None => {
-                                o.remove_prop(&name);
-                                true
-                            }
-                        }
+                        crate::reflect::delete_own(it, o, &name).map_err(|c| classify(it, c))?
                     }
                     _ => true,
                 }
