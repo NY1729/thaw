@@ -52,12 +52,20 @@ pub(crate) fn enable(it: &mut Interp) {
         ("__thaw_json_graph_napi_each_export", "eachExport"),
         ("__thaw_json_graph_proxy_for_handle", "proxyForHandle"),
         ("__thaw_napi_graph_function_for_handle", "functionForHandle"),
+        ("__thaw_json_graph_napi_call_export", "callExport"),
+        ("__thaw_json_graph_napi_construct", "construct"),
     ] {
         let value = it
             .get(&api, field)
             .unwrap_or_else(|_| panic!("native addon proxy layer exports {field}"));
         it.global.declare(name, value, false);
     }
+    // Last: the shim takes the trusted path as soon as this reports the bridge, so every other global is in place.
+    let available = it
+        .get(&api, "bridgeAvailable")
+        .unwrap_or_else(|_| panic!("native addon proxy layer exports bridgeAvailable"));
+    it.global
+        .declare("__thaw_json_graph_napi_bridge_available", available, false);
     let pair = native_pair_matches_global(it);
     it.global
         .declare("__thaw_json_graph_native_pair_matches", pair, false);
