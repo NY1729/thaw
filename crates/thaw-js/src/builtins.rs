@@ -1227,22 +1227,14 @@ impl Interp {
             });
             self.set_native(o, "freeze", |_, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
-                    o.frozen.set(true);
-                    for p in o.props.borrow_mut().iter_mut() {
-                        p.configurable = false;
-                        if matches!(p.slot, Slot::Data(_)) {
-                            p.writable = false;
-                        }
-                    }
+                    freeze_obj(&o);
                 }
                 Ok(arg(args, 0))
             });
             self.set_native(o, "isFrozen", |it, _, args| {
                 let subject = it.proxy_unwrap(&arg(args, 0), "isFrozen")?;
                 Ok(Value::Bool(match subject {
-                    Value::Object(o) => {
-                        o.frozen.get() || (o.ext.get() != 0 && o.props.borrow().is_empty())
-                    }
+                    Value::Object(o) => test_integrity(&o, true),
                     _ => true,
                 }))
             });
@@ -1256,10 +1248,7 @@ impl Interp {
             });
             self.set_native(o, "seal", |_, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
-                    o.ext.set(2);
-                    for p in o.props.borrow_mut().iter_mut() {
-                        p.configurable = false;
-                    }
+                    seal_obj(&o);
                 }
                 Ok(arg(args, 0))
             });
@@ -1275,7 +1264,7 @@ impl Interp {
             self.set_native(o, "isSealed", |it, _, args| {
                 let subject = it.proxy_unwrap(&arg(args, 0), "isSealed")?;
                 Ok(Value::Bool(match subject {
-                    Value::Object(o) => o.ext.get() == 2 || o.frozen.get(),
+                    Value::Object(o) => test_integrity(&o, false),
                     _ => true,
                 }))
             });
@@ -2665,6 +2654,47 @@ struct PropDesc {
     configurable: Option<Value>,
     get: Option<Value>,
     set: Option<Value>,
+}
+
+/// `Object.freeze` on `o`, also used by the napi integrity export: every own property becomes
+/// non-configurable, data properties non-writable, and the object is marked frozen.
+pub(crate) fn freeze_obj(o: &Obj) {
+    o.frozen.set(true);
+    for p in o.props.borrow_mut().iter_mut() {
+        p.configurable = false;
+        if matches!(p.slot, Slot::Data(_)) {
+            p.writable = false;
+        }
+    }
+}
+
+/// `Object.seal` on `o`, also used by the napi integrity export: non-extensible, and every own
+/// property becomes non-configurable.
+pub(crate) fn seal_obj(o: &Obj) {
+    o.ext.set(2);
+    for p in o.props.borrow_mut().iter_mut() {
+        p.configurable = false;
+    }
+}
+
+/// `TestIntegrityLevel` (frozen or sealed) over the object flags and per-Prop attributes. Array
+/// elements have no Prop: they count as non-configurable and non-writable only once sealed/frozen.
+/// Typed arrays are not checked (ceiling).
+pub(crate) fn test_integrity(o: &Obj, frozen: bool) -> bool {
+    let sealed = o.frozen.get() || o.ext.get() == 2;
+    if !sealed && o.ext.get() == 0 {
+        return false;
+    }
+    let elements_ok = if frozen { o.frozen.get() } else { sealed };
+    if !elements_ok
+        && matches!(&*o.kind.borrow(), Kind::Array(items) if items.iter().any(|v| !matches!(v, Value::Hole)))
+    {
+        return false;
+    }
+    o.props
+        .borrow()
+        .iter()
+        .all(|p| !p.configurable && (!frozen || !matches!(p.slot, Slot::Data(_)) || !p.writable))
 }
 
 /// `ValidateAndApplyPropertyDescriptor` for a non-configurable `cur`: whether `d` may still apply.
