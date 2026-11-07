@@ -4043,6 +4043,50 @@ fn push_on_proxy_forwards_to_target_array() {
 }
 
 #[test]
+fn array_slice_call_on_typed_array_copies_elements() {
+    assert_eq!(
+        one("const u = new Uint8Array([1, 2, 3]); console.log(JSON.stringify(Array.prototype.slice.call(u)))"),
+        "[1,2,3]"
+    );
+    assert_eq!(
+        one("const u = new Uint8Array([1, 2, 3]); console.log(JSON.stringify([Array.prototype.slice.call(u, -2), Array.prototype.slice.call(u, 1, 2), Array.prototype.slice.call(u, 1, -1)]))"),
+        "[[2,3],[2],[2]]"
+    );
+}
+
+#[test]
+fn array_slice_call_on_array_like_objects_and_arguments() {
+    assert_eq!(
+        one("console.log(JSON.stringify(Array.prototype.slice.call({ 0: 'a', 1: 'b', length: 2 })))"),
+        r#"["a","b"]"#
+    );
+    assert_eq!(
+        one("function f() { return Array.prototype.slice.call(arguments, 1); } console.log(JSON.stringify(f(1, 2, 3)))"),
+        "[2,3]"
+    );
+}
+
+#[test]
+fn array_slice_call_on_buffer_and_string() {
+    assert_eq!(
+        one("console.log(JSON.stringify(Array.prototype.slice.call(Buffer.from([5, 6, 7]), 1)))"),
+        "[6,7]"
+    );
+    assert_eq!(
+        one("console.log(JSON.stringify(Array.prototype.slice.call('abc', 1)))"),
+        r#"["b","c"]"#
+    );
+}
+
+#[test]
+fn array_slice_call_result_is_a_fresh_array_not_a_view() {
+    assert_eq!(
+        one("const u = new Uint8Array([1, 2]); const r = Array.prototype.slice.call(u); r[0] = 9; console.log(u[0], Array.isArray(r), r.length)"),
+        "1 true 2"
+    );
+}
+
+#[test]
 fn push_on_plain_array_is_unchanged() {
     assert_eq!(
         one("var a = [1]; var n = a.push(2, 3); console.log(n, a.join())"),
