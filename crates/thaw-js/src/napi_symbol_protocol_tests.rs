@@ -279,7 +279,7 @@ fn coercion_of_a_native_symbol_is_a_type_error_after_global_symbol_is_replaced()
     assert!(r.error.is_null(), "unexpected error");
     assert!(r.units.is_null());
     assert_ne!(r.exception_handle, 0);
-    let thrown = handle_value(r.exception_handle as u64).unwrap();
+    let thrown = handle_value(r.exception_handle).unwrap();
     let name = with_package(default_realm(), |p| {
         let it = &mut p.interp;
         let name = it.get(&thrown, "name").map_err(|c| classify(it, c))?;
