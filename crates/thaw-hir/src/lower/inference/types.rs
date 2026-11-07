@@ -646,7 +646,11 @@ impl<'a> FnLowerer<'a> {
                             }
                             (params, ret)
                         }
-                        _ => return Err("call target is not a function value".into()),
+                        other => {
+                            return Err(format!(
+                                "call target is not a function value (callee type: {other:?})"
+                            ))
+                        }
                     };
                     if params.len() != args.len() {
                         return Err(format!(
