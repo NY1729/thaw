@@ -14,8 +14,11 @@
 # env:   THAW        thaw binary            (default: $CARGO_TARGET_DIR/debug/thaw or <repo>/target/debug/thaw)
 #        THAW_SCAN   thaw-js-scan binary    (default: same dir as THAW)
 #        SCRATCH     scratch root           (default: /home/fedora/work/thaw-tmp/qjsq1-measure)
-#        PK_DIR      corpus programs        (default: /home/fedora/work/thaw-tmp/tmp-run/jsr/pk)
-#        JS_DIR      scan bundles           (default: /home/fedora/work/thaw-tmp/tmp-run/jsr/corpus)
+#        CORPUS      corpus root            (default: <repo>/tools/quickjs-removal/corpus)
+#        VERSIONS    pinned specs           (default: $CORPUS/versions.txt; lines `name spec@ver ...`)
+#        PK_DIR      corpus programs        (default: $CORPUS/pk)
+#        JS_DIR      scan bundles           (default: $CORPUS/corpus; scan skipped if absent)
+#        Each program's run_ms is the median of 5 runs (date-based ms, %e kept for RSS).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -23,8 +26,10 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
 THAW="${THAW:-$TARGET_DIR/debug/thaw}"
 THAW_SCAN="${THAW_SCAN:-$(dirname "$THAW")/thaw-js-scan}"
 SCRATCH="${SCRATCH:-/home/fedora/work/thaw-tmp/qjsq1-measure}"
-PK_DIR="${PK_DIR:-/home/fedora/work/thaw-tmp/tmp-run/jsr/pk}"
-JS_DIR="${JS_DIR:-/home/fedora/work/thaw-tmp/tmp-run/jsr/corpus}"
+CORPUS="${CORPUS:-$REPO/tools/quickjs-removal/corpus}"
+VERSIONS="${VERSIONS:-$CORPUS/versions.txt}"
+PK_DIR="${PK_DIR:-$CORPUS/pk}"
+JS_DIR="${JS_DIR:-$CORPUS/corpus}"
 OUT="$SCRATCH/baseline.tsv"
 ONLY=""
 SKIP_NODE_COMPAT=0
@@ -38,33 +43,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# program name and npm package specs (same mapping as the jsr run1.sh set)
-PROGRAMS=(
-  "ms ms @types/ms"
-  "lodash lodash @types/lodash"
-  "zod zod"
-  "dayjs dayjs"
-  "semver semver @types/semver"
-  "uuid uuid"
-  "qs qs @types/qs"
-  "marked marked"
-  "jsyaml js-yaml @types/js-yaml"
-  "validator validator @types/validator"
-  "nanoid nanoid"
-  "chalk chalk"
-  "minimist minimist @types/minimist"
-  "bcryptjs bcryptjs"
-  "luxon luxon @types/luxon"
-  "datefns date-fns"
-  "hono hono"
-  "handlebars handlebars"
-  "ajv ajv"
-  "commander commander"
-  "cheerio cheerio"
-  "axios axios"
-  "ejs ejs @types/ejs"
-  "yup yup"
-)
+# program name and pinned npm specs: one line per program, `name spec@ver ...`
+[ -f "$VERSIONS" ] || { echo "missing versions file: $VERSIONS" >&2; exit 1; }
+mapfile -t PROGRAMS < <(grep -vE '^[[:space:]]*(#|$)' "$VERSIONS")
 
 ENGINES=(quickjs thaw-js)
 export TMPDIR="$SCRATCH/tmp"
@@ -90,8 +71,26 @@ measure_program() {
   [ -f package.json ] || echo '{"name":"t","version":"1.0.0"}' > package.json
   # a cached thaw_modules bundle from an older thaw is "up to date" to `add` and silently stale
   rm -rf thaw_modules
-  # shellcheck disable=SC2086
-  timeout 300 "$THAW" add $specs --prefix . > "$SCRATCH/out/$name.add.log" 2>&1 || true
+  local attempt add_ok=0
+  for attempt in 1 2 3; do
+    # shellcheck disable=SC2086
+    if timeout 300 "$THAW" add $specs --prefix . > "$SCRATCH/out/$name.add.log" 2>&1; then
+      add_ok=1
+      break
+    fi
+    echo "[measure] thaw add for $name failed (attempt $attempt/3)" >&2
+    sleep 5
+  done
+  row program "$name" node add_ok "$add_ok"
+  if [ "$add_ok" = 0 ] || [ ! -f "$PK_DIR/$name.ts" ]; then
+    # Missing bundle or program source: fail the program under both engines, do not skip silently.
+    local f
+    for f in "${ENGINES[@]}"; do
+      row program "$name" "$f" build_ok 0
+      row program "$name" "$f" stdout_eq_node 0
+    done
+    return
+  fi
   cp "$PK_DIR/$name.ts" .
 
   # Node reference output (the program does not auto-invoke main() under node).
@@ -137,18 +136,26 @@ measure_program() {
     row program "$name" "$engine" F "$F"
     row program "$name" "$engine" size_bytes "$(stat -c %s "$bin")"
 
-    /usr/bin/time -f "%e %M" -o "$log.time" timeout 120 "$bin" > "$log.stdout" 2> "$log.stderr"
-    local run_status=$?
-    local wall rss
-    read -r wall rss < "$log.time"
+    # Five runs: run_ms is the median (startup-dominated runs are noisy); stdout must match Node on every run.
+    local -a runs=()
+    local r status run_status=0 rss=0 rrss ok=1
+    for r in 1 2 3 4 5; do
+      s=$(date +%s%N)
+      /usr/bin/time -f "%e %M" -o "$log.time" timeout 120 "$bin" > "$log.stdout" 2> "$log.stderr"
+      status=$?
+      e=$(date +%s%N)
+      runs+=( $(( (e - s) / 1000000 )) )
+      [ "$status" = 0 ] || run_status=$status
+      read -r _ rrss < "$log.time"
+      [ "${rrss:-0}" -gt "$rss" ] && rss=$rrss
+      cmp -s "$log.stdout" "$SCRATCH/out/$name.node" || ok=0
+    done
+    local median
+    median=$(printf '%s\n' "${runs[@]}" | sort -n | sed -n '3p')
     row program "$name" "$engine" run_exit "$run_status"
-    row program "$name" "$engine" run_ms "$(awk -v w="$wall" 'BEGIN{printf "%d", w*1000}')"
+    row program "$name" "$engine" run_ms "$median"
     row program "$name" "$engine" rss_kb "$rss"
-    if cmp -s "$log.stdout" "$SCRATCH/out/$name.node"; then
-      row program "$name" "$engine" stdout_eq_node 1
-    else
-      row program "$name" "$engine" stdout_eq_node 0
-    fi
+    row program "$name" "$engine" stdout_eq_node "$ok"
   done
 }
 
@@ -161,7 +168,8 @@ for entry in "${PROGRAMS[@]}"; do
 done
 
 # thaw-js-scan over the bundle corpus: eligibility and blocker counts (engine-independent).
-if [ -z "$ONLY" ] && [ -x "$THAW_SCAN" ]; then
+# Skipped when the bundle directory is absent (the CI ratio gate does not need it).
+if [ -z "$ONLY" ] && [ -x "$THAW_SCAN" ] && [ -d "$JS_DIR" ]; then
   echo "[measure] thaw-js-scan" >&2
   "$THAW_SCAN" "$JS_DIR"/*.js > "$SCRATCH/out/scan.tsv" 2> "$SCRATCH/out/scan.err"
   row scan corpus thaw-js bundles "$(awk -F'\t' '$2=="modules"' "$SCRATCH/out/scan.tsv" | wc -l)"

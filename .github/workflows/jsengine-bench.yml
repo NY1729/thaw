@@ -175,15 +175,17 @@ jobs:
       - name: Check for corpus programs
         id: corpus
         run: |
-          # The 24-program corpus lives outside the repo today (measure.sh defaults to thaw-tmp paths).
-          # Point PK_DIR/JS_DIR at a committed copy; without it, report and skip rather than fail.
-          pk="$GITHUB_WORKSPACE/tools/quickjs-removal/corpus/pk"
-          if [ -d "$pk" ]; then
-            echo "present=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=0" >> "$GITHUB_OUTPUT"
-            echo "corpus programs not found at $pk; corpus ratio not measured" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          # The 24 committed programs and their pinned versions live under tools/quickjs-removal/corpus.
+          # Missing corpus is a failure (no silent skip).
+          corpus="$GITHUB_WORKSPACE/tools/quickjs-removal/corpus"
+          for need in "$corpus/pk" "$corpus/versions.txt"; do
+            if [ ! -e "$need" ]; then
+              echo "corpus input not found: $need" >&2
+              echo "corpus input not found: $need" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
+          echo "present=1" >> "$GITHUB_OUTPUT"
       - name: Run corpus measurement
         if: steps.corpus.outputs.present == '1'
         env:
@@ -191,7 +193,7 @@ jobs:
           THAW_SCAN: ${{ github.workspace }}/target/release/thaw-js-scan
           SCRATCH: ${{ runner.temp }}/qjsq1-measure
           PK_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/pk
-          JS_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/bundles
+          VERSIONS: ${{ github.workspace }}/tools/quickjs-removal/corpus/versions.txt
         run: |
           tools/quickjs-removal/measure.sh --skip-node-compat -o "$RUNNER_TEMP/corpus.tsv"
       - name: Print corpus ratios
