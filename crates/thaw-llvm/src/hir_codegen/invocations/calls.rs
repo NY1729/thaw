@@ -2992,7 +2992,12 @@ impl<'ctx> HirCompiler<'ctx> {
         let function = self
             .module
             .get_function(&symbol)
-            .ok_or_else(|| format!("call to undeclared function `{name}`"))?;
+            .ok_or_else(|| {
+                format!(
+                    "call to undeclared function `{name}` (recorded variable type: {:?})",
+                    self.variable_hir_types.get(name)
+                )
+            })?;
 
         if self.is_proven_typed_quickjs_wrapper(name) {
             self.with_typed_wrapper_argument_scope(
