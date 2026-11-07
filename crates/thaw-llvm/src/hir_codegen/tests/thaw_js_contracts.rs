@@ -266,3 +266,22 @@ fn a_void_callback_on_the_thaw_js_text_lane_returns_undefined_not_null() {
     assert!(ir.contains("@thaw_tjs_register_callback"), "{ir}");
     assert!(ir.contains("$__thaw_napi_undefined$"), "{ir}");
 }
+
+#[test]
+fn discarded_jsvalue_argument_call_does_not_release_its_possible_alias() {
+    // `mark(token)` may return `token` itself (decorator shape): releasing the discarded result would drop its only reference
+    let (_, _, ir) = compile_thaw_js_program(
+        "function mark(value: JsValue): JsValue { return value; }
+         function main(): void { const token: JsValue = {a: 1}; mark(token); }",
+    );
+    assert!(!ir.contains("release_discarded_dynamic_value"), "{ir}");
+}
+
+#[test]
+fn discarded_jsvalue_result_call_without_jsvalue_arguments_still_releases() {
+    let (_, _, ir) = compile_thaw_js_program(
+        "function make(): JsValue { return {a: 1}; }
+         function main(): void { make(); }",
+    );
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+}

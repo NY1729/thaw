@@ -521,8 +521,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let result_type = self.expr_hir_type(expr);
                 self.discard_owned_json_statement_result(expr, value, result_type.clone())?;
+                // The result may be one of its own JsValue arguments (a decorator `Mark(token)`
+                // returning its parameter); releasing it would drop the only reference.
+                // ponytail: skipping that release leaks one handle per discarded JsValue-in/JsValue-out
+                // call; proper fix = the callee retains a returned JsValue parameter, then release here.
+                let may_alias_jsvalue_argument = match expr {
+                    HirExpr::Call(_, args) | HirExpr::DynamicCall(_, args) => {
+                        args.iter().any(|arg| self.expr_hir_type(arg) == Some(HirType::JsValue))
+                    }
+                    _ => false,
+                };
                 if matches!(expr, HirExpr::Call(..) | HirExpr::DynamicCall(..))
                     && result_type == Some(HirType::JsValue)
+                    && !may_alias_jsvalue_argument
                 {
                     self.builder
                         .build_call(
