@@ -204,12 +204,21 @@ jobs:
           awk -F'\t' '
             NR == 1 { next }
             $1 == "program" { progs[$2] = 1 }
+            $1 == "program" && $4 == "build_ok" { bok[$2, $3] = $5 }
             $1 == "program" && $4 == "run_ms" { ms[$2, $3] = $5 }
             $1 == "program" && $4 == "run_exit" { ex[$2, $3] = $5 }
             $1 == "program" && $4 == "stdout_eq_node" { eq[$2, $3] = $5 }
             END {
               for (p in progs) {
                 q = ms[p, "quickjs"]; t = ms[p, "thaw-js"]
+                # A build failure on either engine is a SKIP: listed in the table, excluded from geomean/OVER.
+                if (bok[p, "quickjs"] != "1" || bok[p, "thaw-js"] != "1") {
+                  if (bok[p, "quickjs"] != "1" && bok[p, "thaw-js"] != "1") why = "both builds failed"
+                  else if (bok[p, "quickjs"] != "1") why = "quickjs build failed"
+                  else why = "thaw-js build failed"
+                  printf "%s\t%s\t%s\t-\tSKIP (%s)\n", p, q, t, why
+                  continue
+                }
                 if (q + 0 > 0 && t != "") {
                   # A run that exits non-zero or differs from Node on either engine has no ratio.
                   if (ex[p, "quickjs"] != "0" || ex[p, "thaw-js"] != "0" || eq[p, "quickjs"] != "1" || eq[p, "thaw-js"] != "1") {
@@ -232,8 +241,11 @@ jobs:
             echo
             awk -F'\t' '$4 ~ /^[0-9]/ { n++; s += log($4); if ($4 + 0 > max + 0 || n == 1) { max = $4; maxname = $1 } if ($4 + 0 > 1.5) over++ }
               $5 == "FAIL" { failed++ }
+              $5 ~ /^SKIP/ { skipped++; skiplist = skiplist sprintf("  - %s: %s\n", $1, $5) }
               END { if (n) printf "- geomean: %.3f over %d programs\n- max ratio: %s (%s)\n- programs over 1.5x: %d\n", exp(s / n), n, max, maxname, over + 0
-                printf "- programs with a failed run or stdout != Node (no ratio): %d\n", failed + 0 }' "$RUNNER_TEMP/corpus-ratios.tsv"
+                printf "- programs with a failed run or stdout != Node (no ratio): %d\n", failed + 0
+                printf "- programs SKIPPED for a build failure (excluded from geomean/OVER): %d\n", skipped + 0
+                printf "%s", skiplist }' "$RUNNER_TEMP/corpus-ratios.tsv"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()

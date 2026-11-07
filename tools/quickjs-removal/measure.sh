@@ -139,6 +139,8 @@ measure_program() {
     row program "$name" "$engine" build_ok "$build_ok"
     row program "$name" "$engine" build_ms "$(( (e - s) / 1000000 ))"
     if [ "$build_ok" = 0 ]; then
+      # Visible skip: the corpus ratio table prints this program as SKIP and excludes it from geomean/OVER.
+      echo "[measure] SKIP $name/$engine: build failed (no run_ms; excluded from ratio)" >&2
       row program "$name" "$engine" F ""
       row program "$name" "$engine" links_quickjs ""
       row program "$name" "$engine" stdout_eq_node 0
