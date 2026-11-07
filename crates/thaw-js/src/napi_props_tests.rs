@@ -728,3 +728,26 @@ fn abstract_to_string_units_runs_effects_and_keeps_throws() {
     assert!(!stale.error.is_null());
     assert_eq!(error_of(stale.error), "invalid JavaScript handle");
 }
+
+/// The graph wire of `thaw_tjs_host_property_names_result` for `object` (keys as napi graph nodes).
+fn names_wire(object: u64, filter: u32) -> String {
+    let result = thaw_tjs_napi_host_property_names_result(object, 1, filter, 0);
+    assert!(result.error.is_null(), "{}", error_of(result.error));
+    unsafe { CStr::from_ptr(result.value) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn property_names_wire_keeps_a_lone_surrogate_key_as_utf16_units() {
+    load("globalThis.__pnSu = { [String.fromCharCode(0xD800)]: 1 };");
+    let wire = names_wire(global("__pnSu"), 0);
+    assert!(wire.contains(r#"{"su":[55296]}"#), "{wire}");
+}
+
+#[test]
+fn property_names_wire_encodes_a_symbol_key_as_a_handle_node() {
+    load("globalThis.__pnSy = { [Symbol('pnSym')]: 1 };");
+    let wire = names_wire(global("__pnSy"), 8);
+    assert!(wire.contains(r#""hdl""#), "{wire}");
+}

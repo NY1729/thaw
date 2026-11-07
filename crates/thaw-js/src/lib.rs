@@ -144,6 +144,8 @@ pub struct ObjData {
     proto: RefCell<Option<Obj>>,
     kind: RefCell<Kind>,
     frozen: Cell<bool>,
+    /// An array's `length` made non-writable (`defineProperty(a, 'length', {writable: false})`).
+    len_ro: Cell<bool>,
     /// 0 extensible, 1 non-extensible (`preventExtensions`), 2 sealed.
     ext: Cell<u8>,
     /// Key -> position in `props`, built lazily for objects with many properties (`None` = stale).
@@ -154,6 +156,11 @@ pub struct ObjData {
 const INDEX_MIN: usize = 10;
 
 impl ObjData {
+    /// Writability of an array's `length`: frozen or made read-only both clear it.
+    fn len_writable(&self) -> bool {
+        !self.frozen.get() && !self.len_ro.get()
+    }
+
     /// Position of own property `key`.
     fn position(&self, key: &str) -> Option<usize> {
         let props = self.props.borrow();
@@ -663,6 +670,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         proto: RefCell::new(proto),
         kind: RefCell::new(kind),
         frozen: Cell::new(false),
+        len_ro: Cell::new(false),
         ext: Cell::new(0),
         index: RefCell::new(None),
     })
@@ -797,6 +805,11 @@ pub struct Interp {
     pub(crate) yielded: bool,
     /// Function values made for compiled callbacks, by callback id (host.rs `callback_value`): stable identity.
     pub(crate) callback_values: HashMap<usize, Value>,
+    /// The intrinsic `Symbol` constructor, its `Symbol.for` registry and the well-known symbols, captured at
+    /// realm setup (collections.rs `install_collections`), so Rust never looks `Symbol` up in the global scope.
+    pub(crate) symbol_ctor: Option<Obj>,
+    pub(crate) symbol_registry: Option<Obj>,
+    pub(crate) well_known: Vec<Obj>,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -892,6 +905,9 @@ impl Interp {
             slice_end: None,
             yielded: false,
             callback_values: HashMap::new(),
+            symbol_ctor: None,
+            symbol_registry: None,
+            well_known: Vec::new(),
         };
         it.install_builtins();
         it.install_collections();
@@ -1607,8 +1623,12 @@ impl Interp {
             }
             return self.assign_var(&self.global.clone(), key, value);
         }
+        let len_ro = o.len_ro.get();
         if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
             if let Some(i) = array_index(key) {
+                if len_ro && i >= items.len() {
+                    return Ok(()); // sloppy mode: silently ignored (read-only `length` blocks growth)
+                }
                 if i >= items.len() {
                     items.resize(i + 1, Value::Hole);
                 }
@@ -1616,6 +1636,9 @@ impl Interp {
                 return Ok(());
             }
             if key == "length" {
+                if len_ro {
+                    return Ok(()); // sloppy mode: silently ignored
+                }
                 let n = match value {
                     Value::Number(n) if n >= 0.0 => n as usize,
                     _ => 0,
@@ -3188,11 +3211,11 @@ impl Interp {
                         let strings = self.array(cooked);
                         if let Value::Object(o) = &strings {
                             let raw = self.array(raw);
+                            put_hidden(o, "raw", raw.clone());
                             if let Value::Object(r) = &raw {
-                                r.frozen.set(true);
+                                crate::builtins::freeze_obj(r);
                             }
-                            put_hidden(o, "raw", raw);
-                            o.frozen.set(true);
+                            crate::builtins::freeze_obj(o);
                         }
                         self.tpl_cache.insert(site, strings.clone());
                         strings
@@ -4101,6 +4124,8 @@ mod napi_proxy_tests;
 mod napi_symbols_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod prop_array_length_tests;
 #[cfg(test)]
 mod prop_configurable_tests;
 #[cfg(test)]
