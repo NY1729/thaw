@@ -46,13 +46,7 @@ pub(crate) fn enable(it: &mut Interp) {
     {
         return;
     }
-    let factory = it
-        .run_sloppy(SOURCE)
-        .unwrap_or_else(|_| panic!("native addon proxy layer must evaluate"));
-    let cap = cap_object(it);
-    let api = it
-        .call(&factory, &Value::Undefined, &[cap])
-        .unwrap_or_else(|_| panic!("native addon proxy layer factory must run"));
+    let api = factory_api(it);
     for (name, field) in [
         ("__thaw_json_graph_napi_exports", "exports"),
         ("__thaw_json_graph_napi_each_export", "eachExport"),
@@ -67,6 +61,17 @@ pub(crate) fn enable(it: &mut Interp) {
     let pair = native_pair_matches_global(it);
     it.global
         .declare("__thaw_json_graph_native_pair_matches", pair, false);
+}
+
+/// Runs the layer's script in `it` and calls its factory with the private natives: the factory's object, which
+/// holds the layer's functions. Each call makes a separate instance with its own caches.
+pub(crate) fn factory_api(it: &mut Interp) -> Value {
+    let factory = it
+        .run_sloppy(SOURCE)
+        .unwrap_or_else(|_| panic!("native addon proxy layer must evaluate"));
+    let cap = cap_object(it);
+    it.call(&factory, &Value::Undefined, &[cap])
+        .unwrap_or_else(|_| panic!("native addon proxy layer factory must run"))
 }
 
 /// The private natives the layer's factory receives: the bridge's exports and owner lookups, and the invoker

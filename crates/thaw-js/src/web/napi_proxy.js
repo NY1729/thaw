@@ -1,4 +1,4 @@
-// The native addon proxy layer (plan tj107 sections 2 and 4, PRs 6b-1 and 6b-2): the export listing, the owner
+// The native addon proxy layer (plan tj107 sections 2 and 4, PRs 6b-1, 6b-2 and 6b-4a): the export listing, the owner
 // lookup, and the object and array proxies of native handles. napi_proxy.rs runs this file as a script; its
 // completion value is the factory below, called once per realm with `cap`, the private natives (exports, owner,
 // invoker). Object, array and function proxies of the native handles (PR 6b-2 and 6b-3).
@@ -374,6 +374,195 @@
     return proxy;
   };
 
+  // ---- Plain typed ABI, structured part (PR 6b-4a; RJ runtime.js 1049-1096). Binary values and promises are
+  // PR 6b-4b and throw a TypeError until then. Symbols are a per-realm Map, not a native registry (ponytail).
+  const referenceIds = new WeakMap();
+  const referenceValues = new Map();
+  const symbolValues = new Map();
+  const binaryMarkers = ['__thaw_napi_buffer__', '__thaw_napi_arraybuffer__', '__thaw_napi_view__',
+    '__thaw_napi_binary__', '__thaw_napi_promise__'];
+  let lastReference = 0;
+
+  // A handle marker is only sent for an object whose native owner is one of this realm's export owners.
+  const ownsHandle = handle => {
+    const owners = exports().ownerByExportName || {};
+    const owner = ownerOf(handle);
+    return Object.keys(owners).some(name => owners[name] === owner);
+  };
+
+  const snapshotOf = (value, active) => {
+    const properties = {};
+    Object.keys(value).forEach(key => {
+      Object.defineProperty(properties, key, {
+        value: argument(value[key], active), enumerable: true, configurable: true, writable: true,
+      });
+    });
+    return properties;
+  };
+
+  // The `__thaw_napi_reference_<id>` global the native side calls: its first argument is the metadata
+  // (`true` with a receiver, or `{__thaw_napi_argument_handles__, __thaw_napi_this_handle__}`), then the arguments.
+  const defineCallback = (id, target) => {
+    Object.defineProperty(globalThis, '__thaw_napi_reference_' + id, {
+      value: function () {
+        const args = Array.prototype.slice.call(arguments);
+        const meta = args.shift();
+        let receiver;
+        if (meta && meta.__thaw_napi_argument_handles__) {
+          meta.__thaw_napi_argument_handles__.forEach(entry => {
+            const path = entry[0];
+            let parent = args;
+            for (let i = 0; i + 1 < path.length; i++) {
+              const own = Reflect.getOwnPropertyDescriptor(parent, path[i]);
+              if (!own) throw new TypeError('invalid native callback path');
+              parent = own.value;
+            }
+            Object.defineProperty(parent, path[path.length - 1], {
+              value: proxyForHandle(entry[1]), writable: true, enumerable: true, configurable: true,
+            });
+          });
+        }
+        if (meta === true) receiver = args.shift();
+        if (meta && meta.__thaw_napi_this_handle__) {
+          const stored = proxies.get(meta.__thaw_napi_this_handle__);
+          receiver = stored !== undefined ? stored : proxyForHandle(meta.__thaw_napi_this_handle__);
+        }
+        const returned = Reflect.apply(target, receiver, args);
+        return typeof returned === 'function' ? argument(returned) : returned;
+      },
+      writable: false, configurable: false,
+    });
+  };
+
+  // The wire form of one JS value passed to native code (RJ __thaw_napi_argument). `active` holds the objects being
+  // encoded, so a cycle becomes a reference marker.
+  const argument = (value, active) => {
+    if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;
+    if (handleOf.has(value)) {
+      const handle = handleOf.get(value);
+      if (!ownsHandle(handle)) throw new TypeError('native object belongs to another addon');
+      return { __thaw_napi_handle__: handle };
+    }
+    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer)
+      throw new TypeError('native binary values are not implemented yet');
+    active = active || new WeakSet();
+    let id = referenceIds.get(value);
+    if (id !== undefined && active.has(value)) return { __thaw_napi_ref__: id };
+    const fresh = id === undefined;
+    if (fresh) {
+      lastReference += 1;
+      id = lastReference;
+      referenceIds.set(value, id);
+      referenceValues.set(id, value);
+    }
+    if (typeof value === 'function') {
+      if (fresh) defineCallback(id, value);
+      return { __thaw_napi_function__: id };
+    }
+    active.add(value);
+    const encoded = Array.isArray(value)
+      ? { __thaw_napi_array__: id, value: value.map(item => argument(item, active)) }
+      : { __thaw_napi_object__: id, value: snapshotOf(value, active) };
+    active.delete(value);
+    return encoded;
+  };
+
+  const argumentsOf = args => {
+    const active = new WeakSet();
+    return args.map(value => argument(value, active));
+  };
+
+  // The JS value of one wire value (RJ __thaw_napi_decode). `origins` lists the paths that need a type the JSON
+  // cannot carry (dates, non-finite numbers, plain values); `path` is this value's path.
+  const decodeValue = (value, origins, path) => {
+    path = path || [];
+    if (Array.isArray(origins)) origins = new Map(origins.map(entry => [jsonStringify(entry[0]), entry]));
+    const origin = origins ? origins.get(jsonStringify(path)) : undefined;
+    if (origin && origin[1] === 'date') return new Date(origin[2] === null ? NaN : origin[2]);
+    if (origin && origin[1] === 'nonfinite') return Number(origin[2]);
+    const plain = !!origin && origin[1] === 'plain';
+    if (value && typeof value === 'object') {
+      if (!plain && value['$__thaw_napi_undefined$'] === true) return undefined;
+      if (!plain && hasOwn(value, '__thaw_napi_error__')) {
+        const Constructor = value.name === 'TypeError' ? TypeError
+          : value.name === 'RangeError' ? RangeError : Error;
+        const error = new Constructor(value.__thaw_napi_error__);
+        if (value.name && error.name !== value.name) error.name = value.name;
+        return error;
+      }
+      if (!plain && value.__thaw_napi_symbol__) {
+        const id = value.__thaw_napi_symbol__;
+        if (!symbolValues.has(id)) {
+          symbolValues.set(id, value.global ? Symbol.for(value.description) : Symbol(value.description));
+        }
+        return symbolValues.get(id);
+      }
+      if (!plain && value.__thaw_napi_ref__) return referenceValues.get(value.__thaw_napi_ref__);
+      if (!plain && value.__thaw_napi_handle__) return proxyForHandle(value.__thaw_napi_handle__);
+      if (!plain && binaryMarkers.some(key => hasOwn(value, key)))
+        throw new TypeError('native binary and promise values are not implemented yet');
+      if (Array.isArray(value)) return value.map((child, index) => decodeValue(child, origins, path.concat([index])));
+      const decoded = {};
+      Object.keys(value).forEach(key => {
+        Object.defineProperty(decoded, key, {
+          value: decodeValue(value[key], origins, path.concat([key])),
+          enumerable: true, configurable: true, writable: true,
+        });
+      });
+      return decoded;
+    }
+    return value;
+  };
+
+  // One bridge operation with its arguments encoded and its reply decoded (RJ __thaw_napi_handle). `sync_reference`
+  // keeps its raw reply: the caller reads its origins itself.
+  const handle = (operation, target, name, args) => {
+    const result = jsonParse(bridgeHandle(operation, String(target), name || '',
+      jsonStringify(argumentsOf(args || []))));
+    if (result && hasOwn(result, '__thaw_error__')) throw new Error(result.__thaw_error__);
+    if (result && hasOwn(result, 'value') && result.kind !== 'method' && operation !== 'sync_reference')
+      result.value = decodeValue(result.value, result.origins);
+    return result;
+  };
+
+  // After a call, the native side's values replace the JS arguments in place (RJ __thaw_napi_sync_arguments).
+  const syncArguments = args => {
+    const seen = new WeakSet();
+    const sync = value => {
+      if (value === null || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+      const proxyHandle = handleOf.get(value);
+      const id = referenceIds.get(value);
+      if (proxyHandle !== undefined && !ownsHandle(proxyHandle))
+        throw new TypeError('native object belongs to another addon');
+      if (proxyHandle === undefined && id === undefined) return;
+      const response = proxyHandle !== undefined
+        ? handle('sync_handle', proxyHandle, '', [])
+        : handle('sync_reference', id, '', []);
+      if (proxyHandle !== undefined) return;
+      const updated = response.value;
+      const originMap = new Map((response.origins || []).map(entry => [jsonStringify(entry[0]), entry]));
+      if (Array.isArray(value)) value.length = updated.length;
+      else {
+        Object.keys(value).forEach(key => {
+          if (!hasOwn(updated, key)) {
+            try { delete value[key]; } catch (error) { /* A non-configurable property stays. */ }
+          }
+        });
+      }
+      Object.keys(updated).forEach(key => {
+        const next = decodeValue(updated[key], originMap, [Array.isArray(updated) ? Number(key) : key]);
+        if (key === '__proto__') {
+          Object.defineProperty(value, key, { value: next, writable: true, enumerable: true, configurable: true });
+        } else if (value[key] !== next) {
+          try { value[key] = next; } catch (error) { /* A getter-only property keeps its value. */ }
+        }
+        if (next && typeof next === 'object') sync(next);
+      });
+    };
+    args.forEach(sync);
+  };
+
   // The function proxy of the native Function handle `handle`. Its target is a plain function without `prototype`
   // (ponytail: thaw-js enforces no Proxy invariants, so the bound target of the QuickJS runtime is not needed).
   // apply and construct send the captured graph to the native Function through the invoker.
@@ -568,5 +757,10 @@
     ownerOf,
     proxyForHandle,
     functionForHandle,
+    argument,
+    arguments: argumentsOf,
+    decode: decodeValue,
+    handle,
+    syncArguments,
   };
 });
