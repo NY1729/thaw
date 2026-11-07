@@ -1,7 +1,7 @@
-// The native addon proxy layer (plan tj107 sections 2 and 4, PRs 6b-1, 6b-2 and 6b-4a): the export listing, the owner
-// lookup, and the object and array proxies of native handles. napi_proxy.rs runs this file as a script; its
-// completion value is the factory below, called once per realm with `cap`, the private natives (exports, owner,
-// invoker). Object, array and function proxies of the native handles (PR 6b-2 and 6b-3).
+// The native addon proxy layer (plan tj107 sections 2 and 4, PRs 6b-1 to 6b-4b): the export listing, the owner
+// lookup, the object, array and function proxies of native handles, and the plain typed ABI. napi_proxy.rs runs this
+// file as a script; its completion value is the factory below, called once per realm with `cap`, the private natives
+// (exports, owner, invoker).
 (function (cap) {
   'use strict';
   // The intrinsics the proxies use, captured before user code runs. ponytail: the Reflect and Object methods are
@@ -29,6 +29,10 @@
   const encodeGraph = __thaw_json_graph_encode_js;
   const bridgeHandle = __thaw_napi_bridge_handle;
   const tagNative = __thaw_napi_graph_tag;
+  const setTimer = setTimeout;
+  const uint8Array = Uint8Array;
+  const arrayFrom = Array.from;
+  const bufferCtor = typeof Buffer === 'function' ? Buffer : undefined;
   const positiveDecimal = /^[1-9][0-9]*$/;
 
   const hasOwn = (object, key) => hasOwnProperty.call(object, key);
@@ -374,14 +378,18 @@
     return proxy;
   };
 
-  // ---- Plain typed ABI, structured part (PR 6b-4a; RJ runtime.js 1049-1096). Binary values and promises are
-  // PR 6b-4b and throw a TypeError until then. Symbols are a per-realm Map, not a native registry (ponytail).
+  // ---- Plain typed ABI (PR 6b-4a and 6b-4b; RJ runtime.js 1049-1096). Symbols are a per-realm Map, not a native
+  // registry (ponytail). Native binaries and promises are cached per id for the realm's life: no finalizers, so
+  // their handles are renewed once and never released (ponytail, as the proxies).
   const referenceIds = new WeakMap();
   const referenceValues = new Map();
   const symbolValues = new Map();
-  const binaryMarkers = ['__thaw_napi_buffer__', '__thaw_napi_arraybuffer__', '__thaw_napi_view__',
-    '__thaw_napi_binary__', '__thaw_napi_promise__'];
+  const binaryValues = new Map();
+  const promises = new Map();
   let lastReference = 0;
+  const isBufferValue = value => bufferCtor !== undefined && bufferCtor.isBuffer(value);
+  // ponytail: Array.prototype.slice.call on a typed array is [] in thaw-js, so the bytes are read through a Uint8Array.
+  const bytesOf = value => arrayFrom(new uint8Array(value));
 
   // A handle marker is only sent for an object whose native owner is one of this realm's export owners.
   const ownsHandle = handle => {
@@ -443,7 +451,8 @@
       if (!ownsHandle(handle)) throw new TypeError('native object belongs to another addon');
       return { __thaw_napi_handle__: handle };
     }
-    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer)
+    // A plain typed array or DataView is still refused (the 6b-4a contract); a Buffer or an ArrayBuffer crosses by value.
+    if (ArrayBuffer.isView(value) && !isBufferValue(value))
       throw new TypeError('native binary values are not implemented yet');
     active = active || new WeakSet();
     let id = referenceIds.get(value);
@@ -460,9 +469,11 @@
       return { __thaw_napi_function__: id };
     }
     active.add(value);
-    const encoded = Array.isArray(value)
-      ? { __thaw_napi_array__: id, value: value.map(item => argument(item, active)) }
-      : { __thaw_napi_object__: id, value: snapshotOf(value, active) };
+    const encoded = isBufferValue(value) ? { __thaw_napi_buffer__: id, value: bytesOf(value) }
+      : value instanceof ArrayBuffer ? { __thaw_napi_arraybuffer__: id, shared: false, value: bytesOf(value) }
+      : Array.isArray(value)
+        ? { __thaw_napi_array__: id, value: value.map(item => argument(item, active)) }
+        : { __thaw_napi_object__: id, value: snapshotOf(value, active) };
     active.delete(value);
     return encoded;
   };
@@ -470,6 +481,57 @@
   const argumentsOf = args => {
     const active = new WeakSet();
     return args.map(value => argument(value, active));
+  };
+
+  // The JS value of a native binary (RJ __thaw_napi_decode binary branch), one per id. Only ArrayBuffer and Uint8Array
+  // are built: thaw-js has no SharedArrayBuffer or DataView, and no other typed kind is wired yet.
+  const binaryOf = (value, origins, path) => {
+    const id = value.__thaw_napi_binary__;
+    const existing = binaryValues.get(id);
+    if (existing !== undefined) return existing;
+    let binary;
+    if (value.kind === 'ArrayBuffer') {
+      binary = new ArrayBuffer(value.data.length);
+      new uint8Array(binary).set(value.data);
+    } else {
+      if (value.kind === 'SharedArrayBuffer' || value.kind === 'DataView')
+        throw new TypeError('unsupported native binary kind');
+      if (value.array_type !== 1) throw new TypeError('unsupported native typed array kind');
+      const backing = decodeValue(value.buffer, origins, path.concat(['buffer']));
+      if (!(backing instanceof ArrayBuffer)) throw new TypeError('Invalid native binary view');
+      binary = new uint8Array(backing, value.byte_offset, value.length);
+    }
+    handleOf.set(binary, id);
+    bridgeReply('renew_handle', id, '[]', 'Native handle renewal failed');
+    binaryValues.set(id, binary);
+    return binary;
+  };
+
+  // The Promise of a native Promise handle, settled by polling `promise_state` once per turn (RJ result_value).
+  // ponytail: a zero-delay timer per poll, no backoff.
+  const promiseOf = id => {
+    const existing = promises.get(id);
+    if (existing !== undefined) return existing;
+    const promise = new Promise((resolve, reject) => {
+      const check = () => {
+        let state;
+        try {
+          state = handle('promise_state', id, '', []);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        if (state.kind === 'pending') {
+          setTimer(check, 0);
+          return;
+        }
+        if (state.kind === 'rejected') reject(state.value);
+        else resolve(state.value);
+      };
+      setTimer(check, 0);
+    });
+    promises.set(id, promise);
+    return promise;
   };
 
   // The JS value of one wire value (RJ __thaw_napi_decode). `origins` lists the paths that need a type the JSON
@@ -499,8 +561,8 @@
       }
       if (!plain && value.__thaw_napi_ref__) return referenceValues.get(value.__thaw_napi_ref__);
       if (!plain && value.__thaw_napi_handle__) return proxyForHandle(value.__thaw_napi_handle__);
-      if (!plain && binaryMarkers.some(key => hasOwn(value, key)))
-        throw new TypeError('native binary and promise values are not implemented yet');
+      if (!plain && value.__thaw_napi_binary__) return binaryOf(value, origins, path);
+      if (!plain && hasOwn(value, '__thaw_napi_promise__')) return promiseOf(value.__thaw_napi_promise__);
       if (Array.isArray(value)) return value.map((child, index) => decodeValue(child, origins, path.concat([index])));
       const decoded = {};
       Object.keys(value).forEach(key => {
@@ -539,6 +601,13 @@
       const response = proxyHandle !== undefined
         ? handle('sync_handle', proxyHandle, '', [])
         : handle('sync_reference', id, '', []);
+      // A binary's bytes are copied in place, for a native-origin one too (RJ __thaw_napi_sync_arguments).
+      if (value instanceof ArrayBuffer || isBufferValue(value)) {
+        const bytes = value instanceof ArrayBuffer ? new uint8Array(value) : value;
+        for (let index = 0; index < bytes.length && index < response.value.length; index++)
+          bytes[index] = response.value[index];
+        return;
+      }
       if (proxyHandle !== undefined) return;
       const updated = response.value;
       const originMap = new Map((response.origins || []).map(entry => [jsonStringify(entry[0]), entry]));
