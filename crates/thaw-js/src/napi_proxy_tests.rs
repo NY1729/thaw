@@ -136,11 +136,11 @@ const PROBE: &str = "[typeof __thaw_json_graph_napi_exports, typeof __thaw_json_
      typeof __thaw_json_graph_native_pair_matches, typeof __thaw_json_graph_napi_bridge_available].join('|')";
 
 #[test]
-fn proxy_layer_globals_exist_only_after_enable_and_bridge_available_never_does() {
+fn proxy_layer_globals_exist_only_after_enable() {
     let _bridge = fake_bridge();
     assert_eq!(eval(PROBE), "undefined|undefined|undefined|undefined");
     thaw_tjs_napi_enable_proxy_layer();
-    assert_eq!(eval(PROBE), "function|function|function|undefined");
+    assert_eq!(eval(PROBE), "function|function|function|function");
 }
 
 #[test]
@@ -1025,4 +1025,104 @@ fn native_promise_resolves_once_promise_state_stops_reporting_pending() {
     it.run_event_loop().unwrap_or_else(|_| panic!("event loop"));
     assert_eq!(run_in(&mut it, "settled.join(',')"), "done");
     assert_eq!(op_count("promise_state"), 4);
+}
+
+thread_local! {
+    /// The `(name, payload)` of every `bridge_call` the shim-style fake got on this thread.
+    static E2E_CALLS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    /// The exports listing and the `bridge_call` reply of the shim-style fake.
+    static E2E_EXPORTS: RefCell<String> = const { RefCell::new(String::new()) };
+    static E2E_CALL_REPLY: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+unsafe extern "C" fn e2e_exports() -> *const c_char {
+    owned(&E2E_EXPORTS.with(|e| e.borrow().clone()))
+}
+
+unsafe extern "C" fn e2e_call(name: *const c_char, payload: *const c_char) -> *const c_char {
+    let (name, payload) = (read(name), read(payload));
+    E2E_CALLS.with(|c| c.borrow_mut().push((name, payload)));
+    owned(&E2E_CALL_REPLY.with(|r| r.borrow().clone()))
+}
+
+/// The table bridge (owner 7, handle replies from `reply`) with the shim-style exports and call fake.
+fn shim_bridge(exports: &str, call_reply: &str) -> FakeBridge {
+    let bridge = table_bridge();
+    E2E_EXPORTS.with(|e| *e.borrow_mut() = exports.to_string());
+    E2E_CALL_REPLY.with(|r| *r.borrow_mut() = call_reply.to_string());
+    E2E_CALLS.with(|c| c.borrow_mut().clear());
+    clear_for_tests();
+    thaw_tjs_register_napi_bridge(
+        e2e_exports,
+        e2e_call,
+        table_handle,
+        fake_poll,
+        fake_pending,
+        owner_seven,
+        fake_release,
+    );
+    bridge
+}
+
+#[test]
+fn shim_trusted_path_calls_an_export_through_the_bridge_call() {
+    let _bridge = shim_bridge(
+        r#"{"names":["addon::fn"],"qualifiedPackages":[],"ownerByExportName":{"addon::fn":"7"}}"#,
+        r#"{"value":3}"#,
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    // The shim's own wrapper shape: the trusted globals are read as `globalThis` properties.
+    assert_eq!(
+        eval(
+            "(() => { const addon = {}; addon.fn = function () { return globalThis.__thaw_json_graph_napi_call_export('addon::fn', arguments); }; \
+             return [addon.fn(1, {a: 1}), typeof globalThis.__thaw_json_graph_napi_bridge_available, \
+             globalThis.__thaw_json_graph_napi_bridge_available()].join('|'); })()"
+        ),
+        "3|function|true"
+    );
+    assert_eq!(
+        eval(
+            "(() => { try { globalThis.__thaw_json_graph_napi_call_export('addon::missing', []); return 'no error'; } \
+             catch (e) { return e.name + '|' + e.message; } })()"
+        ),
+        "TypeError|Native addon export has no live owner"
+    );
+    E2E_CALLS.with(|c| {
+        let calls = c.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "addon::fn");
+        assert!(calls[0].1.starts_with("[1,{"), "{}", calls[0].1);
+        assert!(calls[0].1.contains(r#""value":{"a":1}"#), "{}", calls[0].1);
+    });
+}
+
+#[test]
+fn shim_trusted_path_constructs_a_proxy_that_reads_through_the_bridge() {
+    let _bridge = shim_bridge(
+        r#"{"names":["addon::Cls"],"qualifiedPackages":[],"ownerByExportName":{"addon::Cls":"7"}}"#,
+        r#"{"value":0}"#,
+    );
+    reply("construct", "", r#"{"value":"81"}"#);
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    reply("has_graph", r#"{"v":"x"}"#, r#"{"value":true}"#);
+    reply("get_graph", r#"{"v":"x"}"#, &graph(r#"{"v":42}"#, ""));
+    thaw_tjs_napi_enable_proxy_layer();
+    assert_eq!(
+        eval(
+            "(() => { const addon = {}; addon.Cls = function () { if (new.target) return \
+             globalThis.__thaw_json_graph_napi_construct('addon::Cls', arguments, new.target.prototype); }; \
+             const p = new addon.Cls(5, 'b'); return p.x; })()"
+        ),
+        "42"
+    );
+    OPS.with(|o| {
+        let ops = o.borrow();
+        assert!(
+            ops.iter().any(|(op, target, graph)| op == "construct"
+                && target == "addon::Cls"
+                && graph == r#"[5,"b"]"#),
+            "{ops:?}"
+        );
+    });
+    assert_eq!(op_count("get_graph"), 1);
 }

@@ -1,4 +1,4 @@
-// The native addon proxy layer (plan tj107 sections 2 and 4, PRs 6b-1 to 6b-4b): the export listing, the owner
+// The native addon proxy layer (plan tj107 sections 2 and 4, PRs 6b-1 to 6b-5): the export listing, the owner
 // lookup, the object, array and function proxies of native handles, and the plain typed ABI. napi_proxy.rs runs this
 // file as a script; its completion value is the factory below, called once per realm with `cap`, the private natives
 // (exports, owner, invoker).
@@ -28,6 +28,8 @@
   const decodeOwned = __thaw_json_graph_decode_owned;
   const encodeGraph = __thaw_json_graph_encode_js;
   const bridgeHandle = __thaw_napi_bridge_handle;
+  const bridgeCall = __thaw_napi_bridge_call;
+  const bridgeAvailableNative = __thaw_napi_bridge_available;
   const tagNative = __thaw_napi_graph_tag;
   const setTimer = setTimeout;
   const uint8Array = Uint8Array;
@@ -822,12 +824,45 @@
     return proxy;
   };
 
+  // ---- Trusted path (PR 6b-5; RJ runtime.js 1199-1240, 1301-1316). The generated shim calls these globals once
+  // `bridgeAvailable()` is true, instead of its own untrusted codec. `args` is the shim's Arguments object.
+  const ownerForExport = name => {
+    const owners = exports().ownerByExportName;
+    const owner = owners && hasOwn(owners, name) ? owners[name] : undefined;
+    if (typeof owner !== 'string') throw new TypeError('Native addon export has no live owner');
+    return owner;
+  };
+
+  const callExport = (name, args) => {
+    ownerForExport(name);
+    const values = arrayFrom(args);
+    const result = jsonParse(bridgeCall(name, jsonStringify(argumentsOf(values))));
+    if (result && hasOwn(result, '__thaw_error__')) throw new TypeError(result.__thaw_error__);
+    syncArguments(values);
+    return decodeValue(result.value, result.origins);
+  };
+
+  const construct = (name, args, prototype) => {
+    ownerForExport(name);
+    const created = handle('construct', name, '', arrayFrom(args));
+    Object.keys(prototype).forEach(key => {
+      handle('set', created.value, key, [prototype[key]]);
+    });
+    return proxyForHandle(created.value, prototype);
+  };
+
+  const bridgeAvailable = () => bridgeAvailableNative();
+
   return {
     exports,
     eachExport,
     ownerOf,
+    ownerForExport,
     proxyForHandle,
     functionForHandle,
+    callExport,
+    construct,
+    bridgeAvailable,
     argument,
     arguments: argumentsOf,
     decode: decodeValue,
