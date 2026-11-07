@@ -146,7 +146,15 @@ fn reflect_set(
     }
     let indexed = matches!(&*target.kind.borrow(), Kind::Array(_) | Kind::Typed(_));
     if indexed && !receiver_data {
-        if target.frozen.get() {
+        // a read-only `length` refuses writes to `length` and to indices past it
+        let refused = !target.len_writable()
+            && match &*target.kind.borrow() {
+                Kind::Array(items) => {
+                    key == "length" || array_index(key).is_some_and(|i| i >= items.len())
+                }
+                _ => false,
+            };
+        if target.frozen.get() || refused {
             return Ok(false);
         }
         it.set(&Value::Object(target.clone()), key, value)?;
@@ -258,7 +266,7 @@ pub(crate) fn own_entries(o: &Obj) -> Vec<(Rc<str>, u32)> {
                     out.push((i.to_string().into(), 2 | writable | configurable));
                 }
             }
-            out.push(("length".into(), writable));
+            out.push(("length".into(), u32::from(o.len_writable())));
         }
         Kind::Typed(t) => {
             for i in 0..t.len {
@@ -679,13 +687,27 @@ pub(crate) fn define_slot(
         if frozen {
             return it.throw_error("TypeError", &format!("Cannot redefine property: {key}"));
         }
-        if !exists && o.ext.get() != 0 {
+        if !exists && (o.ext.get() != 0 || o.len_ro.get()) {
             return it.throw_error(
                 "TypeError",
                 &format!("Cannot define property {key}, object is not extensible"),
             );
         }
+        // a read-only `length` only takes its own value, and `writable: false` locks it
+        let len_now = match &*o.kind.borrow() {
+            Kind::Array(items) => items.len() as f64,
+            _ => 0.0,
+        };
+        if key == "length"
+            && !o.len_writable()
+            && (writable || !matches!(&v, Value::Number(n) if *n == len_now))
+        {
+            return it.throw_error("TypeError", &format!("Cannot redefine property: {key}"));
+        }
         it.set(target, key, v)?;
+        if key == "length" && !writable {
+            o.len_ro.set(true);
+        }
         return Ok(());
     }
     let existing = o.position(key);
