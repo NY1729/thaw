@@ -175,15 +175,17 @@ jobs:
       - name: Check for corpus programs
         id: corpus
         run: |
-          # The 24-program corpus lives outside the repo today (measure.sh defaults to thaw-tmp paths).
-          # Point PK_DIR/JS_DIR at a committed copy; without it, report and skip rather than fail.
-          pk="$GITHUB_WORKSPACE/tools/quickjs-removal/corpus/pk"
-          if [ -d "$pk" ]; then
-            echo "present=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=0" >> "$GITHUB_OUTPUT"
-            echo "corpus programs not found at $pk; corpus ratio not measured" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          # The 24 committed programs and their pinned versions live under tools/quickjs-removal/corpus.
+          # Missing corpus is a failure (no silent skip).
+          corpus="$GITHUB_WORKSPACE/tools/quickjs-removal/corpus"
+          for need in "$corpus/pk" "$corpus/versions.txt"; do
+            if [ ! -e "$need" ]; then
+              echo "corpus input not found: $need" >&2
+              echo "corpus input not found: $need" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
+          echo "present=1" >> "$GITHUB_OUTPUT"
       - name: Run corpus measurement
         if: steps.corpus.outputs.present == '1'
         env:
@@ -191,7 +193,7 @@ jobs:
           THAW_SCAN: ${{ github.workspace }}/target/release/thaw-js-scan
           SCRATCH: ${{ runner.temp }}/qjsq1-measure
           PK_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/pk
-          JS_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/bundles
+          VERSIONS: ${{ github.workspace }}/tools/quickjs-removal/corpus/versions.txt
         run: |
           tools/quickjs-removal/measure.sh --skip-node-compat -o "$RUNNER_TEMP/corpus.tsv"
       - name: Print corpus ratios
@@ -201,11 +203,28 @@ jobs:
           # Long-format rows: section subject engine metric value. Ratio = run_ms(thaw-js) / run_ms(quickjs).
           awk -F'\t' '
             NR == 1 { next }
-            $1 == "program" && $4 == "run_ms" { ms[$2, $3] = $5; progs[$2] = 1 }
+            $1 == "program" { progs[$2] = 1 }
+            $1 == "program" && $4 == "build_ok" { bok[$2, $3] = $5 }
+            $1 == "program" && $4 == "run_ms" { ms[$2, $3] = $5 }
+            $1 == "program" && $4 == "run_exit" { ex[$2, $3] = $5 }
+            $1 == "program" && $4 == "stdout_eq_node" { eq[$2, $3] = $5 }
             END {
               for (p in progs) {
                 q = ms[p, "quickjs"]; t = ms[p, "thaw-js"]
+                # A build failure on either engine is a SKIP: listed in the table, excluded from geomean/OVER.
+                if (bok[p, "quickjs"] != "1" || bok[p, "thaw-js"] != "1") {
+                  if (bok[p, "quickjs"] != "1" && bok[p, "thaw-js"] != "1") why = "both builds failed"
+                  else if (bok[p, "quickjs"] != "1") why = "quickjs build failed"
+                  else why = "thaw-js build failed"
+                  printf "%s\t%s\t%s\t-\tSKIP (%s)\n", p, q, t, why
+                  continue
+                }
                 if (q + 0 > 0 && t != "") {
+                  # A run that exits non-zero or differs from Node on either engine has no ratio.
+                  if (ex[p, "quickjs"] != "0" || ex[p, "thaw-js"] != "0" || eq[p, "quickjs"] != "1" || eq[p, "thaw-js"] != "1") {
+                    printf "%s\t%s\t%s\t\tFAIL\n", p, q, t
+                    continue
+                  }
                   r = t / q
                   printf "%s\t%s\t%s\t%.3f\t%s\n", p, q, t, r, (r > 1.5 ? "OVER" : "ok")
                 } else {
@@ -220,12 +239,24 @@ jobs:
             echo "|---|---|---|---|---|"
             awk -F'\t' '{ printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5 }' "$RUNNER_TEMP/corpus-ratios.tsv"
             echo
-            awk -F'\t' '$4 != "-" { n++; s += log($4); if ($4 + 0 > max + 0 || n == 1) { max = $4; maxname = $1 } if ($4 + 0 > 1.5) over++ }
-              END { if (n) printf "- geomean: %.3f over %d programs\n- max ratio: %s (%s)\n- programs over 1.5x: %d\n", exp(s / n), n, max, maxname, over + 0 }' "$RUNNER_TEMP/corpus-ratios.tsv"
+            awk -F'\t' '$4 ~ /^[0-9]/ { n++; s += log($4); if ($4 + 0 > max + 0 || n == 1) { max = $4; maxname = $1 } if ($4 + 0 > 1.5) over++ }
+              $5 == "FAIL" { failed++ }
+              $5 ~ /^SKIP/ { skipped++; skiplist = skiplist sprintf("  - %s: %s\n", $1, $5) }
+              END { if (n) printf "- geomean: %.3f over %d programs\n- max ratio: %s (%s)\n- programs over 1.5x: %d\n", exp(s / n), n, max, maxname, over + 0
+                printf "- programs with a failed run or stdout != Node (no ratio): %d\n", failed + 0
+                printf "- programs SKIPPED for a build failure (excluded from geomean/OVER): %d\n", skipped + 0
+                printf "%s", skiplist }' "$RUNNER_TEMP/corpus-ratios.tsv"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: jsengine-corpus-tsv
           path: ${{ runner.temp }}/corpus.tsv
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          # Whole measure.sh scratch output: per-program .build, .stderr, .stdout, .node, .time, .inspect, add logs.
+          name: jsengine-corpus-logs
+          path: ${{ runner.temp }}/qjsq1-measure/out
           if-no-files-found: ignore
