@@ -112,6 +112,8 @@ struct FnLowerer<'a> {
     /// Nesting of dynamic accessor projections (guards against recursive class types).
     accessor_projection_depth: usize,
     member_receiver_bindings: HashSet<Symbol>,
+    /// Names used as a call callee (`h("x")`) somewhere in the statement list.
+    called_bindings: HashSet<Symbol>,
     /// Names assigned somewhere after an uninitialized `let x: T;` in the
     /// same statement list (definite-assignment approximation).
     assigned_later: HashSet<Symbol>,

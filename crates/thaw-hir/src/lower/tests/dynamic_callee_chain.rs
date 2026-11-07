@@ -41,3 +41,53 @@ fn call_of_typed_closure_returning_call_keeps_static_function_call() {
     );
     assert!(!body.contains("callDynamicValueHandle"), "{body}");
 }
+
+#[test]
+fn const_bound_dynamic_method_result_called_later_lowers_as_dynamic_handle_call() {
+    let body = dynamic_callee_chain_main_body(
+        r##"
+        declare function mk(): JsValue;
+        function main(): void {
+            const c = mk();
+            const h = c.hex("#f80");
+            const s: string = h("x") as string;
+        }
+        "##,
+    );
+    assert!(body.contains("__thaw_call_selected_dynamic_method_handle"), "{body}");
+    assert!(body.contains("callDynamicValueHandle"), "{body}");
+    assert!(!body.contains("JsonAsNative"), "{body}");
+}
+
+#[test]
+fn const_bound_dynamic_method_result_never_called_stays_json_snapshot() {
+    let body = dynamic_callee_chain_main_body(
+        r##"
+        declare function mk(): JsValue;
+        function main(): void {
+            const c = mk();
+            const d = c.hex("#f80");
+            console.log(d);
+        }
+        "##,
+    );
+    assert!(body.contains("__thaw_call_selected_dynamic_method"), "{body}");
+    assert!(!body.contains("__thaw_call_selected_dynamic_method_handle"), "{body}");
+}
+
+#[test]
+fn let_bound_dynamic_method_result_called_with_two_args_lowers_as_dynamic_handle_call() {
+    let body = dynamic_callee_chain_main_body(
+        r##"
+        declare function mk(): JsValue;
+        function main(): void {
+            const c = mk();
+            let h = c.rgb(1, 2, 3);
+            const s: string = h("a", "b") as string;
+        }
+        "##,
+    );
+    assert!(body.contains("__thaw_call_selected_dynamic_method_handle"), "{body}");
+    assert!(body.contains("callDynamicValueHandle"), "{body}");
+    assert!(!body.contains("JsonAsNative"), "{body}");
+}
