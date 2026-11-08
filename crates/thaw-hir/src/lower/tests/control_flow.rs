@@ -935,6 +935,18 @@ fn throw_borrowed_jsvalue_uses_exact_capture_instead_of_placeholder_json() {
 }
 
 #[test]
+fn rethrown_jsvalue_displays_inspected_text_not_placeholder() {
+    let program = lower(r#"
+        declare function reason(): JsValue;
+        function main(): void { throw reason(); }
+    "#);
+    let text = format!("{:?}", program.functions[0].body);
+    assert!(text.contains("__thaw_console_inspect_text"), "{text}");
+    assert!(text.contains("__thaw_capture_exception_js_value"), "{text}");
+    assert!(!text.contains("[exception value]"), "{text}");
+}
+
+#[test]
 fn lowers_finally_onto_normal_return_and_rethrow_paths() {
     let program = lower(
         r#"function f(): string {
@@ -2005,14 +2017,14 @@ fn thaw_rethrow_cleanup_assert_carrier_publication(
         unreachable!("publisher helper checked the final throw");
     };
     assert_eq!(callee.as_ref(), &HirExpr::Var("@@thaw_published_exception_text".into()));
-    // Members 6 (Object) and 7 (Json) inspect at run time; the placeholder
-    // stays only for the 8/9 members and the chain's fallback.
+    // Members 6 (Object), 7 (Json) and 8 (JsValue) inspect at run time; the placeholder
+    // stays only for member 9 and the chain's fallback.
     let [display] = args.as_slice() else {
         panic!("expected one display argument: {args:#?}");
     };
     let display = format!("{display:?}");
-    assert_eq!(display.matches("__thaw_console_inspect_text").count(), 2, "{display}");
-    assert_eq!(display.matches("[exception value]").count(), 3, "{display}");
+    assert_eq!(display.matches("__thaw_console_inspect_text").count(), 3, "{display}");
+    assert_eq!(display.matches("[exception value]").count(), 2, "{display}");
 }
 
 #[test]
