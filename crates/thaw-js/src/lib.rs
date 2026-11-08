@@ -241,6 +241,8 @@ struct FuncDef {
     is_gen: bool,
     /// Named function expressions see their own name; methods do not.
     bind_self: bool,
+    /// No `prototype` object: methods, accessors and async (non-generator) functions. Generators keep one.
+    no_prototype: bool,
     uses_arguments: bool,
     uses_new_target: bool,
     /// The body (or an arrow inside it) reads `this`; other calls skip the binding.
@@ -1998,6 +2000,7 @@ impl Interp {
         is_async: bool,
         is_gen: bool,
         bind_self: bool,
+        method: bool,
         lo: u32,
         hi: u32,
         scope: &Rc<Scope>,
@@ -2020,7 +2023,7 @@ impl Interp {
                 };
                 let param_names = simple_param_names(&params);
                 let param_mask = param_mask(&param_names);
-                Rc::new(FuncDef { name, params, body, arrow, is_async, is_gen, bind_self, uses_arguments: finder.found && !arrow, uses_new_target: finder.new_target && !arrow, uses_this: finder.uses_this, src: (self_run_id, lo, hi), hoisted, param_names, param_mask, strict, class: None })
+                Rc::new(FuncDef { name, params, body, arrow, is_async, is_gen, bind_self, no_prototype: !is_gen && (method || is_async), uses_arguments: finder.found && !arrow, uses_new_target: finder.new_target && !arrow, uses_this: finder.uses_this, src: (self_run_id, lo, hi), hoisted, param_names, param_mask, strict, class: None })
             })
             .clone();
         self.closure_from_def(def, scope)
@@ -2028,7 +2031,8 @@ impl Interp {
 
     /// A fresh function object for an already analysed definition.
     fn closure_from_def(&mut self, def: Rc<FuncDef>, scope: &Rc<Scope>) -> Value {
-        let (arrow, is_async, is_gen) = (def.arrow, def.is_async, def.is_gen);
+        let (arrow, is_async, is_gen, no_prototype) =
+            (def.arrow, def.is_async, def.is_gen, def.no_prototype);
         let f = new_obj(
             Some(self.function_proto.clone()),
             Kind::Closure {
@@ -2050,7 +2054,7 @@ impl Interp {
                 false,
                 false,
             );
-        } else if !arrow {
+        } else if !arrow && !no_prototype {
             let proto = new_obj(Some(self.object_proto.clone()), Kind::Plain);
             put_hidden(&proto, "constructor", Value::Object(f.clone()));
             put_with(&f, "prototype", Value::Object(proto), true, false, false);
@@ -2469,7 +2473,7 @@ impl Interp {
         f: &a::Function,
         scope: &Rc<Scope>,
     ) -> R<Value> {
-        self.function_value_ex(name, f, scope, true)
+        self.function_value_ex(name, f, scope, false)
     }
 
     /// A method / accessor: named, but its name is not a binding inside its own body.
@@ -2479,7 +2483,7 @@ impl Interp {
         f: &a::Function,
         scope: &Rc<Scope>,
     ) -> R<Value> {
-        self.function_value_ex(name, f, scope, false)
+        self.function_value_ex(name, f, scope, true)
     }
 
     fn function_value_ex(
@@ -2487,7 +2491,7 @@ impl Interp {
         name: Option<Rc<str>>,
         f: &a::Function,
         scope: &Rc<Scope>,
-        bind_self: bool,
+        method: bool,
     ) -> R<Value> {
         if let Some(def) = self.fn_cache.get(&(self.run_id, f.span.lo.0)).cloned() {
             return Ok(self.closure_from_def(def, scope));
@@ -2500,7 +2504,8 @@ impl Interp {
             false,
             f.is_async,
             f.is_generator,
-            bind_self,
+            !method,
+            method,
             f.span.lo.0,
             f.span.hi.0,
             scope,
@@ -3077,6 +3082,7 @@ impl Interp {
                     body,
                     true,
                     f.is_async,
+                    false,
                     false,
                     false,
                     f.span.lo.0,
