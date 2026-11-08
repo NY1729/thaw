@@ -1,0 +1,176 @@
+name: size-report
+
+# TJ-137: measurement only. Builds thaw-cli and a hello-world per variant and uploads size data.
+# Nothing here gates a build; the numbers are read from the step summary and the artifacts.
+# Variants are applied to the CI checkout only (Cargo.toml edits are never committed).
+
+on:
+  workflow_dispatch:
+    inputs:
+      variants:
+        description: "JSON list of variants: base, jiff-system-tz, icu-opt-s, icf"
+        default: '["base","jiff-system-tz","icu-opt-s","icf"]'
+
+permissions:
+  contents: read
+
+jobs:
+  size:
+    name: size ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    # Observed runtime-comparison builds take 14-17 minutes.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(inputs.variants) }}
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      # Leave the symbol table in the thaw-built hello so nm/size see every symbol.
+      THAW_KEEP_SYMBOLS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev binutils gawk; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-${{ runner.arch }}-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Apply variant (CI checkout only)
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          case "$VARIANT" in
+            base|icf) ;;   # icf only differs in the cc shim below (needs ld.lld from the LLVM 22 bin dir)
+            jiff-system-tz)   # tzdb read from /usr/share/zoneinfo at runtime instead of bundled
+              sed -i 's/features = \["std", "tzdb-bundle-always"\]/features = ["std", "tz-system", "tzdb-zoneinfo"]/' crates/thaw-runtime/Cargo.toml
+              grep -q 'tzdb-zoneinfo' crates/thaw-runtime/Cargo.toml || { echo "jiff sed did not apply" >&2; exit 1; }
+              ;;
+            icu-opt-s)        # size-optimize the data-heavy, non-hot crates
+              printf '\n[profile.release.package.icu_calendar]\nopt-level = "s"\n[profile.release.package.icu_casemap]\nopt-level = "s"\n[profile.release.package.icu_normalizer]\nopt-level = "s"\n[profile.release.package.jiff]\nopt-level = "s"\n[profile.release.package.regress]\nopt-level = "s"\n[profile.release.package.regex]\nopt-level = "s"\n[profile.release.package.regex-automata]\nopt-level = "s"\n[profile.release.package.regex-syntax]\nopt-level = "s"\n' >> Cargo.toml
+              ;;
+            *) echo "unknown variant $VARIANT" >&2; exit 1 ;;
+          esac
+      - name: Install cc shim (linker map and optional ICF)
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          shim="$RUNNER_TEMP/shim"
+          mkdir -p "$shim" "$RUNNER_TEMP/maps"
+          real=$(command -v cc)
+          extra=""
+          if [ "$VARIANT" = icf ]; then extra="-Wl,--icf=all"; fi
+          # Every cc call writes its own map ($$ = shim pid); the largest map is the hello link.
+          printf '#!/bin/sh\nexec %s "$@" -Wl,-Map="%s/maps/$$.map" %s\n' "$real" "$RUNNER_TEMP" "$extra" > "$shim/cc"
+          chmod +x "$shim/cc"
+          echo "$shim" >> "$GITHUB_PATH"
+      - name: Build thaw and hello
+        run: |
+          cargo build --release -p thaw-cli
+          mkdir -p out
+          printf 'function main(): void { console.log("hello"); }\n' > out/hello.ts
+          target/release/thaw build out/hello.ts -o out/hello
+          ls -l out/hello
+      - name: Collect size data
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          d="out/$VARIANT"
+          mkdir -p "$d"
+          strip -o out/hello.stripped out/hello
+          {
+            echo "file_bytes $(stat -c %s out/hello)"
+            echo "stripped_bytes $(stat -c %s out/hello.stripped)"
+            echo "text+data+bss (size -B):"
+            size out/hello
+          } > "$d/summary.txt"
+          size -A out/hello > "$d/size-A.txt"
+          nm -S --size-sort -C out/hello | tail -n 300 > "$d/nm-top300.txt"
+          # Per-crate aggregation of all sized symbols (demangled, approximate). Crate = identifier
+          # before the first "::" after stripping "<", "&", "dyn ", drop_in_place wrappers; others go to [c].
+          nm -S -C --size-sort out/hello | gawk '
+            NF >= 4 {
+              sz = strtonum("0x" $2)
+              name = $0
+              sub(/^[^ ]+ [^ ]+ [^ ]+ /, "", name)
+              s = name
+              gsub(/^(core::ptr::drop_in_place|<|&|dyn |\*const |\*mut )+/, "", s)
+              if (match(s, /^[A-Za-z_][A-Za-z0-9_]*::/)) c = substr(s, 1, RLENGTH - 2); else c = "[c]"
+              tot[c] += sz
+            }
+            END { for (c in tot) printf "%10d %s\n", tot[c], c }' | sort -rn > "$d/per-crate.txt"
+          # Exact attribution from the linker map (lld -Map: columns VMA, file offset, size, align, input).
+          # Input-section lines name an archive member as "libX.a(member.o):(.section)"; sizes are hex.
+          map=$(ls -S "$RUNNER_TEMP"/maps/*.map | head -1)
+          cp "$map" "$d/link.map"
+          gawk '
+            function hex(s) { return s ~ /^0x/ ? strtonum(s) : strtonum("0x" s) }
+            $0 ~ /\.a\(/ {
+              match($0, /[^\/ ]+\.a\(/)
+              a = substr($0, RSTART, RLENGTH - 1)
+              t[a] += hex($3)
+            }
+            END { for (a in t) printf "%10d %s\n", t[a], a }' "$d/link.map" | sort -rn > "$d/per-archive.txt"
+          # Rust crate view from the map: rustc bundles each crate's CGUs as <crate>-<hash16>.<cgu>.rcgu.o.
+          gawk '
+            function hex(s) { return s ~ /^0x/ ? strtonum(s) : strtonum("0x" s) }
+            /rcgu\.o/ && match($0, /[A-Za-z0-9_]+-[0-9a-f]{16}\./) {
+              n = substr($0, RSTART, RLENGTH)
+              sub(/-[0-9a-f]{16}\.$/, "", n)
+              t[n] += hex($3)
+            }
+            END { for (n in t) printf "%10d %s\n", t[n], n }' "$d/link.map" | sort -rn > "$d/per-rust-crate-from-map.txt"
+          gzip -9 "$d/link.map"
+          {
+            echo "### size $VARIANT"
+            echo '```'
+            cat "$d/summary.txt"
+            echo '```'
+            echo "Top rust crates (from linker map):"
+            echo '```'
+            head -40 "$d/per-rust-crate-from-map.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: size-${{ matrix.variant }}
+          path: out/${{ matrix.variant }}
