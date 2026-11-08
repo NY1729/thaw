@@ -762,16 +762,15 @@ pub(crate) fn string_to_number(s: &str) -> f64 {
 }
 
 pub(crate) fn to_int32(n: f64) -> i32 {
-    let t = n.trunc();
-    // |t| < 2^63: `as i64` is exact and `as i32` keeps the low 32 bits, which is ToInt32.
-    // NaN fails this comparison too, so it reaches the non-finite check below.
-    if t.abs() < 9.2e18 {
-        return t as i64 as i32;
+    // |n| < 2^63: `as i64` truncates toward zero (no libm `trunc` call) and `as i32` keeps the
+    // low 32 bits, which is ToInt32. NaN fails this comparison too, so it reaches the check below.
+    if n.abs() < 9.2e18 {
+        return n as i64 as i32;
     }
     if !n.is_finite() {
         return 0;
     }
-    (t.rem_euclid(4294967296.0) as u64 as u32) as i32
+    (n.trunc().rem_euclid(4294967296.0) as u64 as u32) as i32
 }
 
 pub(crate) fn strict_equals(x: &Value, y: &Value) -> bool {
@@ -3540,7 +3539,8 @@ impl Interp {
         if let a::MemberProp::Computed(c) = prop {
             let kv = self.eval(&c.expr, scope)?;
             if let Value::Number(n) = &kv {
-                if *n >= 0.0 && n.fract() == 0.0 && *n < 4294967295.0 {
+                // Range first (rejects NaN), then an exact-integer round trip: no libm `fract` call.
+                if *n >= 0.0 && *n < 4294967295.0 && (*n as u32) as f64 == *n {
                     return Ok(Loc::Index(obj, *n as usize));
                 }
             }
