@@ -1267,6 +1267,40 @@ fn compiled_listener_on_a_coroutine_thread_gets_that_threads_stack_limit() {
     assert_eq!(it.out, vec!["ok".to_string()]);
 }
 
+const CO_EXPORTS: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require) {
+  exports.val = 5;
+  exports.run = async function (cb) { return cb(); };
+},
+};
+var __thaw_bundle_require_maps = { "p/index.js": {}, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#;
+
+static CO_PROBE: std::sync::Mutex<Option<Result<String, String>>> = std::sync::Mutex::new(None);
+
+/// A callback that compiled code makes from an async body, so it runs on that body's coroutine thread.
+unsafe extern "C" fn co_probe_adapter(
+    _context: *const std::ffi::c_void,
+    _args: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    *CO_PROBE.lock().unwrap() = Some(class_call("$value$co::val$arity0", "[]", 0, false));
+    thaw_arena::owned_string("null")
+}
+
+#[test]
+fn class_ops_from_a_callback_on_a_coroutine_thread_see_the_host_packages() {
+    use crate::host::{thaw_tjs_register, thaw_tjs_register_callback};
+    use std::ffi::CString;
+    let bundle = CString::new(CO_EXPORTS).unwrap();
+    assert_eq!(thaw_tjs_register(c"co".as_ptr(), bundle.as_ptr()), 1);
+    let probe = thaw_tjs_register_callback(co_probe_adapter as *const _, std::ptr::null(), 0);
+    let args = format!("[{{\"__thaw_tjs_cb__\":{probe}}}]");
+    assert_eq!(typed_call("co::run", &args), Ok("null".into()));
+    assert_eq!(CO_PROBE.lock().unwrap().take(), Some(Ok("5".into())));
+}
+
 #[test]
 fn thrown_errors_are_framed_with_name_message_code_and_properties() {
     use crate::host::{HostError, Package};

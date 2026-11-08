@@ -650,9 +650,7 @@ fn class_call(
             .ok_or_else(|| HostError::Bundle("invalid class instance handle".into()))?,
         _ => BY_NAME
             .with(|m| m.borrow().get(package).copied())
-            .ok_or_else(|| {
-                HostError::Bundle(format!("thaw-js package `{package}` is not loaded"))
-            })?,
+            .ok_or_else(|| HostError::Bundle(not_loaded(package)))?,
     };
     let Native::Array(args) = Native::from_json(args_json)? else {
         return Err(HostError::Bundle("arguments must be a JSON array".into()));
@@ -4265,6 +4263,101 @@ pub(crate) fn with_package<T>(
     result
 }
 
+/// The thread-local host tables of one realm. They are moved, not copied, between the host thread
+/// and the coroutine thread that runs its async bodies, so a compiled callback that runs there sees
+/// the same packages, handles and callbacks as on the host thread.
+struct HostTls {
+    packages: Vec<Option<Package>>,
+    running: HashMap<usize, *mut Package>,
+    by_name: HashMap<String, usize>,
+    last_package: usize,
+    handles: Vec<(usize, Value)>,
+    handle_refs: Vec<u32>,
+    live_by_object: HashMap<usize, Vec<u64>>,
+    native_objects: HashMap<(usize, String), NativeWrapper>,
+    native_owners: HashMap<usize, Vec<(usize, String)>>,
+    last_frame: Option<(String, String)>,
+    watches: Vec<Watch>,
+}
+
+// SAFETY: the host thread and the coroutine thread strictly alternate (each hands control to the
+// other through a channel), so the `Rc`s and raw pointers inside are never touched by two threads at once.
+struct SendHostTls(HostTls);
+unsafe impl Send for SendHostTls {}
+
+/// Tables given up by the thread that is handing control away, keyed by the realm (`Interp` address).
+/// The thread receiving control takes its realm's entry; a realm on another host thread has its own key.
+static PARKED: std::sync::Mutex<Vec<(usize, SendHostTls)>> = std::sync::Mutex::new(Vec::new());
+
+/// Give this thread's host tables for realm `key` to whichever thread takes control next.
+pub(crate) fn park_host_tls(key: usize) {
+    let tls = HostTls {
+        packages: PACKAGES.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        running: RUNNING.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        by_name: BY_NAME.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        last_package: LAST_PACKAGE.with(|c| c.take()),
+        handles: HANDLES.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        handle_refs: HANDLE_REFS.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        live_by_object: LIVE_BY_OBJECT.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        native_objects: NATIVE_OBJECTS.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        native_owners: NATIVE_OWNERS.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        last_frame: LAST_FRAME.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        watches: WATCHES.with(|c| std::mem::take(&mut *c.borrow_mut())),
+    };
+    PARKED.lock().unwrap().push((key, SendHostTls(tls)));
+}
+
+/// Take over realm `key`'s parked host tables on this thread. A no-op when nothing is parked for it.
+pub(crate) fn adopt_host_tls(key: usize) {
+    let parked = {
+        let mut parked = PARKED.lock().unwrap();
+        parked
+            .iter()
+            .position(|(k, _)| *k == key)
+            .map(|i| parked.remove(i))
+    };
+    let Some((_, SendHostTls(tls))) = parked else {
+        return;
+    };
+    let HostTls {
+        packages,
+        running,
+        by_name,
+        last_package,
+        handles,
+        handle_refs,
+        live_by_object,
+        native_objects,
+        native_owners,
+        last_frame,
+        watches,
+    } = tls;
+    // the replaced values are empty (the other thread parked them), so dropping them runs no code
+    drop(PACKAGES.with(|c| c.replace(packages)));
+    drop(RUNNING.with(|c| c.replace(running)));
+    drop(BY_NAME.with(|c| c.replace(by_name)));
+    LAST_PACKAGE.with(|c| c.set(last_package));
+    drop(HANDLES.with(|c| c.replace(handles)));
+    drop(HANDLE_REFS.with(|c| c.replace(handle_refs)));
+    drop(LIVE_BY_OBJECT.with(|c| c.replace(live_by_object)));
+    drop(NATIVE_OBJECTS.with(|c| c.replace(native_objects)));
+    drop(NATIVE_OWNERS.with(|c| c.replace(native_owners)));
+    drop(LAST_FRAME.with(|c| c.replace(last_frame)));
+    drop(WATCHES.with(|c| c.replace(watches)));
+}
+
+/// Where a "not loaded" package lookup failed: the thread, and what is loaded there.
+fn not_loaded(package: &str) -> String {
+    let mut names: Vec<String> = BY_NAME.with(|m| m.borrow().keys().cloned().collect());
+    names.sort();
+    format!(
+        "thaw-js package `{package}` is not loaded (thread {:?}, loaded: [{}], packages: {})",
+        std::thread::current().id(),
+        names.join(", "),
+        names.len()
+    )
+}
+
 thread_local! {
     /// Tests only: called with the status instead of `_exit` in `terminate_process`.
     static EXIT_HOOK: Cell<Option<fn(i32)>> = const { Cell::new(None) };
@@ -4846,7 +4939,7 @@ pub extern "C" fn thaw_tjs_call_typed_result(
         let (package, export) = symbol.split_once("::").ok_or("malformed thaw-js symbol")?;
         let handle = BY_NAME
             .with(|m| m.borrow().get(package).copied())
-            .ok_or_else(|| format!("thaw-js package `{package}` is not loaded"))?;
+            .ok_or_else(|| not_loaded(package))?;
         let Native::Array(args) = Native::from_json(&args).map_err(|e| e.to_string())? else {
             return Err("arguments must be a JSON array".into());
         };
