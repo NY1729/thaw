@@ -286,6 +286,8 @@ impl Interp {
                 return self.throw_error("TypeError", "proxy [[Construct]] must return an object");
             };
             if !Rc::ptr_eq(t, n) {
+                // a lazy `prototype` on `n` must be materialised before its table moves to `t`
+                n.force_lazy();
                 // the trap built a different object: `this` takes over its contents (the derived
                 // constructor keeps the pre-allocated identity). A proxy result's prototype comes from
                 // its getPrototypeOf trap, which must be asked before `n` loses its kind.
@@ -296,7 +298,7 @@ impl Interp {
                 };
                 *t.kind.borrow_mut() = std::mem::replace(&mut *n.kind.borrow_mut(), Kind::Plain);
                 *t.proto.borrow_mut() = proto;
-                *t.props.borrow_mut() = std::mem::take(&mut *n.props.borrow_mut());
+                *t.raw_props.borrow_mut() = std::mem::take(&mut *n.raw_props.borrow_mut());
                 *t.index.borrow_mut() = n.index.borrow_mut().take();
                 t.ext.set(n.ext.get());
                 t.frozen.set(n.frozen.get());

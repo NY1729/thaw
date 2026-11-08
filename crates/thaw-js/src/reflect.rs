@@ -49,8 +49,9 @@ fn own_prop(o: &Obj, key: &str) -> Option<(Slot, bool)> {
             }
         }
     }
+    o.force_key(key);
     let i = o.position(key)?;
-    let props = o.props.borrow();
+    let props = o.raw_props.borrow();
     Some((props[i].slot.clone(), props[i].writable && writable))
 }
 
@@ -94,6 +95,7 @@ fn get(it: &mut Interp, o: &Obj, key: &str, recv: &Value) -> R<Value> {
         }
         match own_prop(&cur, key) {
             Some((Slot::Data(v), _)) => return Ok(v),
+            Some((Slot::LazyProto { .. }, _)) => unreachable!("own_prop forces the key"),
             Some((Slot::Accessor { get, .. }, _)) => {
                 return match get {
                     Some(getter) => it.call(&getter, recv, &[]),
@@ -128,6 +130,7 @@ fn set(it: &mut Interp, o: &Obj, key: &str, v: Value, recv: &Value, intr: &Intri
                 };
             }
             Some((Slot::Data(_), writable)) => break writable,
+            Some((Slot::LazyProto { .. }, _)) => unreachable!("own_prop forces the key"),
             None => {}
         }
         let next = cur.proto.borrow().clone();
@@ -243,7 +246,7 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
         }
     }
     if let Some(i) = o.position(key) {
-        if !o.props.borrow()[i].configurable {
+        if !o.raw_props.borrow()[i].configurable {
             return Ok(false);
         }
     }

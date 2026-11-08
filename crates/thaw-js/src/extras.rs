@@ -291,7 +291,7 @@ impl crate::Interp {
                 holders.push(p);
             }
             for h in holders {
-                for p in h.props.borrow().iter() {
+                for p in h.props().borrow().iter() {
                     if let Slot::Data(pv @ Value::Object(po)) = &p.slot {
                         if is_native(pv) {
                             work.push((po.clone(), p.key.clone()));

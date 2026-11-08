@@ -17,7 +17,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use classes::ClassInfo;
 use swc_ecma_visit::{Visit, VisitWith};
@@ -142,7 +142,12 @@ pub(crate) fn unhole(v: Option<&Value>) -> Value {
 }
 
 pub struct ObjData {
-    props: RefCell<Vec<Prop>>,
+    /// Own properties in insertion order. Read it through `props()` when a slot's value matters;
+    /// `raw_props` is for key, position and flag readers (a `LazyProto` placeholder has the flags
+    /// of the real `prototype`).
+    raw_props: RefCell<Vec<Prop>>,
+    /// Set while a `Slot::LazyProto` placeholder may be in `raw_props`.
+    lazy_proto: Cell<bool>,
     proto: RefCell<Option<Obj>>,
     kind: RefCell<Kind>,
     frozen: Cell<bool>,
@@ -163,9 +168,49 @@ impl ObjData {
         !self.frozen.get() && !self.len_ro.get()
     }
 
+    /// The own property table with a pending lazy `prototype` materialised first.
+    pub(crate) fn props(&self) -> &RefCell<Vec<Prop>> {
+        self.force_lazy();
+        &self.raw_props
+    }
+
+    /// Materialise the lazy `prototype` when `key` is that key (the only key a placeholder sits on).
+    pub(crate) fn force_key(&self, key: &str) {
+        if key == "prototype" {
+            self.force_lazy();
+        }
+    }
+
+    /// Replace a pending `LazyProto` with the object `closure_from_def` would have built eagerly:
+    /// `{constructor: f}` inheriting from the realm's Object.prototype. The key stays at its index.
+    pub(crate) fn force_lazy(&self) {
+        if !self.lazy_proto.get() {
+            return;
+        }
+        self.lazy_proto.set(false);
+        let found = self
+            .raw_props
+            .borrow()
+            .iter()
+            .enumerate()
+            .find_map(|(i, p)| match &p.slot {
+                Slot::LazyProto { owner, parent } => Some((i, owner.clone(), parent.clone())),
+                _ => None,
+            });
+        let Some((i, owner, parent)) = found else {
+            return;
+        };
+        let f = owner
+            .upgrade()
+            .expect("a lazy prototype is only reached through its live function");
+        let proto = new_obj(Some(parent), Kind::Plain);
+        put_hidden(&proto, "constructor", Value::Object(f));
+        self.raw_props.borrow_mut()[i].slot = Slot::Data(Value::Object(proto));
+    }
+
     /// Position of own property `key`.
     fn position(&self, key: &str) -> Option<usize> {
-        let props = self.props.borrow();
+        let props = self.raw_props.borrow();
         if props.len() < INDEX_MIN {
             return props.iter().position(|p| &*p.key == key);
         }
@@ -182,7 +227,7 @@ impl ObjData {
 
     /// Remove own property `key`, if present.
     pub(crate) fn remove_prop(&self, key: &str) {
-        self.props.borrow_mut().retain(|p| *p.key != *key);
+        self.raw_props.borrow_mut().retain(|p| *p.key != *key);
         *self.index.borrow_mut() = None;
     }
 }
@@ -202,6 +247,12 @@ enum Slot {
     Accessor {
         get: Option<Value>,
         set: Option<Value>,
+    },
+    /// A plain function's `prototype` before its first use. `owner` is the function (a weak link, so
+    /// no cycle) and `parent` the Object.prototype the materialised object inherits from.
+    LazyProto {
+        owner: Weak<ObjData>,
+        parent: Obj,
     },
 }
 
@@ -705,7 +756,8 @@ impl Value {
 
 fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
     Rc::new(ObjData {
-        props: RefCell::new(Vec::new()),
+        raw_props: RefCell::new(Vec::new()),
+        lazy_proto: Cell::new(false),
         proto: RefCell::new(proto),
         kind: RefCell::new(kind),
         frozen: Cell::new(false),
@@ -1152,14 +1204,14 @@ impl Interp {
             .collect();
         names.extend(
             self.object_proto
-                .props
+                .raw_props
                 .borrow()
                 .iter()
                 .map(|p| p.key.to_string()),
         );
         names.extend(
             self.global_object
-                .props
+                .raw_props
                 .borrow()
                 .iter()
                 .map(|p| p.key.to_string()),
@@ -1206,7 +1258,7 @@ impl Interp {
                 }
                 // namespace members such as `Intl.DateTimeFormat.prototype`
                 let members: Vec<Value> = o
-                    .props
+                    .props()
                     .borrow()
                     .iter()
                     .filter_map(|p| match &p.slot {
@@ -1227,7 +1279,7 @@ impl Interp {
             // inherited methods count too (`%TypedArray%.prototype.subarray` on `Uint8Array.prototype`)
             let mut cur = Some(o);
             while let Some(o) = cur {
-                names.extend(o.props.borrow().iter().map(|p| p.key.to_string()));
+                names.extend(o.raw_props.borrow().iter().map(|p| p.key.to_string()));
                 cur = o.proto.borrow().clone();
             }
         }
@@ -1441,7 +1493,7 @@ impl Interp {
                     },
                     K::Plain => {
                         let props: Vec<Prop> = o
-                            .props
+                            .raw_props
                             .borrow()
                             .iter()
                             .filter(|p| p.enumerable)
@@ -1463,6 +1515,10 @@ impl Interp {
                                         format!("{}: {}", p.key, self.inspect(val, false))
                                     }
                                     Slot::Accessor { .. } => format!("{}: [Getter/Setter]", p.key),
+                                    // non-enumerable, so filtered out above
+                                    Slot::LazyProto { .. } => {
+                                        unreachable!("placeholder is not enumerable")
+                                    }
                                 })
                                 .collect();
                             format!("{{ {} }}", parts.join(", "))
@@ -1507,7 +1563,7 @@ impl Interp {
                     keys.extend((0..builtins::str_len(s)).map(|i| Rc::from(i.to_string())));
                 }
                 let own: Vec<Rc<str>> = o
-                    .props
+                    .raw_props
                     .borrow()
                     .iter()
                     .filter(|p| p.enumerable && !p.key.starts_with("@@sym:"))
@@ -1726,11 +1782,12 @@ impl Interp {
                 }
                 return Ok(());
             }
+            Some(Slot::LazyProto { .. }) => unreachable!("`find_own` forces the key"),
             Some(Slot::Data(_)) => {
                 // an inherited or own read-only data property ignores the write
                 let mut cur = Some(o.clone());
                 while let Some(c) = cur {
-                    if let Some(p) = c.props.borrow().iter().find(|p| &*p.key == key) {
+                    if let Some(p) = c.raw_props.borrow().iter().find(|p| &*p.key == key) {
                         if !p.writable {
                             return Ok(());
                         }
@@ -2084,9 +2141,24 @@ impl Interp {
                 false,
             );
         } else if !arrow && !no_prototype {
-            let proto = new_obj(Some(self.object_proto.clone()), Kind::Plain);
-            put_hidden(&proto, "constructor", Value::Object(f.clone()));
-            put_with(&f, "prototype", Value::Object(proto), true, false, false);
+            // ponytail: the object is built on first use (`ObjData::force_lazy`); the placeholder keeps
+            // the key at this index with the same flags, so key order and descriptors do not change.
+            let slot = Slot::LazyProto {
+                owner: Rc::downgrade(&f),
+                parent: self.object_proto.clone(),
+            };
+            push_prop(
+                &f,
+                &mut f.raw_props.borrow_mut(),
+                Prop {
+                    key: "prototype".into(),
+                    slot,
+                    enumerable: false,
+                    writable: true,
+                    configurable: false,
+                },
+            );
+            f.lazy_proto.set(true);
         }
         Value::Object(f)
     }
@@ -2914,7 +2986,7 @@ impl Interp {
                 if let Value::Object(o) = &target {
                     let mut cur = o.proto.borrow().clone();
                     while let Some(c) = cur {
-                        for p in c.props.borrow().iter().filter(|p| p.enumerable) {
+                        for p in c.raw_props.borrow().iter().filter(|p| p.enumerable) {
                             if !keys.contains(&p.key) {
                                 keys.push(p.key.clone());
                             }
@@ -3877,8 +3949,9 @@ pub(crate) fn arg(args: &[Value], i: usize) -> Value {
 }
 
 fn find_own(o: &Obj, key: &str) -> Option<(Slot, bool)> {
+    o.force_key(key);
     let i = o.position(key)?;
-    let props = o.props.borrow();
+    let props = o.raw_props.borrow();
     let p = &props[i];
     Some((p.slot.clone(), p.enumerable))
 }
@@ -3929,12 +4002,14 @@ enum Fast {
 }
 
 fn read_own(o: &ObjData, key: &str) -> Option<Read> {
+    o.force_key(key);
     let i = o.position(key)?;
-    let props = o.props.borrow();
+    let props = o.raw_props.borrow();
     Some(match &props[i].slot {
         Slot::Data(v) => Read::Data(v.clone()),
         Slot::Accessor { get: Some(g), .. } => Read::Getter(g.clone()),
         Slot::Accessor { .. } => Read::NoGetter,
+        Slot::LazyProto { .. } => unreachable!("`force_key` runs before the slot is read"),
     })
 }
 
@@ -4027,7 +4102,7 @@ fn thread_stack_has_room(_sp: usize) -> bool {
 
 pub(crate) fn put(o: &Obj, key: &str, value: Value) {
     let pos = o.position(key);
-    let mut props = o.props.borrow_mut();
+    let mut props = o.raw_props.borrow_mut();
     match pos.map(|i| &mut props[i]) {
         Some(p) => p.slot = Slot::Data(value),
         None => push_prop(
@@ -4081,7 +4156,7 @@ pub(crate) fn put_with(
     configurable: bool,
 ) {
     let pos = o.position(key);
-    let mut props = o.props.borrow_mut();
+    let mut props = o.raw_props.borrow_mut();
     match pos.map(|i| &mut props[i]) {
         Some(p) => {
             p.slot = Slot::Data(value);
@@ -4106,7 +4181,7 @@ pub(crate) fn put_with(
 /// Create or overwrite a non-enumerable, writable data property (builtins).
 pub(crate) fn put_hidden(o: &Obj, key: &str, value: Value) {
     let pos = o.position(key);
-    let mut props = o.props.borrow_mut();
+    let mut props = o.raw_props.borrow_mut();
     match pos.map(|i| &mut props[i]) {
         Some(p) => {
             p.slot = Slot::Data(value);
@@ -4134,7 +4209,7 @@ pub(crate) fn define_accessor(
     enumerable: bool,
 ) {
     let pos = o.position(key);
-    let mut props = o.props.borrow_mut();
+    let mut props = o.raw_props.borrow_mut();
     match pos.map(|i| &mut props[i]) {
         Some(p) => {
             if let Slot::Accessor { get: g, set: s } = &mut p.slot {

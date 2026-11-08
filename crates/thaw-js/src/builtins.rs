@@ -665,10 +665,11 @@ impl Interp {
         // a read-only `length` also refuses new elements past it
         let len_blocks = o.len_ro.get()
             && matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(key).is_some_and(|i| i >= items.len()));
+        o.force_key(key);
         let current = if is_array_elem {
             arr_current
         } else {
-            o.position(key).map(|i| o.props.borrow()[i].clone())
+            o.position(key).map(|i| o.raw_props.borrow()[i].clone())
         };
         match &current {
             Some(cur) if !cur.configurable && !redefine_allowed(cur, &d) => return Ok(false),
@@ -697,7 +698,7 @@ impl Interp {
         }
         let existing = o.position(key);
         let flag = |v: &Option<Value>, default: bool| v.as_ref().map_or(default, |v| v.truthy());
-        let mut props = o.props.borrow_mut();
+        let mut props = o.raw_props.borrow_mut();
         let slot = if d.get.is_some() || d.set.is_some() {
             let (mut g, mut s) = match existing.map(|i| props[i].slot.clone()) {
                 Some(Slot::Accessor { get, set }) => (get, set),
@@ -1135,7 +1136,7 @@ impl Interp {
                 }
                 if let Value::Object(o) = &t {
                     names.extend(
-                        o.props
+                        o.raw_props
                             .borrow()
                             .iter()
                             .filter(|p| !p.enumerable && !p.key.starts_with("@@"))
@@ -1174,7 +1175,7 @@ impl Interp {
                     return Ok(it.array(syms));
                 }
                 let found: Vec<Value> = o
-                    .props
+                    .raw_props
                     .borrow()
                     .iter()
                     .filter_map(|p| p.key.strip_prefix("@@sym:")?.parse::<u64>().ok())
@@ -1200,7 +1201,14 @@ impl Interp {
                         it.call(&gopd, &Value::Undefined, &[target, arg(args, 1)])
                     };
                 }
-                let Some(p) = o.props.borrow().iter().find(|p| *p.key == *key).cloned() else {
+                o.force_key(&key);
+                let Some(p) = o
+                    .raw_props
+                    .borrow()
+                    .iter()
+                    .find(|p| *p.key == *key)
+                    .cloned()
+                else {
                     if let Some(v) = synth_fn_own(&o, &key) {
                         let d = it.plain();
                         put(&d, "value", v);
@@ -1235,6 +1243,7 @@ impl Interp {
                         put(&d, "value", v);
                         put(&d, "writable", Value::Bool(p.writable && !o.frozen.get()));
                     }
+                    Slot::LazyProto { .. } => unreachable!("the key is forced above"),
                     Slot::Accessor { get, set } => {
                         put(&d, "get", get.unwrap_or(Value::Undefined));
                         put(&d, "set", set.unwrap_or(Value::Undefined));
@@ -2683,7 +2692,7 @@ struct PropDesc {
 /// non-configurable, data properties non-writable, and the object is marked frozen.
 pub(crate) fn freeze_obj(o: &Obj) {
     o.frozen.set(true);
-    for p in o.props.borrow_mut().iter_mut() {
+    for p in o.props().borrow_mut().iter_mut() {
         p.configurable = false;
         if matches!(p.slot, Slot::Data(_)) {
             p.writable = false;
@@ -2695,7 +2704,7 @@ pub(crate) fn freeze_obj(o: &Obj) {
 /// property becomes non-configurable.
 pub(crate) fn seal_obj(o: &Obj) {
     o.ext.set(2);
-    for p in o.props.borrow_mut().iter_mut() {
+    for p in o.raw_props.borrow_mut().iter_mut() {
         p.configurable = false;
     }
 }
@@ -2714,7 +2723,7 @@ pub(crate) fn test_integrity(o: &Obj, frozen: bool) -> bool {
     {
         return false;
     }
-    o.props
+    o.props()
         .borrow()
         .iter()
         .all(|p| !p.configurable && (!frozen || !matches!(p.slot, Slot::Data(_)) || !p.writable))
@@ -2732,6 +2741,7 @@ fn redefine_allowed(cur: &Prop, d: &PropDesc) -> bool {
         return false;
     }
     match &cur.slot {
+        Slot::LazyProto { .. } => unreachable!("defineProperty forces the key first"),
         Slot::Accessor { get, set } => {
             if d.value.is_some() || d.writable.is_some() {
                 return false;
