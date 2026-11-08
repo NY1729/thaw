@@ -6476,3 +6476,69 @@ fn ident_hint_vm_context_sandbox_mutation() {
     );
     assert_eq!(one(&src), "a,b,c,function");
 }
+
+#[test]
+fn hint_stats_bcrypt_shape() {
+    // A 40-name wrapper (its name filter saturates) around a bcrypt-like kernel called 1000 times.
+    let vars: String = (0..40).map(|i| format!("var w{i} = {i};")).collect();
+    let src = format!(
+        "function wrap() {{ {vars} function enc(lr, off, P, S) {{ var l = lr[off], r = lr[off + 1], i = 0, n = 0; for (i = 0; i < 16; i++) {{ n = S[l >>> 24]; n += S[0x100 | ((l >> 16) & 0xff)]; r ^= n ^ P[i]; n = r; l ^= n; }} lr[off] = l; lr[off + 1] = r; }} return enc; }}
+        const enc = wrap(); const P = []; for (let k = 0; k < 18; k++) P.push(k * 7919); const S = []; for (let k = 0; k < 1024; k++) S.push((k * 2654435761) >>> 0);
+        const lr = [1, 2]; for (let c = 0; c < 1000; c++) enc(lr, 0, P, S); console.log(lr.length);"
+    );
+    let mut it = Interp::new();
+    it.hint_stats.on = true;
+    let _ = it.run(&src);
+    assert_eq!(it.out, vec!["2".to_string()]);
+    let st = &it.hint_stats;
+    eprintln!("{}", st.summary());
+    assert!(st.hit.get() > 0, "no hinted read hit: {}", st.summary());
+    it.hint_stats.on = false;
+}
+
+#[test]
+fn ident_hint_conditional_let_layout_drift() {
+    // `eval('var pre')` runs on some calls only, so `let t` sits at a different index of the
+    // frame's list on each call. The read of `t` must follow the layout it actually sees.
+    let mut it = Interp::new();
+    it.hint_stats.on = true;
+    let _ = it.run_sloppy("function f(c) { if (c) eval('var pre = 1'); let t = c ? 'T' : 'F'; return t } const out = []; for (let i = 0; i < 6; i++) out.push(f(i % 2 === 0)); console.log(out.join())");
+    assert_eq!(it.out, vec!["T,F,T,F,T,F".to_string()]);
+    eprintln!("{}", it.hint_stats.summary());
+    it.hint_stats.on = false;
+}
+
+#[test]
+fn ident_hint_mask_collision_resolves_both_names() {
+    // Two names with the same filter bit, one bound in the outer scope and one in `f`. The read
+    // of the outer name walks through `f`'s scope, whose bit is set, so it must take the by-name
+    // path and still find the outer binding.
+    let mut pair = None;
+    'search: for i in 0..200 {
+        for j in i + 1..200 {
+            let (a, b) = (format!("q{i}"), format!("q{j}"));
+            if name_bit(&a) == name_bit(&b) {
+                pair = Some((a, b));
+                break 'search;
+            }
+        }
+    }
+    let (a, b) = pair.expect("two names share a filter bit");
+    let src = format!(
+        "let {a} = 'outer'; function f() {{ let {b} = 'inner'; const out = []; for (let k = 0; k < 3; k++) out.push({a}, {b}); return out.join(','); }} console.log(f(), f());"
+    );
+    let mut it = Interp::new();
+    it.hint_stats.on = true;
+    let _ = it.run(&src);
+    assert_eq!(
+        it.out,
+        vec!["outer,inner,outer,inner,outer,inner outer,inner,outer,inner,outer,inner".to_string()]
+    );
+    assert!(
+        it.hint_stats.miss_mid_mask.get() > 0,
+        "the colliding scope was never walked: {}",
+        it.hint_stats.summary()
+    );
+    eprintln!("{}", it.hint_stats.summary());
+    it.hint_stats.on = false;
+}

@@ -434,13 +434,14 @@ impl Vars {
 }
 
 /// One bit of a scope's name filter: a lookup skips every scope whose filter lacks the name's bit.
+/// Every byte feeds an Fx-style fold and the top 6 bits pick the bit, so names that differ only in
+/// their middle still spread out. Collisions just cost a walk.
 fn name_bit(name: &str) -> u64 {
-    // ponytail: from (len, first byte, last byte) only; names that collide just cost a walk.
-    let b = name.as_bytes();
-    let first = b.first().copied().unwrap_or(0) as u32;
-    let last = b.last().copied().unwrap_or(0) as u32;
-    let h = (b.len() as u32).wrapping_mul(31) ^ (first << 5) ^ last;
-    1u64 << (h & 63)
+    let mut h: u64 = 0;
+    for &b in name.as_bytes() {
+        h = (h.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    1u64 << (h >> 58)
 }
 
 /// One scope walk to the binding of `name` that runs `f` on it in place. `None` (with nothing
@@ -811,7 +812,9 @@ pub struct Interp {
     /// Distinguishes source positions of different `run` calls (spans restart at 1 per parse).
     run_id: u32,
     /// Read-hint slots, one per annotated identifier (`hints.rs`). Slot 0 is never used.
-    ident_hints: Vec<Cell<u32>>,
+    ident_hints: Vec<hints::HintSlot>,
+    /// Hint counters (`THAW_JS_HINT_STATS=1`).
+    hint_stats: hints::HintStats,
     /// Oracle mode: every hinted read also runs the by-name lookup and asserts they agree.
     check_hints: bool,
     /// Process-unique id of this realm: tags the zlib jobs it starts so only it collects their results.
@@ -932,7 +935,8 @@ impl Interp {
             loop_captures: FxMap::default(),
             names: Default::default(),
             run_id: 0,
-            ident_hints: vec![Cell::new(0)],
+            ident_hints: vec![hints::HintSlot::default()],
+            hint_stats: hints::HintStats::from_env(),
             check_hints: cfg!(test) || std::env::var_os("THAW_JS_CHECK_HINTS").is_some(),
             realm_id: next_realm_id(),
             depth: 0,
