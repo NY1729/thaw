@@ -17,6 +17,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use crate::host::{adopt_host_tls, park_host_tls};
+
 thread_local! {
     /// Timer/immediate ids are unique across every realm on this thread, so a Timeout can be cleared from any realm.
     static NEXT_TIMER_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -702,9 +704,12 @@ impl Interp {
         ));
         self.rt.cur_co.push(ctx);
         let snap = self.snapshot();
+        let key = self as *mut Interp as usize;
+        park_host_tls(key);
         let spawned = std::thread::Builder::new()
             .stack_size(CO_STACK)
             .spawn(move || {
+                adopt_host_tls(key);
                 let r = {
                     let (ip, f, def, scope, this, args) = payload.into_inner();
                     // SAFETY: the host thread is blocked in `co_wait` until we send a message.
@@ -714,9 +719,11 @@ impl Interp {
                     // every Rc captured above is dropped here, before the hand-back
                 };
                 park_native_ready();
+                park_host_tls(key);
                 let _ = done_tx.send(SendBox(Yield::Done(r)));
             });
         if spawned.is_err() {
+            adopt_host_tls(key);
             self.rt.cur_co.pop();
             return self.throw_error("RangeError", "cannot start coroutine (thread limit)");
         }
@@ -736,6 +743,7 @@ impl Interp {
     pub(crate) fn co_wait(&mut self, co: &Rc<Co>, snap: CoSnapshot) -> R<()> {
         let y = co.from_co.recv();
         adopt_native_ready();
+        adopt_host_tls(self as *mut Interp as usize);
         self.restore(snap);
         self.rt.cur_co.pop();
         match y.map(SendBox::into_inner) {
@@ -772,6 +780,7 @@ impl Interp {
         );
         self.rt.cur_co.push(co.ctx.clone());
         let snap = self.snapshot();
+        park_host_tls(self as *mut Interp as usize);
         let _ = co.to_co.send(SendBox(resume));
         self.co_wait(co, snap)
     }
@@ -783,9 +792,11 @@ impl Interp {
         };
         let snap = self.snapshot();
         park_native_ready();
+        park_host_tls(self as *mut Interp as usize);
         let _ = ctx.to_host.send(SendBox(Yield::Await(v)));
         // the host runs from here until it resumes us
         let msg = ctx.from_host.recv();
+        adopt_host_tls(self as *mut Interp as usize);
         self.restore(snap);
         match msg.map(SendBox::into_inner) {
             Ok(Resume::Value(v)) => Ok(v),
