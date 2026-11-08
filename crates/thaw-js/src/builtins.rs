@@ -1144,6 +1144,21 @@ impl Interp {
                     if matches!(&*o.kind.borrow(), Kind::Array(_)) {
                         names.push(Value::str("length"));
                     }
+                    // A closure lists `length` then `name` first, as in V8, whether each is synthesized or a
+                    // real `Prop`. Natives are a ceiling: they get no synthesized `length`/`name`.
+                    if matches!(&*o.kind.borrow(), Kind::Closure { .. }) {
+                        let is_fn_key =
+                            |v: &Value, k: &str| matches!(v, Value::Str(s) if &**s == k);
+                        let mut head = Vec::new();
+                        for k in ["length", "name"] {
+                            if synth_fn_own(o, k).is_some() || names.iter().any(|v| is_fn_key(v, k))
+                            {
+                                head.push(Value::str(k));
+                            }
+                        }
+                        names.retain(|v| !is_fn_key(v, "length") && !is_fn_key(v, "name"));
+                        names.splice(0..0, head);
+                    }
                 }
                 Ok(it.array(names))
             });
@@ -1186,6 +1201,14 @@ impl Interp {
                     };
                 }
                 let Some(p) = o.props.borrow().iter().find(|p| *p.key == *key).cloned() else {
+                    if let Some(v) = synth_fn_own(&o, &key) {
+                        let d = it.plain();
+                        put(&d, "value", v);
+                        put(&d, "writable", Value::Bool(false));
+                        put(&d, "enumerable", Value::Bool(false));
+                        put(&d, "configurable", Value::Bool(true));
+                        return Ok(Value::Object(d));
+                    }
                     let v = it.get(&arg(args, 0), &key)?;
                     if matches!(&*o.kind.borrow(), Kind::Array(_)) && !matches!(v, Value::Undefined)
                     {
@@ -1281,7 +1304,7 @@ impl Interp {
                 }
             }
             Ok(Value::Bool(match this {
-                Value::Object(o) => find_own(o, &key).is_some() || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))) || *key == *"length"),
+                Value::Object(o) => find_own(o, &key).is_some() || synth_fn_own(o, &key).is_some() || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))) || *key == *"length"),
                 Value::Str(s) => array_index(&key).is_some_and(|i| i < str_len(s)),
                 _ => false,
             }))

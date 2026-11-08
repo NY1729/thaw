@@ -508,3 +508,49 @@ fn integrity_of_primitives_and_empty_objects() {
         "false false true true"
     );
 }
+
+// Closure `name` and `length` are own properties (synthesized from the definition until a real `Prop`
+// shadows them). Only strict, arrow and class cases are pinned: sloppy functions also have V8's own
+// `arguments`/`caller`, which thaw does not model.
+
+#[test]
+fn closure_own_keys_list_length_then_name() {
+    assert_eq!(
+        one("console.log(Reflect.ownKeys(() => 1).join());"),
+        "length,name"
+    );
+    assert_eq!(
+        one("console.log(Reflect.ownKeys(class A { static s() {} }).join());"),
+        "length,name,prototype,s"
+    );
+    assert_eq!(
+        one("console.log(Reflect.ownKeys((function () { 'use strict'; })).join());"),
+        "length,name,prototype"
+    );
+    assert_eq!(
+        one("console.log(Object.getOwnPropertyNames(() => {}).join());"),
+        "length,name"
+    );
+    // Object-literal naming gives a real `name` Prop; it must still list before `prototype`.
+    assert_eq!(
+        one("const o = { named: (a, b) => 0, f: function () { 'use strict'; } }; console.log(Reflect.ownKeys(o.named).join(), o.named.length, JSON.stringify(Object.getOwnPropertyDescriptor(o.named, 'name')));"),
+        "length,name 2 {\"value\":\"named\",\"writable\":false,\"enumerable\":false,\"configurable\":true}"
+    );
+    assert_eq!(one("const o = { f: function () { 'use strict'; } }; console.log(Reflect.ownKeys(o.f).join());"), "length,name,prototype");
+}
+
+#[test]
+fn closure_length_and_name_descriptors_and_keys() {
+    assert_eq!(
+        one("console.log(JSON.stringify(Object.getOwnPropertyDescriptor(() => {}, 'length')));"),
+        "{\"value\":0,\"writable\":false,\"enumerable\":false,\"configurable\":true}"
+    );
+    assert_eq!(
+        one("console.log((() => {}).hasOwnProperty('name'));"),
+        "true"
+    );
+    assert_eq!(
+        one("console.log(JSON.stringify(Object.keys(() => {})));"),
+        "[]"
+    );
+}
