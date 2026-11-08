@@ -492,6 +492,15 @@ impl<'a> FnLowerer<'a> {
             }
             HirType::Void => Ok(HirExpr::Lit(HirLit::Str("undefined".into()))),
             HirType::Json | HirType::Dictionary(_) => self.inspect_rejection_value(value),
+            // A rethrown JsValue member keeps its real text: capture the exact
+            // handle as Json (same as the provenance arm) and inspect it.
+            HirType::JsValue => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_console_inspect_text".into())),
+                vec![HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_capture_exception_js_value".into())),
+                    vec![value],
+                )],
+            )),
             HirType::Union(members) => {
                 let mut result = HirExpr::Lit(HirLit::Str("[exception value]".into()));
                 for (index, member) in members.iter().enumerate().rev() {
