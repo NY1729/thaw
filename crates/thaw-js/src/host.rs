@@ -3422,6 +3422,65 @@ fn throw_type_error<T>(it: &mut Interp, message: &str) -> R<T> {
     it.throw_error("TypeError", message)
 }
 
+/// The live handle id of a tracked native Json root (`__thaw_js_handle_id__`), or 0. Looked up by
+/// symbol like `native_promise_state`; thaw-js takes no Cargo dependency on thaw-std.
+#[cfg(unix)]
+fn tracked_handle_id(object: usize) -> u64 {
+    // SAFETY: the symbol, when present, is thaw-std's `thaw_json_borrowed_tracked_handle_id`.
+    unsafe {
+        let sym = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            c"thaw_json_borrowed_tracked_handle_id".as_ptr(),
+        );
+        if sym.is_null() {
+            return 0;
+        }
+        std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*const c_void) -> u64>(sym)(
+            object as *const c_void,
+        )
+    }
+}
+
+#[cfg(not(unix))]
+fn tracked_handle_id(_object: usize) -> u64 {
+    0
+}
+
+/// The live value behind a handle id (index + 1 into `HANDLES`); 0 or a released id gives None.
+pub(crate) fn handle_value(id: u64) -> Option<Value> {
+    if id == 0 {
+        return None;
+    }
+    HANDLES.with(|h| {
+        h.borrow()
+            .get((id as usize).wrapping_sub(1))
+            .map(|e| e.1.clone())
+    })
+}
+
+/// A compiled throw of a live JS object rethrows that exact object, as thaw-quickjs
+/// `reconstitute_exception_packet` does: tag 7 with the object pointer as its pending value, and
+/// the pointer is a tracked native Json root. Anything else keeps the framed-Error path.
+pub(crate) fn original_js_exception_with(
+    packet: &thaw_arena::exception::ExceptionPacket,
+    lookup: impl FnOnce(usize) -> u64,
+) -> Option<Value> {
+    if !(packet.tag == 7
+        && packet.object != 0
+        && packet.pending == packet.object
+        && packet.native == 0
+        && packet.aggregate == 0
+        && packet.native_text == 0)
+    {
+        return None;
+    }
+    handle_value(lookup(packet.object))
+}
+
+fn original_js_exception(packet: &thaw_arena::exception::ExceptionPacket) -> Option<Value> {
+    original_js_exception_with(packet, tracked_handle_id)
+}
+
 /// The exact value of a thrown or rejected primitive (`throw 0`, `throw false`, `reject(undefined)`).
 /// It has no object, native or aggregate identity, so its type is the packet's value tag. The tags
 /// are the compiled runtime's (`hir_codegen/statements.rs` unions 1 number, 2 bigint, 3 bool, 5
@@ -3458,6 +3517,9 @@ pub(crate) fn take_callback_result(
     };
     if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
         eprintln!("thaw-js callback result: {out:?}");
+    }
+    if let Some(original) = packet.as_deref().and_then(original_js_exception) {
+        return Err(Ctl::Throw(original));
     }
     if let Some(reason) = packet.as_deref().and_then(primitive_reason) {
         return Err(Ctl::Throw(reason));
@@ -3749,6 +3811,9 @@ fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<
     };
     if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
         eprintln!("thaw-js callback({id}) result: {out:?} args={}", args.len());
+    }
+    if let Some(original) = packet.as_deref().and_then(original_js_exception) {
+        return Err(Ctl::Throw(original));
     }
     if packet.is_some() || out.starts_with('\u{2}') {
         return Err(tagged_error(it, &out));

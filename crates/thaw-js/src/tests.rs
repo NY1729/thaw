@@ -3604,6 +3604,53 @@ fn exception_packet_with_object_identity_stays_an_error() {
     assert!(matches!(ctl, Ctl::Throw(Value::Object(_))));
 }
 
+#[test]
+fn exception_packet_handle_value_returns_the_stored_object() {
+    // A live handle id maps back to the very object it was stored for (same Rc, same properties).
+    let mut it = Interp::new();
+    let Ok(Value::Object(original)) =
+        it.run("({ code: 'ERR_BAD_REQUEST', response: { status: 404 } })")
+    else {
+        panic!("object literal did not evaluate to an object");
+    };
+    let id = crate::host::store_handle(0, Value::Object(original.clone())) as u64;
+    let Some(Value::Object(found)) = crate::host::handle_value(id) else {
+        panic!("stored handle {id} did not resolve to an object");
+    };
+    assert!(Rc::ptr_eq(&original, &found));
+    assert!(crate::host::handle_value(0).is_none());
+    assert!(crate::host::handle_value(id + 1000).is_none());
+}
+
+#[test]
+fn exception_packet_tag7_unknown_object_keeps_error_fallback() {
+    // No tracked handle for the pointer (the lookup symbol is absent in unit tests): the old Error path.
+    let mut packet = primitive_exception_packet(7, 0.0, 0, false, 0x1234);
+    packet.pending = 0x1234;
+    let ctl = take_exception_packet(packet);
+    assert!(matches!(ctl, Ctl::Throw(Value::Object(_))));
+}
+
+#[test]
+fn exception_packet_tag7_live_handle_rethrows_the_original_object() {
+    // The guard plus lookup yields the stored object itself, not a fresh Error.
+    let mut it = Interp::new();
+    let Ok(Value::Object(original)) = it.run("({ code: 'ERR_BAD_REQUEST' })") else {
+        panic!("object literal did not evaluate to an object");
+    };
+    let id = crate::host::store_handle(0, Value::Object(original.clone())) as u64;
+    let mut packet = primitive_exception_packet(7, 0.0, 0, false, 0x1234);
+    packet.pending = 0x1234;
+    let Some(Value::Object(found)) = crate::host::original_js_exception_with(&packet, |_| id)
+    else {
+        panic!("tag-7 packet with a live handle did not yield the original object");
+    };
+    assert!(Rc::ptr_eq(&original, &found));
+    // A packet whose pending value differs from its object is not reconstituted.
+    packet.pending = 0;
+    assert!(crate::host::original_js_exception_with(&packet, |_| id).is_none());
+}
+
 /// A busy worker keeps the thaw-js loop alive; a native continuation that a timer made ready must still run inside
 /// that loop (the compiled terminal loop's `turn_hook`), or the awaited `terminate()` never runs.
 #[test]
