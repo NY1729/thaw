@@ -1628,3 +1628,39 @@ fn storage_callback_that_mutates_or_leaks_params_keeps_array_dynamic() {
         assert!(storage_allocations(source)[0], "{source}");
     }
 }
+
+#[test]
+fn storage_array_from_length_literal_stays_native_when_result_is_dynamic() {
+    // `Array.from({ length })` only reads `.length`: the result never aliases the literal, so an
+    // `unknown` sink on the result must not turn the `{ length }` literal into dynamic (Json) storage.
+    assert_eq!(
+        storage_allocations(
+            r#"
+        function line(label: string, v: unknown): void {}
+        function main(): void {
+            const vers: string[] = Array.from({ length: 200 }, (_, i) => `${i}`);
+            line("len", vers.length);
+        }
+    "#
+        ),
+        vec![false]
+    );
+}
+
+#[test]
+fn storage_array_from_array_source_stays_dynamic_when_result_is_dynamic() {
+    // Control: a real-array source's elements flow into the result, so it keeps the `contain` edge.
+    assert_eq!(
+        storage_allocations(
+            r#"
+        function line(label: string, v: unknown): void {}
+        function main(): void {
+            const src: number[] = [1, 2, 3];
+            const vers: string[] = Array.from(src, (_, i) => `${i}`);
+            line("len", vers.length);
+        }
+    "#
+        ),
+        vec![true]
+    );
+}

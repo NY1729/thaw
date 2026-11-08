@@ -1788,6 +1788,30 @@ fn compiles_native_array_from_an_array_like_length_object() {
 }
 
 #[test]
+fn array_from_length_literal_ir_has_no_json_iteration_when_result_is_dynamic() {
+    // `Array.from({ length })` whose result reaches an `unknown` sink: the `{ length }` source must
+    // stay a native object, not Json, so `main` never spreads a dynamic value ("value is not iterable").
+    let source = r#"
+        function line(label: string, v: unknown): void {}
+        function main(): void {
+            const vers: string[] = Array.from({ length: 200 }, (_, i) => `${i}`);
+            line("len", vers.length);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "array_from_length_dynamic_result");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.module.print_to_string().to_string();
+    // The runtime symbol is declared unconditionally, so look for an actual call site only.
+    assert!(
+        !ir.lines().any(|line| line.contains("call") && line.contains("@thaw_json_is_native_iterator(")),
+        "the array-like source must not lower through the Json iterator path:\n{ir}"
+    );
+}
+
+#[test]
 fn compiles_map_group_by_a_native_array() {
     // Built entirely from the same generic primitives `.get()`/`.set()`/
     // `.push()` already lower to, plus `__thaw_map_new`/`ArrayAlloc` --
