@@ -3458,23 +3458,31 @@ pub(crate) fn handle_value(id: u64) -> Option<Value> {
     })
 }
 
-/// A compiled throw of a live JS object rethrows that exact object, as thaw-quickjs
-/// `reconstitute_exception_packet` does: tag 7 with the object pointer as its pending value, and
-/// the pointer is a tracked native Json root. Anything else keeps the framed-Error path.
+/// A compiled throw of a live JS object rethrows that exact object: tag 7 with a non-zero `object`
+/// that is a tracked native Json root. The guard does not require `pending == object` or
+/// `native_text == 0`, because async-callback rejections publish a display text in `pending` and
+/// `native_text` while the object stays in `object`; the tracked-root lookup is what authenticates
+/// the object. An id of 0 (untracked, or not a live handle) keeps the framed-Error path. The
+/// QuickJS side (`thaw-quickjs` `reconstitute_exception_packet`) is unchanged.
 pub(crate) fn original_js_exception_with(
     packet: &thaw_arena::exception::ExceptionPacket,
     lookup: impl FnOnce(usize) -> u64,
 ) -> Option<Value> {
-    if !(packet.tag == 7
-        && packet.object != 0
-        && packet.pending == packet.object
-        && packet.native == 0
-        && packet.aggregate == 0
-        && packet.native_text == 0)
-    {
+    let id = if packet.tag == 7 && packet.object != 0 {
+        lookup(packet.object)
+    } else {
+        0
+    };
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        eprintln!(
+            "thaw-js exc packet: tag={:#x} object={:#x} pending={:#x} native={:#x} aggregate={:#x} native_text={:#x} lookup={:#x}",
+            packet.tag, packet.object, packet.pending, packet.native, packet.aggregate, packet.native_text, id
+        );
+    }
+    if !(packet.tag == 7 && packet.object != 0 && packet.native == 0 && packet.aggregate == 0) {
         return None;
     }
-    handle_value(lookup(packet.object))
+    handle_value(id)
 }
 
 fn original_js_exception(packet: &thaw_arena::exception::ExceptionPacket) -> Option<Value> {
