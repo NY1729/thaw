@@ -1680,8 +1680,11 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
     text_result(on_handle(handle, |p, _, v| {
         let it = &mut p.interp;
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let is_array =
-            matches!(&v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)));
+        // a proxy over an array is an array (IsArray looks through the proxy; a revoked one answers "no")
+        let is_array = matches!(
+            &it.proxy_unwrap(&v, "isArray").unwrap_or(Value::Undefined),
+            Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_))
+        );
         let is_object = matches!(v, Value::Object(_));
         let number = |it: &mut Interp, v: &Value| {
             let n = it.num(v);
@@ -5262,6 +5265,22 @@ mod host_query_live_tests {
             query(construct("Proxy", "[{\"v\":{}},{\"v\":{}}]"), 29),
             "1"
         );
+    }
+
+    #[test]
+    fn host_query_is_array_looks_through_a_proxy_over_an_array() {
+        let array = construct("Array", "[{\"v\":1},{\"v\":2}]");
+        assert_eq!(query(array, 4), "1");
+        let ctor = thaw_tjs_get_global(CString::new("Proxy").unwrap().as_ptr());
+        let wire = CString::new(format!(
+            r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}},{{"v":{{}}}}]}},{{"hdl":{array}}}]}}"#
+        ))
+        .unwrap();
+        let result = thaw_tjs_construct_handle_graph_args_result(ctor as u64, wire.as_ptr());
+        assert!(result.error.is_null());
+        let proxy = result.value;
+        assert_eq!(query(proxy, 4), "1");
+        assert_eq!(query(construct("Proxy", "[{\"v\":{}},{\"v\":{}}]"), 4), "0");
     }
 
     #[test]

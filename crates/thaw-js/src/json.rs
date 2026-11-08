@@ -142,6 +142,13 @@ impl Interp {
         self.throw_error("TypeError", &msg)
     }
 
+    /// The items of a proxy over an array: `length`, then each index, both through the proxy's traps.
+    fn proxy_array_items(&mut self, v: &Value) -> R<Vec<Value>> {
+        let len = self.get(v, "length")?;
+        let n = self.num(&len) as usize;
+        (0..n).map(|i| self.get(v, &i.to_string())).collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn json_ser(
         &mut self,
@@ -197,7 +204,14 @@ impl Interp {
                 if let Some(p) = wrapped {
                     return self.json_ser(holder, key, p, ser, cur, out);
                 }
-                let is_arr = matches!(&*o.kind.borrow(), Kind::Array(_));
+                let is_proxy = matches!(&*o.kind.borrow(), Kind::Proxy(_));
+                // IsArray looks through proxies (a revoked one throws)
+                let is_arr = if is_proxy {
+                    let target = self.proxy_unwrap(&v, "IsArray")?;
+                    matches!(&target, Value::Object(t) if matches!(&*t.kind.borrow(), Kind::Array(_)))
+                } else {
+                    matches!(&*o.kind.borrow(), Kind::Array(_))
+                };
                 if let Some(at) = ser.stack.iter().position(|(s, _)| Rc::ptr_eq(s, o)) {
                     let parent_arr = ser
                         .stack
@@ -210,7 +224,12 @@ impl Interp {
                 ser.stack.push((o.clone(), key.into()));
                 let mut pieces: Vec<String> = Vec::new();
                 if is_arr {
-                    for (i, item) in self.array_items(&v).into_iter().enumerate() {
+                    let items = if is_proxy {
+                        self.proxy_array_items(&v)?
+                    } else {
+                        self.array_items(&v)
+                    };
+                    for (i, item) in items.into_iter().enumerate() {
                         let mut piece = String::new();
                         let k = i.to_string();
                         if !self.json_ser(&v, &k, item, ser, &inner, &mut piece)? {
