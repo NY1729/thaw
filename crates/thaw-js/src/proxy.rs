@@ -249,12 +249,24 @@ impl Interp {
         if !enumerable_only {
             return Ok(Some(all));
         }
+        // a key is listed when its descriptor is enumerable: the getOwnPropertyDescriptor trap's, else the target's
+        let gopd = self.proxy_trap(o, "getOwnPropertyDescriptor")?;
         let allowed = self.own_keys(&target);
-        Ok(Some(
-            all.into_iter()
-                .filter(|k| matches!(k, Value::Str(s) if allowed.contains(&s.into_rc())))
-                .collect(),
-        ))
+        let mut keep = Vec::new();
+        for k in all {
+            let Value::Str(s) = &k else { continue };
+            let enumerable = match &gopd {
+                Some((t, h, trap)) if trap.is_callable() => {
+                    let d = self.call(trap, h, &[t.clone(), k.clone()])?;
+                    matches!(d, Value::Object(_)) && self.get(&d, "enumerable")?.truthy()
+                }
+                _ => allowed.contains(&s.into_rc()),
+            };
+            if enumerable {
+                keep.push(k);
+            }
+        }
+        Ok(Some(keep))
     }
 
     pub(crate) fn proxy_call(&mut self, o: &Obj, this: &Value, args: &[Value]) -> R<Value> {
