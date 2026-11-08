@@ -59,6 +59,40 @@ fn closures_and_per_iteration_bindings() {
 }
 
 #[test]
+fn interned_declared_names_are_bounded_by_distinct_names() {
+    // 10k distinct `let` names, each in its own block, inside a loop that runs twice
+    let mut src = String::from("for (let r = 0; r < 2; r++) {\n");
+    for i in 0..10_000 {
+        src.push_str(&format!("{{ let v{i} = {i}; }}\n"));
+    }
+    src.push_str("}\n");
+    let mut it = Interp::new();
+    let before = it.names.len();
+    assert!(it.run(&src).is_ok(), "first run");
+    let after_one = it.names.len();
+    assert_eq!(after_one - before, 10_001, "10k block names plus `r`");
+    assert!(it.run(&src).is_ok(), "second run");
+    assert_eq!(
+        it.names.len(),
+        after_one,
+        "re-executing declarations interns nothing new"
+    );
+}
+
+#[test]
+fn shadowing_and_closures_resolve_with_interned_names() {
+    assert_eq!(
+        one(
+            "let x = 1; function f(){ return x } { let x = 2; console.log(f(), x) } console.log(x)"
+        ),
+        "1 2|1"
+    );
+    assert_eq!(one("var fs = []; for (let i = 0; i < 3; i++) { let j = i * 2; fs.push(() => i + j) } console.log(fs[0](), fs[1](), fs[2]())"), "0 3 6");
+    assert_eq!(one("let e = 'outer'; try { throw 'inner' } catch (e) { let e2 = e; console.log(e, e2) } console.log(e)"), "inner inner|outer");
+    assert_eq!(one("function mk(){ let n = 0; class C { static k = n } let g = () => n; n = 5; return [g(), C.k] } console.log(mk().join(','))"), "5,0");
+}
+
+#[test]
 fn recursion_hoisting_and_default_rest_params() {
     assert_eq!(
         one("console.log(fib(15)); function fib(n){ return n < 2 ? n : fib(n-1) + fib(n-2); }"),

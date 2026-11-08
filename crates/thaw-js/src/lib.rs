@@ -368,7 +368,10 @@ impl Vars {
     fn position(&self, key: &str) -> Option<usize> {
         match &self.index {
             Some(map) => map.get(key).copied(),
-            None => self.list.iter().position(|(name, _)| &**name == key),
+            // a name interned for this key matches by pointer; any other name compares by string
+            None => self.list.iter().position(|(name, _)| {
+                (name.as_ptr() == key.as_ptr() && name.len() == key.len()) || &**name == key
+            }),
         }
     }
     fn get(&self, key: &str) -> Option<&Binding> {
@@ -801,6 +804,10 @@ pub struct Interp {
     pub(crate) sources: FxMap<u32, Rc<str>>,
     /// For statements (by position) whose body creates closures, so each iteration needs its own bindings.
     loop_captures: FxMap<(u32, u32), bool>,
+    /// Shared `Rc<str>` for every name declared by `let`/`const`/class/hoisted function/catch/destructuring,
+    /// so re-executing a declaration reuses one allocation. Per Interp: never shared across threads.
+    // ponytail: grows with distinct declared names; eval-generated names are unbounded, cap it if that shows.
+    names: std::collections::HashSet<Rc<str>, std::hash::BuildHasherDefault<FxHasher>>,
     /// Distinguishes source positions of different `run` calls (spans restart at 1 per parse).
     run_id: u32,
     /// Process-unique id of this realm: tags the zlib jobs it starts so only it collects their results.
@@ -919,6 +926,7 @@ impl Interp {
             tpl_cache: FxMap::default(),
             sources: FxMap::default(),
             loop_captures: FxMap::default(),
+            names: Default::default(),
             run_id: 0,
             realm_id: next_realm_id(),
             depth: 0,
@@ -2190,6 +2198,16 @@ impl Interp {
         Ok(())
     }
 
+    /// The shared `Rc<str>` for a declared name (see `Interp::names`).
+    fn intern(&mut self, name: &str) -> Rc<str> {
+        if let Some(n) = self.names.get(name) {
+            return n.clone();
+        }
+        let n: Rc<str> = name.into();
+        self.names.insert(n.clone());
+        n
+    }
+
     /// Bind (`declare`) or assign (`!declare`) `value` to a pattern.
     fn bind_pattern(
         &mut self,
@@ -2201,7 +2219,8 @@ impl Interp {
         match pat {
             a::Pat::Ident(id) => {
                 if declare {
-                    scope.declare(&id.id.sym, value, true);
+                    let name = self.intern(&id.id.sym);
+                    scope.declare_rc(name, value, true);
                     Ok(())
                 } else {
                     self.assign_var(scope, &id.id.sym, value)
@@ -2494,7 +2513,7 @@ impl Interp {
     ) -> R<()> {
         for s in stmts {
             if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
-                let name: Rc<str> = f.ident.sym.as_ref().into();
+                let name = self.intern(&f.ident.sym);
                 let func = self.function_value(Some(name.clone()), &f.function, scope)?;
                 if in_block && !scope.strict.get() {
                     let mut cur = scope.parent.as_deref();
@@ -2508,7 +2527,7 @@ impl Interp {
                         cur = outer.parent.as_deref();
                     }
                 }
-                scope.declare(&name, func, true);
+                scope.declare_rc(name, func, true);
             }
         }
         Ok(())
@@ -2555,7 +2574,8 @@ impl Interp {
             a::Stmt::Decl(a::Decl::Var(v)) => self.exec_var(v, scope),
             a::Stmt::Decl(a::Decl::Class(c)) => {
                 let v = self.eval_class(Some(&c.ident), &c.class, scope)?;
-                scope.declare(&c.ident.sym, v, true);
+                let name = self.intern(&c.ident.sym);
+                scope.declare_rc(name, v, true);
                 Ok(())
             }
             a::Stmt::Decl(_) => unsupported("declaration kind"),
@@ -2650,7 +2670,10 @@ impl Interp {
                 None => Value::Undefined,
             };
             match &d.name {
-                a::Pat::Ident(id) if !is_var => scope.declare(&id.id.sym, value, mutable),
+                a::Pat::Ident(id) if !is_var => {
+                    let name = self.intern(&id.id.sym);
+                    scope.declare_rc(name, value, mutable);
+                }
                 a::Pat::Ident(id) => self.assign_var(scope, &id.id.sym, value)?,
                 pat if is_var => self.bind_pattern(pat, value, scope, false)?,
                 pat => self.bind_pattern(pat, value, scope, true)?,
