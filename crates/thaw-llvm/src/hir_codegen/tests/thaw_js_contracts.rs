@@ -320,3 +320,20 @@ fn discarded_jsvalue_result_call_without_jsvalue_arguments_still_releases() {
     );
     assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
 }
+
+#[test]
+fn object_literal_with_jsvalue_in_a_callback_registers_host_operations_before_encoding() {
+    // The callback body may be the first dynamic operation on its thread; the literal's live JsValue
+    // needs the host operations to be registered before the mixed-handle args are graph-encoded.
+    let (_, _, ir) = compile_thaw_js_program(
+        "function wrap(v: JsValue): JsValue { return { data: v }; }
+         function main(): void { const r = wrap({ a: 1 }); console.log(r); }",
+    );
+    let body = ir
+        .split("\ndefine ")
+        .find(|function| function.contains("mixed_handle_args_json"))
+        .unwrap_or_else(|| panic!("{ir}"));
+    let register = body.find("call void @thaw_json_register_host_operations(").expect(body);
+    let encode = body.find("@thaw_json_graph_encode(").expect(body);
+    assert!(register < encode, "{body}");
+}
