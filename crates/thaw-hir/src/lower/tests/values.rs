@@ -3985,3 +3985,25 @@ fn array_destructuring_a_generator_lowers_to_a_prefix_loop() {
     let source = format!("{:?}", program.functions);
     assert!(source.contains("__thaw_iter_items_"), "{source}");
 }
+
+#[test]
+fn array_from_length_literal_lowers_as_array_like_when_result_is_dynamic() {
+    let program = lower(
+        r#"
+            function line(label: string, v: unknown): void {}
+            function main(): void {
+                const vers: string[] = Array.from({ length: 200 }, (_, i) => `${i}`);
+                line("len", vers.length);
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    assert!(
+        source.contains("Object([(\"length\", F64)])"),
+        "the `{{ length }}` source should keep its array-like object type:\n{source}"
+    );
+    assert!(
+        !source.contains("__thaw_json_is_native_iterator") && !source.contains("__thaw_spread_source"),
+        "the array-like source must not be spread as Json:\n{source}"
+    );
+}

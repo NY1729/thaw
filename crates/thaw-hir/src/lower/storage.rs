@@ -520,6 +520,18 @@ impl StorageGraph {
                 | ("Buffer", "from" | "concat" | "alloc" | "allocUnsafe" | "allocUnsafeSlow") | ("Uint8Array", "from"))
     }
 
+    /// `Array.from({ length: n }, ..)`'s first argument: a single-`length` literal. `Array.from` reads only `length`
+    /// from it, so neither the result nor the call aliases the literal and a dynamic result must not make it Json.
+    fn array_from_length_source(&self, callee: &Expr, index: usize, argument: &swc_ecma_ast::ExprOrSpread) -> bool {
+        let Expr::Member(member) = callee else { return false };
+        index == 0 && argument.spread.is_none()
+            && matches!((member.obj.as_ref(), &member.prop), (Expr::Ident(object), swc_ecma_ast::MemberProp::Ident(method))
+                if object.sym == "Array" && method.sym == "from" && self.lookup("Array").is_none())
+            && matches!(argument.expr.as_ref(), Expr::Object(object) if object.props.len() == 1
+                && matches!(&object.props[0], PropOrSpread::Prop(property)
+                    if matches!(property.as_ref(), Prop::KeyValue(entry) if class_property_name(&entry.key).ok().as_deref() == Some("length"))))
+    }
+
     fn link(&mut self, left: Span, right: Span) {
         if left.is_dummy() || right.is_dummy() || left == right {
             return;
@@ -1342,8 +1354,11 @@ impl Visit for StorageGraph {
             }
             Expr::Call(call) => {
                 if let Callee::Expr(callee) = &call.callee {
+                    // An unresolved call containers every recorded argument by its callee, so `Array.from`'s
+                    // `{ length }` source is left out here too (see `array_from_length_source`).
                     self.calls.push(StorageCall { callee: callee.span(),
-                        arguments: call.args.iter().map(|arg| (arg.expr.span(), arg.spread.is_some())).collect(), result: span,
+                        arguments: call.args.iter().enumerate().filter(|(index, arg)| !self.array_from_length_source(callee.as_ref(), *index, arg))
+                            .map(|(_, arg)| (arg.expr.span(), arg.spread.is_some())).collect(), result: span,
                         source_function: self.source_callable(callee) });
                     if let Expr::Ident(name) = callee.as_ref() {
                         // (thaw-js copies plain data at the call, so its arguments need no live dynamic storage.)
@@ -1384,9 +1399,10 @@ impl Visit for StorageGraph {
                             let pure_method = matches!(&member.prop, swc_ecma_ast::MemberProp::Ident(method)
                                 if matches!(method.sym.as_ref(), "sort" | "toSorted" | "some" | "every" | "find" | "findIndex"
                                     | "findLast" | "findLastIndex" | "filter" | "forEach"));
-                            for argument in &call.args {
+                            for (index, argument) in call.args.iter().enumerate() {
                                 let is_fn = matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_));
                                 if is_fn && (array_from || (pure_method && callback_only_reads_params(&argument.expr))) { continue; }
+                                if self.array_from_length_source(callee.as_ref(), index, argument) { continue; }
                                 self.contain(member.obj.span(), argument.expr.span());
                             }
                         }
