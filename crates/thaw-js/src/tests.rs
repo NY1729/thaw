@@ -6633,3 +6633,243 @@ fn no_prototype_async_and_method_closures_free_their_scope() {
         "10k async functions / methods kept their scope alive"
     );
 }
+
+// ----- lazy `prototype` for ordinary functions (R5b): every observable result is unchanged -----
+
+#[test]
+fn lazy_prototype_key_order_is_unchanged_by_materialisation() {
+    assert_eq!(
+        one("function f(){}; f.a=1; console.log(JSON.stringify(Object.getOwnPropertyNames(f)), JSON.stringify(Reflect.ownKeys(f)), JSON.stringify(Object.keys(f)));"),
+        r#"["length","name","a","prototype"] ["length","name","a","prototype"] ["a"]"#
+    );
+    assert_eq!(
+        one("function f(){}; f.a=1; f.prototype; console.log(JSON.stringify(Object.getOwnPropertyNames(f)), JSON.stringify(Reflect.ownKeys(f)), JSON.stringify(Object.keys(f)));"),
+        r#"["length","name","a","prototype"] ["length","name","a","prototype"] ["a"]"#
+    );
+    assert_eq!(
+        one("var g = function(){}; console.log(JSON.stringify(Object.getOwnPropertyNames(g)));"),
+        r#"["length","name","prototype"]"#
+    );
+    assert_eq!(
+        one("var g = function(){}; g.prototype; g.x = 2; console.log(JSON.stringify(Object.getOwnPropertyNames(g)), JSON.stringify(Object.keys(g)));"),
+        r#"["length","name","x","prototype"] ["x"]"#
+    );
+    // more than INDEX_MIN properties: the hash index must still find the placeholder
+    assert_eq!(
+        one("function m(){}; for (var i=0;i<12;i++) m['k'+i]=i; console.log(JSON.stringify(Object.getOwnPropertyNames(m)).length, JSON.stringify(Object.getOwnPropertyNames(m).slice(0,4)), Object.getOwnPropertyNames(m).indexOf('prototype')); m.prototype; console.log(JSON.stringify(Object.getOwnPropertyNames(m).slice(0,4)), Object.getOwnPropertyNames(m).indexOf('prototype'), Object.getOwnPropertyNames(m).length);"),
+        r#"91 ["length","name","k0","k1"] 14|["length","name","k0","k1"] 14 15"#
+    );
+    // a later non-enumerable key stays after the prototype, as before
+    assert_eq!(
+        one("function f(){}; f.a=1; Object.defineProperty(f,'z',{value:1,enumerable:true}); console.log(JSON.stringify(Object.getOwnPropertyNames(f)), JSON.stringify(Object.keys(f)));"),
+        r#"["length","name","a","z","prototype"] ["a","z"]"#
+    );
+    assert_eq!(
+        one("function f(){}; f.z=3; console.log(Object.keys(Object.getOwnPropertyDescriptors(f)).join(','));"),
+        "length,name,z,prototype"
+    );
+    assert_eq!(
+        one("function f(){}; console.log(Object.getOwnPropertyNames(f).join(','), Object.getOwnPropertyDescriptor(f,'name').value, Object.getOwnPropertyDescriptor(f,'length').value);"),
+        "length,name,prototype f 0"
+    );
+    assert_eq!(
+        one("function f(){}; console.log(f.hasOwnProperty('prototype'), 'prototype' in f, Object.prototype.hasOwnProperty.call(f,'prototype'), Object.getOwnPropertyNames(f).indexOf('prototype'));"),
+        "true true true 2"
+    );
+}
+
+#[test]
+fn lazy_prototype_descriptors_and_constructor_flags() {
+    assert_eq!(
+        one("function f(){}; var d = Object.getOwnPropertyDescriptor(f,'prototype'); console.log(d.writable, d.enumerable, d.configurable, typeof d.value, d.value.constructor === f);"),
+        "true false false object true"
+    );
+    assert_eq!(
+        one("function f(){}; f.prototype; var d = Object.getOwnPropertyDescriptor(f,'prototype'); console.log(d.writable, d.enumerable, d.configurable, typeof d.value, d.value.constructor === f);"),
+        "true false false object true"
+    );
+    assert_eq!(
+        one("function f(){}; var d = Object.getOwnPropertyDescriptor(f.prototype,'constructor'); console.log(d.writable, d.enumerable, d.configurable, d.value === f, Object.getOwnPropertyNames(f.prototype).join(','));"),
+        "true false true true constructor"
+    );
+    assert_eq!(
+        one("function f(){}; var all = Object.getOwnPropertyDescriptors(f); console.log(all.prototype.writable, all.prototype.enumerable, all.prototype.configurable, all.prototype.value.constructor === f);"),
+        "true false false true"
+    );
+    assert_eq!(
+        one("function f(){}; Object.defineProperty(f,'prototype',{value:{k:2}}); console.log(new f().k, JSON.stringify(Object.getOwnPropertyDescriptor(f,'prototype').writable));"),
+        "2 true"
+    );
+    assert_eq!(
+        one("function f(){}; console.log(Reflect.deleteProperty(f,'prototype'), f.hasOwnProperty('prototype'), f.propertyIsEnumerable('prototype'));"),
+        "false true false"
+    );
+}
+
+#[test]
+fn lazy_prototype_new_instanceof_and_constructor_identity() {
+    assert_eq!(
+        one("function f(){ this.v = 1; }; console.log(f.prototype.constructor === f, new f().v, new f() instanceof f, new f().constructor === f, Object.getPrototypeOf(new f()) === f.prototype);"),
+        "true 1 true true true"
+    );
+    assert_eq!(
+        one("function f(){ this.v = 1; }; var o = new f(); console.log(o.v, o instanceof f, Object.getPrototypeOf(o) === f.prototype, f.prototype.constructor === f);"),
+        "1 true true true"
+    );
+    assert_eq!(
+        one("function f(){}; var p0 = f.prototype; f.prototype = {x:1}; console.log(new f().x, p0 === f.prototype, p0.constructor === f);"),
+        "1 false true"
+    );
+    assert_eq!(
+        one("function f(){}; f.prototype = {x:1}; console.log(new f().x, f.hasOwnProperty('prototype'));"),
+        "1 true"
+    );
+    assert_eq!(
+        one("function Base(){ this.b = 1; }; class D extends Base { constructor(){ super(); this.d = 2; } }; var x = new D(); console.log(x.b, x.d, Object.getPrototypeOf(D) === Base, x instanceof Base, x instanceof D);"),
+        "1 2 true true true"
+    );
+    assert_eq!(
+        one("function Base(){ this.b = 1; }; class D extends Base {}; console.log(new D().b, Object.getPrototypeOf(D.prototype) === Base.prototype);"),
+        "1 true"
+    );
+    assert_eq!(
+        one("function f(){ this.who = 'f'; }; function g(){}; g.prototype = {z: 9}; var r = Reflect.construct(f, [], g); console.log(r.who, Object.getPrototypeOf(r) === g.prototype, r.z);"),
+        "f true 9"
+    );
+    assert_eq!(
+        one("var p = new Proxy(function(){ this.q = 1 }, {}); var o = new p(); console.log(o.q, o instanceof p);"),
+        "1 true"
+    );
+    assert_eq!(
+        one("var P = new Proxy(function(){}, { construct(t, args, nt) { return { via: 'trap' }; } }); console.log(JSON.stringify(new P()));"),
+        r#"{"via":"trap"}"#
+    );
+}
+
+#[test]
+fn lazy_prototype_integrity_and_seal_flags() {
+    assert_eq!(
+        one("function f(){}; console.log(Object.isFrozen(f), Object.isSealed(f), Object.isExtensible(f));"),
+        "false false true"
+    );
+    assert_eq!(
+        one("function f(){}; Object.freeze(f); var d = Object.getOwnPropertyDescriptor(f,'prototype'); console.log(Object.isFrozen(f), Object.isSealed(f), d.writable, d.configurable, d.enumerable, d.value.constructor === f);"),
+        "true true false false false true"
+    );
+    assert_eq!(
+        one("function f(){}; f.prototype; Object.freeze(f); var d = Object.getOwnPropertyDescriptor(f,'prototype'); console.log(Object.isFrozen(f), d.writable, d.configurable, d.value.constructor === f);"),
+        "true false false true"
+    );
+    assert_eq!(
+        one("function f(){}; Object.seal(f); var d = Object.getOwnPropertyDescriptor(f,'prototype'); console.log(Object.isSealed(f), Object.isFrozen(f), d.writable, d.configurable, d.enumerable);"),
+        "true false true false false"
+    );
+    assert_eq!(
+        one("function f(){}; Object.preventExtensions(f); console.log(Object.isExtensible(f), Object.isFrozen(f), Object.isSealed(f), JSON.stringify(Object.getOwnPropertyNames(f)));"),
+        r#"false false true ["length","name","prototype"]"#
+    );
+    assert_eq!(
+        one("function f(){}; Object.freeze(f); f.prototype.q = 1; console.log(f.prototype.q, Object.isFrozen(f.prototype));"),
+        "1 false"
+    );
+}
+
+#[test]
+fn lazy_prototype_json_assign_spread_and_inspect_skip_it() {
+    assert_eq!(
+        one("function f(){}; f.a = 1; console.log(JSON.stringify({fn: f, n: 1}), JSON.stringify(Object.assign({}, f)), JSON.stringify({...f}), JSON.stringify(Object.entries(f)));"),
+        r#"{"n":1} {"a":1} {"a":1} [["a",1]]"#
+    );
+    assert_eq!(
+        one("function f(){}; f.prototype; f.a = 1; console.log(JSON.stringify({fn: f, n: 1}), JSON.stringify(Object.assign({}, f)), JSON.stringify({...f}), JSON.stringify(Object.entries(f)));"),
+        r#"{"n":1} {"a":1} {"a":1} [["a",1]]"#
+    );
+    assert_eq!(
+        one("function f(){}; console.log(f); console.log(f.prototype.constructor === f, f);"),
+        "[Function: f]|true [Function: f]"
+    );
+    assert_eq!(
+        one("function f(){}; f.e = 1; var ks = []; for (var k in f) ks.push(k); console.log(JSON.stringify(ks));"),
+        r#"["e"]"#
+    );
+}
+
+#[test]
+fn lazy_prototype_generators_arrows_methods_and_bound_functions() {
+    assert_eq!(
+        one("function* gen(){}; var d = Object.getOwnPropertyDescriptor(gen,'prototype'); console.log(JSON.stringify(Object.getOwnPropertyNames(gen)), d.writable, d.enumerable, d.configurable, Object.getPrototypeOf(gen.prototype) === Object.getPrototypeOf(function*(){}).prototype, typeof gen.prototype);"),
+        r#"["length","name","prototype"] true false false false object"#
+    );
+    assert_eq!(
+        one("function* gen(){ yield 1; yield 2; }; console.log([...gen()].join(','), Object.getPrototypeOf(gen()) === gen.prototype);"),
+        "1,2 true"
+    );
+    assert_eq!(
+        one("var o = { m() {} }; var ar = () => 1; async function af(){}; console.log(o.m.hasOwnProperty('prototype'), ar.hasOwnProperty('prototype'), af.hasOwnProperty('prototype'), JSON.stringify(Object.getOwnPropertyNames(ar)), JSON.stringify(Object.getOwnPropertyNames(o.m)));"),
+        r#"false false false ["length","name"] ["length","name"]"#
+    );
+    assert_eq!(
+        one("function f(a){ this.k = a; }; var b = f.bind(null, 5); console.log(b.hasOwnProperty('prototype'), JSON.stringify(Object.getOwnPropertyNames(b)), new b().k, new b() instanceof f);"),
+        "false [] 5 true"
+    );
+    assert_eq!(
+        one("function f(a,b){}; console.log(f.call(null), f.apply(null, []), f.name, f.length, JSON.stringify(Object.getOwnPropertyNames(f)));"),
+        r#"undefined undefined f 2 ["length","name","prototype"]"#
+    );
+    assert_eq!(
+        one("function F(){}; F.prototype.m = function(){}; var inst = new F(); console.log(inst.m === F.prototype.m, JSON.stringify(Object.getOwnPropertyNames(F.prototype)), Object.getOwnPropertyDescriptor(F,'prototype').writable);"),
+        r#"true ["m","constructor"] true"#
+    );
+    assert_eq!(
+        one("function mk(){ return function(){}; }; var a = mk(), b = mk(); console.log(a.prototype !== b.prototype, a.prototype.constructor === a, b.prototype.constructor === b);"),
+        "true true true"
+    );
+}
+
+#[test]
+fn lazy_prototype_plain_closures_free_their_scope() {
+    let mut it = Interp::new();
+    assert!(it.run("function zzLazyPlain() {}").is_ok());
+    let def = it
+        .fn_cache
+        .values()
+        .find(|d| d.name.as_deref() == Some("zzLazyPlain"))
+        .cloned()
+        .expect("cached definition");
+    let scope = Scope::new(Some(it.global.clone()));
+    let weak = Rc::downgrade(&scope);
+    for _ in 0..10_000 {
+        drop(it.closure_from_def(def.clone(), &scope));
+    }
+    drop(scope);
+    assert!(
+        weak.upgrade().is_none(),
+        "10k plain functions that never touched `prototype` kept their scope alive"
+    );
+}
+
+#[test]
+fn lazy_prototype_name_length_call_and_bind_do_not_materialise_it() {
+    let mut it = Interp::new();
+    assert!(it.run("function zzLazyRead(a, b) {}").is_ok());
+    let def = it
+        .fn_cache
+        .values()
+        .find(|d| d.name.as_deref() == Some("zzLazyRead"))
+        .cloned()
+        .expect("cached definition");
+    let scope = Scope::new(Some(it.global.clone()));
+    let weak = Rc::downgrade(&scope);
+    for _ in 0..10_000 {
+        let f = it.closure_from_def(def.clone(), &scope);
+        assert!(it.get(&f, "name").is_ok());
+        assert!(it.get(&f, "length").is_ok());
+        assert!(it.get(&f, "call").is_ok());
+        assert!(it.get(&f, "bind").is_ok());
+    }
+    drop(scope);
+    assert!(
+        weak.upgrade().is_none(),
+        "reading name/length/call/bind materialised `prototype` and kept the scope alive"
+    );
+}

@@ -405,6 +405,7 @@ fn units_json(units: &[u16]) -> String {
 
 /// The current value of own data property `key`: an array slot, `length`, or a stored slot.
 fn own_value(o: &Obj, key: &str) -> Value {
+    o.force_key(key);
     if let Kind::Array(items) = &*o.kind.borrow() {
         if let Some(slot) = array_index(key) {
             return unhole(items.get(slot));
@@ -414,9 +415,10 @@ fn own_value(o: &Obj, key: &str) -> Value {
         }
     }
     match o.position(key) {
-        Some(i) => match &o.props.borrow()[i].slot {
+        Some(i) => match &o.raw_props.borrow()[i].slot {
             Slot::Data(v) => v.clone(),
             Slot::Accessor { .. } => Value::Undefined,
+            Slot::LazyProto { .. } => unreachable!("`force_key` runs first"),
         },
         None => Value::Undefined,
     }
@@ -424,7 +426,7 @@ fn own_value(o: &Obj, key: &str) -> Value {
 
 /// Whether `o` has an own accessor property (such an object stays a live handle).
 fn has_accessor(o: &Obj) -> bool {
-    o.props
+    o.raw_props
         .borrow()
         .iter()
         .any(|p| matches!(p.slot, Slot::Accessor { .. }))
