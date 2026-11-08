@@ -101,6 +101,7 @@ impl Interp {
             is_async: false,
             is_gen: false,
             bind_self: false,
+            no_prototype: false,
             uses_arguments: false,
             uses_new_target: ctor_uses_new_target || parent.is_some(),
             uses_this: true,
@@ -110,6 +111,7 @@ impl Interp {
             param_mask,
             strict: true,
             class: Some(info),
+            cstate: Default::default(),
         });
         let ctor_obj = new_obj(
             Some(self.function_proto.clone()),

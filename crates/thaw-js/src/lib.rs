@@ -31,6 +31,7 @@ mod classes;
 mod jsstr;
 pub use jsstr::JsStr;
 mod collections;
+mod compile;
 mod date;
 mod dns;
 mod esm;
@@ -241,6 +242,8 @@ struct FuncDef {
     is_gen: bool,
     /// Named function expressions see their own name; methods do not.
     bind_self: bool,
+    /// No `prototype` object: methods, accessors and async (non-generator) functions. Generators keep one.
+    no_prototype: bool,
     uses_arguments: bool,
     uses_new_target: bool,
     /// The body (or an arrow inside it) reads `this`; other calls skip the binding.
@@ -255,6 +258,8 @@ struct FuncDef {
     param_mask: u64,
     strict: bool,
     class: Option<ClassInfo>,
+    /// Lazy compilation state (`compile/mod.rs`); `Cold` until the function has been called enough.
+    cstate: std::cell::RefCell<compile::CState>,
 }
 
 enum Body {
@@ -817,6 +822,11 @@ pub struct Interp {
     hint_stats: hints::HintStats,
     /// Oracle mode: every hinted read also runs the by-name lookup and asserts they agree.
     check_hints: bool,
+    /// `THAW_JS_COMPILE` mode, `THAW_JS_COMPILE_AFTER` call threshold, `THAW_JS_COMPILE_STATS` report flag.
+    compile_mode: compile::CompileMode,
+    compile_after: u32,
+    compile_stats: bool,
+    cstats: compile::Stats,
     /// Process-unique id of this realm: tags the zlib jobs it starts so only it collects their results.
     pub(crate) realm_id: usize,
     depth: usize,
@@ -938,6 +948,16 @@ impl Interp {
             ident_hints: vec![hints::HintSlot::default()],
             hint_stats: hints::HintStats::from_env(),
             check_hints: cfg!(test) || std::env::var_os("THAW_JS_CHECK_HINTS").is_some(),
+            compile_mode: compile::CompileMode::parse(
+                std::env::var("THAW_JS_COMPILE").ok().as_deref(),
+            ),
+            compile_after: compile::parse_after(
+                std::env::var("THAW_JS_COMPILE_AFTER").ok().as_deref(),
+            ),
+            compile_stats: compile::stats_enabled(
+                std::env::var("THAW_JS_COMPILE_STATS").ok().as_deref(),
+            ),
+            cstats: Default::default(),
             realm_id: next_realm_id(),
             depth: 0,
             max_depth: MAX_DEPTH,
@@ -1859,6 +1879,11 @@ impl Interp {
         args: &[Value],
     ) -> R<Value> {
         let new_target = self.rt.pending_nt.take();
+        if self.compile_mode != compile::CompileMode::Off {
+            if let Some(r) = self.try_compiled(def) {
+                return r;
+            }
+        }
         let frame = Scope::new(Some(scope.clone()));
         // the parameters are the bulk of a frame's bindings: size the list once and seed the filter
         frame.mask.set(def.param_mask);
@@ -2002,6 +2027,7 @@ impl Interp {
         is_async: bool,
         is_gen: bool,
         bind_self: bool,
+        method: bool,
         lo: u32,
         hi: u32,
         scope: &Rc<Scope>,
@@ -2024,7 +2050,7 @@ impl Interp {
                 };
                 let param_names = simple_param_names(&params);
                 let param_mask = param_mask(&param_names);
-                Rc::new(FuncDef { name, params, body, arrow, is_async, is_gen, bind_self, uses_arguments: finder.found && !arrow, uses_new_target: finder.new_target && !arrow, uses_this: finder.uses_this, src: (self_run_id, lo, hi), hoisted, param_names, param_mask, strict, class: None })
+                Rc::new(FuncDef { name, params, body, arrow, is_async, is_gen, bind_self, no_prototype: !is_gen && (method || is_async), uses_arguments: finder.found && !arrow, uses_new_target: finder.new_target && !arrow, uses_this: finder.uses_this, src: (self_run_id, lo, hi), hoisted, param_names, param_mask, strict, class: None, cstate: Default::default() })
             })
             .clone();
         self.closure_from_def(def, scope)
@@ -2032,7 +2058,8 @@ impl Interp {
 
     /// A fresh function object for an already analysed definition.
     fn closure_from_def(&mut self, def: Rc<FuncDef>, scope: &Rc<Scope>) -> Value {
-        let (arrow, is_async, is_gen) = (def.arrow, def.is_async, def.is_gen);
+        let (arrow, is_async, is_gen, no_prototype) =
+            (def.arrow, def.is_async, def.is_gen, def.no_prototype);
         let f = new_obj(
             Some(self.function_proto.clone()),
             Kind::Closure {
@@ -2054,7 +2081,7 @@ impl Interp {
                 false,
                 false,
             );
-        } else if !arrow {
+        } else if !arrow && !no_prototype {
             let proto = new_obj(Some(self.object_proto.clone()), Kind::Plain);
             put_hidden(&proto, "constructor", Value::Object(f.clone()));
             put_with(&f, "prototype", Value::Object(proto), true, false, false);
@@ -2473,7 +2500,7 @@ impl Interp {
         f: &a::Function,
         scope: &Rc<Scope>,
     ) -> R<Value> {
-        self.function_value_ex(name, f, scope, true)
+        self.function_value_ex(name, f, scope, false)
     }
 
     /// A method / accessor: named, but its name is not a binding inside its own body.
@@ -2483,7 +2510,7 @@ impl Interp {
         f: &a::Function,
         scope: &Rc<Scope>,
     ) -> R<Value> {
-        self.function_value_ex(name, f, scope, false)
+        self.function_value_ex(name, f, scope, true)
     }
 
     fn function_value_ex(
@@ -2491,7 +2518,7 @@ impl Interp {
         name: Option<Rc<str>>,
         f: &a::Function,
         scope: &Rc<Scope>,
-        bind_self: bool,
+        method: bool,
     ) -> R<Value> {
         if let Some(def) = self.fn_cache.get(&(self.run_id, f.span.lo.0)).cloned() {
             return Ok(self.closure_from_def(def, scope));
@@ -2504,7 +2531,8 @@ impl Interp {
             false,
             f.is_async,
             f.is_generator,
-            bind_self,
+            !method,
+            method,
             f.span.lo.0,
             f.span.hi.0,
             scope,
@@ -3081,6 +3109,7 @@ impl Interp {
                     body,
                     true,
                     f.is_async,
+                    false,
                     false,
                     false,
                     f.span.lo.0,

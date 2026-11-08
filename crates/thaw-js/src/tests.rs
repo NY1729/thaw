@@ -6542,3 +6542,77 @@ fn ident_hint_mask_collision_resolves_both_names() {
     eprintln!("{}", it.hint_stats.summary());
     it.hint_stats.on = false;
 }
+
+// ----- no `prototype` object for methods, accessors and async functions (R5a) -----
+
+#[test]
+fn no_prototype_for_methods_accessors_and_async_functions() {
+    assert_eq!(
+        one(
+            "var o = { m() {}, get g() { return 1; }, set s(v) {}, async am() {} };\n\
+             class C { k() {} static s() {} get x() { return 1; } }\n\
+             async function af() {}\n\
+             var ae = async function () {};\n\
+             var ar = async () => 1;\n\
+             console.log(o.m.hasOwnProperty('prototype'), 'prototype' in o.m, \
+             Object.getOwnPropertyDescriptor(o, 'g').get.hasOwnProperty('prototype'), \
+             Object.getOwnPropertyDescriptor(o, 's').set.hasOwnProperty('prototype'), \
+             o.am.hasOwnProperty('prototype'), C.prototype.k.hasOwnProperty('prototype'), \
+             C.s.hasOwnProperty('prototype'), af.hasOwnProperty('prototype'), \
+             ae.hasOwnProperty('prototype'), ar.hasOwnProperty('prototype'), \
+             Object.getOwnPropertyNames(af).indexOf('prototype'))"
+        ),
+        "false false false false false false false false false false -1"
+    );
+}
+
+#[test]
+fn no_prototype_keeps_prototype_for_plain_functions_classes_and_generators() {
+    assert_eq!(
+        one("function f() {}\n\
+             class C {}\n\
+             function* g() {}\n\
+             var o = { *gm() {} };\n\
+             console.log(f.hasOwnProperty('prototype'), f.prototype.constructor === f, \
+             C.prototype.constructor === C, g.hasOwnProperty('prototype'), \
+             o.gm.hasOwnProperty('prototype'), typeof g.prototype)"),
+        "true true true true true object"
+    );
+}
+
+#[test]
+fn no_prototype_new_works_on_plain_functions_and_classes() {
+    assert_eq!(
+        one("function P(a) { this.a = a; }\n\
+             class K { constructor(v) { this.v = v; } }\n\
+             var p = new P(3), k = new K(4);\n\
+             console.log(p.a, p instanceof P, k.v, k instanceof K, P.prototype.isPrototypeOf(p))"),
+        "3 true 4 true true"
+    );
+}
+
+#[test]
+fn no_prototype_async_and_method_closures_free_their_scope() {
+    let mut it = Interp::new();
+    assert!(it
+        .run("async function zzNoProtoAsync() {} var zzo = { async zzNoProtoMethod() {} };")
+        .is_ok());
+    let find = |it: &Interp, n: &str| {
+        it.fn_cache
+            .values()
+            .find(|d| d.name.as_deref() == Some(n))
+            .cloned()
+            .expect("cached definition")
+    };
+    let defs = [find(&it, "zzNoProtoAsync"), find(&it, "zzNoProtoMethod")];
+    let scope = Scope::new(Some(it.global.clone()));
+    let weak = Rc::downgrade(&scope);
+    for i in 0..10_000 {
+        drop(it.closure_from_def(defs[i % 2].clone(), &scope));
+    }
+    drop(scope);
+    assert!(
+        weak.upgrade().is_none(),
+        "10k async functions / methods kept their scope alive"
+    );
+}
