@@ -6,6 +6,7 @@
 //! ponytail: one OS thread per started generator that is not run to completion (parked until exit).
 
 use crate::eventloop::{adopt_native_ready, park_native_ready, Co, Resume, SendBox, Yield};
+use crate::host::{adopt_host_tls, park_host_tls};
 use crate::*;
 use std::collections::VecDeque;
 
@@ -175,12 +176,14 @@ impl Interp {
                 Req::Throw => Resume::Throw(v),
                 Req::Return => Resume::Return(v),
             };
+            park_host_tls(self as *mut Interp as usize);
             let _ = co.to_co.send(SendBox(resume));
             (co, snap)
         };
         g.status.set(GStatus::Running);
         let y = co.from_co.recv();
         adopt_native_ready();
+        adopt_host_tls(self as *mut Interp as usize);
         self.restore(snap);
         self.rt.cur_co.pop();
         match y.map(SendBox::into_inner) {
@@ -316,8 +319,10 @@ impl Interp {
         };
         let snap = self.snapshot();
         park_native_ready();
+        park_host_tls(self as *mut Interp as usize);
         let _ = ctx.to_host.send(SendBox(Yield::Yielded(v)));
         let msg = ctx.from_host.recv();
+        adopt_host_tls(self as *mut Interp as usize);
         self.restore(snap);
         match msg.map(SendBox::into_inner) {
             Ok(r) => Ok(r),
