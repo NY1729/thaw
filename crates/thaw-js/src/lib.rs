@@ -497,6 +497,35 @@ fn number_binop(op: a::BinaryOp, x: f64, y: f64) -> Option<Value> {
         B::LtEq => Value::Bool(x <= y),
         B::Gt => Value::Bool(x > y),
         B::GtEq => Value::Bool(x >= y),
+        B::BitAnd => Value::Number((to_int32(x) & to_int32(y)) as f64),
+        B::BitOr => Value::Number((to_int32(x) | to_int32(y)) as f64),
+        B::BitXor => Value::Number((to_int32(x) ^ to_int32(y)) as f64),
+        B::LShift => Value::Number(to_int32(x).wrapping_shl(to_int32(y) as u32 & 31) as f64),
+        B::RShift => Value::Number((to_int32(x) >> (to_int32(y) as u32 & 31)) as f64),
+        B::ZeroFillRShift => {
+            Value::Number(((to_int32(x) as u32) >> (to_int32(y) as u32 & 31)) as f64)
+        }
+        _ => return None,
+    })
+}
+
+/// The binary operator behind a compound assignment (`None` for `=`, `&&=`, `||=`, `??=`).
+fn compound_binop(op: a::AssignOp) -> Option<a::BinaryOp> {
+    use a::AssignOp as A;
+    use a::BinaryOp as B;
+    Some(match op {
+        A::AddAssign => B::Add,
+        A::SubAssign => B::Sub,
+        A::MulAssign => B::Mul,
+        A::DivAssign => B::Div,
+        A::ModAssign => B::Mod,
+        A::ExpAssign => B::Exp,
+        A::LShiftAssign => B::LShift,
+        A::RShiftAssign => B::RShift,
+        A::ZeroFillRShiftAssign => B::ZeroFillRShift,
+        A::BitOrAssign => B::BitOr,
+        A::BitXorAssign => B::BitXor,
+        A::BitAndAssign => B::BitAnd,
         _ => return None,
     })
 }
@@ -730,10 +759,16 @@ pub(crate) fn string_to_number(s: &str) -> f64 {
 }
 
 pub(crate) fn to_int32(n: f64) -> i32 {
+    let t = n.trunc();
+    // |t| < 2^63: `as i64` is exact and `as i32` keeps the low 32 bits, which is ToInt32.
+    // NaN fails this comparison too, so it reaches the non-finite check below.
+    if t.abs() < 9.2e18 {
+        return t as i64 as i32;
+    }
     if !n.is_finite() {
         return 0;
     }
-    (n.trunc().rem_euclid(4294967296.0) as u64 as u32) as i32
+    (t.rem_euclid(4294967296.0) as u64 as u32) as i32
 }
 
 pub(crate) fn strict_equals(x: &Value, y: &Value) -> bool {
@@ -3443,20 +3478,15 @@ impl Interp {
                         return Ok(v);
                     }
                 }
-                let bop = match op {
-                    A::AddAssign => a::BinaryOp::Add,
-                    A::SubAssign => a::BinaryOp::Sub,
-                    A::MulAssign => a::BinaryOp::Mul,
-                    A::DivAssign => a::BinaryOp::Div,
-                    A::ModAssign => a::BinaryOp::Mod,
-                    A::ExpAssign => a::BinaryOp::Exp,
-                    A::LShiftAssign => a::BinaryOp::LShift,
-                    A::RShiftAssign => a::BinaryOp::RShift,
-                    A::ZeroFillRShiftAssign => a::BinaryOp::ZeroFillRShift,
-                    A::BitOrAssign => a::BinaryOp::BitOr,
-                    A::BitXorAssign => a::BinaryOp::BitXor,
-                    A::BitAndAssign => a::BinaryOp::BitAnd,
-                    _ => return unsupported("assignment operator"),
+                // both Numbers: no coercion, no user code (same operators as `number_binop`)
+                if let (Value::Number(x), Value::Number(y)) = (&cur, &rhs) {
+                    if let Some(v) = compound_binop(op).and_then(|b| number_binop(b, *x, *y)) {
+                        self.write_loc(&loc, v.clone(), scope)?;
+                        return Ok(v);
+                    }
+                }
+                let Some(bop) = compound_binop(op) else {
+                    return unsupported("assignment operator");
                 };
                 self.binary(bop, &cur, &rhs)?
             }

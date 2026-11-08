@@ -6095,3 +6095,80 @@ fn non_iterable_object_in_destructuring_for_of_and_spread_throws_type_error() {
         "TypeError:true:value is not iterable TypeError:true:value is not iterable TypeError:true:Spread syntax requires ...iterable[Symbol.iterator] to be a function TypeError:true:value is not iterable"
     );
 }
+
+#[test]
+fn int32_bitwise_table_matches_js() {
+    // expected values generated with node 22
+    assert_eq!(
+        one("console.log(-1.5|0, 4294967295.5|0, 2147483648|0, 4294967296|0, 4294967297|0, -2147483649|0, 1e20|0, 1e300|0, NaN|0, Infinity|0, -Infinity|0, -0|0, 3000000000>>>0, -1>>>0, 1<<31, 1<<32, 1<<-1, 5>>>32, -8>>1, 0xd1310ba6^0x243f6a88, ~5, ~~3.7, ~NaN)"),
+        "-1 -1 -2147483648 0 1 2147483647 1661992960 0 0 0 0 0 3000000000 4294967295 -2147483648 1 -2147483648 5 -4 -183606994 -6 3 -1"
+    );
+    assert_eq!(
+        one("console.log(-0.9|0, 2.5^0, -2.5>>>0, 4294967295>>>0, 9007199254740993|0, 1e19|0, -1e19|0, 1e-300|0, 2**53|0, (2**53+2)>>>0, 0.5<<1, 1.99>>>0)"),
+        "0 2 4294967294 4294967295 0 -1981284352 1981284352 0 0 2 0 1"
+    );
+    assert_eq!(
+        one("console.log(7 >> 33, -1 << 31, 1 >>> 0, 0xffffffff|0, -1 >>> 31, 255 ^ -1, 1.5 & 3.9, -7 >> 1, -7 >>> 1)"),
+        "3 -2147483648 1 -1 1 -256 1 -4 2147483644"
+    );
+}
+
+#[test]
+fn bitwise_coercion_and_slow_path_still_apply() {
+    assert_eq!(
+        one("console.log(({valueOf(){return 6}})&3, '7'|0, true|2, null^5, (1n & 1n) === 1n, (6n << 2n) === 24n)"),
+        "2 7 3 5 true true"
+    );
+    assert_eq!(
+        one("try { 2n | 1 } catch (e) { console.log(e instanceof TypeError) }"),
+        "true"
+    );
+}
+
+#[test]
+fn compound_number_ops_match_js() {
+    assert_eq!(
+        one("let n=1; n += 2; n ^= 0xff; n <<= 3; n >>>= 1; console.log(n)"),
+        "1008"
+    );
+    assert_eq!(
+        one("let x=1; x += (x = 10, 5); let y=1; y ^= (y=10, 5); console.log(x, y)"),
+        "6 4"
+    );
+    assert_eq!(
+        one("var a=[1,2,3]; var i=1; a[i] ^= 7; a[i] <<= 2; console.log(a[1])"),
+        "20"
+    );
+    assert_eq!(
+        one("var t=new Int32Array(2); t[0]=2147483647; t[0] += 1; t[1] |= 5; t[1] >>= 1; console.log(t[0], t[1])"),
+        "-2147483648 2"
+    );
+    assert_eq!(
+        one("let g=5; g %= 3; g -= 0.5; let h = 2**31; h |= 0; let k = 3; k >>>= -1; let e=2; e **= 3; console.log(g, h, k, e)"),
+        "1.5 -2147483648 0 8"
+    );
+}
+
+#[test]
+fn compound_non_number_operands_take_generic_path() {
+    assert_eq!(
+        one("var s='a'; s += 1; let o={valueOf(){return 2}}; let o2=1; o2 += o; let b=1n; b += 2n; console.log(s, o2, b === 3n)"),
+        "a1 3 true"
+    );
+    assert_eq!(
+        one("let z = '5'; z ^= 1; let w = '6'; w *= 2; let q = true; q |= 2; console.log(z, w, q)"),
+        "4 12 3"
+    );
+    assert_eq!(
+        one("try { let u=3; u <<= 1n } catch (e) { console.log(e instanceof TypeError) }"),
+        "true"
+    );
+}
+
+#[test]
+fn compound_bitwise_on_const_still_throws() {
+    assert_eq!(
+        one("const c=1; try { c |= 1 } catch (e) { console.log(e instanceof TypeError, e.message) }"),
+        "true Assignment to constant variable."
+    );
+}
