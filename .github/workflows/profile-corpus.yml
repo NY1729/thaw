@@ -22,6 +22,10 @@ on:
         description: add -C debuginfo=line-tables-only (slower build; enables srcline/inline attribution)
         type: boolean
         default: false
+      trace_wire:
+        description: run the stats pass with THAW_JS_TRACE=1 THAW_JS_TRACE_WIRE=1 (large stderr, kept in stats.txt)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -47,6 +51,7 @@ jobs:
       ITERATIONS: ${{ inputs.iterations }}
       WORKLOAD_N: ${{ inputs.workload_n }}
       PROFILE_TOOL: ${{ inputs.tool }}
+      TRACE_WIRE: ${{ inputs.trace_wire }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -146,8 +151,11 @@ jobs:
           nm "$RUNNER_TEMP/prog" 2>/dev/null | grep -c ' [tT] ' | sed 's/^/text symbols: /' | tee -a "$RUNNER_TEMP/out/inspect.txt" || true
           nm -C "$RUNNER_TEMP/prog" | grep -E 'Vars::position|name_bit|assign_var' | head | tee -a "$RUNNER_TEMP/out/inspect.txt" || true
           # One plain run with the interpreter's own counters (identifier-hint hit/miss and compiler analyzer coverage).
-          cd "$RUNNER_TEMP" && THAW_JS_HINT_STATS=1 THAW_JS_COMPILE=on THAW_JS_COMPILE_STATS=1 ./prog > out/stdout.txt 2> out/stats.txt && head -3 out/stdout.txt
+          trace_env=()
+          if [ "$TRACE_WIRE" = "true" ]; then trace_env=(THAW_JS_TRACE=1 THAW_JS_TRACE_WIRE=1); fi
+          cd "$RUNNER_TEMP" && env THAW_JS_HINT_STATS=1 THAW_JS_COMPILE=on THAW_JS_COMPILE_STATS=1 "${trace_env[@]}" ./prog > out/stdout.txt 2> out/stats.txt && head -3 out/stdout.txt
           echo "---- interpreter stats (stderr of the run above) ----"; tail -60 out/stats.txt || true
+          if [ "$TRACE_WIRE" = "true" ]; then grep -n "exc packet\|thaw-js callback result" out/stats.txt | head -40 > out/trace-exc.txt || true; echo "---- exception packet trace ----"; cat out/trace-exc.txt; fi
       - name: Profile with perf
         if: inputs.tool == 'perf'
         working-directory: ${{ runner.temp }}
@@ -222,4 +230,5 @@ jobs:
             ${{ runner.temp }}/out/*.log
             ${{ runner.temp }}/out/inspect.txt
             ${{ runner.temp }}/out/stats.txt
+            ${{ runner.temp }}/out/trace-exc.txt
           if-no-files-found: ignore
