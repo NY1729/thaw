@@ -3,6 +3,9 @@
 Ten small deterministic scripts (fib, loop sum, object/array/string/JSON, class and closure calls,
 regexp, Map/Set). Each prints one checksum line so a run can be verified.
 
+The `*_fn.js` variants (plus `blowfish_fn.js`) put the same kernels inside a function and call it twice,
+so the second call is the one a function-level compiler can take; the top-level originals stay as they are.
+
 ```
 benchmarks/jsengine/run.sh [-n RUNS] [-o OUT.tsv]
 ```

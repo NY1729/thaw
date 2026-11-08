@@ -31,6 +31,7 @@ mod classes;
 mod jsstr;
 pub use jsstr::JsStr;
 mod collections;
+mod compile;
 mod date;
 mod dns;
 mod esm;
@@ -255,6 +256,8 @@ struct FuncDef {
     param_mask: u64,
     strict: bool,
     class: Option<ClassInfo>,
+    /// Lazy compilation state (`compile/mod.rs`); `Cold` until the function has been called enough.
+    cstate: std::cell::RefCell<compile::CState>,
 }
 
 enum Body {
@@ -814,6 +817,11 @@ pub struct Interp {
     ident_hints: Vec<Cell<u32>>,
     /// Oracle mode: every hinted read also runs the by-name lookup and asserts they agree.
     check_hints: bool,
+    /// `THAW_JS_COMPILE` mode, `THAW_JS_COMPILE_AFTER` call threshold, `THAW_JS_COMPILE_STATS` report flag.
+    compile_mode: compile::CompileMode,
+    compile_after: u32,
+    compile_stats: bool,
+    cstats: compile::Stats,
     /// Process-unique id of this realm: tags the zlib jobs it starts so only it collects their results.
     pub(crate) realm_id: usize,
     depth: usize,
@@ -934,6 +942,16 @@ impl Interp {
             run_id: 0,
             ident_hints: vec![Cell::new(0)],
             check_hints: cfg!(test) || std::env::var_os("THAW_JS_CHECK_HINTS").is_some(),
+            compile_mode: compile::CompileMode::parse(
+                std::env::var("THAW_JS_COMPILE").ok().as_deref(),
+            ),
+            compile_after: compile::parse_after(
+                std::env::var("THAW_JS_COMPILE_AFTER").ok().as_deref(),
+            ),
+            compile_stats: compile::stats_enabled(
+                std::env::var("THAW_JS_COMPILE_STATS").ok().as_deref(),
+            ),
+            cstats: Default::default(),
             realm_id: next_realm_id(),
             depth: 0,
             max_depth: MAX_DEPTH,
@@ -1855,6 +1873,11 @@ impl Interp {
         args: &[Value],
     ) -> R<Value> {
         let new_target = self.rt.pending_nt.take();
+        if self.compile_mode != compile::CompileMode::Off {
+            if let Some(r) = self.try_compiled(def) {
+                return r;
+            }
+        }
         let frame = Scope::new(Some(scope.clone()));
         // the parameters are the bulk of a frame's bindings: size the list once and seed the filter
         frame.mask.set(def.param_mask);
@@ -2020,7 +2043,7 @@ impl Interp {
                 };
                 let param_names = simple_param_names(&params);
                 let param_mask = param_mask(&param_names);
-                Rc::new(FuncDef { name, params, body, arrow, is_async, is_gen, bind_self, uses_arguments: finder.found && !arrow, uses_new_target: finder.new_target && !arrow, uses_this: finder.uses_this, src: (self_run_id, lo, hi), hoisted, param_names, param_mask, strict, class: None })
+                Rc::new(FuncDef { name, params, body, arrow, is_async, is_gen, bind_self, uses_arguments: finder.found && !arrow, uses_new_target: finder.new_target && !arrow, uses_this: finder.uses_this, src: (self_run_id, lo, hi), hoisted, param_names, param_mask, strict, class: None, cstate: Default::default() })
             })
             .clone();
         self.closure_from_def(def, scope)
