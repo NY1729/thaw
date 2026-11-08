@@ -1424,6 +1424,8 @@ impl<'ctx> HirCompiler<'ctx> {
         handles: &HirExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.js_mark_handles_used();
+        // Arguments may carry live handles; encoding/decoding them needs the host operations.
+        self.compile_register_js_callback_host_operations()?;
         let json_args = self.compile_expr(json_args)?;
         let handles = self.compile_expr(handles)?.into_pointer_value();
         let handles = self.compile_array_data(handles)?;
@@ -1506,6 +1508,8 @@ impl<'ctx> HirCompiler<'ctx> {
         handles: &HirExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.js_mark_handles_used();
+        // Arguments may carry live handles; encoding/decoding them needs the host operations.
+        self.compile_register_js_callback_host_operations()?;
         let value = self.compile_expr(value)?;
         let space = self.compile_expr(space)?;
         let handles = self.compile_expr(handles)?.into_pointer_value();
@@ -1601,6 +1605,8 @@ impl<'ctx> HirCompiler<'ctx> {
         consume_handles: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.js_mark_handles_used();
+        // Arguments may carry live handles; encoding/decoding them needs the host operations.
+        self.compile_register_js_callback_host_operations()?;
         let callable = callable.into_int_value();
         let json_args = self.compile_expr(json_args)?;
         let handles = self.compile_expr(handles)?.into_pointer_value();
@@ -1686,6 +1692,8 @@ impl<'ctx> HirCompiler<'ctx> {
         json_args: &HirExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.js_mark_handles_used();
+        // Arguments may carry live handles; encoding/decoding them needs the host operations.
+        self.compile_register_js_callback_host_operations()?;
         let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
         self.compiling_quickjs_dynamic_arguments = true;
         let json_args = self.compile_expr(json_args);
