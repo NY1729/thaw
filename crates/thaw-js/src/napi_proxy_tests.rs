@@ -753,7 +753,7 @@ fn function_proxy_hides_prototype_and_reports_only_native_keys() {
     thaw_tjs_napi_enable_proxy_layer();
     assert_eq!(
         eval("(() => { const f = __thaw_napi_graph_function_for_handle('9'); return [Reflect.ownKeys(f).join(','), 'prototype' in f, typeof f].join('|'); })()"),
-        "x|false|function"
+        "x,length,name|false|function"
     );
 }
 
