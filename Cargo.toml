@@ -9,3 +9,8 @@ license = "MIT OR Apache-2.0"
 [patch.crates-io]
 regress = { path = "vendor/regress" }
 rquickjs-sys = { path = "vendor/rquickjs-sys" }
+
+[profile.release]
+# ponytail: thin LTO + one codegen unit for faster generated runtimes; costs release build time.
+lto = "thin"
+codegen-units = 1
