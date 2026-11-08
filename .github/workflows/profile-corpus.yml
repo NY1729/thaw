@@ -1,0 +1,222 @@
+name: profile-corpus
+
+# Manual, non-gating: where does thaw-js interpreter time go on a corpus program (R7 / tj138)?
+on:
+  workflow_dispatch:
+    inputs:
+      program:
+        description: corpus program name (tools/quickjs-removal/corpus/pk/<name>.ts)
+        default: bcryptjs
+      iterations:
+        description: number of back-to-back runs of the binary inside one profile (perf only)
+        default: "1"
+      tool:
+        description: perf or callgrind
+        type: choice
+        options: [perf, callgrind]
+        default: perf
+      workload_n:
+        description: "optional: rewrite 'const N = <num>;' in the program (bcryptjs: 2 for callgrind)"
+        default: ""
+      debuginfo:
+        description: add -C debuginfo=line-tables-only (slower build; enables srcline/inline attribution)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: profile-corpus-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      THAW_KEEP_SYMBOLS: "1"
+      RUST_MIN_STACK: "16777216"
+      # Frame pointers make `perf -g` call chains usable; applies to every cargo invocation in the job,
+      # including the thaw-js staticlib that `thaw build` spawns.
+      RUSTFLAGS: "-C force-frame-pointers=yes"
+      # Inputs go through env, never straight into `run:` text.
+      PROGRAM: ${{ inputs.program }}
+      ITERATIONS: ${{ inputs.iterations }}
+      WORKLOAD_N: ${{ inputs.workload_n }}
+      PROFILE_TOOL: ${{ inputs.tool }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev time valgrind; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Add debuginfo flag
+        if: inputs.debuginfo
+        run: echo "RUSTFLAGS=$RUSTFLAGS -C debuginfo=line-tables-only" >> "$GITHUB_ENV"
+      - name: Install perf
+        if: inputs.tool == 'perf'
+        run: |
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-generic linux-tools-common
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+          perf --version
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-${{ runner.arch }}-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Cache cargo registry and release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # separate key family: RUSTFLAGS differ from the bench job, so its cache would be useless here
+          key: profile-corpus-${{ runner.os }}-${{ inputs.debuginfo }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            profile-corpus-${{ runner.os }}-${{ inputs.debuginfo }}-
+      - name: Build thaw CLI
+        run: cargo build --release -p thaw-cli
+      - name: Build the corpus program (thaw-js engine, symbols kept)
+        run: |
+          set -euo pipefail
+          [[ "$PROGRAM" =~ ^[a-z0-9-]+$ ]] || { echo "bad program name: $PROGRAM" >&2; exit 1; }
+          [[ "$ITERATIONS" =~ ^[1-9][0-9]*$ ]] || { echo "bad iterations: $ITERATIONS" >&2; exit 1; }
+          [[ -z "$WORKLOAD_N" || "$WORKLOAD_N" =~ ^[1-9][0-9]*$ ]] || { echo "bad workload_n: $WORKLOAD_N" >&2; exit 1; }
+          spec=$(awk -v p="$PROGRAM" '$1 == p { $1 = ""; print substr($0, 2) }' tools/quickjs-removal/corpus/versions.txt)
+          [ -n "$spec" ] || { echo "no versions.txt entry for $PROGRAM" >&2; exit 1; }
+          src="$GITHUB_WORKSPACE/tools/quickjs-removal/corpus/pk/$PROGRAM.ts"
+          [ -f "$src" ] || { echo "no corpus program $src" >&2; exit 1; }
+          proj="$RUNNER_TEMP/proj"; mkdir -p "$proj" "$RUNNER_TEMP/out"; cd "$proj"
+          echo '{"name":"t","version":"1.0.0"}' > package.json
+          # shellcheck disable=SC2086
+          timeout 300 "$GITHUB_WORKSPACE/target/release/thaw" add $spec --prefix . 2>&1 | tee "$RUNNER_TEMP/out/add.log"
+          cp "$src" "$PROGRAM.ts"
+          if [ -n "$WORKLOAD_N" ]; then
+            sed -i -E "s/const N = [0-9]+;/const N = $WORKLOAD_N;/" "$PROGRAM.ts"
+            grep -n "const N =" "$PROGRAM.ts" || echo "warning: no 'const N =' in $PROGRAM.ts; workload_n ignored" >&2
+          fi
+          env -u THAW_JS_RUNTIME THAW_JS_ENGINE=thaw-js \
+            timeout 3000 "$GITHUB_WORKSPACE/target/release/thaw" build "$PROGRAM.ts" -o "$RUNNER_TEMP/prog" 2>&1 | tee "$RUNNER_TEMP/out/build.log"
+          # sanity: engine really is thaw-js, and symbols are present
+          "$GITHUB_WORKSPACE/target/release/thaw" inspect "$RUNNER_TEMP/prog" > "$RUNNER_TEMP/out/inspect.txt" 2>&1 || true
+          grep -i '^quickjs:' "$RUNNER_TEMP/out/inspect.txt" || true
+          nm "$RUNNER_TEMP/prog" 2>/dev/null | grep -c ' [tT] ' | sed 's/^/text symbols: /' | tee -a "$RUNNER_TEMP/out/inspect.txt" || true
+          nm -C "$RUNNER_TEMP/prog" | grep -E 'Vars::position|name_bit|assign_var' | head | tee -a "$RUNNER_TEMP/out/inspect.txt" || true
+          cd "$RUNNER_TEMP" && ./prog > out/stdout.txt && head -3 out/stdout.txt
+      - name: Profile with perf
+        if: inputs.tool == 'perf'
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          # -e cpu-clock: software clock, works without a virtualized PMU. 499 Hz keeps perf.data modest.
+          perf record -e cpu-clock -F 499 -g --call-graph fp -o perf.data -- \
+            bash -c 'for i in $(seq "$ITERATIONS"); do ./prog > /dev/null; done'
+          perf report -i perf.data --no-children --sort symbol -g none --stdio 2>/dev/null \
+            | awk '/^ *[0-9]+\.[0-9]+%/ { p = $1; sub(/%/, "", p); s = $0; sub(/^ *[0-9.]+% +\[[^]]\] +/, "", s); print p "\t" s }' \
+            > out/flat.tsv
+          gzip -c perf.data > out/perf.data.gz
+      - name: Profile with callgrind
+        if: inputs.tool == 'callgrind'
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          # ~50-100x slowdown: set workload_n=2 for bcryptjs. ITERATIONS applies to perf only.
+          valgrind --tool=callgrind --callgrind-out-file=callgrind.out ./prog > /dev/null 2> out/callgrind.log
+          # --threshold=100: default 99 would drop the tail of the function list.
+          callgrind_annotate --inclusive=no --threshold=100 callgrind.out > out/callgrind.txt
+          # lines look like "1,234,567 (12.34%)  file:function [binary]"
+          awk '/^ *[0-9,]+ +\( *[0-9.]+%\)/ { p = $2; gsub(/[()%]/, "", p); s = $0; sub(/^ *[0-9,]+ +\( *[0-9.]+%\) +/, "", s); print p "\t" s }' \
+            out/callgrind.txt > out/flat.tsv
+          gzip -c callgrind.out > out/callgrind.out.gz
+      - name: Top symbols and bucket summary
+        working-directory: ${{ runner.temp }}/out
+        run: |
+          set -euo pipefail
+          [ -s flat.tsv ] || { echo "empty profile (flat.tsv)" >&2; exit 1; }
+          sort -t$'\t' -k1,1 -gr flat.tsv | head -60 | awk -F'\t' '{ printf "%6.2f%%  %s\n", $1, $2 }' > top60.txt
+          # Bucket order matters: first match wins. Strict lookup = the R7 gate set.
+          # Scope/frame setup is deliberately bucket 2, not lookup (reported as an upper bound below).
+          awk -F'\t' '
+            function bucket(s,   l) {
+              l = tolower(s)
+              if (l ~ /position|lookup|assign_var|name_bit/) return "1 variable lookup (gate set)"
+              if (l ~ /scope|vars|declare|call_closure|frame/) return "2 scope/frame setup"
+              if (l ~ /malloc|free|alloc|realloc|memcpy|memmove|rc<|rc::|cfree/) return "3 allocation"
+              if (l ~ /clone|drop/) return "4 value clone/drop"
+              if (l ~ /number|f64|binary|to_int|to_u?int32|arith|update|pure_/) return "5 number ops"
+              if (l ~ /typed|array|index|element|get_member|get_prop/) return "6 typed array/array access"
+              if (l ~ /eval|exec|visit|stmt|expr|run|call/) return "7 AST walk/eval"
+              return "8 other"
+            }
+            { b = bucket($2); sum[b] += $1 }
+            END {
+              for (b in sum) printf "%s\t%.2f\n", b, sum[b]
+            }' flat.tsv | sort > buckets.tsv
+          {
+            echo "## $PROGRAM on thaw-js: self time by bucket ($PROFILE_TOOL, iterations=$ITERATIONS)"
+            echo; echo "| bucket | self % |"; echo "|---|---|"
+            awk -F'\t' '{ printf "| %s | %s |\n", $1, $2 }' buckets.tsv
+            echo
+            lk=$(awk -F'\t' '$1 ~ /^1 / { print $2 }' buckets.tsv); lk=${lk:-0}
+            sc=$(awk -F'\t' '$1 ~ /^2 / { print $2 }' buckets.tsv); sc=${sc:-0}
+            echo "- R7 gate: variable-lookup bucket = ${lk}% (< 12% => stop after PR1); with scope/frame setup as an upper bound = $(awk -v a="$lk" -v b="$sc" 'BEGIN { printf "%.2f", a + b }')%"
+            echo; echo "Top 60 symbols (self):"; echo '```'; cat top60.txt; echo '```'
+          } | tee summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: profile-${{ inputs.program }}-${{ inputs.tool }}
+          path: |
+            ${{ runner.temp }}/out/top60.txt
+            ${{ runner.temp }}/out/buckets.tsv
+            ${{ runner.temp }}/out/summary.md
+            ${{ runner.temp }}/out/flat.tsv
+            ${{ runner.temp }}/out/perf.data.gz
+            ${{ runner.temp }}/out/callgrind.out.gz
+            ${{ runner.temp }}/out/callgrind.txt
+            ${{ runner.temp }}/out/*.log
+            ${{ runner.temp }}/out/inspect.txt
+          if-no-files-found: ignore
