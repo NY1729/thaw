@@ -138,6 +138,18 @@ impl VisitMut for Annotate<'_> {
         }
         e.visit_mut_children_with(self);
     }
+
+    /// `x op= v` reads `x` through `eval_ident(&target.id)`, so a plain identifier target needs a hint
+    /// id too. Only simple identifier targets are annotated (not every pattern binding), to save slots.
+    fn visit_mut_simple_assign_target(&mut self, t: &mut a::SimpleAssignTarget) {
+        if let a::SimpleAssignTarget::Ident(b) = t {
+            if self.table.len() < MAX_IDENT_IDS {
+                b.id.ctxt = SyntaxContext::from_u32(self.table.len() as u32);
+                self.table.push(HintSlot::new(name_bit(&b.id.sym)));
+            }
+        }
+        t.visit_mut_children_with(self);
+    }
 }
 
 /// Annotates `module` for hinted reads; see [`Annotate`].
