@@ -101,6 +101,7 @@ impl Interp {
             is_async: false,
             is_gen: false,
             bind_self: false,
+            no_prototype: false,
             uses_arguments: false,
             uses_new_target: ctor_uses_new_target || parent.is_some(),
             uses_this: true,

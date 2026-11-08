@@ -6476,3 +6476,143 @@ fn ident_hint_vm_context_sandbox_mutation() {
     );
     assert_eq!(one(&src), "a,b,c,function");
 }
+
+#[test]
+fn hint_stats_bcrypt_shape() {
+    // A 40-name wrapper (its name filter saturates) around a bcrypt-like kernel called 1000 times.
+    let vars: String = (0..40).map(|i| format!("var w{i} = {i};")).collect();
+    let src = format!(
+        "function wrap() {{ {vars} function enc(lr, off, P, S) {{ var l = lr[off], r = lr[off + 1], i = 0, n = 0; for (i = 0; i < 16; i++) {{ n = S[l >>> 24]; n += S[0x100 | ((l >> 16) & 0xff)]; r ^= n ^ P[i]; n = r; l ^= n; }} lr[off] = l; lr[off + 1] = r; }} return enc; }}
+        const enc = wrap(); const P = []; for (let k = 0; k < 18; k++) P.push(k * 7919); const S = []; for (let k = 0; k < 1024; k++) S.push((k * 2654435761) >>> 0);
+        const lr = [1, 2]; for (let c = 0; c < 1000; c++) enc(lr, 0, P, S); console.log(lr.length);"
+    );
+    let mut it = Interp::new();
+    it.hint_stats.on = true;
+    let _ = it.run(&src);
+    assert_eq!(it.out, vec!["2".to_string()]);
+    let st = &it.hint_stats;
+    eprintln!("{}", st.summary());
+    assert!(st.hit.get() > 0, "no hinted read hit: {}", st.summary());
+    it.hint_stats.on = false;
+}
+
+#[test]
+fn ident_hint_conditional_let_layout_drift() {
+    // `eval('var pre')` runs on some calls only, so `let t` sits at a different index of the
+    // frame's list on each call. The read of `t` must follow the layout it actually sees.
+    let mut it = Interp::new();
+    it.hint_stats.on = true;
+    let _ = it.run_sloppy("function f(c) { if (c) eval('var pre = 1'); let t = c ? 'T' : 'F'; return t } const out = []; for (let i = 0; i < 6; i++) out.push(f(i % 2 === 0)); console.log(out.join())");
+    assert_eq!(it.out, vec!["T,F,T,F,T,F".to_string()]);
+    eprintln!("{}", it.hint_stats.summary());
+    it.hint_stats.on = false;
+}
+
+#[test]
+fn ident_hint_mask_collision_resolves_both_names() {
+    // Two names with the same filter bit, one bound in the outer scope and one in `f`. The read
+    // of the outer name walks through `f`'s scope, whose bit is set, so it must take the by-name
+    // path and still find the outer binding.
+    let mut pair = None;
+    'search: for i in 0..200 {
+        for j in i + 1..200 {
+            let (a, b) = (format!("q{i}"), format!("q{j}"));
+            if name_bit(&a) == name_bit(&b) {
+                pair = Some((a, b));
+                break 'search;
+            }
+        }
+    }
+    let (a, b) = pair.expect("two names share a filter bit");
+    let src = format!(
+        "let {a} = 'outer'; function f() {{ let {b} = 'inner'; const out = []; for (let k = 0; k < 3; k++) out.push({a}, {b}); return out.join(','); }} console.log(f(), f());"
+    );
+    let mut it = Interp::new();
+    it.hint_stats.on = true;
+    let _ = it.run(&src);
+    assert_eq!(
+        it.out,
+        vec!["outer,inner,outer,inner,outer,inner outer,inner,outer,inner,outer,inner".to_string()]
+    );
+    assert!(
+        it.hint_stats.miss_mid_mask.get() > 0,
+        "the colliding scope was never walked: {}",
+        it.hint_stats.summary()
+    );
+    eprintln!("{}", it.hint_stats.summary());
+    it.hint_stats.on = false;
+}
+
+// ----- no `prototype` object for methods, accessors and async functions (R5a) -----
+
+#[test]
+fn no_prototype_for_methods_accessors_and_async_functions() {
+    assert_eq!(
+        one(
+            "var o = { m() {}, get g() { return 1; }, set s(v) {}, async am() {} };\n\
+             class C { k() {} static s() {} get x() { return 1; } }\n\
+             async function af() {}\n\
+             var ae = async function () {};\n\
+             var ar = async () => 1;\n\
+             console.log(o.m.hasOwnProperty('prototype'), 'prototype' in o.m, \
+             Object.getOwnPropertyDescriptor(o, 'g').get.hasOwnProperty('prototype'), \
+             Object.getOwnPropertyDescriptor(o, 's').set.hasOwnProperty('prototype'), \
+             o.am.hasOwnProperty('prototype'), C.prototype.k.hasOwnProperty('prototype'), \
+             C.s.hasOwnProperty('prototype'), af.hasOwnProperty('prototype'), \
+             ae.hasOwnProperty('prototype'), ar.hasOwnProperty('prototype'), \
+             Object.getOwnPropertyNames(af).indexOf('prototype'))"
+        ),
+        "false false false false false false false false false false -1"
+    );
+}
+
+#[test]
+fn no_prototype_keeps_prototype_for_plain_functions_classes_and_generators() {
+    assert_eq!(
+        one("function f() {}\n\
+             class C {}\n\
+             function* g() {}\n\
+             var o = { *gm() {} };\n\
+             console.log(f.hasOwnProperty('prototype'), f.prototype.constructor === f, \
+             C.prototype.constructor === C, g.hasOwnProperty('prototype'), \
+             o.gm.hasOwnProperty('prototype'), typeof g.prototype)"),
+        "true true true true true object"
+    );
+}
+
+#[test]
+fn no_prototype_new_works_on_plain_functions_and_classes() {
+    assert_eq!(
+        one("function P(a) { this.a = a; }\n\
+             class K { constructor(v) { this.v = v; } }\n\
+             var p = new P(3), k = new K(4);\n\
+             console.log(p.a, p instanceof P, k.v, k instanceof K, P.prototype.isPrototypeOf(p))"),
+        "3 true 4 true true"
+    );
+}
+
+#[test]
+fn no_prototype_async_and_method_closures_free_their_scope() {
+    let mut it = Interp::new();
+    assert!(it
+        .run("async function zzNoProtoAsync() {} var zzo = { async zzNoProtoMethod() {} };")
+        .is_ok());
+    let find = |it: &Interp, n: &str| {
+        it.fn_cache
+            .values()
+            .find(|d| d.name.as_deref() == Some(n))
+            .cloned()
+            .expect("cached definition")
+    };
+    let defs = [find(&it, "zzNoProtoAsync"), find(&it, "zzNoProtoMethod")];
+    let scope = Scope::new(Some(it.global.clone()));
+    let weak = Rc::downgrade(&scope);
+    for i in 0..10_000 {
+        drop(it.closure_from_def(defs[i % 2].clone(), &scope));
+    }
+    drop(scope);
+    assert!(
+        weak.upgrade().is_none(),
+        "10k async functions / methods kept their scope alive"
+    );
+}
