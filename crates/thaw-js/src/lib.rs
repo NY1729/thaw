@@ -957,7 +957,9 @@ impl Interp {
             compile_stats: compile::stats_enabled(
                 std::env::var("THAW_JS_COMPILE_STATS").ok().as_deref(),
             ),
-            cstats: Default::default(),
+            cstats: compile::Stats::with_level(compile::stats_level(
+                std::env::var("THAW_JS_COMPILE_STATS").ok().as_deref(),
+            )),
             realm_id: next_realm_id(),
             depth: 0,
             max_depth: MAX_DEPTH,
