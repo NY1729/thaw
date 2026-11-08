@@ -1055,7 +1055,10 @@ impl<'ctx> HirCompiler<'ctx> {
         // The adapter may run on a thread where the host-operation TLS was
         // never registered (e.g. a thaw-js coroutine). Register it here so
         // `hdl` wire nodes decode to live host leases instead of markers.
-        if graph_wire {
+        // Only under thaw-js: native-addon (napi) callbacks share this adapter
+        // and must not reference the engine's `thaw_js_*` symbols.
+        if graph_wire && self.js_engine() == JsEngine::ThawJs {
+            self.js_mark_handles_used();
             self.compile_register_js_callback_host_operations()?;
         }
         let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
