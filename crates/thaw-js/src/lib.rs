@@ -1546,18 +1546,7 @@ impl Interp {
                     Kind::Closure { def, .. }
                         if (key == "name" || key == "length") && find_own(o, key).is_none() =>
                     {
-                        Fast::Hit(if key == "name" {
-                            def.name
-                                .clone()
-                                .map_or(Value::str(""), |n| Value::Str(n.into()))
-                        } else {
-                            Value::Number(
-                                def.params
-                                    .iter()
-                                    .take_while(|p| matches!(p, a::Pat::Ident(_)))
-                                    .count() as f64,
-                            )
-                        })
+                        Fast::Hit(closure_name_or_length(def, key))
                     }
                     _ => Fast::Chain,
                 };
@@ -3797,6 +3786,35 @@ fn find_own(o: &Obj, key: &str) -> Option<(Slot, bool)> {
     Some((p.slot.clone(), p.enumerable))
 }
 
+/// `name` or `length` of a closure that has no real `Prop` for it, derived from its definition.
+fn closure_name_or_length(def: &FuncDef, key: &str) -> Value {
+    if key == "name" {
+        def.name
+            .clone()
+            .map_or(Value::str(""), |n| Value::Str(n.into()))
+    } else {
+        Value::Number(
+            def.params
+                .iter()
+                .take_while(|p| matches!(p, a::Pat::Ident(_)))
+                .count() as f64,
+        )
+    }
+}
+
+/// The synthesized own `name`/`length` of closure `o` (`None` for any other key or object).
+/// Natives report neither (ceiling: no synthesized name/length for natives yet).
+pub(crate) fn synth_fn_own(o: &Obj, key: &str) -> Option<Value> {
+    match &*o.kind.borrow() {
+        Kind::Closure { def, .. }
+            if (key == "name" || key == "length") && find_own(o, key).is_none() =>
+        {
+            Some(closure_name_or_length(def, key))
+        }
+        _ => None,
+    }
+}
+
 /// What a property read needs from the first holder that has the key. Data clones only the
 /// value and an accessor clones only its getter.
 enum Read {
@@ -3950,7 +3968,7 @@ fn name_anonymous_fn(v: &Value, key: &str) {
         let anonymous =
             matches!(&*o.kind.borrow(), Kind::Closure { def, .. } if def.name.is_none());
         if anonymous && find_own(o, "name").is_none() {
-            put_hidden(o, "name", Value::str(key));
+            put_with(o, "name", Value::str(key), false, false, true);
         }
     }
 }
