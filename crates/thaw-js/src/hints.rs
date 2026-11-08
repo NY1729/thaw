@@ -23,6 +23,9 @@ const MAX_IDENT_IDS: usize = 1 << 22;
 const HINT_IDX_BITS: u32 = 24;
 const HINT_IDX_MASK: u32 = (1 << HINT_IDX_BITS) - 1;
 
+/// A by-name lookup result: the value and, unless a `with` record was passed, `(hops, index, key)`.
+type HintedLookup = (Value, Option<(u32, u32, Rc<str>)>);
+
 /// The hint of one annotated identifier. `bit` is `name_bit` of its name, computed once by
 /// [`Annotate`]; `name` is the vars key the hint was recorded for (kept alive by this clone), so a
 /// read validates by pointer first and by string only when the pointers differ.
@@ -258,11 +261,7 @@ impl Interp {
 
     /// By-name lookup, as `lookup`, that also reports where a plain binding sits: `(hops, index,
     /// key)` unless a `with` record was passed on the way (then nothing may be hinted).
-    fn lookup_at(
-        &self,
-        scope: &Rc<Scope>,
-        name: &str,
-    ) -> Option<(Value, Option<(u32, u32, Rc<str>)>)> {
+    fn lookup_at(&self, scope: &Rc<Scope>, name: &str) -> Option<HintedLookup> {
         let bit = name_bit(name);
         let mut cur: &Scope = scope;
         let mut hops = 0u32;
