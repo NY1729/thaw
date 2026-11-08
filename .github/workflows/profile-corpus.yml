@@ -145,7 +145,9 @@ jobs:
           grep -i '^quickjs:' "$RUNNER_TEMP/out/inspect.txt" || true
           nm "$RUNNER_TEMP/prog" 2>/dev/null | grep -c ' [tT] ' | sed 's/^/text symbols: /' | tee -a "$RUNNER_TEMP/out/inspect.txt" || true
           nm -C "$RUNNER_TEMP/prog" | grep -E 'Vars::position|name_bit|assign_var' | head | tee -a "$RUNNER_TEMP/out/inspect.txt" || true
-          cd "$RUNNER_TEMP" && ./prog > out/stdout.txt && head -3 out/stdout.txt
+          # One plain run with the interpreter's own counters (identifier-hint hit/miss and compiler analyzer coverage).
+          cd "$RUNNER_TEMP" && THAW_JS_HINT_STATS=1 THAW_JS_COMPILE=on THAW_JS_COMPILE_STATS=1 ./prog > out/stdout.txt 2> out/stats.txt && head -3 out/stdout.txt
+          echo "---- interpreter stats (stderr of the run above) ----"; tail -60 out/stats.txt || true
       - name: Profile with perf
         if: inputs.tool == 'perf'
         working-directory: ${{ runner.temp }}
@@ -219,4 +221,5 @@ jobs:
             ${{ runner.temp }}/out/callgrind.txt
             ${{ runner.temp }}/out/*.log
             ${{ runner.temp }}/out/inspect.txt
+            ${{ runner.temp }}/out/stats.txt
           if-no-files-found: ignore
