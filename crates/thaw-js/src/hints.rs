@@ -95,7 +95,7 @@ impl Interp {
             let at = self.lookup_at(scope, name).and_then(|(_, loc)| loc);
             assert_eq!(
                 at,
-                Some((hops as u32, idx as u32)),
+                Some((hops, idx as u32)),
                 "hinted read of `{name}` disagrees with the by-name lookup"
             );
         }
