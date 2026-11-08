@@ -308,10 +308,14 @@ impl Interp {
     /// `Symbol.keyFor(sym)`: the key `sym` is registered under by `Symbol.for`, if any.
     pub(crate) fn symbol_key_for(&self, sym: &Obj) -> Option<Rc<str>> {
         let registry = self.symbol_registry.as_ref()?;
-        registry.props.borrow().iter().find_map(|p| match &p.slot {
-            Slot::Data(Value::Object(o)) if Rc::ptr_eq(o, sym) => Some(p.key.clone()),
-            _ => None,
-        })
+        registry
+            .raw_props
+            .borrow()
+            .iter()
+            .find_map(|p| match &p.slot {
+                Slot::Data(Value::Object(o)) if Rc::ptr_eq(o, sym) => Some(p.key.clone()),
+                _ => None,
+            })
     }
 
     /// Whether `sym` is one of the intrinsic well-known symbols (`Symbol.iterator`, ...).
