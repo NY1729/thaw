@@ -295,3 +295,65 @@ fn thaw_js_routing_serves_a_function_returning_a_class_instance() {
     assert_eq!(thaw_js_run(&output), "v=10\n5\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A callback that receives a config object built inside an async package function (after an
+/// `await`, so the callback runs on a thaw-js coroutine). Its non-root object is a live handle and
+/// must stay usable: `url` reads through, the function member stays a function, and no internal
+/// handle marker leaks into the keys.
+#[test]
+fn thaw_js_routing_callback_sees_a_live_config_object_after_an_await() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-adapter-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("tjs-adp");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function dispatch(url: string, f: any): Promise<any>;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = (function(require){\n\
+         var __thaw_bundle_factories = {\n\
+         \"tjs-adp/index.js\": function(module, exports, require) {\n\
+           exports.dispatch = async function (url, f) {\n\
+             var config = Object.create(null);\n\
+             config.url = url;\n\
+             config.adapter = function () {};\n\
+             config.headers = { accept: 'text/plain' };\n\
+             await null;\n\
+             return f(config);\n\
+           };\n\
+         },\n\
+         };\n\
+         var __thaw_bundle_require_maps = { \"tjs-adp/index.js\": {}, };\n\
+         var __thaw_bundle_entry_key = \"tjs-adp/index.js\";\n\
+         var __thaw_entry = { exports: {} };\n\
+         __thaw_bundle_factories[__thaw_bundle_entry_key](__thaw_entry, __thaw_entry.exports, require);\n\
+         return __thaw_entry.exports;\n\
+         })(globalThis.require);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { dispatch } from 'tjs-adp';\n\
+         async function main(): Promise<void> {\n\
+           const out: any = await dispatch('http://x/items', (config: any): string =>\n\
+             Object.keys(config).join(',') + ' ' + typeof config.adapter + ' ' + String(config.url));\n\
+           console.log(out);\n\
+         }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-adp"]));
+    std::fs::remove_dir_all(&registry).unwrap();
+    // Same text real Node prints for the equivalent JavaScript.
+    assert_eq!(
+        thaw_js_run(&output),
+        "url,adapter,headers function http://x/items\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -337,3 +337,25 @@ fn object_literal_with_jsvalue_in_a_callback_registers_host_operations_before_en
     let encode = body.find("@thaw_json_graph_encode(").expect(body);
     assert!(register < encode, "{body}");
 }
+
+#[test]
+fn thaw_js_callback_adapter_registers_host_operations_before_graph_decode() {
+    // The adapter can run on a thaw-js coroutine thread where the host-operation
+    // TLS is unset; it must register before decoding `hdl` wire nodes.
+    let source = "declare function __thaw_typed_tjs_6d733a3a6d73(options: JsValue): Json;
+         function main(): void { console.log(__thaw_typed_tjs_6d733a3a6d73({ adapter: (config: any): string => String(config.url) })); }";
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_callback_adapter_register");
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let body = ir
+        .split("\ndefine ")
+        .find(|function| function.split('(').next().unwrap_or("").contains("@__thaw_napi_value_callback_"))
+        .unwrap_or_else(|| panic!("{ir}"));
+    let register = body.find("call void @thaw_json_register_host_operations(").expect(body);
+    let decode = body.find("@thaw_json_graph_decode(").expect(body);
+    assert!(register < decode, "{body}");
+}
