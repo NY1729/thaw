@@ -3646,8 +3646,25 @@ fn exception_packet_tag7_live_handle_rethrows_the_original_object() {
         panic!("tag-7 packet with a live handle did not yield the original object");
     };
     assert!(Rc::ptr_eq(&original, &found));
-    // A packet whose pending value differs from its object is not reconstituted.
-    packet.pending = 0;
+    // Non-zero pending/native_text (async-callback display text) still yields the same object.
+    packet.pending = 0x9999;
+    packet.native_text = 0x8888;
+    let Some(Value::Object(found)) = crate::host::original_js_exception_with(&packet, |_| id)
+    else {
+        panic!("tag-7 packet with display text in pending/native_text did not yield the object");
+    };
+    assert!(Rc::ptr_eq(&original, &found));
+    // The remaining identity fields still reject the packet.
+    packet.native = 0x7777;
+    assert!(crate::host::original_js_exception_with(&packet, |_| id).is_none());
+    packet.native = 0;
+    packet.aggregate = 0x6666;
+    assert!(crate::host::original_js_exception_with(&packet, |_| id).is_none());
+    packet.aggregate = 0;
+    packet.tag = 6;
+    assert!(crate::host::original_js_exception_with(&packet, |_| id).is_none());
+    packet.tag = 7;
+    packet.object = 0;
     assert!(crate::host::original_js_exception_with(&packet, |_| id).is_none());
 }
 
