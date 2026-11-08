@@ -6206,3 +6206,226 @@ fn compound_bitwise_on_const_still_throws() {
         "true Assignment to constant variable."
     );
 }
+
+// ----- hinted reads (hints.rs). Unit tests run with the oracle on: every hinted read is checked
+// against the by-name lookup. Expected values match node unless a comment says Thaw differs.
+
+/// Like `one`, for sloppy-mode scripts (`with`, `delete x`, `var arguments` need them).
+fn one_sloppy(src: &str) -> String {
+    run_sloppy_lines(src).join("|")
+}
+
+fn run_sloppy_lines(src: &str) -> Vec<String> {
+    let mut it = Interp::new();
+    let _ = it.run_sloppy(src);
+    it.out
+}
+
+#[test]
+fn ident_hint_records_and_hits_in_loops() {
+    let mut it = Interp::new();
+    let _ = it.run("let s = 0; function f(a) { return a + 1 } for (let i = 0; i < 50; i++) s += f(i); console.log(s)");
+    assert_eq!(it.out, vec!["1275".to_string()]);
+    assert!(
+        it.ident_hints.iter().any(|c| c.get() != 0),
+        "no hint was recorded"
+    );
+}
+
+#[test]
+fn ident_hint_shadow_declared_after_record() {
+    // Thaw has no TDZ: the first call runs before `let x` and sees the global. node throws here.
+    assert_eq!(
+        one("let x = 'g'; const out = []; for (let i = 0; i < 3; i++) { const c = () => x; out.push(c()); let x = 'L' + i; out.push(c()); } console.log(out.join(','))"),
+        "g,L0,g,L1,g,L2"
+    );
+}
+
+#[test]
+fn ident_hint_closure_per_iteration_bindings() {
+    assert_eq!(
+        one("const fs = []; for (let i = 0; i < 3; i++) fs.push(() => i); const vs = []; for (var j = 0; j < 3; j++) vs.push(() => j); console.log(fs.map(f => f()).join(), vs.map(f => f()).join())"),
+        "0,1,2 3,3,3"
+    );
+}
+
+#[test]
+fn ident_hint_same_function_called_repeatedly() {
+    assert_eq!(
+        one("let k = 1; function f(a) { const t = a * 2; return t + k } let s = 0; for (let i = 0; i < 5; i++) s += f(i); k = 100; for (let i = 0; i < 5; i++) s += f(i); console.log(s)"),
+        "545"
+    );
+}
+
+#[test]
+fn ident_hint_var_hoisting_and_redeclare() {
+    assert_eq!(
+        one("function h(c) { const out = []; out.push(typeof w); if (c) { var w = 'x'; } var w = 'y'; out.push(w); return out.join(); } const r = []; for (let i = 0; i < 3; i++) r.push(h(i % 2)); console.log(r.join('|'))"),
+        "undefined,y|undefined,y|undefined,y"
+    );
+}
+
+#[test]
+fn ident_hint_function_hoisting_and_block_functions() {
+    assert_eq!(
+        run("console.log(early()); function early() { return 'H' } const r = []; for (let i = 0; i < 3; i++) { { function g() { return 'blk' + i } } r.push(g()); } console.log(r.join())"),
+        vec!["H".to_string(), "blk0,blk1,blk2".to_string()]
+    );
+}
+
+#[test]
+fn ident_hint_named_function_expression_self_binding() {
+    assert_eq!(
+        one("const fact = function f(n) { return n <= 1 ? 1 : n * f(n - 1) }; const self = function g(g) { return g }; const s = []; for (let i = 1; i <= 5; i++) s.push(fact(i)); s.push(self(7), self(8)); console.log(s.join())"),
+        "1,2,6,24,120,7,8"
+    );
+}
+
+#[test]
+fn ident_hint_arguments_as_local() {
+    assert_eq!(
+        run_sloppy_lines("function a1(p) { const r = [arguments[0]]; var arguments = 'loc'; r.push(arguments); return r.join(); } function a2() { return arguments.length } const out = []; for (let i = 0; i < 2; i++) { out.push(a1(i + 10)); out.push(a2(1, 2, 3)); } console.log(out.join('|'))"),
+        vec!["10,loc|3|11,loc|3".to_string()]
+    );
+}
+
+#[test]
+fn ident_hint_catch_param_shadowing() {
+    assert_eq!(
+        one("let e = 'outer'; const out = []; function peek() { return e } for (let i = 0; i < 2; i++) { try { throw i } catch (e) { out.push(e, peek()) } out.push(e) } console.log(out.join())"),
+        "0,outer,outer,1,outer,outer"
+    );
+}
+
+#[test]
+fn ident_hint_class_field_and_static_reads() {
+    assert_eq!(
+        one("let k = 'K'; class A { static s = k; f = k; static m() { return k } } const out = []; for (let i = 0; i < 2; i++) { out.push(new A().f, A.s, A.m()); k = 'J'; } console.log(out.join())"),
+        "K,K,K,J,K,J"
+    );
+}
+
+#[test]
+fn ident_hint_read_before_let_documents_no_tdz() {
+    // Thaw keeps its no-TDZ behaviour: an early read resolves to the outer binding. node throws a
+    // ReferenceError here; this test pins Thaw's behaviour and must not change with the hints.
+    assert_eq!(
+        one("let x = 'o'; const out = []; for (let i = 0; i < 2; i++) { out.push(x); let x = 'i' + i; out.push(x); } console.log(out.join())"),
+        "o,i0,o,i1"
+    );
+}
+
+#[test]
+fn ident_hint_with_gains_and_loses_name() {
+    assert_eq!(
+        one_sloppy("var x = 'g'; const obj = {}; const out = []; function getx() { return x } const o2 = { x: 'W' }; out.push(getx()); with (o2) { out.push(getx(), x) } with (obj) { for (let i = 0; i < 4; i++) { if (i === 1) obj.x = 'w'; if (i === 2) delete obj.x; out.push(x); } } out.push(getx()); console.log(out.join())"),
+        "g,g,W,g,w,g,g,g"
+    );
+}
+
+#[test]
+fn ident_hint_delete_implicit_global_between_reads() {
+    assert_eq!(
+        one_sloppy("function rd() { try { return zz } catch (e) { return 'RE' } } function rd2() { return zz2 } const out = []; zz = 1; out.push(rd()); out.push(rd()); delete zz; out.push(rd()); zz = 2; out.push(rd()); a1 = 1; a2 = 2; a3 = 3; zz2 = 'z'; out.push(rd2()); delete a2; out.push(rd2()); console.log(out.join())"),
+        "1,1,RE,2,z,z"
+    );
+}
+
+#[test]
+fn ident_hint_over_16_vars_uses_hash_index() {
+    let decls: Vec<String> = (0..20).map(|i| format!("var v{i} = {i};")).collect();
+    let src = format!(
+        "function big() {{ {} let s = 0; for (let i = 0; i < 3; i++) {{ s += v0 + v5 + v17 + v19 + i; }} return s; }} console.log(big());",
+        decls.join(" ")
+    );
+    assert_eq!(one(&src), "126");
+}
+
+#[test]
+fn ident_hint_generator_reads_across_yields() {
+    assert_eq!(
+        one("const k = 10; function* gen() { let t = 0; for (let i = 0; i < 3; i++) { t += k + i; yield t; } } const out = []; for (const v of gen()) out.push(v); let kk = 1; function* g2() { for (let i = 0; i < 3; i++) { yield kk; kk++; } } for (const v of g2()) out.push(v); console.log(out.join())"),
+        "10,21,33,1,2,3"
+    );
+}
+
+#[test]
+fn ident_hint_async_reads_across_awaits() {
+    let (out, code) = main_run(
+        "let base = 5; async function step(i) { await null; return base + i } async function main2() { const out = []; for (let i = 0; i < 3; i++) { out.push(await step(i)); base++; } console.log(out.join()); } main2();",
+    );
+    assert_eq!(out, vec!["5,7,9".to_string()]);
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn ident_hint_recursion_reads_per_frame() {
+    assert_eq!(
+        one("function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2) } function depth(n) { const t = n; return n ? depth(n - 1) + t : 0 } console.log(fib(15), depth(20))"),
+        "610 210"
+    );
+}
+
+#[test]
+fn ident_hint_same_function_node_under_different_parents() {
+    assert_eq!(
+        one("function outer(v) { let x = v; return function () { return x } } const f1 = outer(1), f2 = outer(2), f3 = outer(3); const out = []; for (let i = 0; i < 2; i++) out.push(f1(), f2(), f3()); console.log(out.join())"),
+        "1,2,3,1,2,3"
+    );
+}
+
+#[test]
+fn ident_hint_typeof_and_numeric_rmw_paths() {
+    assert_eq!(
+        one("let n = 2; let s = 0; const out = []; for (let i = 0; i < 4; i++) { s += n * 1.5; s = s + n; out.push(typeof missing9); } console.log(s, out[3], typeof n)"),
+        "20 undefined number"
+    );
+}
+
+#[test]
+fn ident_hint_deep_scope_chain_over_hop_limit() {
+    // 300 nested lexical blocks: the read of `x` is 300 hops away, beyond what a hint can store.
+    let open: String = (0..300).map(|i| format!("{{ let a{i} = {i};")).collect();
+    let close = "}".repeat(300);
+    let src = format!(
+        "let x = 'deep'; const out = []; for (let r = 0; r < 2; r++) {{ {open} out.push(x); {close} }} console.log(out.join())"
+    );
+    assert_eq!(one(&src), "deep,deep");
+}
+
+#[test]
+fn ident_hint_new_function_bodies_grow_table_boundedly() {
+    let mut it = Interp::new();
+    let _ = it.run("let s = 0; for (let i = 0; i < 100000; i++) { s += new Function('a', 'return a + 1')(i); } console.log(s)");
+    assert_eq!(it.out, vec!["5000050000".to_string()]);
+    assert!(
+        it.ident_hints.len() < 1_000_000,
+        "hint table grew to {}",
+        it.ident_hints.len()
+    );
+}
+
+#[test]
+fn ident_hint_mask_invariant_after_many_declarations() {
+    let mut it = Interp::new();
+    let _ = it.run_sloppy("let a = 1; const b = 2; var c = 3; function d() {} class E {} for (const f of [1]) {} try { throw 1 } catch (g) {} switch (1) { case 1: let h = 1; } x9 = 4; delete x9; with ({ y: 1 }) { y } (function () { var q = 1; let r = 2; function s() {} return q + r; })(); console.log(a + b + c);");
+    assert_eq!(it.out, vec!["6".to_string()]);
+    it.global.check_mask_invariant();
+}
+
+#[test]
+fn ident_hint_strict_and_sloppy_functions() {
+    assert_eq!(
+        one("var x = 'g'; function s1() { 'use strict'; return x } function s2() { return x } const out = []; for (let i = 0; i < 3; i++) out.push(s1(), s2()); console.log(out.join())"),
+        "g,g,g,g,g,g"
+    );
+}
+
+#[test]
+fn ident_hint_vm_context_sandbox_mutation() {
+    let src = format!(
+        "{}\nconst sb = {{ x: 'a', out: [] }}; const ctx = createContext(sb); runInContext(\"function rd() {{ return x }} out.push(rd()); x = 'b'; out.push(rd());\", ctx); sb.x = 'c'; runInContext(\"out.push(rd()); out.push(typeof rd);\", ctx); console.log(sb.out.join());",
+        include_str!("../../thaw-registry/src/registry/builtins/system/vm_context.js")
+    );
+    assert_eq!(one(&src), "a,b,c,function");
+}

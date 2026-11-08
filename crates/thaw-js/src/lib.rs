@@ -37,6 +37,7 @@ mod esm;
 mod eventloop;
 mod extras;
 mod generators;
+mod hints;
 pub mod host;
 #[cfg(feature = "intl")]
 mod intl;
@@ -809,6 +810,10 @@ pub struct Interp {
     names: std::collections::HashSet<Rc<str>, std::hash::BuildHasherDefault<FxHasher>>,
     /// Distinguishes source positions of different `run` calls (spans restart at 1 per parse).
     run_id: u32,
+    /// Read-hint slots, one per annotated identifier (`hints.rs`). Slot 0 is never used.
+    ident_hints: Vec<Cell<u32>>,
+    /// Oracle mode: every hinted read also runs the by-name lookup and asserts they agree.
+    check_hints: bool,
     /// Process-unique id of this realm: tags the zlib jobs it starts so only it collects their results.
     pub(crate) realm_id: usize,
     depth: usize,
@@ -927,6 +932,8 @@ impl Interp {
             loop_captures: FxMap::default(),
             names: Default::default(),
             run_id: 0,
+            ident_hints: vec![Cell::new(0)],
+            check_hints: cfg!(test) || std::env::var_os("THAW_JS_CHECK_HINTS").is_some(),
             realm_id: next_realm_id(),
             depth: 0,
             max_depth: MAX_DEPTH,
@@ -2334,7 +2341,8 @@ impl Interp {
         parsed: Result<a::Module, String>,
         script: bool,
     ) -> R<Value> {
-        let module = parsed.map_err(|e| Ctl::Throw(Value::str(&e)))?;
+        let mut module = parsed.map_err(|e| Ctl::Throw(Value::str(&e)))?;
+        hints::annotate(&mut module, &mut self.ident_hints);
         self.run_id = next_run_id();
         self.sources.insert(self.run_id, Rc::from(source));
         let mut stmts = Vec::new();
@@ -2388,7 +2396,7 @@ impl Interp {
         scope: &Rc<Scope>,
         sandbox: &Obj,
     ) -> (R<Value>, Vec<Rc<str>>) {
-        let module = match thaw_parser::parse_javascript_script(source) {
+        let mut module = match thaw_parser::parse_javascript_script(source) {
             Ok(m) => m,
             Err(_) => {
                 return (
@@ -2397,6 +2405,7 @@ impl Interp {
                 )
             }
         };
+        hints::annotate(&mut module, &mut self.ident_hints);
         self.run_id = next_run_id();
         self.sources.insert(self.run_id, Rc::from(source));
         let mut stmts = Vec::new();
@@ -3334,7 +3343,7 @@ impl Interp {
             a::UnaryOp::TypeOf => {
                 // typeof of an undeclared identifier must not throw
                 let v = match &*u.arg {
-                    a::Expr::Ident(i) => self.lookup(scope, &i.sym).unwrap_or(Value::Undefined),
+                    a::Expr::Ident(i) => self.lookup_ident(scope, i).unwrap_or(Value::Undefined),
                     other => self.eval(other, scope)?,
                 };
                 Ok(Value::str(match &v {
@@ -3392,7 +3401,7 @@ impl Interp {
     fn pure_number(&self, scope: &Rc<Scope>, e: &a::Expr) -> Option<f64> {
         match e {
             a::Expr::Lit(a::Lit::Num(n)) => Some(n.value),
-            a::Expr::Ident(i) => match self.lookup(scope, &i.sym)? {
+            a::Expr::Ident(i) => match self.lookup_ident(scope, i)? {
                 Value::Number(n) => Some(n),
                 _ => None,
             },
@@ -3518,7 +3527,7 @@ impl Interp {
     }
 
     fn eval_ident(&mut self, i: &a::Ident, scope: &Rc<Scope>) -> R<Value> {
-        match self.lookup(scope, &i.sym) {
+        match self.lookup_ident(scope, i) {
             Some(v) => Ok(v),
             // the global object inherits from Object.prototype (`toString`, `hasOwnProperty`, ...)
             None => match find_in_chain(&self.object_proto, &i.sym) {
