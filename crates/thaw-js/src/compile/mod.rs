@@ -97,6 +97,7 @@ impl Stats {
         self.rejected[reason as usize] += 1;
     }
 
+    #[cfg(test)]
     pub(crate) fn rejected(&self, reason: FallbackReason) -> u64 {
         self.rejected[reason as usize]
     }
