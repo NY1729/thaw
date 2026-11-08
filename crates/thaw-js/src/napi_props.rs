@@ -174,6 +174,7 @@ fn reflect_set(
                 }
                 Slot::Data(_) if !writable || holder.frozen.get() => return Ok(false),
                 Slot::Data(_) => {}
+                Slot::LazyProto { .. } => unreachable!("find_with_holder forces the key"),
             }
         }
     }
@@ -182,7 +183,7 @@ fn reflect_set(
     };
     match receiver.position(key) {
         Some(i) => {
-            let mut props = receiver.props.borrow_mut();
+            let mut props = receiver.raw_props.borrow_mut();
             if matches!(props[i].slot, Slot::Accessor { .. })
                 || !props[i].writable
                 || receiver.frozen.get()
@@ -196,7 +197,7 @@ fn reflect_set(
             if receiver.ext.get() != 0 || receiver.frozen.get() {
                 return Ok(false);
             }
-            let mut props = receiver.props.borrow_mut();
+            let mut props = receiver.raw_props.borrow_mut();
             push_prop(
                 receiver,
                 &mut props,
@@ -217,9 +218,10 @@ fn reflect_set(
 fn find_with_holder(o: &Obj, key: &str) -> Option<(Obj, Slot, bool)> {
     let mut current = Some(o.clone());
     while let Some(node) = current {
+        node.force_key(key);
         if let Some(i) = node.position(key) {
             let (slot, writable) = {
-                let props = node.props.borrow();
+                let props = node.raw_props.borrow();
                 (props[i].slot.clone(), props[i].writable)
             };
             return Some((node, slot, writable));
@@ -280,7 +282,7 @@ pub(crate) fn own_entries(o: &Obj) -> Vec<(Rc<str>, u32)> {
         }
         _ => {}
     }
-    let props = o.props.borrow();
+    let props = o.raw_props.borrow();
     let mut strings: Vec<(Rc<str>, u32)> = Vec::new();
     let mut symbols: Vec<(Rc<str>, u32)> = Vec::new();
     for p in props.iter() {
@@ -659,6 +661,7 @@ pub(crate) fn define_slot(
                     crate::put(&desc, "get", get.clone().unwrap_or(Value::Undefined));
                     crate::put(&desc, "set", set.clone().unwrap_or(Value::Undefined));
                 }
+                Slot::LazyProto { .. } => unreachable!("callers pass a Data or Accessor slot"),
             }
             crate::put(&desc, "enumerable", Value::Bool(enumerable));
             let k = it.key_value(key);
@@ -721,7 +724,7 @@ pub(crate) fn define_slot(
             &format!("Cannot define property {key}, object is not extensible"),
         );
     }
-    let mut props = o.props.borrow_mut();
+    let mut props = o.props().borrow_mut();
     match existing {
         Some(i) => {
             let old = props[i].slot.clone();
