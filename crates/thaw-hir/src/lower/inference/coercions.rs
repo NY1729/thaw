@@ -1569,6 +1569,12 @@ impl<'a> FnLowerer<'a> {
             if actual == crate::caught_exception_carrier_type() {
                 return self.caught_carrier_as_json(value);
             }
+            // A Union/Optional/Nullable/Nullish with a live `JsValue` member must be converted per
+            // member (JsValue -> JsValueAsJson); the generic JsonSet route emits the
+            // `__thaw_js_handle_id__` placeholder, which has no reviver when the callee is native.
+            if Self::contains_js_value_member(&actual) {
+                return self.coerce_composite_to_declared(declared, value, actual);
+            }
             // A `JsValue` (an opaque handle to a live QuickJS-retained
             // object, e.g. zod's `z.string()` returning a `ZodString`
             // schema instance) has no direct JSON representation. Wrapped
@@ -2527,6 +2533,18 @@ impl<'a> FnLowerer<'a> {
         }
 
         self.reorder_object_literal_in_source_order(lit_fields, declared_fields, false)
+    }
+
+    fn contains_js_value_member(ty: &HirType) -> bool {
+        match ty {
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+                matches!(payload.as_ref(), HirType::JsValue) || Self::contains_js_value_member(payload)
+            }
+            HirType::Union(members) => members
+                .iter()
+                .any(|member| matches!(member, HirType::JsValue) || Self::contains_js_value_member(member)),
+            _ => false,
+        }
     }
 
     /// Normalize nested alias wrappers and unions one tag at a time. The

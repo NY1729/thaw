@@ -1,4 +1,20 @@
 #[test]
+fn union_with_js_value_member_passed_to_unknown_converts_per_member() {
+    let program = lower(
+        r#"
+        function sink(v: unknown): void {}
+        function f(live: JsValue, n: number): void { sink(n > 1 ? "x" : live); }
+        function main(): void {}
+        "#,
+    );
+    let body = format!(
+        "{:?}",
+        program.functions.iter().find(|function| function.name == "f").unwrap().body,
+    );
+    assert!(body.contains("JsValueAsJson"), "{body}");
+}
+
+#[test]
 fn lowers_any_and_unknown_annotations_to_dynamic_values() {
     let program = lower(
         r#"
