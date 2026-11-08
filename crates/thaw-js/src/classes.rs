@@ -111,6 +111,7 @@ impl Interp {
             param_mask,
             strict: true,
             class: Some(info),
+            cstate: Default::default(),
         });
         let ctor_obj = new_obj(
             Some(self.function_proto.clone()),
