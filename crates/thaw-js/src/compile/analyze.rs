@@ -569,10 +569,10 @@ impl Visit for Walk {
     fn visit_assign_expr(&mut self, n: &a::AssignExpr) {
         match &n.left {
             a::AssignTarget::Pat(_) => self.block(FallbackReason::Destructuring),
-            a::AssignTarget::Simple(a::SimpleAssignTarget::Ident(b)) => {
-                if self.fn_depth == 0 && !self.is_resolved(&b.id.sym) {
-                    self.impure = true;
-                }
+            a::AssignTarget::Simple(a::SimpleAssignTarget::Ident(b))
+                if self.fn_depth == 0 && !self.is_resolved(&b.id.sym) =>
+            {
+                self.impure = true;
             }
             _ => {}
         }
@@ -837,10 +837,9 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         if d.kind.lexical()
             && class_of(&d.name) == NameClass::Slot
             && (d.in_switch || pos < d.decl_end)
+            && reason.is_none_or(|cur| FallbackReason::ReadBeforeDecl.priority() > cur.priority())
         {
-            if reason.is_none_or(|cur| FallbackReason::ReadBeforeDecl.priority() > cur.priority()) {
-                reason = Some(FallbackReason::ReadBeforeDecl);
-            }
+            reason = Some(FallbackReason::ReadBeforeDecl);
         }
     }
 
