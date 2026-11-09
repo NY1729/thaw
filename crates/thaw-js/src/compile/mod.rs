@@ -19,6 +19,9 @@ mod expr;
 mod fuzz_tests;
 mod gen;
 mod member;
+mod num;
+#[cfg(test)]
+mod num_tests;
 mod run;
 mod stmt;
 #[cfg(test)]

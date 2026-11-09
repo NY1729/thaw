@@ -6,6 +6,7 @@ use thaw_parser::ast as a;
 
 use super::gen::{reject, Gen, CG};
 use super::member;
+use super::num::{self, Bl};
 use super::{bx, Ex, Frame, CR};
 use crate::{bigint, builtins, to_int32, Interp, JsStr, Kind, Value, R};
 
@@ -51,7 +52,7 @@ pub(crate) fn sequence(list: Vec<Ex>) -> Ex {
 }
 
 /// The value of a literal, computed once at compile time (the same arms as `Interp::eval`).
-fn lit_value(l: &a::Lit) -> CG<Value> {
+pub(crate) fn lit_value(l: &a::Lit) -> CG<Value> {
     Ok(match l {
         a::Lit::Num(n) => Value::Number(n.value),
         a::Lit::Str(s) => match s.value.as_str() {
@@ -85,12 +86,15 @@ pub(crate) fn compile(g: &mut Gen, e: &a::Expr) -> CG<Ex> {
         }
         a::Expr::Tpl(t) => template(g, t),
         a::Expr::Cond(c) => {
-            let test = compile(g, &c.test)?;
+            let test = num::test(g, &c.test)?;
             let cons = compile(g, &c.cons)?;
             let alt = compile(g, &c.alt)?;
             Ok(cond(test, cons, alt))
         }
-        a::Expr::Bin(b) => bin(g, b.op, &b.left, &b.right),
+        a::Expr::Bin(b) => match num::bin(g, b.op, &b.left, &b.right)? {
+            Some(s) => Ok(num::side_ex(s)),
+            None => bin(g, b.op, &b.left, &b.right),
+        },
         a::Expr::Unary(u) => unary(g, u.op, &u.arg),
         a::Expr::Update(u) => update(g, &u.arg, matches!(u.op, a::UpdateOp::PlusPlus), u.prefix),
         a::Expr::Assign(asg) => assign(g, asg),
@@ -103,7 +107,7 @@ pub(crate) fn compile(g: &mut Gen, e: &a::Expr) -> CG<Ex> {
 
 /// A name that an assignment or `++`/`--` writes: a slot of this frame, or a free name (closure scope).
 #[derive(Clone)]
-enum Place {
+pub(crate) enum Place {
     Slot { k: u32, mutable: bool },
     Free(a::Ident),
 }
@@ -171,27 +175,39 @@ fn logical_assign(p: Place, op: a::AssignOp, rhs: Ex) -> Ex {
 }
 
 /// `x op= e` for the operators behind `compound_binop`: the old value is read before the right-hand side.
-fn compound(p: Place, op: a::BinaryOp, rhs: Ex) -> Ex {
+pub(crate) fn compound(p: Place, op: a::BinaryOp, rhs: Ex) -> Ex {
     mk_ex(move |it, f| {
         let cur = p.read(it, f)?;
         let r = rhs(it, f)?;
-        // `s += x` on a mutable slot holding a string, `x` primitive: appended in place
-        let cur = match &p {
-            Place::Slot { k, mutable: true }
-                if matches!(op, a::BinaryOp::Add) && is_str_append(&cur, &r) =>
-            {
-                let rs = it.to_str(&r);
-                match append_slot(&mut f.slots, *k as usize, cur, &rs) {
-                    Ok(v) => return Ok(v),
-                    Err(back) => back,
-                }
-            }
-            _ => cur,
-        };
-        let v = bx(combine(it, op, &cur, &r))?;
-        p.write(it, f, v.clone())?;
-        Ok(v)
+        compound_finish(it, f, &p, op, cur, r)
     })
+}
+
+/// The part of `x op= e` after both operands were read: in-place string append, else `combine` and the write.
+pub(crate) fn compound_finish(
+    it: &mut Interp,
+    f: &mut Frame,
+    p: &Place,
+    op: a::BinaryOp,
+    cur: Value,
+    r: Value,
+) -> CR<Value> {
+    // `s += x` on a mutable slot holding a string, `x` primitive: appended in place
+    let cur = match p {
+        Place::Slot { k, mutable: true }
+            if matches!(op, a::BinaryOp::Add) && is_str_append(&cur, &r) =>
+        {
+            let rs = it.to_str(&r);
+            match append_slot(&mut f.slots, *k as usize, cur, &rs) {
+                Ok(v) => return Ok(v),
+                Err(back) => back,
+            }
+        }
+        _ => cur,
+    };
+    let v = bx(combine(it, op, &cur, &r))?;
+    p.write(it, f, v.clone())?;
+    Ok(v)
 }
 
 /// Only `+=` of a string with a primitive can append in place (no user code runs in ToPrimitive).
@@ -254,7 +270,10 @@ fn assign(g: &mut Gen, asg: &a::AssignExpr) -> CG<Ex> {
         A::Assign => Ok(store(p, rhs)),
         A::AndAssign | A::OrAssign | A::NullishAssign => Ok(logical_assign(p, asg.op, rhs)),
         op => match crate::compound_binop(op) {
-            Some(b) => Ok(compound(p, b, rhs)),
+            Some(b) => Ok(match p {
+                Place::Slot { k, mutable: true } => num::compound_slot(k, b, rhs),
+                other => compound(other, b, rhs),
+            }),
             None => reject(),
         },
     }
@@ -283,9 +302,9 @@ fn update(g: &mut Gen, arg: &a::Expr, inc: bool, prefix: bool) -> CG<Ex> {
     }))
 }
 
-fn cond(test: Ex, cons: Ex, alt: Ex) -> Ex {
+fn cond(test: Bl, cons: Ex, alt: Ex) -> Ex {
     mk_ex(move |it, f| {
-        if test(it, f)?.truthy() {
+        if test(it, f)? {
             cons(it, f)
         } else {
             alt(it, f)
