@@ -10,6 +10,11 @@ on:
       iterations:
         description: number of back-to-back runs of the binary inside one profile (perf only)
         default: "1"
+      compile:
+        description: THAW_JS_COMPILE for the perf and callgrind runs
+        type: choice
+        options: ["off", "on"]
+        default: "off"
       tool:
         description: perf or callgrind
         type: choice
@@ -154,6 +159,16 @@ jobs:
           trace_env=()
           if [ "$TRACE_WIRE" = "true" ]; then trace_env=(THAW_JS_TRACE=1 THAW_JS_TRACE_WIRE=1); fi
           cd "$RUNNER_TEMP" && env THAW_JS_HINT_STATS=1 THAW_JS_COMPILE=on THAW_JS_COMPILE_STATS=1 "${trace_env[@]}" ./prog > out/stdout.txt 2> out/stats.txt && head -3 out/stdout.txt
+          # Same-run wall time of the plain binary with the closure compiler off and on (best of 3).
+          : > out/timing.txt
+          for m in off on; do
+            best=
+            for i in 1 2 3; do
+              t0=$(date +%s%N); THAW_JS_COMPILE=$m ./prog > /dev/null 2>&1 || true; t1=$(date +%s%N)
+              ms=$(( (t1 - t0) / 1000000 )); if [ -z "$best" ] || [ "$ms" -lt "$best" ]; then best=$ms; fi
+            done
+            echo "compile=$m run_ms=$best" | tee -a out/timing.txt
+          done
           echo "---- interpreter stats (stderr of the run above) ----"; tail -60 out/stats.txt || true
           if [ "$TRACE_WIRE" = "true" ]; then grep -n "exc packet\|thaw-js callback result" out/stats.txt | head -40 > out/trace-exc.txt || true; echo "---- exception packet trace ----"; cat out/trace-exc.txt; fi
       - name: Profile with perf
@@ -163,7 +178,7 @@ jobs:
           set -euo pipefail
           # -e cpu-clock: software clock, works without a virtualized PMU. 499 Hz keeps perf.data modest.
           perf record -e cpu-clock -F 499 -g --call-graph fp -o perf.data -- \
-            bash -c 'for i in $(seq "$ITERATIONS"); do ./prog > /dev/null; done'
+            env THAW_JS_COMPILE=${{ inputs.compile }} bash -c 'for i in $(seq "$ITERATIONS"); do ./prog > /dev/null; done'
           perf report -i perf.data --no-children --sort symbol -g none --stdio 2>/dev/null \
             | awk '/^ *[0-9]+\.[0-9]+%/ { p = $1; sub(/%/, "", p); s = $0; sub(/^ *[0-9.]+% +\[[^]]\] +/, "", s); print p "\t" s }' \
             > out/flat.tsv
@@ -174,7 +189,7 @@ jobs:
         run: |
           set -euo pipefail
           # ~50-100x slowdown: set workload_n=2 for bcryptjs. ITERATIONS applies to perf only.
-          valgrind --tool=callgrind --callgrind-out-file=callgrind.out ./prog > /dev/null 2> out/callgrind.log
+          THAW_JS_COMPILE=${{ inputs.compile }} valgrind --tool=callgrind --callgrind-out-file=callgrind.out ./prog > /dev/null 2> out/callgrind.log
           # --threshold=100: default 99 would drop the tail of the function list.
           callgrind_annotate --inclusive=no --threshold=100 callgrind.out > out/callgrind.txt
           # lines look like "1,234,567 (12.34%)  file:function [binary]"
@@ -230,5 +245,6 @@ jobs:
             ${{ runner.temp }}/out/*.log
             ${{ runner.temp }}/out/inspect.txt
             ${{ runner.temp }}/out/stats.txt
+            ${{ runner.temp }}/out/timing.txt
             ${{ runner.temp }}/out/trace-exc.txt
           if-no-files-found: ignore
