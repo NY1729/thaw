@@ -5,11 +5,14 @@
 mod analyze;
 #[cfg(test)]
 mod analyze_tests;
+mod call;
 mod check;
 #[cfg(test)]
 mod check_mode_tests;
 #[cfg(test)]
 mod diff_tests;
+#[cfg(test)]
+mod diff_tests_calls;
 #[cfg(test)]
 mod diff_tests_ctl;
 #[cfg(test)]
@@ -80,7 +83,8 @@ pub(crate) fn stats_level(v: Option<&str>) -> u8 {
 /// Why a function stays on the AST interpreter. The blocker of highest `priority` is the verdict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FallbackReason {
-    /// Calls and `new`: the C3 call path is not compiled yet.
+    /// Calls and `new`. No longer produced (C3 compiles them through `call.rs`); kept for its name in the stats.
+    #[allow(dead_code)]
     NotYet,
     // Permanent (plan 1.3, 1.7): the function stays on the AST interpreter.
     With,
@@ -547,8 +551,9 @@ impl Interp {
             CState::Never(r) => self.cstats.calls_rejected[*r as usize] += 1,
             CState::Cold(_) => {}
         }
-        // constructor calls stay on the AST (`new.target` plumbing is C3+); `class` bodies are analyzer-blocked
-        if new_target.is_some() || def.class.is_some() {
+        // a constructor call runs compiled unless the body reads `new.target` (the analyzer blocks that anyway);
+        // `class` bodies stay on the AST
+        if (new_target.is_some() && def.uses_new_target) || def.class.is_some() {
             return None;
         }
         let CState::Compiled(c) = &*st else {
