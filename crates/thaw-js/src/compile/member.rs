@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use thaw_parser::ast as a;
 
+use super::elem;
 use super::expr::{self, combine, mk_ex};
 use super::gen::{reject, Gen, CG};
 use super::num::{self, Side};
@@ -96,6 +97,9 @@ fn store(it: &mut Interp, loc: &MLoc, v: Value) -> R<()> {
 
 /// `o.p` / `o[e]` as a value.
 pub(crate) fn read(g: &mut Gen, m: &a::MemberExpr) -> CG<Ex> {
+    if let Some(el) = elem::compile(g, m)? {
+        return Ok(elem::ex(el));
+    }
     let obj = expr::compile(g, &m.obj)?;
     let key = prop_key(g, &m.prop)?;
     Ok(mk_ex(move |it, f| {
