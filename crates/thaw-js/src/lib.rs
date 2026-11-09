@@ -1939,7 +1939,7 @@ impl Interp {
     ) -> R<Value> {
         let new_target = self.rt.pending_nt.take();
         if self.compile_mode != compile::CompileMode::Off {
-            if let Some(r) = self.try_compiled(def, scope, this, args, &new_target) {
+            if let Some(r) = self.try_compiled(f, def, scope, this, args, &new_target) {
                 return r;
             }
         }

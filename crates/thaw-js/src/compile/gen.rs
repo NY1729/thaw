@@ -130,6 +130,7 @@ pub(crate) fn compile(def: &FuncDef, plan: &FnPlan) -> CG<CompiledFn> {
         arrow: def.arrow,
         uses_this: def.uses_this,
         strict: def.strict,
+        pure_kernel: plan.pure_kernel,
     })
 }
 
