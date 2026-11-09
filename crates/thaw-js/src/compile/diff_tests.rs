@@ -256,8 +256,8 @@ fn pr1_function_with_a_call_stays_on_the_ast() {
         CompileMode::On,
     )
     .2;
-    assert_eq!(it.cstats.compiled(), 0);
-    assert!(it.cstats.rejected(FallbackReason::NotYet) >= 1);
+    // C3: calls now compile
+    assert!(it.cstats.compiled() >= 1);
 }
 
 /// `new` of a leaf function returns the constructed object, whatever the compiled body would return.

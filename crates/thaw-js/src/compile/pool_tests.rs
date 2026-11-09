@@ -49,6 +49,7 @@ fn nested_entry_takes_its_own_buffer() {
         console.log(String(g(o)));");
     assert_eq!(it.out, vec!["11".to_string(), "11".to_string()]);
     assert!(it.cstats.compiled() >= 2, "f and g must compile");
-    assert_eq!(it.frame_pool.len(), 2);
+    // C3: calls now compile (the getter is compiled too, so three frames are live at once)
+    assert_eq!(it.frame_pool.len(), 3);
     assert!(it.frame_pool.iter().all(|v| v.is_empty()));
 }

@@ -535,7 +535,6 @@ impl Visit for Walk {
                 }
             }
         }
-        self.block(FallbackReason::NotYet);
         self.impure = true;
         n.visit_children_with(self);
     }
@@ -546,7 +545,6 @@ impl Visit for Walk {
                 self.block(FallbackReason::FunctionCtor);
             }
         }
-        self.block(FallbackReason::NotYet);
         self.impure = true;
         n.visit_children_with(self);
     }

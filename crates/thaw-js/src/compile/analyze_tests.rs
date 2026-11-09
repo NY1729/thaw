@@ -348,13 +348,16 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         Some(R::InstanceOfIn),
         "o:slot | free: Array",
     ),
-    ("function f(a) { return a() }", Some(R::NotYet), "a:slot"),
+    // C3: calls now compile
+    ("function f(a) { return a() }", None, "a:slot"),
     (
         "function f() { return new Date() }",
-        Some(R::NotYet),
+        // C3: calls now compile
+        None,
         "| free: Date",
     ),
-    ("function f(a) { return a.b() }", Some(R::NotYet), "a:slot"),
+    // C3: calls now compile
+    ("function f(a) { return a.b() }", None, "a:slot"),
     (
         "function f() { return { __proto__: null } }",
         Some(R::ProtoLiteralKey),
@@ -539,9 +542,11 @@ fn stats_follow_the_cstate_transitions() {
     let s = &it.cstats;
     assert_eq!(s.calls(), 18);
     assert_eq!(s.eligible(), 1);
-    assert_eq!(s.rejected(R::NotYet), 1);
+    // C3: calls now compile
+    assert_eq!(s.rejected(R::NotYet), 0);
     assert_eq!(s.calls_eligible(), 2);
-    assert_eq!(s.calls_rejected(R::NotYet), 14);
+    // C3: calls now compile
+    assert_eq!(s.calls_rejected(R::NotYet), 0);
 }
 
 #[test]

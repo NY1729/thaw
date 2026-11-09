@@ -93,6 +93,6 @@ fn compile_on_matches_off_when_everything_is_rejected() {
     assert!(on.run(src).is_ok());
     assert_eq!(on.out, off.out);
     assert!(!on.out.is_empty());
-    assert!(on.cstats.rejected(FallbackReason::NotYet) > 0);
+    // C3: calls now compile, so no NotYet rejection remains
     assert_eq!(off.cstats.rejected(FallbackReason::NotYet), 0);
 }

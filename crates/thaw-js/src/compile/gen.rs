@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use thaw_parser::ast as a;
 
-use super::analyze::{DeclKind, FnPlan};
+use super::analyze::{DeclKind, FnPlan, NameClass};
 use super::{expr, stmt, CompiledFn, Ex, FallbackReason};
 use crate::{Body, FuncDef};
 
@@ -104,6 +104,8 @@ pub(crate) fn compile(def: &FuncDef, plan: &FnPlan) -> CG<CompiledFn> {
         || def.is_gen
         || def.is_async
         || plan.names.iter().any(|n| n.kind == DeclKind::SelfName)
+        // no inner function is compiled yet, so no name is scoped: a scoped name here is a bug, not a fallback
+        || plan.names.iter().any(|n| n.class == NameClass::Scoped)
     {
         return reject();
     }

@@ -211,7 +211,8 @@ fn pr3_tier_a_loop_programs_stay_on_the_ast() {
         let (want, ok_want, _) = run_mode(src, CompileMode::Off);
         let (got, ok, it) = run_mode(src, CompileMode::On);
         assert_eq!((got, ok), (want, ok_want), "{src}");
-        assert_eq!(it.cstats.compiled(), 0, "{src}");
+        // C3: calls now compile (a JS prelude function with a call compiles); the tier A function itself is
+        // still rejected, asserted by the ReadBeforeDecl count below
         assert_eq!(
             it.cstats.rejected(FallbackReason::ReadBeforeDecl),
             1,

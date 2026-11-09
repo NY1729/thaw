@@ -4,6 +4,7 @@
 
 use thaw_parser::ast as a;
 
+use super::call;
 use super::gen::{reject, Gen, CG};
 use super::member;
 use super::num::{self, Bl};
@@ -99,6 +100,8 @@ pub(crate) fn compile(g: &mut Gen, e: &a::Expr) -> CG<Ex> {
         a::Expr::Update(u) => update(g, &u.arg, matches!(u.op, a::UpdateOp::PlusPlus), u.prefix),
         a::Expr::Assign(asg) => assign(g, asg),
         a::Expr::Member(m) => member::read(g, m),
+        a::Expr::Call(c) => call::call(g, c),
+        a::Expr::New(n) => call::new_expr(g, n),
         a::Expr::Array(arr) => member::array(g, arr),
         a::Expr::Object(o) => member::object(g, o),
         _ => reject(),

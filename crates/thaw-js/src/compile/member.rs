@@ -13,7 +13,7 @@ use super::{bx, Ex, Frame, CR};
 use crate::{bigint, put, Interp, Value, R};
 
 /// The property of a member expression or literal, decided at compile time.
-enum PropKey {
+pub(crate) enum PropKey {
     Name(Rc<str>),
     Computed(Ex),
     /// A computed key that is a Number by construction (a bitwise node): no `Value` is built for it.
@@ -26,7 +26,7 @@ enum MLoc {
     Prop(Value, Rc<str>),
 }
 
-fn prop_key(g: &mut Gen, p: &a::MemberProp) -> CG<PropKey> {
+pub(crate) fn prop_key(g: &mut Gen, p: &a::MemberProp) -> CG<PropKey> {
     match p {
         a::MemberProp::Ident(i) => Ok(PropKey::Name(Rc::from(i.sym.as_ref()))),
         a::MemberProp::Computed(c) => Ok(match num::operand(g, &c.expr)? {
@@ -58,6 +58,22 @@ fn locate(it: &mut Interp, f: &mut Frame, obj: Value, key: &PropKey) -> CR<MLoc>
                 return Ok(MLoc::Index(obj, n as usize));
             }
             Ok(MLoc::Prop(obj, it.key_of(&Value::Number(n))))
+        }
+    }
+}
+
+/// The key of a callee `o.p` / `o[e]` as the AST call arm builds it (`member_key`): a computed key goes through
+/// `key_of` only, with no integer shortcut.
+pub(crate) fn callee_key(it: &mut Interp, f: &mut Frame, key: &PropKey) -> CR<Rc<str>> {
+    match key {
+        PropKey::Name(n) => Ok(n.clone()),
+        PropKey::Computed(e) => {
+            let v = e(it, f)?;
+            Ok(it.key_of(&v))
+        }
+        PropKey::Num(e) => {
+            let n = e(it, f)?;
+            Ok(it.key_of(&Value::Number(n)))
         }
     }
 }
