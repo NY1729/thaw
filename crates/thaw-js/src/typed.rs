@@ -80,22 +80,23 @@ pub(crate) struct TypedArr {
 }
 
 impl TypedArr {
+    #[inline]
     pub(crate) fn get(&self, i: usize) -> Option<f64> {
         if i >= self.len {
             return None;
         }
         let d = self.data.borrow();
         let p = self.off + i * self.ty.size();
-        let b = &d[p..p + self.ty.size()];
+        // one bounds check per read: a fixed-size copy of the element bytes
         Some(match self.ty {
-            Ty::I8 => b[0] as i8 as f64,
-            Ty::U8 | Ty::U8C => b[0] as f64,
-            Ty::I16 => i16::from_le_bytes([b[0], b[1]]) as f64,
-            Ty::U16 => u16::from_le_bytes([b[0], b[1]]) as f64,
-            Ty::I32 => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
-            Ty::U32 => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
-            Ty::F32 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
-            Ty::F64 => f64::from_le_bytes(b.try_into().unwrap()),
+            Ty::I8 => d.get(p).copied()? as i8 as f64,
+            Ty::U8 | Ty::U8C => d.get(p).copied()? as f64,
+            Ty::I16 => i16::from_le_bytes(d.get(p..p + 2)?.try_into().ok()?) as f64,
+            Ty::U16 => u16::from_le_bytes(d.get(p..p + 2)?.try_into().ok()?) as f64,
+            Ty::I32 => i32::from_le_bytes(d.get(p..p + 4)?.try_into().ok()?) as f64,
+            Ty::U32 => u32::from_le_bytes(d.get(p..p + 4)?.try_into().ok()?) as f64,
+            Ty::F32 => f32::from_le_bytes(d.get(p..p + 4)?.try_into().ok()?) as f64,
+            Ty::F64 => f64::from_le_bytes(d.get(p..p + 8)?.try_into().ok()?),
         })
     }
 

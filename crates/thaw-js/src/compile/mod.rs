@@ -18,11 +18,14 @@ mod diff_tests_ctl;
 #[cfg(test)]
 mod diff_tests_direct;
 #[cfg(test)]
+mod diff_tests_elem;
+#[cfg(test)]
 mod diff_tests_mem;
 #[cfg(test)]
 mod diff_tests_num2;
 #[cfg(test)]
 mod diff_tests_self;
+mod elem;
 mod expr;
 #[cfg(test)]
 mod fuzz_tests;
@@ -309,6 +312,15 @@ pub(crate) struct Stats {
     /// Test-only: run-time hits of the Number-Number fast path of a bitwise or fused numeric node.
     #[cfg(test)]
     nm_fast_hits: u64,
+    /// Test-only: element-read nodes built (`elem.rs`), summed over compiled functions.
+    #[cfg(test)]
+    elem_built: u64,
+    /// Test-only: run-time hits of the element fast path (a Number element of an Array or typed array).
+    #[cfg(test)]
+    elem_fast: u64,
+    /// Test-only: run-time element reads that took the interpreter helper.
+    #[cfg(test)]
+    elem_slow: u64,
 }
 
 impl Default for Stats {
@@ -335,6 +347,12 @@ impl Stats {
             bit_ex_built: 0,
             #[cfg(test)]
             nm_fast_hits: 0,
+            #[cfg(test)]
+            elem_built: 0,
+            #[cfg(test)]
+            elem_fast: 0,
+            #[cfg(test)]
+            elem_slow: 0,
         }
     }
 
@@ -421,6 +439,44 @@ impl Stats {
     pub(crate) fn note_bit_ex_built(&mut self, n: u64) {
         self.bit_ex_built += n;
     }
+
+    #[cfg(test)]
+    pub(crate) fn note_elem_built(&mut self, n: u64) {
+        self.elem_built += n;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn elem_built(&self) -> u64 {
+        self.elem_built
+    }
+
+    #[cfg(test)]
+    pub(crate) fn elem_fast(&self) -> u64 {
+        self.elem_fast
+    }
+
+    #[cfg(test)]
+    pub(crate) fn elem_slow(&self) -> u64 {
+        self.elem_slow
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_elem_fast(&mut self) {
+        self.elem_fast += 1;
+    }
+
+    #[cfg(not(test))]
+    #[inline]
+    pub(crate) fn note_elem_fast(&mut self) {}
+
+    #[cfg(test)]
+    pub(crate) fn note_elem_slow(&mut self) {
+        self.elem_slow += 1;
+    }
+
+    #[cfg(not(test))]
+    #[inline]
+    pub(crate) fn note_elem_slow(&mut self) {}
 
     #[cfg(test)]
     pub(crate) fn calls_rejected(&self, reason: FallbackReason) -> u64 {
@@ -531,6 +587,9 @@ pub(crate) struct CompiledFn {
     /// Test-only: bitwise operator nodes this function's codegen built.
     #[cfg(test)]
     pub(crate) bit_ex_built: u64,
+    /// Test-only: element-read nodes this function's codegen built.
+    #[cfg(test)]
+    pub(crate) elem_built: u64,
 }
 
 /// Compiled and interpreted `Ctl` are the same error: this unboxes a compiled error back to `R`.
@@ -579,6 +638,8 @@ impl Interp {
                             Ok(c) => {
                                 #[cfg(test)]
                                 self.cstats.note_bit_ex_built(c.bit_ex_built);
+                                #[cfg(test)]
+                                self.cstats.note_elem_built(c.elem_built);
                                 *st = CState::Compiled(Rc::new(c));
                                 self.cstats.compiled += 1;
                                 if self.compile_stats && self.cstats.level() >= 2 {
