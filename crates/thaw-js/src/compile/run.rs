@@ -43,7 +43,7 @@ impl CompiledFn {
             match st(it, &mut frame) {
                 Ok(Flow::Next) => {}
                 Ok(Flow::Return) => return Ok(std::mem::replace(&mut frame.ret, Value::Undefined)),
-                // break/continue cannot leave a function body (labels and loops are C2 PR3)
+                // break/continue are compiled only inside a loop, so they cannot leave the body
                 Ok(_) => return Ok(Value::Undefined),
                 // an expression-level `Ctl::Return` (generator resumption) is a return value, as in the AST
                 Err(b) => {

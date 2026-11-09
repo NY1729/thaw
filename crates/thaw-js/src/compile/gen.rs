@@ -32,6 +32,8 @@ pub(crate) struct Gen {
     scopes: Vec<Vec<Local>>,
     next_slot: u32,
     pub(crate) arrow: bool,
+    /// Loops enclosing the statement being compiled: an unlabeled `break`/`continue` needs one.
+    pub(crate) loops: u32,
 }
 
 impl Gen {
@@ -40,6 +42,7 @@ impl Gen {
             scopes: vec![Vec::new()],
             next_slot: 0,
             arrow,
+            loops: 0,
         }
     }
 

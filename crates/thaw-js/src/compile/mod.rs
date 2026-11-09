@@ -8,6 +8,8 @@ mod analyze_tests;
 mod check;
 #[cfg(test)]
 mod diff_tests;
+#[cfg(test)]
+mod diff_tests_ctl;
 mod expr;
 mod gen;
 mod run;
@@ -392,8 +394,7 @@ impl Drop for Stats {
     }
 }
 
-/// Completion of a compiled statement. `Break`/`Continue` are produced only from C2 PR3 on.
-#[allow(dead_code)]
+/// Completion of a compiled statement. Only unlabeled `break`/`continue` inside a loop are produced (`0`).
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Flow {
     Next,
