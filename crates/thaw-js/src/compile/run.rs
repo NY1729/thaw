@@ -12,6 +12,7 @@ impl CompiledFn {
     pub(crate) fn run(
         &self,
         it: &mut Interp,
+        callee: &Value,
         scope: &Rc<Scope>,
         this: &Value,
         args: &[Value],
@@ -30,6 +31,9 @@ impl CompiledFn {
         // and takes its own buffer, so no live frame is ever shared
         let mut slots = it.frame_pool.pop().unwrap_or_default();
         slots.resize(self.nslots as usize, Value::Undefined);
+        if let Some(k) = self.self_slot {
+            slots[k as usize] = callee.clone();
+        }
         // in argument order, so a duplicate parameter name ends with the last argument (as `insert` does)
         for (i, slot) in self.param_slots.iter().enumerate() {
             if let Some(k) = slot {

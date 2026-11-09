@@ -99,17 +99,21 @@ impl Gen {
 
 /// Compiles an analyzer-accepted function. `plan` only contributes the decisions the analyzer owns.
 pub(crate) fn compile(def: &FuncDef, plan: &FnPlan) -> CG<CompiledFn> {
-    // the self name of a named function expression is a slot the prologue must fill: not in C2 PR1
     if def.class.is_some()
         || def.is_gen
         || def.is_async
-        || plan.names.iter().any(|n| n.kind == DeclKind::SelfName)
         // no inner function is compiled yet, so no name is scoped: a scoped name here is a bug, not a fallback
         || plan.names.iter().any(|n| n.class == NameClass::Scoped)
     {
         return reject();
     }
     let mut g = Gen::new(def.arrow);
+    // the self name: the prologue stores the callee here, before the parameters; a `var` of the same name reuses it
+    let self_slot = plan
+        .names
+        .iter()
+        .find(|n| n.kind == DeclKind::SelfName)
+        .map(|n| g.declare_fn(&n.name, true));
     let mut param_slots = Vec::with_capacity(def.params.len());
     for p in &def.params {
         let a::Pat::Ident(b) = p else {
@@ -124,8 +128,13 @@ pub(crate) fn compile(def: &FuncDef, plan: &FnPlan) -> CG<CompiledFn> {
         Body::Block(stmts) => (stmt::body(&mut g, stmts)?, None),
         Body::Expr(e) => (Vec::new(), Some(expr::compile(&mut g, e)?)),
     };
+    debug_assert_eq!(
+        g.next_slot, plan.nslots,
+        "slot count of the analyzer and codegen differ"
+    );
     Ok(CompiledFn {
         nslots: g.next_slot,
+        self_slot,
         param_slots,
         body,
         expr_body,

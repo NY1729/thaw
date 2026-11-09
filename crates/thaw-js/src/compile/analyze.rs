@@ -161,6 +161,11 @@ impl Walk {
         if self.fn_depth > 0 {
             return;
         }
+        // a body-level `let`/`const`/`class` of the self name replaces the self binding in the interpreter's
+        // frame, so it stays on the AST (a nested block shadow is an ordinary slot)
+        if frame == 1 && kind.lexical() && self.self_name.as_deref() == Some(name) {
+            self.block(FallbackReason::SelfBinding);
+        }
         let idx = self.decls.len();
         self.decls.push(Decl {
             name: name.to_string(),
@@ -169,6 +174,16 @@ impl Walk {
             in_switch,
         });
         self.frames[frame].push(idx);
+    }
+
+    /// The self name of a named function, unless a parameter or function declaration already holds the name.
+    fn declare_self(&mut self, name: Option<&str>) {
+        if let Some(name) = name {
+            if !self.frames[0].iter().any(|&i| self.decls[i].name == name) {
+                self.declare_fn_level(name, DeclKind::SelfName);
+                self.self_name = Some(name.to_string());
+            }
+        }
     }
 
     /// A function-level name; a name declared earlier (parameter, `var`, function) keeps its record.
@@ -397,9 +412,7 @@ impl Visit for Walk {
         match self.resolve(name) {
             Some(i) => {
                 let kind = self.decls[i].kind;
-                if kind == DeclKind::SelfName {
-                    self.block(FallbackReason::SelfBinding);
-                } else if kind.lexical() {
+                if kind.lexical() {
                     self.reads.push((i, n.span.lo.0));
                 }
             }
@@ -774,6 +787,19 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
             _ => w.block(FallbackReason::Destructuring),
         }
     }
+    // The self name is a slot only when the body mentions it (plan 1.3). It is declared after the parameters
+    // and function declarations (which win, as the interpreter's bindings do) and before the `var`s, so a
+    // `var` of the same name reuses it: the interpreter's `declare_if_absent` keeps the callee.
+    let mut idents = IdentNames(Default::default());
+    def.params.visit_with(&mut idents);
+    match &def.body {
+        Body::Block(stmts) => stmts.visit_with(&mut idents),
+        Body::Expr(e) => e.visit_with(&mut idents),
+    }
+    let self_name = def
+        .name
+        .as_deref()
+        .filter(|n| def.bind_self && idents.0.contains(*n));
     if let Body::Block(stmts) = &def.body {
         let mut vars = VarNames(Vec::new());
         for s in stmts {
@@ -782,26 +808,12 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
                 _ => s.visit_with(&mut vars),
             }
         }
+        w.declare_self(self_name);
         for name in vars.0 {
             w.declare_fn_level(&name, DeclKind::Var);
         }
-    }
-    // The self name is a slot only when the body mentions it (plan 1.3).
-    let mut idents = IdentNames(Default::default());
-    def.params.visit_with(&mut idents);
-    match &def.body {
-        Body::Block(stmts) => stmts.visit_with(&mut idents),
-        Body::Expr(e) => e.visit_with(&mut idents),
-    }
-    if let Some(name) = def
-        .name
-        .as_deref()
-        .filter(|n| def.bind_self && idents.0.contains(*n))
-    {
-        if !w.frames[0].iter().any(|&i| w.decls[i].name == name) {
-            w.declare_fn_level(name, DeclKind::SelfName);
-            w.self_name = Some(name.to_string());
-        }
+    } else {
+        w.declare_self(self_name);
     }
     for p in &def.params {
         w.pat_refs(p);

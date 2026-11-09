@@ -19,6 +19,8 @@ mod diff_tests_ctl;
 mod diff_tests_direct;
 #[cfg(test)]
 mod diff_tests_mem;
+#[cfg(test)]
+mod diff_tests_self;
 mod expr;
 #[cfg(test)]
 mod fuzz_tests;
@@ -477,6 +479,8 @@ pub(crate) struct Frame {
 /// A compiled function body. `run` is in `run.rs`.
 pub(crate) struct CompiledFn {
     pub(crate) nslots: u32,
+    /// The slot of the function's own name (a named function), filled with the callee on every call.
+    pub(crate) self_slot: Option<u32>,
     /// Per parameter position, the slot of that parameter name (a duplicate name shares its slot).
     pub(crate) param_slots: Vec<Option<u32>>,
     /// Block body statements (empty for an expression body).
@@ -587,6 +591,6 @@ impl Interp {
         if check::applies(self.compile_mode, &c) {
             return Some(self.run_checked(f, def, scope, this, args, &c));
         }
-        Some(c.run(self, scope, this, args))
+        Some(c.run(self, f, scope, this, args))
     }
 }

@@ -130,7 +130,7 @@ impl Interp {
         self.cstats.compiled_calls += 1;
         self.cstats.note_direct_call();
         let caller_run = std::mem::replace(&mut self.run_id, src_run);
-        let r = c.run(self, &scope, this, args);
+        let r = c.run(self, f, &scope, this, args);
         self.run_id = caller_run;
         self.depth -= 1;
         r

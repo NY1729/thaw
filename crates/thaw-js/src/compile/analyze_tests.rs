@@ -222,11 +222,8 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         "g:slot",
     ),
     // named function expressions: the self name is a Slot, a reference to it is a blocker
-    (
-        "var f = function g() { return g }",
-        Some(R::SelfBinding),
-        "g:slot",
-    ),
+    // self-binding compiles
+    ("var f = function g() { return g }", None, "g:slot"),
     ("var f = function g() { return 1 }", None, ""),
     ("var f = function g(g) { return g }", None, "g:slot"),
     ("function f() { var f = 1; return f }", None, "f:slot"),
@@ -532,8 +529,8 @@ fn analysis_is_pure_and_does_not_touch_cstate() {
 #[test]
 fn stats_follow_the_cstate_transitions() {
     // add: call 1 is cold, call 2 analyses it (eligible), call 3 is an eligible call.
-    // fib(5) makes 15 calls: the first is cold, the second analyses it (rejected: calls and new),
-    // the other 13 are rejected calls, plus the second call itself.
+    // fib(5) makes 15 calls: the first is cold, the second analyses it (eligible: self-binding compiles),
+    // the other 13 are eligible calls, plus the second call itself.
     let src = "function add(a, b) { return a + b } \
                function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2) } \
                add(1, 2); add(3, 4); add(5, 6); fib(5);";
@@ -541,10 +538,12 @@ fn stats_follow_the_cstate_transitions() {
     it.run(src).unwrap();
     let s = &it.cstats;
     assert_eq!(s.calls(), 18);
-    assert_eq!(s.eligible(), 1);
+    // self-binding compiles
+    assert_eq!(s.eligible(), 2);
     // C3: calls now compile
     assert_eq!(s.rejected(R::NotYet), 0);
-    assert_eq!(s.calls_eligible(), 2);
+    // self-binding compiles
+    assert_eq!(s.calls_eligible(), 16);
     // C3: calls now compile
     assert_eq!(s.calls_rejected(R::NotYet), 0);
 }
