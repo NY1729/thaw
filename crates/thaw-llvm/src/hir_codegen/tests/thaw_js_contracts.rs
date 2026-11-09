@@ -359,3 +359,34 @@ fn thaw_js_callback_adapter_registers_host_operations_before_graph_decode() {
     let decode = body.find("@thaw_json_graph_decode(").expect(body);
     assert!(register < decode, "{body}");
 }
+
+#[test]
+fn async_throw_of_a_jsvalue_records_its_handle_id_before_the_tag_seven_store() {
+    // The tag-7 packet carries the live handle id in its i64 slot, so a Promise hop on another
+    // thread can still resolve the thrown object.
+    let source = "declare function __thaw_typed_tjs_783a3a6166746572(value: string): JsValue;
+         async function fail(): Promise<void> { const r = __thaw_typed_tjs_783a3a6166746572(\"hi\"); throw r; }
+         function main(): void { fail(); }";
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_async_throw_handle_id");
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let lines: Vec<&str> = ir.lines().collect();
+    let handle_call = lines
+        .iter()
+        .position(|line| line.contains("call i64 @thaw_json_borrowed_handle_id("))
+        .unwrap_or_else(|| panic!("{ir}"));
+    let handle_name = lines[handle_call].split(" = ").next().unwrap().trim();
+    let id_store = lines
+        .iter()
+        .position(|line| line.contains(&format!("store i64 {handle_name}, ptr @__thaw_pending_exception_i64")))
+        .unwrap_or_else(|| panic!("{ir}"));
+    let tag_store = lines
+        .iter()
+        .position(|line| line.contains("store i64 7, ptr @__thaw_pending_exception_value_tag"))
+        .unwrap_or_else(|| panic!("{ir}"));
+    assert!(handle_call < id_store && id_store < tag_store, "{ir}");
+}

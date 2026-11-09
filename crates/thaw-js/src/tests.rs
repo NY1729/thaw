@@ -3668,6 +3668,25 @@ fn exception_packet_tag7_live_handle_rethrows_the_original_object() {
     assert!(crate::host::original_js_exception_with(&packet, |_| id).is_none());
 }
 
+#[test]
+fn exception_packet_tag7_recorded_handle_id_resolves_when_lookup_misses() {
+    // A throw on another thread: the tracked-root lookup misses (0), but the id recorded in the
+    // packet's i64 slot still resolves to the original object.
+    let mut it = Interp::new();
+    let Ok(Value::Object(original)) = it.run("({ code: 'ERR_BAD_REQUEST' })") else {
+        panic!("object literal did not evaluate to an object");
+    };
+    let id = crate::host::store_handle(0, Value::Object(original.clone())) as u64;
+    let packet = primitive_exception_packet(7, 0.0, id as i64, false, 0x1234);
+    let Some(Value::Object(found)) = crate::host::original_js_exception_with(&packet, |_| 0) else {
+        panic!("tag-7 packet with a recorded handle id did not yield the original object");
+    };
+    assert!(Rc::ptr_eq(&original, &found));
+    // No recorded id and no lookup hit stays on the framed-Error path.
+    let packet = primitive_exception_packet(7, 0.0, 0, false, 0x1234);
+    assert!(crate::host::original_js_exception_with(&packet, |_| 0).is_none());
+}
+
 /// A busy worker keeps the thaw-js loop alive; a native continuation that a timer made ready must still run inside
 /// that loop (the compiled terminal loop's `turn_hook`), or the awaited `terminate()` never runs.
 #[test]

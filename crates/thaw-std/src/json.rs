@@ -12389,6 +12389,21 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn tracked_root_membership_is_per_thread_but_the_handle_id_is_not() {
+        // The packet's recorded handle id is read on whichever thread finishes the Promise, while
+        // the tracked-root table is thread-local: the id resolves on any thread, the lookup only here.
+        let address = std::thread::spawn(|| {
+            let tracked = thaw_json_track_arena_owned_root(host_array_test_value(9));
+            tracked as usize
+        })
+        .join()
+        .unwrap();
+        let value = address as *const Value;
+        assert_eq!(unsafe { thaw_json_borrowed_handle_id(value) }, 9);
+        assert_eq!(unsafe { thaw_json_borrowed_tracked_handle_id(value) }, 0);
+    }
+
     fn host_array_test_length(handle: u64) -> i64 {
         let value = host_array_test_value(handle);
         let length = thaw_json_array_length(value);

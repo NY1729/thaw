@@ -1557,6 +1557,12 @@ pub(crate) fn graph_result(r: Result<String, String>) -> ThawResult {
 /// not assimilated), a primitive is copied.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_capture_handle_graph_result(handle: u64) -> ThawResult {
+    if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
+        eprintln!(
+            "thaw-js capture handle={handle} thread={:?}",
+            std::thread::current().id()
+        );
+    }
     graph_result(on_handle(handle, |p, owner, v| {
         let mut out = WireOut {
             owner,
@@ -3468,15 +3474,22 @@ pub(crate) fn original_js_exception_with(
     packet: &thaw_arena::exception::ExceptionPacket,
     lookup: impl FnOnce(usize) -> u64,
 ) -> Option<Value> {
-    let id = if packet.tag == 7 && packet.object != 0 {
+    let looked_up = if packet.tag == 7 && packet.object != 0 {
         lookup(packet.object)
     } else {
         0
     };
+    // The throwing thread recorded the handle id in `bigint` (the tag-7 i64 slot). The tracked-root
+    // lookup can miss on another thread, so fall back to it.
+    let id = if looked_up != 0 {
+        looked_up
+    } else {
+        packet.bigint
+    };
     if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
         eprintln!(
-            "thaw-js exc packet: tag={:#x} object={:#x} pending={:#x} native={:#x} aggregate={:#x} native_text={:#x} lookup={:#x}",
-            packet.tag, packet.object, packet.pending, packet.native, packet.aggregate, packet.native_text, id
+            "thaw-js exc packet: tag={:#x} object={:#x} pending={:#x} native={:#x} aggregate={:#x} native_text={:#x} lookup={:#x} bigint={:#x} thread={:?}",
+            packet.tag, packet.object, packet.pending, packet.native, packet.aggregate, packet.native_text, id, packet.bigint, std::thread::current().id()
         );
     }
     if !(packet.tag == 7 && packet.object != 0 && packet.native == 0 && packet.aggregate == 0) {
