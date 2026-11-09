@@ -1,14 +1,23 @@
-//! Closure-compiling evaluator (TJ143). C1 adds the analyzer (`analyze.rs`) and the coverage stats. Nothing
-//! is compiled yet: `try_compiled` always returns `None`, so every mode runs the AST interpreter.
+//! Closure-compiling evaluator (TJ143). C1 added the analyzer (`analyze.rs`) and the coverage stats. C2 PR1
+//! (plan TJ150) adds the plumbing and compiles the straight-line leaf subset (`gen.rs`, `expr.rs`,
+//! `stmt.rs`, `run.rs`). Any function outside the subset stays on the AST interpreter.
 
 mod analyze;
 #[cfg(test)]
 mod analyze_tests;
 mod check;
 #[cfg(test)]
+mod diff_tests;
+mod expr;
+mod gen;
+mod run;
+mod stmt;
+#[cfg(test)]
 mod tests;
 
-use super::{FuncDef, Interp, Value, R};
+use std::rc::Rc;
+
+use super::{Ctl, FuncDef, Interp, Scope, Value, R};
 
 pub(crate) use analyze::analyze;
 
@@ -217,10 +226,12 @@ impl FallbackReason {
 }
 
 /// Per-function lazy state: `Cold(n)` counts calls; the analysis then accepts the function (`Eligible`)
-/// or rejects it for good (`Never`). Compiled bodies arrive in C2.
+/// or rejects it for good (`Never`). An accepted function is `Compiled` when code generation supports it;
+/// `Eligible` with no code means the analyzer accepted it but codegen did not (it runs on the AST).
 pub(crate) enum CState {
     Cold(u32),
     Eligible,
+    Compiled(Rc<CompiledFn>),
     Never(FallbackReason),
 }
 
@@ -238,7 +249,7 @@ impl CState {
                 *n = n.saturating_add(1);
                 *n >= after
             }
-            CState::Eligible | CState::Never(_) => false,
+            CState::Eligible | CState::Compiled(_) | CState::Never(_) => false,
         }
     }
 
@@ -259,6 +270,10 @@ pub(crate) struct Stats {
     calls: u64,
     calls_eligible: u64,
     calls_rejected: [u64; FallbackReason::COUNT],
+    /// Functions whose code was generated.
+    compiled: u64,
+    /// Analyzer-accepted functions that codegen refused, by the reason (always `Unsupported` in C2 PR1).
+    codegen_rejected: [u64; FallbackReason::COUNT],
 }
 
 impl Default for Stats {
@@ -276,6 +291,8 @@ impl Stats {
             calls: 0,
             calls_eligible: 0,
             calls_rejected: [0; FallbackReason::COUNT],
+            compiled: 0,
+            codegen_rejected: [0; FallbackReason::COUNT],
         }
     }
 
@@ -291,9 +308,18 @@ impl Stats {
         self.eligible += 1;
     }
 
+    pub(crate) fn record_codegen_rejected(&mut self, reason: FallbackReason) {
+        self.codegen_rejected[reason as usize] += 1;
+    }
+
     #[cfg(test)]
     pub(crate) fn rejected(&self, reason: FallbackReason) -> u64 {
         self.rejected[reason as usize]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compiled(&self) -> u64 {
+        self.compiled
     }
 
     #[cfg(test)]
@@ -341,6 +367,18 @@ impl Stats {
                 );
             }
         }
+        if self.compiled > 0 || self.codegen_rejected.iter().any(|&n| n > 0) {
+            out += &format!("thaw-js compile: compiled={}\n", self.compiled);
+            for (i, reason) in FallbackReason::ALL.iter().enumerate() {
+                if self.codegen_rejected[i] > 0 {
+                    out += &format!(
+                        "  codegen {:<17} functions={}\n",
+                        reason.name(),
+                        self.codegen_rejected[i]
+                    );
+                }
+            }
+        }
         out
     }
 }
@@ -354,7 +392,7 @@ impl Drop for Stats {
     }
 }
 
-/// Compiled bodies take their statements, slots and captured scope from this (C2 onwards).
+/// Completion of a compiled statement. `Break`/`Continue` are produced only from C2 PR3 on.
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Flow {
@@ -365,11 +403,51 @@ pub(crate) enum Flow {
 }
 
 /// Internal error type of compiled closures: boxing `Ctl` keeps `CR<f64>` in two registers.
-#[allow(dead_code)]
-pub(crate) type CR<T> = Result<T, Box<crate::Ctl>>;
+pub(crate) type CR<T> = Result<T, Box<Ctl>>;
 
 const _: () = assert!(std::mem::size_of::<CR<f64>>() == 16);
 const _: () = assert!(std::mem::size_of::<Flow>() <= 4);
+
+/// A compiled expression: one closure per AST node, evaluated against the frame of one call.
+pub(crate) type Ex = Box<dyn Fn(&mut Interp, &mut Frame) -> CR<Value>>;
+/// A compiled statement.
+pub(crate) type St = Box<dyn Fn(&mut Interp, &mut Frame) -> CR<Flow>>;
+
+/// The locals of one call. Declared names live in `slots`; everything else resolves through `scope`.
+pub(crate) struct Frame {
+    /// Parameters first, then `var`s and block-level `let`/`const` (see `gen.rs`).
+    pub(crate) slots: Vec<Value>,
+    /// The CLOSURE's scope: no frame `Scope` is created, so free names resolve from here.
+    pub(crate) scope: Rc<Scope>,
+    /// The call's `this`, already sloppy-normalised (non-arrow functions only).
+    pub(crate) this: Value,
+    /// Set by `return`, read by `CompiledFn::run`.
+    pub(crate) ret: Value,
+}
+
+/// A compiled function body. `run` is in `run.rs`.
+pub(crate) struct CompiledFn {
+    pub(crate) nslots: u32,
+    /// Per parameter position, the slot of that parameter name (a duplicate name shares its slot).
+    pub(crate) param_slots: Vec<Option<u32>>,
+    /// Block body statements (empty for an expression body).
+    pub(crate) body: Vec<St>,
+    /// Arrow functions with an expression body.
+    pub(crate) expr_body: Option<Ex>,
+    pub(crate) arrow: bool,
+    pub(crate) uses_this: bool,
+    pub(crate) strict: bool,
+}
+
+/// Compiled and interpreted `Ctl` are the same error: this unboxes a compiled error back to `R`.
+pub(crate) fn unbox<T>(r: CR<T>) -> R<T> {
+    r.map_err(|b| *b)
+}
+
+/// The inverse of `unbox`, for every call into an interpreter helper.
+pub(crate) fn bx<T>(r: R<T>) -> CR<T> {
+    r.map_err(Box::new)
+}
 
 impl Interp {
     /// A realm with the given compile mode, independent of `THAW_JS_COMPILE`. For tests and embedders.
@@ -379,9 +457,17 @@ impl Interp {
         it
     }
 
-    /// Dispatch from `call_closure_body` (the caller checks `compile_mode != Off` first). Always `None` in
-    /// C1: the analysis only feeds the stats.
-    pub(crate) fn try_compiled(&mut self, def: &FuncDef) -> Option<R<Value>> {
+    /// Dispatch from `call_closure_body` (the caller checks `compile_mode != Off` first). Returns `None` when
+    /// the call must run on the AST: the function is not compiled, it is a constructor call, or it was
+    /// created inside a `with` (its scope chain has a dynamic object record).
+    pub(crate) fn try_compiled(
+        &mut self,
+        def: &FuncDef,
+        scope: &Rc<Scope>,
+        this: &Value,
+        args: &[Value],
+        new_target: &Option<Value>,
+    ) -> Option<R<Value>> {
         let mut st = def.cstate.borrow_mut();
         self.cstats.calls += 1;
         if st.on_call(self.compile_after) {
@@ -389,8 +475,19 @@ impl Interp {
             let name = def.name.as_deref().unwrap_or("<anonymous>");
             match plan.verdict() {
                 Ok(()) => {
-                    *st = CState::Eligible;
                     self.cstats.record_eligible();
+                    // A function created inside `with` never compiles: its scope chain is dynamic.
+                    // Codegen refusals stay `Eligible` (no code, AST path) and are never retried.
+                    *st = CState::Eligible;
+                    if !scope.in_with {
+                        match gen::compile(def, &plan) {
+                            Ok(c) => {
+                                *st = CState::Compiled(Rc::new(c));
+                                self.cstats.compiled += 1;
+                            }
+                            Err(r) => self.cstats.record_codegen_rejected(r),
+                        }
+                    }
                     if self.compile_stats && self.cstats.level() >= 2 {
                         eprintln!(
                             "thaw-js compile: {name} at {}:{}-{} would compile",
@@ -413,10 +510,20 @@ impl Interp {
             }
         }
         match &*st {
-            CState::Eligible => self.cstats.calls_eligible += 1,
+            CState::Eligible | CState::Compiled(_) => self.cstats.calls_eligible += 1,
             CState::Never(r) => self.cstats.calls_rejected[*r as usize] += 1,
             CState::Cold(_) => {}
         }
-        None
+        // constructor calls stay on the AST (`new.target` plumbing is C3+); `class` bodies are analyzer-blocked
+        if new_target.is_some() || def.class.is_some() {
+            return None;
+        }
+        let CState::Compiled(c) = &*st else {
+            return None;
+        };
+        let c = c.clone();
+        // the borrow ends before the body runs: a recursive call re-enters `try_compiled` for this function
+        drop(st);
+        Some(c.run(self, scope, this, args))
     }
 }
