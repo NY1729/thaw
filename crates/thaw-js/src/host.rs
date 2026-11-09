@@ -189,7 +189,7 @@ impl Package {
     /// As [`Package::load`], limiting recursion by the real stack (`stack_bytes` available from here)
     /// instead of the fixed call depth; 0 keeps the depth cap.
     pub fn load_with_stack(bundle_js: &str, stack_bytes: usize) -> Result<Package, HostError> {
-        let parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
+        let mut parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
         if let Some(problem) = parts.esm_problems.iter().next() {
             return Err(HostError::Unsupported((*problem).to_string()));
         }
@@ -205,6 +205,9 @@ impl Package {
             .sources
             .insert(interp.run_id, std::rc::Rc::from(parts.source.as_str()));
         let entry = parts.entry.clone();
+        for (_, func) in parts.factories.iter_mut() {
+            interp.annotate_function(func);
+        }
         let mut factories = HashMap::new();
         for (key, func) in &parts.factories {
             let scope = interp.global.clone();
