@@ -1939,10 +1939,23 @@ impl Interp {
     ) -> R<Value> {
         let new_target = self.rt.pending_nt.take();
         if self.compile_mode != compile::CompileMode::Off {
-            if let Some(r) = self.try_compiled(def) {
+            if let Some(r) = self.try_compiled(def, scope, this, args, &new_target) {
                 return r;
             }
         }
+        self.call_closure_ast(f, def, scope, this, args, new_target)
+    }
+
+    /// The AST body of a call: the path of every function that is not (or not yet) compiled.
+    fn call_closure_ast(
+        &mut self,
+        f: &Value,
+        def: &Rc<FuncDef>,
+        scope: &Rc<Scope>,
+        this: &Value,
+        args: &[Value],
+        new_target: Option<Value>,
+    ) -> R<Value> {
         let frame = Scope::new(Some(scope.clone()));
         // the parameters are the bulk of a frame's bindings: size the list once and seed the filter
         frame.mask.set(def.param_mask);
