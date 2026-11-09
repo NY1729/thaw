@@ -1614,15 +1614,12 @@ impl Interp {
             }
             Value::Str(s) => {
                 if key == "length" {
-                    return Ok(Value::Number(
-                        builtins::str_len_with(s, s.is_ascii_cached()) as f64,
-                    ));
+                    return Ok(Value::Number(s.len16() as f64));
                 }
                 if let Some(i) = array_index(key) {
-                    return Ok(builtins::str_unit_at_with(s, s.is_ascii_cached(), i)
-                        .map_or(Value::Undefined, |u| {
-                            Value::Str(builtins::units_str(&[u]).into())
-                        }));
+                    return Ok(s.unit_at(i).map_or(Value::Undefined, |u| {
+                        Value::Str(builtins::units_str(&[u]).into())
+                    }));
                 }
                 holder = self.string_proto.clone();
                 &holder
@@ -1659,12 +1656,10 @@ impl Interp {
                     }
                     Kind::Wrapper(Value::Str(s)) => {
                         if key == "length" {
-                            Fast::Hit(Value::Number(
-                                builtins::str_len_with(s, s.is_ascii_cached()) as f64,
-                            ))
+                            Fast::Hit(Value::Number(s.len16() as f64))
                         } else {
                             array_index(key)
-                                .and_then(|i| builtins::str_unit_at_with(s, s.is_ascii_cached(), i))
+                                .and_then(|i| s.unit_at(i))
                                 .map_or(Fast::Chain, |u| {
                                     Fast::Hit(Value::Str(builtins::units_str(&[u]).into()))
                                 })
@@ -4359,6 +4354,8 @@ mod prop_configurable_tests;
 mod prop_get_tests;
 #[cfg(test)]
 mod proxy_trap_tests;
+#[cfg(test)]
+mod str_cursor_tests;
 #[cfg(test)]
 mod str_unit_tests;
 #[cfg(test)]
