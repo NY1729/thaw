@@ -165,7 +165,7 @@ pub(crate) fn units_str(u: &[u16]) -> String {
 
 /// `s.length` in UTF-16 code units.
 pub(crate) fn str_len(s: &str) -> usize {
-    str_len_with(s, s.is_ascii())
+    str_len_with(s, crate::jsstr::scan_ascii(s))
 }
 
 /// [`str_len`] when the caller already knows `ascii == s.is_ascii()`.
@@ -175,6 +175,7 @@ pub(crate) fn str_len_with(s: &str, ascii: bool) -> usize {
     } else {
         s.chars()
             .map(|c| {
+                crate::jsstr::walk_step();
                 if (c as u32) >= 0x10000 && (c as u32) < LONE {
                     2
                 } else {
@@ -187,7 +188,7 @@ pub(crate) fn str_len_with(s: &str, ascii: bool) -> usize {
 
 /// UTF-16 unit index -> byte offset (a unit inside a surrogate pair maps to the pair's start).
 pub(crate) fn unit_to_byte(s: &str, ui: usize) -> usize {
-    unit_to_byte_with(s, s.is_ascii(), ui)
+    unit_to_byte_with(s, crate::jsstr::scan_ascii(s), ui)
 }
 
 /// [`unit_to_byte`] when the caller already knows `ascii == s.is_ascii()`.
@@ -197,6 +198,7 @@ pub(crate) fn unit_to_byte_with(s: &str, ascii: bool, ui: usize) -> usize {
     }
     let mut u = 0;
     for (b, c) in s.char_indices() {
+        crate::jsstr::walk_step();
         if u >= ui {
             return b;
         }
@@ -210,7 +212,7 @@ pub(crate) fn unit_to_byte_with(s: &str, ascii: bool, ui: usize) -> usize {
 }
 
 pub(crate) fn byte_to_unit(s: &str, bi: usize) -> usize {
-    byte_to_unit_with(s, s.is_ascii(), bi)
+    byte_to_unit_with(s, crate::jsstr::scan_ascii(s), bi)
 }
 
 /// [`byte_to_unit`] when the caller already knows `ascii == s.is_ascii()`.
@@ -223,19 +225,26 @@ pub(crate) fn byte_to_unit_with(s: &str, ascii: bool, bi: usize) -> usize {
 
 /// `s.slice(a, b)` by UTF-16 unit indices (already clamped to `0..=len`).
 pub(crate) fn str_slice(s: &str, a: usize, b: usize) -> String {
-    if s.is_ascii() {
+    str_slice_with(s, crate::jsstr::scan_ascii(s), a, b)
+}
+
+/// [`str_slice`] when the caller already knows `ascii == s.is_ascii()`.
+pub(crate) fn str_slice_with(s: &str, ascii: bool, a: usize, b: usize) -> String {
+    if ascii {
         return s[a..b].to_string();
     }
     units_str(&str_units(s)[a..b])
 }
 
-pub(crate) fn str_unit_at(s: &str, i: usize) -> Option<u16> {
-    if s.is_ascii() {
+/// [`str_unit_at`] when the caller already knows `ascii == s.is_ascii()`.
+pub(crate) fn str_unit_at_with(s: &str, ascii: bool, i: usize) -> Option<u16> {
+    if ascii {
         return s.as_bytes().get(i).map(|b| u16::from(*b));
     }
     // Walk the chars to the owning one instead of building the whole UTF-16 vector.
     let mut u = 0;
     for c in s.chars() {
+        crate::jsstr::walk_step();
         let cp = c as u32;
         let n = if (0x10000..LONE).contains(&cp) { 2 } else { 1 };
         if i < u + n {
@@ -1797,17 +1806,20 @@ impl Interp {
         self.set_native(&sp, "charAt", |it, this, args| {
             let s = this_str(it, this);
             let i = it.num(&arg(args, 0));
-            Ok(Value::Str(if i >= 0.0 && (i as usize) < str_len(&s) {
-                str_slice(&s, i as usize, i as usize + 1).into()
-            } else {
-                "".into()
-            }))
+            let ascii = s.is_ascii_cached();
+            Ok(Value::Str(
+                if i >= 0.0 && (i as usize) < str_len_with(&s, ascii) {
+                    str_slice_with(&s, ascii, i as usize, i as usize + 1).into()
+                } else {
+                    "".into()
+                },
+            ))
         });
         self.set_native(&sp, "charCodeAt", |it, this, args| {
             let s = this_str(it, this);
             let i = it.num(&arg(args, 0));
             Ok(Value::Number(if i >= 0.0 {
-                str_unit_at(&s, i as usize).map_or(f64::NAN, f64::from)
+                str_unit_at_with(&s, s.is_ascii_cached(), i as usize).map_or(f64::NAN, f64::from)
             } else {
                 f64::NAN
             }))
@@ -1901,12 +1913,14 @@ impl Interp {
         }
         self.set_native(&sp, "slice", |it, this, args| {
             let s = this_str(it, this);
-            let (from, to) = it.range(args, str_len(&s));
-            Ok(Value::Str(str_slice(&s, from, to).into()))
+            let ascii = s.is_ascii_cached();
+            let (from, to) = it.range(args, str_len_with(&s, ascii));
+            Ok(Value::Str(str_slice_with(&s, ascii, from, to).into()))
         });
         self.set_native(&sp, "substring", |it, this, args| {
             let s = this_str(it, this);
-            let n_units = str_len(&s);
+            let ascii = s.is_ascii_cached();
+            let n_units = str_len_with(&s, ascii);
             let clamp = |it: &mut Interp, v: Value, d: usize| match v {
                 Value::Undefined => d,
                 v => {
@@ -1920,11 +1934,12 @@ impl Interp {
             };
             let (a, b) = (clamp(it, arg(args, 0), 0), clamp(it, arg(args, 1), n_units));
             let (from, to) = (a.min(b), a.max(b));
-            Ok(Value::Str(str_slice(&s, from, to).into()))
+            Ok(Value::Str(str_slice_with(&s, ascii, from, to).into()))
         });
         self.set_native(&sp, "substr", |it, this, args| {
             let s = this_str(it, this);
-            let total = str_len(&s);
+            let ascii = s.is_ascii_cached();
+            let total = str_len_with(&s, ascii);
             let n = it.num(&arg(args, 0));
             let from = if n < 0.0 {
                 (total as f64 + n).max(0.0) as usize
@@ -1935,7 +1950,9 @@ impl Interp {
                 Value::Undefined => total - from,
                 v => (it.num(&v).max(0.0) as usize).min(total - from),
             };
-            Ok(Value::Str(str_slice(&s, from, from + len).into()))
+            Ok(Value::Str(
+                str_slice_with(&s, ascii, from, from + len).into(),
+            ))
         });
         self.set_native(&sp, "concat", |it, this, args| {
             let mut s = this_str(it, this).to_string();
