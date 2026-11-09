@@ -879,6 +879,8 @@ pub struct Interp {
     compile_after: u32,
     compile_stats: bool,
     cstats: compile::Stats,
+    /// Recycled slot buffers of compiled calls (`compile/run.rs`); at most `FRAME_POOL_CAP` entries, all empty.
+    frame_pool: Vec<Vec<Value>>,
     /// Process-unique id of this realm: tags the zlib jobs it starts so only it collects their results.
     pub(crate) realm_id: usize,
     depth: usize,
@@ -1012,6 +1014,7 @@ impl Interp {
             cstats: compile::Stats::with_level(compile::stats_level(
                 std::env::var("THAW_JS_COMPILE_STATS").ok().as_deref(),
             )),
+            frame_pool: Vec::new(),
             realm_id: next_realm_id(),
             depth: 0,
             max_depth: MAX_DEPTH,

@@ -593,6 +593,19 @@ jobs:
         run: |
           cargo test --workspace --exclude thaw-cli --exclude thaw-llvm --exclude thaw-registry
           cargo test -p thaw-registry -- --test-threads=1
+      # Non-gating (plan TJ150 section 7, PR7): the thaw-js tests with every eligible function compiled.
+      - name: thaw-js tests with compiled functions (non-gating)
+        continue-on-error: true
+        env:
+          THAW_JS_COMPILE: "on"
+          THAW_JS_COMPILE_AFTER: "1"
+        run: cargo test -p thaw-js
+      - name: thaw-js tests in compile check mode (non-gating)
+        continue-on-error: true
+        env:
+          THAW_JS_COMPILE: "check"
+          THAW_JS_COMPILE_AFTER: "1"
+        run: cargo test -p thaw-js
       - name: Install Prisma example
         run: npm ci --prefix examples/hono-react-prisma-board
       - name: Test Hono, Prisma, and PostgreSQL
