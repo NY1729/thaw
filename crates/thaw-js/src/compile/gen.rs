@@ -37,6 +37,9 @@ pub(crate) struct Gen {
     /// Test-only: bitwise operator nodes built so far (copied into `CompiledFn`).
     #[cfg(test)]
     pub(crate) bit_ex_built: u64,
+    /// Test-only: element-read nodes (`elem.rs`) built so far.
+    #[cfg(test)]
+    pub(crate) elem_built: u64,
 }
 
 impl Gen {
@@ -48,6 +51,8 @@ impl Gen {
             loops: 0,
             #[cfg(test)]
             bit_ex_built: 0,
+            #[cfg(test)]
+            elem_built: 0,
         }
     }
 
@@ -149,6 +154,8 @@ pub(crate) fn compile(def: &FuncDef, plan: &FnPlan) -> CG<CompiledFn> {
         pure_kernel: plan.pure_kernel,
         #[cfg(test)]
         bit_ex_built: g.bit_ex_built,
+        #[cfg(test)]
+        elem_built: g.elem_built,
     })
 }
 

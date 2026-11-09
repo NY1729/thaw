@@ -6,6 +6,7 @@
 
 use thaw_parser::ast as a;
 
+use super::elem;
 use super::expr::{self, combine, mk_ex, Place};
 use super::gen::{Gen, CG};
 use super::{bx, Ex, Frame, CR};
@@ -26,6 +27,8 @@ pub(crate) enum Leaf {
     Slot(u32),
     Const(Value),
     Ex(Ex),
+    /// `slot[pure key]` (elem.rs).
+    Elem(Box<elem::Elem>),
 }
 
 /// A compiled operand: `N` when its value is a Number by construction, otherwise a `Leaf`.
@@ -40,7 +43,7 @@ pub(crate) enum Num2 {
     V(Value),
 }
 
-fn num2_val(n: Num2) -> Value {
+pub(crate) fn num2_val(n: Num2) -> Value {
     match n {
         Num2::N(x) => Value::Number(x),
         Num2::V(v) => v,
@@ -61,12 +64,13 @@ impl Leaf {
                 Value::Number(x) => Num2::N(x),
                 v => Num2::V(v),
             },
+            Leaf::Elem(el) => el.eval_n(it, f)?,
         })
     }
 }
 
 impl Side {
-    fn eval_n(&self, it: &mut Interp, f: &mut Frame) -> CR<Num2> {
+    pub(crate) fn eval_n(&self, it: &mut Interp, f: &mut Frame) -> CR<Num2> {
         match self {
             Side::N(n) => Ok(Num2::N(n(it, f)?)),
             Side::L(l) => l.eval_n(it, f),
@@ -114,6 +118,7 @@ fn leaf_val(l: &Leaf, it: &mut Interp, f: &mut Frame) -> CR<Value> {
         Leaf::Slot(k) => Ok(f.slots[*k as usize].clone()),
         Leaf::Const(v) => Ok(v.clone()),
         Leaf::Ex(e) => e(it, f),
+        Leaf::Elem(el) => Ok(num2_val(el.eval_n(it, f)?)),
     }
 }
 
@@ -137,6 +142,7 @@ pub(crate) fn side_ex(s: Side) -> Ex {
         Leaf::Slot(k) => expr::slot_read(k),
         Leaf::Const(v) => expr::lit(v),
         Leaf::Ex(e) => e,
+        Leaf::Elem(el) => elem::ex(*el),
     }
 }
 
@@ -154,6 +160,10 @@ pub(crate) fn operand(g: &mut Gen, e: &a::Expr) -> CG<Side> {
             None => Leaf::Ex(expr::compile(g, e)?),
         })),
         a::Expr::Lit(l) => Ok(Side::L(Leaf::Const(expr::lit_value(l)?))),
+        a::Expr::Member(m) => match elem::compile(g, m)? {
+            Some(el) => Ok(Side::L(Leaf::Elem(Box::new(el)))),
+            None => Ok(Side::L(Leaf::Ex(expr::compile(g, e)?))),
+        },
         _ => Ok(Side::L(Leaf::Ex(expr::compile(g, e)?))),
     }
 }
