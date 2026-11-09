@@ -16,6 +16,8 @@ mod diff_tests_calls;
 #[cfg(test)]
 mod diff_tests_ctl;
 #[cfg(test)]
+mod diff_tests_direct;
+#[cfg(test)]
 mod diff_tests_mem;
 mod expr;
 #[cfg(test)]
@@ -294,6 +296,9 @@ pub(crate) struct Stats {
     compiled_calls: u64,
     /// Analyzer-accepted functions that codegen refused, by the reason (always `Unsupported` in C2 PR1).
     codegen_rejected: [u64; FallbackReason::COUNT],
+    /// Test-only: calls that took the `Interp::call_direct` fast path.
+    #[cfg(test)]
+    direct_calls: u64,
 }
 
 impl Default for Stats {
@@ -314,6 +319,8 @@ impl Stats {
             compiled: 0,
             compiled_calls: 0,
             codegen_rejected: [0; FallbackReason::COUNT],
+            #[cfg(test)]
+            direct_calls: 0,
         }
     }
 
@@ -362,6 +369,20 @@ impl Stats {
     pub(crate) fn calls_eligible(&self) -> u64 {
         self.calls_eligible
     }
+
+    #[cfg(test)]
+    pub(crate) fn direct_calls(&self) -> u64 {
+        self.direct_calls
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_direct_call(&mut self) {
+        self.direct_calls += 1;
+    }
+
+    #[cfg(not(test))]
+    #[inline]
+    pub(crate) fn note_direct_call(&mut self) {}
 
     #[cfg(test)]
     pub(crate) fn calls_rejected(&self, reason: FallbackReason) -> u64 {
