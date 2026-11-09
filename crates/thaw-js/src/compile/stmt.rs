@@ -1,11 +1,12 @@
-//! Statement nodes (plan TJ150 section 4, PR1 subset: expression statements, empty statements, blocks,
-//! `var`/`let`/`const` with identifier patterns, `return`).
+//! Statement nodes (plan TJ150 section 4). PR1: expression statements, empty statements, blocks,
+//! `var`/`let`/`const` with identifier patterns, `return`. PR3: `if`, `while`, `do-while`, `for`, and
+//! unlabeled `break`/`continue`.
 
 use thaw_parser::ast as a;
 
 use super::expr;
 use super::gen::{self, reject, Gen, CG};
-use super::{Flow, Frame, St, CR};
+use super::{bx, Ex, Flow, Frame, St, CR};
 use crate::Interp;
 
 fn mk_st<F>(f: F) -> St
@@ -66,8 +67,138 @@ pub(crate) fn compile(g: &mut Gen, s: &a::Stmt) -> CG<St> {
             }))
         }
         a::Stmt::Decl(a::Decl::Var(v)) => var_decl(g, v),
+        a::Stmt::If(i) => if_stmt(g, i),
+        a::Stmt::While(w) => while_stmt(g, w),
+        a::Stmt::DoWhile(w) => do_while_stmt(g, w),
+        a::Stmt::For(fs) => for_stmt(g, fs),
+        a::Stmt::Break(b) => jump(g, b.label.is_some(), Flow::Break(0)),
+        a::Stmt::Continue(c) => jump(g, c.label.is_some(), Flow::Continue(0)),
         _ => reject(),
     }
+}
+
+/// A loop body: `break`/`continue` are legal inside it.
+fn loop_body(g: &mut Gen, s: &a::Stmt) -> CG<St> {
+    g.loops += 1;
+    let r = compile(g, s);
+    g.loops -= 1;
+    r
+}
+
+/// `break`/`continue` without a label, inside a loop of this function. Labels are blocked by the analyzer,
+/// and a stray one is rejected rather than compiled.
+fn jump(g: &Gen, labeled: bool, flow: Flow) -> CG<St> {
+    if labeled || g.loops == 0 {
+        return reject();
+    }
+    Ok(mk_st(move |_, _| Ok(flow)))
+}
+
+/// What a loop does with one completed body: `None` to run the next iteration (normal or `continue`),
+/// `Some(flow)` to leave the loop with `flow` (`break` ends it normally; anything else propagates).
+fn after_body(fl: Flow) -> Option<Flow> {
+    match fl {
+        Flow::Next | Flow::Continue(0) => None,
+        Flow::Break(0) => Some(Flow::Next),
+        other => Some(other),
+    }
+}
+
+fn if_stmt(g: &mut Gen, i: &a::IfStmt) -> CG<St> {
+    let test = expr::compile(g, &i.test)?;
+    let cons = compile(g, &i.cons)?;
+    let alt = match &i.alt {
+        Some(s) => Some(compile(g, s)?),
+        None => None,
+    };
+    Ok(mk_st(move |it, f| {
+        if test(it, f)?.truthy() {
+            cons(it, f)
+        } else if let Some(other) = &alt {
+            other(it, f)
+        } else {
+            Ok(Flow::Next)
+        }
+    }))
+}
+
+fn while_stmt(g: &mut Gen, w: &a::WhileStmt) -> CG<St> {
+    let test = expr::compile(g, &w.test)?;
+    let body = loop_body(g, &w.body)?;
+    Ok(mk_st(move |it, f| {
+        while test(it, f)?.truthy() {
+            // the interpreter's order: test, then the deadline check, then the body
+            bx(it.check_deadline())?;
+            if let Some(out) = after_body(body(it, f)?) {
+                return Ok(out);
+            }
+        }
+        Ok(Flow::Next)
+    }))
+}
+
+fn do_while_stmt(g: &mut Gen, w: &a::DoWhileStmt) -> CG<St> {
+    let body = loop_body(g, &w.body)?;
+    let test = expr::compile(g, &w.test)?;
+    Ok(mk_st(move |it, f| loop {
+        bx(it.check_deadline())?;
+        if let Some(out) = after_body(body(it, f)?) {
+            return Ok(out);
+        }
+        if !test(it, f)?.truthy() {
+            return Ok(Flow::Next);
+        }
+    }))
+}
+
+fn for_stmt(g: &mut Gen, fs: &a::ForStmt) -> CG<St> {
+    // the head's `let`/`const` live in their own block scope, as the interpreter's `cur` scope does
+    g.push();
+    let r = for_parts(g, fs);
+    g.pop();
+    r
+}
+
+fn for_parts(g: &mut Gen, fs: &a::ForStmt) -> CG<St> {
+    let init: Option<St> = match &fs.init {
+        Some(a::VarDeclOrExpr::VarDecl(v)) => Some(var_decl(g, v)?),
+        Some(a::VarDeclOrExpr::Expr(e)) => {
+            let x = expr::compile(g, e)?;
+            Some(mk_st(move |it, f| {
+                x(it, f)?;
+                Ok(Flow::Next)
+            }))
+        }
+        None => None,
+    };
+    let test: Option<Ex> = match &fs.test {
+        Some(e) => Some(expr::compile(g, e)?),
+        None => None,
+    };
+    let update: Option<Ex> = match &fs.update {
+        Some(e) => Some(expr::compile(g, e)?),
+        None => None,
+    };
+    let body = loop_body(g, &fs.body)?;
+    Ok(mk_st(move |it, f| {
+        if let Some(i) = &init {
+            i(it, f)?;
+        }
+        loop {
+            bx(it.check_deadline())?;
+            if let Some(t) = &test {
+                if !t(it, f)?.truthy() {
+                    return Ok(Flow::Next);
+                }
+            }
+            if let Some(out) = after_body(body(it, f)?) {
+                return Ok(out);
+            }
+            if let Some(u) = &update {
+                u(it, f)?;
+            }
+        }
+    }))
 }
 
 /// `slots[k] = init`.
