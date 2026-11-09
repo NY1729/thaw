@@ -64,12 +64,12 @@ impl JsStr {
     #[inline]
     pub(crate) fn is_ascii_cached(&self) -> bool {
         match &self.0 {
-            Repr::Plain(r) => r.is_ascii(),
+            Repr::Plain(r) => scan_ascii(r),
             Repr::Buf(b) => match b.ascii.get() {
                 1 => true,
                 2 => false,
                 _ => {
-                    let a = b.s.is_ascii();
+                    let a = scan_ascii(&b.s);
                     b.ascii.set(if a { 1 } else { 2 });
                     a
                 }
@@ -88,6 +88,41 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn copies_made() -> usize {
     COPIES.with(Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Full O(n) `is_ascii` scans of string payloads on this thread (a test-only work counter).
+    static ASCII_SCANS: Cell<usize> = const { Cell::new(0) };
+    /// Chars visited by UTF-16 index walks on this thread (a test-only work counter).
+    static CHAR_WALK_STEPS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Full ASCII scans made on this thread (test builds only).
+#[cfg(test)]
+pub(crate) fn ascii_scans() -> usize {
+    ASCII_SCANS.with(Cell::get)
+}
+
+/// Char steps of index walks made on this thread (test builds only).
+#[cfg(test)]
+pub(crate) fn char_walk_steps() -> usize {
+    CHAR_WALK_STEPS.with(Cell::get)
+}
+
+/// `s.is_ascii()`, counted in test builds. Every O(n) ASCII scan goes through here.
+#[inline]
+pub(crate) fn scan_ascii(s: &str) -> bool {
+    #[cfg(test)]
+    ASCII_SCANS.with(|c| c.set(c.get() + 1));
+    s.is_ascii()
+}
+
+/// One char visited by a UTF-16 index walk (counted in test builds only).
+#[inline]
+pub(crate) fn walk_step() {
+    #[cfg(test)]
+    CHAR_WALK_STEPS.with(|c| c.set(c.get() + 1));
 }
 
 impl JsStr {
