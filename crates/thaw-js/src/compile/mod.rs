@@ -22,6 +22,8 @@ mod member;
 mod num;
 #[cfg(test)]
 mod num_tests;
+#[cfg(test)]
+mod pool_tests;
 mod run;
 mod stmt;
 #[cfg(test)]
@@ -284,6 +286,8 @@ pub(crate) struct Stats {
     calls_rejected: [u64; FallbackReason::COUNT],
     /// Functions whose code was generated.
     compiled: u64,
+    /// Calls that ran compiled code (not the AST).
+    compiled_calls: u64,
     /// Analyzer-accepted functions that codegen refused, by the reason (always `Unsupported` in C2 PR1).
     codegen_rejected: [u64; FallbackReason::COUNT],
 }
@@ -304,6 +308,7 @@ impl Stats {
             calls_eligible: 0,
             calls_rejected: [0; FallbackReason::COUNT],
             compiled: 0,
+            compiled_calls: 0,
             codegen_rejected: [0; FallbackReason::COUNT],
         }
     }
@@ -332,6 +337,11 @@ impl Stats {
     #[cfg(test)]
     pub(crate) fn compiled(&self) -> u64 {
         self.compiled
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compiled_calls(&self) -> u64 {
+        self.compiled_calls
     }
 
     #[cfg(test)]
@@ -380,7 +390,10 @@ impl Stats {
             }
         }
         if self.compiled > 0 || self.codegen_rejected.iter().any(|&n| n > 0) {
-            out += &format!("thaw-js compile: compiled={}\n", self.compiled);
+            out += &format!(
+                "thaw-js compile: compiled={} compiled-calls={}\n",
+                self.compiled, self.compiled_calls
+            );
             for (i, reason) in FallbackReason::ALL.iter().enumerate() {
                 if self.codegen_rejected[i] > 0 {
                     out += &format!(
@@ -498,6 +511,12 @@ impl Interp {
                             Ok(c) => {
                                 *st = CState::Compiled(Rc::new(c));
                                 self.cstats.compiled += 1;
+                                if self.compile_stats && self.cstats.level() >= 2 {
+                                    eprintln!(
+                                        "thaw-js compile: {name} at {}:{}-{} compiled",
+                                        def.src.0, def.src.1, def.src.2
+                                    );
+                                }
                             }
                             Err(r) => self.cstats.record_codegen_rejected(r),
                         }
@@ -538,6 +557,7 @@ impl Interp {
         let c = c.clone();
         // the borrow ends before the body runs: a recursive call re-enters `try_compiled` for this function
         drop(st);
+        self.cstats.compiled_calls += 1;
         if check::applies(self.compile_mode, &c) {
             return Some(self.run_checked(f, def, scope, this, args, &c));
         }
