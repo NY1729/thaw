@@ -12,8 +12,13 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::rc::Rc;
 
+use crate::builtins::{units_str, LONE};
+
 /// Strings at or above this many bytes use the `Buf` representation.
 const BUF_MIN: usize = 256;
+
+/// `len16` of a `BufStr` not computed yet.
+const NO_LEN: usize = usize::MAX;
 
 #[derive(Clone)]
 enum Repr {
@@ -25,19 +30,199 @@ enum Repr {
 struct BufStr {
     /// 0 = not yet computed, 1 = ASCII, 2 = not ASCII.
     ascii: Cell<u8>,
+    /// UTF-16 length of a non-ASCII string; `NO_LEN` until computed. Reset by `push_joined`.
+    len16: Cell<usize>,
+    /// `(unit, byte)` of a char start: where the next index walk resumes. Always a char boundary.
+    /// Reset by `push_joined`.
+    cursor: Cell<(usize, usize)>,
     s: String,
 }
 
 #[derive(Clone)]
 pub struct JsStr(Repr);
 
+/// UTF-16 units one char takes in the string layer (a lone surrogate is one unit).
+#[inline]
+fn units_of(c: char) -> usize {
+    if (0x10000..LONE).contains(&(c as u32)) {
+        2
+    } else {
+        1
+    }
+}
+
+/// UTF-16 length of a whole string.
+fn count16(s: &str) -> usize {
+    s.chars()
+        .map(|c| {
+            walk_step();
+            units_of(c)
+        })
+        .sum()
+}
+
+/// The char holding unit `ui` of `s`, as (unit, byte) of its start and the char. Walks forward
+/// from `cur` when `ui` is at or after it, back from `cur` when that is nearer than the start of
+/// the string, else from the start. `cur` must be a char start. None when `ui` is past the end.
+fn locate(s: &str, cur: (usize, usize), ui: usize) -> Option<(usize, usize, char)> {
+    let (cu, cb) = cur;
+    if ui >= cu {
+        forward(s, cu, cb, ui)
+    } else if 2 * ui < cu {
+        forward(s, 0, 0, ui)
+    } else {
+        backward(s, cu, cb, ui)
+    }
+}
+
+fn forward(s: &str, mut u: usize, mut b: usize, ui: usize) -> Option<(usize, usize, char)> {
+    let mut first = true;
+    loop {
+        // the char at the resume point is free; every later char we step over is a walk step
+        let c = s[b..].chars().next()?;
+        if !first {
+            walk_step();
+        }
+        first = false;
+        let n = units_of(c);
+        if ui < u + n {
+            return Some((u, b, c));
+        }
+        u += n;
+        b += c.len_utf8();
+    }
+}
+
+fn backward(s: &str, u: usize, b: usize, ui: usize) -> Option<(usize, usize, char)> {
+    let mut end = u;
+    for (p, c) in s[..b].char_indices().rev() {
+        walk_step();
+        let start = end - units_of(c);
+        if ui >= start {
+            return Some((start, p, c));
+        }
+        end = start;
+    }
+    None
+}
+
 impl JsStr {
     #[inline]
     fn buf(s: String) -> Self {
         JsStr(Repr::Buf(Rc::new(BufStr {
             ascii: Cell::new(0),
+            len16: Cell::new(NO_LEN),
+            cursor: Cell::new((0, 0)),
             s,
         })))
+    }
+
+    /// The char holding UTF-16 unit `ui` (non-ASCII only). A `Buf` resumes from and updates its
+    /// cursor; a `Plain` string walks from the start every time.
+    fn locate_char(&self, ui: usize) -> Option<(usize, usize, char)> {
+        match &self.0 {
+            Repr::Plain(r) => locate(r, (0, 0), ui),
+            Repr::Buf(b) => {
+                let (u, by, c) = locate(&b.s, b.cursor.get(), ui)?;
+                b.cursor.set((u, by));
+                Some((u, by, c))
+            }
+        }
+    }
+
+    /// `s.length` in UTF-16 units. A non-ASCII `Buf` counts once and keeps the count.
+    pub(crate) fn len16(&self) -> usize {
+        if self.is_ascii_cached() {
+            return self.len();
+        }
+        match &self.0 {
+            Repr::Plain(r) => count16(r),
+            Repr::Buf(b) => {
+                if b.len16.get() == NO_LEN {
+                    b.len16.set(count16(&b.s));
+                }
+                b.len16.get()
+            }
+        }
+    }
+
+    /// The UTF-16 unit at index `i` (`None` past the end). A lone surrogate is its own unit; an
+    /// astral char gives its high unit at its start and its low unit after it.
+    pub(crate) fn unit_at(&self, i: usize) -> Option<u16> {
+        if self.is_ascii_cached() {
+            return self.as_bytes().get(i).map(|b| u16::from(*b));
+        }
+        if i >= self.len16() {
+            return None;
+        }
+        let (u, _, c) = self.locate_char(i)?;
+        let cp = c as u32;
+        Some(if units_of(c) == 1 {
+            if cp >= LONE {
+                (cp - LONE + 0xD800) as u16
+            } else {
+                cp as u16
+            }
+        } else {
+            let v = cp - 0x10000;
+            if i == u {
+                (0xD800 + (v >> 10)) as u16
+            } else {
+                (0xDC00 + (v & 0x3FF)) as u16
+            }
+        })
+    }
+
+    /// UTF-16 unit index -> byte offset of the first char starting at or after that unit (the
+    /// end of the string when there is none). Same mapping as `builtins::unit_to_byte`.
+    #[cfg_attr(not(test), allow(dead_code))] // for indexOf from an offset (plan-tj154 step 4)
+    pub(crate) fn unit_to_byte(&self, ui: usize) -> usize {
+        if self.is_ascii_cached() {
+            return ui.min(self.len());
+        }
+        if ui >= self.len16() {
+            return self.len();
+        }
+        match self.locate_char(ui) {
+            Some((u, b, c)) if u < ui => b + c.len_utf8(),
+            Some((_, b, _)) => b,
+            None => self.len(),
+        }
+    }
+
+    /// `s.slice(a, b)` by UTF-16 units, `a <= b <= len16()`. A cut inside a surrogate pair keeps
+    /// the half as a lone surrogate, as the string layer always has.
+    pub(crate) fn slice_units(&self, a: usize, b: usize) -> String {
+        let s: &str = self;
+        if self.is_ascii_cached() {
+            return s[a..b].to_string();
+        }
+        if a >= b {
+            return String::new();
+        }
+        let (sa, ba, ca) = self.locate_char(a).expect("slice start within the string");
+        let (sb, bb, cb) = self
+            .locate_char(b - 1)
+            .expect("slice end within the string");
+        if sa == sb {
+            // a and b - 1 are the two halves of one astral char
+            let units: Vec<u16> = (a..b).filter_map(|x| self.unit_at(x)).collect();
+            return units_str(&units);
+        }
+        let mut out = String::new();
+        let mut start = ba;
+        if sa != a {
+            // `a` is the low half of the pair that starts at `sa`
+            out.push_str(&units_str(&[self.unit_at(a).unwrap_or(0)]));
+            start = ba + ca.len_utf8();
+        }
+        let lone_tail = sb == b - 1 && units_of(cb) == 2;
+        let end = if lone_tail { bb } else { bb + cb.len_utf8() };
+        out.push_str(&s[start..end]);
+        if lone_tail {
+            out.push_str(&units_str(&[self.unit_at(b - 1).unwrap_or(0)]));
+        }
+        out
     }
 
     /// The shared `Rc<str>` for this string (used for property keys and names).
@@ -98,6 +283,17 @@ thread_local! {
     static CHAR_WALK_STEPS: Cell<usize> = const { Cell::new(0) };
 }
 
+impl JsStr {
+    /// The `(unit, byte)` cursor of a `Buf` (test builds only; `None` for `Plain`).
+    #[cfg(test)]
+    pub(crate) fn cursor_for_test(&self) -> Option<(usize, usize)> {
+        match &self.0 {
+            Repr::Buf(b) => Some(b.cursor.get()),
+            Repr::Plain(_) => None,
+        }
+    }
+}
+
 /// Full ASCII scans made on this thread (test builds only).
 #[cfg(test)]
 pub(crate) fn ascii_scans() -> usize {
@@ -140,6 +336,9 @@ impl JsStr {
                 1 if !t.is_ascii() => 2,
                 other => other,
             });
+            // the seam merge may pop the last char, so the cached length and cursor are stale
+            b.len16.set(NO_LEN);
+            b.cursor.set((0, 0));
             return;
         }
         #[cfg(test)]
