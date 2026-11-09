@@ -3668,6 +3668,25 @@ fn exception_packet_tag7_live_handle_rethrows_the_original_object() {
     assert!(crate::host::original_js_exception_with(&packet, |_| id).is_none());
 }
 
+#[test]
+fn exception_packet_tag7_recorded_handle_id_resolves_when_lookup_misses() {
+    // A throw on another thread: the tracked-root lookup misses (0), but the id recorded in the
+    // packet's i64 slot still resolves to the original object.
+    let mut it = Interp::new();
+    let Ok(Value::Object(original)) = it.run("({ code: 'ERR_BAD_REQUEST' })") else {
+        panic!("object literal did not evaluate to an object");
+    };
+    let id = crate::host::store_handle(0, Value::Object(original.clone())) as u64;
+    let packet = primitive_exception_packet(7, 0.0, id as i64, false, 0x1234);
+    let Some(Value::Object(found)) = crate::host::original_js_exception_with(&packet, |_| 0) else {
+        panic!("tag-7 packet with a recorded handle id did not yield the original object");
+    };
+    assert!(Rc::ptr_eq(&original, &found));
+    // No recorded id and no lookup hit stays on the framed-Error path.
+    let packet = primitive_exception_packet(7, 0.0, 0, false, 0x1234);
+    assert!(crate::host::original_js_exception_with(&packet, |_| 0).is_none());
+}
+
 /// A busy worker keeps the thaw-js loop alive; a native continuation that a timer made ready must still run inside
 /// that loop (the compiled terminal loop's `turn_hook`), or the awaited `terminate()` never runs.
 #[test]
@@ -6533,6 +6552,34 @@ fn ident_hint_compound_assignment_targets_are_annotated() {
     );
     assert!(st.hit.get() > 0, "no hinted read hit: {}", st.summary());
     it.hint_stats.on = false;
+}
+
+#[test]
+fn hint_stats_package_factories_annotated() {
+    // A bcrypt-shaped kernel inside a registry bundle factory: package code must be annotated at load.
+    const BUNDLE: &str = r#"module.exports = (function(require){ var __thaw_bundle_entry_key = "m";
+var __thaw_bundle_factories = { "m": function(module, exports, require) {
+  var P = [], S = [];
+  for (var k = 0; k < 18; k++) P.push(k * 7919);
+  for (var k = 0; k < 1024; k++) S.push((k * 2654435761) >>> 0);
+  function enc(lr) { var l = lr[0], r = lr[1], i = 0, n = 0; for (i = 0; i < 16; i++) { n = S[l >>> 24]; n = n + S[0x100 | ((l >> 16) & 0xff)]; r = r ^ (n ^ P[i]); n = r; l = l ^ n; } lr[0] = l; lr[1] = r; }
+  exports.run = function () { var lr = [1, 2]; for (var c = 0; c < 1000; c++) enc(lr); return lr[0]; };
+} };
+var __thaw_bundle_require_maps = { "m": {} };
+})(globalThis.require);"#;
+    use crate::host::Package;
+    let mut p = Package::load(BUNDLE).expect("loads");
+    p.interp.hint_stats.on = true;
+    assert!(p.call("run", &[]).is_ok());
+    let st = &p.interp.hint_stats;
+    eprintln!("{}", st.summary());
+    assert!(st.hit.get() > 0, "no hinted read hit: {}", st.summary());
+    assert!(
+        st.unannotated.get() * 10 < st.reads.get(),
+        "package reads left unannotated: {}",
+        st.summary()
+    );
+    p.interp.hint_stats.on = false;
 }
 
 #[test]

@@ -2227,11 +2227,17 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_original_quickjs_exception_handle(handle, false);
             }
             "__thaw_set_pending_exception_json" => {
-                let [value] = args else {
+                let [operand] = args else {
                     return Err(format!("{name} expects one operand"));
                 };
+                // Only a captured JsValue throw carries a live handle id; plain Json keeps 0.
+                let js_value_capture = matches!(
+                    operand,
+                    HirExpr::Call(callee, _)
+                        if matches!(callee.as_ref(), HirExpr::Var(var) if var == "__thaw_capture_exception_js_value")
+                );
                 self.tracks_owned_json_roots = true;
-                let value = self.compile_expr(value)?.into_pointer_value();
+                let value = self.compile_expr(operand)?.into_pointer_value();
                 let shared = self.builder.build_call(
                     self.module.get_function("thaw_json_share").unwrap(),
                     &[value.into()], "pending_exception_json_share",
@@ -2253,9 +2259,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL).as_pointer_value(),
                     self.context.f64_type().const_zero(),
                 ).map_err(|error| error.to_string())?;
+                let handle_id = if js_value_capture {
+                    self.compile_borrowed_handle_id(rooted.into())?
+                } else {
+                    self.context.i64_type().const_zero().into()
+                };
                 self.builder.build_store(
                     self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(),
-                    self.context.i64_type().const_zero(),
+                    handle_id,
                 ).map_err(|error| error.to_string())?;
                 self.builder.build_store(
                     self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(),

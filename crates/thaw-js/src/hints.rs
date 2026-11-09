@@ -157,6 +157,16 @@ pub(crate) fn annotate(module: &mut a::Module, table: &mut Vec<HintSlot>) {
     module.visit_mut_with(&mut Annotate { table });
 }
 
+impl Interp {
+    /// Annotates one pre-parsed function (a package factory) with this interpreter's hint table,
+    /// before `function_value` clones its body.
+    pub(crate) fn annotate_function(&mut self, f: &mut a::Function) {
+        f.visit_mut_with(&mut Annotate {
+            table: &mut self.ident_hints,
+        });
+    }
+}
+
 impl Scope {
     /// Oracle helper: every name in `vars` has its `mask` bit set (no false negatives).
     pub(crate) fn check_mask_invariant(&self) {

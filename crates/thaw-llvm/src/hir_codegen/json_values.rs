@@ -86,6 +86,21 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_check_json_host_error(rooted, None)
     }
 
+    /// The live JS handle id of a thrown JSON box (`thaw_json_borrowed_handle_id`, 0 for
+    /// plain Json). Stored in the tag-7 packet's i64 slot so the packet can be resolved on a
+    /// thread whose tracked-root table does not contain the box (see host.rs
+    /// `original_js_exception_with`).
+    pub(super) fn compile_borrowed_handle_id(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.builder.build_call(
+            self.module.get_function("thaw_json_borrowed_handle_id").unwrap(),
+            &[value.into()], "pending_exception_handle_id",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("borrowed JSON handle returned no value".into())
+    }
+
     /// Publish an owned original JS throw through the ordinary tagged
     /// pending channel. The capture helper owns the input when requested;
     /// this fresh JSON Box is then independently arena-rooted for catch,
@@ -111,9 +126,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
             self.context.i64_type().const_int(7, false),
         ).map_err(|error| error.to_string())?;
-        let zeros: [(&str, BasicValueEnum<'ctx>); 3] = [
+        let handle_id = self.compile_borrowed_handle_id(original)?;
+        self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(), handle_id)
+            .map_err(|error| error.to_string())?;
+        let zeros: [(&str, BasicValueEnum<'ctx>); 2] = [
             (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().const_zero().into()),
-            (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().const_zero().into()),
             (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().const_zero().into()),
         ];
         for (symbol, zero) in zeros {
