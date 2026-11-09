@@ -20,6 +20,8 @@ mod diff_tests_direct;
 #[cfg(test)]
 mod diff_tests_mem;
 #[cfg(test)]
+mod diff_tests_num2;
+#[cfg(test)]
 mod diff_tests_self;
 mod expr;
 #[cfg(test)]
@@ -301,6 +303,12 @@ pub(crate) struct Stats {
     /// Test-only: calls that took the `Interp::call_direct` fast path.
     #[cfg(test)]
     direct_calls: u64,
+    /// Test-only: bitwise operator nodes built (`num::bit_ex`), summed over compiled functions.
+    #[cfg(test)]
+    bit_ex_built: u64,
+    /// Test-only: run-time hits of the Number-Number fast path of a bitwise or fused numeric node.
+    #[cfg(test)]
+    nm_fast_hits: u64,
 }
 
 impl Default for Stats {
@@ -323,6 +331,10 @@ impl Stats {
             codegen_rejected: [0; FallbackReason::COUNT],
             #[cfg(test)]
             direct_calls: 0,
+            #[cfg(test)]
+            bit_ex_built: 0,
+            #[cfg(test)]
+            nm_fast_hits: 0,
         }
     }
 
@@ -385,6 +397,30 @@ impl Stats {
     #[cfg(not(test))]
     #[inline]
     pub(crate) fn note_direct_call(&mut self) {}
+
+    #[cfg(test)]
+    pub(crate) fn bit_ex_built(&self) -> u64 {
+        self.bit_ex_built
+    }
+
+    #[cfg(test)]
+    pub(crate) fn nm_fast_hits(&self) -> u64 {
+        self.nm_fast_hits
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_nm_fast(&mut self) {
+        self.nm_fast_hits += 1;
+    }
+
+    #[cfg(not(test))]
+    #[inline]
+    pub(crate) fn note_nm_fast(&mut self) {}
+
+    #[cfg(test)]
+    pub(crate) fn note_bit_ex_built(&mut self, n: u64) {
+        self.bit_ex_built += n;
+    }
 
     #[cfg(test)]
     pub(crate) fn calls_rejected(&self, reason: FallbackReason) -> u64 {
@@ -492,6 +528,9 @@ pub(crate) struct CompiledFn {
     pub(crate) strict: bool,
     /// The analyzer's `pure_kernel` verdict: the functions `check` mode compares (plan 6).
     pub(crate) pure_kernel: bool,
+    /// Test-only: bitwise operator nodes this function's codegen built.
+    #[cfg(test)]
+    pub(crate) bit_ex_built: u64,
 }
 
 /// Compiled and interpreted `Ctl` are the same error: this unboxes a compiled error back to `R`.
@@ -538,6 +577,8 @@ impl Interp {
                     if !scope.in_with {
                         match gen::compile(def, &plan) {
                             Ok(c) => {
+                                #[cfg(test)]
+                                self.cstats.note_bit_ex_built(c.bit_ex_built);
                                 *st = CState::Compiled(Rc::new(c));
                                 self.cstats.compiled += 1;
                                 if self.compile_stats && self.cstats.level() >= 2 {

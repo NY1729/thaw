@@ -34,6 +34,9 @@ pub(crate) struct Gen {
     pub(crate) arrow: bool,
     /// Loops enclosing the statement being compiled: an unlabeled `break`/`continue` needs one.
     pub(crate) loops: u32,
+    /// Test-only: bitwise operator nodes built so far (copied into `CompiledFn`).
+    #[cfg(test)]
+    pub(crate) bit_ex_built: u64,
 }
 
 impl Gen {
@@ -43,6 +46,8 @@ impl Gen {
             next_slot: 0,
             arrow,
             loops: 0,
+            #[cfg(test)]
+            bit_ex_built: 0,
         }
     }
 
@@ -142,6 +147,8 @@ pub(crate) fn compile(def: &FuncDef, plan: &FnPlan) -> CG<CompiledFn> {
         uses_this: def.uses_this,
         strict: def.strict,
         pure_kernel: plan.pure_kernel,
+        #[cfg(test)]
+        bit_ex_built: g.bit_ex_built,
     })
 }
 

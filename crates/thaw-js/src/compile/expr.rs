@@ -7,7 +7,7 @@ use thaw_parser::ast as a;
 use super::call;
 use super::gen::{reject, Gen, CG};
 use super::member;
-use super::num::{self, Bl};
+use super::num::{self, Bl, Side};
 use super::{bx, Ex, Frame, CR};
 use crate::{bigint, builtins, to_int32, Interp, JsStr, Kind, Value, R};
 
@@ -268,14 +268,20 @@ fn assign(g: &mut Gen, asg: &a::AssignExpr) -> CG<Ex> {
         _ => return reject(),
     };
     let p = Place::of(g, id);
-    let rhs = compile(g, &asg.right)?;
+    // `operand` compiles exactly what `compile` does for the right-hand side, but keeps the Number-valued forms
+    let rhs: Side = num::operand(g, &asg.right)?;
     match asg.op {
-        A::Assign => Ok(store(p, rhs)),
-        A::AndAssign | A::OrAssign | A::NullishAssign => Ok(logical_assign(p, asg.op, rhs)),
+        A::Assign => match (p, rhs) {
+            (Place::Slot { k, mutable: true }, Side::N(n)) => Ok(num::store_slot(k, n)),
+            (p, rhs) => Ok(store(p, num::side_ex(rhs))),
+        },
+        A::AndAssign | A::OrAssign | A::NullishAssign => {
+            Ok(logical_assign(p, asg.op, num::side_ex(rhs)))
+        }
         op => match crate::compound_binop(op) {
             Some(b) => Ok(match p {
                 Place::Slot { k, mutable: true } => num::compound_slot(k, b, rhs),
-                other => compound(other, b, rhs),
+                other => compound(other, b, num::side_ex(rhs)),
             }),
             None => reject(),
         },
