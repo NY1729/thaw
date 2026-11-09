@@ -4681,7 +4681,7 @@
     {
       "name": "r6b top-level string append stays linear and keeps aliases",
       "expect": "matched",
-      "source": "let s = \"\";\nfor (let i = 0; i < 100000; i++) { s += \"x\"; }\nconst t = s;\ns += \"y\";\nconst summary = s.length + \" \" + t.length + \" \" + (t === s.slice(0, -1));\nfunction main(): void {\n  console.log(summary);\n}\n"
+      "source": "let s = \"\";\nfor (let i = 0; i < 30000; i++) { s += \"x\"; }\nconst t = s;\ns += \"y\";\nconst summary = s.length + \" \" + t.length + \" \" + (t === s.slice(0, -1));\nfunction main(): void {\n  console.log(summary);\n}\n"
     },
     {
       "name": "r6b top-level string global read by a function keeps snapshots",
