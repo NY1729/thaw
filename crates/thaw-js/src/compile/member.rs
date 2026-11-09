@@ -111,7 +111,7 @@ pub(crate) fn read(g: &mut Gen, m: &a::MemberExpr) -> CG<Ex> {
 
 /// The operator of a member assignment, decided at compile time.
 #[derive(Clone, Copy)]
-enum Rmw {
+pub(crate) enum Rmw {
     Set,
     Logic(a::AssignOp),
     Arith(a::BinaryOp),
@@ -128,6 +128,10 @@ pub(crate) fn assign(g: &mut Gen, m: &a::MemberExpr, asg: &a::AssignExpr) -> CG<
             None => return reject(),
         },
     };
+    if let Some(el) = elem::compile(g, m)? {
+        let rhs = expr::compile(g, &asg.right)?;
+        return Ok(elem::assign(el, rmw, rhs));
+    }
     let obj = expr::compile(g, &m.obj)?;
     let key = prop_key(g, &m.prop)?;
     let rhs = expr::compile(g, &asg.right)?;
@@ -161,6 +165,9 @@ pub(crate) fn assign(g: &mut Gen, m: &a::MemberExpr, asg: &a::AssignExpr) -> CG<
 
 /// `++o.p` / `o[i]--` and friends (the `Expr::Update` arm for a member target).
 pub(crate) fn update(g: &mut Gen, m: &a::MemberExpr, inc: bool, prefix: bool) -> CG<Ex> {
+    if let Some(el) = elem::compile(g, m)? {
+        return Ok(elem::update(el, inc, prefix));
+    }
     let obj = expr::compile(g, &m.obj)?;
     let key = prop_key(g, &m.prop)?;
     Ok(mk_ex(move |it, f| {
