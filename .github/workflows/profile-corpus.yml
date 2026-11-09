@@ -154,6 +154,16 @@ jobs:
           trace_env=()
           if [ "$TRACE_WIRE" = "true" ]; then trace_env=(THAW_JS_TRACE=1 THAW_JS_TRACE_WIRE=1); fi
           cd "$RUNNER_TEMP" && env THAW_JS_HINT_STATS=1 THAW_JS_COMPILE=on THAW_JS_COMPILE_STATS=1 "${trace_env[@]}" ./prog > out/stdout.txt 2> out/stats.txt && head -3 out/stdout.txt
+          # Same-run wall time of the plain binary with the closure compiler off and on (best of 3).
+          : > out/timing.txt
+          for m in off on; do
+            best=
+            for i in 1 2 3; do
+              t0=$(date +%s%N); THAW_JS_COMPILE=$m ./prog > /dev/null 2>&1 || true; t1=$(date +%s%N)
+              ms=$(( (t1 - t0) / 1000000 )); if [ -z "$best" ] || [ "$ms" -lt "$best" ]; then best=$ms; fi
+            done
+            echo "compile=$m run_ms=$best" | tee -a out/timing.txt
+          done
           echo "---- interpreter stats (stderr of the run above) ----"; tail -60 out/stats.txt || true
           if [ "$TRACE_WIRE" = "true" ]; then grep -n "exc packet\|thaw-js callback result" out/stats.txt | head -40 > out/trace-exc.txt || true; echo "---- exception packet trace ----"; cat out/trace-exc.txt; fi
       - name: Profile with perf
@@ -230,5 +240,6 @@ jobs:
             ${{ runner.temp }}/out/*.log
             ${{ runner.temp }}/out/inspect.txt
             ${{ runner.temp }}/out/stats.txt
+            ${{ runner.temp }}/out/timing.txt
             ${{ runner.temp }}/out/trace-exc.txt
           if-no-files-found: ignore
