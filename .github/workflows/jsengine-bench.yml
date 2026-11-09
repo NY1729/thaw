@@ -8,6 +8,12 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
+    inputs:
+      compile:
+        description: THAW_JS_COMPILE for the corpus per-program measurement (the micro benchmarks always print both)
+        type: choice
+        options: ["off", "on"]
+        default: "off"
 
 permissions:
   contents: read
@@ -222,6 +228,7 @@ jobs:
           SCRATCH: ${{ runner.temp }}/qjsq1-measure
           PK_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/pk
           VERSIONS: ${{ github.workspace }}/tools/quickjs-removal/corpus/versions.txt
+          THAW_JS_COMPILE: ${{ inputs.compile || 'off' }}
         run: |
           tools/quickjs-removal/measure.sh --skip-node-compat -o "$RUNNER_TEMP/corpus.tsv"
       - name: Print corpus ratios
