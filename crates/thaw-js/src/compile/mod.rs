@@ -20,6 +20,8 @@ mod diff_tests_direct;
 #[cfg(test)]
 mod diff_tests_elem;
 #[cfg(test)]
+mod diff_tests_elemw;
+#[cfg(test)]
 mod diff_tests_mem;
 #[cfg(test)]
 mod diff_tests_num2;
@@ -321,6 +323,12 @@ pub(crate) struct Stats {
     /// Test-only: run-time element reads that took the interpreter helper.
     #[cfg(test)]
     elem_slow: u64,
+    /// Test-only: run-time element stores that took the plain-store fast path (`elem.rs` `fast_set`).
+    #[cfg(test)]
+    elem_store_fast: u64,
+    /// Test-only: run-time element stores that took `set_index` / `set`.
+    #[cfg(test)]
+    elem_store_slow: u64,
 }
 
 impl Default for Stats {
@@ -353,6 +361,10 @@ impl Stats {
             elem_fast: 0,
             #[cfg(test)]
             elem_slow: 0,
+            #[cfg(test)]
+            elem_store_fast: 0,
+            #[cfg(test)]
+            elem_store_slow: 0,
         }
     }
 
@@ -477,6 +489,34 @@ impl Stats {
     #[cfg(not(test))]
     #[inline]
     pub(crate) fn note_elem_slow(&mut self) {}
+
+    #[cfg(test)]
+    pub(crate) fn elem_store_fast(&self) -> u64 {
+        self.elem_store_fast
+    }
+
+    #[cfg(test)]
+    pub(crate) fn elem_store_slow(&self) -> u64 {
+        self.elem_store_slow
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_elem_store_fast(&mut self) {
+        self.elem_store_fast += 1;
+    }
+
+    #[cfg(not(test))]
+    #[inline]
+    pub(crate) fn note_elem_store_fast(&mut self) {}
+
+    #[cfg(test)]
+    pub(crate) fn note_elem_store_slow(&mut self) {
+        self.elem_store_slow += 1;
+    }
+
+    #[cfg(not(test))]
+    #[inline]
+    pub(crate) fn note_elem_store_slow(&mut self) {}
 
     #[cfg(test)]
     pub(crate) fn calls_rejected(&self, reason: FallbackReason) -> u64 {
