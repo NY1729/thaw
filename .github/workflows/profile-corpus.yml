@@ -183,6 +183,11 @@ jobs:
             | awk '/^ *[0-9]+\.[0-9]+%/ { p = $1; sub(/%/, "", p); s = $0; sub(/^ *[0-9.]+% +\[[^]]\] +/, "", s); print p "\t" s }' \
             > out/flat.tsv
           gzip -c perf.data > out/perf.data.gz
+          # With debuginfo: where inside the hottest symbols the time goes (source lines, inlined frames).
+          if [ "${{ inputs.debuginfo }}" = "true" ]; then
+            perf report -i perf.data --no-children --sort symbol,srcline -g none --stdio 2>/dev/null | head -150 > out/srcline.txt || true
+            perf report -i perf.data --no-children --sort srcline -g none --stdio 2>/dev/null | head -80 > out/srcline-only.txt || true
+          fi
       - name: Profile with callgrind
         if: inputs.tool == 'callgrind'
         working-directory: ${{ runner.temp }}
@@ -246,5 +251,7 @@ jobs:
             ${{ runner.temp }}/out/inspect.txt
             ${{ runner.temp }}/out/stats.txt
             ${{ runner.temp }}/out/timing.txt
+            ${{ runner.temp }}/out/srcline.txt
+            ${{ runner.temp }}/out/srcline-only.txt
             ${{ runner.temp }}/out/trace-exc.txt
           if-no-files-found: ignore
