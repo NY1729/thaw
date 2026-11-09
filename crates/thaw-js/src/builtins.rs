@@ -137,7 +137,7 @@ pub(crate) fn civil_to_ms(n: &[f64]) -> f64 {
 
 /// Strings are stored as UTF-8 but behave as UTF-16 sequences. A lone surrogate (which `str`
 /// cannot hold) is kept as the private-use char `U+10F800 + (unit - 0xD800)`.
-const LONE: u32 = 0x10F800;
+pub(crate) const LONE: u32 = 0x10F800;
 
 pub(crate) fn str_units(s: &str) -> Vec<u16> {
     let mut out = Vec::with_capacity(s.len());
@@ -237,6 +237,7 @@ pub(crate) fn str_slice_with(s: &str, ascii: bool, a: usize, b: usize) -> String
 }
 
 /// [`str_unit_at`] when the caller already knows `ascii == s.is_ascii()`.
+#[cfg_attr(not(test), allow(dead_code))] // the char-walk reference the oracle tests compare against
 pub(crate) fn str_unit_at_with(s: &str, ascii: bool, i: usize) -> Option<u16> {
     if ascii {
         return s.as_bytes().get(i).map(|b| u16::from(*b));
@@ -1806,20 +1807,17 @@ impl Interp {
         self.set_native(&sp, "charAt", |it, this, args| {
             let s = this_str(it, this);
             let i = it.num(&arg(args, 0));
-            let ascii = s.is_ascii_cached();
-            Ok(Value::Str(
-                if i >= 0.0 && (i as usize) < str_len_with(&s, ascii) {
-                    str_slice_with(&s, ascii, i as usize, i as usize + 1).into()
-                } else {
-                    "".into()
-                },
-            ))
+            Ok(Value::Str(if i >= 0.0 && (i as usize) < s.len16() {
+                s.slice_units(i as usize, i as usize + 1).into()
+            } else {
+                "".into()
+            }))
         });
         self.set_native(&sp, "charCodeAt", |it, this, args| {
             let s = this_str(it, this);
             let i = it.num(&arg(args, 0));
             Ok(Value::Number(if i >= 0.0 {
-                str_unit_at_with(&s, s.is_ascii_cached(), i as usize).map_or(f64::NAN, f64::from)
+                s.unit_at(i as usize).map_or(f64::NAN, f64::from)
             } else {
                 f64::NAN
             }))
@@ -1896,7 +1894,7 @@ impl Interp {
                     Value::Undefined => " ".into(),
                     v => it.to_str(&v),
                 };
-                let len = str_len(&s);
+                let len = s.len16();
                 if target <= len || fill.is_empty() {
                     return Ok(Value::Str(s));
                 }
@@ -1913,14 +1911,12 @@ impl Interp {
         }
         self.set_native(&sp, "slice", |it, this, args| {
             let s = this_str(it, this);
-            let ascii = s.is_ascii_cached();
-            let (from, to) = it.range(args, str_len_with(&s, ascii));
-            Ok(Value::Str(str_slice_with(&s, ascii, from, to).into()))
+            let (from, to) = it.range(args, s.len16());
+            Ok(Value::Str(s.slice_units(from, to).into()))
         });
         self.set_native(&sp, "substring", |it, this, args| {
             let s = this_str(it, this);
-            let ascii = s.is_ascii_cached();
-            let n_units = str_len_with(&s, ascii);
+            let n_units = s.len16();
             let clamp = |it: &mut Interp, v: Value, d: usize| match v {
                 Value::Undefined => d,
                 v => {
@@ -1934,12 +1930,11 @@ impl Interp {
             };
             let (a, b) = (clamp(it, arg(args, 0), 0), clamp(it, arg(args, 1), n_units));
             let (from, to) = (a.min(b), a.max(b));
-            Ok(Value::Str(str_slice_with(&s, ascii, from, to).into()))
+            Ok(Value::Str(s.slice_units(from, to).into()))
         });
         self.set_native(&sp, "substr", |it, this, args| {
             let s = this_str(it, this);
-            let ascii = s.is_ascii_cached();
-            let total = str_len_with(&s, ascii);
+            let total = s.len16();
             let n = it.num(&arg(args, 0));
             let from = if n < 0.0 {
                 (total as f64 + n).max(0.0) as usize
@@ -1950,9 +1945,7 @@ impl Interp {
                 Value::Undefined => total - from,
                 v => (it.num(&v).max(0.0) as usize).min(total - from),
             };
-            Ok(Value::Str(
-                str_slice_with(&s, ascii, from, from + len).into(),
-            ))
+            Ok(Value::Str(s.slice_units(from, from + len).into()))
         });
         self.set_native(&sp, "concat", |it, this, args| {
             let mut s = this_str(it, this).to_string();
