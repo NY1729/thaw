@@ -34,6 +34,54 @@ pub(crate) enum Side {
     L(Leaf),
 }
 
+/// An evaluated operand: `N` for a Number (no `Value` built), `V` for anything else. `V` never holds a Number.
+pub(crate) enum Num2 {
+    N(f64),
+    V(Value),
+}
+
+fn num2_val(n: Num2) -> Value {
+    match n {
+        Num2::N(x) => Value::Number(x),
+        Num2::V(v) => v,
+    }
+}
+
+impl Leaf {
+    /// Evaluates the operand once, without cloning a slot or literal that holds a Number.
+    fn eval_n(&self, it: &mut Interp, f: &mut Frame) -> CR<Num2> {
+        Ok(match self {
+            Leaf::Slot(k) => match &f.slots[*k as usize] {
+                Value::Number(x) => Num2::N(*x),
+                v => Num2::V(v.clone()),
+            },
+            Leaf::Const(Value::Number(x)) => Num2::N(*x),
+            Leaf::Const(v) => Num2::V(v.clone()),
+            Leaf::Ex(e) => match e(it, f)? {
+                Value::Number(x) => Num2::N(x),
+                v => Num2::V(v),
+            },
+        })
+    }
+}
+
+impl Side {
+    fn eval_n(&self, it: &mut Interp, f: &mut Frame) -> CR<Num2> {
+        match self {
+            Side::N(n) => Ok(Num2::N(n(it, f)?)),
+            Side::L(l) => l.eval_n(it, f),
+        }
+    }
+}
+
+/// `x = v` on a slot, reusing the Number in place (the old value is dropped only when it is not a Number).
+fn set_num(slot: &mut Value, v: f64) {
+    match slot {
+        Value::Number(s) => *s = v,
+        o => *o = Value::Number(v),
+    }
+}
+
 fn is_bit(op: B) -> bool {
     matches!(
         op,
@@ -128,7 +176,11 @@ pub(crate) fn bin(g: &mut Gen, op: B, left: &a::Expr, right: &a::Expr) -> CG<Opt
             if op == B::ZeroFillRShift || is_num(&l) || is_num(&r) {
                 Side::N(bit_nm(op, l, r))
             } else {
-                Side::L(Leaf::Ex(slow_ex(op, l, r)))
+                #[cfg(test)]
+                {
+                    g.bit_ex_built += 1;
+                }
+                Side::L(Leaf::Ex(bit_ex(op, l, r)))
             },
         ));
     }
@@ -198,20 +250,64 @@ where
     F: Fn(f64, f64) -> f64 + 'static,
 {
     Box::new(move |it: &mut Interp, f: &mut Frame| {
-        let lv = side_val(&l, it, f)?;
-        let rv = side_val(&r, it, f)?;
-        if let (Value::Number(x), Value::Number(y)) = (&lv, &rv) {
+        let lv = l.eval_n(it, f)?;
+        let rv = r.eval_n(it, f)?;
+        if let (Num2::N(x), Num2::N(y)) = (&lv, &rv) {
+            it.cstats.note_nm_fast();
             return Ok(fast(*x, *y));
         }
-        num_of(it, op, &lv, &rv)
+        num_of(it, op, &num2_val(lv), &num2_val(rv))
     })
 }
 
 fn slow_nm(op: B, l: Side, r: Side) -> Nm {
     Box::new(move |it: &mut Interp, f: &mut Frame| {
-        let lv = side_val(&l, it, f)?;
-        let rv = side_val(&r, it, f)?;
-        num_of(it, op, &lv, &rv)
+        let lv = l.eval_n(it, f)?;
+        let rv = r.eval_n(it, f)?;
+        num_of(it, op, &num2_val(lv), &num2_val(rv))
+    })
+}
+
+/// A bitwise operator whose operands are both non-literal: the Number-Number pair takes the `number_binop`
+/// expression, anything else `combine` on the evaluated values (each child runs once, left first).
+fn bit_ex(op: B, l: Side, r: Side) -> Ex {
+    fn with<F>(op: B, l: Side, r: Side, fast: F) -> Ex
+    where
+        F: Fn(f64, f64) -> f64 + 'static,
+    {
+        mk_ex(move |it, f| {
+            let lv = l.eval_n(it, f)?;
+            let rv = r.eval_n(it, f)?;
+            if let (Num2::N(x), Num2::N(y)) = (&lv, &rv) {
+                it.cstats.note_nm_fast();
+                return Ok(Value::Number(fast(*x, *y)));
+            }
+            bx(combine(it, op, &num2_val(lv), &num2_val(rv)))
+        })
+    }
+    match op {
+        B::BitAnd => with(op, l, r, |x, y| (to_int32(x) & to_int32(y)) as f64),
+        B::BitOr => with(op, l, r, |x, y| (to_int32(x) | to_int32(y)) as f64),
+        B::BitXor => with(op, l, r, |x, y| (to_int32(x) ^ to_int32(y)) as f64),
+        B::LShift => with(op, l, r, |x, y| {
+            to_int32(x).wrapping_shl(to_int32(y) as u32 & 31) as f64
+        }),
+        B::RShift => with(op, l, r, |x, y| {
+            (to_int32(x) >> (to_int32(y) as u32 & 31)) as f64
+        }),
+        B::ZeroFillRShift => with(op, l, r, |x, y| {
+            ((to_int32(x) as u32) >> (to_int32(y) as u32 & 31)) as f64
+        }),
+        _ => slow_ex(op, l, r),
+    }
+}
+
+/// `x = e` on a mutable slot whose right-hand side is a Number by construction: the slot is written in place.
+pub(crate) fn store_slot(k: u32, n: Nm) -> Ex {
+    mk_ex(move |it, f| {
+        let x = n(it, f)?;
+        set_num(&mut f.slots[k as usize], x);
+        Ok(Value::Number(x))
     })
 }
 
@@ -321,7 +417,7 @@ pub(crate) fn discard(g: &mut Gen, e: &a::Expr) -> CG<Ex> {
                 let slow = expr::compile(g, e)?;
                 return Ok(mk_ex(move |it, f| match f.slots[k] {
                     Value::Number(n) => {
-                        f.slots[k] = Value::Number(if inc { n + 1.0 } else { n - 1.0 });
+                        set_num(&mut f.slots[k], if inc { n + 1.0 } else { n - 1.0 });
                         Ok(Value::Undefined)
                     }
                     _ => slow(it, f),
@@ -334,7 +430,7 @@ pub(crate) fn discard(g: &mut Gen, e: &a::Expr) -> CG<Ex> {
 
 /// `x op= e` on a mutable slot. Numbers take the inline operator, everything else the shared `compound_finish`.
 /// `cur` is read before the right-hand side, as in `compound`.
-pub(crate) fn compound_slot(k: u32, op: B, rhs: Ex) -> Ex {
+pub(crate) fn compound_slot(k: u32, op: B, rhs: Side) -> Ex {
     match op {
         B::Add => fused(op, k, rhs, |x, y| x + y),
         B::Sub => fused(op, k, rhs, |x, y| x - y),
@@ -353,23 +449,30 @@ pub(crate) fn compound_slot(k: u32, op: B, rhs: Ex) -> Ex {
         B::ZeroFillRShift => fused(op, k, rhs, |x, y| {
             ((to_int32(x) as u32) >> (to_int32(y) as u32 & 31)) as f64
         }),
-        _ => expr::compound(Place::Slot { k, mutable: true }, op, rhs),
+        _ => expr::compound(Place::Slot { k, mutable: true }, op, side_ex(rhs)),
     }
 }
 
-fn fused<F>(op: B, k: u32, rhs: Ex, fast: F) -> Ex
+/// `x op= e` on a slot. The old value is read before the right-hand side (`n += (n = 5)` keeps the old `n`);
+/// a Number old value with a Number right-hand side is written in place.
+fn fused<F>(op: B, k: u32, rhs: Side, fast: F) -> Ex
 where
     F: Fn(f64, f64) -> f64 + 'static,
 {
     let p = Place::Slot { k, mutable: true };
     mk_ex(move |it, f| {
-        let cur = f.slots[k as usize].clone();
-        let r = rhs(it, f)?;
-        if let (Value::Number(x), Value::Number(y)) = (&cur, &r) {
-            let v = Value::Number(fast(*x, *y));
-            f.slots[k as usize] = v.clone();
-            return Ok(v);
+        if let Value::Number(x) = f.slots[k as usize] {
+            let r = rhs.eval_n(it, f)?;
+            if let Num2::N(y) = r {
+                it.cstats.note_nm_fast();
+                let v = fast(x, y);
+                set_num(&mut f.slots[k as usize], v);
+                return Ok(Value::Number(v));
+            }
+            return expr::compound_finish(it, f, &p, op, Value::Number(x), num2_val(r));
         }
-        expr::compound_finish(it, f, &p, op, cur, r)
+        let cur = f.slots[k as usize].clone();
+        let r = rhs.eval_n(it, f)?;
+        expr::compound_finish(it, f, &p, op, cur, num2_val(r))
     })
 }
