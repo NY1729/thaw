@@ -7,12 +7,16 @@ mod analyze;
 mod analyze_tests;
 mod check;
 #[cfg(test)]
+mod check_mode_tests;
+#[cfg(test)]
 mod diff_tests;
 #[cfg(test)]
 mod diff_tests_ctl;
 #[cfg(test)]
 mod diff_tests_mem;
 mod expr;
+#[cfg(test)]
+mod fuzz_tests;
 mod gen;
 mod member;
 mod run;
@@ -441,6 +445,8 @@ pub(crate) struct CompiledFn {
     pub(crate) arrow: bool,
     pub(crate) uses_this: bool,
     pub(crate) strict: bool,
+    /// The analyzer's `pure_kernel` verdict: the functions `check` mode compares (plan 6).
+    pub(crate) pure_kernel: bool,
 }
 
 /// Compiled and interpreted `Ctl` are the same error: this unboxes a compiled error back to `R`.
@@ -466,7 +472,8 @@ impl Interp {
     /// created inside a `with` (its scope chain has a dynamic object record).
     pub(crate) fn try_compiled(
         &mut self,
-        def: &FuncDef,
+        f: &Value,
+        def: &Rc<FuncDef>,
         scope: &Rc<Scope>,
         this: &Value,
         args: &[Value],
@@ -528,6 +535,9 @@ impl Interp {
         let c = c.clone();
         // the borrow ends before the body runs: a recursive call re-enters `try_compiled` for this function
         drop(st);
+        if check::applies(self.compile_mode, &c) {
+            return Some(self.run_checked(f, def, scope, this, args, &c));
+        }
         Some(c.run(self, scope, this, args))
     }
 }
