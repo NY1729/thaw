@@ -5,6 +5,7 @@
 use thaw_parser::ast as a;
 
 use super::gen::{reject, Gen, CG};
+use super::member;
 use super::{bx, Ex, Frame, CR};
 use crate::{bigint, builtins, to_int32, Interp, JsStr, Kind, Value, R};
 
@@ -93,6 +94,9 @@ pub(crate) fn compile(g: &mut Gen, e: &a::Expr) -> CG<Ex> {
         a::Expr::Unary(u) => unary(g, u.op, &u.arg),
         a::Expr::Update(u) => update(g, &u.arg, matches!(u.op, a::UpdateOp::PlusPlus), u.prefix),
         a::Expr::Assign(asg) => assign(g, asg),
+        a::Expr::Member(m) => member::read(g, m),
+        a::Expr::Array(arr) => member::array(g, arr),
+        a::Expr::Object(o) => member::object(g, o),
         _ => reject(),
     }
 }
@@ -225,7 +229,7 @@ fn append_slot(slots: &mut [Value], k: usize, cur: Value, rs: &JsStr) -> Result<
 }
 
 /// The interpreter's operator step: two Numbers take `number_binop`, everything else `binary`.
-fn combine(it: &mut Interp, op: a::BinaryOp, l: &Value, r: &Value) -> R<Value> {
+pub(crate) fn combine(it: &mut Interp, op: a::BinaryOp, l: &Value, r: &Value) -> R<Value> {
     if let (Value::Number(x), Value::Number(y)) = (l, r) {
         if let Some(v) = crate::number_binop(op, *x, *y) {
             return Ok(v);
@@ -234,13 +238,17 @@ fn combine(it: &mut Interp, op: a::BinaryOp, l: &Value, r: &Value) -> R<Value> {
     it.binary(op, l, r)
 }
 
-/// `x = e` / `x op= e` / `x &&= e` with an identifier target. Member targets are C2 PR4.
+/// `x = e` / `x op= e` / `x &&= e` on an identifier, or a member target (`member::assign`).
 fn assign(g: &mut Gen, asg: &a::AssignExpr) -> CG<Ex> {
     use a::AssignOp as A;
-    let a::AssignTarget::Simple(a::SimpleAssignTarget::Ident(id)) = &asg.left else {
-        return reject();
+    let id = match &asg.left {
+        a::AssignTarget::Simple(a::SimpleAssignTarget::Ident(id)) => &id.id,
+        a::AssignTarget::Simple(a::SimpleAssignTarget::Member(m)) => {
+            return member::assign(g, m, asg)
+        }
+        _ => return reject(),
     };
-    let p = Place::of(g, &id.id);
+    let p = Place::of(g, id);
     let rhs = compile(g, &asg.right)?;
     match asg.op {
         A::Assign => Ok(store(p, rhs)),
@@ -252,10 +260,12 @@ fn assign(g: &mut Gen, asg: &a::AssignExpr) -> CG<Ex> {
     }
 }
 
-/// `++x` / `x++` / `--x` / `x--` on an identifier. Member targets are C2 PR4.
+/// `++x` / `x++` / `--x` / `x--` on an identifier or a member (`member::update`).
 fn update(g: &mut Gen, arg: &a::Expr, inc: bool, prefix: bool) -> CG<Ex> {
-    let a::Expr::Ident(i) = arg else {
-        return reject();
+    let i = match arg {
+        a::Expr::Ident(i) => i,
+        a::Expr::Member(m) => return member::update(g, m, inc, prefix),
+        _ => return reject(),
     };
     let p = Place::of(g, i);
     Ok(mk_ex(move |it, f| {

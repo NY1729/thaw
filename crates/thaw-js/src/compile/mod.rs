@@ -10,8 +10,11 @@ mod check;
 mod diff_tests;
 #[cfg(test)]
 mod diff_tests_ctl;
+#[cfg(test)]
+mod diff_tests_mem;
 mod expr;
 mod gen;
+mod member;
 mod run;
 mod stmt;
 #[cfg(test)]
