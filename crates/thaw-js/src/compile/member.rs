@@ -8,6 +8,7 @@ use thaw_parser::ast as a;
 
 use super::expr::{self, combine, mk_ex};
 use super::gen::{reject, Gen, CG};
+use super::num::{self, Side};
 use super::{bx, Ex, Frame, CR};
 use crate::{bigint, put, Interp, Value, R};
 
@@ -15,6 +16,8 @@ use crate::{bigint, put, Interp, Value, R};
 enum PropKey {
     Name(Rc<str>),
     Computed(Ex),
+    /// A computed key that is a Number by construction (a bitwise node): no `Value` is built for it.
+    Num(num::Nm),
 }
 
 /// A located property: an integer index (kept numeric, so `arr[i]` builds no key) or a string key.
@@ -26,7 +29,10 @@ enum MLoc {
 fn prop_key(g: &mut Gen, p: &a::MemberProp) -> CG<PropKey> {
     match p {
         a::MemberProp::Ident(i) => Ok(PropKey::Name(Rc::from(i.sym.as_ref()))),
-        a::MemberProp::Computed(c) => Ok(PropKey::Computed(expr::compile(g, &c.expr)?)),
+        a::MemberProp::Computed(c) => Ok(match num::operand(g, &c.expr)? {
+            Side::N(n) => PropKey::Num(n),
+            side => PropKey::Computed(num::side_ex(side)),
+        }),
         a::MemberProp::PrivateName(_) => reject(),
     }
 }
@@ -39,11 +45,19 @@ fn locate(it: &mut Interp, f: &mut Frame, obj: Value, key: &PropKey) -> CR<MLoc>
             let kv = e(it, f)?;
             if let Value::Number(n) = &kv {
                 // range first (rejects NaN), then an exact-integer round trip
-                if *n >= 0.0 && *n < 4294967295.0 && (*n as u32) as f64 == *n {
+                if (0.0..4294967295.0).contains(n) && (*n as u32) as f64 == *n {
                     return Ok(MLoc::Index(obj, *n as usize));
                 }
             }
             Ok(MLoc::Prop(obj, it.key_of(&kv)))
+        }
+        // the same decision as the `Value::Number` arm above
+        PropKey::Num(e) => {
+            let n = e(it, f)?;
+            if (0.0..4294967295.0).contains(&n) && (n as u32) as f64 == n {
+                return Ok(MLoc::Index(obj, n as usize));
+            }
+            Ok(MLoc::Prop(obj, it.key_of(&Value::Number(n))))
         }
     }
 }
@@ -203,6 +217,10 @@ pub(crate) fn object(g: &mut Gen, o: &a::ObjectLit) -> CG<Ex> {
                 PropKey::Computed(e) => {
                     let kv = e(it, f)?;
                     it.key_of(&kv)
+                }
+                PropKey::Num(e) => {
+                    let n = e(it, f)?;
+                    it.key_of(&Value::Number(n))
                 }
             };
             let v = v(it, f)?;

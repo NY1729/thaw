@@ -6,6 +6,7 @@ use thaw_parser::ast as a;
 
 use super::expr;
 use super::gen::{self, reject, Gen, CG};
+use super::num::{self, Bl};
 use super::{bx, Ex, Flow, Frame, St, CR};
 use crate::Interp;
 
@@ -48,7 +49,7 @@ fn block(g: &mut Gen, stmts: &[a::Stmt]) -> CG<St> {
 pub(crate) fn compile(g: &mut Gen, s: &a::Stmt) -> CG<St> {
     match s {
         a::Stmt::Expr(e) => {
-            let x = expr::compile(g, &e.expr)?;
+            let x = num::discard(g, &e.expr)?;
             Ok(mk_st(move |it, f| {
                 x(it, f)?;
                 Ok(Flow::Next)
@@ -105,14 +106,14 @@ fn after_body(fl: Flow) -> Option<Flow> {
 }
 
 fn if_stmt(g: &mut Gen, i: &a::IfStmt) -> CG<St> {
-    let test = expr::compile(g, &i.test)?;
+    let test = num::test(g, &i.test)?;
     let cons = compile(g, &i.cons)?;
     let alt = match &i.alt {
         Some(s) => Some(compile(g, s)?),
         None => None,
     };
     Ok(mk_st(move |it, f| {
-        if test(it, f)?.truthy() {
+        if test(it, f)? {
             cons(it, f)
         } else if let Some(other) = &alt {
             other(it, f)
@@ -123,10 +124,10 @@ fn if_stmt(g: &mut Gen, i: &a::IfStmt) -> CG<St> {
 }
 
 fn while_stmt(g: &mut Gen, w: &a::WhileStmt) -> CG<St> {
-    let test = expr::compile(g, &w.test)?;
+    let test: Bl = num::test(g, &w.test)?;
     let body = loop_body(g, &w.body)?;
     Ok(mk_st(move |it, f| {
-        while test(it, f)?.truthy() {
+        while test(it, f)? {
             // the interpreter's order: test, then the deadline check, then the body
             bx(it.check_deadline())?;
             if let Some(out) = after_body(body(it, f)?) {
@@ -139,13 +140,13 @@ fn while_stmt(g: &mut Gen, w: &a::WhileStmt) -> CG<St> {
 
 fn do_while_stmt(g: &mut Gen, w: &a::DoWhileStmt) -> CG<St> {
     let body = loop_body(g, &w.body)?;
-    let test = expr::compile(g, &w.test)?;
+    let test: Bl = num::test(g, &w.test)?;
     Ok(mk_st(move |it, f| loop {
         bx(it.check_deadline())?;
         if let Some(out) = after_body(body(it, f)?) {
             return Ok(out);
         }
-        if !test(it, f)?.truthy() {
+        if !test(it, f)? {
             return Ok(Flow::Next);
         }
     }))
@@ -171,12 +172,12 @@ fn for_parts(g: &mut Gen, fs: &a::ForStmt) -> CG<St> {
         }
         None => None,
     };
-    let test: Option<Ex> = match &fs.test {
-        Some(e) => Some(expr::compile(g, e)?),
+    let test: Option<Bl> = match &fs.test {
+        Some(e) => Some(num::test(g, e)?),
         None => None,
     };
     let update: Option<Ex> = match &fs.update {
-        Some(e) => Some(expr::compile(g, e)?),
+        Some(e) => Some(num::discard(g, e)?),
         None => None,
     };
     let body = loop_body(g, &fs.body)?;
@@ -187,7 +188,7 @@ fn for_parts(g: &mut Gen, fs: &a::ForStmt) -> CG<St> {
         loop {
             bx(it.check_deadline())?;
             if let Some(t) = &test {
-                if !t(it, f)?.truthy() {
+                if !t(it, f)? {
                     return Ok(Flow::Next);
                 }
             }

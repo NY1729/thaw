@@ -66,6 +66,28 @@ jobs:
           benchmarks/jsengine/run.sh -n 5 -o "$RUNNER_TEMP/jsengine.tsv" 2> "$RUNNER_TEMP/jsengine.err" || true
           cat "$RUNNER_TEMP/jsengine.err" || true
           test -s "$RUNNER_TEMP/jsengine.tsv" || { echo "run.sh produced no TSV" >&2; exit 1; }
+      - name: Run benchmarks again with the closure compiler on
+        # Same run, same runner: the only fair A/B for the compiler. Informational only.
+        run: |
+          THAW_JS_COMPILE=on THAW_JS_COMPILE_AFTER=1 benchmarks/jsengine/run.sh -n 5 -o "$RUNNER_TEMP/jsengine-on.tsv" 2> "$RUNNER_TEMP/jsengine-on.err" || true
+          cat "$RUNNER_TEMP/jsengine-on.err" || true
+      - name: Print compiler A/B summary
+        run: |
+          off="$RUNNER_TEMP/jsengine.tsv"; on="$RUNNER_TEMP/jsengine-on.tsv"
+          test -s "$on" || { echo "no compile=on TSV" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "## compiler A/B (THAW_JS_COMPILE=on vs off, same run, best of 5)"
+            echo
+            echo "| benchmark | off ms | on ms | speedup | quickjs ms |"
+            echo "|---|---|---|---|---|"
+            awk -F'\t' 'NR == FNR { if (FNR > 1 && $1 != "geomean") off[$1] = $2; next }
+              FNR > 1 && $1 != "geomean" && ($1 in off) { printf "| %s | %s | %s | %.2fx | %s |\n", $1, off[$1], $2, (($2 + 0) > 0 ? off[$1] / $2 : 0), $3 }' "$off" "$on"
+            if grep -q "checksum mismatch" "$RUNNER_TEMP/jsengine-on.err"; then
+              echo
+              echo "**Checksum mismatches with the compiler on:**"
+              grep "checksum mismatch" "$RUNNER_TEMP/jsengine-on.err" | sed 's/^/- /'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Print benchmark summary
         # Informational only: prints geomean, max ratio, rows over 4x, and the strict fib(20) <= 1.2x line.
         run: |
