@@ -6533,6 +6533,28 @@ fn hint_stats_bcrypt_shape() {
 }
 
 #[test]
+fn ident_hint_compound_assignment_targets_are_annotated() {
+    // `n += v`, `r ^= v`, `l ^= v` read their target through `eval_ident`; the target ident must
+    // carry a hint id like any other identifier read, so nothing in this kernel is unannotated.
+    let src = "function enc(P) { var l = 1, r = 2, n = 0, i = 0; for (i = 0; i < 16; i++) { n += P[i]; r ^= n; l ^= r; } return l ^ r ^ n; }
+        const P = []; for (let k = 0; k < 16; k++) P.push(k * 7919); let t = 0; for (let c = 0; c < 200; c++) t = enc(P); console.log(t);";
+    let mut it = Interp::new();
+    it.hint_stats.on = true;
+    let _ = it.run(src);
+    assert_eq!(it.out.len(), 1);
+    let st = &it.hint_stats;
+    eprintln!("{}", st.summary());
+    assert_eq!(
+        st.unannotated.get(),
+        0,
+        "unannotated reads remain: {}",
+        st.summary()
+    );
+    assert!(st.hit.get() > 0, "no hinted read hit: {}", st.summary());
+    it.hint_stats.on = false;
+}
+
+#[test]
 fn hint_stats_package_factories_annotated() {
     // A bcrypt-shaped kernel inside a registry bundle factory: package code must be annotated at load.
     const BUNDLE: &str = r#"module.exports = (function(require){ var __thaw_bundle_entry_key = "m";
