@@ -324,7 +324,7 @@ fn refused_inner_method_stays_on_ast() {
 #[test]
 fn refused_inner_generator_stays_on_ast() {
     refused(
-        "function f() { var g = function* () { yield 1 }; return g().next().value } console.log('' + f());",
+        "function f() { var g = function* () { yield 1 }; var i = g(); var v = i.next().value; i.next(); return v } console.log('' + f());",
         FallbackReason::InnerFunction,
     );
 }
