@@ -164,7 +164,14 @@ impl Interp {
             (Ok(a), Ok(b)) if same_value(a, b) => None,
             (Ok(_), Ok(_)) => Some("result".to_string()),
             (Err(Ctl::Throw(a)), Err(Ctl::Throw(b))) => {
-                (self.error_text(a) != self.error_text(b)).then(|| "error".to_string())
+                // Error objects compare by `name: message`; thrown primitives (`throw 1`) compare by value.
+                let differs = match (a, b) {
+                    (Value::Object(_), Value::Object(_)) => {
+                        self.error_text(a) != self.error_text(b)
+                    }
+                    _ => !same_value(a, b),
+                };
+                differs.then(|| "error".to_string())
             }
             (Err(a), Err(b)) if std::mem::discriminant(a) == std::mem::discriminant(b) => None,
             _ => Some("error".to_string()),
@@ -189,4 +196,31 @@ impl Interp {
 /// The mode check: `real` is only compared when the function is a pure kernel.
 pub(crate) fn applies(mode: CompileMode, c: &CompiledFn) -> bool {
     mode == CompileMode::Check && c.pure_kernel
+}
+
+#[cfg(test)]
+mod thrown_value_tests {
+    use super::*;
+
+    #[test]
+    fn thrown_primitives_are_compared_by_value() {
+        let mut it = Interp::new();
+        let throw = |v: Value| -> R<Value> { Err(Ctl::Throw(v)) };
+        let num = |n: f64| Value::Number(n);
+        assert!(it
+            .diff_detail(&throw(num(1.0)), &throw(num(1.0)), &[], &[])
+            .is_none());
+        assert!(it
+            .diff_detail(&throw(num(1.0)), &throw(num(2.0)), &[], &[])
+            .is_some());
+        assert!(it
+            .diff_detail(&throw(num(f64::NAN)), &throw(num(f64::NAN)), &[], &[])
+            .is_none());
+        assert!(it
+            .diff_detail(&throw(num(0.0)), &throw(num(-0.0)), &[], &[])
+            .is_some());
+        assert!(it
+            .diff_detail(&throw(Value::Undefined), &throw(Value::Null), &[], &[])
+            .is_some());
+    }
 }

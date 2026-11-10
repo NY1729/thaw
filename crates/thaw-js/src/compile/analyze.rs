@@ -709,7 +709,7 @@ impl Visit for Walk {
     }
 
     fn visit_throw_stmt(&mut self, n: &a::ThrowStmt) {
-        self.block(FallbackReason::Throw);
+        // compiled since TJ156; the argument's own blockers and impurity (calls, `new`) still apply
         n.visit_children_with(self);
     }
 

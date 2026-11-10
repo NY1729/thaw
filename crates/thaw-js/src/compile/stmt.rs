@@ -8,7 +8,7 @@ use super::expr;
 use super::gen::{self, reject, Gen, CG};
 use super::num::{self, Bl};
 use super::{bx, Ex, Flow, Frame, St, CR};
-use crate::Interp;
+use crate::{Ctl, Interp};
 
 fn mk_st<F>(f: F) -> St
 where
@@ -72,6 +72,14 @@ pub(crate) fn compile(g: &mut Gen, s: &a::Stmt) -> CG<St> {
         a::Stmt::While(w) => while_stmt(g, w),
         a::Stmt::DoWhile(w) => do_while_stmt(g, w),
         a::Stmt::For(fs) => for_stmt(g, fs),
+        // TJ156: `throw` produces the same `Ctl::Throw` the AST does, after the argument is evaluated
+        a::Stmt::Throw(t) => {
+            let x = expr::compile(g, &t.arg)?;
+            Ok(mk_st(move |it, f| {
+                let v = x(it, f)?;
+                Err(Box::new(Ctl::Throw(v)))
+            }))
+        }
         a::Stmt::Break(b) => jump(g, b.label.is_some(), Flow::Break(0)),
         a::Stmt::Continue(c) => jump(g, c.label.is_some(), Flow::Continue(0)),
         _ => reject(),
