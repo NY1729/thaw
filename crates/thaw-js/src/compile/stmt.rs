@@ -84,6 +84,7 @@ pub(crate) fn compile(g: &mut Gen, s: &a::Stmt) -> CG<St> {
         }
         a::Stmt::Break(b) => jump(g, b.label.is_some(), Flow::Break(0)),
         a::Stmt::Continue(c) => jump(g, c.label.is_some(), Flow::Continue(0)),
+        a::Stmt::Switch(sw) => switch_stmt(g, sw),
         _ => reject(),
     }
 }
@@ -91,18 +92,73 @@ pub(crate) fn compile(g: &mut Gen, s: &a::Stmt) -> CG<St> {
 /// A loop body: `break`/`continue` are legal inside it.
 fn loop_body(g: &mut Gen, s: &a::Stmt) -> CG<St> {
     g.loops += 1;
+    g.breakables += 1;
     let r = compile(g, s);
     g.loops -= 1;
+    g.breakables -= 1;
     r
 }
 
-/// `break`/`continue` without a label, inside a loop of this function. Labels are blocked by the analyzer,
-/// and a stray one is rejected rather than compiled.
+/// `break`/`continue` without a label, inside a loop (`continue`) or a loop or `switch` (`break`) of this
+/// function. Labels are blocked by the analyzer, and a stray one is rejected rather than compiled.
 fn jump(g: &Gen, labeled: bool, flow: Flow) -> CG<St> {
-    if labeled || g.loops == 0 {
+    let enclosing = match flow {
+        Flow::Break(_) => g.breakables,
+        _ => g.loops,
+    };
+    if labeled || enclosing == 0 {
         return reject();
     }
     Ok(mk_st(move |_, _| Ok(flow)))
+}
+
+/// `switch`: the discriminant once, the tests in source order up to the first strict match, else the first
+/// `default` (wherever it is); the bodies from there on, with fallthrough. Only `break` ends the switch. The
+/// analyzer refuses lexical and function declarations in a case, so the interpreter's inner scope is
+/// unobservable and no scope is modelled here.
+fn switch_stmt(g: &mut Gen, sw: &a::SwitchStmt) -> CG<St> {
+    g.breakables += 1;
+    let r = switch_parts(g, sw);
+    g.breakables -= 1;
+    r
+}
+
+fn switch_parts(g: &mut Gen, sw: &a::SwitchStmt) -> CG<St> {
+    let disc = expr::compile(g, &sw.discriminant)?;
+    let mut tests: Vec<Option<Ex>> = Vec::with_capacity(sw.cases.len());
+    let mut bodies: Vec<St> = Vec::with_capacity(sw.cases.len());
+    for case in &sw.cases {
+        tests.push(match &case.test {
+            Some(t) => Some(expr::compile(g, t)?),
+            None => None,
+        });
+        bodies.push(seq(body(g, &case.cons)?));
+    }
+    let default_at = sw.cases.iter().position(|c| c.test.is_none());
+    Ok(mk_st(move |it, f| {
+        let d = disc(it, f)?;
+        let mut matched = None;
+        for (i, t) in tests.iter().enumerate() {
+            if let Some(t) = t {
+                let tv = t(it, f)?;
+                if crate::strict_equals(&d, &tv) {
+                    matched = Some(i);
+                    break;
+                }
+            }
+        }
+        if let Some(start) = matched.or(default_at) {
+            for b in &bodies[start..] {
+                match b(it, f)? {
+                    Flow::Next => {}
+                    // `break` ends the switch normally; `continue` and `return` belong to the enclosing code
+                    Flow::Break(0) => return Ok(Flow::Next),
+                    other => return Ok(other),
+                }
+            }
+        }
+        Ok(Flow::Next)
+    }))
 }
 
 /// What a loop does with one completed body: `None` to run the next iteration (normal or `continue`),
