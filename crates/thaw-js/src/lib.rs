@@ -2632,6 +2632,39 @@ impl Interp {
         ))
     }
 
+    /// A function expression's value (`Expr::Fn`; compiled closures call it too).
+    fn fn_expr_value(&mut self, f: &a::FnExpr, scope: &Rc<Scope>) -> R<Value> {
+        let name = f.ident.as_ref().map(|i| Rc::<str>::from(i.sym.as_ref()));
+        self.function_value(name, &f.function, scope)
+    }
+
+    /// An arrow function's value (`Expr::Arrow`; compiled closures call it too).
+    fn arrow_value(&mut self, f: &a::ArrowExpr, scope: &Rc<Scope>) -> R<Value> {
+        if f.is_generator {
+            return unsupported("generator");
+        }
+        if let Some(def) = self.fn_cache.get(&(self.run_id, f.span.lo.0)).cloned() {
+            return Ok(self.closure_from_def(def, scope));
+        }
+        let body = match &*f.body {
+            a::ArrowFunctionBody::FunctionBody(b) => Body::Block(b.stmts.clone()),
+            a::ArrowFunctionBody::Expr(e) => Body::Expr(e.clone()),
+        };
+        Ok(self.make_function(
+            None,
+            f.params.clone(),
+            body,
+            true,
+            f.is_async,
+            false,
+            false,
+            false,
+            f.span.lo.0,
+            f.span.hi.0,
+            scope,
+        ))
+    }
+
     fn hoist_functions(&mut self, stmts: &[a::Stmt], scope: &Rc<Scope>) -> R<()> {
         self.hoist_functions_in(stmts, scope, false)
     }
@@ -3181,35 +3214,8 @@ impl Interp {
                 }
                 Ok(Value::Object(obj))
             }
-            a::Expr::Fn(f) => {
-                let name = f.ident.as_ref().map(|i| Rc::<str>::from(i.sym.as_ref()));
-                self.function_value(name, &f.function, scope)
-            }
-            a::Expr::Arrow(f) => {
-                if f.is_generator {
-                    return unsupported("generator");
-                }
-                if let Some(def) = self.fn_cache.get(&(self.run_id, f.span.lo.0)).cloned() {
-                    return Ok(self.closure_from_def(def, scope));
-                }
-                let body = match &*f.body {
-                    a::ArrowFunctionBody::FunctionBody(b) => Body::Block(b.stmts.clone()),
-                    a::ArrowFunctionBody::Expr(e) => Body::Expr(e.clone()),
-                };
-                Ok(self.make_function(
-                    None,
-                    f.params.clone(),
-                    body,
-                    true,
-                    f.is_async,
-                    false,
-                    false,
-                    false,
-                    f.span.lo.0,
-                    f.span.hi.0,
-                    scope,
-                ))
-            }
+            a::Expr::Fn(f) => self.fn_expr_value(f, scope),
+            a::Expr::Arrow(f) => self.arrow_value(f, scope),
             a::Expr::Member(m) => {
                 let obj = self.eval(&m.obj, scope)?;
                 match self.member_loc(obj, &m.prop, scope)? {

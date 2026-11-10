@@ -142,6 +142,8 @@ struct Walk {
     free: BTreeSet<String>,
     /// Nested functions and arrows entered directly in this function (not inside another nested one).
     inner_fns: u32,
+    /// Set by `visit_fn_expr` for the function expression `visit_function` is about to enter.
+    ok_fn: bool,
     /// References to lexical declarations: (declaration index, byte position).
     reads: Vec<(usize, u32)>,
     labels: Vec<String>,
@@ -161,6 +163,7 @@ impl Walk {
             captured: BTreeSet::new(),
             free: BTreeSet::new(),
             inner_fns: 0,
+            ok_fn: false,
             reads: Vec::new(),
             labels: Vec::new(),
             impure: false,
@@ -470,6 +473,7 @@ impl Visit for Walk {
         if let Some(id) = &n.ident {
             self.bound(&id.sym);
         }
+        self.ok_fn = true;
         n.function.visit_with(self);
     }
 
@@ -477,7 +481,11 @@ impl Visit for Walk {
         if self.fn_depth == 0 {
             self.inner_fns += 1;
         }
-        self.block(FallbackReason::InnerFunction);
+        // only a plain function expression is accepted; declarations, methods, accessors (`ok_fn` unset),
+        // async and generator functions stay refused
+        if !std::mem::take(&mut self.ok_fn) || f.is_async || f.is_generator {
+            self.block(FallbackReason::InnerFunction);
+        }
         self.impure = true;
         self.fn_depth += 1;
         self.nonarrow_depth += 1;
@@ -495,7 +503,9 @@ impl Visit for Walk {
         if self.fn_depth == 0 {
             self.inner_fns += 1;
         }
-        self.block(FallbackReason::InnerFunction);
+        if n.is_async || n.is_generator {
+            self.block(FallbackReason::InnerFunction);
+        }
         self.impure = true;
         self.fn_depth += 1;
         for p in &n.params {
@@ -917,6 +927,17 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         .any(|n| n.level >= 2 && n.class == NameClass::Scoped)
     {
         blockers |= FallbackReason::ScopedBlock.bit();
+    }
+    // A captured name is compiled only as a parameter or a `var` (function level). Any other captured name
+    // (lexical, block-level, catch, self, class) keeps the function on the AST.
+    if names
+        .iter()
+        .any(|n| n.class == NameClass::Scoped && !matches!(n.kind, DeclKind::Param | DeclKind::Var))
+    {
+        blockers |= FallbackReason::InnerFunction.bit();
+        if reason.is_none_or(|cur| FallbackReason::InnerFunction.priority() > cur.priority()) {
+            reason = Some(FallbackReason::InnerFunction);
+        }
     }
     let needs_scope = inner_fns > 0
         && (names.iter().any(|n| n.class == NameClass::Scoped)

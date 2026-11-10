@@ -28,6 +28,8 @@ mod diff_tests_elem;
 #[cfg(test)]
 mod diff_tests_elemw;
 #[cfg(test)]
+mod diff_tests_inner;
+#[cfg(test)]
 mod diff_tests_inre;
 #[cfg(test)]
 mod diff_tests_mem;
@@ -631,6 +633,16 @@ impl Stats {
     pub(crate) fn note_elem_store_slow(&mut self) {}
 
     #[cfg(test)]
+    pub(crate) fn scope_frames(&self) -> u64 {
+        self.scope_frames
+    }
+
+    #[cfg(test)]
+    pub(crate) fn closures_created(&self) -> u64 {
+        self.closures_created
+    }
+
+    #[cfg(test)]
     pub(crate) fn calls_rejected(&self, reason: FallbackReason) -> u64 {
         self.calls_rejected[reason as usize]
     }
@@ -737,12 +749,23 @@ pub(crate) type St = Box<dyn Fn(&mut Interp, &mut Frame) -> CR<Flow>>;
 pub(crate) struct Frame {
     /// Parameters first, then `var`s and block-level `let`/`const` (see `gen.rs`).
     pub(crate) slots: Vec<Value>,
-    /// The CLOSURE's scope: no frame `Scope` is created, so free names resolve from here.
+    /// The scope free names resolve from: the closure's scope, or the call's own `Scope` when `frame` is set.
     pub(crate) scope: Rc<Scope>,
     /// The call's `this`, already sloppy-normalised (non-arrow functions only).
     pub(crate) this: Value,
     /// Set by `return`, read by `CompiledFn::run`.
     pub(crate) ret: Value,
+}
+
+/// The per-call `Scope` of a function with inner closures (`FnPlan::needs_scope`). It holds the names the
+/// closures can reach (the captured parameters and `var`s, which are not slots), and the `this` of arrows.
+pub(crate) struct FrameInit {
+    /// The non-arrow `this` is bound in the `Scope` (an inner arrow reads it through the chain).
+    pub(crate) set_this: bool,
+    /// Captured parameters: (argument index, interned name), in argument order.
+    pub(crate) params: Vec<(usize, Rc<str>)>,
+    /// Captured `var`s: declared with `declare_if_absent` after the parameters, as `call_closure_ast` does.
+    pub(crate) vars: Vec<Rc<str>>,
 }
 
 /// A compiled function body. `run` is in `run.rs`.
@@ -756,6 +779,8 @@ pub(crate) struct CompiledFn {
     pub(crate) body: Vec<St>,
     /// Arrow functions with an expression body.
     pub(crate) expr_body: Option<Ex>,
+    /// Set when the function creates inner closures that need the call's own `Scope`.
+    pub(crate) frame: Option<FrameInit>,
     pub(crate) arrow: bool,
     pub(crate) uses_this: bool,
     pub(crate) strict: bool,
@@ -822,7 +847,8 @@ impl Interp {
                     // Codegen refusals stay `Eligible` (no code, AST path) and are never retried.
                     *st = CState::Eligible;
                     if !scope.in_with {
-                        match gen::compile(def, &plan) {
+                        let compiled = gen::compile(def, &plan, &mut |n| self.intern(n));
+                        match compiled {
                             Ok(c) => {
                                 #[cfg(test)]
                                 self.cstats.note_bit_ex_built(c.bit_ex_built);
