@@ -2,6 +2,8 @@
 //! assignment on slots and free names). Every node calls the same interpreter helper the AST arm calls,
 //! in the same order: `combine` is `number_binop` then `binary`, the way `Interp::eval` does it.
 
+use std::rc::Rc;
+
 use thaw_parser::ast as a;
 
 use super::call;
@@ -109,6 +111,21 @@ pub(crate) fn compile(g: &mut Gen, e: &a::Expr) -> CG<Ex> {
         a::Expr::New(n) => call::new_expr(g, n),
         a::Expr::Array(arr) => member::array(g, arr),
         a::Expr::Object(o) => member::object(g, o),
+        // a closure over the call's scope: the interpreter's own creation path, against `f.scope`
+        a::Expr::Fn(f) => {
+            let f = Rc::new(f.clone());
+            Ok(mk_ex(move |it, fr| {
+                it.cstats.closures_created += 1;
+                bx(it.fn_expr_value(&f, &fr.scope))
+            }))
+        }
+        a::Expr::Arrow(f) => {
+            let f = Rc::new(f.clone());
+            Ok(mk_ex(move |it, fr| {
+                it.cstats.closures_created += 1;
+                bx(it.arrow_value(&f, &fr.scope))
+            }))
+        }
         _ => reject(),
     }
 }

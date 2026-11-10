@@ -73,6 +73,32 @@ impl CompiledFn {
                 };
             }
         }
+        // the call's own `Scope` (as `call_closure_ast` makes): the parameters, then the `var`s, which are not
+        // slots because an inner closure names them. A function without inner closures keeps the closure scope.
+        let scope = match &self.frame {
+            None => scope,
+            Some(init) => {
+                it.cstats.scope_frames += 1;
+                let s = Scope::new(Some(scope));
+                if self.strict {
+                    s.strict.set(true);
+                }
+                if init.set_this {
+                    s.set_this(this.clone());
+                }
+                for (i, name) in &init.params {
+                    let v = match args.get_mut(*i) {
+                        Some(a) => std::mem::replace(a, Value::Undefined),
+                        None => Value::Undefined,
+                    };
+                    s.declare_rc(name.clone(), v, true);
+                }
+                for name in &init.vars {
+                    s.declare_if_absent(name);
+                }
+                s
+            }
+        };
         let mut frame = Frame {
             slots,
             scope,

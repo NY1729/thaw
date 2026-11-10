@@ -2,6 +2,8 @@
 //! `var`/`let`/`const` with identifier patterns, `return`. PR3: `if`, `while`, `do-while`, `for`, and
 //! unlabeled `break`/`continue`.
 
+use std::rc::Rc;
+
 use thaw_parser::ast as a;
 
 use super::expr;
@@ -210,6 +212,16 @@ fn for_parts(g: &mut Gen, fs: &a::ForStmt) -> CG<St> {
     }))
 }
 
+/// `x = init` for a scoped `var` x: assigned by name in the call's scope, as `exec_var` does.
+fn assign_scoped(name: &str, init: super::Ex) -> St {
+    let name: Rc<str> = name.into();
+    mk_st(move |it, f| {
+        let v = init(it, f)?;
+        bx(it.assign_var(&f.scope, &name, v))?;
+        Ok(Flow::Next)
+    })
+}
+
 /// `slots[k] = init`.
 fn store(k: u32, init: super::Ex) -> St {
     mk_st(move |it, f| {
@@ -229,12 +241,20 @@ fn var_decl(g: &mut Gen, v: &a::VarDecl) -> CG<St> {
         };
         let name = &b.id.sym;
         if is_var {
-            // `var` is hoisted: its slot exists already, and a bare `var x;` does nothing
-            let Some(l) = g.var_local(name) else {
-                return reject();
-            };
-            if let Some(e) = &d.init {
-                steps.push(store(l.slot, expr::compile(g, e)?));
+            // `var` is hoisted: its slot (or its scoped binding, declared by the prologue) exists already,
+            // and a bare `var x;` does nothing
+            match g.var_local(name) {
+                Some(l) => {
+                    if let Some(e) = &d.init {
+                        steps.push(store(l.slot, expr::compile(g, e)?));
+                    }
+                }
+                None if g.is_scoped(name) => {
+                    if let Some(e) = &d.init {
+                        steps.push(assign_scoped(name, expr::compile(g, e)?));
+                    }
+                }
+                None => return reject(),
             }
         } else {
             let init = match &d.init {
