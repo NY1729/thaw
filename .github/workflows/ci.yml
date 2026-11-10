@@ -357,6 +357,15 @@ jobs:
               echo "Failing cases (classification other than matched):"
               jq -r '.results[] | select(.classification != "matched") | "- \(.name): \(.classification) \((.detail // "") | .[0:200] | gsub("\n"; " "))"' "$report"
               echo
+              if jq -e 'any(.results[]; has("linksQuickjs"))' "$report" > /dev/null; then
+                echo "Cases linking QuickJS: $(jq '[.results[] | select(.linksQuickjs == true)] | length' "$report"), not linking: $(jq '[.results[] | select(.linksQuickjs == false)] | length' "$report")"
+                echo
+                echo "Cases still linking QuickJS (sorted, max 80):"
+                jq -r '.results[] | select(.linksQuickjs == true) | .name' "$report" | sort | head -n 80
+              else
+                echo "QuickJS link: not recorded"
+              fi
+              echo
               echo "Cases using new Function or eval (the user-dynamic set):"
               jq -r --rawfile names "$RUNNER_TEMP/dynamic-names.txt" '($names | split("\n") | map(select(length > 0))) as $dyn | .results[] | select(.name as $n | any($dyn[]; . == $n)) | "- \(.name): \(.classification)"' "$report"
             else

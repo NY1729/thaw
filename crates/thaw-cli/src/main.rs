@@ -600,6 +600,20 @@ fn elf_section<'a>(bytes: &'a [u8], name: &[u8]) -> Result<&'a [u8], String> {
     found.ok_or_else(|| "executable does not contain a Thaw artifact section".into())
 }
 
+/// Whether an artifact manifest says the executable links QuickJS (`thaw inspect`'s `quickjs:` line).
+fn manifest_links_quickjs(manifest: &serde_json::Value) -> bool {
+    manifest["quickjs"].as_bool().unwrap_or(false)
+}
+
+/// Whether the executable at `path` links QuickJS, read the same way `thaw inspect` reads it.
+fn binary_links_quickjs(path: &Path) -> Result<bool, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+    Ok(manifest_links_quickjs(&artifact_manifest_from_bytes(
+        &bytes,
+    )?))
+}
+
 fn run_inspect(args: &[String]) -> Result<(), String> {
     if args.len() != 1 {
         return Err("usage: thaw inspect <executable>".into());
@@ -634,10 +648,7 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
                 .join(", "))
             .unwrap_or_default()
     );
-    println!(
-        "quickjs: {}",
-        manifest["quickjs"].as_bool().unwrap_or(false)
-    );
+    println!("quickjs: {}", manifest_links_quickjs(&manifest));
     if let Some(reasons) = manifest["quickjs_reasons"].as_array() {
         for reason in reasons {
             let kind = reason["kind"].as_str().unwrap_or("unknown");
