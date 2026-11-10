@@ -241,6 +241,10 @@ fn run_node_compat_case(
         false,
         shared_rt,
     );
+    let links_quickjs = build
+        .as_ref()
+        .ok()
+        .and_then(|()| binary_links_quickjs(&output).ok());
     let outcome = build.and_then(|_| {
         command_output_with_timeout(
             Command::new(&output).args(&arguments),
@@ -306,11 +310,19 @@ fn run_node_compat_case(
         result["exitCode"] = expected_exit_code.into();
         result["actualExitCode"] = thaw_exit_code.into();
     }
+    record_quickjs_link(&mut result, links_quickjs);
     Ok(NodeCompatCase {
         result,
         bug: classification == "bug",
         reference_error: false,
     })
+}
+
+/// Adds `linksQuickjs` to a case's result; omitted when no built binary was inspected.
+fn record_quickjs_link(result: &mut serde_json::Value, links_quickjs: Option<bool>) {
+    if let Some(links) = links_quickjs {
+        result["linksQuickjs"] = links.into();
+    }
 }
 
 enum NodeReferenceError {
@@ -545,5 +557,30 @@ mod capture_pipe_tests {
         let captured = Arc::new(Mutex::new(Vec::new()));
         capture_pipe(InterruptedOnce(0), Arc::clone(&captured)).unwrap();
         assert_eq!(*captured.lock().unwrap(), b"marker");
+    }
+}
+
+#[cfg(test)]
+mod quickjs_link_tests {
+    use super::record_quickjs_link;
+
+    #[test]
+    fn records_link_flag_and_keeps_existing_keys() {
+        let mut result = serde_json::json!({"name": "case", "classification": "matched"});
+        record_quickjs_link(&mut result, Some(true));
+        assert_eq!(result["linksQuickjs"], true);
+        assert_eq!(result["name"], "case");
+        assert_eq!(result["classification"], "matched");
+
+        let mut result = serde_json::json!({"name": "case"});
+        record_quickjs_link(&mut result, Some(false));
+        assert_eq!(result["linksQuickjs"], false);
+    }
+
+    #[test]
+    fn omits_key_when_build_or_inspect_failed() {
+        let mut result = serde_json::json!({"name": "case"});
+        record_quickjs_link(&mut result, None);
+        assert!(result.get("linksQuickjs").is_none());
     }
 }
