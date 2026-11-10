@@ -31,6 +31,8 @@ mod diff_tests_mem;
 mod diff_tests_num2;
 #[cfg(test)]
 mod diff_tests_self;
+#[cfg(test)]
+mod diff_tests_throw;
 mod elem;
 mod expr;
 #[cfg(test)]
@@ -134,6 +136,8 @@ pub(crate) enum FallbackReason {
     RegexLiteral,
     ObjectMethod,
     Try,
+    /// No longer produced (TJ156 compiles `throw`); kept for its name in the stats.
+    #[allow(dead_code)]
     Throw,
     Switch,
     Labels,

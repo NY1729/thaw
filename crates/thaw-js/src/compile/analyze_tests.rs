@@ -302,7 +302,8 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         Some(R::Try),
         "e:slot o:slot",
     ),
-    ("function f() { throw 1 }", Some(R::Throw), ""),
+    // throw compiles
+    ("function f() { throw 1 }", None, ""),
     (
         "function f(a) { switch (a) { case 1: return 2; default: return 3 } }",
         Some(R::Switch),
