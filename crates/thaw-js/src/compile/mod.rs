@@ -740,6 +740,16 @@ pub(crate) fn bx<T>(r: R<T>) -> CR<T> {
 }
 
 impl Interp {
+    /// A realm for running programs: the closure compiler is on unless `THAW_JS_COMPILE` says otherwise
+    /// (`off`, `check`). `Interp::new()` keeps `Off` as its default so embedders and tests are unchanged.
+    pub fn runtime() -> Interp {
+        let mut it = Interp::new();
+        if std::env::var_os("THAW_JS_COMPILE").is_none() {
+            it.compile_mode = CompileMode::On;
+        }
+        it
+    }
+
     /// A realm with the given compile mode, independent of `THAW_JS_COMPILE`. For tests and embedders.
     pub fn with_compile_mode(mode: CompileMode) -> Interp {
         let mut it = Interp::new();

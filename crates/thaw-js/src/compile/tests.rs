@@ -96,3 +96,15 @@ fn compile_on_matches_off_when_everything_is_rejected() {
     // C3: calls now compile, so no NotYet rejection remains
     assert_eq!(off.cstats.rejected(FallbackReason::NotYet), 0);
 }
+
+/// `Interp::runtime()` (the entry used by `Package::load`, the default realm, workers and thaw-js-node) turns the
+/// compiler on unless `THAW_JS_COMPILE` is set; `Interp::new()` keeps `Off`. The env var is process-wide, so
+/// this only checks the unset case when the test runner has it unset.
+#[test]
+fn runtime_realm_defaults_to_on_and_new_stays_off() {
+    if std::env::var_os("THAW_JS_COMPILE").is_some() {
+        return;
+    }
+    assert_eq!(Interp::runtime().compile_mode, CompileMode::On);
+    assert_eq!(Interp::new().compile_mode, CompileMode::Off);
+}
