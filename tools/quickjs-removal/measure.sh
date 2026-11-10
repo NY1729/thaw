@@ -18,7 +18,8 @@
 #        VERSIONS    pinned specs           (default: $CORPUS/versions.txt; lines `name spec@ver ...`)
 #        PK_DIR      corpus programs        (default: $CORPUS/pk)
 #        JS_DIR      scan bundles           (default: $CORPUS/corpus; scan skipped if absent)
-#        Each program's run_ms is the median of 5 runs (date-based ms, %e kept for RSS).
+#        Each program's run_ms is the median of 5 runs (date-based ms, %e kept for RSS). Engines alternate within each round (MEASURE_RUNS rounds, default 5);
+#        paired_ratio is the median over rounds of thaw-js/quickjs.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -48,6 +49,8 @@ done
 mapfile -t PROGRAMS < <(grep -vE '^[[:space:]]*(#|$)' "$VERSIONS")
 
 ENGINES=(quickjs thaw-js)
+RUNS="${MEASURE_RUNS:-5}"
+case "$RUNS" in ''|*[!0-9]*|0) RUNS=5 ;; esac
 export TMPDIR="$SCRATCH/tmp"
 export RUST_MIN_STACK=16777216
 mkdir -p "$SCRATCH/proj" "$SCRATCH/bin" "$SCRATCH/out" "$TMPDIR" "$(dirname "$OUT")"
@@ -126,7 +129,10 @@ measure_program() {
     row program "$name" node stdout_ok 0
   fi
 
+  # Phase 1: build every engine's binary (rows and diagnostics that do not depend on running).
   local engine
+  local -A binof=() logof=()
+  local -a built=()
   for engine in "${ENGINES[@]}"; do
     local -a envargs
     read -r -a envargs <<< "$(engine_env "$engine")"
@@ -154,31 +160,58 @@ measure_program() {
     row program "$name" "$engine" links_quickjs "${links:-0}"
     row program "$name" "$engine" F "$F"
     row program "$name" "$engine" size_bytes "$(stat -c %s "$bin")"
+    binof[$engine]="$bin"; logof[$engine]="$log"; built+=( "$engine" )
+  done
 
-    # Five runs: run_ms is the median (startup-dominated runs are noisy); stdout must match Node on every run.
-    local -a runs=()
-    local r status run_status=0 rss=0 rrss ok=1
-    for r in 1 2 3 4 5; do
+  # Phase 2: MEASURE_RUNS rounds (default 5), each round runs every built engine once, alternating which engine goes
+  # first. A runner that speeds up or slows down during the job then hits both engines alike, and the per-round
+  # thaw-js/quickjs ratio (reported as paired_ratio, median over rounds) cancels the drift. stdout must match Node
+  # on every run.
+  local -A runs_of=() status_of=() rss_of=() ok_of=()
+  local round eng order r2 status rrss rs0
+  for engine in "${built[@]}"; do runs_of[$engine]=""; status_of[$engine]=0; rss_of[$engine]=0; ok_of[$engine]=1; done
+  local -a paired=()
+  for (( round = 1; round <= RUNS; round++ )); do
+    order=( "${built[@]}" )
+    if (( round % 2 == 0 )); then
+      order=(); for (( r2 = ${#built[@]} - 1; r2 >= 0; r2-- )); do order+=( "${built[$r2]}" ); done
+    fi
+    local qms="" tms=""
+    for eng in "${order[@]}"; do
+      local log2="${logof[$eng]}"
       s=$(date +%s%N)
-      /usr/bin/time -f "%e %M" -o "$log.time" timeout 120 "$bin" > "$log.stdout" 2> "$log.stderr"
+      /usr/bin/time -f "%e %M" -o "$log2.time" timeout 120 "${binof[$eng]}" > "$log2.stdout" 2> "$log2.stderr"
       status=$?
       e=$(date +%s%N)
-      runs+=( $(( (e - s) / 1000000 )) )
-      [ "$status" = 0 ] || run_status=$status
-      read -r _ rrss < "$log.time" 2>/dev/null
+      rs0=$(( (e - s) / 1000000 ))
+      runs_of[$eng]="${runs_of[$eng]} $rs0"
+      [ "$status" = 0 ] || status_of[$eng]=$status
+      read -r _ rrss < "$log2.time" 2>/dev/null
       # /usr/bin/time prints "Command terminated by signal N" instead of "<sec> <kB>" when the child dies.
       case "$rrss" in ''|*[!0-9]*) rrss=0 ;; esac
-      [ "$rrss" -gt "$rss" ] && rss=$rrss
-      cmp -s "$log.stdout" "$SCRATCH/out/$name.node" || ok=0
+      [ "$rrss" -gt "${rss_of[$eng]}" ] && rss_of[$eng]=$rrss
+      cmp -s "$log2.stdout" "$SCRATCH/out/$name.node" || ok_of[$eng]=0
+      [ "$eng" = quickjs ] && qms=$rs0
+      [ "$eng" = thaw-js ] && tms=$rs0
     done
-    local median
-    median=$(printf '%s\n' "${runs[@]}" | sort -n | sed -n '3p')
-    row program "$name" "$engine" run_exit "$run_status"
-    row program "$name" "$engine" run_ms "$median"
-    row program "$name" "$engine" rss_kb "$rss"
-    row program "$name" "$engine" stdout_eq_node "$ok"
-    diagnose "$name" "$engine" "$log" "$build_ok" "$run_status" "$ok"
+    if [ -n "$qms" ] && [ -n "$tms" ] && [ "$qms" -gt 0 ]; then
+      paired+=( "$(awk -v t="$tms" -v q="$qms" 'BEGIN { printf "%.4f", t / q }')" )
+    fi
   done
+
+  # Phase 3: rows. run_ms is the median of the rounds (startup-dominated runs are noisy).
+  for engine in "${built[@]}"; do
+    local median
+    median=$(printf '%s\n' ${runs_of[$engine]} | sort -n | sed -n "$(( (RUNS + 1) / 2 ))p")
+    row program "$name" "$engine" run_exit "${status_of[$engine]}"
+    row program "$name" "$engine" run_ms "$median"
+    row program "$name" "$engine" rss_kb "${rss_of[$engine]}"
+    row program "$name" "$engine" stdout_eq_node "${ok_of[$engine]}"
+    diagnose "$name" "$engine" "${logof[$engine]}" 1 "${status_of[$engine]}" "${ok_of[$engine]}"
+  done
+  if [ "${#paired[@]}" -gt 0 ]; then
+    row program "$name" thaw-js paired_ratio "$(printf '%s\n' "${paired[@]}" | sort -n | sed -n "$(( (${#paired[@]} + 1) / 2 ))p")"
+  fi
 }
 
 for entry in "${PROGRAMS[@]}"; do

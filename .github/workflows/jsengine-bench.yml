@@ -14,6 +14,9 @@ on:
         type: choice
         options: ["default", "off", "on"]
         default: "default"
+      runs:
+        description: rounds per corpus program (each round runs QuickJS and thaw-js once, alternating); more rounds give a steadier paired ratio
+        default: "5"
 
 permissions:
   contents: read
@@ -229,8 +232,22 @@ jobs:
           PK_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/pk
           VERSIONS: ${{ github.workspace }}/tools/quickjs-removal/corpus/versions.txt
           THAW_JS_COMPILE: ${{ (inputs.compile == 'off' || inputs.compile == 'on') && inputs.compile || '' }}
+          MEASURE_RUNS: ${{ inputs.runs || '5' }}
         run: |
           tools/quickjs-removal/measure.sh --skip-node-compat -o "$RUNNER_TEMP/corpus.tsv"
+      - name: Print paired corpus ratios
+        if: steps.corpus.outputs.present == '1'
+        run: |
+          tsv="$RUNNER_TEMP/corpus.tsv"
+          {
+            echo "## corpus paired ratio (thaw-js / quickjs; median over rounds of the per-round ratio)"
+            echo
+            echo "Each round runs both engines back to back, so runner drift cancels. Compare with the table of medians above."
+            echo
+            echo "| program | paired ratio |"
+            echo "|---|---|"
+            awk -F'\t' '$1 == "program" && $4 == "paired_ratio" { printf "%s\t%s\n", $2, $5 }' "$tsv" | sort -t$'\t' -k2 -rn | awk -F'\t' '{ printf "| %s | %.2fx%s |\n", $1, $2, ($2 > 1.5 ? " OVER" : "") }'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Print corpus ratios
         if: steps.corpus.outputs.present == '1'
         run: |
