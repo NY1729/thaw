@@ -193,7 +193,7 @@ impl Package {
         if let Some(problem) = parts.esm_problems.iter().next() {
             return Err(HostError::Unsupported((*problem).to_string()));
         }
-        let mut interp = Box::new(Interp::new());
+        let mut interp = Box::new(Interp::runtime());
         interp.share_process_state(crate::procstate::host_shared());
         // console output goes straight to stdout: nothing in the host drains `Interp::out`
         interp.set_stream(true);
@@ -1101,7 +1101,7 @@ pub struct HandleResult {
 /// ponytail: a program mixing packages and dynamic code shares the last-entered package's realm.
 pub(crate) fn default_realm() -> usize {
     if PACKAGES.with(|ps| ps.borrow().is_empty()) {
-        let mut interp = Box::new(Interp::new());
+        let mut interp = Box::new(Interp::runtime());
         interp.share_process_state(crate::procstate::host_shared());
         // console output goes straight to stdout: nothing in the host drains `Interp::out`
         interp.set_stream(true);

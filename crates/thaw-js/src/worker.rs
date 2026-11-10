@@ -137,7 +137,7 @@ fn run_worker(
 ) {
     let exit_tx = tx.clone();
     let code = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let mut it = Box::new(Interp::new());
+        let mut it = Box::new(Interp::runtime());
         it.configure_stack(STACK);
         it.set_stream(true);
         it.interrupt = Some(interrupt.clone());
