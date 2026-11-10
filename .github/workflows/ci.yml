@@ -253,6 +253,10 @@ jobs:
             dynamic: "0"
           - mode: runtime-user-dynamic
             dynamic: "1"
+          # The same run with the closure compiler on, to compare against runtime-only (decides the default flip).
+          - mode: runtime-only-compile-on
+            dynamic: "0"
+            compile: "on"
     name: node-compat thaw-js (${{ matrix.mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -328,6 +332,7 @@ jobs:
         env:
           THAW_JS_ENGINE: thaw-js
           THAW_JS_USER_DYNAMIC: ${{ matrix.dynamic }}
+          THAW_JS_COMPILE: ${{ matrix.compile || 'off' }}
           THAW_NODE_COMPAT_JOBS: "4"
         run: |
           set +e
