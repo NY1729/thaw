@@ -83,6 +83,8 @@ pub(crate) struct FnPlan {
     /// No calls, `new`, closures, object literals, free-variable writes, or property names other than
     /// `length` (the check-mode kernels of plan 4.1).
     pub(crate) pure_kernel: bool,
+    /// Every blocker found, as `FallbackReason::bit` bits. `reason` is the first one, by priority.
+    pub(crate) blockers: u64,
     reason: Option<FallbackReason>,
 }
 
@@ -92,6 +94,16 @@ impl FnPlan {
             None => Ok(()),
             Some(r) => Err(r),
         }
+    }
+
+    /// Every blocker of the function, in `FallbackReason::ALL` order.
+    #[cfg(test)]
+    pub(crate) fn all_reasons(&self) -> Vec<FallbackReason> {
+        FallbackReason::ALL
+            .iter()
+            .copied()
+            .filter(|r| self.blockers & r.bit() != 0)
+            .collect()
     }
 }
 
@@ -110,6 +122,8 @@ struct Decl {
 /// contribute to the capture set and to the blockers.
 struct Walk {
     reason: Option<FallbackReason>,
+    /// Every blocker seen (`block` and the tier A check), as `FallbackReason::bit` bits.
+    blockers: u64,
     decls: Vec<Decl>,
     /// Scope stack of declaration indices. `frames[0]` is the function-level frame.
     frames: Vec<Vec<usize>>,
@@ -130,6 +144,7 @@ impl Walk {
     fn new() -> Walk {
         Walk {
             reason: None,
+            blockers: 0,
             decls: Vec::new(),
             frames: vec![Vec::new()],
             fn_depth: 0,
@@ -145,6 +160,7 @@ impl Walk {
 
     /// Keeps the verdict at the highest priority; the first of equal priority wins.
     fn block(&mut self, r: FallbackReason) {
+        self.blockers |= r.bit();
         if self.reason.is_none_or(|cur| r.priority() > cur.priority()) {
             self.reason = Some(r);
         }
@@ -825,6 +841,7 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
 
     let Walk {
         mut reason,
+        mut blockers,
         decls,
         captured,
         free,
@@ -847,9 +864,11 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         if d.kind.lexical()
             && class_of(&d.name) == NameClass::Slot
             && (d.in_switch || pos < d.decl_end)
-            && reason.is_none_or(|cur| FallbackReason::ReadBeforeDecl.priority() > cur.priority())
         {
-            reason = Some(FallbackReason::ReadBeforeDecl);
+            blockers |= FallbackReason::ReadBeforeDecl.bit();
+            if reason.is_none_or(|cur| FallbackReason::ReadBeforeDecl.priority() > cur.priority()) {
+                reason = Some(FallbackReason::ReadBeforeDecl);
+            }
         }
     }
 
@@ -876,6 +895,7 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         nslots,
         labels,
         pure_kernel: !impure && !def.is_gen && !def.is_async,
+        blockers,
         reason,
     }
 }
