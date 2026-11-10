@@ -39,7 +39,7 @@ fn main() {
                     it
                 }
                 None => {
-                    plain = Box::new(Interp::new());
+                    plain = Box::new(Interp::runtime());
                     &mut plain
                 }
             };
