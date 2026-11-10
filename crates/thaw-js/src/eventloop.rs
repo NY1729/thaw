@@ -132,6 +132,21 @@ static NATIVE_READY_HOOKS: std::sync::OnceLock<Option<(ReadyHook, ReadyHook)>> =
 pub(crate) static TEST_READY_HOOKS: std::sync::Mutex<Option<(ReadyHook, ReadyHook)>> =
     std::sync::Mutex::new(None);
 
+/// Test-only count of coroutines that parked because their host dropped its channel ends.
+#[cfg(test)]
+pub(crate) static DISCONNECT_PARKS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// A suspended coroutine whose host dropped its channel ends: park forever. Callers must not
+/// touch the Interp, TLS hand-offs or native-ready state before reaching this.
+pub(crate) fn park_disconnected() -> ! {
+    #[cfg(test)]
+    DISCONNECT_PARKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    loop {
+        std::thread::park();
+    }
+}
+
 fn ready_hooks() -> Option<(ReadyHook, ReadyHook)> {
     #[cfg(test)]
     if let Some(hooks) = *TEST_READY_HOOKS
@@ -795,17 +810,17 @@ impl Interp {
         park_host_tls(self as *mut Interp as usize);
         let _ = ctx.to_host.send(SendBox(Yield::Await(v)));
         // the host runs from here until it resumes us
-        let msg = ctx.from_host.recv();
+        // check the disconnect before touching `self` (the Interp may be torn down by the host)
+        let Ok(msg) = ctx.from_host.recv() else {
+            // the host dropped this coroutine (promise never settled): never touch shared state again
+            park_disconnected()
+        };
         adopt_host_tls(self as *mut Interp as usize);
         self.restore(snap);
-        match msg.map(SendBox::into_inner) {
-            Ok(Resume::Value(v)) => Ok(v),
-            Ok(Resume::Throw(e)) => Err(Ctl::Throw(e)),
-            Ok(Resume::Return(v)) => Err(Ctl::Return(v)),
-            Err(_) => loop {
-                // the host dropped this coroutine (promise never settled): never touch shared state again
-                std::thread::park();
-            },
+        match msg.into_inner() {
+            Resume::Value(v) => Ok(v),
+            Resume::Throw(e) => Err(Ctl::Throw(e)),
+            Resume::Return(v) => Err(Ctl::Return(v)),
         }
     }
 
