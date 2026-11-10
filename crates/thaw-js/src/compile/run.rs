@@ -8,14 +8,44 @@ use crate::{Ctl, Interp, Scope, Value, R};
 /// Most empty slot buffers kept for reuse. Nested calls each hold one, so this bounds the pool, not the depth.
 const FRAME_POOL_CAP: usize = 64;
 
+/// Most empty argument buffers kept for reuse (`Interp::arg_pool`), as `FRAME_POOL_CAP`.
+pub(super) const ARG_POOL_CAP: usize = 64;
+
+/// Returns an argument buffer to the pool: its values are dropped now, and only the empty buffer is kept.
+pub(super) fn give_arg_buf(it: &mut Interp, mut buf: Vec<Value>) {
+    buf.clear();
+    if it.arg_pool.len() < ARG_POOL_CAP {
+        it.arg_pool.push(buf);
+    }
+}
+
 impl CompiledFn {
-    pub(crate) fn run(
+    /// `run` for a caller holding the arguments as a shared slice: the values are copied into a pooled buffer
+    /// first, so the caller's slice is left intact (`run` moves values out of its buffer).
+    pub(crate) fn run_shared(
         &self,
         it: &mut Interp,
         callee: &Value,
         scope: &Rc<Scope>,
         this: &Value,
         args: &[Value],
+    ) -> R<Value> {
+        let mut owned = it.arg_pool.pop().unwrap_or_default();
+        owned.extend_from_slice(args);
+        let r = self.run(it, callee, scope.clone(), this, &mut owned);
+        give_arg_buf(it, owned);
+        r
+    }
+
+    /// One call. `args` is the caller's buffer: each parameter value is moved out of it (the caller clears the
+    /// rest), so no argument is cloned. `scope` is the closure's scope, moved into the frame.
+    pub(crate) fn run(
+        &self,
+        it: &mut Interp,
+        callee: &Value,
+        scope: Rc<Scope>,
+        this: &Value,
+        args: &mut [Value],
     ) -> R<Value> {
         // the same normalisation as `call_closure_ast`: sloppy undefined/null `this` is the global object
         let this = if self.arrow || !self.uses_this {
@@ -37,12 +67,15 @@ impl CompiledFn {
         // in argument order, so a duplicate parameter name ends with the last argument (as `insert` does)
         for (i, slot) in self.param_slots.iter().enumerate() {
             if let Some(k) = slot {
-                slots[*k as usize] = args.get(i).cloned().unwrap_or(Value::Undefined);
+                slots[*k as usize] = match args.get_mut(i) {
+                    Some(a) => std::mem::replace(a, Value::Undefined),
+                    None => Value::Undefined,
+                };
             }
         }
         let mut frame = Frame {
             slots,
-            scope: scope.clone(),
+            scope,
             this,
             ret: Value::Undefined,
         };

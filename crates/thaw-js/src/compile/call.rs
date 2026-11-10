@@ -11,6 +11,7 @@ use super::check::applies;
 use super::expr::{self, mk_ex};
 use super::gen::{reject, Gen, CG};
 use super::member::{self, PropKey};
+use super::run::give_arg_buf;
 use super::{bx, CState, Ex, Frame, CR};
 use crate::{Interp, Kind, Value, R};
 
@@ -32,10 +33,25 @@ fn args_of(g: &mut Gen, args: &[a::ExprOrSpread]) -> CG<Vec<Ex>> {
     Ok(out)
 }
 
+/// The argument values, left to right, in a buffer from `Interp::arg_pool`. A throw part way returns the buffer
+/// (emptied) to the pool before it propagates. The caller gives the buffer back after the call.
 fn eval_args(it: &mut Interp, f: &mut Frame, args: &[Ex]) -> CR<Vec<Value>> {
-    let mut out = Vec::with_capacity(args.len());
+    if args.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = it.arg_pool.pop().unwrap_or_default();
+    #[cfg(test)]
+    if out.capacity() > 0 {
+        it.cstats.note_arg_pool_hit();
+    }
     for x in args {
-        out.push(x(it, f)?);
+        match x(it, f) {
+            Ok(v) => out.push(v),
+            Err(e) => {
+                give_arg_buf(it, out);
+                return Err(e);
+            }
+        }
     }
     Ok(out)
 }
@@ -66,11 +82,14 @@ pub(crate) fn call(g: &mut Gen, c: &a::CallExpr) -> CG<Ex> {
                 (bx(it.get(&o, &k))?, o)
             }
         };
-        let argv = eval_args(it, f, &args)?;
-        if !fv.is_callable() {
-            return bx(it.throw_error("TypeError", &format!("{text} is not a function")));
-        }
-        bx(it.call_direct(&fv, &this, &argv))
+        let mut argv = eval_args(it, f, &args)?;
+        let r = if fv.is_callable() {
+            bx(it.call_direct_owned(&fv, &this, &mut argv))
+        } else {
+            bx(it.throw_error("TypeError", &format!("{text} is not a function")))
+        };
+        give_arg_buf(it, argv);
+        r
     }))
 }
 
@@ -85,10 +104,13 @@ pub(crate) fn new_expr(g: &mut Gen, n: &a::NewExpr) -> CG<Ex> {
     Ok(mk_ex(move |it, f| {
         let fv = callee(it, f)?;
         let argv = eval_args(it, f, &args)?;
-        if !fv.is_callable() {
-            return bx(it.throw_error("TypeError", &format!("{text} is not a constructor")));
-        }
-        bx(it.construct(&fv, &argv))
+        let r = if fv.is_callable() {
+            bx(it.construct(&fv, &argv))
+        } else {
+            bx(it.throw_error("TypeError", &format!("{text} is not a constructor")))
+        };
+        give_arg_buf(it, argv);
+        r
     }))
 }
 
@@ -98,7 +120,21 @@ impl Interp {
     /// and deadline checks, `depth`, the pending `new.target`, the `run_id` swap and restore, and the call counters.
     /// Everything else (natives, classes, generators, async, uncompiled closures, check-mode pure kernels) goes
     /// through `call`, unchanged.
+    /// `call_direct_owned` for a caller holding the arguments as a shared slice (tests).
+    #[cfg(test)]
     pub(crate) fn call_direct(&mut self, f: &Value, this: &Value, args: &[Value]) -> R<Value> {
+        let mut owned = args.to_vec();
+        self.call_direct_owned(f, this, &mut owned)
+    }
+
+    /// `args` is the caller's argument buffer; a compiled callee moves the values out of it (the caller then
+    /// gives the buffer back), every other callee sees it as a shared slice.
+    pub(crate) fn call_direct_owned(
+        &mut self,
+        f: &Value,
+        this: &Value,
+        args: &mut [Value],
+    ) -> R<Value> {
         let Value::Object(fo) = f else {
             return self.call(f, this, args);
         };
@@ -130,7 +166,7 @@ impl Interp {
         self.cstats.compiled_calls += 1;
         self.cstats.note_direct_call();
         let caller_run = std::mem::replace(&mut self.run_id, src_run);
-        let r = c.run(self, f, &scope, this, args);
+        let r = c.run(self, f, scope, this, args);
         self.run_id = caller_run;
         self.depth -= 1;
         r
