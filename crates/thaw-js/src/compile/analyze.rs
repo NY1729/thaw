@@ -67,6 +67,8 @@ pub(crate) struct NamePlan {
     pub(crate) class: NameClass,
     /// Frame slot index (Slot names only), in declaration order.
     pub(crate) slot: Option<u32>,
+    /// Block level of the declaration: 0 function level, 1 body top, 2 any nested block.
+    pub(crate) level: u8,
 }
 
 /// The analysis result for one function. `verdict()` is `Ok` only when the function could be compiled.
@@ -85,6 +87,9 @@ pub(crate) struct FnPlan {
     pub(crate) pure_kernel: bool,
     /// Every blocker found, as `FallbackReason::bit` bits. `reason` is the first one, by priority.
     pub(crate) blockers: u64,
+    /// Inner functions need a per-call `Scope`: a captured name, strict mode, or a `this` seen by an arrow.
+    /// Nothing reads it yet (no behaviour change in this step).
+    pub(crate) needs_scope: bool,
     reason: Option<FallbackReason>,
 }
 
@@ -110,6 +115,8 @@ impl FnPlan {
 /// One declaration record. Block-level records exist only for the blocks that declare them.
 struct Decl {
     name: String,
+    /// The scope frame that declares it (0 function level, 1 body top, deeper for blocks).
+    frame: usize,
     kind: DeclKind,
     /// Byte position where a lexical declaration takes effect (the end of its declarator, or the start
     /// of the loop body for `for-in`/`for-of` heads). Zero for every other kind.
@@ -133,6 +140,8 @@ struct Walk {
     nonarrow_depth: u32,
     captured: BTreeSet<String>,
     free: BTreeSet<String>,
+    /// Nested functions and arrows entered directly in this function (not inside another nested one).
+    inner_fns: u32,
     /// References to lexical declarations: (declaration index, byte position).
     reads: Vec<(usize, u32)>,
     labels: Vec<String>,
@@ -151,6 +160,7 @@ impl Walk {
             nonarrow_depth: 0,
             captured: BTreeSet::new(),
             free: BTreeSet::new(),
+            inner_fns: 0,
             reads: Vec::new(),
             labels: Vec::new(),
             impure: false,
@@ -185,6 +195,7 @@ impl Walk {
         let idx = self.decls.len();
         self.decls.push(Decl {
             name: name.to_string(),
+            frame,
             kind,
             decl_end,
             in_switch,
@@ -463,6 +474,9 @@ impl Visit for Walk {
     }
 
     fn visit_function(&mut self, f: &a::Function) {
+        if self.fn_depth == 0 {
+            self.inner_fns += 1;
+        }
         self.block(FallbackReason::InnerFunction);
         self.impure = true;
         self.fn_depth += 1;
@@ -478,6 +492,9 @@ impl Visit for Walk {
     }
 
     fn visit_arrow_expr(&mut self, n: &a::ArrowExpr) {
+        if self.fn_depth == 0 {
+            self.inner_fns += 1;
+        }
         self.block(FallbackReason::InnerFunction);
         self.impure = true;
         self.fn_depth += 1;
@@ -850,6 +867,7 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         reads,
         labels,
         impure,
+        inner_fns,
         ..
     } = w;
     let class_of = |name: &str| {
@@ -888,9 +906,22 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
                 kind: d.kind,
                 class,
                 slot,
+                level: d.frame.min(2) as u8,
             }
         })
         .collect();
+    // A captured name declared in a nested block needs per-iteration or per-block scopes (not modelled yet).
+    // It is a blocker bit only: it never becomes the verdict, so no function changes compiled/not-compiled.
+    if names
+        .iter()
+        .any(|n| n.level >= 2 && n.class == NameClass::Scoped)
+    {
+        blockers |= FallbackReason::ScopedBlock.bit();
+    }
+    let needs_scope = inner_fns > 0
+        && (names.iter().any(|n| n.class == NameClass::Scoped)
+            || def.strict
+            || (def.uses_this && !def.arrow));
     FnPlan {
         names,
         free: free.into_iter().collect(),
@@ -898,6 +929,7 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         labels,
         pure_kernel: !impure && !def.is_gen && !def.is_async,
         blockers,
+        needs_scope,
         reason,
     }
 }

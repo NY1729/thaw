@@ -4,6 +4,8 @@
 
 mod analyze;
 #[cfg(test)]
+mod analyze_scope_tests;
+#[cfg(test)]
 mod analyze_tests;
 #[cfg(test)]
 mod blocker_stats_tests;
@@ -124,6 +126,9 @@ pub(crate) enum FallbackReason {
     ReadBeforeDecl,
     // Staged: a later PR lifts each one (plan section 5).
     InnerFunction,
+    /// A captured name declared inside a nested block (`for (let ...)`, `{ let }`, `catch`). Blocker bit only
+    /// (lowest priority): it is never the verdict.
+    ScopedBlock,
     SelfBinding,
     Arguments,
     NewTarget,
@@ -177,6 +182,7 @@ impl FallbackReason {
         FallbackReason::SwitchLexical,
         FallbackReason::ReadBeforeDecl,
         FallbackReason::InnerFunction,
+        FallbackReason::ScopedBlock,
         FallbackReason::SelfBinding,
         FallbackReason::Arguments,
         FallbackReason::NewTarget,
@@ -208,6 +214,7 @@ impl FallbackReason {
     pub(crate) fn priority(self) -> u8 {
         match self {
             FallbackReason::ReadBeforeDecl => 3,
+            FallbackReason::ScopedBlock => 0,
             FallbackReason::With
             | FallbackReason::DirectEval
             | FallbackReason::FunctionCtor
@@ -245,6 +252,7 @@ impl FallbackReason {
             FallbackReason::SwitchLexical => "switch-lexical",
             FallbackReason::ReadBeforeDecl => "read-before-decl",
             FallbackReason::InnerFunction => "inner-function",
+            FallbackReason::ScopedBlock => "scoped-block",
             FallbackReason::SelfBinding => "self-binding",
             FallbackReason::Arguments => "arguments",
             FallbackReason::NewTarget => "new-target",
@@ -367,6 +375,12 @@ pub(crate) struct Stats {
     /// Calls of rejected functions, attributed to every blocker (any) and to the sole blocker (sole).
     calls_any: [u64; FallbackReason::COUNT],
     calls_sole: [u64; FallbackReason::COUNT],
+    /// Per-call `Scope`s built for compiled inner functions (always 0 until the closure step lands).
+    scope_frames: u64,
+    /// Compiled closure creations (always 0 until the closure step lands).
+    closures_created: u64,
+    /// Per-call `Scope`s still unshared when their call returned (always 0 until the closure step lands).
+    scope_unique_at_exit: u64,
 }
 
 impl Default for Stats {
@@ -409,6 +423,9 @@ impl Stats {
             sole_functions: [0; FallbackReason::COUNT],
             calls_any: [0; FallbackReason::COUNT],
             calls_sole: [0; FallbackReason::COUNT],
+            scope_frames: 0,
+            closures_created: 0,
+            scope_unique_at_exit: 0,
         }
     }
 
@@ -676,6 +693,12 @@ impl Stats {
                     self.calls_sole[i]
                 );
             }
+        }
+        if self.scope_frames + self.closures_created + self.scope_unique_at_exit > 0 {
+            out += &format!(
+                "thaw-js compile scopes: frames={} closures={} unique-at-exit={}\n",
+                self.scope_frames, self.closures_created, self.scope_unique_at_exit
+            );
         }
         out
     }
