@@ -181,9 +181,10 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         Some(R::InnerFunction),
         "g:slot x:scoped",
     ),
+    // inner functions compile
     (
         "function f() { var g = function () { return h }; var h = 2; return g }",
-        Some(R::InnerFunction),
+        None,
         "g:slot h:scoped",
     ),
     (
@@ -191,14 +192,16 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         Some(R::InnerFunction),
         "g:slot i:scoped",
     ),
+    // inner functions compile
     (
         "function f(p) { var g = () => p; return g }",
-        Some(R::InnerFunction),
+        None,
         "g:slot p:scoped",
     ),
+    // inner functions compile
     (
         "function f() { var g = () => { let z = 1; return z }; return g }",
-        Some(R::InnerFunction),
+        None,
         "g:slot",
     ),
     (
@@ -216,9 +219,10 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         Some(R::InnerFunction),
         "g:slot k:scoped",
     ),
+    // inner functions compile
     (
         "function f() { var g = function () { let q = 1 }; return g }",
-        Some(R::InnerFunction),
+        None,
         "g:slot",
     ),
     // named function expressions: the self name is a Slot, a reference to it is a blocker
@@ -233,9 +237,10 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         Some(R::Arguments),
         "| free: arguments",
     ),
+    // inner functions compile, so the outer function's `arguments` use is now the reason
     (
         "function f() { return () => arguments }",
-        Some(R::InnerFunction),
+        Some(R::Arguments),
         "",
     ),
     ("function f() { return new.target }", Some(R::NewTarget), ""),

@@ -1,12 +1,13 @@
 //! Code generation (plan TJ150 section 3): `FuncDef` -> `CompiledFn`. Names are resolved here, at compile
 //! time: a declared name becomes a frame slot, anything else is a free name read through the closure's scope.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use thaw_parser::ast as a;
 
 use super::analyze::{DeclKind, FnPlan, NameClass};
-use super::{expr, stmt, CompiledFn, Ex, FallbackReason};
+use super::{expr, stmt, CompiledFn, Ex, FallbackReason, FrameInit};
 use crate::{Body, FuncDef};
 
 /// Codegen result: `Err` names the reason the function stays on the AST interpreter.
@@ -34,6 +35,8 @@ pub(crate) struct Gen {
     pub(crate) arrow: bool,
     /// Loops enclosing the statement being compiled: an unlabeled `break`/`continue` needs one.
     pub(crate) loops: u32,
+    /// Names an inner closure can reach: never declared here, so they resolve by name through the frame scope.
+    scoped: HashSet<String>,
     /// Test-only: bitwise operator nodes built so far (copied into `CompiledFn`).
     #[cfg(test)]
     pub(crate) bit_ex_built: u64,
@@ -43,17 +46,23 @@ pub(crate) struct Gen {
 }
 
 impl Gen {
-    fn new(arrow: bool) -> Gen {
+    fn new(arrow: bool, scoped: HashSet<String>) -> Gen {
         Gen {
             scopes: vec![Vec::new()],
             next_slot: 0,
             arrow,
             loops: 0,
+            scoped,
             #[cfg(test)]
             bit_ex_built: 0,
             #[cfg(test)]
             elem_built: 0,
         }
+    }
+
+    /// Whether `name` is a scoped name (see `scoped`).
+    pub(crate) fn is_scoped(&self, name: &str) -> bool {
+        self.scoped.contains(name)
     }
 
     pub(crate) fn push(&mut self) {
@@ -107,17 +116,31 @@ impl Gen {
     }
 }
 
-/// Compiles an analyzer-accepted function. `plan` only contributes the decisions the analyzer owns.
-pub(crate) fn compile(def: &FuncDef, plan: &FnPlan) -> CG<CompiledFn> {
+/// Compiles an analyzer-accepted function. `plan` only contributes the decisions the analyzer owns. `intern`
+/// gives the shared `Rc<str>` of a name the call's `Scope` declares (see `Interp::intern`).
+pub(crate) fn compile(
+    def: &FuncDef,
+    plan: &FnPlan,
+    intern: &mut dyn FnMut(&str) -> Rc<str>,
+) -> CG<CompiledFn> {
     if def.class.is_some()
         || def.is_gen
         || def.is_async
-        // no inner function is compiled yet, so no name is scoped: a scoped name here is a bug, not a fallback
-        || plan.names.iter().any(|n| n.class == NameClass::Scoped)
+        // the analyzer scopes only parameters and `var`s; any other scoped name here is a bug, not a fallback
+        || plan
+            .names
+            .iter()
+            .any(|n| n.class == NameClass::Scoped && !matches!(n.kind, DeclKind::Param | DeclKind::Var))
     {
         return reject();
     }
-    let mut g = Gen::new(def.arrow);
+    let scoped = plan
+        .names
+        .iter()
+        .filter(|n| n.class == NameClass::Scoped)
+        .map(|n| n.name.clone())
+        .collect();
+    let mut g = Gen::new(def.arrow, scoped);
     // the self name: the prologue stores the callee here, before the parameters; a `var` of the same name reuses it
     let self_slot = plan
         .names
@@ -125,14 +148,25 @@ pub(crate) fn compile(def: &FuncDef, plan: &FnPlan) -> CG<CompiledFn> {
         .find(|n| n.kind == DeclKind::SelfName)
         .map(|n| g.declare_fn(&n.name, true));
     let mut param_slots = Vec::with_capacity(def.params.len());
-    for p in &def.params {
+    let mut scoped_params = Vec::new();
+    for (i, p) in def.params.iter().enumerate() {
         let a::Pat::Ident(b) = p else {
             return reject();
         };
-        param_slots.push(Some(g.declare_fn(&b.id.sym, true)));
+        if g.is_scoped(&b.id.sym) {
+            scoped_params.push((i, intern(&b.id.sym)));
+            param_slots.push(None);
+        } else {
+            param_slots.push(Some(g.declare_fn(&b.id.sym, true)));
+        }
     }
+    let mut scoped_vars = Vec::new();
     for name in &def.hoisted {
-        g.declare_fn(name, true);
+        if g.is_scoped(name) {
+            scoped_vars.push(intern(name));
+        } else {
+            g.declare_fn(name, true);
+        }
     }
     let (body, expr_body) = match &def.body {
         Body::Block(stmts) => (stmt::body(&mut g, stmts)?, None),
@@ -148,6 +182,11 @@ pub(crate) fn compile(def: &FuncDef, plan: &FnPlan) -> CG<CompiledFn> {
         param_slots,
         body,
         expr_body,
+        frame: plan.needs_scope.then_some(FrameInit {
+            set_this: def.uses_this && !def.arrow,
+            params: scoped_params,
+            vars: scoped_vars,
+        }),
         arrow: def.arrow,
         uses_this: def.uses_this,
         strict: def.strict,
