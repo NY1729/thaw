@@ -744,7 +744,8 @@ impl Interp {
     /// (`off`, `check`). `Interp::new()` keeps `Off` as its default so embedders and tests are unchanged.
     pub fn runtime() -> Interp {
         let mut it = Interp::new();
-        if std::env::var_os("THAW_JS_COMPILE").is_none() {
+        // unset or empty means the shipped default (a workflow cannot unset a variable, only blank it)
+        if std::env::var("THAW_JS_COMPILE").map_or(true, |v| v.trim().is_empty()) {
             it.compile_mode = CompileMode::On;
         }
         it
