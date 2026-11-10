@@ -35,6 +35,9 @@ pub(crate) struct Gen {
     pub(crate) arrow: bool,
     /// Loops enclosing the statement being compiled: an unlabeled `break`/`continue` needs one.
     pub(crate) loops: u32,
+    /// Loops and `switch`es enclosing the statement being compiled: an unlabeled `break` needs one. Separate from
+    /// `loops`, because a `break` inside a `switch` (with no loop around it) is legal and a `continue` is not.
+    pub(crate) breakables: u32,
     /// Names an inner closure can reach: never declared here, so they resolve by name through the frame scope.
     scoped: HashSet<String>,
     /// Test-only: bitwise operator nodes built so far (copied into `CompiledFn`).
@@ -52,6 +55,7 @@ impl Gen {
             next_slot: 0,
             arrow,
             loops: 0,
+            breakables: 0,
             scoped,
             #[cfg(test)]
             bit_ex_built: 0,

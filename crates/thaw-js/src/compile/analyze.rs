@@ -718,7 +718,7 @@ impl Visit for Walk {
     fn visit_continue_stmt(&mut self, _: &a::ContinueStmt) {}
 
     fn visit_switch_stmt(&mut self, n: &a::SwitchStmt) {
-        self.block(FallbackReason::Switch);
+        // compiled since TJ156; `SwitchLexical` (in `prepopulate`) still refuses case-scoped declarations
         n.discriminant.visit_with(self);
         self.frames.push(Vec::new());
         for case in &n.cases {
