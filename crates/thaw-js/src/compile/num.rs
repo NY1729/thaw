@@ -159,7 +159,9 @@ pub(crate) fn operand(g: &mut Gen, e: &a::Expr) -> CG<Side> {
             Some(l) => Leaf::Slot(l.slot),
             None => Leaf::Ex(expr::compile(g, e)?),
         })),
-        a::Expr::Lit(l) => Ok(Side::L(Leaf::Const(expr::lit_value(l)?))),
+        a::Expr::Lit(l) if !matches!(l, a::Lit::Regex(_)) => {
+            Ok(Side::L(Leaf::Const(expr::lit_value(l)?)))
+        }
         a::Expr::Member(m) => match elem::compile(g, m)? {
             Some(el) => Ok(Side::L(Leaf::Elem(Box::new(el)))),
             None => Ok(Side::L(Leaf::Ex(expr::compile(g, e)?))),

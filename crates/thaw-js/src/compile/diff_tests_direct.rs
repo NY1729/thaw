@@ -185,8 +185,14 @@ fn direct_check_mode_keeps_pure_kernels_checked() {
     CHECK_FAILPOINT.with(|c| c.set(false));
     assert!(ok);
     assert_eq!(it.out, lines(&["caught"]));
+    // The failpoint makes check mode build an error object, which runs prelude JS functions that compile
+    // (and call each other directly) now that in/instanceof and regex literals compile. So the "no direct
+    // call" assertion runs the same program in check mode without the failpoint.
+    let mut quiet = Interp::with_compile_mode(CompileMode::Check);
+    quiet.compile_after = 1;
+    assert!(quiet.run_sloppy(src).is_ok());
     assert_eq!(
-        it.cstats.direct_calls(),
+        quiet.cstats.direct_calls(),
         0,
         "pure kernel must not bypass the check"
     );

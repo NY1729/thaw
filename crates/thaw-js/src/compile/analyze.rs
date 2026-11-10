@@ -587,8 +587,9 @@ impl Visit for Walk {
     }
 
     fn visit_bin_expr(&mut self, n: &a::BinExpr) {
+        // `in` (Proxy `has`) and `instanceof` (`Symbol.hasInstance`) can run user code
         if matches!(n.op, a::BinaryOp::In | a::BinaryOp::InstanceOf) {
-            self.block(FallbackReason::InstanceOfIn);
+            self.impure = true;
         }
         n.visit_children_with(self);
     }
@@ -668,7 +669,8 @@ impl Visit for Walk {
     }
 
     fn visit_regex(&mut self, _: &a::Regex) {
-        self.block(FallbackReason::RegexLiteral);
+        // allocates a RegExp object per evaluation
+        self.impure = true;
     }
 
     fn visit_labeled_stmt(&mut self, n: &a::LabeledStmt) {

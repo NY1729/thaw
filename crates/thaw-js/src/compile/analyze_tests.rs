@@ -324,7 +324,8 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         Some(R::TaggedTemplate),
         "a:slot",
     ),
-    ("function f() { return /ab/g }", Some(R::RegexLiteral), ""),
+    // in/instanceof and regex literals compile
+    ("function f() { return /ab/g }", None, ""),
     (
         "function f() { return { m() { return 1 } } }",
         Some(R::ObjectMethod),
@@ -337,12 +338,14 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
     ),
     (
         "function f(o) { return 'x' in o }",
-        Some(R::InstanceOfIn),
+        // in/instanceof compile
+        None,
         "o:slot",
     ),
     (
         "function f(o) { return o instanceof Array }",
-        Some(R::InstanceOfIn),
+        // in/instanceof compile
+        None,
         "o:slot | free: Array",
     ),
     // C3: calls now compile
