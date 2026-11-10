@@ -5,6 +5,8 @@
 mod analyze;
 #[cfg(test)]
 mod analyze_tests;
+#[cfg(test)]
+mod blocker_stats_tests;
 mod call;
 mod check;
 #[cfg(test)]
@@ -140,7 +142,14 @@ pub(crate) enum FallbackReason {
     InstanceOfIn,
 }
 
+const _: () = assert!(FallbackReason::COUNT <= 64);
+
 impl FallbackReason {
+    /// This reason's bit in a blocker mask (`FnPlan::blockers`).
+    pub(crate) fn bit(self) -> u64 {
+        1u64 << (self as u32)
+    }
+
     /// Every variant in declaration order: `Stats` indexes its counters by `reason as usize`.
     pub(crate) const ALL: &'static [FallbackReason] = &[
         FallbackReason::NotYet,
@@ -261,7 +270,11 @@ pub(crate) enum CState {
     Cold(u32),
     Eligible,
     Compiled(Rc<CompiledFn>),
+    /// Rejected with the first blocker only (no blocker mask).
+    #[cfg_attr(not(test), allow(dead_code))] // the analyzer path uses `Blocked`
     Never(FallbackReason),
+    /// Rejected: the first blocker, and the mask of every blocker (`FnPlan::blockers`).
+    Blocked(FallbackReason, u64),
 }
 
 impl Default for CState {
@@ -278,12 +291,19 @@ impl CState {
                 *n = n.saturating_add(1);
                 *n >= after
             }
-            CState::Eligible | CState::Compiled(_) | CState::Never(_) => false,
+            CState::Eligible | CState::Compiled(_) | CState::Never(_) | CState::Blocked(..) => {
+                false
+            }
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // the analyzer path uses `reject_with_blockers`
     pub(crate) fn reject(&mut self, reason: FallbackReason) {
         *self = CState::Never(reason);
+    }
+
+    pub(crate) fn reject_with_blockers(&mut self, reason: FallbackReason, blockers: u64) {
+        *self = CState::Blocked(reason, blockers);
     }
 }
 
@@ -329,6 +349,13 @@ pub(crate) struct Stats {
     /// Test-only: run-time element stores that took `set_index` / `set`.
     #[cfg(test)]
     elem_store_slow: u64,
+    /// Rejected functions that have the reason among their blockers (any), and those whose only
+    /// blocker it is (sole). The first-blocker count is `rejected`.
+    any_functions: [u64; FallbackReason::COUNT],
+    sole_functions: [u64; FallbackReason::COUNT],
+    /// Calls of rejected functions, attributed to every blocker (any) and to the sole blocker (sole).
+    calls_any: [u64; FallbackReason::COUNT],
+    calls_sole: [u64; FallbackReason::COUNT],
 }
 
 impl Default for Stats {
@@ -365,6 +392,10 @@ impl Stats {
             elem_store_fast: 0,
             #[cfg(test)]
             elem_store_slow: 0,
+            any_functions: [0; FallbackReason::COUNT],
+            sole_functions: [0; FallbackReason::COUNT],
+            calls_any: [0; FallbackReason::COUNT],
+            calls_sole: [0; FallbackReason::COUNT],
         }
     }
 
@@ -378,6 +409,47 @@ impl Stats {
 
     pub(crate) fn record_eligible(&mut self) {
         self.eligible += 1;
+    }
+
+    /// Counts a rejected function's blocker mask: each blocker is an "any", and the only one is a "sole".
+    pub(crate) fn record_blockers(&mut self, mask: u64) {
+        Self::add_mask(&mut self.any_functions, &mut self.sole_functions, mask);
+    }
+
+    /// Counts one call of a rejected function, with its blocker mask.
+    pub(crate) fn note_blocked_call(&mut self, mask: u64) {
+        Self::add_mask(&mut self.calls_any, &mut self.calls_sole, mask);
+    }
+
+    fn add_mask(any: &mut [u64], sole: &mut [u64], mask: u64) {
+        for (i, r) in FallbackReason::ALL.iter().enumerate() {
+            if mask & r.bit() != 0 {
+                any[i] += 1;
+            }
+        }
+        if mask.count_ones() == 1 {
+            sole[mask.trailing_zeros() as usize] += 1;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn any_functions(&self, reason: FallbackReason) -> u64 {
+        self.any_functions[reason as usize]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sole_functions(&self, reason: FallbackReason) -> u64 {
+        self.sole_functions[reason as usize]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn calls_any(&self, reason: FallbackReason) -> u64 {
+        self.calls_any[reason as usize]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn calls_sole(&self, reason: FallbackReason) -> u64 {
+        self.calls_sole[reason as usize]
     }
 
     pub(crate) fn record_codegen_rejected(&mut self, reason: FallbackReason) {
@@ -563,6 +635,25 @@ impl Stats {
                 }
             }
         }
+        // Appended after the lines above, and only when a rejected function has blockers to show.
+        let blocker_rows: Vec<usize> = (0..FallbackReason::COUNT)
+            .filter(|&i| self.any_functions[i] > 0 || self.calls_any[i] > 0)
+            .collect();
+        if !blocker_rows.is_empty() {
+            out += "thaw-js compile blockers: first = first blocker (functions, calls), any = a blocker, sole = the only blocker\n";
+            for i in blocker_rows {
+                out += &format!(
+                    "  {:<24} functions first={:<6} any={:<6} sole={:<6} calls first={:<8} any={:<8} sole={}\n",
+                    FallbackReason::ALL[i].name(),
+                    self.rejected[i],
+                    self.any_functions[i],
+                    self.sole_functions[i],
+                    self.calls_rejected[i],
+                    self.calls_any[i],
+                    self.calls_sole[i]
+                );
+            }
+        }
         out
     }
 }
@@ -700,8 +791,9 @@ impl Interp {
                     }
                 }
                 Err(reason) => {
-                    st.reject(reason);
+                    st.reject_with_blockers(reason, plan.blockers);
                     self.cstats.record_rejected(reason);
+                    self.cstats.record_blockers(plan.blockers);
                     if self.compile_stats && self.cstats.level() >= 1 {
                         eprintln!(
                             "thaw-js compile: {name} at {}:{} rejected: {}",
@@ -716,6 +808,10 @@ impl Interp {
         match &*st {
             CState::Eligible | CState::Compiled(_) => self.cstats.calls_eligible += 1,
             CState::Never(r) => self.cstats.calls_rejected[*r as usize] += 1,
+            CState::Blocked(r, mask) => {
+                self.cstats.calls_rejected[*r as usize] += 1;
+                self.cstats.note_blocked_call(*mask);
+            }
             CState::Cold(_) => {}
         }
         // a constructor call runs compiled unless the body reads `new.target` (the analyzer blocks that anyway);
