@@ -4373,4 +4373,6 @@ mod sysio_stdin_tests;
 mod tests;
 
 #[cfg(test)]
+mod coroutine_teardown_tests;
+#[cfg(test)]
 mod vm_realm_tests;

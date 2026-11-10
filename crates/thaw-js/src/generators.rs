@@ -5,7 +5,9 @@
 //! are driven from the event loop (an `await` inside the body suspends the driver, not the caller).
 //! ponytail: one OS thread per started generator that is not run to completion (parked until exit).
 
-use crate::eventloop::{adopt_native_ready, park_native_ready, Co, Resume, SendBox, Yield};
+use crate::eventloop::{
+    adopt_native_ready, park_disconnected, park_native_ready, Co, Resume, SendBox, Yield,
+};
 use crate::host::{adopt_host_tls, park_host_tls};
 use crate::*;
 use std::collections::VecDeque;
@@ -321,16 +323,14 @@ impl Interp {
         park_native_ready();
         park_host_tls(self as *mut Interp as usize);
         let _ = ctx.to_host.send(SendBox(Yield::Yielded(v)));
-        let msg = ctx.from_host.recv();
+        // check the disconnect before touching `self` (the Interp may be torn down by the host)
+        let Ok(msg) = ctx.from_host.recv() else {
+            // the generator was dropped while suspended: never touch shared state again
+            park_disconnected()
+        };
         adopt_host_tls(self as *mut Interp as usize);
         self.restore(snap);
-        match msg.map(SendBox::into_inner) {
-            Ok(r) => Ok(r),
-            Err(_) => loop {
-                // the generator was dropped while suspended: never touch shared state again
-                std::thread::park();
-            },
-        }
+        Ok(msg.into_inner())
     }
 
     pub(crate) fn yield_value(&mut self, v: Value) -> R<Value> {
