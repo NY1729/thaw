@@ -14,6 +14,8 @@ mod check_mode_tests;
 #[cfg(test)]
 mod diff_tests;
 #[cfg(test)]
+mod diff_tests_args;
+#[cfg(test)]
 mod diff_tests_calls;
 #[cfg(test)]
 mod diff_tests_ctl;
@@ -334,6 +336,9 @@ pub(crate) struct Stats {
     /// Test-only: calls that took the `Interp::call_direct` fast path.
     #[cfg(test)]
     direct_calls: u64,
+    /// Test-only: compiled call sites that took a recycled argument buffer (`call.rs` `eval_args`).
+    #[cfg(test)]
+    arg_pool_hits: u64,
     /// Test-only: bitwise operator nodes built (`num::bit_ex`), summed over compiled functions.
     #[cfg(test)]
     bit_ex_built: u64,
@@ -384,6 +389,8 @@ impl Stats {
             codegen_rejected: [0; FallbackReason::COUNT],
             #[cfg(test)]
             direct_calls: 0,
+            #[cfg(test)]
+            arg_pool_hits: 0,
             #[cfg(test)]
             bit_ex_built: 0,
             #[cfg(test)]
@@ -500,6 +507,16 @@ impl Stats {
     #[cfg(test)]
     pub(crate) fn note_direct_call(&mut self) {
         self.direct_calls += 1;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arg_pool_hits(&self) -> u64 {
+        self.arg_pool_hits
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_arg_pool_hit(&mut self) {
+        self.arg_pool_hits += 1;
     }
 
     #[cfg(not(test))]
@@ -846,6 +863,6 @@ impl Interp {
         if check::applies(self.compile_mode, &c) {
             return Some(self.run_checked(f, def, scope, this, args, &c));
         }
-        Some(c.run(self, f, scope, this, args))
+        Some(c.run_shared(self, f, scope, this, args))
     }
 }

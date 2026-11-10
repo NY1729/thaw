@@ -131,10 +131,10 @@ impl Interp {
     ) -> R<Value> {
         let copies: Option<Vec<Value>> = args.iter().map(|a| snapshot(self, a)).collect();
         let Some(copies) = copies else {
-            return c.run(self, f, scope, this, args);
+            return c.run_shared(self, f, scope, this, args);
         };
         let ast = self.call_closure_ast(f, def, scope, this, &copies, None);
-        let real = c.run(self, f, scope, this, args);
+        let real = c.run_shared(self, f, scope, this, args);
         #[cfg(test)]
         let real = failpoint(real);
         if self.dl_hit {
