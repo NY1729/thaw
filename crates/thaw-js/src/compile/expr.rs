@@ -71,6 +71,11 @@ pub(crate) fn lit_value(l: &a::Lit) -> CG<Value> {
 
 pub(crate) fn compile(g: &mut Gen, e: &a::Expr) -> CG<Ex> {
     match e {
+        // a fresh RegExp object per evaluation, as `Interp::eval` does
+        a::Expr::Lit(a::Lit::Regex(r)) => {
+            let (src, flags) = (r.exp.to_string(), r.flags.to_string());
+            Ok(mk_ex(move |it, _| bx(it.new_regexp(&src, &flags))))
+        }
         a::Expr::Lit(l) => Ok(lit(lit_value(l)?)),
         a::Expr::Ident(i) => Ok(match g.resolve(&i.sym) {
             Some(l) => slot_read(l.slot),
@@ -321,12 +326,9 @@ fn cond(test: Bl, cons: Ex, alt: Ex) -> Ex {
     })
 }
 
-/// Binary operators. `in` and `instanceof` stay on the AST (the analyzer blocks them too).
+/// Binary operators. `in` and `instanceof` go through `combine` -> `Interp::binary`, as the AST does.
 fn bin(g: &mut Gen, op: a::BinaryOp, left: &a::Expr, right: &a::Expr) -> CG<Ex> {
     use a::BinaryOp as B;
-    if matches!(op, B::In | B::InstanceOf) {
-        return reject();
-    }
     let l = compile(g, left)?;
     let r = compile(g, right)?;
     Ok(match op {
