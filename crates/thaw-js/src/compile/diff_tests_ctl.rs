@@ -224,11 +224,13 @@ fn pr3_tier_a_loop_programs_stay_on_the_ast() {
 /// Loop-adjacent statements outside the subset stay on the AST, with the same output.
 #[test]
 fn pr3_switch_try_and_labels_stay_on_the_ast() {
-    let cases: [(&str, &[FallbackReason]); 3] = [
-        (
-            "function s(a) { switch (a) { case 1: return 'one'; default: return 'other' } } console.log(s(1), s(2)); console.log(s(1), s(2));",
-            &[FallbackReason::Switch],
-        ),
+    // switch compiles: same output as the AST, and the function is compiled
+    let sw = "function s(a) { switch (a) { case 1: return 'one'; default: return 'other' } } console.log(s(1), s(2)); console.log(s(1), s(2));";
+    let (want, ok_want, _) = run_mode(sw, CompileMode::Off);
+    let (got, ok, it) = run_mode(sw, CompileMode::On);
+    assert_eq!((got, ok), (want, ok_want), "{sw}");
+    assert!(it.cstats.compiled() >= 1, "{sw}");
+    let cases: [(&str, &[FallbackReason]); 2] = [
         (
             "function t() { try { throw 1 } catch (e) { return 'c' } } console.log(t()); console.log(t());",
             &[FallbackReason::Try, FallbackReason::Throw],

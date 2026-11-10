@@ -30,46 +30,46 @@ fn run_on(src: &str) -> Interp {
 
 #[test]
 fn two_blockers_are_both_any_and_neither_is_sole() {
-    // `switch` comes first, so it is the first blocker; `for-of` is the second.
-    let src = "function f(a) { switch (a) { case 1: return 2; default: return 3 } \
-               for (const x of a) { } return 0 }";
+    // switch compiles: the default parameter comes first, so it is the first blocker; `for-of` is the second.
+    let src = "function f(a = 0) { for (const x of a) { } return 0 }";
     let plan = analyze(&def_of(src));
-    assert_eq!(plan.verdict(), Err(R::Switch));
-    assert_eq!(plan.all_reasons(), vec![R::Switch, R::ForOf]);
+    assert_eq!(plan.verdict(), Err(R::DefaultParam));
+    assert_eq!(plan.all_reasons(), vec![R::DefaultParam, R::ForOf]);
 
-    let it = run_on(&format!("{src}\nf(1); f(2);"));
+    let it = run_on(&format!("{src}\nf([1]); f([2]);"));
     let s = &it.cstats;
     assert_eq!(s.calls(), 2);
-    assert_eq!(s.rejected(R::Switch), 1);
+    assert_eq!(s.rejected(R::DefaultParam), 1);
     assert_eq!(s.rejected(R::ForOf), 0);
-    assert_eq!(s.any_functions(R::Switch), 1);
+    assert_eq!(s.any_functions(R::DefaultParam), 1);
     assert_eq!(s.any_functions(R::ForOf), 1);
-    assert_eq!(s.sole_functions(R::Switch), 0);
+    assert_eq!(s.sole_functions(R::DefaultParam), 0);
     assert_eq!(s.sole_functions(R::ForOf), 0);
     // calls go to every blocker (any), to none as the sole one
-    assert_eq!(s.calls_rejected(R::Switch), 2);
-    assert_eq!(s.calls_any(R::Switch), 2);
+    assert_eq!(s.calls_rejected(R::DefaultParam), 2);
+    assert_eq!(s.calls_any(R::DefaultParam), 2);
     assert_eq!(s.calls_any(R::ForOf), 2);
-    assert_eq!(s.calls_sole(R::Switch), 0);
+    assert_eq!(s.calls_sole(R::DefaultParam), 0);
     assert_eq!(s.calls_sole(R::ForOf), 0);
 }
 
 #[test]
 fn one_blocker_is_sole() {
-    let src = "function f(a) { switch (a) { case 1: return 2; default: return 3 } } \
-               f(1); f(2); f(3);";
+    // switch compiles: a for-of over an array is the single blocker
+    let src = "function f(a) { for (const x of a) { } return 0 } \
+               f([1]); f([]); f([2]);";
     let it = run_on(src);
     let s = &it.cstats;
-    assert_eq!(s.rejected(R::Switch), 1);
-    assert_eq!(s.any_functions(R::Switch), 1);
-    assert_eq!(s.sole_functions(R::Switch), 1);
-    assert_eq!(s.any_functions(R::ForOf), 0);
-    assert_eq!(s.calls_any(R::Switch), 3);
-    assert_eq!(s.calls_sole(R::Switch), 3);
+    assert_eq!(s.rejected(R::ForOf), 1);
+    assert_eq!(s.any_functions(R::ForOf), 1);
+    assert_eq!(s.sole_functions(R::ForOf), 1);
+    assert_eq!(s.any_functions(R::DefaultParam), 0);
+    assert_eq!(s.calls_any(R::ForOf), 3);
+    assert_eq!(s.calls_sole(R::ForOf), 3);
     let text = s.report();
     assert!(text.contains("thaw-js compile blockers"), "{text}");
     assert!(
-        text.lines().any(|l| l.trim_start().starts_with("switch")
+        text.lines().any(|l| l.trim_start().starts_with("for-of")
             && l.contains("any=1")
             && l.contains("sole=1")),
         "{text}"
