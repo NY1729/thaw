@@ -1,0 +1,172 @@
+name: diag-decorator-wire-trace
+
+# One-off diagnostic (plan-tj165 2b): runs the decorated-class identity programs under both engines with the wire trace on.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    name: wire trace of the decorated-class identity programs
+    runs-on: ubuntu-latest
+    # Observed shards take 15-26 minutes.
+    timeout-minutes: 75
+    env:
+      THAW_JS_ENGINE: thaw-js
+      THAW_JS_USER_DYNAMIC: "1"
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Build the thaw CLI
+        run: cargo build -p thaw-cli
+      - name: Build and run the decorated-class identity programs under both engines with the wire trace
+        run: |
+          D="$RUNNER_TEMP/diag"; W="$RUNNER_TEMP/work"; mkdir -p "$D" "$W/modules/identity-kit"
+          printf 'export declare function identity(value: any): any;\n' > "$W/modules/identity-kit/package.d.ts"
+          printf 'module.exports.identity = function(value) { return value; };\n' > "$W/modules/identity-kit/bundle.js"
+          cat > "$W/dec.ts" <<'EOT'
+          import { identity } from "identity-kit";
+          function Mark(value: JsValue): JsValue { return value; }
+          @Mark class Item { value: number = 3; }
+          function main(): void {
+              const item = new Item();
+              const returned = identity(item);
+              returned.value = 9;
+              console.log(returned === item, item.value);
+          }
+          EOT
+          cat > "$W/undec.ts" <<'EOT'
+          import { identity } from "identity-kit";
+          class Item { value: number = 3; }
+          function main(): void {
+              const item = new Item();
+              const returned = identity(item);
+              returned.value = 9;
+              console.log(returned === item, item.value);
+          }
+          EOT
+          cat > "$W/decm.ts" <<'EOT'
+          import { identity } from "identity-kit";
+          function Mark(value: JsValue): JsValue { return value; }
+          @Mark class Item { value: number = 3; bump(): number { return this.value; } }
+          function main(): void {
+              const item = new Item();
+              const returned = identity(item);
+              returned.value = 9;
+              console.log(returned === item, item.value);
+          }
+          EOT
+          cat > "$W/split.ts" <<'EOT'
+          import { identity } from "identity-kit";
+          function Mark(value: JsValue): JsValue { return value; }
+          @Mark class Item { value: number = 3; }
+          function main(): void {
+              const item = new Item();
+              const returned = identity(item);
+              console.log("before", returned.value);
+              returned.value = 9;
+              console.log("write-through", item.value);
+              console.log("identity", returned === item);
+              console.log("again", identity(item) === returned);
+          }
+          EOT
+          cat > "$W/void.ts" <<'EOT'
+          import { identity } from "identity-kit";
+          function Mark(value: JsValue): void { }
+          @Mark class Item { value: number = 3; }
+          function main(): void {
+              const item = new Item();
+              const returned = identity(item);
+              returned.value = 9;
+              console.log(returned === item, item.value);
+          }
+          EOT
+          sed -i 's/^          //' "$W/dec.ts" "$W/undec.ts" "$W/decm.ts" "$W/split.ts" "$W/void.ts"
+          CLI="$PWD/target/debug/thaw"
+          set +e
+          for prog in dec undec decm split void; do
+            for eng in thaw-js quickjs; do
+              if [ "$eng" = thaw-js ]; then export THAW_JS_ENGINE=thaw-js THAW_JS_USER_DYNAMIC=1; else unset THAW_JS_ENGINE THAW_JS_RUNTIME THAW_JS_USER_DYNAMIC; fi
+              "$CLI" build "$W/$prog.ts" -o "$W/$prog.$eng" --registry "$W/modules" > "$D/$prog.$eng.build.log" 2>&1
+              echo "build $prog $eng exit $?" | tee -a "$D/summary.txt"
+              env THAW_JS_TRACE=1 THAW_JS_TRACE_WIRE=1 "$W/$prog.$eng" > "$D/$prog.$eng.stdout" 2> "$D/$prog.$eng.trace"
+              echo "run $prog $eng exit $? stdout: $(tr '\n' ' ' < "$D/$prog.$eng.stdout")" | tee -a "$D/summary.txt"
+              "$CLI" inspect "$W/$prog.$eng" > "$D/$prog.$eng.inspect" 2>&1
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diag-decorator
+          path: ${{ runner.temp }}/diag
+          if-no-files-found: ignore

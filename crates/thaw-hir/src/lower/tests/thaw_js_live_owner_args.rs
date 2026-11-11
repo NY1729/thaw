@@ -193,3 +193,23 @@ fn thaw_js_quickjs_and_method_symbols_do_not_take_promoted_lease() {
     );
     assert!(!body.contains("params: [Json]"), "{body}");
 }
+
+#[test]
+fn thaw_js_any_slot_takes_a_live_owner_marker_for_a_decorated_method_less_class_instance() {
+    let identity = thaw_js_owner_symbol("tjs", "k::identity");
+    let decls = format!(
+        "function Mark(value: JsValue): JsValue {{ return value; }}\n@Mark class Item {{ value: number = 3; }}\ndeclare function {identity}(value: Json): Json;"
+    );
+    let body = thaw_js_owner_main_body(&decls, &identity, "const item = new Item();", "item");
+    assert!(body.contains("__thaw_tjs_live_owner_arg"), "{body}");
+}
+
+#[test]
+fn thaw_js_any_slot_takes_a_live_owner_marker_for_a_decorated_class_with_a_method() {
+    let identity = thaw_js_owner_symbol("tjs", "k::identity");
+    let decls = format!(
+        "function Mark(value: JsValue): JsValue {{ return value; }}\n@Mark class Item {{ value: number = 3; bump(): number {{ return 1; }} }}\ndeclare function {identity}(value: Json): Json;"
+    );
+    let body = thaw_js_owner_main_body(&decls, &identity, "const item = new Item();", "item");
+    assert!(body.contains("__thaw_tjs_live_owner_arg"), "{body}");
+}
