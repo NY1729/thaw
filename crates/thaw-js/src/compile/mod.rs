@@ -34,6 +34,8 @@ mod diff_tests_inre;
 #[cfg(test)]
 mod diff_tests_mem;
 #[cfg(test)]
+mod diff_tests_names;
+#[cfg(test)]
 mod diff_tests_num2;
 #[cfg(test)]
 mod diff_tests_self;

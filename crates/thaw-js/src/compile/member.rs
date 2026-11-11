@@ -221,16 +221,22 @@ fn prop_name(g: &mut Gen, k: &a::PropName) -> CG<PropKey> {
 
 /// `{ k: v, s, [c]: v }`: key then value, each in source order, then `put` (no methods, accessors or spread).
 pub(crate) fn object(g: &mut Gen, o: &a::ObjectLit) -> CG<Ex> {
-    let mut fields: Vec<(PropKey, Ex)> = Vec::with_capacity(o.props.len());
+    // the bool: an anonymous function value takes its key as `name` (the interpreter's `Prop::KeyValue` rule)
+    let mut fields: Vec<(PropKey, Ex, bool)> = Vec::with_capacity(o.props.len());
     for p in &o.props {
         let a::PropOrSpread::Prop(p) = p else {
             return reject();
         };
         let field = match &**p {
-            a::Prop::KeyValue(kv) => (prop_name(g, &kv.key)?, expr::compile(g, &kv.value)?),
+            a::Prop::KeyValue(kv) => (
+                prop_name(g, &kv.key)?,
+                expr::compile(g, &kv.value)?,
+                crate::is_anonymous_fn_def(&kv.value),
+            ),
             a::Prop::Shorthand(i) => (
                 PropKey::Name(Rc::from(i.sym.as_ref())),
                 expr::compile(g, &a::Expr::Ident(i.clone()))?,
+                false,
             ),
             _ => return reject(),
         };
@@ -238,7 +244,7 @@ pub(crate) fn object(g: &mut Gen, o: &a::ObjectLit) -> CG<Ex> {
     }
     Ok(mk_ex(move |it, f| {
         let obj = it.plain();
-        for (k, v) in &fields {
+        for (k, v, name_it) in &fields {
             let k = match k {
                 PropKey::Name(n) => n.clone(),
                 PropKey::Computed(e) => {
@@ -251,6 +257,9 @@ pub(crate) fn object(g: &mut Gen, o: &a::ObjectLit) -> CG<Ex> {
                 }
             };
             let v = v(it, f)?;
+            if *name_it {
+                crate::name_anonymous_fn(&v, &k);
+            }
             put(&obj, &k, v);
         }
         Ok(Value::Object(obj))
