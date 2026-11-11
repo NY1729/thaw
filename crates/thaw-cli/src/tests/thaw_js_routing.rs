@@ -387,14 +387,11 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:crypto",
         "node:https",
         "node:http2",
-        "node:stream/promises",
         "node:stream/consumers",
         "node:diagnostics_channel",
         "node:trace_events",
             "node:repl",
         "node:punycode",
-        "node:v8",
-            "node:test/reporters",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
@@ -405,14 +402,11 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
 #[test]
 fn node_batch1_builtin_bundles_scan_clean() {
     for module in [
-        "node:stream/promises",
         "node:stream/consumers",
         "node:diagnostics_channel",
         "node:trace_events",
             "node:repl",
         "node:punycode",
-        "node:v8",
-            "node:test/reporters",
     ] {
         let bundle = thaw_registry::builtin_bundle_with(module, &[]).unwrap();
         let report = thaw_js::scan::scan_bundle(&bundle).unwrap();

@@ -444,14 +444,11 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:crypto",
     "node:https",
     "node:http2",
-    "node:stream/promises",
     "node:stream/consumers",
     "node:diagnostics_channel",
     "node:trace_events",
     "node:repl",
     "node:punycode",
-    "node:v8",
-    "node:test/reporters",
 ];
 
 /// `node:perf_hooks` marks, measures, observers, timerify and entries exist only on QuickJS's performance.js.
