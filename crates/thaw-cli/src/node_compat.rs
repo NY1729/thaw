@@ -241,10 +241,11 @@ fn run_node_compat_case(
         false,
         shared_rt,
     );
-    let links_quickjs = build
+    let link_info = build
         .as_ref()
         .ok()
-        .and_then(|()| binary_links_quickjs(&output).ok());
+        .and_then(|()| binary_link_info(&output).ok());
+    let links_quickjs = link_info.as_ref().map(|(links, _)| *links);
     let outcome = build.and_then(|_| {
         command_output_with_timeout(
             Command::new(&output).args(&arguments),
@@ -311,6 +312,9 @@ fn run_node_compat_case(
         result["actualExitCode"] = thaw_exit_code.into();
     }
     record_quickjs_link(&mut result, links_quickjs);
+    if let Some((true, reasons)) = &link_info {
+        record_quickjs_reasons(&mut result, reasons);
+    }
     Ok(NodeCompatCase {
         result,
         bug: classification == "bug",
@@ -323,6 +327,17 @@ fn record_quickjs_link(result: &mut serde_json::Value, links_quickjs: Option<boo
     if let Some(links) = links_quickjs {
         result["linksQuickjs"] = links.into();
     }
+}
+
+/// Adds `quickjsReasons` (the reason and blocker lines `thaw inspect` prints, capped at 6 entries of 300 chars).
+/// Additive: only called for a case that links QuickJS.
+fn record_quickjs_reasons(result: &mut serde_json::Value, reasons: &[String]) {
+    let reasons: Vec<String> = reasons
+        .iter()
+        .take(6)
+        .map(|reason| reason.chars().take(300).collect())
+        .collect();
+    result["quickjsReasons"] = reasons.into();
 }
 
 enum NodeReferenceError {
@@ -562,7 +577,19 @@ mod capture_pipe_tests {
 
 #[cfg(test)]
 mod quickjs_link_tests {
-    use super::record_quickjs_link;
+    use super::{record_quickjs_link, record_quickjs_reasons};
+
+    #[test]
+    fn records_reasons_capped_and_truncated() {
+        let long = "x".repeat(400);
+        let reasons: Vec<String> = (0..8).map(|_| long.clone()).collect();
+        let mut result = serde_json::json!({"name": "case", "linksQuickjs": true});
+        record_quickjs_reasons(&mut result, &reasons);
+        let recorded = result["quickjsReasons"].as_array().expect("array");
+        assert_eq!(recorded.len(), 6);
+        assert_eq!(recorded[0].as_str().map(str::len), Some(300));
+        assert_eq!(result["linksQuickjs"], true);
+    }
 
     #[test]
     fn records_link_flag_and_keeps_existing_keys() {

@@ -605,13 +605,70 @@ fn manifest_links_quickjs(manifest: &serde_json::Value) -> bool {
     manifest["quickjs"].as_bool().unwrap_or(false)
 }
 
-/// Whether the executable at `path` links QuickJS, read the same way `thaw inspect` reads it.
-fn binary_links_quickjs(path: &Path) -> Result<bool, String> {
+/// The `quickjs-reason:` lines `thaw inspect` prints, one per reason in the manifest.
+fn quickjs_reason_lines(manifest: &serde_json::Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(reasons) = manifest["quickjs_reasons"].as_array() {
+        for reason in reasons {
+            let kind = reason["kind"].as_str().unwrap_or("unknown");
+            let package = reason["package"]
+                .as_str()
+                .map(|value| format!(" package={value}"))
+                .unwrap_or_default();
+            let operation = reason["function"]
+                .as_str()
+                .or_else(|| reason["operation"].as_str())
+                .map(|value| format!(" operation={value}"))
+                .unwrap_or_default();
+            let detail = reason["detail"]
+                .as_str()
+                .map(|value| format!(" reason={value}"))
+                .unwrap_or_default();
+            let location = match (
+                reason["source"].as_str(),
+                reason["line"].as_u64(),
+                reason["column"].as_u64(),
+            ) {
+                (Some(source), Some(line), Some(column)) if line > 0 => {
+                    format!(" at {source}:{line}:{column}")
+                }
+                _ => String::new(),
+            };
+            lines.push(format!(
+                "quickjs-reason: {kind}{package}{operation}{location}{detail}"
+            ));
+        }
+    }
+    lines
+}
+
+/// The `thaw-js-blocker:` lines `thaw inspect` prints, one per blocker in the manifest.
+fn thaw_js_blocker_lines(manifest: &serde_json::Value) -> Vec<String> {
+    manifest["thaw_js_blockers"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "thaw-js-blocker: package={} why={}",
+                        entry["package"].as_str().unwrap_or("?"),
+                        entry["why"].as_str().unwrap_or("?")
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the executable at `path` links QuickJS and the reasons `thaw inspect` prints for it.
+fn binary_link_info(path: &Path) -> Result<(bool, Vec<String>), String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
-    Ok(manifest_links_quickjs(&artifact_manifest_from_bytes(
-        &bytes,
-    )?))
+    let manifest = artifact_manifest_from_bytes(&bytes)?;
+    let mut reasons = quickjs_reason_lines(&manifest);
+    reasons.extend(thaw_js_blocker_lines(&manifest));
+    Ok((manifest_links_quickjs(&manifest), reasons))
 }
 
 fn run_inspect(args: &[String]) -> Result<(), String> {
@@ -649,34 +706,8 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
             .unwrap_or_default()
     );
     println!("quickjs: {}", manifest_links_quickjs(&manifest));
-    if let Some(reasons) = manifest["quickjs_reasons"].as_array() {
-        for reason in reasons {
-            let kind = reason["kind"].as_str().unwrap_or("unknown");
-            let package = reason["package"]
-                .as_str()
-                .map(|value| format!(" package={value}"))
-                .unwrap_or_default();
-            let operation = reason["function"]
-                .as_str()
-                .or_else(|| reason["operation"].as_str())
-                .map(|value| format!(" operation={value}"))
-                .unwrap_or_default();
-            let detail = reason["detail"]
-                .as_str()
-                .map(|value| format!(" reason={value}"))
-                .unwrap_or_default();
-            let location = match (
-                reason["source"].as_str(),
-                reason["line"].as_u64(),
-                reason["column"].as_u64(),
-            ) {
-                (Some(source), Some(line), Some(column)) if line > 0 => {
-                    format!(" at {source}:{line}:{column}")
-                }
-                _ => String::new(),
-            };
-            println!("quickjs-reason: {kind}{package}{operation}{location}{detail}");
-        }
+    for line in quickjs_reason_lines(&manifest) {
+        println!("{line}");
     }
     if let Some(routed) = manifest["thaw_js_routed"]
         .as_array()
@@ -711,14 +742,8 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
             }
         }
     }
-    if let Some(entries) = manifest["thaw_js_blockers"].as_array() {
-        for entry in entries {
-            println!(
-                "thaw-js-blocker: package={} why={}",
-                entry["package"].as_str().unwrap_or("?"),
-                entry["why"].as_str().unwrap_or("?")
-            );
-        }
+    for line in thaw_js_blocker_lines(&manifest) {
+        println!("{line}");
     }
     for line in js_infer_inspect_lines(&manifest) {
         println!("{line}");
