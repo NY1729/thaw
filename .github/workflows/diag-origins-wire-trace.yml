@@ -87,18 +87,47 @@ jobs:
           echo "$prefix/bin" >> "$GITHUB_PATH"
           echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
-      - name: Run the test under thaw-js and QuickJS with the wire trace
+      - name: Build the thaw CLI
+        run: cargo build -p thaw-cli
+      - name: Build and run the identity programs under both engines with the wire trace
         run: |
-          mkdir -p "$RUNNER_TEMP/diag"
-          T=generic_fallback_identity_preserves_promoted_json_object_identity
+          D="$RUNNER_TEMP/diag"; W="$RUNNER_TEMP/work"; mkdir -p "$D" "$W/modules/identity-kit"
+          printf 'export declare function identity<T>(value: T): T;\n' > "$W/modules/identity-kit/package.d.ts"
+          printf 'module.exports.identity = function(value) { return value; };\n' > "$W/modules/identity-kit/bundle.js"
+          cat > "$W/live.ts" <<'EOT'
+          import { identity } from "identity-kit";
+          function main(): void {
+              const source: { n: number } = { n: 1 };
+              const exposed: any = source;
+              const result = identity(source);
+              result.n = 7;
+              console.log(source.n);
+              console.log(result === source);
+          }
+          EOT
+          cat > "$W/parsed.ts" <<'EOT'
+          import { identity } from "identity-kit";
+          function main(): void {
+              const source: any = JSON.parse('{"n":1}');
+              const result = identity(source);
+              result.n = 7;
+              console.log(source.n);
+              console.log(result === source);
+          }
+          EOT
+          sed -i 's/^          //' "$W/live.ts" "$W/parsed.ts"
+          CLI="$PWD/target/debug/thaw"
           set +e
-          env THAW_JS_ENGINE=thaw-js THAW_JS_USER_DYNAMIC=1 THAW_JS_TRACE=1 THAW_JS_TRACE_WIRE=1 \
-            cargo test -p thaw-cli "$T" -- --nocapture > "$RUNNER_TEMP/diag/thaw-js.log" 2>&1
-          echo "thaw-js exit $?" | tee -a "$RUNNER_TEMP/diag/summary.txt"
-          env -u THAW_JS_ENGINE -u THAW_JS_RUNTIME \
-            cargo test -p thaw-cli "$T" -- --nocapture > "$RUNNER_TEMP/diag/quickjs.log" 2>&1
-          echo "quickjs exit $?" | tee -a "$RUNNER_TEMP/diag/summary.txt"
-          grep -nE "origin|serial|hdl|lease|wire" "$RUNNER_TEMP/diag/thaw-js.log" | head -80 > "$RUNNER_TEMP/diag/thaw-js-wire-lines.txt" || true
+          for prog in live parsed; do
+            for eng in thaw-js quickjs; do
+              if [ "$eng" = thaw-js ]; then export THAW_JS_ENGINE=thaw-js THAW_JS_USER_DYNAMIC=1; else unset THAW_JS_ENGINE THAW_JS_RUNTIME THAW_JS_USER_DYNAMIC; fi
+              "$CLI" build "$W/$prog.ts" -o "$W/$prog.$eng" --registry "$W/modules" > "$D/$prog.$eng.build.log" 2>&1
+              echo "build $prog $eng exit $?" | tee -a "$D/summary.txt"
+              env THAW_JS_TRACE=1 THAW_JS_TRACE_WIRE=1 "$W/$prog.$eng" > "$D/$prog.$eng.stdout" 2> "$D/$prog.$eng.trace"
+              echo "run $prog $eng exit $? stdout: $(tr '\n' ' ' < "$D/$prog.$eng.stdout")" | tee -a "$D/summary.txt"
+              "$CLI" inspect "$W/$prog.$eng" > "$D/$prog.$eng.inspect" 2>&1
+            done
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
