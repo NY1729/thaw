@@ -369,6 +369,97 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Diagnostic for the hono `Uncaught: TypeError: undefined is not a function`
+/// failure in the routes test above: the same three sections, each built as
+/// its own program, run with `THAW_JS_COMPILE=on` and `=off`, with
+/// `THAW_JS_TRACE_CALLBACK=1` so an Array-callback failure names its method.
+/// The table of (section, mode, status, stdout, stderr) is printed on every
+/// run; this is expected to FAIL until the hono bug is fixed, and that
+/// failure is the diagnostic. Gated like the other hono tests.
+#[test]
+fn registry_add_hono_sections_isolated_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-hono-sections-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "hono").unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let sections: [(&str, &str, &str); 3] = [
+        (
+            "A",
+            r#"import { Hono, Context } from "hono";
+async function main(): Promise<void> {
+    const appA = new Hono();
+    appA.get('/', (c: Context) => { return c.text('hello world'); });
+    const resA: JsValue = appA.request('/');
+    console.log(resA.status);
+}"#,
+            "200\n",
+        ),
+        (
+            "B",
+            r#"import { Hono, Context } from "hono";
+async function main(): Promise<void> {
+    const appB = new Hono();
+    appB.get('/', (c: JsValue) => c.text('hello again'));
+    const resB: JsValue = appB.request('/');
+    console.log(resB.status);
+    const bodyB: string = await resB.text();
+    console.log(bodyB);
+}"#,
+            "200\nhello again\n",
+        ),
+        (
+            "C",
+            r#"import { Hono, Context } from "hono";
+async function main(): Promise<void> {
+    const appC = new Hono();
+    appC.use('/users/:id', async (c, next) => {
+        console.log('mw ran');
+        await next();
+    });
+    appC.get('/users/:id', (c) => {
+        const id = c.req.param('id');
+        return c.text('user ' + id);
+    });
+    const resC: JsValue = appC.request('/users/42');
+    console.log(resC.status);
+    const bodyC: string = await resC.text();
+    console.log(bodyC);
+}"#,
+            "mw ran\n200\nuser 42\n",
+        ),
+    ];
+    let mut table = String::new();
+    let mut all_ok = true;
+    for (section, source_text, expected) in sections {
+        let source = dir.join(format!("main_{section}.ts"));
+        let output = dir.join(format!("app_{section}"));
+        std::fs::write(&source, source_text).unwrap();
+        build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+        for mode in ["on", "off"] {
+            let result = Command::new(&output)
+                .env("THAW_JS_TRACE_CALLBACK", "1")
+                .env("THAW_JS_COMPILE", mode)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
+            let ok = result.status.success() && stdout == expected;
+            all_ok &= ok;
+            table.push_str(&format!(
+                "section={section} compile={mode} ok={ok} status={} stdout={stdout:?} stderr={:?}\n",
+                result.status,
+                String::from_utf8_lossy(&result.stderr)
+            ));
+        }
+    }
+    std::fs::remove_dir_all(&registry).unwrap();
+    eprintln!("{table}");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(all_ok, "{table}");
+}
+
 /// Real, fetched uuid -- the first breadth-first bug-hunting target after
 /// zod/dayjs/hono all closed out (per [[project_thaw_overview]]'s Phase-4
 /// roadmap). `v4`/`v1`/`v3`/`v5`/`v6`/`v7`/`validate`/`version` all build
