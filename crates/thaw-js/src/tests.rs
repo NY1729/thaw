@@ -7066,3 +7066,21 @@ fn set_interval_keeps_ticking_after_a_throwing_tick_under_uncaught_exception() {
     assert_eq!(out.join("|"), "tick1|uncaught:boom|tick2|tick3|done");
     assert_eq!(code, 0);
 }
+
+/// TJ171: async bodies run on coroutine threads with their own counters; a timer id handed out there must not
+/// equal a host-thread timer's id, or `clearTimeout` on the async side deletes the host's interval.
+/// Count-based (not a sentinel delay) so a slow first loop pass cannot fake the result.
+/// Node prints `ok` for the same script (scratch: thaw-tmp/tmp-run/tj171/timer_collide.js).
+#[test]
+fn async_body_timers_do_not_collide_with_host_thread_timer_ids() {
+    let mut it = Interp::new();
+    it.run_main(
+        "let ticks = 0; \
+         const iv = setInterval(() => { if (++ticks === 3) { console.log('ok'); clearInterval(iv); clearTimeout(fb); } }, 2); \
+         async function other() { await null; const t = setTimeout(() => {}, 1000); clearTimeout(t); } \
+         other(); \
+         const fb = setTimeout(() => { console.log('stalled:' + ticks); clearInterval(iv); }, 3000);",
+    )
+    .expect("runs");
+    assert_eq!(it.out.join("|"), "ok");
+}
