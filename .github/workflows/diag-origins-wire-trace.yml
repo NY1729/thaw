@@ -1,0 +1,107 @@
+name: diag-origins-wire-trace
+
+# One-off diagnostic (plan-tj162 P0): runs the promoted-Json identity test under both engines with the wire trace on.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    name: wire trace of the promoted-Json identity test
+    runs-on: ubuntu-latest
+    # Observed shards take 15-26 minutes.
+    timeout-minutes: 75
+    env:
+      THAW_JS_ENGINE: thaw-js
+      THAW_JS_USER_DYNAMIC: "1"
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Run the test under thaw-js and QuickJS with the wire trace
+        run: |
+          mkdir -p "$RUNNER_TEMP/diag"
+          T=generic_fallback_identity_preserves_promoted_json_object_identity
+          set +e
+          env THAW_JS_ENGINE=thaw-js THAW_JS_USER_DYNAMIC=1 THAW_JS_TRACE=1 THAW_JS_TRACE_WIRE=1 \
+            cargo test -p thaw-cli "$T" -- --nocapture > "$RUNNER_TEMP/diag/thaw-js.log" 2>&1
+          echo "thaw-js exit $?" | tee -a "$RUNNER_TEMP/diag/summary.txt"
+          env -u THAW_JS_ENGINE -u THAW_JS_RUNTIME \
+            cargo test -p thaw-cli "$T" -- --nocapture > "$RUNNER_TEMP/diag/quickjs.log" 2>&1
+          echo "quickjs exit $?" | tee -a "$RUNNER_TEMP/diag/summary.txt"
+          grep -nE "origin|serial|hdl|lease|wire" "$RUNNER_TEMP/diag/thaw-js.log" | head -80 > "$RUNNER_TEMP/diag/thaw-js-wire-lines.txt" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diag-origins
+          path: ${{ runner.temp }}/diag
+          if-no-files-found: ignore
