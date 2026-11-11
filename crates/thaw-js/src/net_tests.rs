@@ -179,3 +179,35 @@ fn server_socket_with_unread_data_reads_eof_after_peer_destroy() {
         .expect("server socket never reached EOF (hang)");
     assert_eq!(out, "ok:78|eof");
 }
+
+#[test]
+fn tls_peer_closing_without_close_notify_reads_as_eof() {
+    // Node (OpenSSL, IGNORE_UNEXPECTED_EOF) reads a peer that drops TCP without close_notify as a plain EOF.
+    let hex = |s: &str| s.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+    let cert = hex(include_str!("../tests/fixtures/tls/cert.pem"));
+    let key = hex(include_str!("../tests/fixtures/tls/key.pem"));
+    let ca = hex(include_str!("../tests/fixtures/tls/ca.pem"));
+    let script = format!(
+        r#"
+        var cert = '{cert}', key = '{key}', ca = '{ca}';
+        var l = __thaw_tls_server_listen('127.0.0.1', 0, cert, key).split(':');
+        var op = __thaw_tls_connect_start('127.0.0.1', Number(l[2]), 'localhost', ca, '', '', '1|' + Buffer.from('http/1.1').toString('hex') + '|0|');
+        var client, server, reads = 0;
+        (function step() {{
+          if (!client) {{ var r = __thaw_async_poll(op); if (r !== 'pending') client = r.split(':'); }}
+          if (!server) {{ var a = __thaw_tls_server_poll_accept(Number(l[1])); if (a.indexOf('ok:') === 0) server = a.split(':'); }}
+          if (!client || !server) return setTimeout(step, 1);
+          // the server drops its TCP socket with no TLS close_notify
+          __thaw_tls_destroy(Number(server[1]));
+          (function read() {{
+            var d = __thaw_tls_poll_read(Number(client[1]));
+            if (d === 'pending') {{ if (++reads > 2000) {{ console.log('gave up'); return; }} return setTimeout(read, 1); }}
+            console.log(d);
+            __thaw_tls_destroy(Number(client[1])); __thaw_tls_server_close(Number(l[1]));
+          }})();
+        }})();
+        "#
+    );
+    let out = run_ok(&script);
+    assert_eq!(out, "eof");
+}

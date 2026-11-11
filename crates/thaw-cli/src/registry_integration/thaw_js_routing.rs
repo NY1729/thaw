@@ -549,6 +549,19 @@ fn thaw_js_path_bundle(root_bundle: &str, builtin: &str) -> String {
         )
 }
 
+/// A `createHook` program whose timers or promises would become async resources: thaw-js does not report
+/// those resources to hooks yet, so the module stays on QuickJS. A plain `createHook` (no timer or promise
+/// words) keeps `node:async_hooks` on thaw-js.
+fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
+    const RESOURCES: &[&str] = &[
+        "setTimeout", "setInterval", "setImmediate", "Promise", "then", "await", "async", "nextTick", "queueMicrotask",
+    ];
+    (pkg_name == "node:async_hooks"
+        && thaw_js_mentions(user_source, "createHook")
+        && RESOURCES.iter().any(|name| thaw_js_mentions(user_source, name)))
+    .then_some("createHook with timers/promises resources is not supported on thaw-js yet")
+}
+
 /// `node:child_process` delivers stdout/exit on the thaw-js loop, which node:http's client has not been
 /// shown to share reliably under CI load. Remove once the 3 http+spawn cases pass in CI.
 fn thaw_js_child_process_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
@@ -584,6 +597,9 @@ fn thaw_js_package_eligible(
     }
     if pkg.name.starts_with("node:") && !THAW_JS_BUILTIN_MODULES.contains(&pkg.name.as_str()) {
         return reject("builtin module not validated on thaw-js".into());
+    }
+    if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
+        return reject(why.into());
     }
     if let Some(why) = thaw_js_perf_hooks_blocker(&pkg.name, user_source) {
         return reject(why.into());
@@ -684,6 +700,19 @@ fn thaw_js_mentions_matches_whole_identifiers_only() {
     assert!(thaw_js_mentions("bcrypt.hash(a)", "hash"));
     assert!(thaw_js_mentions("import { $x } from 'p'", "$x"));
     assert!(thaw_js_mentions("ns.sub.hash(1)", "a.b.hash"));
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_async_hooks_create_hook_with_timers_or_promises_keeps_the_module_on_quickjs() {
+    let timers = "import { createHook } from 'node:async_hooks';\nsetTimeout(() => {}, 1);";
+    let promises = "import { createHook } from 'node:async_hooks';\nawait Promise.resolve();";
+    let hooks = "import { createHook } from 'node:async_hooks';\ncreateHook({ init() {} }).enable();";
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", timers).is_some());
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", promises).is_some());
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", hooks).is_none());
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", "new AsyncLocalStorage();").is_none());
+    assert!(thaw_js_async_hooks_blocker("node:path", timers).is_none());
 }
 
 #[cfg(test)]
