@@ -101,7 +101,8 @@ jobs:
             echo "apt attempt $attempt failed" >&2
             sleep 10
           done
-          exit 1
+          echo 'gdb/strace unavailable; continuing without them' >&2
+          exit 0
       - name: Write the hang variants
         run: |
           W="$RUNNER_TEMP/work"; mkdir -p "$W"
