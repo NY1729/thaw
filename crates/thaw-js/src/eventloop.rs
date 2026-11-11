@@ -729,6 +729,9 @@ impl Interp {
                     // every Rc captured above is dropped here, before the hand-back
                 };
                 park_native_ready();
+                // ponytail: each finished coroutine thread leaks its bump chunks (see
+                // thaw_arena_detach_thread). Upgrade path: adopt the arena into the host thread.
+                thaw_arena::thaw_arena_detach_thread();
                 park_host_tls(key);
                 let _ = done_tx.send(SendBox(Yield::Done(r)));
             });

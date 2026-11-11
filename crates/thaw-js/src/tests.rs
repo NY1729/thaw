@@ -1367,6 +1367,20 @@ fn class_ops_from_a_callback_on_a_coroutine_thread_see_the_host_packages() {
     assert_eq!(CO_PROBE.lock().unwrap().take(), Some(Ok("5".into())));
 }
 
+/// A string built in an async body lives in that body's coroutine-thread arena. It is read back
+/// on the host after the coroutine thread has exited, so it must survive the thread.
+#[test]
+fn async_body_string_result_survives_its_coroutine_thread_exit() {
+    let mut it = crate::Interp::new();
+    let src = "const out = [];
+        async function f() { await null; out.push('a' + 'b'); }
+        f().then(() => console.log(out.join(',')));
+        async function g() { await null; return 'a' + 'b'; }
+        g().then(v => console.log(v));";
+    assert!(it.run_main(src).is_ok());
+    assert_eq!(it.out, ["ab", "ab"]);
+}
+
 #[test]
 fn thrown_errors_are_framed_with_name_message_code_and_properties() {
     use crate::host::{HostError, Package};

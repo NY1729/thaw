@@ -3536,6 +3536,82 @@ async function main(): Promise<void> {{
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn registry_add_chokidar_add_event_string_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-chokidar-add-string-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "chokidar").unwrap();
+    let watched = dir.join("watched");
+    std::fs::create_dir_all(&watched).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        format!(
+            r#"import {{ watch }} from "chokidar";
+import * as fs from "node:fs";
+
+const dir = {watched:?};
+
+function sleep(ms: number): Promise<void> {{
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}}
+
+async function main(): Promise<void> {{
+    const events: string[] = [];
+    const watcher = watch(dir, {{ persistent: true, ignoreInitial: true }});
+
+    watcher.on("add", (path: string) => {{ events.push("add:" + path.split("/").pop()); }});
+    watcher.on("change", (path: string) => {{ events.push("change:" + path.split("/").pop()); }});
+    watcher.on("unlink", (path: string) => {{ events.push("unlink:" + path.split("/").pop()); }});
+
+    await new Promise<void>((resolve) => {{ watcher.on("ready", () => resolve()); }});
+
+    fs.writeFileSync(dir + "/file.txt", "hello");
+    await sleep(300);
+    fs.writeFileSync(dir + "/file.txt", "hello world");
+    await sleep(300);
+    fs.unlinkSync(dir + "/file.txt");
+    await sleep(300);
+
+    await watcher.close();
+    console.log(JSON.stringify(events));
+}}
+"#,
+            watched = watched.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["chokidar".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[\"add:file.txt\",\"change:file.txt\",\"unlink:file.txt\"]\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Round 22's npm compat audit (adm-zip). `Buffer.isBuffer` was missing
 /// entirely (fixed, `fac4a4ae`), then constructing an archive from a
 /// `Buffer` (`new AdmZip(buffer)`, where `buffer` comes from an
