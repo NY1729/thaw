@@ -2886,10 +2886,39 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(BasicMetadataValueEnum::from(value))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let call_site = self
+            .builder
+            .build_call(function, &compiled_args, "calltmp")
+            .map_err(|e| e.to_string())?;
+
+        self.branch_on_pending_exception()?;
+        self.record_borrowed_jsvalue_args(args, &compiled_args);
+
+        if function.get_type().get_return_type().is_none() {
+            Ok(self.context.f64_type().const_zero().into())
+        } else {
+            call_site
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| format!("`{name}` does not return a value"))
+        }
+    }
+}
+
+impl<'ctx> HirCompiler<'ctx> {
+    /// Records the borrowed JsValue arguments of a call that was just emitted (`values[i]` is the
+    /// compiled value of `args[i]`), so a discarded result equal to one of them is not released by
+    /// the statement (see `HirStmt::Expr` in statements.rs). Shared by every call shape that can
+    /// return a borrowed argument, so the guard has exactly one implementation.
+    fn record_borrowed_jsvalue_args(
+        &mut self,
+        args: &[HirExpr],
+        values: &[BasicMetadataValueEnum<'ctx>],
+    ) {
         // Borrowed JsValue arguments (not fresh call results, which are +1 and owned by nobody else).
         let borrowed_jsvalue_args: Vec<IntValue<'ctx>> = args
             .iter()
-            .zip(&compiled_args)
+            .zip(values)
             .filter_map(|(arg, value)| match value {
                 BasicMetadataValueEnum::IntValue(bits)
                     if self.expr_hir_type(arg) == Some(HirType::JsValue)
@@ -2900,25 +2929,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 _ => None,
             })
             .collect();
-
-        let call_site = self
-            .builder
-            .build_call(function, &compiled_args, "calltmp")
-            .map_err(|e| e.to_string())?;
-
-        self.branch_on_pending_exception()?;
         if !borrowed_jsvalue_args.is_empty() {
             self.last_call_borrowed_jsvalue_args =
                 Some((args.as_ptr(), args.len(), borrowed_jsvalue_args));
-        }
-
-        if function.get_type().get_return_type().is_none() {
-            Ok(self.context.f64_type().const_zero().into())
-        } else {
-            call_site
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| format!("`{name}` does not return a value"))
         }
     }
 }

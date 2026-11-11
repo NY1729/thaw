@@ -498,6 +498,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 .ok_or_else(|| format!("function value `{name}` does not return a value"))?
         };
         self.branch_on_pending_exception()?;
+        // `compiled_args[0]` is the closure itself; the rest line up with `args`.
+        self.record_borrowed_jsvalue_args(args, &compiled_args[1..]);
         Ok(value)
     }
 
