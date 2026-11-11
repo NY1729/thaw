@@ -697,6 +697,68 @@ fn fs_watch_reports_directory_rename_and_change_events() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+/// Deleting a watched file emits one `rename` with its basename and keeps the
+/// handle open (Node parity), instead of emitting 'error' and closing.
+#[test]
+fn fs_watch_file_deletion_emits_rename_without_error() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_watch_file_delete");
+    fs::write(
+            dir.join("index.js"),
+            "var fs = require('node:fs'); module.exports = async function (root) { var file = root + '/gone.txt'; fs.writeFileSync(file, 'a'); var events = [], errors = 0, watcher = fs.watch(file, { interval: 1, persistent: false }); watcher.on('error', function() { errors++; }); var first = new Promise(function(resolve) { watcher.on('change', function(type, name) { events.push([type, name]); resolve(); }); }); setTimeout(function() { fs.unlinkSync(file); }, 3); await first; var closedBefore = watcher.closed; watcher.close(); return [events, errors, closedBefore, watcher.closed]; };",
+        )
+        .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_watch_file_delete_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWatchFileDelete = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments =
+        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
+            .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseFsWatchFileDelete").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[["rename","gone.txt"]],0,false,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+/// A directory entry that vanishes between readdir and stat is skipped
+/// instead of tearing down the directory watcher with 'error'.
+#[test]
+fn fs_watch_directory_survives_entry_removed_between_readdir_and_stat() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_watch_entry_race");
+    fs::write(
+            dir.join("index.js"),
+            "var fs = require('node:fs'); module.exports = async function (root) { var work = root + '/racy'; fs.mkdirSync(work); fs.writeFileSync(work + '/ghost.txt', 'g'); var original = fs.statSync, errors = 0, events = [], watcher; fs.statSync = function(path, options) { if (String(path).slice(-10) === '/ghost.txt') { var error = new Error('ENOENT: ghost'); error.code = 'ENOENT'; throw error; } return original(path, options); }; watcher = fs.watch(work, { interval: 1, persistent: false }); watcher.on('error', function() { errors++; }); var done = new Promise(function(resolve) { watcher.on('change', function(type, name) { events.push([type, name]); resolve(); }); }); setTimeout(function() { fs.writeFileSync(work + '/value.txt', 'a'); }, 3); await done; fs.statSync = original; var closedBefore = watcher.closed; watcher.close(); return [events, errors, closedBefore]; };",
+        )
+        .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_watch_entry_race_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWatchEntryRace = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments =
+        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
+            .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseFsWatchEntryRace").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[["rename","value.txt"]],0,false]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 #[test]
 fn fs_glob_supports_patterns_exclusions_and_async_iteration() {
     use std::ffi::{CStr, CString};

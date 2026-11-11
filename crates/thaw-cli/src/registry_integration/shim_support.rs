@@ -389,6 +389,7 @@ fn generate_napi_class_method_overloads(
         observed_arities,
         shim,
         napi,
+        false,
         &mut Vec::new(),
     )
     .into_iter()
@@ -398,12 +399,16 @@ fn generate_napi_class_method_overloads(
     .collect()
 }
 
+/// `thaw_js` marks a thaw-js-routed class: a method whose declared return is a union with a
+/// `Promise<T>` member (`Response | Promise<Response>`) gets a `$await` runtime-key suffix there, which
+/// makes thaw-js settle the returned Promise (`class_call` flag bit 2). QuickJS keys are unchanged.
 fn generate_napi_class_method_overloads_with_callback_instances(
     class: &thaw_bridge::DtsClass,
     is_static: bool,
     observed_arities: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
     shim: &mut String,
     napi: bool,
+    thaw_js: bool,
     method_contexts: &mut Vec<ClassMethodContext>,
 ) -> Vec<GeneratedClassMethod> {
     let mut generated = Vec::new();
@@ -524,8 +529,17 @@ fn generate_napi_class_method_overloads_with_callback_instances(
                     included_params.last(),
                     Some((_, thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)))
                 );
+                let await_suffix = if thaw_js
+                    && !napi
+                    && matches!(&overload.ret, thaw_bridge::DtsType::Unsupported(reason)
+                        if reason.starts_with(thaw_bridge::UNION_PROMISE_UNSUPPORTED))
+                {
+                    "$await"
+                } else {
+                    ""
+                };
                 let runtime_key = format!(
-                    "{}{}${}$overload{overload_index}$arity{argument_count}",
+                    "{}{}${}$overload{overload_index}$arity{argument_count}{await_suffix}",
                     match (is_static, &overload.ret) {
                         (true, thaw_bridge::DtsType::Native(thaw_hir::HirType::Void)) => {
                             "$staticmethodvoid$"

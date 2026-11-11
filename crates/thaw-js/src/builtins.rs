@@ -2562,16 +2562,22 @@ impl Interp {
             }
             Ok(Some(it.get_index(this, i)?))
         }
-        fn callback(it: &mut Interp, f: &Value) -> R<()> {
+        fn callback(it: &mut Interp, f: &Value, method: &str) -> R<()> {
             if f.is_callable() {
                 return Ok(());
             }
             let shown = it.inspect(f, false);
-            it.throw_error("TypeError", &format!("{shown} is not a function"))
+            // Node's message stays the default; the method tag is opt-in for diagnosing hono's failure.
+            let tag = if std::env::var("THAW_JS_TRACE_CALLBACK").as_deref() == Ok("1") {
+                format!(" [Array.prototype.{method}]")
+            } else {
+                String::new()
+            };
+            it.throw_error("TypeError", &format!("{shown} is not a function{tag}"))
         }
         self.set_native(&ap, "forEach", |it, this, args| {
             let (f, t) = (arg(args, 0), arg(args, 1));
-            callback(it, &f)?;
+            callback(it, &f, "forEach")?;
             for i in 0..length_of(it, this)? {
                 if let Some(v) = element(it, this, i)? {
                     it.call(&f, &t, &[v, Value::Number(i as f64), this.clone()])?;
@@ -2581,7 +2587,7 @@ impl Interp {
         });
         self.set_native(&ap, "map", |it, this, args| {
             let (f, t) = (arg(args, 0), arg(args, 1));
-            callback(it, &f)?;
+            callback(it, &f, "map")?;
             let len = length_of(it, this)?;
             let mut out = Vec::with_capacity(len);
             for i in 0..len {
@@ -2596,7 +2602,7 @@ impl Interp {
         });
         self.set_native(&ap, "filter", |it, this, args| {
             let (f, t) = (arg(args, 0), arg(args, 1));
-            callback(it, &f)?;
+            callback(it, &f, "filter")?;
             let mut out = Vec::new();
             for i in 0..length_of(it, this)? {
                 if let Some(v) = element(it, this, i)? {
@@ -2613,7 +2619,7 @@ impl Interp {
         for (name, stop_on) in [("some", true), ("every", false)] {
             self.set_native(&ap, name, move |it, this, args| {
                 let (f, t) = (arg(args, 0), arg(args, 1));
-                callback(it, &f)?;
+                callback(it, &f, name)?;
                 for i in 0..length_of(it, this)? {
                     if let Some(v) = element(it, this, i)? {
                         if it
@@ -2631,7 +2637,7 @@ impl Interp {
         for (name, want_index) in [("find", false), ("findIndex", true)] {
             self.set_native(&ap, name, move |it, this, args| {
                 let (f, t) = (arg(args, 0), arg(args, 1));
-                callback(it, &f)?;
+                callback(it, &f, name)?;
                 for i in 0..length_of(it, this)? {
                     let v = element(it, this, i)?.unwrap_or(Value::Undefined);
                     if it
@@ -2654,7 +2660,7 @@ impl Interp {
         }
         self.set_native(&ap, "reduce", |it, this, args| {
             let f = arg(args, 0);
-            callback(it, &f)?;
+            callback(it, &f, "reduce")?;
             let len = length_of(it, this)?;
             let mut i = 0;
             let mut acc = if args.len() >= 2 {

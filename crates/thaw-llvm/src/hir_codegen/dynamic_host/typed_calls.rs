@@ -2345,11 +2345,13 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let name = self.intern_string(symbol, "thaw_js_class_symbol")
             .map_err(|error| error.to_string())?;
-        // bit 0: the result is a handle id; bit 1: await a returned Promise (see `class_call`)
-        let want_handle = self
-            .context
-            .i8_type()
-            .const_int(u64::from(ret_handle) | (u64::from(is_promise) << 1), false);
+        // bit 0: the result is a handle id; bit 1: await a returned Promise (see `class_call`);
+        // bit 2: await a returned Promise only for a union return (`$await` runtime-key suffix)
+        let union_promise = ret_handle && symbol.ends_with("$await");
+        let want_handle = self.context.i8_type().const_int(
+            u64::from(ret_handle) | (u64::from(is_promise) << 1) | (u64::from(union_promise) << 2),
+            false,
+        );
         let json = self.compile_json_backend_values_with_extra(
             name.as_pointer_value().into(),
             array,

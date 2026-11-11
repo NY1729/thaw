@@ -89,3 +89,28 @@ fn tj6_routed_promise_of_a_date_stays_unrouted() {
     let (_, _, ir) = tj6_compile_routed(&source, "tj6_promise_date");
     assert!(ir.contains("non-plain-data"), "{ir}");
 }
+
+#[test]
+fn tj6_routed_union_promise_method_sets_the_union_await_bit() {
+    let request = tj6_hex("$method$k::Svc$request$overload0$arity1$await");
+    let plain = tj6_hex("$method$k::Svc$plain$overload0$arity1");
+    let new = tj6_hex("$new$k::Svc$arity0");
+    let source = format!(
+        "declare function __thaw_typed_tjs_{new}(): JsValue;
+         declare function __thaw_typed_tjs_{request}(receiver: JsValue, p: string): JsValue;
+         declare function __thaw_typed_tjs_{plain}(receiver: JsValue, p: string): JsValue;
+         async function main(): Promise<void> {{
+           const svc = __thaw_typed_tjs_{new}();
+           const a = __thaw_typed_tjs_{request}(svc, \"x\");
+           const b = __thaw_typed_tjs_{plain}(svc, \"x\");
+         }}"
+    );
+    let (uses_thaw_js, uses_quickjs, ir) = tj6_compile_routed(&source, "tj6_union_promise");
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    // flags: bit 0 (handle result) | bit 2 (await a union Promise) for the `$await` key only
+    assert_eq!(ir.matches("i8 5)").count(), 1, "{ir}");
+    let calls = ir
+        .matches("call { ptr, ptr } @thaw_tjs_class_call(")
+        .count();
+    assert_eq!(calls, 3, "{ir}");
+}

@@ -616,14 +616,17 @@ fn parse_class_symbol(symbol: &str) -> Option<(&str, &str, &str, Option<&str>)> 
     Some((kind, package, class_path, member))
 }
 
-/// `flags`: bit 0 asks for a handle id, bit 1 awaits a returned Promise (its settled value is the result).
+/// `flags`: bit 0 asks for a handle id, bit 1 awaits a returned Promise (its settled value is the result),
+/// bit 2 awaits a returned Promise only when the declared return type is a union with a Promise member
+/// (`Response | Promise<Response>`); the same settle as bit 1 when the result is a Promise.
 fn class_call(
     symbol: &str,
     args_json: &str,
     receiver: i64,
     flags: u8,
 ) -> Result<String, HostError> {
-    let (want_handle, await_promise) = (flags & 1 != 0, flags & 2 != 0);
+    let (want_handle, await_promise, await_union) =
+        (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
     let (kind, package, class_path, member) = parse_class_symbol(symbol)
         .ok_or_else(|| HostError::Bundle(format!("malformed class symbol `{symbol}`")))?;
     let op = match kind {
@@ -698,7 +701,7 @@ fn class_call(
             }
         };
         let it = &mut p.interp;
-        let result = if await_promise {
+        let result = if await_promise || (await_union && it.is_promise(&result)) {
             awaited(it, result)?
         } else {
             result
@@ -712,7 +715,8 @@ fn class_call(
 
 /// Run a class operation (see `parse_class_symbol`): construct (`receiver` 0), call a method on an
 /// instance handle, or call a static method. The result is JSON text, or a decimal handle id when
-/// bit 0 of `flags` is set (the class instance stays in the thaw-js heap); bit 1 awaits a Promise result.
+/// bit 0 of `flags` is set (the class instance stays in the thaw-js heap); bit 1 awaits a Promise result,
+/// bit 2 awaits one only for a union return type (see `class_call`).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_class_call(
     symbol: *const c_char,
