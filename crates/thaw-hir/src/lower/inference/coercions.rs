@@ -578,6 +578,26 @@ impl<'a> FnLowerer<'a> {
         )))
     }
 
+    /// A storage-promoted object/array variable passed to an `any`/generic slot of a thaw-js extern
+    /// function is a Json-typed `Var` (or `JsonAsNative(Var, Object|Array)` after a native coercion), which
+    /// codegen would decode into a native copy, so the package sees a JSON copy and identity is lost.
+    /// Pass the Json lease itself (`Var(v)`, a `Value::Host`) instead: `ordered_json` then sends
+    /// `{"__thaw_tjs_handle__": id}`.
+    pub(in crate::lower) fn thaw_js_promoted_json_argument(
+        &mut self,
+        value: &HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let inner = match value {
+            HirExpr::JsonAsNative(inner, HirType::Object(_) | HirType::Array(_)) => inner.as_ref(),
+            _ => value,
+        };
+        let HirExpr::Var(_) = inner else { return Ok(None) };
+        if self.infer_expr_type(inner)? != HirType::Json {
+            return Ok(None);
+        }
+        Ok(Some(inner.clone()))
+    }
+
     /// Whether a declared slot stores `any` values (directly or as an element).
     fn type_holds_any(declared: &HirType) -> bool {
         match declared {
