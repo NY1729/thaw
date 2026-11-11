@@ -32,6 +32,16 @@ fn thaw_js_declaration_scan_accepts_plain_data_and_rejects_everything_else() {
         "declare function __thaw_typed_js_6d73(): Promise<number>;"
     ));
     assert!(!plain("function __thaw_typed_wrapper_js_6d73(): number {"));
+    // a bare `Uint8Array` result crosses as bytes; in params, unions and nested positions it stays out
+    assert!(plain(
+        "declare function __thaw_typed_js_6d73(path: string): Uint8Array;"
+    ));
+    assert!(!plain(
+        "declare function __thaw_typed_js_6d73(v: Uint8Array): number;"
+    ));
+    assert!(!plain(
+        "declare function __thaw_typed_js_6d73(): Uint8Array | string;"
+    ));
 }
 
 #[test]
@@ -321,6 +331,9 @@ fn thaw_js_async_overload_is_plain_when_its_resolved_type_is() {
     ));
     assert!(!thaw_js_async_declaration_plain(
         "declare function __thaw_typed_js_6d73(t: Promise<string>): string;"
+    ));
+    assert!(thaw_js_async_declaration_plain(
+        "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;"
     ));
 }
 

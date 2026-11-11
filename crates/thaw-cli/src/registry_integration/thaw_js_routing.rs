@@ -197,7 +197,8 @@ fn thaw_js_keeps_js_value(package: &str) -> bool {
 /// thaw-js JSON boundary: `number`, `string`, `boolean`, `Json`, `void`, `null`, `undefined`, its own
 /// type parameters, unions/array/object-literal shapes of those, and an opaque `JsValue` (a type the
 /// `.d.ts` classifier could not resolve), which the retargeted declaration turns into `Json`.
-/// Callbacks and every other type name (classes, `Buffer`, ...) are rejected.
+/// Callbacks and every other type name (classes, `Buffer`, ...) are rejected, except a whole
+/// `Uint8Array` result.
 fn thaw_js_declaration_plain(line: &str) -> bool {
     let Some(rest) = line.strip_prefix("declare function ") else {
         return false;
@@ -259,6 +260,9 @@ fn thaw_js_declaration_plain(line: &str) -> bool {
         return false;
     };
     let (params, result) = (&after_name[..result_start], &after_name[result_start + 3..]);
+    // A bare `Uint8Array` result (`readFileSync(path): Uint8Array`) crosses as bytes; in params,
+    // unions and nested positions it stays rejected.
+    let bytes_result = result.trim().trim_end_matches(';').trim() == "Uint8Array";
     let identifiers_plain = |text: &str| {
         let chars = text.chars().collect::<Vec<_>>();
         let mut index = 0;
@@ -303,7 +307,7 @@ fn thaw_js_declaration_plain(line: &str) -> bool {
         }
         true
     };
-    identifiers_plain(params) && identifiers_plain(result)
+    identifiers_plain(params) && (bytes_result || identifiers_plain(result))
 }
 
 /// An async overload (`...): Promise<string>;` or `string | Promise<string>`, ejs `render`): the typed
@@ -313,8 +317,10 @@ fn thaw_js_async_declaration_plain(line: &str) -> bool {
         return false;
     };
     let (params, result) = line.split_at(at);
+    // `Promise<Uint8Array>` resolves to the bare bytes result the sync gate accepts
+    let resolved = result.replace("Promise<Uint8Array>", "Uint8Array");
     result.contains("Promise<")
-        && thaw_js_declaration_plain(&format!("{params}{}", result.replace("Promise", "")))
+        && thaw_js_declaration_plain(&format!("{params}{}", resolved.replace("Promise", "")))
 }
 
 /// Whether `line` declares an operation of `package`'s class `class` (`$new$`, `$method$`,
@@ -543,14 +549,6 @@ fn thaw_js_path_bundle(root_bundle: &str, builtin: &str) -> String {
         )
 }
 
-/// A `createHook({ init(..) {..} })` callback written as an object-literal member reaches thaw-js as
-/// `{}`: the methods are dropped by the dynamic-object operations builder, so no hook ever fires.
-/// Until that is fixed, a program that names `createHook` keeps `node:async_hooks` on QuickJS.
-fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    (pkg_name == "node:async_hooks" && thaw_js_mentions(user_source, "createHook"))
-        .then_some("createHook callbacks in an object literal are not marshalled to thaw-js yet")
-}
-
 /// `node:child_process` delivers stdout/exit on the thaw-js loop, which node:http's client has not been
 /// shown to share reliably under CI load. Remove once the 3 http+spawn cases pass in CI.
 fn thaw_js_child_process_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
@@ -586,9 +584,6 @@ fn thaw_js_package_eligible(
     }
     if pkg.name.starts_with("node:") && !THAW_JS_BUILTIN_MODULES.contains(&pkg.name.as_str()) {
         return reject("builtin module not validated on thaw-js".into());
-    }
-    if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
-        return reject(why.into());
     }
     if let Some(why) = thaw_js_perf_hooks_blocker(&pkg.name, user_source) {
         return reject(why.into());
@@ -689,15 +684,6 @@ fn thaw_js_mentions_matches_whole_identifiers_only() {
     assert!(thaw_js_mentions("bcrypt.hash(a)", "hash"));
     assert!(thaw_js_mentions("import { $x } from 'p'", "$x"));
     assert!(thaw_js_mentions("ns.sub.hash(1)", "a.b.hash"));
-}
-
-#[cfg(test)]
-#[test]
-fn thaw_js_async_hooks_create_hook_keeps_the_module_on_quickjs() {
-    let import = "import { createHook } from \"node:async_hooks\";";
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", import).is_some());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", "new AsyncLocalStorage();").is_none());
-    assert!(thaw_js_async_hooks_blocker("node:path", import).is_none());
 }
 
 #[cfg(test)]
