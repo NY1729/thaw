@@ -4388,6 +4388,7 @@ impl<'a> FnLowerer<'a> {
                     Self::is_napi_constructor_typed_call(backend, &symbol, &signature.ret)
                 })
         });
+        let mut json_lease_args: Vec<usize> = Vec::new();
         let mut args = lowered_arguments
             .into_iter()
             .enumerate()
@@ -4402,6 +4403,12 @@ impl<'a> FnLowerer<'a> {
                             self.thaw_js_live_owner_argument(&value, declared, generic_call)?
                         {
                             return Ok(marked);
+                        }
+                        if generic_call || *declared == HirType::Json {
+                            if let Some(lease) = self.thaw_js_promoted_json_argument(&value)? {
+                                json_lease_args.push(i);
+                                return Ok(lease);
+                            }
                         }
                     }
                 }
@@ -4659,6 +4666,7 @@ impl<'a> FnLowerer<'a> {
             &args,
             &GenericCallContext {
                 call,
+                json_lease_args: &json_lease_args,
                 packed_native_rest_fixed_count,
                 expected_source_return_hint: expected_source_return_hint.as_ref(),
                 expected_return_hint: expected_return_hint.as_ref(),

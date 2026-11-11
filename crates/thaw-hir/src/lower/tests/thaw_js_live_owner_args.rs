@@ -94,3 +94,102 @@ fn thaw_js_function_any_slot_keeps_promoted_json_variable_by_value() {
     );
     assert!(!body.contains("__thaw_tjs_live_owner_arg"), "{body}");
 }
+
+// PR1: a storage-promoted object passed to a generic thaw-js extern slot is the Json lease itself, not a
+// JsonAsNative native copy, so the package receives the live handle and the result stays Json.
+#[test]
+fn thaw_js_generic_slot_passes_promoted_json_object_as_lease() {
+    let identity = thaw_js_owner_symbol("tjs", "k::identity");
+    let decls = format!("declare function {identity}<T>(value: T): T;");
+    let body = thaw_js_owner_main_body(
+        &decls,
+        &identity,
+        "const source = { n: 1 }; const exposed: any = source;",
+        "source",
+    );
+    assert!(body.contains("params: [Json]"), "{body}");
+    assert!(body.contains("ret: Json"), "{body}");
+    assert!(body.contains("Let(\"result\", Json"), "{body}");
+    assert!(body.contains("[Var(\"source\")]"), "{body}");
+    assert!(!body.contains("__thaw_tjs_live_owner_arg"), "{body}");
+}
+
+#[test]
+fn thaw_js_generic_slot_passes_promoted_json_array_as_lease() {
+    let identity = thaw_js_owner_symbol("tjs", "k::identity");
+    let decls = format!("declare function {identity}<T>(value: T): T;");
+    let body = thaw_js_owner_main_body(
+        &decls,
+        &identity,
+        "const source = [{ n: 1 }]; const exposed: any = source;",
+        "source",
+    );
+    assert!(body.contains("params: [Json]"), "{body}");
+    assert!(body.contains("[Var(\"source\")]"), "{body}");
+    assert!(!body.contains("__thaw_tjs_live_owner_arg"), "{body}");
+}
+
+// Negative controls: the lease path must not fire for these shapes.
+#[test]
+fn thaw_js_generic_slot_keeps_non_promoted_named_object_on_owner_marker() {
+    let identity = thaw_js_owner_symbol("tjs", "k::identity");
+    let decls = format!("declare function {identity}<T>(value: T): T;");
+    let body = thaw_js_owner_main_body(&decls, &identity, "const source = { n: 1 };", "source");
+    assert!(body.contains("__thaw_tjs_live_owner_arg"), "{body}");
+    assert!(!body.contains("params: [Json]"), "{body}");
+}
+
+#[test]
+fn thaw_js_generic_slot_keeps_fresh_literal_by_value() {
+    let identity = thaw_js_owner_symbol("tjs", "k::identity");
+    let decls = format!("declare function {identity}<T>(value: T): T;");
+    let body = thaw_js_owner_main_body(&decls, &identity, "", "{ n: 1 }");
+    assert!(!body.contains("ret: Json"), "{body}");
+    assert!(!body.contains("__thaw_tjs_live_owner_arg"), "{body}");
+}
+
+#[test]
+fn thaw_js_generic_slot_keeps_promoted_primitive_as_number() {
+    let identity = thaw_js_owner_symbol("tjs", "k::identity");
+    let decls = format!("declare function {identity}<T>(value: T): T;");
+    let body = thaw_js_owner_main_body(&decls, &identity, "const source = 5;", "source");
+    assert!(!body.contains("params: [Json]"), "{body}");
+    assert!(!body.contains("__thaw_tjs_live_owner_arg"), "{body}");
+}
+
+#[test]
+fn thaw_js_concrete_param_does_not_take_promoted_lease() {
+    let score = thaw_js_owner_symbol("tjs", "k::score");
+    let decls = format!("declare function {score}(value: {{ n: number }}): number;");
+    let body = thaw_js_owner_main_body(
+        &decls,
+        &score,
+        "const source = { n: 1 }; const exposed: any = source;",
+        "source",
+    );
+    assert!(!body.contains("params: [Json]"), "{body}");
+}
+
+#[test]
+fn thaw_js_quickjs_and_method_symbols_do_not_take_promoted_lease() {
+    let quickjs = thaw_js_owner_symbol("js", "k::identity");
+    let decls = format!("declare function {quickjs}<T>(value: T): T;");
+    let body = thaw_js_owner_main_body(
+        &decls,
+        &quickjs,
+        "const source = { n: 1 }; const exposed: any = source;",
+        "source",
+    );
+    // QuickJS keeps its own Json-typed call shape (the lease gate is ThawJs-only).
+    assert!(body.contains("backend: QuickJs"), "{body}");
+    assert!(!body.contains("__thaw_tjs_live_owner_arg"), "{body}");
+    let method = thaw_js_owner_symbol("tjs", "$method$k::Emitter$emit$overload0$arity1");
+    let decls = format!("declare function {method}<T>(value: T): T;");
+    let body = thaw_js_owner_main_body(
+        &decls,
+        &method,
+        "const source = { n: 1 }; const exposed: any = source;",
+        "source",
+    );
+    assert!(!body.contains("params: [Json]"), "{body}");
+}
