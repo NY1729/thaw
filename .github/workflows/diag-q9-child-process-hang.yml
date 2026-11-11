@@ -14,7 +14,7 @@ permissions:
 jobs:
   diag:
     name: child process hang variants under thaw-js
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed shards take 15-26 minutes.
     timeout-minutes: 75
     env:

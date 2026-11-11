@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "4"
@@ -128,7 +128,7 @@ jobs:
           - group: others
             manifests: "typescript-runtime-compat builtins-compat path-contracts-compat process-credentials-compat text-encoding-contracts-compat"
     name: node-compat (${{ matrix.group }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: "4"
@@ -258,7 +258,7 @@ jobs:
             dynamic: "0"
             compile: "on"
     name: node-compat thaw-js (${{ matrix.mode }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "4"
@@ -388,7 +388,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure')
     continue-on-error: true
     name: node-compat thaw-js others
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "4"
@@ -513,7 +513,7 @@ jobs:
           if-no-files-found: ignore
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed runs take 55-75 minutes; a hang fails with its logs instead of
     # running for the 6-hour default.
     timeout-minutes: 90
@@ -663,7 +663,7 @@ jobs:
       matrix:
         crate: [thaw-llvm, thaw-cli]
         shard: [0, 1, 2, 3]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed shards take 15-26 minutes.
     timeout-minutes: 75
     env:
@@ -791,7 +791,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed shards took 15-39 minutes under the old index-modulo split. The
     # split is now weighted by .github/npm-shard-weights.txt (expected ~18 min
     # max). A single lost shard ran 53 minutes with no log before this cap existed.
@@ -961,7 +961,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             llvm_asset: LLVM-22.1.8-Linux-X64.tar.xz
             llvm_sha256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
             architecture: x64
@@ -1073,7 +1073,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure')
     continue-on-error: true
     name: thaw-napi engine-thaw-js
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       CARGO_BUILD_JOBS: "4"
