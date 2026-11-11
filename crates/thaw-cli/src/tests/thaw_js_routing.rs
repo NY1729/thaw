@@ -756,6 +756,28 @@ fn thaw_js_routed_node_http_get_refused_without_a_server() {
 }
 
 #[test]
+fn thaw_js_routed_node_http_fetch_from_listen_callback_refused() {
+    let (dir, registry, entry) = thaw_js_fixture(
+        "node-http-fetch-from-listen-callback",
+        "import * as http from 'node:http';\n\
+         function main(): void {\n\
+           const srv = http.createServer((req, res) => { res.end('x'); });\n\
+           srv.listen(0, '127.0.0.1', async () => {\n\
+             try { await fetch('http://127.0.0.1:9/'); } catch (e: any) { console.log('err'); }\n\
+             srv.close();\n\
+           });\n\
+         }\n",
+    );
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    // Narrow blocker: a native createServer next to the fetch client keeps node:http on QuickJS.
+    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run_guarded(&output), "err\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn thaw_js_routed_node_http_get_from_listen_callback_refused() {
     let (dir, registry, entry) = thaw_js_fixture(
         "node-http-get-from-listen-callback",

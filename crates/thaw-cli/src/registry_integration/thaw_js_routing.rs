@@ -558,13 +558,14 @@ fn thaw_js_child_process_blocker(pkg_name: &str, user_source: &str) -> Option<&'
         .then_some("node:child_process stays on QuickJS while node:http is in the program")
 }
 
-/// A native `createServer` next to the thaw-js http client (`get` / `request`): the client's request
-/// never completes while the native server runs, so such a program keeps `node:http` on QuickJS.
+/// A native `createServer` next to a thaw-js http client (`get` / `request` / global `fetch`): the client's
+/// request never completes while the native server runs, so such a program keeps `node:http` on QuickJS.
 fn thaw_js_native_server_with_http_client_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
     (pkg_name == "node:http"
         && thaw_js_uses_function(user_source, "createServer")
-        && ["get", "request"].iter().any(|name| thaw_js_uses_function(user_source, name)))
-        .then_some("native createServer together with the thaw-js http client is not supported on thaw-js yet")
+        && (["get", "request"].iter().any(|name| thaw_js_uses_function(user_source, name))
+            || thaw_js_mentions(user_source, "fetch")))
+        .then_some("native createServer together with a thaw-js http client (get/request/fetch) is not supported on thaw-js yet")
 }
 
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
@@ -741,6 +742,10 @@ fn thaw_js_native_server_with_http_client_keeps_node_http_on_quickjs() {
     assert!(thaw_js_native_server_with_http_client_blocker("node:http", server_only).is_none());
     let client_only = "import * as http from 'node:http';\nhttp.get('http://x/', () => {});";
     assert!(thaw_js_native_server_with_http_client_blocker("node:http", client_only).is_none());
+    let fetch = "import * as http from 'node:http';\nhttp.createServer(() => {}).listen(0);\nawait fetch('http://x/');";
+    assert!(thaw_js_native_server_with_http_client_blocker("node:http", fetch).is_some());
+    let fetch_only = "import * as http from 'node:http';\nawait fetch('http://x/');";
+    assert!(thaw_js_native_server_with_http_client_blocker("node:http", fetch_only).is_none());
     assert!(thaw_js_native_server_with_http_client_blocker("node:path", combo).is_none());
 }
 
