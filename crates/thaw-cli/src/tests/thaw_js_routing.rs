@@ -487,6 +487,11 @@ fn thaw_js_runtime_alias_still_works() {
 }
 
 #[test]
+fn thaw_js_default_is_thaw_js() {
+    assert!(THAW_JS_DEFAULT);
+}
+
+#[test]
 fn thaw_js_engine_default_applies_when_unset() {
     assert_eq!(thaw_js_engine_from(None, None, THAW_JS_DEFAULT), THAW_JS_DEFAULT);
     // unknown THAW_JS_ENGINE values fall through to the RUNTIME alias, then the default
