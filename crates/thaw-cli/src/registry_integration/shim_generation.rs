@@ -1916,11 +1916,26 @@ fn generate_registry_shims_pass(
                 qualified,
                 &bare_aliased,
             ));
-        } else if !thaw_js_package {
+        } else {
             // (A thaw-js package has no untyped QuickJS `callDynamic` wrappers: every function the
-            // program mentions has a typed target, see `thaw_js_package_eligible`.)
+            // program mentions is either a native FastPath function, declared below, or has a typed
+            // target, see `thaw_js_package_eligible`.)
+            let functions: Vec<_> = if thaw_js_package {
+                pkg.functions
+                    .iter()
+                    .filter(|function| {
+                        pkg.classifications.iter().any(|(name, class)| {
+                            name == &function.name
+                                && matches!(class, thaw_bridge::Classification::FastPath(_))
+                        })
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                pkg.functions.clone()
+            };
             shim.push_str(&thaw_bridge::generate_shim(
-                &pkg.functions,
+                &functions,
                 native_lib_available,
                 qualified,
                 &bare_aliased,

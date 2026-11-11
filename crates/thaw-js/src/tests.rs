@@ -7124,3 +7124,78 @@ fn async_body_timers_do_not_collide_with_host_thread_timer_ids() {
     .expect("runs");
     assert_eq!(it.out.join("|"), "ok");
 }
+
+// ----- the terminal loop drives the compiled native http server (`thaw_http_poll_servers`) -----
+
+/// Serialises the tests that install `TEST_SERVER_POLL` (process-wide).
+static SERVER_POLL_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SERVER_POLLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Live (bit 0) for the first calls, then idle; the first call also reports a ran callback (bit 1).
+extern "C" fn fake_server_poll() -> u8 {
+    match SERVER_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+        0 => 3,
+        1..=4 => 1,
+        _ => 0,
+    }
+}
+
+/// Runs `body` on a fresh thread (host tables are thread-local) and fails instead of hanging.
+fn guarded(body: impl FnOnce() + Send + 'static) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        body();
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(20))
+        .expect("event loop did not finish within 20s");
+}
+
+#[test]
+fn terminal_loop_polls_native_servers_until_idle() {
+    use crate::host::{thaw_tjs_run_event_loop, TEST_SERVER_POLL};
+    let _guard = SERVER_POLL_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    *TEST_SERVER_POLL.lock().unwrap() = Some(fake_server_poll);
+    SERVER_POLLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    guarded(|| {
+        thaw_tjs_run_event_loop();
+    });
+    *TEST_SERVER_POLL.lock().unwrap() = None;
+    // before the fix the loop has no packages and breaks at once: 0 polls
+    assert!(SERVER_POLLS.load(std::sync::atomic::Ordering::SeqCst) >= 6);
+}
+
+#[test]
+fn package_timer_wait_is_capped_while_a_native_server_is_live() {
+    use crate::host::{thaw_tjs_register, thaw_tjs_run_event_loop, TEST_SERVER_POLL};
+    let _guard = SERVER_POLL_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    *TEST_SERVER_POLL.lock().unwrap() = Some(fake_server_poll_40);
+    SERVER_POLLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    guarded(|| {
+        let (name, source) = (
+            std::ffi::CString::new("tmr").unwrap(),
+            std::ffi::CString::new(
+                r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "tmr/index.js": function(module, exports, require) {
+  exports.t = function () { setTimeout(function () {}, 150); };
+}, };
+var __thaw_bundle_require_maps = { "tmr/index.js": {}, };
+var __thaw_bundle_entry_key = "tmr/index.js";
+})(globalThis.require);"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+        typed_call("tmr::t", "[]").expect("arm timer");
+        thaw_tjs_run_event_loop();
+    });
+    *TEST_SERVER_POLL.lock().unwrap() = None;
+    // a 2 ms cap over the 150 ms timer gives ~40 polls while the server is live; a single sleep gives ~0
+    assert!(SERVER_POLLS.load(std::sync::atomic::Ordering::SeqCst) >= 20);
+}
+
+/// Live for 40 calls, then idle (the 150 ms timer test).
+extern "C" fn fake_server_poll_40() -> u8 {
+    let n = SERVER_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    u8::from(n < 40)
+}
