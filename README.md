@@ -158,9 +158,9 @@ add-ons can be embedded or placed beside the executable with
 - Arbitrary-precision `BigInt`
 
 Statically understood code is compiled through HIR and LLVM. Package code that
-requires general JavaScript semantics uses the embedded QuickJS compatibility
-layer. An experimental Thaw-native JavaScript evaluator (`thaw-js`) can serve a
-subset of this code instead; see [thaw-js](#thaw-js-experimental).
+requires general JavaScript semantics runs on the Thaw-native JavaScript evaluator
+(`thaw-js`), the default engine; see [thaw-js](#thaw-js). The embedded QuickJS layer
+remains only as a temporary fallback (`THAW_JS_ENGINE=quickjs` selects it explicitly).
 `thaw inspect` reports whether QuickJS or N-API is present, which packages were
 routed to thaw-js, and explains known fallback reasons.
 
@@ -260,14 +260,13 @@ Known gaps against Node semantics:
 - `Number.prototype.toLocaleString` on native values does not apply non-Latin default numbering
   systems (for example `ar-EG`); `Intl.NumberFormat` is the reference.
 
-## thaw-js (experimental)
+## thaw-js
 
-`thaw-js` is a Thaw-native JavaScript evaluator intended to replace the embedded
-QuickJS layer. It is opt-in: set `THAW_JS_ENGINE=thaw-js` when running `thaw build`
-(`THAW_JS_ENGINE=quickjs` selects QuickJS explicitly; the legacy `THAW_JS_RUNTIME=1` and `=0` still
-work, and `THAW_JS_ENGINE` wins when both are set). Without either, QuickJS remains the default engine. With it, a package is served by
-thaw-js only when its bundle passes the thaw-js feature scan and every call the
-program makes is a typed call of plain data; anything else stays on QuickJS.
+`thaw-js` is a Thaw-native JavaScript evaluator and the default engine for `thaw build`.
+`THAW_JS_ENGINE=quickjs` is a temporary opt-out that selects the embedded QuickJS layer; the legacy
+`THAW_JS_RUNTIME=1` and `=0` still work, and `THAW_JS_ENGINE` wins when both are set. A package is
+served by thaw-js when its bundle passes the thaw-js feature scan and every call the
+program makes is a typed call of plain data; anything else still falls back to QuickJS for now.
 The routed Node built-in modules are `node:events`, `node:module`, `node:path` (with
 `path/posix` and `path/win32`), `node:assert` (with `assert/strict`), `node:os`, `node:util`
 (with `util/types`), `node:constants`, `node:url`, `node:fs` (with `fs/promises`),

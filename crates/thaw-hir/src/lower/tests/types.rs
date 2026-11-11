@@ -4470,6 +4470,39 @@ fn dynamic_symbol_decodes_the_thaw_js_backend_and_keeps_quickjs_untouched() {
     assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_6d733a3a6d73").is_none());
 }
 
+#[test]
+fn ambient_js_export_passed_to_promisify_is_fetched_by_registry_key_on_both_backends() {
+    fn hex(text: &str) -> String {
+        text.bytes().map(|byte| format!("{byte:02x}")).collect()
+    }
+    fn main_body(backend: &str, symbol: &str) -> String {
+        let name = format!("__thaw_typed_{backend}_{}", hex(symbol));
+        let program = lower(&format!(
+            r#"
+            declare function {name}(file: string): JsValue;
+            declare function promisify(fn: any): any;
+            function main(): void {{
+                const promisified = promisify({name});
+            }}
+            "#
+        ));
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main is lowered");
+        format!("{:?}", main.body)
+    }
+    for backend in ["tjs", "js"] {
+        let body = main_body(backend, "child_process::execFile");
+        assert!(body.contains("getDynamicValue"), "{backend}: {body}");
+        assert!(body.contains(r#"Str("child_process::execFile")"#), "{backend}: {body}");
+    }
+    // thaw-js method symbols keep the typed stub: no registry-key fetch.
+    let method = main_body("tjs", "$method$k::Emitter$emit$overload0$arity0");
+    assert!(!method.contains("getDynamicValue"), "{method}");
+}
+
 // Receiver-generic inference controls for the reviewed r1 prerequisite. These
 // tests deliberately stop at metadata and actual-call type inference; they do
 // not claim a receiver-aware specialization ABI or runtime function value.

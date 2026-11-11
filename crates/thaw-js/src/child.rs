@@ -508,8 +508,9 @@ impl Interp {
         let f = self.native(move |it, _, a| {
             // Flush parent output first so an inheriting child's lines land after it.
             it.flush_partial();
+            let cmd = s(a, 0, it);
             Ok(Value::Number(f64::from(spawn(
-                &s(a, 0, it),
+                &cmd,
                 &s(a, 1, it),
                 &s(a, 2, it),
             ))))

@@ -1,8 +1,9 @@
-// Experimental thaw-js routing (`THAW_JS_ENGINE=thaw-js`): which packages the Thaw-native JavaScript
-// runtime can serve for a given program. Everything else keeps the QuickJS path unchanged.
+// thaw-js routing (the default JavaScript engine): which packages the Thaw-native JavaScript runtime
+// can serve for a given program. A package it cannot serve falls back to the QuickJS path while the
+// fallback exists (`THAW_JS_ENGINE=quickjs` opts out of thaw-js entirely).
 
-/// The engine when no env var selects one. QuickJS until thaw-js is made the default.
-const THAW_JS_DEFAULT: bool = false;
+/// The engine when no env var selects one: thaw-js. `THAW_JS_ENGINE=quickjs` is the temporary opt-out.
+const THAW_JS_DEFAULT: bool = true;
 
 /// Whether thaw-js routing is on. `THAW_JS_ENGINE` (`thaw-js` or `quickjs`) wins over
 /// `THAW_JS_RUNTIME`, which stays a legacy alias: `1` is thaw-js, `0` is QuickJS.
@@ -70,8 +71,8 @@ fn thaw_js_blockers_manifest() -> serde_json::Value {
     })
 }
 
-/// The program's own dynamic code (`new Function`, `eval`) is served on thaw-js by default under
-/// `THAW_JS_RUNTIME=1`; `THAW_JS_USER_DYNAMIC=0` opts out and keeps it on QuickJS.
+/// The program's own dynamic code (`new Function`, `eval`) is served on thaw-js by default;
+/// `THAW_JS_USER_DYNAMIC=0` opts out and keeps it on QuickJS.
 fn thaw_js_user_dynamic_enabled() -> bool {
     thaw_js_user_dynamic_from(std::env::var("THAW_JS_USER_DYNAMIC").ok().as_deref())
 }
