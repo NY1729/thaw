@@ -11,6 +11,7 @@ enum GenericCallableTemplate {
 
 struct GenericCallContext<'a> {
     call: &'a CallExpr,
+    json_lease_args: &'a [usize],
     packed_native_rest_fixed_count: Option<usize>,
     expected_source_return_hint: Option<&'a HirType>,
     expected_return_hint: Option<&'a HirType>,
@@ -48,6 +49,7 @@ impl FnLowerer<'_> {
     ) -> Result<Option<Vec<HirType>>, String> {
         let GenericCallContext {
             call,
+            json_lease_args,
             packed_native_rest_fixed_count,
             expected_source_return_hint,
             expected_return_hint,
@@ -94,6 +96,9 @@ impl FnLowerer<'_> {
             .enumerate()
             .take(inference_argument_count)
             .map(|(index, arg)| {
+                if json_lease_args.contains(&index) {
+                    return Ok(HirType::Json);
+                }
                 let source = (signature.native_rest.is_none() && call.args.len() == args.len())
                     .then(|| call.args.get(index))
                     .flatten()
