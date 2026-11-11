@@ -1110,6 +1110,19 @@ impl Interp {
         crate::napi_bridge::poll();
         let g = Value::Object(self.global_object.clone());
         let f = self.get(&g, "__thaw_poll_platform_events")?;
+        if crate::host::trace_wire() {
+            // first 20 polls, then every 500th: the loop polls every ~2 ms
+            static POLLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = POLLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 20 || n % 500 == 0 {
+                eprintln!(
+                    "tjs poll_platform_events realm={} hook={} child_active={} n={n}",
+                    self.realm_id,
+                    matches!(f, Value::Object(_)),
+                    crate::child::active()
+                );
+            }
+        }
         if matches!(f, Value::Object(_)) {
             self.call(&f, &g, &[])?;
             self.run_jobs()?;

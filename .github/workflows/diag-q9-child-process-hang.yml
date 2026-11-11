@@ -1,0 +1,222 @@
+name: diag-q9-child-process-hang
+
+# One-off diagnostic (plan-q9-child-process-hang-diag, Steps 1-4): runs the
+# "child process callback and promisified startup failures complete once" hang
+# variants under the default thaw-js engine with the wire trace on.
+on:
+  push:
+    branches: [feat/q9-flip-default-thaw-js]
+    paths: ['.github/workflows/diag-q9-child-process-hang.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    name: child process hang variants under thaw-js
+    runs-on: ubuntu-latest
+    # Observed shards take 15-26 minutes.
+    timeout-minutes: 75
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Build the thaw CLI
+        run: cargo build -p thaw-cli
+      - name: Install gdb and strace
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y gdb strace; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Write the hang variants
+        run: |
+          W="$RUNNER_TEMP/work"; mkdir -p "$W"
+          cat > "$W/v1.ts" <<'EOT'
+          import { execFile } from 'node:child_process';
+          const MISSING = '/__thaw_process_credentials_missing__';
+          async function main(): Promise<void> {
+              console.log('start');
+              await new Promise<void>((resolve) => {
+                  execFile(MISSING, { uid: null } as any, (error: any) => {
+                      console.log('cb called', error && error.code);
+                      resolve();
+                  });
+              });
+              console.log('A done');
+          }
+          EOT
+          cat > "$W/v2.ts" <<'EOT'
+          import { execFile } from 'node:child_process';
+          const MISSING = '/__thaw_process_credentials_missing__';
+          async function main(): Promise<void> {
+              console.log('start');
+              await new Promise<void>((resolve) => {
+                  execFile(MISSING, (error: any) => {
+                      console.log('cb called', error && error.code);
+                      resolve();
+                  });
+              });
+              console.log('A done');
+          }
+          EOT
+          cat > "$W/v3.ts" <<'EOT'
+          import { execFile } from 'node:child_process';
+          import { promisify } from 'node:util';
+          const MISSING = '/__thaw_process_credentials_missing__';
+          async function main(): Promise<void> {
+              console.log('start');
+              console.log('typeof', typeof promisify(execFile));
+              try {
+                  await promisify(execFile)(MISSING);
+              } catch (e: any) {
+                  console.log('caught', e.code);
+              }
+              console.log('B done');
+          }
+          EOT
+          cat > "$W/v4.ts" <<'EOT'
+          import { execFile } from 'node:child_process';
+          import { promisify } from 'node:util';
+          const MISSING = '/__thaw_process_credentials_missing__';
+          async function main(): Promise<void> {
+              console.log('start');
+              try {
+                  await promisify(execFile)(MISSING, { gid: undefined } as any);
+              } catch (e: any) {
+                  console.log('caught', e.code);
+              }
+              console.log('B done');
+          }
+          EOT
+          cat > "$W/v5.ts" <<'EOT'
+          import { spawn } from 'node:child_process';
+          const MISSING = '/__thaw_process_credentials_missing__';
+          async function main(): Promise<void> {
+              console.log('start');
+              await new Promise<void>((resolve) => {
+                  const c = spawn(MISSING, []);
+                  c.on('error', (e: any) => console.log('error', e.code));
+                  c.on('close', () => {
+                      console.log('close');
+                      resolve();
+                  });
+              });
+              console.log('C done');
+          }
+          EOT
+          jq -r '.cases[1].source' tests/process-credentials-compat.json > "$W/v6.ts"
+          # thaw auto-invokes main(); no variant calls it explicitly
+          grep -c 'main();' "$W"/v*.ts || true
+      - name: Build and run the hang variants with the wire trace
+        run: |
+          D="$RUNNER_TEMP/diag"; W="$RUNNER_TEMP/work"; mkdir -p "$D"
+          CLI="$PWD/target/debug/thaw"
+          set +e
+          for v in v1 v2 v3 v4 v5 v6; do
+            THAW_DUMP_SHIM="$D/$v.shim.ts" THAW_JS_RUNTIME_DEBUG=1 THAW_JS_RUNTIME_DUMP_FN=main \
+              "$CLI" build "$W/$v.ts" -o "$W/$v.bin" > "$D/$v.build.log" 2>&1
+            echo "build $v exit $?" | tee -a "$D/summary.txt"
+            "$CLI" inspect "$W/$v.bin" > "$D/$v.inspect" 2>&1
+            env THAW_JS_TRACE=1 THAW_JS_TRACE_WIRE=1 timeout -s KILL 10 "$W/$v.bin" > "$D/$v.stdout" 2> "$D/$v.stderr" &
+            PID=$!
+            sleep 5
+            if kill -0 "$PID" 2>/dev/null; then
+              BIN=$(pgrep -f "$W/$v.bin" | head -1)
+              sudo gdb -p "$BIN" -batch -ex 'thread apply all bt 15' > "$D/$v.gdb" 2>&1
+              sudo timeout 2 strace -f -c -p "$BIN" > "$D/$v.strace" 2>&1
+            fi
+            wait "$PID"
+            echo "run $v exit $? stdout: $(tr '\n' '|' < "$D/$v.stdout")" | tee -a "$D/summary.txt"
+          done
+          exit 0
+      - name: Print results
+        if: always()
+        run: |
+          D="$RUNNER_TEMP/diag"
+          for f in "$D"/summary.txt "$D"/*.stdout; do echo "=== $f"; head -c 6000 "$f"; done
+          for f in "$D"/*.stderr; do
+            echo "=== $f (trace lines)"; grep -E 'tjs child|tjs poll_platform' "$f" | head -60
+            echo "=== $f (tail)"; tail -5 "$f"
+          done
+          for f in "$D"/*.gdb "$D"/*.strace; do echo "=== $f"; head -c 6000 "$f"; done
+          for f in "$D"/*.shim.ts; do echo "=== $f"; head -c 300 "$f"; echo; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diag-q9-child-process-hang
+          path: ${{ runner.temp }}/diag
+          if-no-files-found: ignore
