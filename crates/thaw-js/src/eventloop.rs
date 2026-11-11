@@ -1110,22 +1110,32 @@ impl Interp {
         crate::napi_bridge::poll();
         let g = Value::Object(self.global_object.clone());
         let f = self.get(&g, "__thaw_poll_platform_events")?;
-        if crate::host::trace_wire() {
-            // first 20 polls, then every 500th: the loop polls every ~2 ms
-            static POLLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let n = POLLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if n < 20 || n % 500 == 0 {
-                eprintln!(
-                    "tjs poll_platform_events realm={} hook={} child_active={} n={n}",
-                    self.realm_id,
-                    matches!(f, Value::Object(_)),
-                    crate::child::active()
-                );
-            }
-        }
         if matches!(f, Value::Object(_)) {
             self.call(&f, &g, &[])?;
             self.run_jobs()?;
+        } else if crate::child::active() {
+            // ponytail: this realm has no child_process hook (a call made through another package, e.g.
+            // promisify(execFile)); the realm that owns the shim's `children` map drains the thread-wide table.
+            // Ceiling: two realms each running their own shim can drain each other's events; upgrade = per-handle owner.
+            let mut failed = None;
+            crate::host::for_other_realms(self, |other| {
+                if failed.is_some() {
+                    return;
+                }
+                let og = Value::Object(other.global_object.clone());
+                match other.get(&og, "__thaw_poll_platform_events") {
+                    Ok(h @ Value::Object(_)) => {
+                        if let Err(e) = other.call(&h, &og, &[]).and_then(|_| other.run_jobs()) {
+                            failed = Some(e);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => failed = Some(e),
+                }
+            });
+            if let Some(e) = failed {
+                return Err(e);
+            }
         }
         let events = crate::worker::poll(self);
         if events != "[]" {

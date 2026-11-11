@@ -238,16 +238,11 @@ fn spawn(cmd: &str, args: &str, options: &str) -> u32 {
         .stdout(stdio_for(mode(1)))
         .stderr(stdio_for(mode(2)));
     match spawn_retrying(&mut c) {
-        Err(e) => {
-            if crate::host::trace_wire() {
-                eprintln!("tjs child spawn-failed handle={handle} err={e}");
-            }
-            TABLE.with(|t| {
-                t.borrow_mut()
-                    .failed
-                    .insert(handle, error_events(handle, &e.to_string(), error_code(&e)));
-            })
-        }
+        Err(e) => TABLE.with(|t| {
+            t.borrow_mut()
+                .failed
+                .insert(handle, error_events(handle, &e.to_string(), error_code(&e)));
+        }),
         Ok(mut child) => {
             let (tx, rx) = mpsc::channel();
             let mut open_pipes = 0;
@@ -514,11 +509,11 @@ impl Interp {
             // Flush parent output first so an inheriting child's lines land after it.
             it.flush_partial();
             let cmd = s(a, 0, it);
-            let h = spawn(&cmd, &s(a, 1, it), &s(a, 2, it));
-            if crate::host::trace_wire() {
-                eprintln!("tjs child spawn realm={} cmd={cmd} handle={h}", it.realm_id);
-            }
-            Ok(Value::Number(f64::from(h)))
+            Ok(Value::Number(f64::from(spawn(
+                &cmd,
+                &s(a, 1, it),
+                &s(a, 2, it),
+            ))))
         });
         g.declare("__thaw_child_process_spawn", f, true);
         let f = self.native(move |it, _, a| {
@@ -550,13 +545,7 @@ impl Interp {
             Ok(Value::Bool(true))
         });
         g.declare("__thaw_child_process_stdin", f, true);
-        let f = self.native(|it, _, _| {
-            let r = poll();
-            if crate::host::trace_wire() && r != "[]" {
-                eprintln!("tjs child poll realm={} {r}", it.realm_id);
-            }
-            Ok(Value::str(&r))
-        });
+        let f = self.native(|_, _, _| Ok(Value::str(&poll())));
         g.declare("__thaw_child_process_poll", f, true);
     }
 }
