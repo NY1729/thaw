@@ -872,6 +872,17 @@ pub extern "C" fn thaw_arena_reset() {
     run_reset_hooks(true);
 }
 
+/// Called by a thread that is about to exit while values it allocated may still be referenced
+/// (a coroutine thread handing its results back to the host). Leaks this thread's arena and
+/// retained generations instead of freeing them on thread exit.
+// ponytail: each finished coroutine thread leaks its bump chunks (and its retained generations).
+// Upgrade path: adopt the arena into the host thread's RETAINED generations so it is reclaimed.
+#[no_mangle]
+pub extern "C" fn thaw_arena_detach_thread() {
+    ARENA.with(|arena| std::mem::forget(std::mem::take(&mut *arena.borrow_mut())));
+    RETAINED.with(|retained| std::mem::forget(std::mem::take(&mut *retained.borrow_mut())));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1278,5 +1289,24 @@ mod tests {
         assert!(was_reclaimed(object as usize));
         ROOTS.with(|roots| roots.borrow_mut().clear());
         TRACING.with(|tracing| tracing.set(false));
+    }
+
+    #[test]
+    fn detached_thread_arena_outlives_thread() {
+        const PAYLOAD: usize = 480;
+        let address = std::thread::spawn(|| {
+            let pointer = thaw_arena_alloc(PAYLOAD, 1);
+            assert!(!pointer.is_null());
+            unsafe { std::ptr::write_bytes(pointer, b'x', PAYLOAD) };
+            thaw_arena_detach_thread();
+            pointer as usize
+        })
+        .join()
+        .unwrap();
+        // Reuse the freed heap on this thread: many buffers of the freed chunk's size class.
+        let churn: Vec<Vec<u8>> = (0..50_000).map(|i| vec![0xAA; 300 + i % 400]).collect();
+        let bytes = unsafe { std::slice::from_raw_parts(address as *const u8, PAYLOAD) };
+        assert!(bytes.iter().all(|&b| b == b'x'));
+        drop(churn);
     }
 }

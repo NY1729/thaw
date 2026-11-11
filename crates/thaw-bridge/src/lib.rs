@@ -143,6 +143,12 @@ pub struct DtsValue {
 /// itself (thaw-js) match on it; every other consumer treats the whole type as `Unsupported`.
 pub const PROMISE_PAYLOAD_UNSUPPORTED: &str = "Promise<T> payload has no native layout";
 
+/// Reason prefix on a `DtsType::Unsupported` produced by a union with a `Promise<T>` member whose
+/// other member has no native layout (`Response | Promise<Response>`). thaw-js's `class_call` settles
+/// the returned Promise for such a method (through the `$await` runtime-key suffix, see
+/// `thaw-cli`'s `generate_napi_class_method_overloads_with_callback_instances`).
+pub const UNION_PROMISE_UNSUPPORTED: &str = "union with Promise member has no native layout";
+
 /// A parameter/return type as written in the `.d.ts`, before deciding
 /// whether the whole signature is representable in Thaw's native type
 /// system.

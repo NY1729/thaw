@@ -768,6 +768,44 @@ fn classifies_quoted_keys_inside_generic_interfaces() {
 }
 
 #[test]
+fn union_with_promise_member_keeps_a_marked_reason_only_when_unsupported() {
+    let classes = parse_dts_classes(
+        "export declare class Hono {
+            request(p: string): Response | Promise<Response>;
+            plain(): Response;
+            maybe(): string | Promise<string>;
+        }",
+    )
+    .unwrap();
+    let method = |name: &str| {
+        classes[0]
+            .methods
+            .iter()
+            .find(|method| method.name == name)
+            .unwrap()
+    };
+    match &method("request").ret {
+        DtsType::Unsupported(reason) => {
+            assert!(reason.starts_with(UNION_PROMISE_UNSUPPORTED), "{reason}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+    match &method("plain").ret {
+        DtsType::Unsupported(reason) => {
+            assert!(!reason.starts_with(UNION_PROMISE_UNSUPPORTED), "{reason}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+    assert_eq!(
+        method("maybe").ret,
+        DtsType::Native(HirType::Union(vec![
+            HirType::Str,
+            HirType::Promise(Box::new(HirType::Str)),
+        ]))
+    );
+}
+
+#[test]
 fn promise_of_unsupported_payload_keeps_a_marked_reason() {
     let array = parse_dts("export declare function once(): Promise<any[]>;").unwrap();
     match &array[0].ret {

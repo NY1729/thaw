@@ -487,6 +487,38 @@ fn await_unwraps_values_and_throws_rejections() {
 }
 
 #[test]
+fn rejected_await_in_try_catch_inside_timer_driven_async_listener() {
+    // chokidar-shaped: an async listener awaits a stat-like promise that rejects from a
+    // microtask, catches it, and defers a follow-up event through a timer (TJ168 section 2).
+    // Expected output is what Node prints for the same program.
+    let (out, code) = main_run(
+        "var out = [];
+         function statLike(p) {
+           return new Promise(function (res, rej) {
+             queueMicrotask(function () {
+               if (p === 'missing') rej(Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }));
+               else res({ size: 1 });
+             });
+           });
+         }
+         var listener = async function (path) {
+           try {
+             var s = await statLike(path);
+             out.push('stat:' + s.size);
+           } catch (e) {
+             out.push('catch:' + e.code);
+             setTimeout(function () { out.push('unlink:' + path); }, 150);
+           }
+         };
+         setTimeout(function () { listener('missing'); }, 10);
+         setTimeout(function () { listener('present'); }, 20);
+         setTimeout(function () { console.log(out.join('|')); }, 400);",
+    );
+    assert_eq!(out.join("|"), "catch:ENOENT|stat:1|unlink:missing");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn many_concurrent_async_calls_and_never_settled_ones() {
     let (out, _) = main_run(
         "var n = 0; var gate = new Promise(function () {});
@@ -1333,6 +1365,20 @@ fn class_ops_from_a_callback_on_a_coroutine_thread_see_the_host_packages() {
     let args = format!("[{{\"__thaw_tjs_cb__\":{probe}}}]");
     assert_eq!(typed_call("co::run", &args), Ok("null".into()));
     assert_eq!(CO_PROBE.lock().unwrap().take(), Some(Ok("5".into())));
+}
+
+/// A string built in an async body lives in that body's coroutine-thread arena. It is read back
+/// on the host after the coroutine thread has exited, so it must survive the thread.
+#[test]
+fn async_body_string_result_survives_its_coroutine_thread_exit() {
+    let mut it = crate::Interp::new();
+    let src = "const out = [];
+        async function f() { await null; out.push('a' + 'b'); }
+        f().then(() => console.log(out.join(',')));
+        async function g() { await null; return 'a' + 'b'; }
+        g().then(v => console.log(v));";
+    assert!(it.run_main(src).is_ok());
+    assert_eq!(it.out, ["ab", "ab"]);
 }
 
 #[test]
@@ -6941,4 +6987,114 @@ fn lazy_prototype_name_length_call_and_bind_do_not_materialise_it() {
         weak.upgrade().is_none(),
         "reading name/length/call/bind materialised `prototype` and kept the scope alive"
     );
+}
+
+// ----- `Response | Promise<Response>`-style returns: flag bit 2 awaits only a returned Promise -----
+
+const UNION_RETURN_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"u/index.js": function(module, exports, require) {
+  class Hub {
+    later(v) { return Promise.resolve(v * 3); }
+    twice(n) { return n * 2; }
+    boom() { return Promise.reject(new TypeError('nope')); }
+  }
+  exports.Hub = Hub;
+},
+};
+var __thaw_bundle_require_maps = { "u/index.js": {}, };
+var __thaw_bundle_entry_key = "u/index.js";
+})(globalThis.require);"#;
+
+fn class_call_with_flags(
+    symbol: &str,
+    args: &str,
+    receiver: i64,
+    flags: u8,
+) -> Result<String, String> {
+    use std::ffi::{CStr, CString};
+    let (symbol, args) = (CString::new(symbol).unwrap(), CString::new(args).unwrap());
+    let result = crate::host::thaw_tjs_class_call(symbol.as_ptr(), args.as_ptr(), receiver, flags);
+    // SAFETY: both strings come from `thaw_tjs_class_call` and are freed exactly once.
+    unsafe {
+        if result.value.is_null() {
+            let error = CStr::from_ptr(result.error).to_str().unwrap().to_string();
+            crate::host::thaw_tjs_free(result.error);
+            Err(error)
+        } else {
+            let value = CStr::from_ptr(result.value).to_str().unwrap().to_string();
+            crate::host::thaw_tjs_free(result.value);
+            Ok(value)
+        }
+    }
+}
+
+#[test]
+fn class_call_bit_two_settles_a_promise_result_only() {
+    use std::ffi::CString;
+    let (name, source) = (
+        CString::new("u").unwrap(),
+        CString::new(UNION_RETURN_BUNDLE).unwrap(),
+    );
+    assert_eq!(
+        crate::host::thaw_tjs_register(name.as_ptr(), source.as_ptr()),
+        1
+    );
+    let hub: i64 = class_call_with_flags("$new$u::Hub$arity0", "[]", 0, 1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    // bit 2 alone settles a returned Promise to its value
+    assert_eq!(
+        class_call_with_flags("$method$u::Hub$later$overload0$arity1", "[5]", hub, 4).unwrap(),
+        "15"
+    );
+    // a non-Promise result is passed through unchanged
+    assert_eq!(
+        class_call_with_flags("$method$u::Hub$twice$overload0$arity1", "[4]", hub, 4).unwrap(),
+        "8"
+    );
+    // a rejected Promise under bit 2 is an error, like bit 1
+    assert_eq!(
+        class_call_with_flags("$method$u::Hub$boom$overload0$arity0", "[]", hub, 4).unwrap_err(),
+        "TypeError: nope"
+    );
+    // bit 1 keeps its meaning
+    assert_eq!(
+        class_call_with_flags("$method$u::Hub$later$overload0$arity1", "[2]", hub, 2).unwrap(),
+        "6"
+    );
+}
+
+// Node 22 prints: tick1, uncaught:boom, tick2, tick3, done (exit 0).
+#[test]
+fn set_interval_keeps_ticking_after_a_throwing_tick_under_uncaught_exception() {
+    let (out, code) = main_run(
+        "process.on('uncaughtException', function (e) { console.log('uncaught:' + e.message); });
+         var n = 0; var t = setInterval(function () {
+           n++; console.log('tick' + n);
+           if (n === 1) throw new Error('boom');
+           if (n === 3) { clearInterval(t); console.log('done'); }
+         }, 1);",
+    );
+    assert_eq!(out.join("|"), "tick1|uncaught:boom|tick2|tick3|done");
+    assert_eq!(code, 0);
+}
+
+/// TJ171: async bodies run on coroutine threads with their own counters; a timer id handed out there must not
+/// equal a host-thread timer's id, or `clearTimeout` on the async side deletes the host's interval.
+/// Count-based (not a sentinel delay) so a slow first loop pass cannot fake the result.
+/// Node prints `ok` for the same script (scratch: thaw-tmp/tmp-run/tj171/timer_collide.js).
+#[test]
+fn async_body_timers_do_not_collide_with_host_thread_timer_ids() {
+    let mut it = Interp::new();
+    it.run_main(
+        "let ticks = 0; \
+         const iv = setInterval(() => { if (++ticks === 3) { console.log('ok'); clearInterval(iv); clearTimeout(fb); } }, 2); \
+         async function other() { await null; const t = setTimeout(() => {}, 1000); clearTimeout(t); } \
+         other(); \
+         const fb = setTimeout(() => { console.log('stalled:' + ticks); clearInterval(iv); }, 3000);",
+    )
+    .expect("runs");
+    assert_eq!(it.out.join("|"), "ok");
 }

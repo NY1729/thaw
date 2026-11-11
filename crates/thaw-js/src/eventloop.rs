@@ -19,16 +19,11 @@ use std::time::{Duration, Instant};
 
 use crate::host::{adopt_host_tls, park_host_tls};
 
-thread_local! {
-    /// Timer/immediate ids are unique across every realm on this thread, so a Timeout can be cleared from any realm.
-    static NEXT_TIMER_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
+/// Timer/immediate ids are unique across every realm and thread (async bodies run on coroutine threads).
+static NEXT_TIMER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn next_timer_id() -> u64 {
-    NEXT_TIMER_ID.with(|c| {
-        c.set(c.get() + 1);
-        c.get()
-    })
+    NEXT_TIMER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
 const TIMEOUT_MAX: f64 = 2147483647.0;
@@ -734,6 +729,9 @@ impl Interp {
                     // every Rc captured above is dropped here, before the hand-back
                 };
                 park_native_ready();
+                // ponytail: each finished coroutine thread leaks its bump chunks (see
+                // thaw_arena_detach_thread). Upgrade path: adopt the arena into the host thread.
+                thaw_arena::thaw_arena_detach_thread();
                 park_host_tls(key);
                 let _ = done_tx.send(SendBox(Yield::Done(r)));
             });
