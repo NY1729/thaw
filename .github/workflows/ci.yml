@@ -377,6 +377,9 @@ jobs:
                 echo
                 echo "Cases still linking QuickJS (sorted, max 80):"
                 jq -r '.results[] | select(.linksQuickjs == true) | .name' "$report" | sort | head -n 80
+                echo
+                echo "QuickJS link reasons (sorted, max 80):"
+                jq -r '.results[] | select(.linksQuickjs == true) | "- \(.name): \((.quickjsReasons // []) | join(" ; ") | .[0:400])"' "$report" | sort | head -n 80
               else
                 echo "QuickJS link: not recorded"
               fi
