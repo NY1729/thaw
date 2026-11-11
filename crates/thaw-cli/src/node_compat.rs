@@ -329,12 +329,17 @@ fn record_quickjs_link(result: &mut serde_json::Value, links_quickjs: Option<boo
     }
 }
 
-/// Adds `quickjsReasons` (the reason and blocker lines `thaw inspect` prints, capped at 6 entries of 300 chars).
+/// Adds `quickjsReasons` (the reason and blocker lines `thaw inspect` prints, capped at 10 entries of 300 chars).
+/// `thaw-js-blocker` lines go first so the cap never cuts off the blocker.
 /// Additive: only called for a case that links QuickJS.
 fn record_quickjs_reasons(result: &mut serde_json::Value, reasons: &[String]) {
-    let reasons: Vec<String> = reasons
+    let is_blocker = |reason: &&String| reason.starts_with("thaw-js-blocker");
+    let ordered = reasons
         .iter()
-        .take(6)
+        .filter(is_blocker)
+        .chain(reasons.iter().filter(|reason| !is_blocker(reason)));
+    let reasons: Vec<String> = ordered
+        .take(10)
         .map(|reason| reason.chars().take(300).collect())
         .collect();
     result["quickjsReasons"] = reasons.into();
@@ -582,13 +587,23 @@ mod quickjs_link_tests {
     #[test]
     fn records_reasons_capped_and_truncated() {
         let long = "x".repeat(400);
-        let reasons: Vec<String> = (0..8).map(|_| long.clone()).collect();
+        let reasons: Vec<String> = (0..12).map(|_| long.clone()).collect();
         let mut result = serde_json::json!({"name": "case", "linksQuickjs": true});
         record_quickjs_reasons(&mut result, &reasons);
         let recorded = result["quickjsReasons"].as_array().expect("array");
-        assert_eq!(recorded.len(), 6);
+        assert_eq!(recorded.len(), 10);
         assert_eq!(recorded[0].as_str().map(str::len), Some(300));
         assert_eq!(result["linksQuickjs"], true);
+    }
+
+    #[test]
+    fn blocker_line_survives_the_reason_cap() {
+        let mut reasons: Vec<String> = (0..8).map(|i| format!("quickjs-reason: {i}")).collect();
+        reasons.push("thaw-js-blocker: package=p why=w".to_string());
+        let mut result = serde_json::json!({"name": "case", "linksQuickjs": true});
+        record_quickjs_reasons(&mut result, &reasons);
+        assert_eq!(result["quickjsReasons"][0], "thaw-js-blocker: package=p why=w");
+        assert_eq!(result["quickjsReasons"].as_array().map(Vec::len), Some(9));
     }
 
     #[test]

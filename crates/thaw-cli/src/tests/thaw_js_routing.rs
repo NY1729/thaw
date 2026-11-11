@@ -387,11 +387,38 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:crypto",
         "node:https",
         "node:http2",
+        "node:stream/promises",
+        "node:stream/consumers",
+        "node:diagnostics_channel",
+        "node:trace_events",
+            "node:repl",
+        "node:punycode",
+        "node:v8",
+            "node:test/reporters",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
-    // modules not yet validated on thaw-js (e.g. node:repl) stay on QuickJS
-    assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:repl"), "node:repl");
+    // modules not yet validated on thaw-js (e.g. node:cluster) stay on QuickJS
+    assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:cluster"), "node:cluster");
+}
+
+#[test]
+fn node_batch1_builtin_bundles_scan_clean() {
+    for module in [
+        "node:stream/promises",
+        "node:stream/consumers",
+        "node:diagnostics_channel",
+        "node:trace_events",
+            "node:repl",
+        "node:punycode",
+        "node:v8",
+            "node:test/reporters",
+    ] {
+        let bundle = thaw_registry::builtin_bundle_with(module, &[]).unwrap();
+        let report = thaw_js::scan::scan_bundle(&bundle).unwrap();
+        assert!(report.is_clean(), "{module}: {:?}", report.blockers);
+        assert_eq!(report.entry, module);
+    }
 }
 
 #[test]
