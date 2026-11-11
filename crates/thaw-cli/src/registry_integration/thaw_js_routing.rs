@@ -369,22 +369,79 @@ fn thaw_js_class_member(line: &str) -> Option<String> {
     parts.nth(1).map(str::to_string)
 }
 
-/// Whether `name` (a function export) is used other than as `name.member` or in an `import` line: those
-/// uses go through the package's value export, not through a call of `name` itself.
+/// Whether `name` (a function export) is used other than as `name.member` or in an import/re-export
+/// statement: those uses go through the package's value export, not through a call of `name` itself.
 fn thaw_js_uses_function(user_source: &str, name: &str) -> bool {
     let name = name.rsplit('.').next().unwrap_or(name);
+    let code = thaw_js_without_module_statements(user_source);
     let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-    user_source.match_indices(name).any(|(start, _)| {
+    code.match_indices(name).any(|(start, _)| {
         let end = start + name.len();
-        let line_start = user_source[..start].rfind('\n').map_or(0, |i| i + 1);
-        !user_source[..start]
+        !code[..start].chars().next_back().is_some_and(is_word)
+            && !code[end..].chars().next().is_some_and(is_word)
+            && !code[end..].starts_with('.')
+    })
+}
+
+/// The program text with every `import ... from '...'`, `import '...'` and `export ... from '...'`
+/// statement blanked out (they may share a line with code). Dynamic `import(...)`, `import.meta` and
+/// local `export const ...` declarations are kept.
+fn thaw_js_without_module_statements(user_source: &str) -> String {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut out = String::with_capacity(user_source.len());
+    let mut index = 0;
+    while index < user_source.len() {
+        let tail = &user_source[index..];
+        let preceded_by_word = user_source[..index]
             .chars()
             .next_back()
-            .is_some_and(is_word)
-            && !user_source[end..].chars().next().is_some_and(is_word)
-            && !user_source[line_start..].trim_start().starts_with("import")
-            && !user_source[end..].starts_with('.')
-    })
+            .is_some_and(|c| is_word(c) || c == '.');
+        let keyword = ["import", "export"].into_iter().find(|kw| {
+            tail.starts_with(kw)
+                && !preceded_by_word
+                && !tail[kw.len()..].chars().next().is_some_and(is_word)
+        });
+        if let Some(keyword) = keyword {
+            if let Some(end) = thaw_js_module_statement_end(user_source, index + keyword.len(), keyword)
+            {
+                out.push(' ');
+                index = end;
+                continue;
+            }
+        }
+        let c = tail.chars().next().expect("index is inside the source");
+        out.push(c);
+        index += c.len_utf8();
+    }
+    out
+}
+
+/// The end of the module statement whose keyword ends at `after_keyword`, or `None` when the keyword
+/// does not start an import/re-export (`import(..)`, `import.meta`, `export const x = '..'`, ...).
+fn thaw_js_module_statement_end(source: &str, after_keyword: usize, keyword: &str) -> Option<usize> {
+    let rest = &source[after_keyword..];
+    let quote_at = rest.find(['\'', '"'])?;
+    let clause = &rest[..quote_at];
+    if clause.contains(['(', ';', '=']) {
+        return None;
+    }
+    let trimmed = clause.trim_end();
+    let is_bare_import = keyword == "import" && clause.trim().is_empty();
+    let has_from = trimmed.ends_with("from")
+        && !trimmed[..trimmed.len() - "from".len()]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    if !is_bare_import && !has_from {
+        return None;
+    }
+    let quote = rest[quote_at..].chars().next()?;
+    let close = rest[quote_at + 1..].find(quote)? + quote_at + 1;
+    let mut end = after_keyword + close + 1;
+    if source[end..].starts_with(';') {
+        end += 1;
+    }
+    Some(end)
 }
 
 /// The function name encoded in a `__thaw_typed_js_<hex>[__suffix...]` symbol.
@@ -569,9 +626,20 @@ fn thaw_js_child_process_blocker(pkg_name: &str, user_source: &str) -> Option<&'
         .then_some("node:child_process stays on QuickJS while node:http is in the program")
 }
 
+/// A native `createServer` next to a thaw-js http client (`get` / `request` / global `fetch`): the client's
+/// request never completes while the native server runs, so such a program keeps `node:http` on QuickJS.
+fn thaw_js_native_server_with_http_client_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
+    (pkg_name == "node:http"
+        && thaw_js_uses_function(user_source, "createServer")
+        && (["get", "request"].iter().any(|name| thaw_js_uses_function(user_source, name))
+            || thaw_js_mentions(user_source, "fetch")))
+        .then_some("native createServer together with a thaw-js http client (get/request/fetch) is not supported on thaw-js yet")
+}
+
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
 /// feature scan, the program touches no class of it (those are live JavaScript objects), and
-/// every function the program mentions is a typed call whose declaration only carries plain data.
+/// every function the program mentions is a typed call whose declaration only carries plain data, or
+/// a native FastPath function (which keeps its own declaration and has no typed target).
 /// `segment` is the package's slice of the generated shim.
 fn thaw_js_package_eligible(
     pkg: &ResolvedPackage,
@@ -604,10 +672,13 @@ fn thaw_js_package_eligible(
     if let Some(why) = thaw_js_perf_hooks_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
+    if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
+        return reject(why.into());
+    }
     if let Some(why) = thaw_js_child_process_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
-    if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
+    if let Some(why) = thaw_js_native_server_with_http_client_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     // A class the program names is served through thaw-js handles (`new`, instance and static
@@ -647,6 +718,13 @@ fn thaw_js_package_eligible(
     pkg.functions
         .iter()
         .filter(|function| thaw_js_uses_function(user_source, &function.name))
+        // A FastPath function is lowered natively and keeps its `generate_shim` declaration; it has no
+        // typed target (`typed_targets` only records Fallback functions).
+        .filter(|function| {
+            !pkg.classifications.iter().any(|(name, class)| {
+                name == &function.name && matches!(class, thaw_bridge::Classification::FastPath(_))
+            })
+        })
         .all(|function| {
             let Some(target) = typed_targets.get(&(pkg.name.clone(), function.name.clone())) else {
                 return reject(format!("`{}` has no typed target", function.name));
@@ -727,6 +805,24 @@ fn thaw_js_child_process_blocker_keeps_child_process_on_quickjs_next_to_http() {
 
 #[cfg(test)]
 #[test]
+fn thaw_js_native_server_with_http_client_keeps_node_http_on_quickjs() {
+    let combo = "import * as http from 'node:http';\nconst s = http.createServer(() => {});\nhttp.get('http://x/', () => {});";
+    assert!(thaw_js_native_server_with_http_client_blocker("node:http", combo).is_some());
+    let request = "import * as http from 'node:http';\nhttp.createServer(() => {});\nhttp.request('http://x/', () => {});";
+    assert!(thaw_js_native_server_with_http_client_blocker("node:http", request).is_some());
+    let server_only = "import * as http from 'node:http';\nhttp.createServer(() => {}).listen(0);";
+    assert!(thaw_js_native_server_with_http_client_blocker("node:http", server_only).is_none());
+    let client_only = "import * as http from 'node:http';\nhttp.get('http://x/', () => {});";
+    assert!(thaw_js_native_server_with_http_client_blocker("node:http", client_only).is_none());
+    let fetch = "import * as http from 'node:http';\nhttp.createServer(() => {}).listen(0);\nawait fetch('http://x/');";
+    assert!(thaw_js_native_server_with_http_client_blocker("node:http", fetch).is_some());
+    let fetch_only = "import * as http from 'node:http';\nawait fetch('http://x/');";
+    assert!(thaw_js_native_server_with_http_client_blocker("node:http", fetch_only).is_none());
+    assert!(thaw_js_native_server_with_http_client_blocker("node:path", combo).is_none());
+}
+
+#[cfg(test)]
+#[test]
 fn thaw_js_function_use_ignores_imports_and_member_access() {
     let source = "import { marked } from \"marked\";\nconsole.log(marked.parse(\"x\"));\n";
     assert!(!thaw_js_uses_function(source, "marked"));
@@ -736,6 +832,26 @@ fn thaw_js_function_use_ignores_imports_and_member_access() {
         "const s = markedAll(\"x\");",
         "marked"
     ));
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_function_use_sees_code_sharing_a_line_with_an_import() {
+    let one_line = "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer(() => {}); srv.listen(0); await fetch('http://x/'); }";
+    assert!(thaw_js_uses_function(one_line, "createServer"));
+    assert!(thaw_js_native_server_with_http_client_blocker("node:http", one_line).is_some());
+    let named = "import { createServer } from 'node:http'; createServer(() => {});";
+    assert!(thaw_js_uses_function(named, "createServer"));
+    let import_only = "import { createServer } from 'node:http';";
+    assert!(!thaw_js_uses_function(import_only, "createServer"));
+    let side_effect = "import 'node:http'; export * from './x'; createServer(() => {});";
+    assert!(thaw_js_uses_function(side_effect, "createServer"));
+    let export_const = "export const createServer = 1;";
+    assert!(thaw_js_uses_function(export_const, "createServer"));
+    let re_export = "export { createServer } from 'node:http'; createServer(() => {});";
+    assert!(thaw_js_uses_function(re_export, "createServer"));
+    let re_export_only = "export { createServer } from 'node:http';";
+    assert!(!thaw_js_uses_function(re_export_only, "createServer"));
 }
 
 #[cfg(test)]

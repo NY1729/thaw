@@ -145,6 +145,52 @@ fn thaw_js_run(output: &Path) -> String {
     String::from_utf8_lossy(&result.stdout).into_owned()
 }
 
+/// `thaw_js_run` with a 20 s guard: a hung binary is killed, its captured output is printed, and the test
+/// panics instead of stalling the whole test run.
+fn thaw_js_run_guarded(output: &Path) -> String {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = Command::new(output)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout_pipe = child.stdout.take().unwrap();
+    let mut stderr_pipe = child.stderr.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = stdout_reader.join().unwrap();
+            let stderr = stderr_reader.join().unwrap();
+            eprintln!("hung child stdout:\n{}", String::from_utf8_lossy(&stdout));
+            eprintln!("hung child stderr:\n{}", String::from_utf8_lossy(&stderr));
+            panic!("hung: {} did not exit within 20s", output.display());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let status = child.wait().unwrap();
+    let stdout = stdout_reader.join().unwrap();
+    let stderr = stderr_reader.join().unwrap();
+    assert!(
+        status.success(),
+        "{}",
+        String::from_utf8_lossy(&stderr)
+    );
+    String::from_utf8_lossy(&stdout).into_owned()
+}
+
 #[test]
 fn thaw_js_routing_serves_a_plain_data_package_without_linking_quickjs() {
     let (dir, registry, entry) = thaw_js_fixture(
@@ -624,5 +670,144 @@ fn imported_buffer_stays_native_when_thaw_js_routes_node_buffer() {
     assert!(!routed.contains("__thaw_type_node_buffer_Buffer"), "{routed}");
     let unrouted = shim_text(&ThawJsPackages::new());
     assert!(unrouted.contains("__thaw_type_node_buffer_Buffer"), "{unrouted}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn node_http_create_server_is_native_fast_path_in_the_real_declarations() {
+    // Premise gate: the real builtin d.ts (not a one-line excerpt) must classify createServer as a native call.
+    let _guard = thaw_bridge::allow_native_bytes_type(true);
+    let dts = thaw_registry::resolve_builtin("node:http").unwrap().dts_source;
+    let functions = thaw_bridge::parse_dts(&dts).unwrap();
+    let classes = thaw_bridge::effective_classifications(&functions, true);
+    let (_, class) = classes
+        .iter()
+        .find(|(name, _)| name == "createServer")
+        .expect("createServer is declared");
+    assert!(
+        matches!(class, thaw_bridge::Classification::FastPath(_)),
+        "{class:?}"
+    );
+}
+
+#[test]
+fn thaw_js_routes_node_http_when_the_program_calls_native_create_server() {
+    // Multi-line source: createServer is a native FastPath function with no typed target.
+    let dir = std::env::temp_dir().join(format!("thaw-cli-http-eligible-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let packages = ["node:http".to_string()];
+    let active = packages.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let source = "import * as http from \"node:http\";\nfunction main(): void {\n    const s = http.createServer((req, res) => { res.end(\"x\"); });\n    s.close();\n}\n";
+    let (_, eligible) = generate_registry_shims_pass(
+        &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
+        &thaw_parser::common::FileName::Custom("http eligible.ts".into()),
+        false, &dir.join("app"), Some(&dir.join("staging")),
+        &std::collections::HashSet::new(), true, &ThawJsPackages::new(),
+    ).unwrap();
+    assert!(eligible.contains("node:http"), "{eligible:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn routed_node_http_keeps_the_native_create_server_declaration() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-http-decl-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let packages = ["node:http".to_string()];
+    let active = packages.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let source = "import * as http from \"node:http\";\nfunction main(): void {\n    const s = http.createServer((req, res) => { res.end(\"x\"); });\n    s.close();\n}\n";
+    let (shims, _) = generate_registry_shims_pass(
+        &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
+        &thaw_parser::common::FileName::Custom("http decl.ts".into()),
+        false, &dir.join("app"), Some(&dir.join("staging")),
+        &std::collections::HashSet::new(), true, &packages.iter().cloned().collect(),
+    ).unwrap();
+    let shim = shims.0;
+    assert!(shim.contains("declare function createServer("), "{shim}");
+    assert!(!shim.contains("callDynamic(\"createServer\""), "{shim}");
+    assert!(!shim.contains("function get(argsArray"), "{shim}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_routed_node_http_server_only_links_no_quickjs() {
+    // Server-only: no thaw-js http client in the program. The listen callback reports the bound port and closes.
+    let (dir, registry, entry) = thaw_js_fixture(
+        "node-http-create-server",
+        "import * as http from 'node:http';\n\
+         function main(): void {\n\
+           const srv = http.createServer((req, res) => { res.statusCode = 201; res.end('body'); });\n\
+           srv.listen(0, '127.0.0.1', () => {\n\
+             console.log('listening', typeof (srv.address() as any).port);\n\
+             srv.close();\n\
+           });\n\
+         }\n",
+    );
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run_guarded(&output), "listening number\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_routed_node_http_get_refused_without_a_server() {
+    let (dir, registry, entry) = thaw_js_fixture(
+        "node-http-get-refused",
+        "import * as http from 'node:http';\n\
+         function main(): void {\n\
+           const r = http.get('http://127.0.0.1:9/', () => {});\n\
+           r.on('error', (e: any) => console.log('err', e.code));\n\
+         }\n",
+    );
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run_guarded(&output), "err ECONNREFUSED\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_routed_node_http_fetch_from_listen_callback_refused() {
+    let (dir, registry, entry) = thaw_js_fixture(
+        "node-http-fetch-from-listen-callback",
+        "import * as http from 'node:http';\n\
+         function main(): void {\n\
+           const srv = http.createServer((req, res) => { res.end('x'); });\n\
+           srv.listen(0, '127.0.0.1', async () => {\n\
+             try { await fetch('http://127.0.0.1:9/'); } catch (e: any) { console.log('err'); }\n\
+             srv.close();\n\
+           });\n\
+         }\n",
+    );
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    // Narrow blocker: a native createServer next to the fetch client keeps node:http on QuickJS.
+    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run_guarded(&output), "err\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_routed_node_http_get_from_listen_callback_refused() {
+    let (dir, registry, entry) = thaw_js_fixture(
+        "node-http-get-from-listen-callback",
+        "import * as http from 'node:http';\n\
+         function main(): void {\n\
+           const srv = http.createServer((req, res) => { res.end('x'); });\n\
+           srv.listen(0, '127.0.0.1', () => {\n\
+             const r = http.get('http://127.0.0.1:9/', () => {});\n\
+             r.on('error', (e: any) => { console.log('err', e.code); srv.close(); });\n\
+           });\n\
+         }\n",
+    );
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    // Narrow blocker: a native createServer next to the http client keeps node:http on QuickJS.
+    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run_guarded(&output), "err ECONNREFUSED\n");
     let _ = std::fs::remove_dir_all(dir);
 }
