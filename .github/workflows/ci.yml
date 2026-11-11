@@ -47,6 +47,11 @@ jobs:
               exit 0
             fi
             echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
             sleep 10
           done
           exit 1
@@ -156,6 +161,11 @@ jobs:
               exit 0
             fi
             echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
             sleep 10
           done
           exit 1
@@ -282,6 +292,11 @@ jobs:
               exit 0
             fi
             echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
             sleep 10
           done
           exit 1
@@ -412,6 +427,11 @@ jobs:
               exit 0
             fi
             echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
             sleep 10
           done
           exit 1
@@ -557,6 +577,11 @@ jobs:
               exit 0
             fi
             echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
             sleep 10
           done
           exit 1
@@ -692,6 +717,11 @@ jobs:
               exit 0
             fi
             echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
             sleep 10
           done
           exit 1
@@ -824,6 +854,11 @@ jobs:
               exit 0
             fi
             echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
             sleep 10
           done
           exit 1
@@ -996,6 +1031,11 @@ jobs:
               exit 0
             fi
             echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
             sleep 10
           done
           exit 1
@@ -1097,6 +1137,11 @@ jobs:
               exit 0
             fi
             echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
             sleep 10
           done
           exit 1
