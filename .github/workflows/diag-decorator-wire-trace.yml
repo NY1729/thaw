@@ -3,6 +3,9 @@ name: diag-decorator-wire-trace
 # One-off diagnostic (plan-tj165 2b): runs the decorated-class identity programs under both engines with the wire trace on.
 on:
   workflow_dispatch:
+  push:
+    branches: [test/decorated-class-diag]
+    paths: ['.github/workflows/diag-decorator-wire-trace.yml']
 
 permissions:
   contents: read
