@@ -917,6 +917,14 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+        // A live owner marker (`thaw_js_live_owner_argument`) is already the final thaw-js argument
+        // and is typed as its owner's Object; re-coercing it here would wrap it in a decorator snapshot
+        // (or a copy) and hide the top-level marker that the call lowering keys on.
+        if matches!(&value, HirExpr::Call(callee, _)
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_tjs_live_owner_arg"))
+        {
+            return Ok(value);
+        }
         // A slot typed through a class back-edge coerces to the layout it names; a value that
         // already has that layout (modulo back-edges) needs no conversion.
         if declared.contains_recursive() {
