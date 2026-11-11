@@ -1113,6 +1113,29 @@ impl Interp {
         if matches!(f, Value::Object(_)) {
             self.call(&f, &g, &[])?;
             self.run_jobs()?;
+        } else if crate::child::active() {
+            // ponytail: this realm has no child_process hook (a call made through another package, e.g.
+            // promisify(execFile)); the realm that owns the shim's `children` map drains the thread-wide table.
+            // Ceiling: two realms each running their own shim can drain each other's events; upgrade = per-handle owner.
+            let mut failed = None;
+            crate::host::for_other_realms(self, |other| {
+                if failed.is_some() {
+                    return;
+                }
+                let og = Value::Object(other.global_object.clone());
+                match other.get(&og, "__thaw_poll_platform_events") {
+                    Ok(h @ Value::Object(_)) => {
+                        if let Err(e) = other.call(&h, &og, &[]).and_then(|_| other.run_jobs()) {
+                            failed = Some(e);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => failed = Some(e),
+                }
+            });
+            if let Some(e) = failed {
+                return Err(e);
+            }
         }
         let events = crate::worker::poll(self);
         if events != "[]" {

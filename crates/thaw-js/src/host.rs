@@ -452,7 +452,7 @@ thread_local! {
 }
 
 /// `THAW_JS_TRACE_WIRE` is read once; off, a trace point costs one load.
-fn trace_wire() -> bool {
+pub(crate) fn trace_wire() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("THAW_JS_TRACE_WIRE").is_some())
 }

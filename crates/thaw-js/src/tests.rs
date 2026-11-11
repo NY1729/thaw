@@ -2467,6 +2467,32 @@ process.on('exit', function () {{ console.log(logs.join(',')); }});"
     );
 }
 
+/// The v3 shape: a realm WITHOUT the child_process hook starts a child (its own native spawn) while the hook lives in
+/// another realm. The loop enters the first-registered realm first, so before the fix it spun forever.
+#[test]
+fn child_spawn_from_a_realm_without_the_hook_is_drained_by_the_hook_realm() {
+    let code = run_loop_or_fail(|| {
+        register_exit_package(
+            "cpb",
+            "exports.go = function () { __thaw_child_process_spawn('/nonexistent/x', '[]', '{}'); };",
+        );
+        register_exit_package(
+            "cpa",
+            &format!(
+                "{CHILD_SHIM}
+                 var inner = globalThis.__thaw_poll_platform_events;
+                 globalThis.__thaw_poll_platform_events = function () {{
+                   inner();
+                   if (logs.indexOf('error:ENOENT') >= 0) process.exitCode = 0;
+                 }};
+                 process.exitCode = 5;"
+            ),
+        );
+        typed_call("cpb::go", "[]").expect("spawn");
+    });
+    assert_eq!(code, 0);
+}
+
 #[test]
 fn child_process_stdin_env_cwd_and_sync() {
     let src = format!(
