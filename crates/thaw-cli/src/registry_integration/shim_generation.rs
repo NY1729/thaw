@@ -1013,6 +1013,7 @@ fn generate_registry_shims_pass(
                         &observed_arities,
                         &mut shim,
                         true,
+                        thaw_js_package,
                         &mut callback_instance_rewrites,
                     )
                 {
@@ -1227,6 +1228,7 @@ fn generate_registry_shims_pass(
                         &observed_arities,
                         &mut shim,
                         true,
+                        thaw_js_package,
                         &mut callback_instance_rewrites,
                     )
                 {
@@ -1344,6 +1346,7 @@ fn generate_registry_shims_pass(
                         &observed_arities,
                         &mut shim,
                         false,
+                        thaw_js_package,
                         &mut callback_instance_rewrites,
                     )
                 {
@@ -1364,6 +1367,7 @@ fn generate_registry_shims_pass(
                         &observed_arities,
                         &mut shim,
                         false,
+                        thaw_js_package,
                         &mut callback_instance_rewrites,
                     )
                 {

@@ -6974,3 +6974,95 @@ fn lazy_prototype_name_length_call_and_bind_do_not_materialise_it() {
         "reading name/length/call/bind materialised `prototype` and kept the scope alive"
     );
 }
+
+// ----- `Response | Promise<Response>`-style returns: flag bit 2 awaits only a returned Promise -----
+
+const UNION_RETURN_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"u/index.js": function(module, exports, require) {
+  class Hub {
+    later(v) { return Promise.resolve(v * 3); }
+    twice(n) { return n * 2; }
+    boom() { return Promise.reject(new TypeError('nope')); }
+  }
+  exports.Hub = Hub;
+},
+};
+var __thaw_bundle_require_maps = { "u/index.js": {}, };
+var __thaw_bundle_entry_key = "u/index.js";
+})(globalThis.require);"#;
+
+fn class_call_with_flags(
+    symbol: &str,
+    args: &str,
+    receiver: i64,
+    flags: u8,
+) -> Result<String, String> {
+    use std::ffi::{CStr, CString};
+    let (symbol, args) = (CString::new(symbol).unwrap(), CString::new(args).unwrap());
+    let result = crate::host::thaw_tjs_class_call(symbol.as_ptr(), args.as_ptr(), receiver, flags);
+    // SAFETY: both strings come from `thaw_tjs_class_call` and are freed exactly once.
+    unsafe {
+        if result.value.is_null() {
+            let error = CStr::from_ptr(result.error).to_str().unwrap().to_string();
+            crate::host::thaw_tjs_free(result.error);
+            Err(error)
+        } else {
+            let value = CStr::from_ptr(result.value).to_str().unwrap().to_string();
+            crate::host::thaw_tjs_free(result.value);
+            Ok(value)
+        }
+    }
+}
+
+#[test]
+fn class_call_bit_two_settles_a_promise_result_only() {
+    use std::ffi::CString;
+    let (name, source) = (
+        CString::new("u").unwrap(),
+        CString::new(UNION_RETURN_BUNDLE).unwrap(),
+    );
+    assert_eq!(
+        crate::host::thaw_tjs_register(name.as_ptr(), source.as_ptr()),
+        1
+    );
+    let hub: i64 = class_call_with_flags("$new$u::Hub$arity0", "[]", 0, 1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    // bit 2 alone settles a returned Promise to its value
+    assert_eq!(
+        class_call_with_flags("$method$u::Hub$later$overload0$arity1", "[5]", hub, 4).unwrap(),
+        "15"
+    );
+    // a non-Promise result is passed through unchanged
+    assert_eq!(
+        class_call_with_flags("$method$u::Hub$twice$overload0$arity1", "[4]", hub, 4).unwrap(),
+        "8"
+    );
+    // a rejected Promise under bit 2 is an error, like bit 1
+    assert_eq!(
+        class_call_with_flags("$method$u::Hub$boom$overload0$arity0", "[]", hub, 4).unwrap_err(),
+        "TypeError: nope"
+    );
+    // bit 1 keeps its meaning
+    assert_eq!(
+        class_call_with_flags("$method$u::Hub$later$overload0$arity1", "[2]", hub, 2).unwrap(),
+        "6"
+    );
+}
+
+// Node 22 prints: tick1, uncaught:boom, tick2, tick3, done (exit 0).
+#[test]
+fn set_interval_keeps_ticking_after_a_throwing_tick_under_uncaught_exception() {
+    let (out, code) = main_run(
+        "process.on('uncaughtException', function (e) { console.log('uncaught:' + e.message); });
+         var n = 0; var t = setInterval(function () {
+           n++; console.log('tick' + n);
+           if (n === 1) throw new Error('boom');
+           if (n === 3) { clearInterval(t); console.log('done'); }
+         }, 1);",
+    );
+    assert_eq!(out.join("|"), "tick1|uncaught:boom|tick2|tick3|done");
+    assert_eq!(code, 0);
+}

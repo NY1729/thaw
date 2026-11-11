@@ -283,6 +283,10 @@ fn classify_native_union(
     let mut native = Vec::new();
     let mut has_null = false;
     let mut has_undefined = false;
+    let has_promise = union.types.iter().any(|element| {
+        matches!(element.as_ref(), TsType::TsTypeRef(ty_ref)
+            if matches!(&ty_ref.type_name, TsEntityName::Ident(name) if name.sym == "Promise"))
+    });
     for element in &union.types {
         match element.as_ref() {
             TsType::TsKeywordType(keyword) if keyword.kind == TsKeywordTypeKind::TsNullKeyword => {
@@ -303,6 +307,12 @@ fn classify_native_union(
                 }
                 DtsType::Native(ty) if !native.contains(&ty) => native.push(ty),
                 DtsType::Native(_) => {}
+                // A Promise member's own payload reason keeps its marker (thaw_js_promise_ret matches it).
+                DtsType::Unsupported(reason)
+                    if has_promise && !reason.starts_with(PROMISE_PAYLOAD_UNSUPPORTED) =>
+                {
+                    return DtsType::Unsupported(format!("{UNION_PROMISE_UNSUPPORTED}: {reason}"));
+                }
                 unsupported => return unsupported,
             },
         }

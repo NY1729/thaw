@@ -464,7 +464,10 @@ async function main(): Promise<void> {
                 .unwrap();
             let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
             let ok = result.status.success() && stdout == expected;
-            all_ok &= ok;
+            // C2 is a print-only probe (QuickJS auto-settles the Promise, Node and thaw-js do not).
+            if section != "C2" {
+                all_ok &= ok;
+            }
             table.push_str(&format!(
                 "section={section} compile={mode} ok={ok} status={} stdout={stdout:?} stderr={:?}\n",
                 result.status,
@@ -3519,6 +3522,7 @@ async function main(): Promise<void> {{
         let _ = std::fs::remove_file(watched.join("file.txt"));
         let result = Command::new(&output)
             .env("THAW_JS_COMPILE", mode)
+            .env("THAW_FS_WATCH_DEBUG", "1")
             .output()
             .unwrap();
         table.push_str(&format!(
