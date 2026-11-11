@@ -207,7 +207,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 "drain_native_microtasks",
             )
             .unwrap();
-        if self.uses_quickjs {
+        // a routed build with `createServer` has no QuickJS, but its thaw-js loop must run before the server
+        // runner blocks: it drives the http client and the server's listen/close callbacks
+        let thaw_js_serves = self.thaw_js_routed
+            && self.uses_thaw_js
+            && self.module.get_function("createServer").is_some();
+        if self.uses_quickjs || thaw_js_serves {
             let status = self
                 .builder
                 .build_call(

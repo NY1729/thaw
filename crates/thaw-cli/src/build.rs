@@ -1590,8 +1590,12 @@ fn quickjs_callback_export_args() -> [&'static str; 4] {
 
 /// The thaw-js loop's native-continuation drain (`drain_native_continuations`, host.rs) looks this symbol up via
 /// RTLD_DEFAULT; it is not in `quickjs_callback_export_args` and must be exported from a thaw-js routed build.
-fn thaw_js_extra_export_args() -> [&'static str; 1] {
-    ["-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle"]
+fn thaw_js_extra_export_args() -> [&'static str; 2] {
+    [
+        "-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle",
+        // the thaw-js loop polls a compiled http server through RTLD_DEFAULT (host.rs poll_native_servers)
+        "-Wl,--export-dynamic-symbol=thaw_http_poll_servers",
+    ]
 }
 
 /// thaw-js looks up the ready-continuation hand-off (`park_native_ready` / `adopt_native_ready`, eventloop.rs) via RTLD_DEFAULT.
@@ -1685,7 +1689,10 @@ fn native_poll_exports_needed_for_quickjs_or_thaw_js() {
 fn thaw_js_builds_export_the_native_continuation_drain() {
     assert_eq!(
         thaw_js_extra_export_args(),
-        ["-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle"]
+        [
+            "-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle",
+            "-Wl,--export-dynamic-symbol=thaw_http_poll_servers",
+        ]
     );
     assert!(thaw_js_drain_export_needed(true));
     assert!(!thaw_js_drain_export_needed(false));

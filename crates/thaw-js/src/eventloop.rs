@@ -1199,11 +1199,13 @@ impl Interp {
             {
                 let mut wait = next - clock_ms();
                 // a worker wakes every 2ms so a terminate() is seen even while a timer is pending
+                // a live compiled http server is polled every 2 ms too, so a long timer does not starve it
                 if crate::child::active()
                     || crate::zlib::active_for(self.realm_id)
                     || crate::worker::active(self)
                     || self.stdin_live()
                     || self.interrupt.is_some()
+                    || crate::host::native_servers_live()
                 {
                     wait = wait.min(2.0);
                 }
@@ -1218,6 +1220,7 @@ impl Interp {
                 || crate::worker::active(self)
                 || self.stdin_live()
                 || self.interrupt.is_some()
+                || crate::host::native_servers_live()
             {
                 loop_idle_sleep(Duration::from_millis(2));
             }

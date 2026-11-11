@@ -3722,6 +3722,11 @@ fn poll_native_promise(it: &mut Interp, p: Obj, promise: usize, finish: usize) -
     it.defer_tick(check)
 }
 
+/// Test stand-in for the compiled runtime's `thaw_http_poll_servers` (process-wide, like the symbol).
+#[cfg(test)]
+pub(crate) static TEST_SERVER_POLL: std::sync::Mutex<Option<extern "C" fn() -> u8>> =
+    std::sync::Mutex::new(None);
+
 /// One drain of the compiled runtime's native continuations (`thaw_runtime_run_until_idle`).
 /// True when a continuation ran. Missing symbol (no compiled runtime, e.g. tests): no progress.
 #[cfg(unix)]
@@ -3741,9 +3746,54 @@ fn drain_native() -> bool {
     false
 }
 
-/// `drain_native` as a loop turn hook.
+thread_local! {
+    /// Whether the last `thaw_http_poll_servers` pass saw a live server (bit 0). Host thread only.
+    static NATIVE_SERVERS_LIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether a compiled http server is still live, as of the last poll on this thread.
+pub(crate) fn native_servers_live() -> bool {
+    NATIVE_SERVERS_LIVE.with(Cell::get)
+}
+
+/// `thaw_http_poll_servers` (compiled thaw-std): bit 0 = a server is live, bit 1 = a listening/error/close
+/// callback ran. Looked up like `drain_native`; 0 without thaw-std. Any thread may call it (process-wide state).
+fn poll_native_servers() -> u8 {
+    #[cfg(test)]
+    let test_poll = *TEST_SERVER_POLL.lock().unwrap();
+    #[cfg(test)]
+    let r = match test_poll {
+        Some(poll) => poll(),
+        None => poll_native_servers_symbol(),
+    };
+    #[cfg(not(test))]
+    let r = poll_native_servers_symbol();
+    NATIVE_SERVERS_LIVE.with(|live| live.set(r & 1 != 0));
+    r
+}
+
+#[cfg(unix)]
+fn poll_native_servers_symbol() -> u8 {
+    // SAFETY: the symbol is the compiled thaw-std's `extern "C" fn() -> u8`, exported by `thaw_js_extra_export_args`.
+    unsafe {
+        let sym = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_http_poll_servers".as_ptr());
+        if sym.is_null() {
+            return 0;
+        }
+        std::mem::transmute::<*mut c_void, extern "C" fn() -> u8>(sym)()
+    }
+}
+
+#[cfg(not(unix))]
+fn poll_native_servers_symbol() -> u8 {
+    0
+}
+
+/// `drain_native` as a loop turn hook. A listen callback may queue continuations, so servers are polled first.
 fn drain_native_continuations(_: &mut Interp) -> bool {
-    drain_native()
+    let http = poll_native_servers();
+    let ran = drain_native();
+    ran || (http & 2) != 0
 }
 
 #[cfg(unix)]
@@ -4697,9 +4747,14 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
     let mut status = 0;
     let mut exited = false;
     loop {
+        // the compiled http server (if any) is serviced here too, so a routed build with no JS timers still answers
+        let http = poll_native_servers();
+        let servers_live = (http & 1) != 0;
+        let http_ran = (http & 2) != 0;
         let settled = pump_watches();
-        // a settled watch resumes the compiled async code queued on the native side, which may watch new promises
-        let drained = settled > 0 && drain_native();
+        // a settled watch resumes the compiled async code queued on the native side, which may watch new promises;
+        // a live server's accept watchers progress only through this drain
+        let drained = ((settled > 0 || servers_live) && drain_native()) || http_ran;
         let count = PACKAGES.with(|ps| ps.borrow().len());
         let mut ran_any = false;
         let mut yielded_any = false;
@@ -4756,8 +4811,12 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
         if exited {
             break;
         }
+        if servers_live && !ran_any && !yielded_any && settled == 0 && !drained {
+            // ponytail: 1 ms poll like QuickJS api.rs:1821; upgrade = block in the runtime fd poll
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         let watching = WATCHES.with(|w| !w.borrow().is_empty());
-        if settled == 0 && !drained && !(ran_any && watching) && !yielded_any {
+        if settled == 0 && !drained && !(ran_any && watching) && !yielded_any && !servers_live {
             break;
         }
     }
