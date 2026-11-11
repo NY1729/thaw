@@ -149,6 +149,7 @@ measure_program() {
       echo "[measure] SKIP $name/$engine: build failed (no run_ms; excluded from ratio)" >&2
       row program "$name" "$engine" F ""
       row program "$name" "$engine" links_quickjs ""
+      row program "$name" "$engine" why ""
       row program "$name" "$engine" stdout_eq_node 0
       diagnose "$name" "$engine" "$log" 0 na 0
       continue
@@ -159,6 +160,10 @@ measure_program() {
     F=$(grep -c '^quickjs-reason:' "$log.inspect")
     row program "$name" "$engine" links_quickjs "${links:-0}"
     row program "$name" "$engine" F "$F"
+    # Reason lines from `thaw inspect` (quickjs-reason / thaw-js-blocker), tabs flattened, cut to 400 chars.
+    local why
+    why=$(grep -E '^(quickjs-reason|thaw-js-blocker):' "$log.inspect" | tr '\t' ' ' | paste -sd';' | cut -c1-400)
+    row program "$name" "$engine" why "$why"
     row program "$name" "$engine" size_bytes "$(stat -c %s "$bin")"
     binof[$engine]="$bin"; logof[$engine]="$log"; built+=( "$engine" )
   done
