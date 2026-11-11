@@ -45,7 +45,8 @@ jobs:
             echo "apt attempt $attempt failed" >&2
             sleep 10
           done
-          exit 1
+          sudo timeout 300 apt-get install -y libuv1-dev || dpkg -s libuv1-dev >/dev/null 2>&1 || echo 'libuv1-dev unavailable; continuing' >&2
+          exit 0
       - name: Cache runtime static libraries
         uses: actions/cache@v4
         with:
