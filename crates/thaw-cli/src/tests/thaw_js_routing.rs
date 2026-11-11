@@ -487,6 +487,7 @@ fn thaw_js_runtime_alias_still_works() {
 }
 
 #[test]
+#[allow(clippy::assertions_on_constants)]
 fn thaw_js_default_is_thaw_js() {
     assert!(THAW_JS_DEFAULT);
 }
