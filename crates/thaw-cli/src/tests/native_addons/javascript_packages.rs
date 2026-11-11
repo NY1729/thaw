@@ -385,7 +385,7 @@ fn registry_add_hono_sections_isolated_when_enabled() {
     let registry = dir.join("modules");
     thaw_registry::add(&registry, "hono").unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    let sections: [(&str, &str, &str); 3] = [
+    let sections: [(&str, &str, &str); 4] = [
         (
             "A",
             r#"import { Hono, Context } from "hono";
@@ -429,6 +429,24 @@ async function main(): Promise<void> {
     console.log(bodyC);
 }"#,
             "mw ran\n200\nuser 42\n",
+        ),
+        (
+            "C2",
+            r#"import { Hono, Context } from "hono";
+async function main(): Promise<void> {
+    const appC = new Hono();
+    appC.use('/users/:id', async (c, next) => {
+        console.log('mw ran');
+        await next();
+    });
+    appC.get('/users/:id', (c) => {
+        const id = c.req.param('id');
+        return c.text('user ' + id);
+    });
+    const resC: JsValue = appC.request('/users/42');
+    console.log(typeof resC.then === 'function');
+}"#,
+            "mw ran\ntrue\n",
         ),
     ];
     let mut table = String::new();
@@ -3419,6 +3437,98 @@ async function main(): Promise<void> {{
         String::from_utf8_lossy(&result.stdout),
         "[\"add:file.txt\",\"change:file.txt\",\"unlink:file.txt\"]\n"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Diagnostic for chokidar `unlink` missing after the fs.watch ENOENT fix
+/// (plan TJ168 section 2). Same watch setup as the test above plus `raw`
+/// and `error` listeners, a 1500 ms settle after the unlink, and a
+/// `statSync` / `promises.stat` probe of the removed file. The table of
+/// (compile mode, events) is printed on every run and nothing is asserted
+/// beyond the build, so this stays green. Reading the table: no
+/// `raw:rename` after unlink means the shim never emitted; `raw:rename`
+/// without `unlink` means the chokidar handler; no `pstat:ENOENT` means the
+/// async stat rejection is broken. Gated like the other chokidar test.
+#[test]
+fn registry_add_chokidar_unlink_diagnostic_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-chokidar-diag-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "chokidar").unwrap();
+    let watched = dir.join("watched");
+    std::fs::create_dir_all(&watched).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        format!(
+            r#"import {{ watch }} from "chokidar";
+import * as fs from "node:fs";
+
+const dir = {watched:?};
+
+function sleep(ms: number): Promise<void> {{
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}}
+
+async function main(): Promise<void> {{
+    const events: string[] = [];
+    const watcher = watch(dir, {{ persistent: true, ignoreInitial: true }});
+
+    watcher.on("raw", (e: string, p: string) => {{ events.push("raw:" + e + ":" + String(p).split("/").pop()); }});
+    watcher.on("error", (e: JsValue) => {{ events.push("error:" + String(e)); }});
+    watcher.on("add", (path: string) => {{ events.push("add:" + path.split("/").pop()); }});
+    watcher.on("change", (path: string) => {{ events.push("change:" + path.split("/").pop()); }});
+    watcher.on("unlink", (path: string) => {{ events.push("unlink:" + path.split("/").pop()); }});
+
+    await new Promise<void>((resolve) => {{ watcher.on("ready", () => resolve()); }});
+
+    fs.writeFileSync(dir + "/file.txt", "hello");
+    await sleep(300);
+    fs.writeFileSync(dir + "/file.txt", "hello world");
+    await sleep(300);
+    fs.unlinkSync(dir + "/file.txt");
+    await sleep(1500);
+
+    try {{ fs.statSync(dir + "/file.txt"); events.push("stat:ok"); }} catch (error: JsValue) {{ events.push("stat:" + String(error.code)); }}
+    try {{ await fs.promises.stat(dir + "/file.txt"); events.push("pstat:ok"); }} catch (error: JsValue) {{ events.push("pstat:" + String(error.code)); }}
+
+    await watcher.close();
+    console.log(JSON.stringify(events));
+}}
+"#,
+            watched = watched.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["chokidar".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let mut table = String::new();
+    for mode in ["on", "off"] {
+        let _ = std::fs::remove_file(watched.join("file.txt"));
+        let result = Command::new(&output)
+            .env("THAW_JS_COMPILE", mode)
+            .output()
+            .unwrap();
+        table.push_str(&format!(
+            "compile={mode} status={} stdout={:?} stderr={:?}\n",
+            result.status,
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+    eprintln!("{table}");
     let _ = std::fs::remove_dir_all(dir);
 }
 

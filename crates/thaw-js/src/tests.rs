@@ -487,6 +487,38 @@ fn await_unwraps_values_and_throws_rejections() {
 }
 
 #[test]
+fn rejected_await_in_try_catch_inside_timer_driven_async_listener() {
+    // chokidar-shaped: an async listener awaits a stat-like promise that rejects from a
+    // microtask, catches it, and defers a follow-up event through a timer (TJ168 section 2).
+    // Expected output is what Node prints for the same program.
+    let (out, code) = main_run(
+        "var out = [];
+         function statLike(p) {
+           return new Promise(function (res, rej) {
+             queueMicrotask(function () {
+               if (p === 'missing') rej(Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }));
+               else res({ size: 1 });
+             });
+           });
+         }
+         var listener = async function (path) {
+           try {
+             var s = await statLike(path);
+             out.push('stat:' + s.size);
+           } catch (e) {
+             out.push('catch:' + e.code);
+             setTimeout(function () { out.push('unlink:' + path); }, 150);
+           }
+         };
+         setTimeout(function () { listener('missing'); }, 10);
+         setTimeout(function () { listener('present'); }, 20);
+         setTimeout(function () { console.log(out.join('|')); }, 400);",
+    );
+    assert_eq!(out.join("|"), "catch:ENOENT|stat:1|unlink:missing");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn many_concurrent_async_calls_and_never_settled_ones() {
     let (out, _) = main_run(
         "var n = 0; var gate = new Promise(function () {});
