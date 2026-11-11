@@ -308,6 +308,39 @@ function main(): void {
 }
 
 #[test]
+fn decorator_returning_its_argument_and_decorator_returning_void_both_keep_identity() {
+    // Differential pair: the decorator result is discarded in both; only the returning one aliases its token.
+    for (tag, mark_ret, mark_body) in [("ret", "JsValue", "return value;"), ("void", "void", "")] {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-registry-fallback-decorator-{tag}-{}",
+            std::process::id()
+        ));
+        let registry = dir.join("modules");
+        let package = registry.join("identity-kit");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("package.d.ts"), "export declare function identity(value: any): any;\n").unwrap();
+        std::fs::write(package.join("bundle.js"), "module.exports.identity = function(value) { return value; };\n").unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(&entry, format!(r#"import {{ identity }} from "identity-kit";
+function Mark(value: JsValue): {mark_ret} {{ {mark_body} }}
+@Mark class Item {{ value: number = 3; }}
+function main(): void {{
+    const item = new Item();
+    const returned = identity(item);
+    returned.value = 9;
+    console.log(returned === item, item.value);
+}}
+"#)).unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "true 9\n", "variant {tag}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
 fn decorated_class_keeps_live_registry_projection_for_supported_contracts() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-fallback-decorated-observer-{}",

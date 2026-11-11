@@ -313,6 +313,47 @@ fn discarded_nested_call_arg_is_not_guarded_by_inner_record() {
 }
 
 #[test]
+fn discarded_closure_variable_call_with_borrowed_jsvalue_arg_guards_release() {
+    // `const f = mark; f(token)` goes through `compile_closure_call`, which must record the borrowed argument like a direct call
+    let (_, _, ir) = compile_thaw_js_program(
+        "function mark(value: JsValue): JsValue { return value; }
+         function main(): void { const token: JsValue = {a: 1}; const f = mark; f(token); }",
+    );
+    assert!(ir.contains("discarded_result_is_argument"), "{ir}");
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+}
+
+#[test]
+fn discarded_decorator_bound_to_a_local_guards_release_of_its_token() {
+    // `@Mark class K` lowers to a discarded `Mark(token)` through a local closure, the shape behind the decorated-class retain failure
+    let (_, _, ir) = compile_thaw_js_program(
+        "function Mark(value: JsValue): JsValue { return value; }
+         @Mark class K {}
+         function main(): void { console.log(new K()); }",
+    );
+    assert!(ir.contains("discarded_result_is_argument"), "{ir}");
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+}
+
+#[test]
+fn discarded_closure_variable_call_with_fresh_or_no_jsvalue_args_releases_unconditionally() {
+    // Negative control: a fresh call-result argument and a call with no JsValue argument are not borrowed, so no guard
+    let (_, _, ir) = compile_thaw_js_program(
+        "function make(): JsValue { return {a: 1}; }
+         function mark(value: JsValue): JsValue { return value; }
+         function main(): void { const f = mark; f(make()); }",
+    );
+    assert!(!ir.contains("discarded_result_is_argument"), "{ir}");
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+    let (_, _, ir) = compile_thaw_js_program(
+        "function make(): JsValue { return {a: 1}; }
+         function main(): void { const f = make; f(); }",
+    );
+    assert!(!ir.contains("discarded_result_is_argument"), "{ir}");
+    assert!(ir.contains("release_discarded_dynamic_value"), "{ir}");
+}
+
+#[test]
 fn discarded_jsvalue_result_call_without_jsvalue_arguments_still_releases() {
     let (_, _, ir) = compile_thaw_js_program(
         "function make(): JsValue { return {a: 1}; }
