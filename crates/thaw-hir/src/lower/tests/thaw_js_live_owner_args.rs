@@ -213,3 +213,27 @@ fn thaw_js_any_slot_takes_a_live_owner_marker_for_a_decorated_class_with_a_metho
     let body = thaw_js_owner_main_body(&decls, &identity, "const item = new Item();", "item");
     assert!(body.contains("__thaw_tjs_live_owner_arg"), "{body}");
 }
+
+// tj167: the CLI flattens module-local names with the `__thawmod0_` prefix; the decorator marker and the
+// class name must agree on that spelling, and the owner marker must stay a top-level extern call argument.
+#[test]
+fn thaw_js_any_slot_marker_for_decorated_flattened_class_names() {
+    let identity = thaw_js_owner_symbol("tjs", "k::identity");
+    let decls = format!(
+        "function __thawmod0_Mark(value: JsValue): JsValue {{ return value; }}\n@__thawmod0_Mark class __thawmod0_Item {{ value: number = 3; }}\ndeclare function {identity}(value: any): any;"
+    );
+    let body = thaw_js_owner_main_body(&decls, &identity, "const item = new __thawmod0_Item();", "item");
+    assert!(body.contains("ret: Json }, [Call(Var(\"__thaw_tjs_live_owner_arg\")"), "{body}");
+    assert!(!body.contains("__thaw_decorator_instance_json_"), "{body}");
+}
+
+#[test]
+fn thaw_js_any_slot_marker_for_decorated_flattened_class_with_a_method() {
+    let identity = thaw_js_owner_symbol("tjs", "k::identity");
+    let decls = format!(
+        "function __thawmod0_Mark(value: JsValue): JsValue {{ return value; }}\n@__thawmod0_Mark class __thawmod0_Item {{ value: number = 3; bump(): number {{ return 1; }} }}\ndeclare function {identity}(value: any): any;"
+    );
+    let body = thaw_js_owner_main_body(&decls, &identity, "const item = new __thawmod0_Item();", "item");
+    assert!(body.contains("ret: Json }, [Call(Var(\"__thaw_tjs_live_owner_arg\")"), "{body}");
+    assert!(!body.contains("__thaw_decorator_instance_json_"), "{body}");
+}
