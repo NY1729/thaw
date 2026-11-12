@@ -96,3 +96,43 @@ fn routed_live_handle_to_json_conversion_captures_the_graph_instead_of_an_empty_
     );
     assert!(!ir.contains("routed_no_host_json"), "{ir}");
 }
+
+#[test]
+fn thaw_js_graph_callback_types_accept_live_parameters_and_nested_callables() {
+    use thaw_hir::HirType::*;
+    let json_callable = CallableFunction(
+        vec![Optional(Box::new(Json)), Optional(Box::new(Json))],
+        Default::default(),
+        None,
+        Box::new(Void),
+    );
+    assert!(thaw_js_graph_callback_type(&Function(vec![JsValue], Box::new(Void))));
+    assert!(thaw_js_graph_callback_type(&Function(
+        vec![JsValue, Array(Box::new(Json))],
+        Box::new(Void)
+    )));
+    assert!(thaw_js_graph_callback_type(&Optional(Box::new(Function(
+        vec![JsValue],
+        Box::new(Void)
+    )))));
+    assert!(thaw_js_graph_callback_type(&Function(
+        vec![JsValue, json_callable.clone()],
+        Box::new(Void)
+    )));
+    // the plain-data predicate is unchanged: a JsValue listener still stays off the text route
+    assert!(!thaw_js_callback_type(&Function(vec![JsValue], Box::new(Void))));
+    // rejected: a non-plain leaf, a Promise result, bytes, a rest callable parameter
+    assert!(!thaw_js_graph_callback_type(&Function(
+        vec![Map(Box::new(Str), Box::new(F64))],
+        Box::new(Void)
+    )));
+    assert!(!thaw_js_graph_callback_type(&Function(
+        vec![JsValue],
+        Box::new(Promise(Box::new(F64)))
+    )));
+    assert!(!thaw_js_graph_callback_type(&Function(vec![Bytes], Box::new(Void))));
+    assert!(!thaw_js_graph_callback_type(&Function(
+        vec![CallableFunction(vec![], Default::default(), Some(Box::new(Json)), Box::new(Void))],
+        Box::new(Void)
+    )));
+}

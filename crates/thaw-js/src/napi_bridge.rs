@@ -126,6 +126,15 @@ pub(crate) fn keep_until_shutdown(token: u64) {
     RETAINED.with(|r| r.borrow_mut().push(token));
 }
 
+/// Releases every reference `keep_until_shutdown` kept; returns how many there were.
+pub(crate) fn release_retained() -> u64 {
+    let tokens = RETAINED.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    for token in &tokens {
+        release_reference(*token);
+    }
+    tokens.len() as u64
+}
+
 /// The raw reply text of one `handle` operation, or None when no bridge is registered.
 fn handle_text(op: &str, target: &str, extra: &str, graph: &str) -> Option<String> {
     let b = bridge()?;
@@ -364,8 +373,8 @@ fn release_packet_leases(graph: &str) {
 
 /// `__thaw_napi_graph_invoker`: a factory from a native Function handle to a closure `(graph, construct)` that
 /// calls it with the captured graph packet and returns the bridge's reply text. The factory retains the handle
-/// once; that retain is never released (ponytail: no weak root until thaw-js has real weakness). A packet that
-/// cannot reach the bridge releases the leases it names.
+/// once and keeps that retain until shutdown (ponytail: no weak root until thaw-js has real weakness). A packet
+/// that cannot reach the bridge releases the leases it names.
 pub(crate) fn graph_invoker_factory(it: &mut Interp) -> Value {
     it.native(|it, _, args| {
         let target = text(args, 0);
@@ -373,9 +382,10 @@ pub(crate) fn graph_invoker_factory(it: &mut Interp) -> Value {
             .ok()
             .and_then(|reply| reply.get("value")?.as_str()?.parse::<u64>().ok())
             .filter(|token| *token != 0);
-        if retained.is_none() {
+        let Some(token) = retained else {
             return it.throw_error("TypeError", "Cannot retain native Function");
-        }
+        };
+        keep_until_shutdown(token);
         Ok(it.native(move |_, _, args| {
             let graph = text(args, 0);
             let operation = if arg(args, 1).truthy() {
@@ -450,9 +460,7 @@ pub(crate) fn shutdown(it: &mut Interp) -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
-    for token in RETAINED.with(|r| std::mem::take(&mut *r.borrow_mut())) {
-        release_reference(token);
-    }
+    release_retained();
     if errors.is_empty() {
         Ok(())
     } else {

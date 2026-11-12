@@ -22,6 +22,8 @@ thread_local! {
     /// Only the test's own thread drives the fakes. Other threads (the rest of the suite) share the
     /// process-wide registration while it is in place, and must see an idle bridge.
     static ARMED: Cell<bool> = const { Cell::new(false) };
+    /// Every token the bridge was asked to release, in order.
+    static RELEASED: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Holds the test lock. Dropping it (also on panic) clears the registration and the fake state.
@@ -45,6 +47,7 @@ fn setup() -> Guard {
     EVENTS.with(|e| e.borrow_mut().clear());
     SHUTDOWN_POLLS.with(|c| c.set(0));
     ERROR_PENDING.with(|c| c.set(false));
+    RELEASED.with(|r| r.borrow_mut().clear());
     ARMED.with(|c| c.set(true));
     Guard { _lock: lock }
 }
@@ -113,6 +116,7 @@ unsafe extern "C" fn fake_owner(handle: u64) -> *mut c_char {
 }
 
 extern "C" fn fake_release(token: u64) -> u8 {
+    RELEASED.with(|r| r.borrow_mut().push(token));
     (token == 7) as u8
 }
 
@@ -244,6 +248,16 @@ fn terminal_work_counts_pending_napi_work() {
     assert_eq!(thaw_tjs_terminal_work_pending(), 0);
     register_bridge(fake_call);
     assert_eq!(thaw_tjs_terminal_work_pending(), 1);
+}
+
+#[test]
+fn release_all_handles_releases_bridge_retained_references() {
+    let _guard = setup();
+    register_bridge(fake_call);
+    keep_until_shutdown(5);
+    assert!(crate::host::thaw_tjs_release_all_handles() >= 1);
+    RELEASED.with(|r| assert_eq!(r.borrow().as_slice(), [5]));
+    assert_eq!(crate::host::thaw_tjs_release_all_handles(), 0);
 }
 
 #[test]

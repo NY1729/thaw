@@ -73,6 +73,24 @@ pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
     }
 }
 
+/// A callback whose parameters may also be live values: `JsValue` leaves and nested callbacks cross as handle
+/// leases, so it can only be registered on the graph route (`thaw_tjs_register_native_callback_graph`), never as
+/// a JSON-text `__thaw_tjs_cb__` marker. Superset of `thaw_js_callback_type`.
+pub(crate) fn thaw_js_graph_callback_type(ty: &HirType) -> bool {
+    match ty {
+        HirType::Optional(inner) => {
+            matches!(inner.as_ref(), HirType::Function(..) | HirType::CallableFunction(..))
+                && thaw_js_graph_callback_type(inner)
+        }
+        _ => thaw_js_callback_abi(ty).is_some_and(|(params, ret, _)| {
+            params.iter().all(|p| {
+                (thaw_js_param_leaf_type(p) && !thaw_js_contains_bytes(p)) || thaw_js_ctor_nested_callback(p)
+            }) && thaw_js_plain_type(&ret)
+                && !thaw_js_contains_bytes(&ret)
+        }),
+    }
+}
+
 /// A constructor option object whose callbacks are receiver handles (`new Writable({ write })`): every
 /// field is plain data or such a callback, and at least one field is a callback. It crosses as the
 /// live object literal of `compile_thaw_js_object_literal_argument`, never as a typed struct.
@@ -107,7 +125,8 @@ fn thaw_js_ctor_option_callback(ty: &HirType) -> bool {
 
 /// A nested callback parameter (`cb` of `write(chunk, enc, cb)`): no-argument-or-plain params, no result.
 fn thaw_js_ctor_nested_callback(ty: &HirType) -> bool {
-    matches!(ty, HirType::Function(params, ret) if **ret == HirType::Void && params.iter().all(thaw_js_param_leaf_type))
+    matches!(ty, HirType::Function(params, ret) | HirType::CallableFunction(params, _, None, ret)
+        if **ret == HirType::Void && params.iter().all(thaw_js_param_leaf_type))
 }
 
 /// Whether `ty` holds a `Bytes` anywhere. Only a bare `Bytes` argument is encoded by
@@ -2313,7 +2332,7 @@ impl<'ctx> HirCompiler<'ctx> {
             && signature.params.iter().skip(usize::from(is_method)).all(|ty| {
                 thaw_js_plain_type(ty)
                     || handle_param(ty)
-                    || thaw_js_callback_type(ty)
+                    || thaw_js_graph_callback_type(ty)
                     || (is_new && !is_value && thaw_js_object_with_callbacks_type(ty))
             })
             && !signature.params.iter().any(|ty| *ty != HirType::Bytes && thaw_js_contains_bytes(ty))
@@ -2343,7 +2362,9 @@ impl<'ctx> HirCompiler<'ctx> {
         for (index, (arg, ty)) in rest.iter().zip(signature.params.iter().skip(usize::from(is_method))).enumerate() {
             let reads_receiver = self.callback_expr_reads_receiver(arg) || self.closure_returns_promise(arg);
             let live_listener = self.live_json_listener(arg, ty);
-            if thaw_js_callback_type(ty) && (reads_receiver || live_listener.is_some()) {
+            // a callback with a live (handle) parameter has no text route: it is always a graph callback
+            let graph_only = thaw_js_graph_callback_type(ty) && !thaw_js_callback_type(ty);
+            if (thaw_js_callback_type(ty) && (reads_receiver || live_listener.is_some())) || graph_only {
                 let target = if reads_receiver { arg } else { live_listener.unwrap_or(arg) };
                 self.compile_thaw_js_receiver_callback_argument(array, target, !reads_receiver)
                     .map_err(|error| format!("thaw-js class callback argument {}: {error}", index + 1))?;

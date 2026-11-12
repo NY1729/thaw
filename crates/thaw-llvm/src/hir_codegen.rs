@@ -1121,6 +1121,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 ("thaw_js_retain_handle", "thaw_tjs_retain_handle"),
                 ("thaw_js_release_handle", "thaw_tjs_release_handle"),
                 (
+                    "thaw_js_release_all_handles",
+                    "thaw_tjs_release_all_handles",
+                ),
+                (
                     "thaw_js_get_property_result",
                     "thaw_tjs_get_property_result",
                 ),

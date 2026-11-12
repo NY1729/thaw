@@ -7446,3 +7446,14 @@ fn hinted_reads_through_large_scopes_keep_the_visible_binding() {
     assert!(on.run(&src).is_ok());
     assert_eq!(on.out, it.out);
 }
+
+#[test]
+fn release_all_handles_drops_every_live_handle_and_reports_the_count() {
+    let first = crate::host::store_handle(0, Value::Number(1.0));
+    let second = crate::host::store_handle(0, Value::Number(2.0));
+    assert_eq!(crate::host::thaw_tjs_retain_handle(second), 1);
+    assert_eq!(crate::host::thaw_tjs_release_all_handles(), 2);
+    assert!(!crate::host::handle_is_live(first));
+    assert!(!crate::host::handle_is_live(second));
+    assert_eq!(crate::host::thaw_tjs_release_all_handles(), 0);
+}

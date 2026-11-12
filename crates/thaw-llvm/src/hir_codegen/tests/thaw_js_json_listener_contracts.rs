@@ -109,3 +109,50 @@ fn json_slot_callback_with_a_json_closure_takes_the_graph_route() {
     assert!(!ir.contains("__thaw_tjs_cb__"), "{ir}");
     assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
 }
+
+#[test]
+fn fixed_jsvalue_listener_takes_the_graph_route() {
+    let ir = listener_ir(
+        "(value: JsValue) => void",
+        "(chunk: JsValue): void => { console.log(chunk); }",
+    );
+    let calls = |name: &str| ir.lines().any(|line| line.contains("call ") && line.contains(name));
+    assert!(calls("@thaw_tjs_register_native_callback_graph("), "{ir}");
+    assert!(!calls("@thaw_tjs_register_callback("), "{ir}");
+    assert!(!ir.contains("__thaw_tjs_cb__"), "{ir}");
+    assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
+    assert!(!ir.contains("cannot cross"), "{ir}");
+}
+
+#[test]
+fn fixed_jsvalue_listener_with_a_json_closure_takes_the_graph_route() {
+    let ir = listener_ir(
+        "(value: JsValue) => void",
+        "(o: Json): void => { console.log(o); }",
+    );
+    let calls = |name: &str| ir.lines().any(|line| line.contains("call ") && line.contains(name));
+    assert!(calls("@thaw_tjs_register_native_callback_graph("), "{ir}");
+    assert!(!calls("@thaw_tjs_register_callback("), "{ir}");
+    assert!(!ir.contains("cannot cross"), "{ir}");
+}
+
+#[test]
+fn optional_jsvalue_listener_takes_the_graph_route_when_given_and_when_omitted() {
+    let on = hex("$method$k::Emitter$on$overload0$arity2");
+    let new = hex("$new$k::Emitter$arity0");
+    let source = format!(
+        "declare function __thaw_typed_tjs_{new}(): JsValue;
+         declare function __thaw_typed_tjs_{on}(receiver: JsValue, event: Json, listener: ((value: JsValue) => void) | undefined): JsValue;
+         function main(): void {{
+           const emitter = __thaw_typed_tjs_{new}();
+           __thaw_typed_tjs_{on}(emitter, \"x\", (chunk: JsValue): void => {{ console.log(chunk); }});
+           __thaw_typed_tjs_{on}(emitter, \"y\", undefined);
+         }}"
+    );
+    let (uses_thaw_js, uses_quickjs, ir) = compile_routed(&source, "thaw_js_optional_jsvalue_listener");
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let calls = |name: &str| ir.lines().any(|line| line.contains("call ") && line.contains(name));
+    assert!(calls("@thaw_tjs_register_native_callback_graph("), "{ir}");
+    assert!(!calls("@thaw_tjs_register_callback("), "{ir}");
+    assert!(!ir.contains("cannot cross"), "{ir}");
+}
