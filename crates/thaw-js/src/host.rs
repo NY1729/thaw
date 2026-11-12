@@ -2232,7 +2232,7 @@ pub extern "C" fn thaw_tjs_emit_rejection_handled_result() -> HandleResult {
 pub extern "C" fn thaw_tjs_error_from_tagged_handle(value: *const c_char) -> HandleResult {
     handle_result((|| {
         let text = cstr(value).ok_or("null framed Error text")?;
-        let owner = LAST_PACKAGE.with(|l| l.get());
+        let owner = default_realm();
         with_package(owner, |p| {
             let it = &mut p.interp;
             let Ctl::Throw(err) = tagged_error(it, &text) else {

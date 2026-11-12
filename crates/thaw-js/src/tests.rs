@@ -7567,3 +7567,22 @@ fn uncaught_exception_monitor_precedes_the_handler_for_a_timer_throw() {
     let order = it.run("order.join(',')").unwrap();
     assert_eq!(it.to_str(&order).to_string(), "monitor,handler");
 }
+
+// A framed Error built with no package loaded (the registered error factory of a program with no JS values).
+#[test]
+fn thaw_tjs_error_from_tagged_handle_builds_with_no_package_loaded() {
+    use crate::host::*;
+    use std::ffi::CString;
+    std::thread::spawn(|| {
+        let framed = CString::new("\u{1}TypeError\u{1}boom").unwrap();
+        let made = thaw_tjs_error_from_tagged_handle(framed.as_ptr());
+        assert!(made.error.is_null());
+        assert_ne!(made.value, 0);
+        let key = CString::new("message").unwrap();
+        assert!(thaw_tjs_get_property_result(made.value, key.as_ptr())
+            .error
+            .is_null());
+    })
+    .join()
+    .unwrap();
+}
