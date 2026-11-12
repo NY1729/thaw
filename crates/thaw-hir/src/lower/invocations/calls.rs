@@ -345,6 +345,89 @@ impl<'a> FnLowerer<'a> {
         is_ordinary_quickjs_symbol(backend, symbol)
     }
 
+    /// Lowers a thaw-js constructor's option object literal that carries a callback (`new Writable({ write })`)
+    /// as a live `__thaw_dynamic_object_literal`, so the callbacks become receiver handles. Only a literal
+    /// whose keys are all declared fields qualifies; any other shape keeps the typed lowering (and its errors).
+    fn thaw_js_ctor_handle_callback(ty: &HirType) -> HirType {
+        match ty {
+            HirType::Optional(inner) => HirType::Optional(Box::new(Self::thaw_js_ctor_handle_callback(inner))),
+            HirType::Function(params, ret) => HirType::Function(
+                params.iter().map(Self::thaw_js_ctor_handle_param).collect(),
+                ret.clone(),
+            ),
+            HirType::CallableFunction(params, this, rest, ret) => HirType::CallableFunction(
+                params.iter().map(Self::thaw_js_ctor_handle_param).collect(),
+                this.clone(),
+                rest.clone(),
+                ret.clone(),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    fn thaw_js_ctor_handle_param(ty: &HirType) -> HirType {
+        match ty {
+            HirType::Function(..) | HirType::CallableFunction(..) => HirType::JsValue,
+            other => other.clone(),
+        }
+    }
+
+    fn lower_thaw_js_ctor_callback_literal(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&HirType>,
+        callee_name: &str,
+        is_extern: bool,
+    ) -> Result<Option<HirExpr>, String> {
+        let Some((DynamicBackend::ThawJs, symbol)) = dynamic_symbol(callee_name) else {
+            return Ok(None);
+        };
+        if !is_extern || !symbol.starts_with("$new$") {
+            return Ok(None);
+        }
+        let Expr::Object(object) = peel_parens(expr) else {
+            return Ok(None);
+        };
+        let Some(fields) = expected.and_then(expected_object_fields) else {
+            return Ok(None);
+        };
+        let has_callback = fields.iter().any(|(_, ty)| {
+            let ty = match ty {
+                HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+                    payload.as_ref()
+                }
+                other => other,
+            };
+            matches!(ty, HirType::Function(..) | HirType::CallableFunction(..))
+        });
+        if !has_callback {
+            return Ok(None);
+        }
+        let all_keys_declared = object.props.iter().all(|prop| match prop {
+            swc_ecma_ast::PropOrSpread::Prop(prop) => {
+                let key = match prop.as_ref() {
+                    swc_ecma_ast::Prop::KeyValue(key_value) => &key_value.key,
+                    swc_ecma_ast::Prop::Method(method) => &method.key,
+                    _ => return false,
+                };
+                self.static_object_property_name(key)
+                    .is_some_and(|name| fields.iter().any(|(field, _)| *field == name))
+            }
+            swc_ecma_ast::PropOrSpread::Spread(_) => false,
+        });
+        if !all_keys_declared {
+            return Ok(None);
+        }
+        // A callback's own function-typed parameter (`write`'s `cb`) reaches the closure as a live handle
+        // the graph wire does not decode into a function, so it is typed `JsValue` (callable as a handle).
+        let fields = fields
+            .iter()
+            .map(|(name, ty)| (name.clone(), Self::thaw_js_ctor_handle_callback(ty)))
+            .collect::<Vec<_>>();
+        self.lower_dynamic_accessor_object_lit_with_expected_fields(object, true, Some(&fields))
+            .map(Some)
+    }
+
     fn is_quickjs_instance_typed_method(backend: DynamicBackend, symbol: &str) -> bool {
         backend == DynamicBackend::QuickJs
             && (symbol.starts_with("$method$") || symbol.starts_with("$methodvoid$"))
@@ -3909,7 +3992,16 @@ impl<'a> FnLowerer<'a> {
                                 // Keep the physical class value for the live projection after source-shape validation.
                                 self.lower_expr(&argument.expr)?
                             }
-                            None => self.lower_expr_with_expected_type(&argument.expr, expected)?,
+                            None => match self.lower_thaw_js_ctor_callback_literal(
+                                &argument.expr,
+                                expected,
+                                &callee_name,
+                                signature.as_ref().is_some_and(|signature| signature.is_extern)
+                                    && method_argument_sources_aligned,
+                            )? {
+                                Some(live) => live,
+                                None => self.lower_expr_with_expected_type(&argument.expr, expected)?,
+                            },
                         }
                     }
                 }
@@ -4371,6 +4463,25 @@ impl<'a> FnLowerer<'a> {
                         && (symbol.starts_with("$method$") || symbol.starts_with("$methodvoid$"))
                 })
         });
+        // A thaw-js constructor's option object: its literal is already live (see `lower_thaw_js_ctor_callback_literal`).
+        let thaw_js_new_slot = signature.as_ref().is_some_and(|signature| {
+            signature.is_extern
+                && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)| {
+                    backend == DynamicBackend::ThawJs && symbol.starts_with("$new$")
+                })
+        });
+        // The live literal of a constructor option object (see `lower_thaw_js_ctor_callback_literal`) keeps its
+        // `Json` marker: no decode to the declared `Object` (that decode would wrap the marker in `JsonAsNative`).
+        let thaw_js_ctor_literal_value = |declared: &HirType, value: &HirExpr| {
+            thaw_js_new_slot
+                && matches!(
+                    declared,
+                    HirType::Object(_) | HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
+                )
+                && expected_object_fields(declared).is_some()
+                && matches!(value, HirExpr::Call(callee, _)
+                    if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_dynamic_object_literal"))
+        };
         // A thaw-js call to a plain extern FUNCTION (method/class symbols start with `$`) may take a live
         // handle for a named object variable passed to an `any`/generic slot.
         let thaw_js_live_owner_slot = signature.as_ref().is_some_and(|signature| {
@@ -4420,6 +4531,7 @@ impl<'a> FnLowerer<'a> {
                     {
                         Ok(value)
                     }
+                    Some(declared) if thaw_js_ctor_literal_value(declared, &value) => Ok(value),
                     Some(declared) => {
                         let public_expected = selected_public_signature
                             .as_ref()
@@ -4844,7 +4956,10 @@ impl<'a> FnLowerer<'a> {
                                     format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                                 })?;
                         }
-                        let value = if live_method_json_argument || promoted_typed_callback {
+                        let value = if live_method_json_argument
+                            || promoted_typed_callback
+                            || thaw_js_ctor_literal_value(declared, &value)
+                        {
                             Ok(value)
                         } else if class_object {
                             self.coerce_primitive_array_argument_aliasing(value, &HirType::Json)

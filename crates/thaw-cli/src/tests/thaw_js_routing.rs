@@ -798,3 +798,14 @@ fn thaw_js_routed_node_http_get_from_listen_callback_refused() {
     assert_eq!(thaw_js_run_guarded(&output), "err ECONNREFUSED\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn thaw_js_ctor_option_callback_declaration_is_plain_only_for_constructors() {
+    let ctor = "declare function __thaw_typed_tjs_246e6577246e6f64653a73747265616d3a3a5772697461626c6524617269747931(opts: { write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }): JsValue;";
+    let method = "declare function __thaw_typed_tjs_246d6574686f64246e6f64653a73747265616d3a3a5772697461626c6524777269746524617269747931(opts: { write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }): JsValue;";
+    // a constructor's option object may carry callbacks (`new Writable({ write })`)
+    assert!(thaw_js_declaration_plain_with(ctor, true));
+    // the same signature is still rejected by default, and for a method operation
+    assert!(!thaw_js_declaration_plain(ctor));
+    assert!(!thaw_js_declaration_plain_with(method, false));
+}
