@@ -1148,15 +1148,17 @@ fn build_with_native_mode_routed(
         .then(|| build_staticlib("thaw-intl"))
         .transpose()?;
     let napi_lib = uses_napi
-        .then(|| {
-            if !uses_quickjs {
-                return build_staticlib_without_default_features("thaw-napi");
+        .then(|| match napi_features(uses_quickjs, compiler.uses_thaw_js(), &runtime_features) {
+            None => build_staticlib_without_default_features("thaw-napi"),
+            Some(features) => {
+                let features = features.iter().map(String::as_str).collect::<Vec<_>>();
+                build_staticlib_with_features("thaw-napi", &features)
             }
-            let features = napi_runtime_features(&runtime_features);
-            let features = features.iter().map(String::as_str).collect::<Vec<_>>();
-            build_staticlib_with_features("thaw-napi", &features)
         })
         .transpose()?;
+    // The thaw-js-engine `thaw-napi` reaches thaw-js through `extern "C"` `thaw_tjs_*` calls only,
+    // so the thaw-js archive must follow it on the link line (see the trailing pass below).
+    let napi_uses_thaw_js = uses_napi && !uses_quickjs && compiler.uses_thaw_js();
     if let Some(napi_lib) = &napi_lib {
         validate_native_addon_imports(&native_addons, napi_lib)?;
     }
@@ -1202,7 +1204,7 @@ fn build_with_native_mode_routed(
             .arg(runtime_lib)
             .arg(jit_lib);
     }
-    if let Some(thaw_js_lib) = thaw_js_lib {
+    if let Some(thaw_js_lib) = &thaw_js_lib {
         linker.arg(thaw_js_lib);
     }
     if let Some(intl_lib) = intl_lib {
@@ -1217,6 +1219,10 @@ fn build_with_native_mode_routed(
     }
     if let Some(napi_lib) = napi_lib {
         linker.arg(napi_lib);
+    }
+    if let (true, Some(thaw_js_lib)) = (napi_uses_thaw_js, &thaw_js_lib) {
+        // Second pass: the napi archive's `thaw_tjs_*` references come after the first thaw-js pass.
+        linker.arg(thaw_js_lib);
     }
     // thaw-quickjs (`thaw_js_dynamic_object_query`) and thaw-napi also call
     // back into thaw-std's `Json` helpers the same "resolved at link time"
@@ -1902,6 +1908,22 @@ fn napi_runtime_features(features: &std::collections::BTreeSet<&str>) -> Vec<Str
         .collect()
 }
 
+/// `thaw-napi` features for a N-API program: the QuickJS engine when the program needs QuickJS,
+/// otherwise the thaw-js engine. `None` builds `thaw-napi` with no engine at all.
+fn napi_features(
+    uses_quickjs: bool,
+    uses_thaw_js: bool,
+    features: &std::collections::BTreeSet<&str>,
+) -> Option<Vec<String>> {
+    if uses_quickjs {
+        Some(napi_runtime_features(features))
+    } else if uses_thaw_js {
+        Some(vec!["engine-thaw-js".to_string()])
+    } else {
+        None
+    }
+}
+
 #[test]
 fn runtime_feature_selection_preserves_exact_requirements() {
     let features = thaw_bridge::required_runtime_features("__thaw_tls_ brotli Intl.NumberFormat");
@@ -1918,6 +1940,21 @@ fn runtime_feature_selection_preserves_exact_requirements() {
         napi_runtime_features(&features),
         ["quickjs", "quickjs-icu4c", "quickjs-intl"]
     );
+}
+
+#[test]
+fn napi_features_select_thaw_js_engine_without_quickjs() {
+    let none: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    assert_eq!(
+        napi_features(false, true, &none),
+        Some(vec!["engine-thaw-js".to_string()])
+    );
+    let brotli: std::collections::BTreeSet<&str> = ["brotli"].into_iter().collect();
+    assert_eq!(
+        napi_features(true, false, &brotli),
+        Some(vec!["quickjs".to_string(), "quickjs-brotli".to_string()])
+    );
+    assert_eq!(napi_features(false, false, &none), None);
 }
 
 fn ensure_static_system_libraries() -> Result<(), String> {
@@ -2241,6 +2278,7 @@ fn run_prepare(args: &[String]) -> Result<(), String> {
     }
     store_prepared_staticlib("thaw-quickjs", true, &[])?;
     store_prepared_staticlib("thaw-napi", true, &[])?;
+    store_prepared_staticlib("thaw-napi", true, &["engine-thaw-js"])?;
     store_prepared_staticlib("thaw-napi", true, &["quickjs"])?;
     store_prepared_staticlib(
         "thaw-napi",
@@ -2317,6 +2355,7 @@ fn prepared_runtime_is_current() -> bool {
         prepared_staticlib_path("thaw-js", false, &[]),
         prepared_staticlib_path("thaw-quickjs", true, &[]),
         prepared_staticlib_path("thaw-napi", true, &[]),
+        prepared_staticlib_path("thaw-napi", true, &["engine-thaw-js"]),
         prepared_staticlib_path("thaw-napi", true, &["quickjs"]),
         prepared_staticlib_path(
             "thaw-napi",
