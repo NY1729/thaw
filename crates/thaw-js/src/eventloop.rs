@@ -217,6 +217,8 @@ pub(crate) struct Rt {
     immediates: Vec<Imm>,
     cleared: Vec<u64>,
     pub(crate) arraybuffer_proto: Option<Obj>,
+    /// SharedArrayBuffer.prototype; separate from ArrayBuffer.prototype (not an ArrayBuffer).
+    pub(crate) sharedarraybuffer_proto: Option<Obj>,
     pub(crate) typed_base_proto: Option<Obj>,
     /// Prototype per `Ty`, in `Ty as usize` order.
     pub(crate) typed_protos: Vec<Obj>,
@@ -1761,6 +1763,15 @@ impl Interp {
             Ok(it.array(vec![Value::Number(active), Value::Number(idle)]))
         });
         g.declare("__thaw_loop_stats", loop_stats, true);
+        // Atomics.wait's only blocking primitive (extras.rs); ms <= 0 or non-finite returns at once.
+        let sleep_ms = self.native(|it, _, a| {
+            let ms = it.num(&arg(a, 0));
+            if ms.is_finite() && ms > 0.0 {
+                std::thread::sleep(std::time::Duration::from_secs_f64(ms / 1000.0));
+            }
+            Ok(Value::Undefined)
+        });
+        g.declare("__thaw_sleep_ms", sleep_ms, true);
         self.set_native(&p, "uptime", |_, _, _| {
             Ok(Value::Number(clock_ms() / 1000.0))
         });
