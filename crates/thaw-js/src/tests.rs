@@ -7207,3 +7207,21 @@ extern "C" fn fake_server_poll_40() -> u8 {
     let n = SERVER_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     u8::from(n < 40)
 }
+
+/// W2 guard: reads of outer names through a 100-variable scope, and a shadowed name one hop deeper, give the
+/// binding a by-name lookup gives (hinted reads included). Holds with or without the exact-membership check.
+#[test]
+fn hinted_reads_through_large_scopes_keep_the_visible_binding() {
+    let decls: String = (0..100).map(|i| format!("let m{i} = {i};")).collect();
+    let src = format!(
+        "{decls} function f() {{ let m7 = 'inner'; return (() => m7 + m8)(); }} \
+         function g() {{ return m50 + m99; }} console.log(f(), g(), f());"
+    );
+    let mut it = Interp::new();
+    it.hint_stats.on = true;
+    assert!(it.run(&src).is_ok());
+    assert_eq!(it.out, vec!["inner8 149 inner8".to_string()]);
+    let mut on = Interp::with_compile_mode(crate::compile::CompileMode::On);
+    assert!(on.run(&src).is_ok());
+    assert_eq!(on.out, it.out);
+}
