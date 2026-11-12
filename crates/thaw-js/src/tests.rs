@@ -4129,6 +4129,14 @@ fn reflect_is_extensible_and_prevent_extensions_exist() {
 }
 
 #[test]
+fn nonextensible_closure_redefines_its_synthesized_name_and_length() {
+    assert_eq!(
+        one("var f = () => {}; Object.preventExtensions(f); console.log(Reflect.defineProperty(f, 'length', { value: 0, writable: false, enumerable: false, configurable: true }), Reflect.defineProperty(f, 'name', { value: 'q', configurable: true }), f.name, Reflect.defineProperty(f, 'name', { value: 'r', configurable: true }), Reflect.defineProperty(f, 'extra', { value: 1 }));"),
+        "true true q true false"
+    );
+}
+
+#[test]
 fn reflect_construct_takes_the_prototype_from_new_target() {
     assert_eq!(
         one("function F() { this.x = 1; } function A() {} A.prototype.hi = 1; var inst = Reflect.construct(F, [], A); console.log(Object.getPrototypeOf(inst) === A.prototype, inst.x, inst instanceof A);"),
