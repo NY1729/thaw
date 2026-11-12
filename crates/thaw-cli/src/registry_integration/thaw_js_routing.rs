@@ -697,13 +697,6 @@ fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'st
     .then_some("createHook with timers/promises resources is not supported on thaw-js yet")
 }
 
-/// `node:child_process` delivers stdout/exit on the thaw-js loop, which node:http's client has not been
-/// shown to share reliably under CI load. Remove once the 3 http+spawn cases pass in CI.
-fn thaw_js_child_process_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    (pkg_name == "node:child_process" && thaw_js_mentions(user_source, "node:http"))
-        .then_some("node:child_process stays on QuickJS while node:http is in the program")
-}
-
 /// A native `createServer` next to the global `fetch` client: the fetch request never completes while the
 /// native server runs, so such a program keeps `node:http` on QuickJS. (`get` / `request` run on thaw-js
 /// next to a native server, see the Q9 Rust-closure this-entry fallback.)
@@ -756,9 +749,6 @@ fn thaw_js_package_eligible(
         return reject(why.into());
     }
     if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
-        return reject(why.into());
-    }
-    if let Some(why) = thaw_js_child_process_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_native_server_with_http_client_blocker(&pkg.name, user_source) {
@@ -884,16 +874,6 @@ fn thaw_js_async_hooks_create_hook_with_timers_or_promises_keeps_the_module_on_q
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", hooks).is_none());
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", "new AsyncLocalStorage();").is_none());
     assert!(thaw_js_async_hooks_blocker("node:path", timers).is_none());
-}
-
-#[cfg(test)]
-#[test]
-fn thaw_js_child_process_blocker_keeps_child_process_on_quickjs_next_to_http() {
-    let http = "import { get } from 'node:http';";
-    let spawn = "import { spawn } from 'node:child_process';";
-    assert!(thaw_js_child_process_blocker("node:child_process", http).is_some());
-    assert!(thaw_js_child_process_blocker("node:child_process", spawn).is_none());
-    assert!(thaw_js_child_process_blocker("node:http", http).is_none());
 }
 
 #[cfg(test)]
