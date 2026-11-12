@@ -490,3 +490,48 @@ fn routed_process_reporters_emit_through_thaw_tjs_and_quickjs_keeps_its_symbols(
     assert!(calls(&quickjs, "@thaw_js_emit_rejection_handled_result("), "{quickjs}");
     assert!(!quickjs.lines().any(|line| line.contains("call ") && line.contains("@thaw_tjs_emit_")), "{quickjs}");
 }
+
+#[test]
+fn every_unported_thaw_js_symbol_in_use_is_listed_as_a_quickjs_blocker() {
+    // Two thaw-js-named functions; only one is called, so only that one may be listed.
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_unported_blockers");
+    let void_fn = context.void_type().fn_type(&[], false);
+    let used = compiler.module.add_function("thaw_js_call_result", void_fn, None);
+    compiler.module.add_function("thaw_js_fatal_exit", void_fn, None);
+    let probe = compiler.module.add_function("q9_probe", void_fn, None);
+    let entry = context.append_basic_block(probe, "entry");
+    compiler.builder.position_at_end(entry);
+    compiler.builder.build_call(used, &[], "").unwrap();
+    compiler.builder.build_return(None).unwrap();
+    compiler.js_unported_symbols_used();
+    assert!(compiler.uses_quickjs());
+    assert_eq!(compiler.quickjs_blockers(), ["unported:thaw_js_call_result".to_string()]);
+}
+
+#[test]
+fn quickjs_site_is_recorded_as_a_blocker_once() {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_site_blockers");
+    compiler.note_quickjs("probe:site");
+    compiler.note_quickjs("probe:site");
+    assert!(compiler.uses_quickjs());
+    assert_eq!(compiler.quickjs_blockers(), ["site:probe:site".to_string()]);
+}
+
+#[test]
+fn routed_typed_quickjs_call_names_its_site_in_the_blockers() {
+    let source = "declare function __thaw_typed_js_6d733a3a6d73(value: string, scale: number): Json;
+         function main(): void { console.log(__thaw_typed_js_6d733a3a6d73(\"2 days\", 1)); }";
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_typed_site");
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
+    assert!(compiler.uses_quickjs());
+    assert_eq!(
+        compiler.quickjs_blockers(),
+        ["site:typed_calls:quickjs_backend".to_string()]
+    );
+}
