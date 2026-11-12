@@ -7567,3 +7567,82 @@ fn uncaught_exception_monitor_precedes_the_handler_for_a_timer_throw() {
     let order = it.run("order.join(',')").unwrap();
     assert_eq!(it.to_str(&order).to_string(), "monitor,handler");
 }
+
+/// Node: `Iterator.from` + the eager-looking helpers return the same values (checked with node 22).
+#[test]
+fn iterator_from_and_helpers_match_node() {
+    assert_eq!(
+        one("console.log(Iterator.from([1,2,3]).map(x=>x*2).toArray().join())"),
+        "2,4,6"
+    );
+    assert_eq!(
+        one("console.log(Iterator.from([1,2,3,4]).reduce((a,b)=>a+b,0), Iterator.from([1,2,3,4]).some(x=>x>3), Iterator.from([1,2,3]).every(x=>x>0), Iterator.from([1,2,3]).find(x=>x>1))"),
+        "10 true true 2"
+    );
+    assert_eq!(
+        one("console.log(Iterator.from([1,2]).flatMap(x=>[x,x*10]).toArray().join(), Iterator.from([1,2,3,4,5]).drop(2).take(2).toArray().join())"),
+        "1,10,2,20 3,4"
+    );
+    assert_eq!(
+        one("let c=0; Iterator.from([5,6]).forEach(x=>{c+=x}); console.log(c)"),
+        "11"
+    );
+    assert_eq!(one("console.log(typeof Iterator, Object.getPrototypeOf(Iterator.prototype)===Object.prototype)"), "function true");
+    assert_eq!(
+        one("try { new Iterator(); } catch (e) { console.log(e.constructor.name); }"),
+        "TypeError"
+    );
+}
+
+/// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
+#[test]
+fn iterator_helpers_are_lazy() {
+    assert_eq!(
+        one("function* nat(){let i=0; while(true) yield i++;} console.log(nat().map(x=>x*x).filter(x=>x%2).take(3).toArray().join())"),
+        "1,9,25"
+    );
+    assert_eq!(
+        one("let n=0; const it = Iterator.from({next(){n++; return {value:n,done:false}}}).map(x=>x); console.log('before', n); console.log(it.next().value, n)"),
+        "before 0|1 1"
+    );
+}
+
+/// Generator and Array iterators inherit the helpers from %IteratorPrototype%. (Map/Set iterators are
+/// arrays in thaw-js, so they do not inherit it yet.)
+#[test]
+fn builtin_iterators_inherit_iterator_prototype() {
+    assert_eq!(
+        one("function* g(){yield 1; yield 2;} console.log(g() instanceof Iterator, [].values() instanceof Iterator)"),
+        "true true"
+    );
+    assert_eq!(
+        one("function* g(){yield 1; yield 2;} console.log(g().map(x=>x+1).toArray().join())"),
+        "2,3"
+    );
+}
+
+/// Node: `JSON.rawJSON` values serialize as their raw text and are frozen null-prototype objects.
+#[test]
+fn json_raw_json_matches_node() {
+    assert_eq!(
+        one("console.log(JSON.stringify({a: JSON.rawJSON('123456789012345678901234567890')}))"),
+        r#"{"a":123456789012345678901234567890}"#
+    );
+    assert_eq!(
+        one("const r = JSON.rawJSON('1'); console.log(JSON.isRawJSON(r), JSON.isRawJSON({}), Object.isFrozen(r), Object.getPrototypeOf(r)===null, r.rawJSON)"),
+        "true false true true 1"
+    );
+    assert_eq!(
+        one("try { JSON.rawJSON('{}'); } catch (e) { console.log(e.constructor.name); }"),
+        "SyntaxError"
+    );
+}
+
+/// `process.hrtime.bigint()` returns a monotonic BigInt of nanoseconds.
+#[test]
+fn process_hrtime_bigint_is_monotonic_bigint() {
+    assert_eq!(
+        one("const a=process.hrtime.bigint(); const b=process.hrtime.bigint(); console.log(typeof a, a > 0n, b >= a)"),
+        "bigint true true"
+    );
+}

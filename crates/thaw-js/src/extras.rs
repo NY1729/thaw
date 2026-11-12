@@ -514,6 +514,203 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   utilTypes.__esModule = true;
   def(globalThis, '__thaw_util_types', utilTypes);
 
+  // ----- Iterator global and iterator helpers. Iterator.prototype is the IterProto base of the
+  // array/String/RegExp iterators (EXTRAS above) and the prototype of generator objects. Map/Set
+  // iterators are arrays here, so they do not inherit the helpers. -----
+  var ITP = Object.getPrototypeOf([].values());
+  var GENP = Object.getPrototypeOf(Object.getPrototypeOf((function* () {})()));
+  function isObj(v) { return v !== null && (typeof v === 'object' || typeof v === 'function'); }
+  function Iterator() {
+    if (new.target === undefined || new.target === Iterator) throw new TypeError('Abstract class Iterator not directly constructable');
+  }
+  Iterator.prototype = ITP;
+  def(ITP, 'constructor', Iterator);
+  Object.setPrototypeOf(GENP, ITP);
+  def(globalThis, 'Iterator', Iterator);
+  function requireObj(v, name) {
+    if (!isObj(v)) throw new TypeError('Iterator.prototype.' + name + ' called on non-object');
+    return v;
+  }
+  function requireFn(f) {
+    if (typeof f !== 'function') throw new TypeError(String(f) + ' is not a function');
+  }
+  function toLimit(limit) {
+    var n = Number(limit);
+    if (n !== n || (n = Math.trunc(n)) < 0) throw new RangeError(String(limit) + ' must be positive');
+    return n;
+  }
+  function closeIt(it) {
+    var r = it.return;
+    if (r !== undefined && r !== null) r.call(it);
+  }
+  function stepOf(it) {
+    var next = it.next;
+    return function () {
+      var r = next.call(it);
+      if (!isObj(r)) throw new TypeError('Iterator result ' + String(r) + ' is not an object');
+      return r;
+    };
+  }
+  // a lazy helper: `pull()` yields {value, done}; `under` (and `cur()`, the active inner iterator) are closed by return()
+  var HelperProto = Object.create(ITP);
+  def(HelperProto, Symbol.toStringTag, 'Iterator Helper');
+  function helper(under, pull, cur) {
+    var h = Object.create(HelperProto), done = false, running = false;
+    def(h, 'next', function next() {
+      if (done) return { value: undefined, done: true };
+      if (running) throw new TypeError('Generator is already running');
+      running = true;
+      var r;
+      try { r = pull(); } catch (e) { done = true; throw e; } finally { running = false; }
+      if (r.done) done = true;
+      return r;
+    });
+    def(h, 'return', function () {
+      if (!done) {
+        done = true;
+        var c = cur && cur();
+        if (c) closeIt(c);
+        closeIt(under);
+      }
+      return { value: undefined, done: true };
+    });
+    return h;
+  }
+  var DONE = { value: undefined, done: true };
+  def(ITP, 'map', function map(fn) {
+    var it = requireObj(this, 'map'); requireFn(fn);
+    var step = stepOf(it), n = 0;
+    return helper(it, function () {
+      var r = step();
+      if (r.done) return DONE;
+      try { return { value: fn(r.value, n++), done: false }; } catch (e) { closeIt(it); throw e; }
+    });
+  });
+  def(ITP, 'filter', function filter(fn) {
+    var it = requireObj(this, 'filter'); requireFn(fn);
+    var step = stepOf(it), n = 0;
+    return helper(it, function () {
+      for (;;) {
+        var r = step();
+        if (r.done) return DONE;
+        var ok;
+        try { ok = fn(r.value, n++); } catch (e) { closeIt(it); throw e; }
+        if (ok) return { value: r.value, done: false };
+      }
+    });
+  });
+  def(ITP, 'take', function take(limit) {
+    var it = requireObj(this, 'take'), left = toLimit(limit), step = stepOf(it);
+    return helper(it, function () {
+      if (left <= 0) { closeIt(it); return DONE; }
+      left--;
+      var r = step();
+      return r.done ? DONE : { value: r.value, done: false };
+    });
+  });
+  def(ITP, 'drop', function drop(limit) {
+    var it = requireObj(this, 'drop'), left = toLimit(limit), step = stepOf(it);
+    return helper(it, function () {
+      while (left > 0) { left--; if (step().done) return DONE; }
+      var r = step();
+      return r.done ? DONE : { value: r.value, done: false };
+    });
+  });
+  def(ITP, 'flatMap', function flatMap(fn) {
+    var it = requireObj(this, 'flatMap'); requireFn(fn);
+    var step = stepOf(it), n = 0, inner = null;
+    return helper(it, function () {
+      for (;;) {
+        if (inner) {
+          var s;
+          try { s = inner.step(); } catch (e) { closeIt(it); throw e; }
+          if (!s.done) return { value: s.value, done: false };
+          inner = null;
+        }
+        var r = step();
+        if (r.done) return DONE;
+        try {
+          var m = fn(r.value, n++);
+          if (!isObj(m)) throw new TypeError(String(m) + ' is not an object');
+          var f = m[Symbol.iterator];
+          var src = f === undefined || f === null ? m : f.call(m);
+          if (!isObj(src)) throw new TypeError(String(src) + ' is not an object');
+          inner = { it: src, step: stepOf(src) };
+        } catch (e) { closeIt(it); throw e; }
+      }
+    }, function () { return inner && inner.it; });
+  });
+  def(ITP, 'reduce', function reduce(fn) {
+    var it = requireObj(this, 'reduce'); requireFn(fn);
+    var step = stepOf(it), acc, c = 0;
+    if (arguments.length < 2) {
+      var first = step();
+      if (first.done) throw new TypeError('Reduce of empty iterator with no initial value');
+      acc = first.value; c = 1;
+    } else acc = arguments[1];
+    for (;;) {
+      var r = step();
+      if (r.done) return acc;
+      try { acc = fn(acc, r.value, c++); } catch (e) { closeIt(it); throw e; }
+    }
+  });
+  def(ITP, 'toArray', function toArray() {
+    var step = stepOf(requireObj(this, 'toArray')), out = [];
+    for (;;) {
+      var r = step();
+      if (r.done) return out;
+      out.push(r.value);
+    }
+  });
+  def(ITP, 'forEach', function forEach(fn) {
+    var it = requireObj(this, 'forEach'); requireFn(fn);
+    var step = stepOf(it), n = 0;
+    for (;;) {
+      var r = step();
+      if (r.done) return undefined;
+      try { fn(r.value, n++); } catch (e) { closeIt(it); throw e; }
+    }
+  });
+  // some / every / find: stop at the first decisive value and close the iterator
+  function search(self, name, fn, decide) {
+    var it = requireObj(self, name); requireFn(fn);
+    var step = stepOf(it), n = 0;
+    for (;;) {
+      var r = step();
+      if (r.done) return decide.none;
+      var ok;
+      try { ok = fn(r.value, n++); } catch (e) { closeIt(it); throw e; }
+      if (!!ok === decide.on) { closeIt(it); return decide.hit(r.value); }
+    }
+  }
+  def(ITP, 'some', function some(fn) {
+    return search(this, 'some', fn, { on: true, none: false, hit: function () { return true; } });
+  });
+  def(ITP, 'every', function every(fn) {
+    return search(this, 'every', fn, { on: false, none: true, hit: function () { return false; } });
+  });
+  def(ITP, 'find', function find(fn) {
+    return search(this, 'find', fn, { on: true, none: undefined, hit: function (v) { return v; } });
+  });
+  def(Iterator, 'from', function from(o) {
+    var it;
+    if (typeof o === 'string' || isObj(o)) {
+      var m = o[Symbol.iterator];
+      it = m === undefined || m === null ? o : m.call(o);
+    }
+    if (!isObj(it)) throw new TypeError(String(o) + ' is not an object');
+    if (ITP.isPrototypeOf(it)) return it;
+    var nx = it.next, w = Object.create(ITP);
+    def(w, 'next', function next() { return nx.call(it); });
+    def(w, 'return', function () {
+      var r = it.return;
+      return r === undefined || r === null ? { value: undefined, done: true } : r.call(it);
+    });
+    return w;
+  });
+  // the native lowering of `Iterator.from` calls this platform global (thaw-hir static_builtins.rs)
+  globalThis.__thaw_iterator_from = function (source) { return Iterator.from(source); };
+
   var start = Date.now();
   if (typeof performance === 'undefined') {
     globalThis.performance = { now: function now() { return typeof __thaw_perf_now === 'function' ? __thaw_perf_now() : Date.now() - start; }, timeOrigin: start };

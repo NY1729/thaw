@@ -1415,9 +1415,11 @@ impl Interp {
                     Kind::Wrapper(_) => "[object Boolean]",
                     Kind::Plain if find_in_chain(o, "__time").is_some() => "[object Date]",
                     Kind::Plain if is_error_instance(it, o) => "[object Error]",
-                    Kind::Plain | Kind::Global | Kind::Generator(_) | Kind::Proxy(_) => {
-                        "[object Object]"
-                    }
+                    Kind::Plain
+                    | Kind::Global
+                    | Kind::Generator(_)
+                    | Kind::Proxy(_)
+                    | Kind::RawJson(_) => "[object Object]",
                 },
             }))
         });

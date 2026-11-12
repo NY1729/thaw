@@ -280,6 +280,8 @@ enum Kind {
     Typed(typed::TypedArr),
     /// `new Number(1)` / `new String('a')` / `new Boolean(true)`.
     Wrapper(Value),
+    /// `JSON.rawJSON(text)`: serializes as `text` verbatim.
+    RawJson(Rc<str>),
 }
 
 type NativeFn = Rc<dyn Fn(&mut Interp, &Value, &[Value]) -> R<Value>>;
@@ -1399,6 +1401,7 @@ impl Interp {
                     | Kind::Set(_)
                     | Kind::Generator(_)
                     | Kind::Proxy(_)
+                    | Kind::RawJson(_)
                     | Kind::Symbol { .. } => K::Plain,
                     Kind::Promise(_) => K::Prom,
                     Kind::Wrapper(p) => K::Bytes(match p {
