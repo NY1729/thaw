@@ -582,17 +582,17 @@ pub(crate) const MODULE_LOADER_GLOBALS: [&str; 2] = [
     "__thaw_bundle_create_require",
 ];
 
-/// Findings a native-addon package bundle carries on thaw-js by design. Its `.node` is loaded through the
-/// prelude's `nativeRequire` (any `*.node` name returns the addon). `__non_webpack_require__` is the node-gyp-build
+/// Findings a native-addon package bundle carries on thaw-js by design. Its `.node` is loaded through thaw-js
+/// `require` (host.rs `addon_of`; any `*.node` name returns the addon). `__non_webpack_require__` is the node-gyp-build
 /// probe, used only when `__webpack_require__` is a function (never on thaw-js). A dynamic `require` is that loader
 /// only when the same bundle also requires a `.node` by name (`bindings`, `node-gyp-build`). Any `method:<name>` is
-/// accepted too: the addon's exports are native functions named by the addon, not by the bundle, so the scan
-/// cannot list them.
+/// accepted too, except `method:dlopen`: the addon's exports are native functions named by the addon, not by the
+/// bundle, so the scan cannot list them. `process.dlopen` itself is never served on thaw-js.
 fn addon_tolerated(feature: &str, node_require: bool) -> bool {
     (feature.starts_with("require:") && feature.ends_with(".node"))
         || (feature == "require:dynamic" && node_require)
         || feature == "global:__non_webpack_require__"
-        || feature.starts_with("method:")
+        || (feature.starts_with("method:") && feature != "method:dlopen")
 }
 
 /// Scan a registry bundle.

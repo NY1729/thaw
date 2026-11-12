@@ -427,7 +427,7 @@ fn c_abi_round_trips_json() {
     crate::host::thaw_tjs_unload(handle);
 }
 
-/// A native-addon package bundle: `.node` is loaded through the prelude's `nativeRequire`, and the
+/// A native-addon package bundle: `.node` is loaded through thaw-js `require` (host.rs `addon_of`), and the
 /// node-gyp-build style probes come with it (`__non_webpack_require__`, a dynamic require).
 const NATIVE_ADDON_BUNDLE: &str = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
@@ -7325,5 +7325,30 @@ fn q9_addon_mode_tolerates_method_exports_only() {
             .map(String::as_str)
             .collect::<Vec<_>>(),
         ["direct-eval"]
+    );
+}
+
+#[test]
+fn scan_addon_mode_keeps_process_dlopen_blocked() {
+    // process.dlopen is not served on thaw-js: addon mode must not tolerate a dlopen method either
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"addon/index.js": function(module, exports, require) {
+  exports.load = function (h, m, p) { return process.dlopen(m, p) || h.dlopen(m, p); };
+},
+};
+var __thaw_bundle_require_maps = { "addon/index.js": {}, };
+var __thaw_bundle_entry_key = "addon/index.js";
+})(globalThis.require);"#;
+    let addon = crate::scan::scan_addon_bundle(bundle).ok().unwrap();
+    assert!(
+        !addon.is_clean(),
+        "dlopen must stay blocked: {:?}",
+        addon.blockers
+    );
+    assert!(
+        addon.blockers.keys().any(|k| k == "method:dlopen"),
+        "{:?}",
+        addon.blockers
     );
 }
