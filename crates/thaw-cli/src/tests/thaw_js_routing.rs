@@ -1141,6 +1141,40 @@ fn routed_esm_next_tick_orders_match_node() {
     }
 }
 
+/// Q9 cluster C1: the node-compat/builtins/ts-runtime case sources for Iterator, iterator helpers and
+/// JSON.rawJSON, routed through thaw-js with RouteAllEnv. The manifests carry no expected output, so the
+/// expected text is what Node 22 prints for the same program (checked with `node`).
+#[test]
+fn routed_iterator_and_raw_json_cases_match_node() {
+    let cases = [
+        (
+            "Iterator.from",
+            "function main(): void { const it = Iterator.from([1,2,3]); console.log(it.next().value, it.next().value); }",
+            "1 2\n",
+        ),
+        (
+            "iterator helpers",
+            "function main(): void { const selected = Iterator.from([1, 2, 3, 4]).map(value => value * 2).filter(value => value > 2).drop(1).take(2).toArray(); const total = Iterator.from([1, 2, 3]).reduce((sum: number, value: number) => sum + value, 0); console.log(selected.join(','), total, Iterator.from(new Set<number>([3, 4])).toArray().join(',')); }",
+            "6,8 6 3,4\n",
+        ),
+        (
+            "JSON.rawJSON",
+            "function main(): void { console.log(JSON.stringify({n: JSON.rawJSON(\"12345678901234567890\")})); }",
+            "{\"n\":12345678901234567890}\n",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let _env = RouteAllEnv::set();
+        let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-c1-{slug}"), body);
+        let output = entry.with_file_name("app");
+        thaw_js_build(&entry, &output, &registry, true);
+        let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+        assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
+    }
+}
+
+
 /// Q9 cluster B1: a native Error caught as `any` or collected in an AggregateError, in a program that loads
 /// no package, goes through the error factory, which must work with an empty package table. The sources are
 /// tests/node-compat.json; the manifests carry no expected-output field, so the expected text is Node's output.
