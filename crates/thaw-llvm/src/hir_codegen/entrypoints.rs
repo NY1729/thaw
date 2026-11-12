@@ -184,6 +184,31 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .unwrap();
             }
+            // Routed thaw-js: the worker and timer callbacks that settle this promise run only inside the
+            // thaw-js event loop, so drive it and wait on the completion again before it is released.
+            if self.thaw_js_routed && self.uses_thaw_js && !self.uses_quickjs {
+                let status = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_js_run_event_loop").unwrap(),
+                        &[],
+                        "run_thaw_js_for_async_main",
+                    )
+                    .unwrap()
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap();
+                self.builder.build_store(quickjs_failure, status).unwrap();
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_runtime_run_until_resolved")
+                            .unwrap(),
+                        &[completion.into()],
+                        "resume_async_main_after_thaw_js",
+                    )
+                    .unwrap();
+            }
             self.builder
                 .build_call(
                     self.module
@@ -193,6 +218,48 @@ impl<'ctx> HirCompiler<'ctx> {
                     "report_async_main_rejection",
                 )
                 .unwrap();
+            // Only a settled completion is released. A still-pending one (its resolver may be reachable from
+            // a callback that fires later) is leaked: the process is exiting, and one box is the ceiling.
+            let state = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_promise_state").unwrap(),
+                    &[completion.into()],
+                    "async_main_state",
+                )
+                .unwrap()
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_int_value();
+            let settled = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    state,
+                    state.get_type().const_zero(),
+                    "async_main_settled",
+                )
+                .unwrap();
+            let function = self
+                .builder
+                .get_insert_block()
+                .unwrap()
+                .get_parent()
+                .unwrap();
+            let destroy_block = self
+                .context
+                .append_basic_block(function, "destroy_settled_async_main");
+            let leak_block = self
+                .context
+                .append_basic_block(function, "leak_pending_async_main");
+            let released_block = self
+                .context
+                .append_basic_block(function, "async_main_completion_released");
+            self.builder
+                .build_conditional_branch(settled, destroy_block, leak_block)
+                .unwrap();
+            self.builder.position_at_end(destroy_block);
             self.builder
                 .build_call(
                     self.module.get_function("thaw_promise_destroy").unwrap(),
@@ -200,6 +267,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     "destroy_async_main",
                 )
                 .unwrap();
+            self.builder.build_unconditional_branch(released_block).unwrap();
+            self.builder.position_at_end(leak_block);
+            self.builder.build_unconditional_branch(released_block).unwrap();
+            self.builder.position_at_end(released_block);
             self.builder
                 .build_call(
                     self.module
