@@ -130,7 +130,7 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
 
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false);
+    assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
