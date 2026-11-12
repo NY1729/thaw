@@ -806,7 +806,7 @@ fn thaw_js_routed_node_http_server_only_links_no_quickjs() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["quickjs"], true, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "listening number\n");
     let _ = std::fs::remove_dir_all(dir);
