@@ -1282,7 +1282,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn release_terminal_handles(&self) -> IntValue<'ctx> {
-        if !self.uses_quickjs_handles {
+        if !self.js_handles_used() {
             return self.context.bool_type().const_zero();
         }
         let count = self.builder.build_call(

@@ -3539,6 +3539,27 @@ fn terminal_quickjs_shutdown_is_emitted_only_for_quickjs_programs() {
 }
 
 #[test]
+fn thaw_js_routed_terminal_shutdown_releases_all_handles() {
+    let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_terminal_release");
+    compiler.uses_napi = true;
+    compiler.uses_thaw_js = true;
+    compiler.uses_thaw_js_handles = true;
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+
+    let release = ir
+        .find("call i64 @thaw_tjs_release_all_handles()")
+        .unwrap_or_else(|| panic!("thaw-js shutdown must release all handles: {ir}"));
+    let poll = ir.find("call i8 @thaw_napi_poll_shutdown(").expect(&ir);
+    assert!(poll < release, "handles must be released after the shutdown poll: {ir}");
+    assert!(!ir.contains("@thaw_js_release_all_handles("), "{ir}");
+}
+
+#[test]
 fn terminal_rejection_listener_jobs_finish_before_process_exit() {
     let source = r#"
         function main(): void {

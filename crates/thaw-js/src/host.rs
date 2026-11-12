@@ -665,6 +665,33 @@ pub extern "C" fn thaw_tjs_release_handle(handle: i64) -> u8 {
     }
 }
 
+/// Release every live handle (terminal shutdown: napi graph pins are dropped with their handles).
+/// Releasing can re-enter napi finalizers, which may retain or create handles, so the scan repeats
+/// until none is live. Returns the number of handles released.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_release_all_handles() -> u64 {
+    let mut released = 0;
+    loop {
+        let live: Vec<i64> = HANDLE_REFS.with(|r| {
+            r.borrow()
+                .iter()
+                .enumerate()
+                .filter(|(_, refs)| **refs > 0)
+                .map(|(index, _)| index as i64 + 1)
+                .collect()
+        });
+        if live.is_empty() {
+            return released;
+        }
+        for handle in &live {
+            while handle_is_live(*handle) {
+                thaw_tjs_release_handle(*handle);
+            }
+        }
+        released += live.len() as u64;
+    }
+}
+
 /// What a class operation does (the symbol prefix compiled code passes).
 enum ClassOp<'a> {
     New {
