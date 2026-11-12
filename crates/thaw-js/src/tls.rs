@@ -1055,6 +1055,7 @@ pub(crate) fn tls_poll_read(handle: u32) -> String {
         let result = stream.read(&mut value);
         let _ = stream.sock.set_nonblocking(false);
         Some(match result {
+            // Node (OpenSSL with SSL_OP_IGNORE_UNEXPECTED_EOF) reads a peer closing without close_notify as a plain EOF.
             Ok(0) => {
                 streams.1.remove(&handle);
                 TLS_CLIENT_CERTIFICATES.with(|certificates| {
@@ -1067,6 +1068,13 @@ pub(crate) fn tls_poll_read(handle: u32) -> String {
                 format!("ok:{}", hex_encode(&value))
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => "pending".to_string(),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                streams.1.remove(&handle);
+                TLS_CLIENT_CERTIFICATES.with(|certificates| {
+                    certificates.borrow_mut().remove(&handle);
+                });
+                "eof".to_string()
+            }
             Err(error) => format!("err:{error}"),
         })
     });
@@ -1089,6 +1097,7 @@ pub(crate) fn tls_poll_read(handle: u32) -> String {
                     format!("ok:{}", hex_encode(&value))
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => "pending".to_string(),
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => "eof".to_string(),
                 Err(error) => format!("err:{error}"),
             }
         })

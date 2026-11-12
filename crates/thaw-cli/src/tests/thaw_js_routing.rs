@@ -2,6 +2,27 @@
 // directly so the tests never touch the process environment.
 
 #[test]
+fn thaw_js_bytes_result_gate_switches_off_for_node_http_and_tls_programs() {
+    let bytes = "declare function __thaw_typed_js_6d73(path: string): Uint8Array;";
+    assert!(!thaw_js_declaration_plain_with(bytes, false));
+    assert!(thaw_js_declaration_plain_with(bytes, true));
+    assert!(thaw_js_declaration_plain(bytes));
+    // a Uint8Array result under a Promise follows the same switch
+    let async_bytes = "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;";
+    assert!(!thaw_js_async_declaration_plain_with(async_bytes, false));
+    assert!(thaw_js_async_declaration_plain_with(async_bytes, true));
+    // the switch only relaxes the bare bytes result, never a rejected parameter
+    let buffer_param = "declare function __thaw_typed_js_6d73(v: Buffer): Uint8Array;";
+    assert!(!thaw_js_declaration_plain_with(buffer_param, true));
+
+    assert!(thaw_js_bytes_result_allowed("import fs from 'node:fs';\nfs.readFileSync(p);"));
+    assert!(!thaw_js_bytes_result_allowed("import https from 'node:https';\nhttps.get(u);"));
+    assert!(!thaw_js_bytes_result_allowed("import http from 'node:http';"));
+    assert!(!thaw_js_bytes_result_allowed("import tls from 'node:tls';"));
+    assert!(!thaw_js_bytes_result_allowed("import http2 from 'node:http2';"));
+}
+
+#[test]
 fn thaw_js_declaration_scan_accepts_plain_data_and_rejects_everything_else() {
     let plain = |line: &str| thaw_js_declaration_plain(line);
     assert!(plain(
@@ -32,6 +53,16 @@ fn thaw_js_declaration_scan_accepts_plain_data_and_rejects_everything_else() {
         "declare function __thaw_typed_js_6d73(): Promise<number>;"
     ));
     assert!(!plain("function __thaw_typed_wrapper_js_6d73(): number {"));
+    // a bare `Uint8Array` result crosses as bytes; in params, unions and nested positions it stays out
+    assert!(plain(
+        "declare function __thaw_typed_js_6d73(path: string): Uint8Array;"
+    ));
+    assert!(!plain(
+        "declare function __thaw_typed_js_6d73(v: Uint8Array): number;"
+    ));
+    assert!(!plain(
+        "declare function __thaw_typed_js_6d73(): Uint8Array | string;"
+    ));
 }
 
 #[test]
@@ -367,6 +398,9 @@ fn thaw_js_async_overload_is_plain_when_its_resolved_type_is() {
     ));
     assert!(!thaw_js_async_declaration_plain(
         "declare function __thaw_typed_js_6d73(t: Promise<string>): string;"
+    ));
+    assert!(thaw_js_async_declaration_plain(
+        "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;"
     ));
 }
 
