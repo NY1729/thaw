@@ -1,7 +1,7 @@
 //! `JSON.stringify` (replacer function / allow-list, `toJSON`, gap, cycle detection) and
 //! `JSON.parse` (reviver, V8-style error messages).
 
-use crate::builtins::json_quote;
+use crate::builtins::{freeze_obj, json_quote};
 use crate::host::Native;
 use crate::*;
 
@@ -15,6 +15,28 @@ struct Ser {
 
 impl Interp {
     pub(crate) fn install_json(&mut self, json: &Obj) {
+        self.set_native(json, "rawJSON", |it, _, args| {
+            let text = it.to_str(&arg(args, 0)).to_string();
+            let b = text.as_bytes();
+            let edge_ws = |c: u8| matches!(c, b'\t' | b'\n' | b'\r' | b' ');
+            // a primitive JSON text only: no surrounding whitespace, no object or array
+            let primitive = !b.is_empty()
+                && !edge_ws(b[0])
+                && !edge_ws(b[b.len() - 1])
+                && !matches!(b[0], b'{' | b'[');
+            let mut p = Parser { s: b, i: 0 };
+            if !primitive || p.top(it).is_err() {
+                return it.throw_error("SyntaxError", "Invalid value for JSON.rawJSON");
+            }
+            let o = new_obj(None, Kind::RawJson(text.as_str().into()));
+            put(&o, "rawJSON", Value::Str(text.as_str().into()));
+            freeze_obj(&o);
+            Ok(Value::Object(o))
+        });
+        self.set_native(json, "isRawJSON", |_, _, args| {
+            let raw = matches!(arg(args, 0), Value::Object(o) if matches!(&*o.kind.borrow(), Kind::RawJson(_)));
+            Ok(Value::Bool(raw))
+        });
         self.set_native(json, "stringify", |it, _, args| {
             let gap = match arg(args, 2) {
                 Value::Number(n) => " ".repeat(n.clamp(0.0, 10.0) as usize),
@@ -194,6 +216,14 @@ impl Interp {
                 self.throw_error("TypeError", "Do not know how to serialize a BigInt")
             }
             Value::Object(o) => {
+                let raw = match &*o.kind.borrow() {
+                    Kind::RawJson(t) => Some(t.clone()),
+                    _ => None,
+                };
+                if let Some(t) = raw {
+                    out.push_str(&t);
+                    return Ok(true);
+                }
                 if v.is_callable() || matches!(&*o.kind.borrow(), Kind::Symbol { .. }) {
                     return Ok(false);
                 }
