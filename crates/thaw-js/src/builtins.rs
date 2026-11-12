@@ -31,6 +31,8 @@ pub(crate) const PRELUDE: &str = r#"
     return m ? this.name + ': ' + m : String(this.name);
   });
   def(E, 'captureStackTrace', function () {});
+  // V8 hook: unset by default (undefined), assignable by addon loaders (`bindings` saves and restores it)
+  def(E, 'prepareStackTrace', undefined);
   E.stackTraceLimit = 10;
   Error = E;
   TypeError = mkError('TypeError', E);

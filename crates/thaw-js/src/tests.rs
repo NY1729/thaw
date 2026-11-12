@@ -7281,3 +7281,49 @@ extern "C" fn fake_server_poll_40() -> u8 {
     let n = SERVER_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     u8::from(n < 40)
 }
+
+#[test]
+fn q9_process_config_and_error_prepare_stack_trace_exist() {
+    let (out, code) = main_run(
+        "console.log(typeof process.config, typeof process.config.variables, typeof process.config.target_defaults);\n\
+         console.log(Error.prepareStackTrace === undefined);\n\
+         Error.prepareStackTrace = function (e, frames) { return 'x'; };\n\
+         console.log(typeof Error.prepareStackTrace);",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(out.join("|"), "object object object|true|function");
+}
+
+#[test]
+fn q9_scan_clean_for_process_config_and_prepare_stack_trace() {
+    let src = "module.exports = (function(require){ var __thaw_bundle_factories = { \"p/index.js\": function(module, exports, require) { exports.c = process.config.variables; exports.p = Error.prepareStackTrace; } }; var __thaw_bundle_require_maps = { \"p/index.js\": {} }; var __thaw_bundle_entry_key = \"p/index.js\"; })(globalThis.require);";
+    let report = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+}
+
+#[test]
+fn q9_addon_mode_tolerates_method_exports_only() {
+    let src = "module.exports = (function(require){ var __thaw_bundle_factories = { \"p/index.js\": function(module, exports, require) { var b = require('./build/Release/x.node'); exports.v = b.encrypt_sync('a'); } }; var __thaw_bundle_require_maps = { \"p/index.js\": {} }; var __thaw_bundle_entry_key = \"p/index.js\"; })(globalThis.require);";
+    let plain = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(
+        plain.blockers.contains_key("method:encrypt_sync"),
+        "{:?}",
+        plain.blockers
+    );
+    let addon = crate::scan::scan_addon_bundle(src).ok().unwrap();
+    assert!(addon.is_clean(), "{:?}", addon.blockers);
+    // addon mode keeps the other rules: an unrelated direct eval is still reported
+    let with_eval = src.replace(
+        "exports.v = b.encrypt_sync('a');",
+        "exports.v = b.encrypt_sync('a'); eval('1');",
+    );
+    let report = crate::scan::scan_addon_bundle(&with_eval).ok().unwrap();
+    assert_eq!(
+        report
+            .blockers
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["direct-eval"]
+    );
+}
