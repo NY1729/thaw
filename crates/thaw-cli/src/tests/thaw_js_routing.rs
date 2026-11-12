@@ -952,19 +952,20 @@ fn routed_uncaught_and_rejection_reports_reach_thaw_js_process_listeners() {
     }
 }
 
-/// Sets `THAW_JS_ROUTE_ALL=1` for one test and removes it on drop (even when the test panics).
+/// Turns route-all on for the calling thread only (the same effect as `THAW_JS_ROUTE_ALL=1`, without
+/// touching the process env that parallel tests share). Off again on drop, even when the test panics.
 struct RouteAllEnv;
 
 impl RouteAllEnv {
     fn set() -> Self {
-        std::env::set_var("THAW_JS_ROUTE_ALL", "1");
+        set_thaw_js_route_all_override(true);
         RouteAllEnv
     }
 }
 
 impl Drop for RouteAllEnv {
     fn drop(&mut self) {
-        std::env::remove_var("THAW_JS_ROUTE_ALL");
+        set_thaw_js_route_all_override(false);
     }
 }
 
@@ -975,6 +976,17 @@ fn thaw_js_route_all_is_opt_in_on_exactly_one() {
     assert!(!thaw_js_route_all_from(Some("0")));
     assert!(!thaw_js_route_all_from(Some("")));
     assert!(!thaw_js_route_all_from(Some("true")));
+}
+
+#[test]
+fn thaw_js_route_all_override_is_thread_local() {
+    if std::env::var("THAW_JS_ROUTE_ALL").is_ok() {
+        return; // the isolation check needs the env unset by the outer shell
+    }
+    let _env = RouteAllEnv::set();
+    assert!(thaw_js_route_all_enabled());
+    let other_thread = std::thread::spawn(thaw_js_route_all_enabled).join().unwrap();
+    assert!(!other_thread, "a route-all override must not leak to another thread");
 }
 
 #[test]
