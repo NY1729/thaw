@@ -665,14 +665,14 @@ fn thaw_js_child_process_blocker(pkg_name: &str, user_source: &str) -> Option<&'
         .then_some("node:child_process stays on QuickJS while node:http is in the program")
 }
 
-/// A native `createServer` next to a thaw-js http client (`get` / `request` / global `fetch`): the client's
-/// request never completes while the native server runs, so such a program keeps `node:http` on QuickJS.
+/// A native `createServer` next to the global `fetch` client: the fetch request never completes while the
+/// native server runs, so such a program keeps `node:http` on QuickJS. (`get` / `request` run on thaw-js
+/// next to a native server, see the Q9 Rust-closure this-entry fallback.)
 fn thaw_js_native_server_with_http_client_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
     (pkg_name == "node:http"
         && thaw_js_uses_function(user_source, "createServer")
-        && (["get", "request"].iter().any(|name| thaw_js_uses_function(user_source, name))
-            || thaw_js_mentions(user_source, "fetch")))
-        .then_some("native createServer together with a thaw-js http client (get/request/fetch) is not supported on thaw-js yet")
+        && thaw_js_mentions(user_source, "fetch"))
+        .then_some("native createServer together with global fetch is not supported on thaw-js yet")
 }
 
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
@@ -858,9 +858,9 @@ fn thaw_js_child_process_blocker_keeps_child_process_on_quickjs_next_to_http() {
 #[test]
 fn thaw_js_native_server_with_http_client_keeps_node_http_on_quickjs() {
     let combo = "import * as http from 'node:http';\nconst s = http.createServer(() => {});\nhttp.get('http://x/', () => {});";
-    assert!(thaw_js_native_server_with_http_client_blocker("node:http", combo).is_some());
+    assert!(thaw_js_native_server_with_http_client_blocker("node:http", combo).is_none());
     let request = "import * as http from 'node:http';\nhttp.createServer(() => {});\nhttp.request('http://x/', () => {});";
-    assert!(thaw_js_native_server_with_http_client_blocker("node:http", request).is_some());
+    assert!(thaw_js_native_server_with_http_client_blocker("node:http", request).is_none());
     let server_only = "import * as http from 'node:http';\nhttp.createServer(() => {}).listen(0);";
     assert!(thaw_js_native_server_with_http_client_blocker("node:http", server_only).is_none());
     let client_only = "import * as http from 'node:http';\nhttp.get('http://x/', () => {});";

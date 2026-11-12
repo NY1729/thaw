@@ -402,6 +402,27 @@ fn thaw_js_callback_adapter_registers_host_operations_before_graph_decode() {
 }
 
 #[test]
+fn thaw_js_graph_callback_falls_back_to_the_plain_entry_when_this_entry_is_null() {
+    // Rust-built closures (thaw-std NativeClosure) have a null this-entry at offset 8;
+    // the adapter must call their plain entry at offset 0 instead of jumping to null.
+    let source = "declare function __thaw_typed_tjs_6d733a3a6d73(options: JsValue): Json;
+         function main(): void { console.log(__thaw_typed_tjs_6d733a3a6d73({ adapter: (config: any): string => String(config.url) })); }";
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_callback_null_this_entry");
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let body = ir
+        .split("\ndefine ")
+        .find(|function| function.split('(').next().unwrap_or("").contains("@__thaw_napi_value_callback_") && function.contains("callback_holder_word"))
+        .unwrap_or_else(|| panic!("{ir}"));
+    assert!(body.contains("%napi_value_callback_this_entry_missing = icmp eq ptr"), "{body}");
+    assert!(body.contains("%invoke_napi_value_callback_plain = call"), "{body}");
+}
+
+#[test]
 fn async_throw_of_a_jsvalue_records_its_handle_id_before_the_tag_seven_store() {
     // The tag-7 packet carries the live handle id in its i64 slot, so a Promise hop on another
     // thread can still resolve the thrown object.

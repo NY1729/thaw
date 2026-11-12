@@ -372,10 +372,23 @@ pub extern "C" fn serveOnceWith(port: f64, callback: *const c_void) -> *const c_
     CString::new(result).unwrap_or_default().into_raw()
 }
 
+/// Layout shared with compiled closures: `code` at 0, the thaw-js this-entry at 8, captures from 16.
+/// Rust-built closures have no this-entry, so it stays null and the adapter calls `code` directly.
 #[repr(C)]
 struct NativeClosure {
     code: *const c_void,
+    this_entry: *const c_void,
     context: *mut c_void,
+}
+
+impl NativeClosure {
+    fn new(code: *const c_void, context: *mut c_void) -> Self {
+        Self {
+            code,
+            this_entry: std::ptr::null(),
+            context,
+        }
+    }
 }
 
 struct ResponseState {
@@ -609,34 +622,34 @@ impl RequestContext {
                 body_bytes: std::ptr::null(),
                 get_header: std::ptr::null(),
             },
-            request_on: NativeClosure {
-                code: request_add_listener as *const c_void,
-                context: std::ptr::null_mut(),
-            },
-            request_body: NativeClosure {
-                code: request_body_string as *const c_void,
-                context: std::ptr::null_mut(),
-            },
-            request_body_hex: NativeClosure {
-                code: request_body_hex as *const c_void,
-                context: std::ptr::null_mut(),
-            },
-            request_body_bytes: NativeClosure {
-                code: request_body_bytes as *const c_void,
-                context: std::ptr::null_mut(),
-            },
-            request_get_header: NativeClosure {
-                code: request_get_header as *const c_void,
-                context: std::ptr::null_mut(),
-            },
-            write_bytes: NativeClosure {
-                code: response_write_bytes as *const c_void,
-                context: std::ptr::null_mut(),
-            },
-            end_bytes: NativeClosure {
-                code: response_end_bytes as *const c_void,
-                context: std::ptr::null_mut(),
-            },
+            request_on: NativeClosure::new(
+                request_add_listener as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            request_body: NativeClosure::new(
+                request_body_string as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            request_body_hex: NativeClosure::new(
+                request_body_hex as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            request_body_bytes: NativeClosure::new(
+                request_body_bytes as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            request_get_header: NativeClosure::new(
+                request_get_header as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            write_bytes: NativeClosure::new(
+                response_write_bytes as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            end_bytes: NativeClosure::new(
+                response_end_bytes as *const c_void,
+                std::ptr::null_mut(),
+            ),
             _raw_body: body.to_vec(),
             _delivered_offset: 0,
             _body_string: None,
@@ -645,22 +658,16 @@ impl RequestContext {
             request_end_listeners: Vec::new(),
             body_events_delivered: false,
             _headers: headers.to_vec(),
-            set_header: NativeClosure {
-                code: response_set_header as *const c_void,
-                context: std::ptr::null_mut(),
-            },
-            write: NativeClosure {
-                code: response_write as *const c_void,
-                context: std::ptr::null_mut(),
-            },
-            end: NativeClosure {
-                code: response_end as *const c_void,
-                context: std::ptr::null_mut(),
-            },
-            end_encoded: NativeClosure {
-                code: response_end_encoded as *const c_void,
-                context: std::ptr::null_mut(),
-            },
+            set_header: NativeClosure::new(
+                response_set_header as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            write: NativeClosure::new(response_write as *const c_void, std::ptr::null_mut()),
+            end: NativeClosure::new(response_end as *const c_void, std::ptr::null_mut()),
+            end_encoded: NativeClosure::new(
+                response_end_encoded as *const c_void,
+                std::ptr::null_mut(),
+            ),
             _method: CString::new(method).unwrap_or_default(),
             _url: CString::new(target).unwrap_or_default(),
         });
@@ -2983,42 +2990,42 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         pending_errors: Mutex::new(Vec::new()),
         close_requested: AtomicBool::new(false),
     }));
-    let listen = Box::into_raw(Box::new(NativeClosure {
-        code: server_listen as *const c_void,
-        context: state.cast(),
-    }));
-    let listen_many = Box::into_raw(Box::new(NativeClosure {
-        code: server_listen_many as *const c_void,
-        context: state.cast(),
-    }));
-    let listen_with_callback = Box::into_raw(Box::new(NativeClosure {
-        code: server_listen_with_callback as *const c_void,
-        context: state.cast(),
-    }));
-    let close = Box::into_raw(Box::new(NativeClosure {
-        code: server_close as *const c_void,
-        context: state.cast(),
-    }));
-    let close_with_callback = Box::into_raw(Box::new(NativeClosure {
-        code: server_close_with_callback as *const c_void,
-        context: state.cast(),
-    }));
-    let on = Box::into_raw(Box::new(NativeClosure {
-        code: server_on as *const c_void,
-        context: state.cast(),
-    }));
-    let on_error = Box::into_raw(Box::new(NativeClosure {
-        code: server_on_error as *const c_void,
-        context: state.cast(),
-    }));
-    let listen_with_host_callback = Box::into_raw(Box::new(NativeClosure {
-        code: server_listen_with_host_callback as *const c_void,
-        context: state.cast(),
-    }));
-    let address = Box::into_raw(Box::new(NativeClosure {
-        code: server_address as *const c_void,
-        context: state.cast(),
-    }));
+    let listen = Box::into_raw(Box::new(NativeClosure::new(
+        server_listen as *const c_void,
+        state.cast(),
+    )));
+    let listen_many = Box::into_raw(Box::new(NativeClosure::new(
+        server_listen_many as *const c_void,
+        state.cast(),
+    )));
+    let listen_with_callback = Box::into_raw(Box::new(NativeClosure::new(
+        server_listen_with_callback as *const c_void,
+        state.cast(),
+    )));
+    let close = Box::into_raw(Box::new(NativeClosure::new(
+        server_close as *const c_void,
+        state.cast(),
+    )));
+    let close_with_callback = Box::into_raw(Box::new(NativeClosure::new(
+        server_close_with_callback as *const c_void,
+        state.cast(),
+    )));
+    let on = Box::into_raw(Box::new(NativeClosure::new(
+        server_on as *const c_void,
+        state.cast(),
+    )));
+    let on_error = Box::into_raw(Box::new(NativeClosure::new(
+        server_on_error as *const c_void,
+        state.cast(),
+    )));
+    let listen_with_host_callback = Box::into_raw(Box::new(NativeClosure::new(
+        server_listen_with_host_callback as *const c_void,
+        state.cast(),
+    )));
+    let address = Box::into_raw(Box::new(NativeClosure::new(
+        server_address as *const c_void,
+        state.cast(),
+    )));
     let server = Box::into_raw(Box::new(Server {
         listen,
         listen_with_callback,
@@ -3069,6 +3076,15 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_closure_layout_matches_compiled_closures() {
+        // Compiled closures keep the thaw-js this-entry at offset 8 and captures from 16.
+        assert_eq!(std::mem::offset_of!(NativeClosure, this_entry), 8);
+        assert_eq!(std::mem::offset_of!(NativeClosure, context), 16);
+        let closure = NativeClosure::new(std::ptr::null(), std::ptr::null_mut());
+        assert!(closure.this_entry.is_null());
+    }
 
     // Unrun regression: HTTP bytes support the common sparse-array handle ABI.
     #[test]
@@ -3128,7 +3144,7 @@ mod tests {
         )
         .cast::<NativeClosure>();
         assert!(!callback.is_null());
-        unsafe { callback.write(NativeClosure { code, context }) };
+        unsafe { callback.write(NativeClosure::new(code, context)) };
         callback.cast()
     }
 
@@ -3440,14 +3456,14 @@ mod tests {
                 lock_was_free: std::cell::Cell::new(false),
                 calls: std::cell::Cell::new(0),
             });
-            let callback = Box::new(NativeClosure {
-                code: if error_event {
+            let callback = Box::new(NativeClosure::new(
+                if error_event {
                     on_error as *const c_void
                 } else {
                     on_event as *const c_void
                 },
-                context: (&*probe as *const Probe).cast_mut().cast(),
-            });
+                (&*probe as *const Probe).cast_mut().cast(),
+            ));
             let listener = EventListener {
                 callback: (&*callback as *const NativeClosure) as usize,
                 once: true,
@@ -3519,14 +3535,8 @@ mod tests {
             error_calls: std::cell::Cell::new(0),
         });
         let context = (&*probe as *const Probe).cast_mut().cast();
-        let close_callback = Box::new(NativeClosure {
-            code: on_close as *const c_void,
-            context,
-        });
-        let error_callback = Box::new(NativeClosure {
-            code: on_error as *const c_void,
-            context,
-        });
+        let close_callback = Box::new(NativeClosure::new(on_close as *const c_void, context));
+        let error_callback = Box::new(NativeClosure::new(on_error as *const c_void, context));
         first.close_listeners.lock().unwrap().push(EventListener {
             callback: (&*close_callback as *const NativeClosure) as usize,
             once: true,
@@ -3573,10 +3583,10 @@ mod tests {
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (stream, _) = listener.accept().unwrap();
         client.shutdown(Shutdown::Write).unwrap();
-        let callback = Box::new(NativeClosure {
-            code: callback as *const c_void,
-            context: std::ptr::null_mut(),
-        });
+        let callback = Box::new(NativeClosure::new(
+            callback as *const c_void,
+            std::ptr::null_mut(),
+        ));
         let server = Box::new(ServerState {
             callback: (&*callback as *const NativeClosure) as usize,
             closed: AtomicBool::new(false),
@@ -3643,10 +3653,10 @@ mod tests {
             .cast::<NativeClosure>();
             assert!(!callback.is_null());
             unsafe {
-                callback.write(NativeClosure {
-                    code: on_data as *const c_void,
-                    context: &calls as *const AtomicUsize as *mut c_void,
-                })
+                callback.write(NativeClosure::new(
+                    on_data as *const c_void,
+                    &calls as *const AtomicUsize as *mut c_void,
+                ))
             };
             let context_ptr = Box::into_raw(RequestContext::new(
                 "POST",
@@ -3673,10 +3683,10 @@ mod tests {
             assert!(thaw_arena::was_reclaimed(callback as usize));
 
             let foreign_calls = AtomicUsize::new(0);
-            let foreign = NativeClosure {
-                code: on_data as *const c_void,
-                context: &foreign_calls as *const AtomicUsize as *mut c_void,
-            };
+            let foreign = NativeClosure::new(
+                on_data as *const c_void,
+                &foreign_calls as *const AtomicUsize as *mut c_void,
+            );
             let context_ptr = Box::into_raw(RequestContext::new(
                 "POST",
                 "/",
@@ -3716,10 +3726,10 @@ mod tests {
             .cast::<NativeClosure>();
             assert!(!callback.is_null());
             unsafe {
-                callback.write(NativeClosure {
-                    code: on_end as *const c_void,
-                    context: &calls as *const AtomicUsize as *mut c_void,
-                })
+                callback.write(NativeClosure::new(
+                    on_end as *const c_void,
+                    &calls as *const AtomicUsize as *mut c_void,
+                ))
             };
             let context_ptr = Box::into_raw(RequestContext::new(
                 "POST",
@@ -3805,10 +3815,10 @@ mod tests {
             .cast::<NativeClosure>();
             assert!(!first_callback.is_null());
             unsafe {
-                first_callback.write(NativeClosure {
-                    code: first as *const c_void,
-                    context: std::ptr::null_mut(),
-                });
+                first_callback.write(NativeClosure::new(
+                    first as *const c_void,
+                    std::ptr::null_mut(),
+                ));
             }
             let context_ptr = Box::into_raw(RequestContext::new(
                 "POST",
@@ -3844,14 +3854,14 @@ mod tests {
                 second_retained: AtomicBool::new(false),
             };
             unsafe {
-                first_callback.write(NativeClosure {
-                    code: first as *const c_void,
-                    context: &probe as *const Probe as *mut c_void,
-                });
-                second_callback.write(NativeClosure {
-                    code: second as *const c_void,
-                    context: &probe as *const Probe as *mut c_void,
-                });
+                first_callback.write(NativeClosure::new(
+                    first as *const c_void,
+                    &probe as *const Probe as *mut c_void,
+                ));
+                second_callback.write(NativeClosure::new(
+                    second as *const c_void,
+                    &probe as *const Probe as *mut c_void,
+                ));
             }
             deliver_request_body_listeners(false, context_ptr);
             assert_eq!(probe.first_calls.load(Ordering::Acquire), 1);
@@ -3914,14 +3924,8 @@ mod tests {
             &[],
             std::ptr::null_mut(),
         ));
-        let first_callback = NativeClosure {
-            code: first as *const c_void,
-            context: context_ptr.cast(),
-        };
-        let second_callback = NativeClosure {
-            code: second as *const c_void,
-            context: context_ptr.cast(),
-        };
+        let first_callback = NativeClosure::new(first as *const c_void, context_ptr.cast());
+        let second_callback = NativeClosure::new(second as *const c_void, context_ptr.cast());
         SECOND_CALLBACK.with(|slot| slot.set((&second_callback as *const NativeClosure).cast()));
         unsafe {
             (*context_ptr)
@@ -4026,10 +4030,10 @@ mod tests {
         .cast::<NativeClosure>();
         assert!(!callback.is_null());
         unsafe {
-            callback.write(NativeClosure {
-                code: end_in_data as *const c_void,
-                context: &probe as *const Probe as *mut c_void,
-            });
+            callback.write(NativeClosure::new(
+                end_in_data as *const c_void,
+                &probe as *const Probe as *mut c_void,
+            ));
             assert!(request_add_listener(
                 (*context).request.on.cast(),
                 c"data".as_ptr(),
@@ -4449,10 +4453,10 @@ mod tests {
         let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let callback = Box::into_raw(Box::new(NativeClosure {
-            code: callback as *const c_void,
-            context: std::ptr::null_mut(),
-        }));
+        let callback = Box::into_raw(Box::new(NativeClosure::new(
+            callback as *const c_void,
+            std::ptr::null_mut(),
+        )));
         let state = Arc::new(ServerState {
             callback: callback as usize,
             closed: AtomicBool::new(false),
@@ -4506,10 +4510,10 @@ mod tests {
         let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let callback = Box::into_raw(Box::new(NativeClosure {
-            code: callback as *const c_void,
-            context: std::ptr::null_mut(),
-        }));
+        let callback = Box::into_raw(Box::new(NativeClosure::new(
+            callback as *const c_void,
+            std::ptr::null_mut(),
+        )));
         let state = Box::into_raw(Box::new(ServerState {
             callback: callback as usize,
             closed: AtomicBool::new(false),
@@ -4524,10 +4528,7 @@ mod tests {
             close_requested: AtomicBool::new(false),
         }));
         unsafe { (*callback).context = state.cast() };
-        let listen = NativeClosure {
-            code: server_listen as *const c_void,
-            context: state.cast(),
-        };
+        let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
         unsafe {
             let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
             assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
@@ -4602,10 +4603,10 @@ mod tests {
         let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let callback = Box::into_raw(Box::new(NativeClosure {
-            code: callback as *const c_void,
-            context: std::ptr::null_mut(),
-        }));
+        let callback = Box::into_raw(Box::new(NativeClosure::new(
+            callback as *const c_void,
+            std::ptr::null_mut(),
+        )));
         let state = Box::into_raw(Box::new(ServerState {
             callback: callback as usize,
             closed: AtomicBool::new(false),
@@ -4620,10 +4621,7 @@ mod tests {
             close_requested: AtomicBool::new(false),
         }));
         unsafe { (*callback).context = state.cast() };
-        let listen = NativeClosure {
-            code: server_listen as *const c_void,
-            context: state.cast(),
-        };
+        let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
         unsafe {
             let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
             assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
@@ -4740,10 +4738,10 @@ mod tests {
         let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let callback = Box::into_raw(Box::new(NativeClosure {
-            code: callback as *const c_void,
-            context: std::ptr::null_mut(),
-        }));
+        let callback = Box::into_raw(Box::new(NativeClosure::new(
+            callback as *const c_void,
+            std::ptr::null_mut(),
+        )));
         let state = Box::into_raw(Box::new(ServerState {
             callback: callback as usize,
             closed: AtomicBool::new(false),
@@ -4758,10 +4756,7 @@ mod tests {
             close_requested: AtomicBool::new(false),
         }));
         unsafe { (*callback).context = state.cast() };
-        let listen = NativeClosure {
-            code: server_listen as *const c_void,
-            context: state.cast(),
-        };
+        let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
         unsafe {
             let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
             assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
