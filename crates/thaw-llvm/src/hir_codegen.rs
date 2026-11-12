@@ -1323,6 +1323,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_js_terminal_work_pending",
                     "thaw_tjs_terminal_work_pending",
                 ),
+                (
+                    "thaw_js_emit_uncaught_result",
+                    "thaw_tjs_emit_uncaught_result",
+                ),
+                (
+                    "thaw_js_emit_unhandled_rejection_result",
+                    "thaw_tjs_emit_unhandled_rejection_result",
+                ),
+                (
+                    "thaw_js_emit_rejection_handled_result",
+                    "thaw_tjs_emit_rejection_handled_result",
+                ),
             ] {
                 if let Some(function) = self.module.get_function(quickjs) {
                     function.as_global_value().set_name(thaw_js);

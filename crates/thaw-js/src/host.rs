@@ -2124,6 +2124,109 @@ pub extern "C" fn thaw_tjs_resolve_handle_handle_result(handle: u64) -> HandleRe
     }))
 }
 
+/// Emit a native uncaught exception or rejection on the first loaded realm whose `process` listens to one of
+/// `events`. The result is the emit's handled flag, or the listener's thrown text; no listener is `0`.
+// ponytail: first realm with a matching listener, not the realm the report came from (QuickJS has one `process`).
+fn native_process_report(
+    events: &[&str],
+    emit: impl FnOnce(&mut Interp) -> R<bool>,
+) -> HandleResult {
+    let count = PACKAGES.with(|ps| ps.borrow().len());
+    let owner = (0..count).find(|&handle| {
+        with_package(handle, |p| {
+            Ok(events.iter().any(|e| p.interp.has_process_listeners(e)))
+        })
+        .unwrap_or(false)
+    });
+    let Some(owner) = owner else {
+        return HandleResult {
+            value: 0,
+            error: ptr::null_mut(),
+        };
+    };
+    match with_package(owner, |p| {
+        Ok(emit(&mut p.interp).map_err(|c| classify(&mut p.interp, c)))
+    }) {
+        Ok(Ok(handled)) => HandleResult {
+            value: u64::from(handled),
+            error: ptr::null_mut(),
+        },
+        Ok(Err(e)) | Err(e) => HandleResult {
+            value: 0,
+            error: thaw_arena::owned_string(error_text(e)),
+        },
+    }
+}
+
+/// The `Error` a native report carries: framed (`\u{1}Name\u{1}message`) text, or a plain message.
+fn native_report_error(it: &mut Interp, raw: &str) -> R<Value> {
+    match tagged_error(it, raw) {
+        Ctl::Throw(v) => Ok(v),
+        other => Err(other),
+    }
+}
+
+fn native_report_text(message: *const c_char) -> Option<String> {
+    if message.is_null() {
+        return None;
+    }
+    // SAFETY: the compiled side passes a NUL-terminated string.
+    Some(
+        unsafe { CStr::from_ptr(message) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// A native uncaught exception: `process.emit('uncaughtExceptionMonitor')`, then `uncaughtException`.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_emit_uncaught_result(message: *const c_char) -> HandleResult {
+    let Some(raw) = native_report_text(message) else {
+        return HandleResult {
+            value: 0,
+            error: ptr::null_mut(),
+        };
+    };
+    native_process_report(&["uncaughtExceptionMonitor", "uncaughtException"], |it| {
+        let error = native_report_error(it, &raw)?;
+        it.emit(
+            "uncaughtExceptionMonitor",
+            &[error.clone(), Value::str("uncaughtException")],
+        )?;
+        it.emit(
+            "uncaughtException",
+            &[error, Value::str("uncaughtException")],
+        )
+    })
+}
+
+/// A native unhandled rejection: an untagged reason is a rejected string, a framed one an `Error`.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_emit_unhandled_rejection_result(message: *const c_char) -> HandleResult {
+    let Some(raw) = native_report_text(message) else {
+        return HandleResult {
+            value: 0,
+            error: ptr::null_mut(),
+        };
+    };
+    native_process_report(&["unhandledRejection"], |it| {
+        let reason = if raw.starts_with('\u{1}') {
+            native_report_error(it, &raw)?
+        } else {
+            Value::str(&raw)
+        };
+        it.emit("unhandledRejection", &[reason, Value::Undefined])
+    })
+}
+
+/// A previously unhandled Promise gained a handler: `process.emit('rejectionHandled')`.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_emit_rejection_handled_result() -> HandleResult {
+    native_process_report(&["rejectionHandled"], |it| {
+        it.emit("rejectionHandled", &[Value::Undefined])
+    })
+}
+
 /// A genuine `Error` object from the compiler's framed error text, as a new handle.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_error_from_tagged_handle(value: *const c_char) -> HandleResult {
