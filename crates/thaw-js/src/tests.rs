@@ -7646,3 +7646,22 @@ fn process_hrtime_bigint_is_monotonic_bigint() {
         "bigint true true"
     );
 }
+
+// A framed Error built with no package loaded (the registered error factory of a program with no JS values).
+#[test]
+fn thaw_tjs_error_from_tagged_handle_builds_with_no_package_loaded() {
+    use crate::host::*;
+    use std::ffi::CString;
+    std::thread::spawn(|| {
+        let framed = CString::new("\u{1}TypeError\u{1}boom").unwrap();
+        let made = thaw_tjs_error_from_tagged_handle(framed.as_ptr());
+        assert!(made.error.is_null());
+        assert_ne!(made.value, 0);
+        let key = CString::new("message").unwrap();
+        assert!(thaw_tjs_get_property_result(made.value, key.as_ptr())
+            .error
+            .is_null());
+    })
+    .join()
+    .unwrap();
+}

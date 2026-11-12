@@ -1173,3 +1173,35 @@ fn routed_iterator_and_raw_json_cases_match_node() {
         assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
     }
 }
+
+
+/// Q9 cluster B1: a native Error caught as `any` or collected in an AggregateError, in a program that loads
+/// no package, goes through the error factory, which must work with an empty package table. The sources are
+/// tests/node-compat.json; the manifests carry no expected-output field, so the expected text is Node's output.
+#[test]
+fn routed_error_factory_runs_in_a_program_with_no_package() {
+    let cases = [
+        (
+            "typinggaps catch any property assign",
+            "function main(): void {\n  try { throw new TypeError(\"boom\"); } catch (e: any) { e.k = 2; e.code = \"E1\"; console.log(e.k, e.code, e.message, e.name); }\n  try { throw { a: 1 }; } catch (e: any) { e.k = 2; console.log(e.k, e.a); }\n  try { throw new Error(\"rethrow\"); } catch (e: any) { e.k = 1; try { throw e; } catch (e2: any) { console.log(e2.k, e2.message); } }\n}\n",
+            "2 E1 boom TypeError\n2 1\n1 rethrow\n",
+        ),
+        (
+            "caught Error keeps pointer identity under strict equality",
+            "function main(): void {\n  const a = new Error(\"x\");\n  const b = new Error(\"x\");\n  try { throw a; } catch (e: any) { console.log(e === a, e === b, e !== a); }\n  try { throw a; } catch (e) { console.log(e === a, e === b); }\n}\n",
+            "true false false\ntrue false\n",
+        ),
+        (
+            "Promise.any rejection exposes the errors of every input",
+            "async function f(n: number): Promise<number> { await Promise.resolve(); throw new Error('f' + n); }\nasync function main(): Promise<void> {\n  try {\n    await Promise.any([f(1), Promise.reject('b'), Promise.reject(7), Promise.reject(null)]);\n  } catch (e: any) {\n    console.log(e.name, e.message, e instanceof AggregateError);\n    console.log(e.errors.length, e.errors[0].message, e.errors[1], e.errors[2], e.errors[3]);\n  }\n  const v = await Promise.any([Promise.reject(new Error('z')), Promise.resolve(5)]);\n  console.log(v);\n  try { await Promise.any([]); } catch (e: any) { console.log(e.name, e.errors.length); }\n}",
+            "AggregateError All promises were rejected true\n4 f1 b 7 null\n5\nAggregateError 0\n",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let _env = RouteAllEnv::set();
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("error-factory-{}", name.len()), body);
+        let output = entry.with_file_name("app");
+        thaw_js_build(&entry, &output, &registry, true);
+        assert_eq!(thaw_js_run_guarded(&output), expected, "{name}");
+    }
+}
