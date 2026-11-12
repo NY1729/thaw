@@ -654,7 +654,7 @@ impl<'ctx> HirCompiler<'ctx> {
             return self.compile_typed_thaw_js_call(signature, args);
         }
         if signature.backend == DynamicBackend::QuickJs {
-            self.uses_quickjs = true;
+            self.note_quickjs("typed_calls:quickjs_backend");
         }
         if signature.backend == DynamicBackend::Napi {
             self.uses_napi = true;

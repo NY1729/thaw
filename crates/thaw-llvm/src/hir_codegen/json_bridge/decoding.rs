@@ -35,7 +35,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .and_then(|(marker, _)| marker.strip_prefix("__thaw_class_identity_\u{1e}"))
                     {
                         if !self.thaw_js_routed {
-                            self.uses_quickjs = true;
+                            self.note_quickjs("decoding:class_identity");
                             self.uses_quickjs_handles = true;
                         }
                         let (pointer, present) =
@@ -1261,7 +1261,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // A native array view passed through a dynamic callback still carries its original owner.
         // Recover it so typed callback arguments keep the same array handle instead of decoding a copy.
         if !self.thaw_js_routed {
-            self.uses_quickjs = true;
+            self.note_quickjs("decoding:native_array_view");
             self.uses_quickjs_handles = true;
         }
         let layout = format!("array:{element:?}");
