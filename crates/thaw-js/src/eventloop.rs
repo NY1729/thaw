@@ -248,6 +248,11 @@ pub(crate) struct Rt {
     pub(crate) stdin_started: bool,
 }
 
+/// Monotonic nanoseconds for `process.hrtime` and `process.hrtime.bigint` (offset by 1s, as before).
+fn hrtime_ns() -> u64 {
+    (clock_ms() * 1e6) as u64 + 1_000_000_000
+}
+
 fn clock_ms() -> f64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
@@ -1759,8 +1764,8 @@ impl Interp {
         self.set_native(&p, "uptime", |_, _, _| {
             Ok(Value::Number(clock_ms() / 1000.0))
         });
-        self.set_native(&p, "hrtime", |it, _, a| {
-            let ns = (clock_ms() * 1e6) as u64 + 1_000_000_000;
+        let hrtime = self.native(|it, _, a| {
+            let ns = hrtime_ns();
             let (mut s, mut n) = ((ns / 1_000_000_000) as f64, (ns % 1_000_000_000) as f64);
             if let Value::Object(_) = arg(a, 0) {
                 let prev = it.array_items(&arg(a, 0));
@@ -1775,6 +1780,12 @@ impl Interp {
             }
             Ok(it.array(vec![Value::Number(s), Value::Number(n)]))
         });
+        if let Value::Object(h) = &hrtime {
+            self.set_native(h, "bigint", |_, _, _| {
+                Ok(crate::bigint::big(num_bigint::BigInt::from(hrtime_ns())))
+            });
+        }
+        put_hidden(&p, "hrtime", hrtime);
         self.set_native(&p, "memoryUsage", |it, _, _| {
             let o = it.plain();
             for k in ["rss", "heapTotal", "heapUsed", "external", "arrayBuffers"] {
