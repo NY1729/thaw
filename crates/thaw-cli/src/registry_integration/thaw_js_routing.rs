@@ -82,6 +82,17 @@ fn thaw_js_user_dynamic_from(value: Option<&str>) -> bool {
     value != Some("0")
 }
 
+/// `THAW_JS_ROUTE_ALL=1` routes every program through thaw-js, not only packages and dynamic-code
+/// programs (a diagnostic opt-in: a build that still needs QuickJS falls back and says why).
+fn thaw_js_route_all_enabled() -> bool {
+    thaw_js_route_all_from(std::env::var("THAW_JS_ROUTE_ALL").ok().as_deref())
+}
+
+/// Only `1` routes every program; unset or any other value keeps the routing rules as they are.
+fn thaw_js_route_all_from(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 /// A routed program whose own source needs the dynamic host, built without `THAW_JS_USER_DYNAMIC=1`,
 /// links QuickJS; record that so `thaw inspect` says why.
 fn record_thaw_js_user_dynamic_blocker(user_source: &str, routing: bool, user_dynamic: bool) {

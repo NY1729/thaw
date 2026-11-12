@@ -919,3 +919,62 @@ fn thaw_js_unready_addon_blocker_keeps_live_owner_and_subscription_addons_on_qui
     assert!(thaw_js_unready_addon_blocker("sqlite3").is_none());
     assert!(thaw_js_unready_addon_blocker("some-unrelated-package").is_none());
 }
+
+/// Sets `THAW_JS_ROUTE_ALL=1` for one test and removes it on drop (even when the test panics).
+struct RouteAllEnv;
+
+impl RouteAllEnv {
+    fn set() -> Self {
+        std::env::set_var("THAW_JS_ROUTE_ALL", "1");
+        RouteAllEnv
+    }
+}
+
+impl Drop for RouteAllEnv {
+    fn drop(&mut self) {
+        std::env::remove_var("THAW_JS_ROUTE_ALL");
+    }
+}
+
+#[test]
+fn thaw_js_route_all_is_opt_in_on_exactly_one() {
+    assert!(thaw_js_route_all_from(Some("1")));
+    assert!(!thaw_js_route_all_from(None));
+    assert!(!thaw_js_route_all_from(Some("0")));
+    assert!(!thaw_js_route_all_from(Some("")));
+    assert!(!thaw_js_route_all_from(Some("true")));
+}
+
+#[test]
+fn thaw_js_route_all_attempts_thaw_js_for_a_plain_any_program_and_names_the_fallback() {
+    // Without THAW_JS_ROUTE_ALL this program has no routed package and no dynamic-code marker, so it
+    // is never attempted on thaw-js. With it, the route is attempted, and a build that still needs
+    // QuickJS says which lowering demanded it in the manifest's blockers.
+    let dir = std::env::temp_dir().join(format!("thaw-cli-route-all-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let registry = dir.join("modules");
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "function main(): void {\n  const data: any = JSON.parse('{\"x\": 1}');\n  console.log(data.x);\n}\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let manifest = {
+        let _env = RouteAllEnv::set();
+        thaw_js_build(&entry, &output, &registry, true)
+    };
+    eprintln!("route-all manifest: {manifest}");
+    if manifest["quickjs"] == true {
+        let blockers = manifest["thaw_js_blockers"].to_string();
+        assert!(
+            blockers.contains("THAW_JS_MIXED")
+                && (blockers.contains("site:") || blockers.contains("unported:thaw_js_")),
+            "a QuickJS fallback must name its sites or symbols: {manifest}"
+        );
+    } else {
+        assert_eq!(thaw_js_run_guarded(&output).trim(), "1");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

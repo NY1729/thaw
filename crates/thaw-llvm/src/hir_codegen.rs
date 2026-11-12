@@ -534,6 +534,9 @@ pub struct HirCompiler<'ctx> {
     /// converted to `Json` there is a thaw-js handle or callback marker.
     thaw_js_call_arguments: bool,
     uses_quickjs: bool,
+    /// Why `uses_quickjs` was set: `site:<name>` for a lowering site, `unported:<symbol>` for a thaw-js
+    /// symbol that has no thaw-js twin. Diagnostic only; deduplicated, in the order found.
+    quickjs_blockers: Vec<String>,
     /// Entry is a CommonJS program: `process.nextTick` callbacks run before the promise jobs
     /// the main script queued (an ES module's body runs inside a microtask, so they run after).
     commonjs_entry: bool,
@@ -977,6 +980,7 @@ impl<'ctx> HirCompiler<'ctx> {
             thaw_js_routed: false,
             thaw_js_call_arguments: false,
             uses_quickjs: false,
+            quickjs_blockers: Vec::new(),
             commonjs_entry: false,
             uses_quickjs_handles: false,
             uses_thaw_js_handles: false,
@@ -1413,6 +1417,11 @@ impl<'ctx> HirCompiler<'ctx> {
     /// native/JIT paths.
     pub fn uses_quickjs(&self) -> bool {
         self.uses_quickjs
+    }
+
+    /// The reasons `uses_quickjs` is set (see the field); empty when QuickJS is not needed.
+    pub fn quickjs_blockers(&self) -> &[String] {
+        &self.quickjs_blockers
     }
 
     /// Whether the generated module calls the N-API addon host.

@@ -151,7 +151,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if on_thaw_js {
             self.js_mark_handles_used();
         } else {
-            self.uses_quickjs = true;
+            self.note_quickjs("quickjs:class_value");
         }
         let source_val = self.compile_expr(source)?;
         let function = self

@@ -145,7 +145,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.uses_thaw_js = true;
                 self.uses_thaw_js_handles = true;
             } else {
+                // Field-level on purpose: `builder` is borrowed here, so `note_quickjs` (a `&mut self` call) cannot be used.
                 self.uses_quickjs = true;
+                if !self.quickjs_blockers.iter().any(|b| b == "site:closures:handle_cell") {
+                    self.quickjs_blockers.push("site:closures:handle_cell".to_string());
+                }
                 self.uses_quickjs_handles = true;
             }
         }

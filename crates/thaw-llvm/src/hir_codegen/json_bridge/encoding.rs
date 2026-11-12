@@ -10,7 +10,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // Symbols without a `thaw_tjs_*` twin are caught after the renames (`js_unported_symbols_used`).
             self.js_mark_handles_used();
         } else if backend_symbol.starts_with("thaw_js_") {
-            self.uses_quickjs = true;
+            self.note_quickjs("encoding:thaw_js_symbol");
         }
         if backend_symbol.starts_with("thaw_napi_") {
             self.uses_napi = true;

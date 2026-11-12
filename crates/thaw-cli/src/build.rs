@@ -998,7 +998,8 @@ fn build_with_native_mode_routed(
     };
     let thaw_js_route = thaw_js_routing
         && (!thaw_js_routed_packages(&shim_source).is_empty()
-            || (thaw_js_user_dynamic_enabled() && source_uses_quickjs(&user_source)));
+            || (thaw_js_user_dynamic_enabled() && source_uses_quickjs(&user_source))
+            || thaw_js_route_all_enabled());
     thaw_hir::set_thaw_js_routed(thaw_js_route);
     let mut program = thaw_hir::lower_module(&module)?;
     for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
@@ -1055,7 +1056,10 @@ fn build_with_native_mode_routed(
             report_thaw_js_mixed(&compiler.print_to_string());
         }
         if uses_quickjs {
-            return Err(THAW_JS_MIXED.to_string());
+            // The reasons ride the error into the `<build>` blocker (`thaw inspect`, node-compat's quickjsReasons).
+            let blockers = compiler.quickjs_blockers().join(",");
+            let blockers: String = blockers.chars().take(600).collect();
+            return Err(format!("{THAW_JS_MIXED}: {blockers}"));
         }
     }
     if let Some(object) = manifest.as_object_mut() {
