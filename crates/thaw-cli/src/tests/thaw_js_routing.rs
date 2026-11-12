@@ -500,11 +500,24 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:trace_events",
             "node:repl",
         "node:punycode",
+        "node:domain",
+        "node:stream/promises",
+        "node:test",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
     // modules not yet validated on thaw-js (e.g. node:cluster) stay on QuickJS
     assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:cluster"), "node:cluster");
+}
+
+#[test]
+fn node_domain_test_stream_promises_bundles_scan_clean() {
+    for module in ["node:domain", "node:test", "node:stream/promises"] {
+        let bundle = thaw_registry::builtin_bundle_with(module, &[]).unwrap();
+        let report = thaw_js::scan::scan_bundle(&bundle).unwrap();
+        assert!(report.is_clean(), "{module}: {:?}", report.blockers);
+        assert_eq!(report.entry, module);
+    }
 }
 
 #[test]
