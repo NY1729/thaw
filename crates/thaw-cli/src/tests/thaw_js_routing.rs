@@ -854,10 +854,35 @@ fn thaw_js_routed_node_http_get_from_listen_callback_refused() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    // Narrow blocker: a native createServer next to the http client keeps node:http on QuickJS.
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "err ECONNREFUSED\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_routed_node_http_get_from_listen_callback_does_not_segv() {
+    // Rust-built Server methods are called through the graph adapter; a null this-entry must fall back to
+    // the plain entry instead of jumping to a heap address (was SIGSEGV, exit 139).
+    let (dir, registry, entry) = thaw_js_fixture(
+        "node-http-get-from-listen-callback-v1",
+        "import * as http from 'node:http';\n\
+         function main(): void {\n\
+           const srv = http.createServer((req, res) => { res.statusCode = 201; res.end('body'); });\n\
+           srv.listen(0, '127.0.0.1', () => {\n\
+             const addr: any = srv.address();\n\
+             http.get('http://127.0.0.1:' + addr.port + '/', (res: any) => {\n\
+               console.log('R', res.statusCode);\n\
+               srv.close();\n\
+             });\n\
+           });\n\
+         }\n",
+    );
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run_guarded(&output), "R 201\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -1308,6 +1308,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_load(ptr_type, code_slot, "napi_value_callback_code")
             .map_err(|error| error.to_string())?
             .into_pointer_value();
+        // Arguments for the plain entry (offset 0) used when the graph route's this-entry slot is null.
+        let mut plain_args = None;
         let closure_type = if tagged_method_receiver {
             let word = self.builder.build_ptr_to_int(argument_json[0], self.context.i64_type(), "callback_method_receiver_word")
                 .map_err(|error| error.to_string())?;
@@ -1329,15 +1331,70 @@ impl<'ctx> HirCompiler<'ctx> {
             ).map_err(|error| error.to_string())?.into_struct_value();
             let receiver = self.builder.build_insert_value(receiver, word, 1, "callback_holder_receiver")
                 .map_err(|error| error.to_string())?.into_struct_value();
+            plain_args = Some(callback_args.clone());
             callback_args.insert(1, receiver.into());
             self.this_entry_function_type(params, ret)?
         } else {
             self.function_type(params, ret)?
         };
-        let call = self
-            .builder
-            .build_indirect_call(closure_type, code, &callback_args, "invoke_napi_value_callback")
-            .map_err(|error| error.to_string())?;
+        let call_result = if let Some(plain_args) = plain_args {
+            // Rust-built closures (thaw-std `NativeClosure`) have no this-entry, so the slot is null:
+            // call their plain entry at offset 0 with the visible arguments only.
+            let this_entry_missing = self
+                .builder
+                .build_is_null(code, "napi_value_callback_this_entry_missing")
+                .map_err(|error| error.to_string())?;
+            let entry_block = self.context.append_basic_block(adapter, "napi_value_callback_this_entry");
+            let plain_block = self.context.append_basic_block(adapter, "napi_value_callback_plain_entry");
+            let invoked_block = self.context.append_basic_block(adapter, "napi_value_callback_invoked");
+            self.builder
+                .build_conditional_branch(this_entry_missing, plain_block, entry_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(entry_block);
+            let entry_call = self
+                .builder
+                .build_indirect_call(closure_type, code, &callback_args, "invoke_napi_value_callback_this_entry")
+                .map_err(|error| error.to_string())?;
+            let entry_end = self.builder.get_insert_block().ok_or("no insert block")?;
+            self.builder.build_unconditional_branch(invoked_block).map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(plain_block);
+            let plain_code = self
+                .builder
+                .build_load(ptr_type, context, "napi_value_callback_plain_code")
+                .map_err(|error| error.to_string())?
+                .into_pointer_value();
+            let plain_call = self
+                .builder
+                .build_indirect_call(self.function_type(params, ret)?, plain_code, &plain_args, "invoke_napi_value_callback_plain")
+                .map_err(|error| error.to_string())?;
+            let plain_end = self.builder.get_insert_block().ok_or("no insert block")?;
+            self.builder.build_unconditional_branch(invoked_block).map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(invoked_block);
+            match entry_call.try_as_basic_value().basic() {
+                Some(entry_value) => {
+                    let plain_value = plain_call
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or("plain callback entry must return a value")?;
+                    let phi = self
+                        .builder
+                        .build_phi(entry_value.get_type(), "invoke_napi_value_callback")
+                        .map_err(|error| error.to_string())?;
+                    phi.add_incoming(&[(&entry_value, entry_end), (&plain_value, plain_end)]);
+                    Some(phi.as_basic_value())
+                }
+                None => None,
+            }
+        } else {
+            let call = self
+                .builder
+                .build_indirect_call(closure_type, code, &callback_args, "invoke_napi_value_callback")
+                .map_err(|error| error.to_string())?;
+            call.try_as_basic_value().basic()
+        };
         let pending_slot = self.pending_exception().as_pointer_value();
         let pending = self
             .builder
@@ -1415,9 +1472,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(success_block);
         if defer_promise && matches!(ret, HirType::Promise(_)) {
-            let promise = call
-                .try_as_basic_value()
-                .basic()
+            let promise = call_result
                 .ok_or("async value callback must return a Promise")?
                 .into_pointer_value();
             for (index, param) in params.iter().enumerate() {
@@ -1485,9 +1540,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_json_null()?
             }
         } else {
-            let result = call
-                .try_as_basic_value()
-                .basic()
+            let result = call_result
                 .ok_or("N-API value callback must return a value")?;
             // An `async` callback's declared return type is always
             // `Promise<T>` here (see `discover_frame_async_functions`'s
