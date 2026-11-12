@@ -5011,6 +5011,7 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
         let mut yielded_any = false;
         for handle in 0..count {
             let ran = with_package(handle, |p| {
+                // work that native continuations queue after the idle pass still runs (exit is emitted once)
                 if !p.interp.work_pending() {
                     return Ok(0);
                 }
@@ -5022,7 +5023,7 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(SLICE_MS));
                 let r = p
                     .interp
-                    .run_event_loop()
+                    .run_loop_only()
                     .map_err(|c| classify(&mut p.interp, c));
                 p.interp.slice_end = None;
                 p.interp.turn_hook = None;
@@ -5071,6 +5072,33 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
             break;
         }
     }
+    // Idle for real (no thaw-js work, no native watch, no live server, no process.exit): each realm runs its
+    // `beforeExit` re-arm loop and then `exit`, once. A realm with listeners but no work still gets them.
+    if !exited && !WATCHES.with(|w| !w.borrow().is_empty()) && !crate::host::native_servers_live() {
+        let count = PACKAGES.with(|ps| ps.borrow().len());
+        for handle in 0..count {
+            let ran = with_package(handle, |p| {
+                if p.interp.exit_emitted() || !p.interp.exit_listeners() {
+                    return Ok(0);
+                }
+                p.interp.turn_hook = Some(drain_native_continuations);
+                let r = p
+                    .interp
+                    .run_event_loop()
+                    .map_err(|c| classify(&mut p.interp, c));
+                p.interp.turn_hook = None;
+                r
+            });
+            match ran {
+                Err(e) => {
+                    eprintln!("{e}");
+                    status = 1;
+                }
+                Ok(code) if code != 0 => status = code,
+                Ok(_) => {}
+            }
+        }
+    }
     // a natural end with `process.exitCode = n` and no pending work is the program's status too
     if status == 0 {
         status = crate::procstate::host_shared()
@@ -5079,6 +5107,45 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
             .map_or(0, |n| n as i32);
     }
     status
+}
+
+/// Drains the `process.nextTick` queue of every loaded package. A routed entry calls this before the compiled
+/// promise queue, so ticks run before promise jobs (Node order). A tick that throws ends the process.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_drain_next_ticks() {
+    let count = PACKAGES.with(|ps| ps.borrow().len());
+    for handle in 0..count {
+        let _ = with_package(handle, |p| {
+            let r = p.interp.drain_ticks();
+            if p.interp.rt.shared.exit_requested.get() {
+                let code = crate::procstate::host_shared()
+                    .exit_code
+                    .get()
+                    .map_or(0, |n| n as i32);
+                terminate_process(&mut p.interp, code);
+            }
+            if let Err(c) = r {
+                eprintln!("{}", classify(&mut p.interp, c));
+                terminate_process(&mut p.interp, 1);
+            }
+            Ok::<(), HostError>(())
+        });
+    }
+}
+
+/// Fatal uncaught exception in a routed build with no handler: every realm drops its queued work and emits
+/// `exit` with code 1 (the thaw-js half of the QuickJS `thaw_js_fatal_exit`).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_fatal_exit() {
+    let count = PACKAGES.with(|ps| ps.borrow().len());
+    for handle in 0..count {
+        let _ = with_package(handle, |p| {
+            p.interp.drop_pending_work();
+            p.interp.set_exit_code(Some(1.0));
+            p.interp.emit_exit_once(1);
+            Ok::<(), HostError>(())
+        });
+    }
 }
 
 /// 1 while any loaded package still has referenced timers/immediates or queued jobs.

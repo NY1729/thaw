@@ -7512,3 +7512,58 @@ fn native_reports_are_unhandled_without_a_process_listener() {
     assert!(u.error.is_null());
     assert_eq!(u.value, 0);
 }
+
+/// Each due timer gets a turn-hook checkpoint (the compiled runtime drains native promise jobs there), so a
+/// promise queued by `timer-1` runs before `timer-2`, as in Node.
+#[test]
+fn due_timers_each_get_a_turn_hook_checkpoint() {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    fn hook(it: &mut Interp) -> bool {
+        let snapshot = it
+            .run("events.join(',')")
+            .map(|v| it.to_str(&v).to_string());
+        SEEN.lock().unwrap().push(snapshot.unwrap_or_default());
+        false
+    }
+    let mut it = Interp::new();
+    it.turn_hook = Some(hook);
+    it.run_main(
+        "var events = []; setTimeout(() => events.push('timer-1'), 0); setTimeout(() => events.push('timer-2'), 0);",
+    )
+    .unwrap();
+    let seen = SEEN.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|s| s == "timer-1"),
+        "no checkpoint between timers: {seen:?}"
+    );
+}
+
+/// `drain_ticks` runs only the `nextTick` queue; promise jobs stay queued until `run_jobs`.
+#[test]
+fn drain_ticks_runs_next_ticks_and_leaves_promise_jobs_queued() {
+    let mut it = Interp::new();
+    it.run("globalThis.log = []; process.nextTick(() => log.push('tick')); Promise.resolve().then(() => log.push('promise'));")
+        .unwrap();
+    it.drain_ticks().unwrap();
+    let after_ticks = it.run("log.join(',')").unwrap();
+    assert_eq!(it.to_str(&after_ticks).to_string(), "tick");
+    it.run_jobs().unwrap();
+    let after_jobs = it.run("log.join(',')").unwrap();
+    assert_eq!(it.to_str(&after_jobs).to_string(), "tick,promise");
+}
+
+/// Node calls `uncaughtExceptionMonitor` listeners before `uncaughtException` for a thrown error.
+#[test]
+fn uncaught_exception_monitor_precedes_the_handler_for_a_timer_throw() {
+    let mut it = Interp::new();
+    it.run_main(
+        "globalThis.order = []; \
+         process.on('uncaughtExceptionMonitor', () => order.push('monitor')); \
+         process.on('uncaughtException', () => order.push('handler')); \
+         setTimeout(() => { throw new Error('boom'); }, 0);",
+    )
+    .unwrap();
+    let order = it.run("order.join(',')").unwrap();
+    assert_eq!(it.to_str(&order).to_string(), "monitor,handler");
+}

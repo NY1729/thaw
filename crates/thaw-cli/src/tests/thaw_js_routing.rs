@@ -169,6 +169,13 @@ fn thaw_js_run(output: &Path) -> String {
 /// `thaw_js_run` with a 20 s guard: a hung binary is killed, its captured output is printed, and the test
 /// panics instead of stalling the whole test run.
 fn thaw_js_run_guarded(output: &Path) -> String {
+    let (stdout, stderr, code) = thaw_js_run_guarded_status(output);
+    assert!(code == Some(0), "{stderr}");
+    stdout
+}
+
+/// `thaw_js_run_guarded` without the success assertion: returns stdout, stderr and the exit code.
+fn thaw_js_run_guarded_status(output: &Path) -> (String, String, Option<i32>) {
     use std::io::Read;
     use std::process::Stdio;
     let mut child = Command::new(output)
@@ -204,12 +211,11 @@ fn thaw_js_run_guarded(output: &Path) -> String {
     let status = child.wait().unwrap();
     let stdout = stdout_reader.join().unwrap();
     let stderr = stderr_reader.join().unwrap();
-    assert!(
-        status.success(),
-        "{}",
-        String::from_utf8_lossy(&stderr)
-    );
-    String::from_utf8_lossy(&stdout).into_owned()
+    (
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+        status.code(),
+    )
 }
 
 #[test]
@@ -946,19 +952,20 @@ fn routed_uncaught_and_rejection_reports_reach_thaw_js_process_listeners() {
     }
 }
 
-/// Sets `THAW_JS_ROUTE_ALL=1` for one test and removes it on drop (even when the test panics).
+/// Turns route-all on for the calling thread only (the same effect as `THAW_JS_ROUTE_ALL=1`, without
+/// touching the process env that parallel tests share). Off again on drop, even when the test panics.
 struct RouteAllEnv;
 
 impl RouteAllEnv {
     fn set() -> Self {
-        std::env::set_var("THAW_JS_ROUTE_ALL", "1");
+        set_thaw_js_route_all_override(true);
         RouteAllEnv
     }
 }
 
 impl Drop for RouteAllEnv {
     fn drop(&mut self) {
-        std::env::remove_var("THAW_JS_ROUTE_ALL");
+        set_thaw_js_route_all_override(false);
     }
 }
 
@@ -969,6 +976,17 @@ fn thaw_js_route_all_is_opt_in_on_exactly_one() {
     assert!(!thaw_js_route_all_from(Some("0")));
     assert!(!thaw_js_route_all_from(Some("")));
     assert!(!thaw_js_route_all_from(Some("true")));
+}
+
+#[test]
+fn thaw_js_route_all_override_is_thread_local() {
+    if std::env::var("THAW_JS_ROUTE_ALL").is_ok() {
+        return; // the isolation check needs the env unset by the outer shell
+    }
+    let _env = RouteAllEnv::set();
+    assert!(thaw_js_route_all_enabled());
+    let other_thread = std::thread::spawn(thaw_js_route_all_enabled).join().unwrap();
+    assert!(!other_thread, "a route-all override must not leak to another thread");
 }
 
 #[test]
@@ -1003,4 +1021,122 @@ fn thaw_js_route_all_attempts_thaw_js_for_a_plain_any_program_and_names_the_fall
         assert_eq!(thaw_js_run_guarded(&output).trim(), "1");
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// node-compat tick, timer and lifecycle cases (sources from tests/node-compat.json; the manifest has no
+/// expected-output field, so each expected text is derived from Node's semantics for that source).
+#[test]
+fn routed_tick_timer_and_lifecycle_order_matches_node() {
+    let cases: [(&str, &str, &str, Option<i32>); 6] = [
+        (
+            "nextTick precedes promise and microtask queues",
+            "async function main(): Promise<void> { const order: string[] = []; process.nextTick(() => order.push('tick')); Promise.resolve().then(() => order.push('promise')); queueMicrotask(() => order.push('microtask')); await new Promise<void>((resolve) => setImmediate(resolve)); console.log(order.join(',')); }",
+            "tick,promise,microtask\n",
+            Some(0),
+        ),
+        (
+            "commonjs program runs nextTick before promises",
+            "function main(): void { console.log('sync'); process.nextTick((): void => console.log('tick')); Promise.resolve().then((): void => console.log('promise')); queueMicrotask((): void => console.log('microtask')); }",
+            "sync\ntick\npromise\nmicrotask\n",
+            Some(0),
+        ),
+        (
+            "timers: each due timer gets a microtask checkpoint",
+            "async function main(): Promise<void> {\n    const events: string[] = [];\n    setTimeout(() => {\n        events.push(\"timer-1\");\n        Promise.resolve().then(() => {\n            events.push(\"promise\");\n        });\n    }, 0);\n    setTimeout(() => {\n        events.push(\"timer-2\");\n    }, 0);\n    await new Promise<void>((resolve) => setTimeout(resolve, 20));\n    console.log(events.join(\",\"));\n}\n",
+            "timer-1,promise,timer-2\n",
+            Some(0),
+        ),
+        (
+            "process beforeExit re-arm and exit event",
+            "function main(): void { let n: number = 0; process.on('beforeExit', (code: number): void => { console.log('beforeExit', code, n); if (n++ < 1) setTimeout((): void => console.log('more'), 1); }); process.on('exit', (code: number): void => console.log('exit', code)); console.log('main'); }",
+            "main\nbeforeExit 0 0\nmore\nbeforeExit 0 1\nexit 0\n",
+            Some(0),
+        ),
+        (
+            "sync throw in main skips registered timers and exit sees code 1",
+            "function main(): void { process.on('exit', (code: number) => console.log('exit', code)); setTimeout(() => console.log('timer'), 5); console.log('a'); throw new Error('boom'); }",
+            "a\nexit 1\n",
+            Some(1),
+        ),
+        (
+            "uncaught exception monitor precedes handler",
+            "function main(): void { const order: string[] = []; process.on('uncaughtExceptionMonitor', () => order.push('monitor')); process.on('uncaughtException', () => { order.push('handler'); console.log(order.join(',')); }); queueMicrotask(() => { throw new Error('boom'); }); }",
+            "monitor,handler\n",
+            Some(0),
+        ),
+    ];
+    for (name, body, expected, code) in cases {
+        let _env = RouteAllEnv::set();
+        let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-tick-{slug}"), body);
+        let output = entry.with_file_name("app");
+        let manifest = thaw_js_build(&entry, &output, &registry, true);
+        assert_eq!(manifest["quickjs"], false, "{name} linked QuickJS: {manifest}");
+        let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+        assert_eq!((stdout.as_str(), status), (expected, code), "{name}: {stderr}");
+    }
+}
+
+/// node-compat `filesystem read and write streams`, `audit2e fs readdir ...` and `nd8 readline/promises ...` with
+/// default routing (no THAW_JS_ROUTE_ALL): each program must exit on its own within the 20 s guard.
+#[test]
+fn routed_fs_and_readline_programs_exit_on_their_own() {
+    let cases = [
+        (
+            "fs-streams",
+            "import { createReadStream, createWriteStream, rmSync } from 'node:fs'; async function main(): Promise<void> { const path = '/tmp/thaw-node-fs-stream.txt'; rmSync(path, { force: true }); await new Promise<void>((resolve, reject) => { const output = createWriteStream(path, { highWaterMark: 2 }); output.on('error', reject); output.end('streamed', resolve); }); const chunks: string[] = []; await new Promise<void>((resolve, reject) => { const input = createReadStream(path, { highWaterMark: 3, encoding: 'utf8' }); input.on('data', (chunk: string): void => chunks.push(chunk)); input.on('end', resolve); input.on('error', reject); }); console.log(chunks.join(''), chunks.length); rmSync(path); }",
+            "streamed 3\n",
+        ),
+        (
+            "readline-promises",
+            "import * as readline from \"node:readline\";\nimport { Readable } from \"node:stream\";\nasync function main(): Promise<void> {\n  const rl2 = readline.createInterface({ input: Readable.from([\"a\\nb\\n\"]) });\n  rl2.on(\"line\", (l: string) => console.log(\"line\", l));\n  await new Promise((r) => rl2.on(\"close\", r));\n  const rlp = await import(\"node:readline/promises\");\n  const rl3 = rlp.createInterface({ input: Readable.from([\"answer\\n\"]) });\n  console.log(await rl3.question(\"q? \"));\n  rl3.close();\n}\n",
+            "line a\nline b\nanswer\n",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-exit-{name}"), body);
+        let output = entry.with_file_name("app");
+        let manifest = thaw_js_build(&entry, &output, &registry, true);
+        eprintln!("{name} manifest: {manifest}");
+        let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+        assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
+    }
+}
+
+/// node-compat `audit2e fs readdir ...` with default routing: exits on its own and prints its seven lines.
+#[test]
+fn routed_audit2e_fs_program_exits_on_its_own() {
+    let body = r##"import * as fs from "node:fs"; import * as os from "node:os"; async function main(): Promise<void> { const d = fs.mkdtempSync(os.tmpdir() + "/fixe-"); for (const n of ["a", "B", "10", "9", "é"]) fs.writeFileSync(d + "/" + n, "1"); console.log(fs.readdirSync(d)); fs.writeFileSync(d + "/b.bin", Buffer.from([1, 2, 3, 4])); console.log(fs.readFileSync(d + "/b.bin", "hex"), fs.readFileSync(d + "/b.bin", { encoding: "base64" }), fs.statSync(d + "/zzz", { throwIfNoEntry: false })); console.log(fs.constants.R_OK, fs.F_OK, fs.R_OK, fs.W_OK, fs.X_OK); await fs.promises.writeFile(d + "/p.txt", "promised"); console.log(await fs.promises.readFile(d + "/p.txt", "utf8"), (await fs.promises.stat(d + "/p.txt")).size); await new Promise<void>((res) => fs.stat(d + "/p.txt", (err, st) => { console.log(err, st.size); res(); })); await new Promise<void>((res) => fs.readdir(d, (err, names) => { console.log(err, names.length); res(); })); await new Promise<void>((res) => fs.exists(d + "/p.txt", (ex) => { console.log(ex); res(); })); fs.accessSync(d + "/p.txt"); fs.rmSync(d, { recursive: true }); }"##;
+    let (_dir, registry, entry) = thaw_js_fixture("route-exit-audit2e", body);
+    let output = entry.with_file_name("app");
+    thaw_js_build(&entry, &output, &registry, true);
+    let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+    assert_eq!((stdout.lines().count(), status), (7, Some(0)), "{stderr}");
+}
+
+/// node-compat `process nextTick ordering` and `es module runs promises before nextTick` (ES module entries:
+/// their promise jobs run before the module's ticks, as in Node), routed through thaw-js with RouteAllEnv.
+#[test]
+fn routed_esm_next_tick_orders_match_node() {
+    let cases = [
+        (
+            "process nextTick ordering",
+            r##"import process from 'node:process'; function main(): void { console.log('sync'); process.nextTick((): void => console.log('tick')); Promise.resolve().then((): void => console.log('promise')); }"##,
+            "sync\npromise\ntick\n",
+        ),
+        (
+            "es module runs promises before nextTick",
+            r##"import { setImmediate as wait } from 'node:timers'; async function main(): Promise<void> { const order: string[] = []; process.nextTick(() => order.push('tick')); Promise.resolve().then(() => order.push('promise')); queueMicrotask(() => order.push('microtask')); await new Promise<void>((resolve) => wait(resolve)); console.log(order.join(',')); }"##,
+            "promise,microtask,tick\n",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let _env = RouteAllEnv::set();
+        let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-esm-{slug}"), body);
+        let output = entry.with_file_name("app");
+        thaw_js_build(&entry, &output, &registry, true);
+        let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+        assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
+    }
 }
