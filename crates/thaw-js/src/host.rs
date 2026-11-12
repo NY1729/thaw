@@ -1673,17 +1673,43 @@ pub extern "C" fn thaw_tjs_capture_handle_graph_result(handle: u64) -> ThawResul
     }))
 }
 
+/// Node's overloaded native `http.Server` methods: a dynamic call picks the field by method name and
+/// argument shape, as the compiler does for a typed receiver (QuickJS: `native_server_overload`).
+fn native_server_overload(
+    it: &mut Interp,
+    this: &Value,
+    name: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let is_function = |index: usize| matches!(args.get(index), Some(v) if v.is_callable());
+    let target = match name {
+        "listen" if args.len() >= 3 && is_function(2) => "__listenWithHostCallback",
+        "listen" if args.len() == 2 && is_function(1) => "__listenWithCallback",
+        "close" if args.len() == 1 && is_function(0) => "__closeWithCallback",
+        "on" if args.len() == 2
+            && matches!(&args[0], Value::Str(_))
+            && it.to_str(&args[0]).to_string() == "error" =>
+        {
+            "__onError"
+        }
+        _ => return None,
+    };
+    let field = it.get(this, target).ok()?;
+    field.is_callable().then_some(field)
+}
+
 /// Call the already-selected method `selected` on `receiver` with the graph-wire argument array; the
 /// result is a plain graph wire, the receiver itself staying a live handle.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_call_selected_method_graph_result(
     receiver: u64,
     selected: u64,
-    _name: *const c_char,
+    name: *const c_char,
     args_json: *const c_char,
 ) -> ThawResult {
     graph_result((|| {
         let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let name = cstr(name).unwrap_or_default();
         let (_, args) = decode_wire(&args_json)?;
         let method = HANDLES
             .with(|h| {
@@ -1695,6 +1721,8 @@ pub extern "C" fn thaw_tjs_call_selected_method_graph_result(
         on_handle(receiver, |p, owner, this| {
             let it = &mut p.interp;
             let args = it.array_items(&args);
+            let method =
+                native_server_overload(it, &this, &name, &args).unwrap_or_else(|| method.clone());
             let result = it
                 .call(&method, &this, &args)
                 .map_err(|c| classify(it, c))?;
@@ -1983,6 +2011,7 @@ pub extern "C" fn thaw_tjs_call_method_graph_result(
             let it = &mut p.interp;
             let method = it.get(&this, &name).map_err(|c| classify(it, c))?;
             let args = it.array_items(&args);
+            let method = native_server_overload(it, &this, &name, &args).unwrap_or(method);
             let result = it
                 .call(&method, &this, &args)
                 .map_err(|c| classify(it, c))?;
@@ -2337,12 +2366,13 @@ pub extern "C" fn thaw_tjs_native_object_pointer(
 pub extern "C" fn thaw_tjs_call_selected_method_handle_graph_args_result(
     receiver: u64,
     selected: u64,
-    _name: *const c_char,
+    name: *const c_char,
     args_json: *const c_char,
     defer_resolution: bool,
 ) -> HandleResult {
     handle_result((|| {
         let args_json = cstr(args_json).ok_or("invalid arguments")?;
+        let name = cstr(name).unwrap_or_default();
         let (_, args) = decode_wire(&args_json)?;
         let method = HANDLES
             .with(|h| {
@@ -2354,6 +2384,8 @@ pub extern "C" fn thaw_tjs_call_selected_method_handle_graph_args_result(
         on_handle(receiver, |p, owner, this| {
             let it = &mut p.interp;
             let args = it.array_items(&args);
+            let method =
+                native_server_overload(it, &this, &name, &args).unwrap_or_else(|| method.clone());
             let result = it
                 .call(&method, &this, &args)
                 .map_err(|c| classify(it, c))?;
@@ -2835,6 +2867,7 @@ pub extern "C" fn thaw_tjs_call_method_handle_graph_args_result(
             let it = &mut p.interp;
             let method = it.get(&this, &name).map_err(|c| classify(it, c))?;
             let args = it.array_items(&args);
+            let method = native_server_overload(it, &this, &name, &args).unwrap_or(method);
             let result = it
                 .call(&method, &this, &args)
                 .map_err(|c| classify(it, c))?;
