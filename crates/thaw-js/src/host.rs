@@ -52,9 +52,80 @@ struct Loader {
     parts: BundleParts,
     factories: HashMap<String, Value>,
     cache: RefCell<HashMap<String, Value>>,
+    /// The package's addon object, built on first use (`addon_of`).
+    addon: RefCell<Option<Value>>,
+    /// The package name the napi bridge keys its exports by.
+    package: String,
+}
+
+/// Builds the addon object from the napi proxy layer globals: one function per export, routed to
+/// `construct` under `new` and to `call` otherwise (the QuickJS prelude's `__thaw_install_native` shape).
+const ADDON_BUILDER: &str = r#"function (info, each, call, construct, pkg) {
+  var addon = {};
+  each(info, pkg + '::', pkg, function (name, bare) {
+    addon[bare] = function () { return new.target
+      ? construct(name, arguments, new.target.prototype)
+      : call(name, arguments); };
+  });
+  return addon;
+}"#;
+
+fn js_error(it: &mut Interp, message: &str) -> Ctl {
+    let ctor = it
+        .lookup(&it.global.clone(), "Error")
+        .unwrap_or(Value::Undefined);
+    match it.construct(&ctor, &[Value::str(message)]) {
+        Ok(err) => Ctl::Throw(err),
+        Err(c) => c,
+    }
+}
+
+/// The package's native addon object. Built once per package from the napi proxy layer globals (installed
+/// on every realm once the bridge is enabled); throws when no bridge is registered.
+fn addon_of(loader: &Rc<Loader>, it: &mut Interp) -> R<Value> {
+    if let Some(addon) = loader.addon.borrow().clone() {
+        return Ok(addon);
+    }
+    let global = it.global.clone();
+    let ready = match it.lookup(&global, "__thaw_json_graph_napi_bridge_available") {
+        Some(f) => it.call(&f, &Value::Undefined, &[])?.truthy(),
+        None => false,
+    };
+    if !ready {
+        return Err(js_error(it, "native addon bridge is unavailable"));
+    }
+    let exports = it
+        .lookup(&global, "__thaw_json_graph_napi_exports")
+        .unwrap_or(Value::Undefined);
+    let info = it.call(&exports, &Value::Undefined, &[])?;
+    let each = it
+        .lookup(&global, "__thaw_json_graph_napi_each_export")
+        .unwrap_or(Value::Undefined);
+    let call = it
+        .lookup(&global, "__thaw_json_graph_napi_call_export")
+        .unwrap_or(Value::Undefined);
+    let construct = it
+        .lookup(&global, "__thaw_json_graph_napi_construct")
+        .unwrap_or(Value::Undefined);
+    let build = it.eval_function(ADDON_BUILDER)?;
+    let addon = it.call(
+        &build,
+        &Value::Undefined,
+        &[info, each, call, construct, Value::str(&loader.package)],
+    )?;
+    *loader.addon.borrow_mut() = Some(addon.clone());
+    Ok(addon)
 }
 
 fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R<Value> {
+    // the addon loaders return the addon itself, never the bundled code (render.rs shortcuts)
+    if spec == "bindings" || spec == "node-gyp-build" {
+        let l = loader.clone();
+        return Ok(it.native(move |it, _, _| addon_of(&l, it)));
+    }
+    if spec.ends_with(".node") {
+        return addon_of(loader, it);
+    }
     let target = loader
         .parts
         .require_maps
@@ -62,6 +133,7 @@ fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R
         .and_then(|m| m.get(spec))
         .cloned();
     match target {
+        Some(key) if key.ends_with(".node") => addon_of(loader, it),
         Some(key) => load_module(loader, it, &key),
         None => {
             let ctor = it
@@ -105,6 +177,9 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         let spec = it.to_str(&crate::arg(args, 0));
         require_in(&l, it, &k, &spec)
     });
+    let l = loader.clone();
+    let addon = it.native(move |it, _, _| addon_of(&l, it));
+    it.set(&require, "addon", addon)?;
     // ESM-converted modules are `function (origin) { return function (module, exports, ...) {...}; }`
     let mut f = factory;
     if it.get(&f, "length")?.as_number() == Some(1.0) {
@@ -189,6 +264,16 @@ impl Package {
     /// As [`Package::load`], limiting recursion by the real stack (`stack_bytes` available from here)
     /// instead of the fixed call depth; 0 keeps the depth cap.
     pub fn load_with_stack(bundle_js: &str, stack_bytes: usize) -> Result<Package, HostError> {
+        Self::load_named("", bundle_js, stack_bytes)
+    }
+
+    /// As [`Package::load_with_stack`] for the package `name`: its native addon exports are the ones the
+    /// napi bridge lists under `name::` (qualified packages) or bare (`addon_of`).
+    pub fn load_named(
+        name: &str,
+        bundle_js: &str,
+        stack_bytes: usize,
+    ) -> Result<Package, HostError> {
         let mut parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
         if let Some(problem) = parts.esm_problems.iter().next() {
             return Err(HostError::Unsupported((*problem).to_string()));
@@ -220,6 +305,8 @@ impl Package {
             parts,
             factories,
             cache: RefCell::new(HashMap::new()),
+            addon: RefCell::new(None),
+            package: name.to_string(),
         });
         if entry == "node:module" {
             install_module_loader(&mut interp, &loader, bundle_js)
@@ -4889,7 +4976,7 @@ pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) 
     if std::env::var_os("THAW_JS_TRACE").is_some() {
         eprintln!("thaw-js: loading package `{name}`");
     }
-    match Package::load_with_stack(&src, process_stack_bytes()) {
+    match Package::load_named(&name, &src, process_stack_bytes()) {
         Ok(p) => {
             PACKAGES.with(|ps| {
                 let mut ps = ps.borrow_mut();
