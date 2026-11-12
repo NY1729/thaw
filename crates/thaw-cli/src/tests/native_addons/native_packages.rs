@@ -66,8 +66,7 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
     )
     .unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    // sqlite3 stays on QuickJS until its callback (typed_calls.rs fixed-arity Function([JsValue])) lands on thaw-js
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     let result = command_output_with_timeout(&mut Command::new(&output), Duration::from_secs(60))
         .unwrap_or_else(|error| panic!("sqlite3 app failed or timed out: {error}"));

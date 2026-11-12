@@ -94,3 +94,72 @@ fn thaw_js_routing_writable_write_arrow_property_runs_on_thaw_js() {
     );
     assert_eq!(stdout, "function buffer a\n");
 }
+
+// Builds `body` (the statements of `main`, with `imports` above it) on thaw-js and returns its stdout.
+// Checks the program does not link QuickJS.
+fn thaw_js_stream_program_output(tag: &str, imports: &str, body: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-stream-{tag}-{}", std::process::id()));
+    let registry = dir.join("modules");
+    std::fs::create_dir_all(&registry).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, format!("{imports}\nfunction main(): void {{\n{body}\n}}\n")).unwrap();
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    let stdout = thaw_js_run_guarded(&output);
+    let bytes = std::fs::read(&output).unwrap();
+    assert!(!bytes.windows(8).any(|window| window == b"rquickjs"), "QuickJS was linked");
+    let _ = std::fs::remove_dir_all(dir);
+    stdout
+}
+
+// A JsValue `data` listener (`(chunk) => ..` on a fixed-arity overload) must reach thaw-js.
+#[test]
+fn thaw_js_routing_passthrough_on_data_runs_on_thaw_js() {
+    let stdout = thaw_js_stream_program_output(
+        "passthrough",
+        "import { PassThrough } from 'node:stream';",
+        "const s = new PassThrough();\n\
+         const out: string[] = [];\n\
+         s.on('data', (chunk: any): void => { out.push(chunk.toString()); });\n\
+         s.on('end', () => console.log(out.join('')));\n\
+         s.end('hello');",
+    );
+    // same text real Node prints for the equivalent JavaScript
+    assert_eq!(stdout, "hello\n");
+}
+
+// Transform with a callback option (`cb(null, data)`) and a JsValue data listener.
+#[test]
+fn thaw_js_routing_transform_with_a_callback_runs_on_thaw_js() {
+    let stdout = thaw_js_stream_program_output(
+        "transform",
+        "import { Transform } from 'node:stream';",
+        "const t = new Transform({ transform(c, _e, cb) { cb(null, c.toString().toUpperCase()); } });\n\
+         const out: string[] = [];\n\
+         t.on('data', (chunk: any): void => { out.push(chunk.toString()); });\n\
+         t.on('end', () => console.log(out.join('')));\n\
+         t.write('ab');\n\
+         t.end();",
+    );
+    assert_eq!(stdout, "AB\n");
+}
+
+// Transform with a `flush` option: the flushed chunk arrives after the transformed one.
+#[test]
+fn thaw_js_routing_transform_flush_runs_on_thaw_js() {
+    let stdout = thaw_js_stream_program_output(
+        "flush",
+        "import { Transform } from 'node:stream';",
+        "const t = new Transform({\n\
+           transform(c, _e, cb) { cb(null, 'x'); },\n\
+           flush(cb) { cb(null, 'z'); },\n\
+         });\n\
+         const out: string[] = [];\n\
+         t.on('data', (chunk: any): void => { out.push(chunk.toString()); });\n\
+         t.on('end', () => console.log(out.join('')));\n\
+         t.write('a');\n\
+         t.end();",
+    );
+    assert_eq!(stdout, "xz\n");
+}
