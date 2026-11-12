@@ -5011,8 +5011,8 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
         let mut yielded_any = false;
         for handle in 0..count {
             let ran = with_package(handle, |p| {
-                // an exited realm runs nothing more; `beforeExit`/`exit` come from the idle pass below
-                if p.interp.exit_emitted() || !p.interp.work_pending() {
+                // work that native continuations queue after the idle pass still runs (exit is emitted once)
+                if !p.interp.work_pending() {
                     return Ok(0);
                 }
                 ran_any = true;
@@ -5078,7 +5078,7 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
         let count = PACKAGES.with(|ps| ps.borrow().len());
         for handle in 0..count {
             let ran = with_package(handle, |p| {
-                if p.interp.exit_emitted() {
+                if p.interp.exit_emitted() || !p.interp.exit_listeners() {
                     return Ok(0);
                 }
                 p.interp.turn_hook = Some(drain_native_continuations);

@@ -1076,3 +1076,67 @@ fn routed_tick_timer_and_lifecycle_order_matches_node() {
         assert_eq!((stdout.as_str(), status), (expected, code), "{name}: {stderr}");
     }
 }
+
+/// node-compat `filesystem read and write streams`, `audit2e fs readdir ...` and `nd8 readline/promises ...` with
+/// default routing (no THAW_JS_ROUTE_ALL): each program must exit on its own within the 20 s guard.
+#[test]
+fn routed_fs_and_readline_programs_exit_on_their_own() {
+    let cases = [
+        (
+            "fs-streams",
+            "import { createReadStream, createWriteStream, rmSync } from 'node:fs'; async function main(): Promise<void> { const path = '/tmp/thaw-node-fs-stream.txt'; rmSync(path, { force: true }); await new Promise<void>((resolve, reject) => { const output = createWriteStream(path, { highWaterMark: 2 }); output.on('error', reject); output.end('streamed', resolve); }); const chunks: string[] = []; await new Promise<void>((resolve, reject) => { const input = createReadStream(path, { highWaterMark: 3, encoding: 'utf8' }); input.on('data', (chunk: string): void => chunks.push(chunk)); input.on('end', resolve); input.on('error', reject); }); console.log(chunks.join(''), chunks.length); rmSync(path); }",
+            "streamed 3\n",
+        ),
+        (
+            "readline-promises",
+            "import * as readline from \"node:readline\";\nimport { Readable } from \"node:stream\";\nasync function main(): Promise<void> {\n  const rl2 = readline.createInterface({ input: Readable.from([\"a\\nb\\n\"]) });\n  rl2.on(\"line\", (l: string) => console.log(\"line\", l));\n  await new Promise((r) => rl2.on(\"close\", r));\n  const rlp = await import(\"node:readline/promises\");\n  const rl3 = rlp.createInterface({ input: Readable.from([\"answer\\n\"]) });\n  console.log(await rl3.question(\"q? \"));\n  rl3.close();\n}\n",
+            "line a\nline b\nanswer\n",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-exit-{name}"), body);
+        let output = entry.with_file_name("app");
+        let manifest = thaw_js_build(&entry, &output, &registry, true);
+        eprintln!("{name} manifest: {manifest}");
+        let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+        assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
+    }
+}
+
+/// node-compat `audit2e fs readdir ...` with default routing: exits on its own and prints its seven lines.
+#[test]
+fn routed_audit2e_fs_program_exits_on_its_own() {
+    let body = r##"import * as fs from "node:fs"; import * as os from "node:os"; async function main(): Promise<void> { const d = fs.mkdtempSync(os.tmpdir() + "/fixe-"); for (const n of ["a", "B", "10", "9", "é"]) fs.writeFileSync(d + "/" + n, "1"); console.log(fs.readdirSync(d)); fs.writeFileSync(d + "/b.bin", Buffer.from([1, 2, 3, 4])); console.log(fs.readFileSync(d + "/b.bin", "hex"), fs.readFileSync(d + "/b.bin", { encoding: "base64" }), fs.statSync(d + "/zzz", { throwIfNoEntry: false })); console.log(fs.constants.R_OK, fs.F_OK, fs.R_OK, fs.W_OK, fs.X_OK); await fs.promises.writeFile(d + "/p.txt", "promised"); console.log(await fs.promises.readFile(d + "/p.txt", "utf8"), (await fs.promises.stat(d + "/p.txt")).size); await new Promise<void>((res) => fs.stat(d + "/p.txt", (err, st) => { console.log(err, st.size); res(); })); await new Promise<void>((res) => fs.readdir(d, (err, names) => { console.log(err, names.length); res(); })); await new Promise<void>((res) => fs.exists(d + "/p.txt", (ex) => { console.log(ex); res(); })); fs.accessSync(d + "/p.txt"); fs.rmSync(d, { recursive: true }); }"##;
+    let (_dir, registry, entry) = thaw_js_fixture("route-exit-audit2e", body);
+    let output = entry.with_file_name("app");
+    thaw_js_build(&entry, &output, &registry, true);
+    let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+    assert_eq!((stdout.lines().count(), status), (7, Some(0)), "{stderr}");
+}
+
+/// node-compat `process nextTick ordering` and `es module runs promises before nextTick` (ES module entries:
+/// their promise jobs run before the module's ticks, as in Node), routed through thaw-js with RouteAllEnv.
+#[test]
+fn routed_esm_next_tick_orders_match_node() {
+    let cases = [
+        (
+            "process nextTick ordering",
+            r##"import process from 'node:process'; function main(): void { console.log('sync'); process.nextTick((): void => console.log('tick')); Promise.resolve().then((): void => console.log('promise')); }"##,
+            "sync\npromise\ntick\n",
+        ),
+        (
+            "es module runs promises before nextTick",
+            r##"import { setImmediate as wait } from 'node:timers'; async function main(): Promise<void> { const order: string[] = []; process.nextTick(() => order.push('tick')); Promise.resolve().then(() => order.push('promise')); queueMicrotask(() => order.push('microtask')); await new Promise<void>((resolve) => wait(resolve)); console.log(order.join(',')); }"##,
+            "promise,microtask,tick\n",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let _env = RouteAllEnv::set();
+        let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-esm-{slug}"), body);
+        let output = entry.with_file_name("app");
+        thaw_js_build(&entry, &output, &registry, true);
+        let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+        assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
+    }
+}

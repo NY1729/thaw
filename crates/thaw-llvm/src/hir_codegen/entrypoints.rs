@@ -110,9 +110,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .unwrap();
         }
-        // Routed thaw-js: the main's own process.nextTick callbacks run before the native promise queue
-        // (Node order), so the tick drain precedes both the native drain and the async-main wait below.
-        if self.thaw_js_routed && self.uses_thaw_js && !self.uses_quickjs {
+        // Routed thaw-js CommonJS entry: the main's own process.nextTick callbacks run before the native promise
+        // queue (Node order). An ES module body runs inside a microtask, so its promises run first and the drain
+        // is skipped. The drain precedes both the native drain and the async-main wait below.
+        if self.commonjs_entry && self.thaw_js_routed && self.uses_thaw_js && !self.uses_quickjs {
             self.builder
                 .build_call(
                     self.module.get_function("thaw_js_drain_next_ticks").unwrap(),

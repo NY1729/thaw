@@ -694,6 +694,13 @@ impl Interp {
         self.rt.exit_emitted
     }
 
+    /// Whether this realm has a `beforeExit` or `exit` listener (the idle pass is only observable then).
+    pub(crate) fn exit_listeners(&self) -> bool {
+        ["beforeExit", "exit"]
+            .iter()
+            .any(|name| self.rt.listeners.get(*name).is_some_and(|l| !l.is_empty()))
+    }
+
     /// One native-continuation checkpoint (`turn_hook`), if the host installed one. The compiled runtime
     /// drains its promise jobs here, so a promise a due timer queued runs before the next due timer.
     fn turn_checkpoint(&mut self) {
