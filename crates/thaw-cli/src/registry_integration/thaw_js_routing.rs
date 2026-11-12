@@ -197,8 +197,16 @@ fn thaw_js_keeps_js_value(package: &str) -> bool {
 /// thaw-js JSON boundary: `number`, `string`, `boolean`, `Json`, `void`, `null`, `undefined`, its own
 /// type parameters, unions/array/object-literal shapes of those, and an opaque `JsValue` (a type the
 /// `.d.ts` classifier could not resolve), which the retargeted declaration turns into `Json`.
-/// Callbacks and every other type name (classes, `Buffer`, ...) are rejected.
+/// Callbacks and every other type name (classes, `Buffer`, ...) are rejected, except a whole
+/// `Uint8Array` result.
+#[cfg(test)]
 fn thaw_js_declaration_plain(line: &str) -> bool {
+    thaw_js_declaration_plain_with(line, true)
+}
+
+/// `thaw_js_declaration_plain`, with the bare `Uint8Array` result relaxation switched by
+/// `bytes_result_ok` (see `thaw_js_bytes_result_allowed`).
+fn thaw_js_declaration_plain_with(line: &str, bytes_result_ok: bool) -> bool {
     let Some(rest) = line.strip_prefix("declare function ") else {
         return false;
     };
@@ -259,6 +267,10 @@ fn thaw_js_declaration_plain(line: &str) -> bool {
         return false;
     };
     let (params, result) = (&after_name[..result_start], &after_name[result_start + 3..]);
+    // A bare `Uint8Array` result (`readFileSync(path): Uint8Array`) crosses as bytes; in params,
+    // unions and nested positions it stays rejected.
+    let bytes_result =
+        bytes_result_ok && result.trim().trim_end_matches(';').trim() == "Uint8Array";
     let identifiers_plain = |text: &str| {
         let chars = text.chars().collect::<Vec<_>>();
         let mut index = 0;
@@ -303,18 +315,35 @@ fn thaw_js_declaration_plain(line: &str) -> bool {
         }
         true
     };
-    identifiers_plain(params) && identifiers_plain(result)
+    identifiers_plain(params) && (bytes_result || identifiers_plain(result))
 }
 
 /// An async overload (`...): Promise<string>;` or `string | Promise<string>`, ejs `render`): the typed
 /// call runs the event loop and unwraps the settled promise, so it is plain when its resolved type is.
+#[cfg(test)]
 fn thaw_js_async_declaration_plain(line: &str) -> bool {
+    thaw_js_async_declaration_plain_with(line, true)
+}
+
+fn thaw_js_async_declaration_plain_with(line: &str, bytes_result_ok: bool) -> bool {
     let Some(at) = line.rfind("): ") else {
         return false;
     };
     let (params, result) = line.split_at(at);
+    // `Promise<Uint8Array>` resolves to the bare bytes result the sync gate accepts
+    let resolved = result.replace("Promise<Uint8Array>", "Uint8Array");
     result.contains("Promise<")
-        && thaw_js_declaration_plain(&format!("{params}{}", result.replace("Promise", "")))
+        && thaw_js_declaration_plain_with(
+            &format!("{params}{}", resolved.replace("Promise", "")),
+            bytes_result_ok,
+        )
+}
+
+/// Whether a program may get the bare `Uint8Array` result relaxation on thaw-js. A program that
+/// touches `node:http`/`node:https`/`node:http2` or `node:tls` (substring match) keeps those results
+/// on QuickJS: its thaw-js client path (ky over node:https) hangs with bytes results. Batch 2 fixes it.
+fn thaw_js_bytes_result_allowed(user_source: &str) -> bool {
+    !(user_source.contains("node:http") || user_source.contains("node:tls"))
 }
 
 /// Whether `line` declares an operation of `package`'s class `class` (`$new$`, `$method$`,
@@ -600,12 +629,17 @@ fn thaw_js_path_bundle(root_bundle: &str, builtin: &str) -> String {
         )
 }
 
-/// A `createHook({ init(..) {..} })` callback written as an object-literal member reaches thaw-js as
-/// `{}`: the methods are dropped by the dynamic-object operations builder, so no hook ever fires.
-/// Until that is fixed, a program that names `createHook` keeps `node:async_hooks` on QuickJS.
+/// A `createHook` program whose timers or promises would become async resources: thaw-js does not report
+/// those resources to hooks yet, so the module stays on QuickJS. A plain `createHook` (no timer or promise
+/// words) keeps `node:async_hooks` on thaw-js.
 fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    (pkg_name == "node:async_hooks" && thaw_js_mentions(user_source, "createHook"))
-        .then_some("createHook callbacks in an object literal are not marshalled to thaw-js yet")
+    const RESOURCES: &[&str] = &[
+        "setTimeout", "setInterval", "setImmediate", "Promise", "then", "await", "async", "nextTick", "queueMicrotask",
+    ];
+    (pkg_name == "node:async_hooks"
+        && thaw_js_mentions(user_source, "createHook")
+        && RESOURCES.iter().any(|name| thaw_js_mentions(user_source, name)))
+    .then_some("createHook with timers/promises resources is not supported on thaw-js yet")
 }
 
 /// `node:child_process` delivers stdout/exit on the thaw-js loop, which node:http's client has not been
@@ -638,6 +672,7 @@ fn thaw_js_package_eligible(
     segment: &str,
 ) -> bool {
     let mentions = |name: &str| thaw_js_mentions(user_source, name);
+    let bytes_result_ok = thaw_js_bytes_result_allowed(user_source);
     let debug = std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1");
     let reject = |why: String| {
         record_thaw_js_blocker(&pkg.name, &why);
@@ -681,7 +716,7 @@ fn thaw_js_package_eligible(
     {
         for line in segment.lines() {
             if thaw_js_class_declaration(line, &pkg.name, &class.name)
-                && !thaw_js_declaration_plain(line)
+                && !thaw_js_declaration_plain_with(line, bytes_result_ok)
                 // a method operation is only emitted where the program calls it, and the thaw-js backend
                 // fails the build (which retries on QuickJS) for a signature it cannot serve
                 && thaw_js_class_member(line).is_none()
@@ -753,8 +788,8 @@ fn thaw_js_package_eligible(
                 return reject(format!("`{}` has no declaration", function.name));
             }
             lines.into_iter().all(|line| {
-                thaw_js_declaration_plain(line)
-                    || thaw_js_async_declaration_plain(line)
+                thaw_js_declaration_plain_with(line, bytes_result_ok)
+                    || thaw_js_async_declaration_plain_with(line, bytes_result_ok)
                     || reject(format!("`{}`: {line}", function.name))
             })
         })
@@ -771,11 +806,15 @@ fn thaw_js_mentions_matches_whole_identifiers_only() {
 
 #[cfg(test)]
 #[test]
-fn thaw_js_async_hooks_create_hook_keeps_the_module_on_quickjs() {
-    let import = "import { createHook } from \"node:async_hooks\";";
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", import).is_some());
+fn thaw_js_async_hooks_create_hook_with_timers_or_promises_keeps_the_module_on_quickjs() {
+    let timers = "import { createHook } from 'node:async_hooks';\nsetTimeout(() => {}, 1);";
+    let promises = "import { createHook } from 'node:async_hooks';\nawait Promise.resolve();";
+    let hooks = "import { createHook } from 'node:async_hooks';\ncreateHook({ init() {} }).enable();";
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", timers).is_some());
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", promises).is_some());
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", hooks).is_none());
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", "new AsyncLocalStorage();").is_none());
-    assert!(thaw_js_async_hooks_blocker("node:path", import).is_none());
+    assert!(thaw_js_async_hooks_blocker("node:path", timers).is_none());
 }
 
 #[cfg(test)]
