@@ -676,6 +676,24 @@ impl Interp {
         let len_blocks = o.len_ro.get()
             && matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(key).is_some_and(|i| i >= items.len()));
         o.force_key(key);
+        // A closure's synthesized `name`/`length` is an existing configurable own property: make it real
+        // first, or a nonextensible closure refuses to redefine it as if it were a new key.
+        if o.position(key).is_none() {
+            if let Some(v) = synth_fn_own(o, key) {
+                let mut props = o.raw_props.borrow_mut();
+                crate::push_prop(
+                    o,
+                    &mut props,
+                    Prop {
+                        key: key.into(),
+                        slot: Slot::Data(v),
+                        enumerable: false,
+                        writable: false,
+                        configurable: true,
+                    },
+                );
+            }
+        }
         let current = if is_array_elem {
             arr_current
         } else {
