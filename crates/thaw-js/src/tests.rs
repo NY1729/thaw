@@ -7462,8 +7462,8 @@ fn release_all_handles_drops_every_live_handle_and_reports_the_count() {
 #[test]
 fn native_reports_emit_to_registered_process_listeners() {
     use crate::host::{
-        thaw_tjs_emit_rejection_handled_result, thaw_tjs_emit_unhandled_rejection_result,
-        thaw_tjs_emit_uncaught_result, thaw_tjs_load_script,
+        thaw_tjs_emit_rejection_handled_result, thaw_tjs_emit_uncaught_result,
+        thaw_tjs_emit_unhandled_rejection_result, thaw_tjs_load_script,
     };
     use std::ffi::CString;
     let src = CString::new(
@@ -7497,7 +7497,10 @@ fn native_reports_emit_to_registered_process_listeners() {
 
 #[test]
 fn native_reports_are_unhandled_without_a_process_listener() {
-    use crate::host::{thaw_tjs_emit_unhandled_rejection_result, thaw_tjs_emit_uncaught_result, thaw_tjs_load_script};
+    use crate::host::{
+        thaw_tjs_emit_uncaught_result, thaw_tjs_emit_unhandled_rejection_result,
+        thaw_tjs_load_script,
+    };
     use std::ffi::CString;
     let src = CString::new("globalThis.quiet = 1;").unwrap();
     assert_eq!(thaw_tjs_load_script(src.as_ptr()), 1);

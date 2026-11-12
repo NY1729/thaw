@@ -651,7 +651,7 @@ impl<'ctx> HirCompiler<'ctx> {
             )
         });
         self.builder.build_call(register_fn, &[limit_slot.into()], "stack_guard_register").unwrap();
-        let reporter = if self.uses_quickjs || self.uses_quickjs_handles {
+        let reporter = if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
             self.module
                 .get_function("thaw_js_emit_unhandled_rejection_result")
                 .unwrap()
@@ -669,7 +669,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "configure_unhandled_rejection_reporter",
             )
             .unwrap();
-        let handled_reporter = if self.uses_quickjs || self.uses_quickjs_handles {
+        let handled_reporter = if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
             self.module
                 .get_function("thaw_js_emit_rejection_handled_result")
                 .unwrap()
@@ -761,7 +761,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_is_not_null(pending, "process_exception_failed")
             .unwrap();
-        let (exception_failure, reported, native_handler_error, listener_error) = if self.uses_quickjs || self.uses_quickjs_handles {
+        let (exception_failure, reported, native_handler_error, listener_error) = if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
             let emission = self.builder.build_call(
                 self.module.get_function("thaw_js_emit_uncaught_result").unwrap(),
                 &[pending_report.into()],
@@ -882,7 +882,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_is_not_null(rejection, "process_rejection_failed")
             .unwrap();
-        let (rejection_failure, reported_rejection, rejection_listener_error) = if self.uses_quickjs || self.uses_quickjs_handles {
+        let (rejection_failure, reported_rejection, rejection_listener_error) = if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
             let emission = self.builder.build_call(
                 self.module.get_function("thaw_js_emit_unhandled_rejection_result").unwrap(),
                 &[rejection.into()],
@@ -948,7 +948,7 @@ impl<'ctx> HirCompiler<'ctx> {
             &[rejection.into()],
             "destroy_detached_rejection_report",
         ).unwrap();
-        let rejection_reporter = if self.uses_quickjs || self.uses_quickjs_handles {
+        let rejection_reporter = if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
             self.module
                 .get_function("thaw_js_emit_unhandled_rejection_result")
                 .unwrap()

@@ -472,22 +472,23 @@ fn routed_process_reporters_emit_through_thaw_tjs_and_quickjs_keeps_its_symbols(
         compiler.print_to_string()
     };
     let calls = |ir: &str, symbol: &str| ir.lines().any(|line| line.contains("call ") && line.contains(symbol));
+    // rejection-handled is registered as a reporter pointer, not called directly
     let symbols = [
         "@thaw_tjs_emit_uncaught_result(",
         "@thaw_tjs_emit_unhandled_rejection_result(",
-        "@thaw_tjs_emit_rejection_handled_result(",
     ];
 
     let routed = compile(false);
     for symbol in symbols {
         assert!(calls(&routed, symbol), "routed entry must report through {symbol}: {routed}");
     }
+    assert!(routed.contains("ptr @thaw_tjs_emit_rejection_handled_result"), "{routed}");
     assert!(!routed.lines().any(|line| line.contains("call ") && line.contains("@thaw_js_emit_")), "{routed}");
 
     let quickjs = compile(true);
     assert!(calls(&quickjs, "@thaw_js_emit_uncaught_result("), "{quickjs}");
     assert!(calls(&quickjs, "@thaw_js_emit_unhandled_rejection_result("), "{quickjs}");
-    assert!(calls(&quickjs, "@thaw_js_emit_rejection_handled_result("), "{quickjs}");
+    assert!(quickjs.contains("ptr @thaw_js_emit_rejection_handled_result"), "{quickjs}");
     assert!(!quickjs.lines().any(|line| line.contains("call ") && line.contains("@thaw_tjs_emit_")), "{quickjs}");
 }
 

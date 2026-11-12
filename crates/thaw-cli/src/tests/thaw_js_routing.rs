@@ -920,9 +920,9 @@ fn thaw_js_unready_addon_blocker_keeps_live_owner_and_subscription_addons_on_qui
     assert!(thaw_js_unready_addon_blocker("some-unrelated-package").is_none());
 }
 
-/// node-compat `queueMicrotask uncaught exception` and `unhandled promise rejection`: native reports must
-/// reach the `process` listeners registered in thaw-js. `new Function` is dynamic code, which thaw-js
-/// serves by default, so it routes the program (no `THAW_JS_ROUTE_ALL` switch on this branch).
+/// node-compat `queueMicrotask uncaught exception` and `unhandled promise rejection` (sources from
+/// tests/node-compat.json; the manifest has no expected-output field, so the expected text is Node's
+/// listener output): native reports must reach the `process` listeners registered in thaw-js.
 #[test]
 fn routed_uncaught_and_rejection_reports_reach_thaw_js_process_listeners() {
     let cases = [
@@ -938,8 +938,8 @@ fn routed_uncaught_and_rejection_reports_reach_thaw_js_process_listeners() {
         ),
     ];
     for (name, body, expected) in cases {
-        let main = format!("const dyn: any = new Function('return 1');\n{body}");
-        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-report-{name}"), &main);
+        let _env = RouteAllEnv::set();
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-report-{name}"), body);
         let output = entry.with_file_name("app");
         thaw_js_build(&entry, &output, &registry, true);
         assert_eq!(thaw_js_run_guarded(&output), expected, "{name}");

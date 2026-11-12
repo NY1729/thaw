@@ -1368,7 +1368,12 @@ impl Interp {
 
     // ----- process events -----
 
-    fn emit(&mut self, name: &str, args: &[Value]) -> R<bool> {
+    /// Whether `process.on(name)` has a listener in this realm.
+    pub(crate) fn has_process_listeners(&self, name: &str) -> bool {
+        self.rt.listeners.get(name).is_some_and(|l| !l.is_empty())
+    }
+
+    pub(crate) fn emit(&mut self, name: &str, args: &[Value]) -> R<bool> {
         let list = self.rt.listeners.get(name).cloned().unwrap_or_default();
         let this = self
             .rt
