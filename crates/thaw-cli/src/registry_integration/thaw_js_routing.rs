@@ -199,6 +199,7 @@ fn thaw_js_keeps_js_value(package: &str) -> bool {
 /// `.d.ts` classifier could not resolve), which the retargeted declaration turns into `Json`.
 /// Callbacks and every other type name (classes, `Buffer`, ...) are rejected, except a whole
 /// `Uint8Array` result.
+#[cfg(test)]
 fn thaw_js_declaration_plain(line: &str) -> bool {
     thaw_js_declaration_plain_with(line, true)
 }
@@ -319,6 +320,7 @@ fn thaw_js_declaration_plain_with(line: &str, bytes_result_ok: bool) -> bool {
 
 /// An async overload (`...): Promise<string>;` or `string | Promise<string>`, ejs `render`): the typed
 /// call runs the event loop and unwraps the settled promise, so it is plain when its resolved type is.
+#[cfg(test)]
 fn thaw_js_async_declaration_plain(line: &str) -> bool {
     thaw_js_async_declaration_plain_with(line, true)
 }
