@@ -2031,6 +2031,82 @@ fn handle_intrinsics_read_properties_call_methods_and_capture_graphs() {
     assert_eq!(thaw_tjs_exception_native_token(id), 0);
 }
 
+// Dynamic calls on a native `http.Server` pick Node's overload by method name and argument shape.
+#[test]
+fn native_server_overloads_are_selected_by_method_name_and_arguments() {
+    use crate::host::*;
+    use std::ffi::{c_char, CStr, CString};
+    let q = |t: &str| CString::new(t).unwrap();
+    let text = |p: *mut c_char| unsafe { CStr::from_ptr(p).to_str().unwrap().to_string() };
+    let src = r#"
+      function tagged(tag) { return function () { return 'ran:' + tag; }; }
+      globalThis.srv = { listen: tagged('plain'), __listenWithCallback: tagged('withCallback'),
+        __listenWithHostCallback: tagged('host'), close: tagged('plainClose'),
+        __closeWithCallback: tagged('closeCallback'), on: tagged('plainOn'), __onError: tagged('onError') };
+      globalThis.bare = { listen: tagged('plain'), close: tagged('plainClose'), on: tagged('plainOn') };
+      globalThis.cbFn = function () {};
+    "#;
+    assert_eq!(thaw_tjs_load_script(q(src).as_ptr()), 1);
+    // `items` is the argument array body; node 1 is a fresh callback handle (`{"r":1}` in the items).
+    // A decoded wire releases its handle lease, so each call takes its own handle.
+    let wire = |items: &str| {
+        let cb = thaw_tjs_get_global(q("cbFn").as_ptr()) as u64;
+        assert!(cb > 0);
+        format!(r#"{{"root":{{"r":0}},"nodes":[{{"a":[{items}]}},{{"hdl":{cb}}}]}}"#)
+    };
+    let cases = [
+        (
+            "srv",
+            "listen",
+            r#"{"v":0},{"v":"127.0.0.1"},{"r":1}"#,
+            "host",
+        ),
+        ("srv", "listen", r#"{"v":0},{"r":1}"#, "withCallback"),
+        ("srv", "close", r#"{"r":1}"#, "closeCallback"),
+        ("srv", "on", r#"{"v":"error"},{"r":1}"#, "onError"),
+        // negatives: one-argument listen, a non-error event, no-arg close, and an object without the `__` fields
+        ("srv", "listen", r#"{"v":0}"#, "plain"),
+        ("srv", "on", r#"{"v":"data"},{"r":1}"#, "plainOn"),
+        ("srv", "close", "", "plainClose"),
+        (
+            "bare",
+            "listen",
+            r#"{"v":0},{"v":"127.0.0.1"},{"r":1}"#,
+            "plain",
+        ),
+        ("bare", "close", r#"{"r":1}"#, "plainClose"),
+    ];
+    for (global, name, items, tag) in cases {
+        let receiver = thaw_tjs_get_global(q(global).as_ptr()) as u64;
+        assert!(receiver > 0, "no global {global}");
+        let method = thaw_tjs_get_property_result(receiver, q(name).as_ptr());
+        assert!(method.error.is_null());
+        let args = wire(items);
+        let call = thaw_tjs_call_selected_method_graph_result(
+            receiver,
+            method.value,
+            q(name).as_ptr(),
+            q(&args).as_ptr(),
+        );
+        assert!(call.error.is_null(), "{}", text(call.error));
+        let out = text(call.value);
+        assert!(
+            out.contains(&format!("\"ran:{tag}\"")),
+            "{global}.{name}({items}) ran the wrong field: {out}"
+        );
+        // the call_method variant (name + property lookup) must select the same field
+        let args = wire(items);
+        let via_name =
+            thaw_tjs_call_method_graph_result(receiver, q(name).as_ptr(), q(&args).as_ptr());
+        assert!(via_name.error.is_null(), "{}", text(via_name.error));
+        assert!(
+            text(via_name.value).contains(&format!("\"ran:{tag}\"")),
+            "{global}.{name}: {}",
+            text(via_name.value)
+        );
+    }
+}
+
 // ----- slice 4: mixed bundles, host os/tty/fs pieces, web streams -----
 
 #[test]
