@@ -544,6 +544,9 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:trace_events",
     "node:repl",
     "node:punycode",
+    "node:domain",
+    "node:stream/promises",
+    "node:test",
 ];
 
 /// `node:perf_hooks` marks, measures, observers, timerify and entries exist only on QuickJS's performance.js.
@@ -561,6 +564,15 @@ fn thaw_js_perf_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'sta
         .iter()
         .any(|name| thaw_js_mentions(user_source, name)))
     .then_some("performance marks/measures/observers are not implemented on thaw-js yet")
+}
+
+/// `node:test` mock timers exist only on QuickJS's runtime.js (`__thaw_test_mock_timers_*`), so a program
+/// that uses `mock.timers` stays on QuickJS. `mock.fn` and the rest of node:test run on thaw-js.
+fn thaw_js_test_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
+    (pkg_name == "node:test"
+        && thaw_js_mentions(user_source, "mock")
+        && thaw_js_mentions(user_source, "timers"))
+    .then_some("node:test mock.timers exists only on QuickJS yet")
 }
 
 /// Native addons thaw-js cannot serve yet: `argon2` needs a live owner for its native exports, and
@@ -711,6 +723,9 @@ fn thaw_js_package_eligible(
         return reject(why.into());
     }
     if let Some(why) = thaw_js_perf_hooks_blocker(&pkg.name, user_source) {
+        return reject(why.into());
+    }
+    if let Some(why) = thaw_js_test_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
@@ -917,6 +932,16 @@ fn thaw_js_class_member_names_the_method_of_a_class_operation() {
     let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
     let line = format!("declare function __thaw_typed_js_{hex}(): JsValue;");
     assert_eq!(thaw_js_class_member(&line), None);
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_test_blocker_keeps_mock_timers_on_quickjs() {
+    assert!(thaw_js_test_blocker("node:test", "const { mock } = require('node:test'); mock.timers.enable();").is_some());
+    assert!(thaw_js_test_blocker("node:test", "t.mock.timers.tick(10);").is_some());
+    assert!(thaw_js_test_blocker("node:test", "const { mock } = require('node:test'); mock.fn();").is_none());
+    assert!(thaw_js_test_blocker("node:test", "const timers = require('node:timers');").is_none());
+    assert!(thaw_js_test_blocker("node:path", "mock.timers.enable();").is_none());
 }
 
 #[cfg(test)]

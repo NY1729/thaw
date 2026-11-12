@@ -4071,6 +4071,9 @@ fn builtin_declarations_cover_typed_buffer_crypto_and_fs_overloads() {
     let fs_promises = resolve_builtin("node:fs/promises").unwrap().dts_source;
     assert!(fs_promises.contains("rm(path: string, options?: any): Promise<void>"));
 
+    let stream_promises = resolve_builtin("node:stream/promises").unwrap().dts_source;
+    assert!(stream_promises.contains("export declare function finished(stream: JsValue, options?: any): Promise<void>;"), "{stream_promises}");
+    assert!(stream_promises.contains("export declare function pipeline(argsArray: any): Promise<JsValue>;"), "{stream_promises}");
     let events = resolve_builtin("node:events").unwrap().dts_source;
     assert!(events.contains("once(emitter: EventEmitter, event: any"));
 
