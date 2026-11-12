@@ -954,3 +954,37 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         reason,
     }
 }
+
+/// Whether the function's own body contains a loop. Nested functions, arrows and classes are skipped:
+/// their loops belong to them. `try_compiled` analyses such a function on its first call.
+pub(crate) fn has_loop(def: &FuncDef) -> bool {
+    let mut f = LoopFinder(false);
+    match &def.body {
+        Body::Block(stmts) => stmts.visit_with(&mut f),
+        Body::Expr(e) => e.visit_with(&mut f),
+    }
+    f.0
+}
+
+struct LoopFinder(bool);
+
+impl Visit for LoopFinder {
+    fn visit_function(&mut self, _: &a::Function) {}
+    fn visit_arrow_expr(&mut self, _: &a::ArrowExpr) {}
+    fn visit_class(&mut self, _: &a::Class) {}
+    fn visit_for_stmt(&mut self, _: &a::ForStmt) {
+        self.0 = true;
+    }
+    fn visit_for_in_stmt(&mut self, _: &a::ForInStmt) {
+        self.0 = true;
+    }
+    fn visit_for_of_stmt(&mut self, _: &a::ForOfStmt) {
+        self.0 = true;
+    }
+    fn visit_while_stmt(&mut self, _: &a::WhileStmt) {
+        self.0 = true;
+    }
+    fn visit_do_while_stmt(&mut self, _: &a::DoWhileStmt) {
+        self.0 = true;
+    }
+}
