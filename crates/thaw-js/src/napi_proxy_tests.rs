@@ -7,7 +7,7 @@ use std::ffi::{c_char, CStr, CString};
 
 use crate::host::{
     classify, default_realm, store_handle, thaw_tjs_release_handle, thaw_tjs_retain_handle,
-    with_package, HostError,
+    with_package, HostError, Native, Package,
 };
 use crate::napi_bridge::{clear_for_tests, thaw_tjs_register_napi_bridge};
 use crate::napi_graph::{tag, Tag};
@@ -1126,4 +1126,106 @@ fn shim_trusted_path_constructs_a_proxy_that_reads_through_the_bridge() {
         );
     });
     assert_eq!(op_count("get_graph"), 1);
+}
+
+/// A one-module package: the entry factory runs `body`; `extra` adds factories, `map` is the entry's require map.
+fn addon_bundle(body: &str, extra: &str, map: &str) -> String {
+    format!(
+        r#"module.exports = (function(require){{
+var __thaw_bundle_factories = {{
+"a/index.js": function(module, exports, require) {{ {body} }},{extra}
+}};
+var __thaw_bundle_require_maps = {{ "a/index.js": {map} }};
+var __thaw_bundle_entry_key = "a/index.js";
+}})(globalThis.require);"#
+    )
+}
+
+#[test]
+fn addon_require_addon_returns_bridge_functions() {
+    let _bridge = shim_bridge(
+        r#"{"names":["a::add"],"qualifiedPackages":["a"],"ownerByExportName":{"a::add":"7"}}"#,
+        r#"{"value":3}"#,
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    let bundle = addon_bundle("exports.v = require.addon().add(1, 2);", "", "{}");
+    let mut p = Package::load_named("a", &bundle, 0).unwrap();
+    assert_eq!(p.get("v").unwrap(), Native::Number(3.0));
+    E2E_CALLS.with(|c| assert_eq!(c.borrow()[0].0, "a::add"));
+}
+
+#[test]
+fn addon_require_resolves_dot_node_specs_to_the_one_addon() {
+    let _bridge = shim_bridge(
+        r#"{"names":["a::add"],"qualifiedPackages":["a"],"ownerByExportName":{"a::add":"7"}}"#,
+        r#"{"value":3}"#,
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    let body = "exports.same = require('@x/y-linux-x64-glibc/y.node') === require('./build/Release/z.node') \
+                && require('./build/Release/z.node') === require.addon();";
+    let mut p = Package::load_named("a", &addon_bundle(body, "", "{}"), 0).unwrap();
+    assert_eq!(p.get("same").unwrap(), Native::Bool(true));
+}
+
+#[test]
+fn addon_require_bypasses_node_gyp_build_and_bindings() {
+    let _bridge = shim_bridge(
+        r#"{"names":["a::add"],"qualifiedPackages":["a"],"ownerByExportName":{"a::add":"7"}}"#,
+        r#"{"value":3}"#,
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    // The bundled node-gyp-build throws if it runs, so a passing load proves the bypass.
+    let extra = r#""ng/index.js": function(module, exports, require) { throw new Error('bundled node-gyp-build must not run'); },"#;
+    let body = "exports.ng = require('node-gyp-build')('/') === require.addon(); \
+                exports.bd = require('bindings')('z') === require.addon();";
+    let mut p = Package::load_named(
+        "a",
+        &addon_bundle(body, extra, r#"{"node-gyp-build": "ng/index.js"}"#),
+        0,
+    )
+    .unwrap();
+    assert_eq!(p.get("ng").unwrap(), Native::Bool(true));
+    assert_eq!(p.get("bd").unwrap(), Native::Bool(true));
+}
+
+#[test]
+fn addon_require_without_bridge_throws_clear_error() {
+    let _lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    clear_for_tests();
+    thaw_tjs_napi_enable_proxy_layer();
+    let body = "exports.t = typeof require.addon; try { require.addon(); exports.m = 'none'; } \
+                catch (e) { exports.m = e.name + '|' + e.message; }";
+    let mut p = Package::load_named("a", &addon_bundle(body, "", "{}"), 0).unwrap();
+    assert_eq!(p.get("t").unwrap(), Native::Str("function".to_string()));
+    assert_eq!(
+        p.get("m").unwrap(),
+        Native::Str("Error|native addon bridge is unavailable".to_string())
+    );
+}
+
+#[test]
+fn addon_construct_uses_new_target() {
+    let _bridge = shim_bridge(
+        r#"{"names":["a::Cls"],"qualifiedPackages":["a"],"ownerByExportName":{"a::Cls":"7"}}"#,
+        r#"{"value":0}"#,
+    );
+    reply("construct", "", r#"{"value":"81"}"#);
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    reply("has_graph", r#"{"v":"x"}"#, r#"{"value":true}"#);
+    reply("get_graph", r#"{"v":"x"}"#, &graph(r#"{"v":42}"#, ""));
+    thaw_tjs_napi_enable_proxy_layer();
+    let body = "var C = require.addon().Cls; exports.x = new C(5, 'b').x;";
+    let mut p = Package::load_named("a", &addon_bundle(body, "", "{}"), 0).unwrap();
+    assert_eq!(p.get("x").unwrap(), Native::Number(42.0));
+    OPS.with(|o| {
+        let ops = o.borrow();
+        assert!(
+            ops.iter().any(|(op, target, args)| op == "construct"
+                && target == "a::Cls"
+                && args == r#"[5,"b"]"#),
+            "{ops:?}"
+        );
+    });
 }
