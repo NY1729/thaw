@@ -3560,6 +3560,35 @@ fn thaw_js_routed_terminal_shutdown_releases_all_handles() {
 }
 
 #[test]
+fn thaw_js_routed_terminal_shutdown_releases_handles_before_napi_ready() {
+    let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_terminal_release_order");
+    compiler.uses_napi = true;
+    compiler.uses_thaw_js = true;
+    compiler.uses_thaw_js_handles = true;
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+
+    // Pins held by the napi side are only dropped by release-all, and Envs only finalize after
+    // that, so the release must be reached whenever the program is quiescent, not only when ready.
+    assert!(
+        ir.contains("br i1 %shutdown_quiescent, label %terminal_shutdown_release_handles,"),
+        "release must be gated on quiescence, not readiness: {ir}"
+    );
+    assert!(
+        !ir.contains("br i1 %shutdown_can_close, label %terminal_shutdown_release_handles,"),
+        "release must not wait for readiness: {ir}"
+    );
+    assert!(
+        ir.contains("br i1 %napi_shutdown_ready, label %terminal_shutdown_close,"),
+        "close must still wait for readiness: {ir}"
+    );
+}
+
+#[test]
 fn terminal_rejection_listener_jobs_finish_before_process_exit() {
     let source = r#"
         function main(): void {

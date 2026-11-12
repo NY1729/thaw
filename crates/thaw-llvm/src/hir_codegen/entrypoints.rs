@@ -1393,11 +1393,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 "shutdown_work_or_gc_jobs").unwrap();
             let unsettled = self.builder.build_or(new_errors, new_work, "shutdown_more_work").unwrap();
             let quiescent = self.builder.build_not(unsettled, "shutdown_quiescent").unwrap();
-            let may_close = self.builder.build_and(ready, quiescent, "shutdown_can_close").unwrap();
-            self.builder.build_conditional_branch(may_close, release, poll).unwrap();
+            // Release runs once quiescent, not only when ready: Envs cannot finalize (so ready stays
+            // false) while the pins they hold are still taken, and release is what drops those pins.
+            self.builder.build_conditional_branch(quiescent, release, poll).unwrap();
             self.builder.position_at_end(release);
             let released_handles = self.release_terminal_handles();
-            self.builder.build_conditional_branch(released_handles, poll, close).unwrap();
+            let check_ready = self.context.append_basic_block(function, "terminal_shutdown_check_ready");
+            self.builder.build_conditional_branch(released_handles, poll, check_ready).unwrap();
+            self.builder.position_at_end(check_ready);
+            self.builder.build_conditional_branch(ready, close, poll).unwrap();
             self.builder.position_at_end(close);
             let released = self.builder.build_call(
                 self.module.get_function("thaw_napi_finish_shutdown").unwrap(), &[],
