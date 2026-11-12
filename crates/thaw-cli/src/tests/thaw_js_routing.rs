@@ -1173,3 +1173,65 @@ fn routed_iterator_and_raw_json_cases_match_node() {
         assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
     }
 }
+
+/// builtins / node-compat / typescript-runtime / text-encoding SharedArrayBuffer and Atomics cases
+/// (sources from tests/*.json; the manifests have no expected-output field, so each expected text is
+/// derived from Node 22 semantics for that source). Cross-worker SAB sharing is not covered here.
+#[test]
+fn routed_shared_array_buffer_and_atomics_match_node() {
+    let cases: [(&str, &str, &str); 9] = [
+        (
+            "sab-byte-length",
+            "function main(): void { const b: SharedArrayBuffer = new SharedArrayBuffer(16); console.log(b.byteLength, b.slice(4).byteLength); }",
+            "16 12\n",
+        ),
+        (
+            "atomics-add",
+            "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); console.log(Atomics.add(a,0,1)); }",
+            "0\n",
+        ),
+        (
+            "atomics-compare-exchange",
+            "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); Atomics.store(a,0,5); console.log(Atomics.compareExchange(a,0,5,9), Atomics.load(a,0)); }",
+            "5 9\n",
+        ),
+        (
+            "atomics-exchange",
+            "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); Atomics.store(a,0,5); console.log(Atomics.exchange(a,0,7), Atomics.load(a,0)); }",
+            "5 7\n",
+        ),
+        (
+            "atomics-load-store",
+            "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(8)); console.log(Atomics.store(a,0,42), Atomics.load(a,0)); }",
+            "42 42\n",
+        ),
+        (
+            "atomics-sub",
+            "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); Atomics.store(a,0,10); console.log(Atomics.sub(a,0,3), Atomics.load(a,0)); }",
+            "10 7\n",
+        ),
+        (
+            "shared-array-buffer-atomics",
+            "function main(): void { const buffer = new SharedArrayBuffer(8); const values = new Int32Array(buffer); Atomics.store(values, 0, 20); console.log(Atomics.add(values, 0, 22), Atomics.load(values, 0), buffer.byteLength); }",
+            "20 42 8\n",
+        ),
+        (
+            "atomics-wait-main-thread",
+            "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  console.log(Atomics.wait(ia, 0, 1, 0));\n  console.log(Atomics.wait(ia, 0, 0, 0));\n  console.log(Atomics.wait(ia, 0, 0, 5));\n}",
+            "not-equal\ntimed-out\ntimed-out\n",
+        ),
+        (
+            "text-decode-real-buffer-sources",
+            "function main(): void { const bytes = new Uint8Array([65, 66, 67, 68]); const buffer = bytes.buffer; const view = new DataView(buffer, 1, 2); const shared = new SharedArrayBuffer(2); new Uint8Array(shared).set([88, 89]); let invalid = ''; try { new TextDecoder().decode({ buffer: buffer, byteOffset: 0, byteLength: 4 } as any); } catch (error: any) { invalid = error.name; } console.log(JSON.stringify([new TextDecoder().decode(buffer), new TextDecoder().decode(view), new TextDecoder().decode(shared), invalid])); }",
+            "[\"ABCD\",\"BC\",\"XY\",\"TypeError\"]\n",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let _env = RouteAllEnv::set();
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-sab-{name}"), body);
+        let output = entry.with_file_name("app");
+        thaw_js_build(&entry, &output, &registry, true);
+        let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+        assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
+    }
+}
