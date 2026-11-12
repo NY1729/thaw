@@ -7457,3 +7457,55 @@ fn release_all_handles_drops_every_live_handle_and_reports_the_count() {
     assert!(!crate::host::handle_is_live(second));
     assert_eq!(crate::host::thaw_tjs_release_all_handles(), 0);
 }
+
+// Native uncaught/unhandled reports reach the `process` listeners registered in this realm.
+#[test]
+fn native_reports_emit_to_registered_process_listeners() {
+    use crate::host::{
+        thaw_tjs_emit_rejection_handled_result, thaw_tjs_emit_unhandled_rejection_result,
+        thaw_tjs_emit_uncaught_result, thaw_tjs_load_script,
+    };
+    use std::ffi::CString;
+    let src = CString::new(
+        "globalThis.seen = []; process.on('unhandledRejection', function (r) { seen.push('rej:' + r); return true; });
+         process.on('uncaughtException', function (e) { seen.push('unc:' + e.message); });
+         process.on('rejectionHandled', function () { seen.push('handled'); });",
+    )
+    .unwrap();
+    assert_eq!(thaw_tjs_load_script(src.as_ptr()), 1);
+
+    let rejection = CString::new("boom").unwrap();
+    let r = thaw_tjs_emit_unhandled_rejection_result(rejection.as_ptr());
+    assert!(r.error.is_null());
+    assert_eq!(r.value, 1, "a registered listener handles the rejection");
+
+    let tagged = CString::new("\u{1}Error\u{1}oops").unwrap();
+    let u = thaw_tjs_emit_uncaught_result(tagged.as_ptr());
+    assert!(u.error.is_null());
+    assert_eq!(u.value, 1, "a registered listener handles the exception");
+
+    let h = thaw_tjs_emit_rejection_handled_result();
+    assert!(h.error.is_null());
+    assert_eq!(h.value, 1);
+
+    let probe = CString::new(
+        "if (seen.join() !== 'rej:boom,unc:oops,handled') throw new Error('got ' + seen.join());",
+    )
+    .unwrap();
+    assert_eq!(thaw_tjs_load_script(probe.as_ptr()), 1);
+}
+
+#[test]
+fn native_reports_are_unhandled_without_a_process_listener() {
+    use crate::host::{thaw_tjs_emit_unhandled_rejection_result, thaw_tjs_emit_uncaught_result, thaw_tjs_load_script};
+    use std::ffi::CString;
+    let src = CString::new("globalThis.quiet = 1;").unwrap();
+    assert_eq!(thaw_tjs_load_script(src.as_ptr()), 1);
+    let msg = CString::new("boom").unwrap();
+    let r = thaw_tjs_emit_unhandled_rejection_result(msg.as_ptr());
+    assert!(r.error.is_null());
+    assert_eq!(r.value, 0);
+    let u = thaw_tjs_emit_uncaught_result(msg.as_ptr());
+    assert!(u.error.is_null());
+    assert_eq!(u.value, 0);
+}
