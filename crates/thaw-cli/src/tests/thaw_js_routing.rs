@@ -213,6 +213,34 @@ fn thaw_js_run_guarded(output: &Path) -> String {
 }
 
 #[test]
+fn thaw_js_package_eligible_accepts_a_native_addon_package_with_a_clean_bundle() {
+    let pkg = ResolvedPackage {
+        name: "tjs-kit".into(),
+        commonjs_export_name: None,
+        commonjs_export_assignment: None,
+        called_commonjs_namespace_properties: Default::default(),
+        functions: Vec::new(),
+        values: Vec::new(),
+        classes: Vec::new(),
+        classifications: Vec::new(),
+        native_lib: None,
+        native_addon: Some(std::path::PathBuf::from("native.node")),
+        native_dependencies: Vec::new(),
+        platform_executable: None,
+        bundle_js: None,
+        factory_class_returns: Default::default(),
+        namespace_self_aliases: Default::default(),
+        type_only_exports: Default::default(),
+        internal_support_classes: Default::default(),
+        type_only_value_names: Default::default(),
+        nested_namespaces: Default::default(),
+    };
+    let bundle = "module.exports = (function(require){ var __thaw_bundle_factories = { \"tjs-kit/index.js\": function(module, exports, require) { exports.add = function (a, b) { return a + b; }; } }; var __thaw_bundle_require_maps = { \"tjs-kit/index.js\": {} }; var __thaw_bundle_entry_key = \"tjs-kit/index.js\"; })(globalThis.require);";
+    let user = "import { add } from 'tjs-kit';\nfunction main(): void { console.log(add(2, 3)); }\n";
+    assert!(thaw_js_package_eligible(&pkg, bundle, user, &Default::default(), ""));
+}
+
+#[test]
 fn thaw_js_routing_serves_a_plain_data_package_without_linking_quickjs() {
     let (dir, registry, entry) = thaw_js_fixture(
         "plain",

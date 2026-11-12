@@ -427,6 +427,80 @@ fn c_abi_round_trips_json() {
     crate::host::thaw_tjs_unload(handle);
 }
 
+/// A native-addon package bundle: `.node` is loaded through the prelude's `nativeRequire`, and the
+/// node-gyp-build style probes come with it (`__non_webpack_require__`, a dynamic require).
+const NATIVE_ADDON_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"addon/index.js": function(module, exports, require) {
+  var nodeRequire = typeof __webpack_require__ === 'function' ? __non_webpack_require__ : require;
+  var native = require('./build/Release/addon.node');
+  var other = require(exports.p);
+  exports.value = function () { return [native, other, nodeRequire]; };
+},
+};
+var __thaw_bundle_require_maps = { "addon/index.js": {}, };
+var __thaw_bundle_entry_key = "addon/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn scan_addon_mode_tolerates_native_loader_keys_only() {
+    let blocked = crate::scan::scan_bundle(NATIVE_ADDON_BUNDLE).ok().unwrap();
+    let names: Vec<&str> = blocked.blockers.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        [
+            "global:__non_webpack_require__",
+            "require:./build/Release/addon.node",
+            "require:dynamic"
+        ]
+    );
+    // addon mode: the `.node` require, the webpack probe and the dynamic require beside it are the loader
+    let addon = crate::scan::scan_addon_bundle(NATIVE_ADDON_BUNDLE)
+        .ok()
+        .unwrap();
+    assert!(addon.is_clean(), "{:?}", addon.blockers);
+    // a non-addon package with the same `.node` require stays blocked on the plain scan
+    let plain = "module.exports = (function(require){ var __thaw_bundle_factories = { \"p/index.js\": function(module, exports, require) { exports.v = require('./build/Release/addon.node'); } }; var __thaw_bundle_require_maps = { \"p/index.js\": {} }; var __thaw_bundle_entry_key = \"p/index.js\"; })(globalThis.require);";
+    let plain_report = crate::scan::scan_bundle(plain).ok().unwrap();
+    assert!(!plain_report.is_clean());
+    assert_eq!(
+        plain_report
+            .blockers
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["require:./build/Release/addon.node"]
+    );
+    // the addon-mode tolerance is scoped to native loader keys: a dynamic require with no `.node`
+    // require beside it (and an unrelated `eval`) stays blocked in addon mode
+    let dynamic_only = plain.replace(
+        "require('./build/Release/addon.node')",
+        "require(exports.p)",
+    );
+    let report = crate::scan::scan_addon_bundle(&dynamic_only).ok().unwrap();
+    assert_eq!(
+        report
+            .blockers
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["require:dynamic"]
+    );
+    let with_eval = NATIVE_ADDON_BUNDLE.replace(
+        "exports.value = function ()",
+        "exports.e = function (s) { return eval(s); };\n  exports.value = function ()",
+    );
+    let report = crate::scan::scan_addon_bundle(&with_eval).ok().unwrap();
+    assert_eq!(
+        report
+            .blockers
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["direct-eval"]
+    );
+}
+
 #[test]
 fn scan_reports_reachable_blockers_only() {
     let clean = crate::scan::scan_bundle(MINI).ok().unwrap();

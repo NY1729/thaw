@@ -65,6 +65,8 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
         &["sqlite3".into()],
     )
     .unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     let result = command_output_with_timeout(&mut Command::new(&output), Duration::from_secs(60))
         .unwrap_or_else(|error| panic!("sqlite3 app failed or timed out: {error}"));
@@ -470,6 +472,8 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
         &["@parcel/watcher".into()],
     )
     .unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     let event_file = watched.join("event.txt");
     let callback_file = watched.join("callback.txt");
     let callback_literal = serde_json::to_string(&callback_file.to_string_lossy()).unwrap();

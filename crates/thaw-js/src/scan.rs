@@ -582,8 +582,28 @@ pub(crate) const MODULE_LOADER_GLOBALS: [&str; 2] = [
     "__thaw_bundle_create_require",
 ];
 
+/// Findings a native-addon package bundle carries on thaw-js by design. Its `.node` is loaded through the
+/// prelude's `nativeRequire` (any `*.node` name returns the addon). `__non_webpack_require__` is the node-gyp-build
+/// probe, used only when `__webpack_require__` is a function (never on thaw-js). A dynamic `require` is that loader
+/// only when the same bundle also requires a `.node` by name (`bindings`, `node-gyp-build`).
+fn addon_tolerated(feature: &str, node_require: bool) -> bool {
+    (feature.starts_with("require:") && feature.ends_with(".node"))
+        || (feature == "require:dynamic" && node_require)
+        || feature == "global:__non_webpack_require__"
+}
+
 /// Scan a registry bundle.
 pub fn scan_bundle(source: &str) -> Result<Report, String> {
+    scan_bundle_with(source, false)
+}
+
+/// Scan the bundle of a package that ships a native (`.node`) addon: the loader keys of
+/// [`addon_tolerated`] are accepted on top of [`scan_bundle`]'s rules. Only addon packages use it.
+pub fn scan_addon_bundle(source: &str) -> Result<Report, String> {
+    scan_bundle_with(source, true)
+}
+
+fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
     let parts = parse_bundle(source)?;
     let reach = reachable(&parts);
     let mut report = Report {
@@ -614,16 +634,6 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
         "__thaw_require",
         "undefined",
     ];
-    let add = |report: &mut Report, feature: String, n: usize, key: &str| {
-        if crate::SUPPORTED_FEATURES.contains(&feature.as_str()) || tolerated(&feature, key) {
-            return;
-        }
-        let e = report
-            .blockers
-            .entry(feature)
-            .or_insert((0, key.to_string()));
-        e.0 += n;
-    };
     // First pass: names the whole reachable package defines (a method call on them is its own code).
     let mut walkers = Vec::new();
     for (key, func) in &parts.factories {
@@ -635,6 +645,24 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
         func.visit_with(&mut w);
         walkers.push((key.clone(), w));
     }
+    let node_require = walkers.iter().any(|(_, w)| {
+        w.requires
+            .iter()
+            .any(|r| r.as_deref().is_some_and(|spec| spec.ends_with(".node")))
+    });
+    let add = |report: &mut Report, feature: String, n: usize, key: &str| {
+        if crate::SUPPORTED_FEATURES.contains(&feature.as_str())
+            || tolerated(&feature, key)
+            || (addon && addon_tolerated(&feature, node_require))
+        {
+            return;
+        }
+        let e = report
+            .blockers
+            .entry(feature)
+            .or_insert((0, key.to_string()));
+        e.0 += n;
+    };
     for problem in &parts.esm_problems {
         add(&mut report, (*problem).to_string(), 1, &parts.entry);
     }

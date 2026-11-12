@@ -684,9 +684,7 @@ fn thaw_js_package_eligible(
         }
         false
     };
-    if pkg.native_addon.is_some() {
-        return reject("native addon".into());
-    }
+    // A native addon is hosted by thaw-napi's thaw-js engine; its bundle is scanned in addon mode below.
     if pkg.name.starts_with("node:") && !THAW_JS_BUILTIN_MODULES.contains(&pkg.name.as_str()) {
         return reject("builtin module not validated on thaw-js".into());
     }
@@ -725,7 +723,12 @@ fn thaw_js_package_eligible(
             }
         }
     }
-    match thaw_js::scan::scan_bundle(bundle_js) {
+    let scanned = if pkg.native_addon.is_some() {
+        thaw_js::scan::scan_addon_bundle(bundle_js)
+    } else {
+        thaw_js::scan::scan_bundle(bundle_js)
+    };
+    match scanned {
         Ok(report) if report.is_clean() => {}
         Ok(report) => {
             let blockers = report
