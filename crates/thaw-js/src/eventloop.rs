@@ -1593,6 +1593,11 @@ impl Interp {
         put(&p, "version", Value::str("v22.23.1"));
         put(&p, "platform", Value::str("linux"));
         put(&p, "arch", Value::str("x64"));
+        // node-gyp / bindings read `process.config.variables` and `target_defaults` (empty, as a build-free runtime)
+        let config = self.plain();
+        put(&config, "variables", Value::Object(self.plain()));
+        put(&config, "target_defaults", Value::Object(self.plain()));
+        put(&p, "config", Value::Object(config));
         put(&p, "pid", Value::Number(std::process::id() as f64));
         // The compiled binary re-runs itself as `node` (thaw_tjs_run_cli handles `-e`).
         let arguments: Vec<String> = std::env::args().collect();

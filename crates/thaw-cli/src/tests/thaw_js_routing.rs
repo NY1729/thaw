@@ -2,6 +2,27 @@
 // directly so the tests never touch the process environment.
 
 #[test]
+fn thaw_js_bytes_result_gate_switches_off_for_node_http_and_tls_programs() {
+    let bytes = "declare function __thaw_typed_js_6d73(path: string): Uint8Array;";
+    assert!(!thaw_js_declaration_plain_with(bytes, false, false));
+    assert!(thaw_js_declaration_plain_with(bytes, true, false));
+    assert!(thaw_js_declaration_plain(bytes));
+    // a Uint8Array result under a Promise follows the same switch
+    let async_bytes = "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;";
+    assert!(!thaw_js_async_declaration_plain_with(async_bytes, false));
+    assert!(thaw_js_async_declaration_plain_with(async_bytes, true));
+    // the switch only relaxes the bare bytes result, never a rejected parameter
+    let buffer_param = "declare function __thaw_typed_js_6d73(v: Buffer): Uint8Array;";
+    assert!(!thaw_js_declaration_plain_with(buffer_param, true, false));
+
+    assert!(thaw_js_bytes_result_allowed("import fs from 'node:fs';\nfs.readFileSync(p);"));
+    assert!(!thaw_js_bytes_result_allowed("import https from 'node:https';\nhttps.get(u);"));
+    assert!(!thaw_js_bytes_result_allowed("import http from 'node:http';"));
+    assert!(!thaw_js_bytes_result_allowed("import tls from 'node:tls';"));
+    assert!(!thaw_js_bytes_result_allowed("import http2 from 'node:http2';"));
+}
+
+#[test]
 fn thaw_js_declaration_scan_accepts_plain_data_and_rejects_everything_else() {
     let plain = |line: &str| thaw_js_declaration_plain(line);
     assert!(plain(
@@ -32,6 +53,16 @@ fn thaw_js_declaration_scan_accepts_plain_data_and_rejects_everything_else() {
         "declare function __thaw_typed_js_6d73(): Promise<number>;"
     ));
     assert!(!plain("function __thaw_typed_wrapper_js_6d73(): number {"));
+    // a bare `Uint8Array` result crosses as bytes; in params, unions and nested positions it stays out
+    assert!(plain(
+        "declare function __thaw_typed_js_6d73(path: string): Uint8Array;"
+    ));
+    assert!(!plain(
+        "declare function __thaw_typed_js_6d73(v: Uint8Array): number;"
+    ));
+    assert!(!plain(
+        "declare function __thaw_typed_js_6d73(): Uint8Array | string;"
+    ));
 }
 
 #[test]
@@ -179,6 +210,34 @@ fn thaw_js_run_guarded(output: &Path) -> String {
         String::from_utf8_lossy(&stderr)
     );
     String::from_utf8_lossy(&stdout).into_owned()
+}
+
+#[test]
+fn thaw_js_package_eligible_accepts_a_native_addon_package_with_a_clean_bundle() {
+    let pkg = ResolvedPackage {
+        name: "tjs-kit".into(),
+        commonjs_export_name: None,
+        commonjs_export_assignment: None,
+        called_commonjs_namespace_properties: Default::default(),
+        functions: Vec::new(),
+        values: Vec::new(),
+        classes: Vec::new(),
+        classifications: Vec::new(),
+        native_lib: None,
+        native_addon: Some(std::path::PathBuf::from("native.node")),
+        native_dependencies: Vec::new(),
+        platform_executable: None,
+        bundle_js: None,
+        factory_class_returns: Default::default(),
+        namespace_self_aliases: Default::default(),
+        type_only_exports: Default::default(),
+        internal_support_classes: Default::default(),
+        type_only_value_names: Default::default(),
+        nested_namespaces: Default::default(),
+    };
+    let bundle = "module.exports = (function(require){ var __thaw_bundle_factories = { \"tjs-kit/index.js\": function(module, exports, require) { exports.add = function (a, b) { return a + b; }; } }; var __thaw_bundle_require_maps = { \"tjs-kit/index.js\": {} }; var __thaw_bundle_entry_key = \"tjs-kit/index.js\"; })(globalThis.require);";
+    let user = "import { add } from 'tjs-kit';\nfunction main(): void { console.log(add(2, 3)); }\n";
+    assert!(thaw_js_package_eligible(&pkg, bundle, user, &Default::default(), ""));
 }
 
 #[test]
@@ -367,6 +426,9 @@ fn thaw_js_async_overload_is_plain_when_its_resolved_type_is() {
     ));
     assert!(!thaw_js_async_declaration_plain(
         "declare function __thaw_typed_js_6d73(t: Promise<string>): string;"
+    ));
+    assert!(thaw_js_async_declaration_plain(
+        "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;"
     ));
 }
 
@@ -804,8 +866,18 @@ fn thaw_js_ctor_option_callback_declaration_is_plain_only_for_constructors() {
     let ctor = "declare function __thaw_typed_tjs_246e6577246e6f64653a73747265616d3a3a5772697461626c6524617269747931(opts: { write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }): JsValue;";
     let method = "declare function __thaw_typed_tjs_246d6574686f64246e6f64653a73747265616d3a3a5772697461626c6524777269746524617269747931(opts: { write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }): JsValue;";
     // a constructor's option object may carry callbacks (`new Writable({ write })`)
-    assert!(thaw_js_declaration_plain_with(ctor, true));
+    assert!(thaw_js_declaration_plain_with(ctor, true, true));
     // the same signature is still rejected by default, and for a method operation
+    assert!(!thaw_js_declaration_plain_with(ctor, true, false));
     assert!(!thaw_js_declaration_plain(ctor));
-    assert!(!thaw_js_declaration_plain_with(method, false));
+    assert!(!thaw_js_declaration_plain_with(method, false, false));
+}
+
+#[test]
+fn thaw_js_unready_addon_blocker_keeps_live_owner_and_subscription_addons_on_quickjs() {
+    assert!(thaw_js_unready_addon_blocker("argon2").is_some());
+    assert!(thaw_js_unready_addon_blocker("@parcel/watcher").is_some());
+    assert!(thaw_js_unready_addon_blocker("bcrypt").is_none());
+    assert!(thaw_js_unready_addon_blocker("sqlite3").is_none());
+    assert!(thaw_js_unready_addon_blocker("some-unrelated-package").is_none());
 }

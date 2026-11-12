@@ -108,3 +108,90 @@ fn runtime_realm_defaults_to_on_and_new_stays_off() {
     assert_eq!(Interp::runtime().compile_mode, CompileMode::On);
     assert_eq!(Interp::new().compile_mode, CompileMode::Off);
 }
+
+/// W1: a function whose body has a loop is compiled on its first call, not on the `compile_after`-th call.
+#[test]
+fn loop_function_compiles_on_first_call() {
+    let src = "function sum(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s; } console.log(sum(10));";
+    let mut it = Interp::with_compile_mode(CompileMode::On);
+    assert!(it.run(src).is_ok());
+    assert_eq!(it.out, vec!["45".to_string()]);
+    assert_eq!(
+        it.cstats.compiled, 1,
+        "a loop function must compile on its first call"
+    );
+    assert_eq!(it.cstats.compiled_calls, 1);
+}
+
+/// W1: a loop-free function still waits for `compile_after` calls.
+#[test]
+fn loop_free_function_still_waits_for_threshold() {
+    let src = "function add(a, b) { return a + b; } console.log(add(1, 2));";
+    let mut it = Interp::with_compile_mode(CompileMode::On);
+    assert!(it.run(src).is_ok());
+    assert_eq!(it.out, vec!["3".to_string()]);
+    assert_eq!(it.cstats.compiled, 0);
+}
+
+/// W1: loops inside a nested function or arrow do not make the outer function a loop function.
+#[test]
+fn loop_in_nested_function_does_not_count_for_outer() {
+    let src = "function outer() { const f = () => { for (let i = 0; i < 2; i++) {} }; return typeof f; } console.log(outer());";
+    let mut it = Interp::with_compile_mode(CompileMode::On);
+    assert!(it.run(src).is_ok());
+    assert_eq!(it.out, vec!["function".to_string()]);
+    assert_eq!(it.cstats.compiled, 0);
+}
+
+/// W1: a loop function run once gives the same output compiled as on the AST (break, labels, closures
+/// captured per iteration, return from a loop, throw out of a loop, a rejected for-of).
+#[test]
+fn loop_function_called_once_matches_ast() {
+    let src = r#"
+        function f(n) {
+            const fns = [];
+            let acc = 0;
+            outer: for (let i = 0; i < n; i++) {
+                for (let j = 0; j < n; j++) {
+                    if (j === 2) continue;
+                    if (i * j > 6) break outer;
+                    acc += i * 10 + j;
+                    fns.push(() => i + j);
+                }
+            }
+            let k = 0;
+            while (true) { if (++k > 3) break; }
+            do { k += 10; } while (k < 30);
+            return [acc, k, fns.map(q => q()).join(",")].join(";");
+        }
+        console.log(f(4));
+        function r(x) { for (let i = 0; i < 5; i++) { if (i === x) return "hit" + i; } return "miss"; }
+        console.log(r(2), r(9));
+        function t() { let s = 0; for (let i = 0; i < 3; i++) { if (i == 1) throw new Error("boom " + i); s += i; } return s; }
+        try { t(); } catch (e) { console.log(e.message); }
+        function o(xs) { let c = 0; for (const x of xs) c += x; return c; }
+        console.log(o([1, 2, 3]));
+    "#;
+    let mut off = Interp::with_compile_mode(CompileMode::Off);
+    assert!(off.run(src).is_ok());
+    let mut on = Interp::with_compile_mode(CompileMode::On);
+    assert!(on.run(src).is_ok());
+    assert_eq!(on.out, off.out);
+    assert_eq!(on.out.len(), 4);
+    assert!(
+        on.cstats.compiled >= 1,
+        "the loop functions must compile on their first call"
+    );
+}
+
+/// W8: the glibc tuning succeeds where it applies (gnu targets), and `runtime()` still builds a realm.
+#[test]
+fn malloc_tuning_applies_on_gnu() {
+    assert_eq!(
+        tune_malloc(),
+        cfg!(all(target_os = "linux", target_env = "gnu"))
+    );
+    let mut it = Interp::runtime();
+    assert!(it.run("console.log(1 + 1)").is_ok());
+    assert_eq!(it.out, vec!["2".to_string()]);
+}
