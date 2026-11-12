@@ -212,9 +212,7 @@ impl Interp {
                 st.bump(&st.miss_mid_mask);
                 // a mask hit is only a maybe: an exact membership test tells a collision from a
                 // real binding (a `with` object matches every name, so it always decides)
-                let Some(name) = stored_name.as_deref() else {
-                    return None;
-                };
+                let name = stored_name.as_deref()?;
                 if cur.with.is_some() || cur.vars.borrow().contains_key(name) {
                     return None;
                 }
