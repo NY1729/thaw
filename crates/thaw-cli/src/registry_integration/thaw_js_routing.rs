@@ -201,12 +201,14 @@ fn thaw_js_keeps_js_value(package: &str) -> bool {
 /// `Uint8Array` result.
 #[cfg(test)]
 fn thaw_js_declaration_plain(line: &str) -> bool {
-    thaw_js_declaration_plain_with(line, true)
+    thaw_js_declaration_plain_with(line, true, false)
 }
 
 /// `thaw_js_declaration_plain`, with the bare `Uint8Array` result relaxation switched by
-/// `bytes_result_ok` (see `thaw_js_bytes_result_allowed`).
-fn thaw_js_declaration_plain_with(line: &str, bytes_result_ok: bool) -> bool {
+/// `bytes_result_ok` (see `thaw_js_bytes_result_allowed`). `callback_options`: a constructor's option
+/// object may carry callback fields (`new Writable({ write })`), so its `=>` types are accepted.
+/// Passed `true` only for `$new$` lines (the class-operation gate).
+fn thaw_js_declaration_plain_with(line: &str, bytes_result_ok: bool, callback_options: bool) -> bool {
     let Some(rest) = line.strip_prefix("declare function ") else {
         return false;
     };
@@ -214,7 +216,7 @@ fn thaw_js_declaration_plain_with(line: &str, bytes_result_ok: bool) -> bool {
     // can already pass such a parameter to thaw-js, see `thaw_js_callback_type`; accepting it here is
     // a one-line change that flips `thaw_js_routing_falls_back_to_quickjs_when_a_callback_...`.)
     // A callback coerced into a `Json` parameter (lodash's `iteratee: Json`) is routed.
-    if rest.contains("=>") {
+    if !callback_options && rest.contains("=>") {
         return false;
     }
     let name_end = rest.find(['<', '(']).unwrap_or(rest.len());
@@ -336,6 +338,7 @@ fn thaw_js_async_declaration_plain_with(line: &str, bytes_result_ok: bool) -> bo
         && thaw_js_declaration_plain_with(
             &format!("{params}{}", resolved.replace("Promise", "")),
             bytes_result_ok,
+            false,
         )
 }
 
@@ -370,9 +373,9 @@ fn thaw_js_class_declaration(line: &str, package: &str, class: &str) -> bool {
     key.starts_with('$') && key.split('$').nth(2) == Some(&format!("{package}::{class}"))
 }
 
-/// The member (`$method$pkg::Class$member$overload0$arity3`, `$staticmethod$...`) a class operation line
-/// calls; `None` for a constructor or any other operation.
-fn thaw_js_class_member(line: &str) -> Option<String> {
+/// The decoded operation key of a `__thaw_typed_js_<hex>` / `__thaw_typed_tjs_<hex>` declaration line
+/// (`$new$pkg::Class$arity0`, `$method$...`).
+fn thaw_js_declaration_key(line: &str) -> Option<String> {
     let symbol = line
         .strip_prefix("declare function __thaw_typed_js_")
         .or_else(|| line.strip_prefix("declare function __thaw_typed_tjs_"))?
@@ -383,7 +386,13 @@ fn thaw_js_class_member(line: &str) -> Option<String> {
         .step_by(2)
         .map(|index| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok())
         .collect::<Option<Vec<_>>>()?;
-    let key = String::from_utf8(bytes).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// The member (`$method$pkg::Class$member$overload0$arity3`, `$staticmethod$...`) a class operation line
+/// calls; `None` for a constructor or any other operation.
+fn thaw_js_class_member(line: &str) -> Option<String> {
+    let key = thaw_js_declaration_key(line)?;
     let mut parts = key.strip_prefix('$')?.split('$');
     let kind = parts.next()?;
     if !kind.starts_with("method") && !kind.starts_with("staticmethod") {
@@ -724,7 +733,12 @@ fn thaw_js_package_eligible(
     {
         for line in segment.lines() {
             if thaw_js_class_declaration(line, &pkg.name, &class.name)
-                && !thaw_js_declaration_plain_with(line, bytes_result_ok)
+                // a constructor's option object may carry callbacks (`new Writable({ write })`)
+                && !thaw_js_declaration_plain_with(
+                    line,
+                    bytes_result_ok,
+                    thaw_js_declaration_key(line).is_some_and(|key| key.starts_with("$new$")),
+                )
                 // a method operation is only emitted where the program calls it, and the thaw-js backend
                 // fails the build (which retries on QuickJS) for a signature it cannot serve
                 && thaw_js_class_member(line).is_none()
@@ -801,7 +815,7 @@ fn thaw_js_package_eligible(
                 return reject(format!("`{}` has no declaration", function.name));
             }
             lines.into_iter().all(|line| {
-                thaw_js_declaration_plain_with(line, bytes_result_ok)
+                thaw_js_declaration_plain_with(line, bytes_result_ok, false)
                     || thaw_js_async_declaration_plain_with(line, bytes_result_ok)
                     || reject(format!("`{}`: {line}", function.name))
             })

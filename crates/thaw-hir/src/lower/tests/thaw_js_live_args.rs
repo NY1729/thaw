@@ -88,3 +88,44 @@ fn thaw_js_instance_method_json_slot_keeps_copying_literals_numbers_and_non_meth
     let quickjs_body = thaw_js_live_arg_main_body(&quickjs, "const arr = [1, 2];", "arr");
     assert!(!quickjs_body.contains("__thaw_array_with_native_view"), "{quickjs_body}");
 }
+
+#[test]
+fn thaw_js_ctor_callback_object_literal_is_a_dynamic_object_literal_without_a_json_decode() {
+    let new = thaw_js_live_arg_symbol("tjs", "$new$node:stream::Writable$arity1");
+    let source = format!(
+        r#"
+        declare function {new}(opts: {{ write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }}): JsValue;
+        function main(): void {{
+            {new}({{ write(c, e, cb) {{ cb(); }} }});
+        }}
+        "#,
+        new = new,
+    );
+    let program = lower(&source);
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .expect("main is lowered");
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("Var(\"__thaw_dynamic_object_literal\")"), "{body}");
+    assert!(!body.contains("JsonAsNative"), "{body}");
+}
+
+#[test]
+fn thaw_js_ctor_callback_object_literal_with_an_undeclared_key_keeps_the_typed_lowering() {
+    let new = thaw_js_live_arg_symbol("tjs", "$new$node:stream::Writable$arity1");
+    let source = format!(
+        r#"
+        declare function {new}(opts: {{ write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }}): JsValue;
+        function main(): void {{
+            {new}({{ write(c, e, cb) {{ cb(); }}, bogus: 1 }});
+        }}
+        "#,
+        new = new,
+    );
+    let module = thaw_parser::parse_typescript(&source).unwrap();
+    // the typed lowering rejects the undeclared key as before; the live literal path must not take it
+    let error = lower_module(&module).expect_err("an undeclared option key is rejected");
+    assert!(!error.contains("__thaw_dynamic_object_literal"), "{error}");
+}

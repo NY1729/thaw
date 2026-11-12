@@ -865,3 +865,4 @@ include!("tests/tj35_bytes_contracts.rs");
 include!("tests/thaw_js_json_listener_contracts.rs");
 include!("tests/thaw_js_live_args_contracts.rs");
 include!("tests/thaw_js_live_owner_args_contracts.rs");
+include!("tests/thaw_js_stream_ctor_contracts.rs");

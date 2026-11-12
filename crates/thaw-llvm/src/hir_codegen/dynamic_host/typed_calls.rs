@@ -73,6 +73,43 @@ pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
     }
 }
 
+/// A constructor option object whose callbacks are receiver handles (`new Writable({ write })`): every
+/// field is plain data or such a callback, and at least one field is a callback. It crosses as the
+/// live object literal of `compile_thaw_js_object_literal_argument`, never as a typed struct.
+pub(crate) fn thaw_js_object_with_callbacks_type(ty: &HirType) -> bool {
+    let ty = match ty {
+        HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => inner.as_ref(),
+        other => other,
+    };
+    match ty {
+        HirType::Object(fields) => {
+            fields.iter().all(|(_, field)| thaw_js_param_leaf_type(field) || thaw_js_ctor_option_callback(field))
+                && fields.iter().any(|(_, field)| thaw_js_ctor_option_callback(field))
+        }
+        _ => false,
+    }
+}
+
+/// A callback field of a constructor option object: a function (optionally absent) whose parameters are
+/// plain data (JsValue leaves allowed) or a nested callback, returning plain data or nothing.
+fn thaw_js_ctor_option_callback(ty: &HirType) -> bool {
+    let ty = match ty {
+        HirType::Optional(inner) => inner.as_ref(),
+        other => other,
+    };
+    let (HirType::Function(params, ret) | HirType::CallableFunction(params, _, None, ret)) = ty else {
+        return false;
+    };
+    params.iter().all(|param| {
+        thaw_js_param_leaf_type(param) || thaw_js_ctor_nested_callback(param)
+    }) && (**ret == HirType::Void || (thaw_js_param_leaf_type(ret) && !thaw_js_contains_bytes(ret)))
+}
+
+/// A nested callback parameter (`cb` of `write(chunk, enc, cb)`): no-argument-or-plain params, no result.
+fn thaw_js_ctor_nested_callback(ty: &HirType) -> bool {
+    matches!(ty, HirType::Function(params, ret) if **ret == HirType::Void && params.iter().all(thaw_js_param_leaf_type))
+}
+
 /// Whether `ty` holds a `Bytes` anywhere. Only a bare `Bytes` argument is encoded by
 /// `compile_thaw_js_bytes_argument`; a nested one would go through the generic JSON encoder as a
 /// `{"type":"Buffer"}` object, which thaw-js would hand over as a plain object.
@@ -2273,7 +2310,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 || ((!is_new || is_value)
                     && thaw_js_plain_type(awaited)
                     && !(is_promise && thaw_js_date_type(awaited))))
-            && signature.params.iter().skip(usize::from(is_method)).all(|ty| thaw_js_plain_type(ty) || handle_param(ty) || thaw_js_callback_type(ty))
+            && signature.params.iter().skip(usize::from(is_method)).all(|ty| {
+                thaw_js_plain_type(ty)
+                    || handle_param(ty)
+                    || thaw_js_callback_type(ty)
+                    || (is_new && !is_value && thaw_js_object_with_callbacks_type(ty))
+            })
             && !signature.params.iter().any(|ty| *ty != HirType::Bytes && thaw_js_contains_bytes(ty))
             && (!is_method || signature.params.first().is_some_and(handle_param))
             && args.len() == signature.params.len();
@@ -2308,6 +2350,25 @@ impl<'ctx> HirCompiler<'ctx> {
                 continue;
             }
             if let Some(literal) = thaw_js_object_literal_for_jsvalue(arg).filter(|_| handle_param(ty)) {
+                let object = self.compile_thaw_js_object_literal_argument(literal)?;
+                self.compile_typed_dynamic_argument(array, object, &HirType::Json)
+                    .map_err(|error| format!("thaw-js class argument {} (object literal): {error}", index + 1))?;
+                continue;
+            }
+            if is_new && !is_value && thaw_js_object_with_callbacks_type(ty) {
+                let literal = match arg {
+                    HirExpr::Call(callee, _)
+                        if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_dynamic_object_literal") =>
+                    {
+                        arg
+                    }
+                    _ => {
+                        return Err(format!(
+                            "thaw-js: constructor option object with callbacks must be an object literal ({})",
+                            signature.symbol
+                        ))
+                    }
+                };
                 let object = self.compile_thaw_js_object_literal_argument(literal)?;
                 self.compile_typed_dynamic_argument(array, object, &HirType::Json)
                     .map_err(|error| format!("thaw-js class argument {} (object literal): {error}", index + 1))?;
@@ -2744,7 +2805,18 @@ impl<'ctx> HirCompiler<'ctx> {
             let field = if is_method {
                 // a method forwards its receiver, so it is a receiver callback (as a handle)
                 self.thaw_js_call_arguments = true;
-                let handle = self.compile_register_native_callback(std::slice::from_ref(callback), false);
+                // A method closure takes its receiver as physical param 0 (`NonArrowReceiver`): register it
+                // with the method ABI, or every argument shifts by one slot.
+                let receiver_first = matches!(
+                    self.expr_hir_type(callback),
+                    Some(HirType::Function(ref params, _))
+                        if matches!(params.first(), Some(HirType::NonArrowReceiver(_)))
+                );
+                let handle = if receiver_first {
+                    self.compile_register_native_method_callback_graph(std::slice::from_ref(callback))
+                } else {
+                    self.compile_register_native_callback(std::slice::from_ref(callback), false)
+                };
                 self.thaw_js_call_arguments = saved;
                 let marker = self.compile_thaw_js_handle_marker(handle?.into_int_value())?;
                 self.compile_json_object_set_native(object, key.as_pointer_value(), marker, &HirType::Json)?;

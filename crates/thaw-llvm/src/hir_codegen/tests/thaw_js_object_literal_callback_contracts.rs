@@ -19,7 +19,8 @@ fn thaw_js_routed_object_literal_methods_are_receiver_handles() {
     let source = thaw_js_object_literal_program("{ cb(x: number): number { return x + 1; }, n: 1 }");
     let (uses_thaw_js, _, ir) = thaw_js_routed_ir(&source, true);
     assert!(uses_thaw_js, "{ir}");
-    assert!(ir.contains("@thaw_tjs_register_native_callback_graph("), "{ir}");
+    assert!(ir.contains("call { i64, ptr } @thaw_tjs_register_native_method_callback_graph("), "{ir}");
+    assert!(!ir.contains("call { i64, ptr } @thaw_tjs_register_native_callback_graph("), "{ir}");
     assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
     // the member is no longer built by the QuickJS builder
     assert!(!ir.contains("__thaw_object_from_operations"), "{ir}");
@@ -59,7 +60,8 @@ fn quickjs_engine_object_literal_keeps_the_builder() {
     assert!(ir.contains("__thaw_object_from_operations"), "{ir}");
     assert!(ir.contains("@thaw_js_get_global("), "{ir}");
     assert!(!ir.contains("__thaw_tjs_handle__"), "{ir}");
-    assert!(!ir.contains("@thaw_tjs_register_native_callback_graph("), "{ir}");
+    assert!(!ir.contains("call { i64, ptr } @thaw_tjs_register_native_callback_graph("), "{ir}");
+    assert!(!ir.contains("call { i64, ptr } @thaw_tjs_register_native_method_callback_graph("), "{ir}");
 }
 
 // A thaw-js routed call builds its method-bearing object literal argument from the members, so the
