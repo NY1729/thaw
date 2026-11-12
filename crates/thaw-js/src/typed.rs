@@ -167,6 +167,54 @@ impl Interp {
         new_obj(self.rt.arraybuffer_proto.clone(), Kind::ArrayBuffer(data))
     }
 
+    /// A SharedArrayBuffer: the same storage kind as an ArrayBuffer under its own prototype.
+    // ponytail: no cross-worker sharing; a SAB handed to a worker is a copy (worker_wire.js refuses it).
+    fn new_shared_buffer(&self, data: Bytes) -> Obj {
+        new_obj(
+            self.rt.sharedarraybuffer_proto.clone(),
+            Kind::ArrayBuffer(data),
+        )
+    }
+
+    /// `new ArrayBuffer(n)` / `new SharedArrayBuffer(n)`: zero-filled, `n` truncated, NaN = 0.
+    fn alloc_buffer(&mut self, args: &[Value], shared: bool) -> R<Value> {
+        let n = self.num(&arg(args, 0));
+        let n = if n.is_nan() { 0.0 } else { n };
+        if !(0.0..=2f64.powi(32)).contains(&n) {
+            return self.throw_error("RangeError", "Array buffer allocation failed");
+        }
+        let data: Bytes = Rc::new(RefCell::new(vec![0; n as usize]));
+        let obj = if shared {
+            self.new_shared_buffer(data)
+        } else {
+            self.new_array_buffer(data)
+        };
+        Ok(Value::Object(obj))
+    }
+
+    /// The bytes `[start, end)` of a buffer for `slice(start, end)` (negative = from the end).
+    fn slice_bytes(it: &mut Interp, data: &Bytes, a: &[Value]) -> Vec<u8> {
+        let n = data.borrow().len() as f64;
+        let rel = |it: &mut Interp, v: Value, d: f64| {
+            let x = if matches!(v, Value::Undefined) {
+                d
+            } else {
+                it.num(&v).trunc()
+            };
+            if x < 0.0 {
+                (n + x).max(0.0)
+            } else {
+                x.min(n)
+            }
+        };
+        let (s, e) = (rel(it, arg(a, 0), 0.0), rel(it, arg(a, 1), n));
+        if e > s {
+            data.borrow()[s as usize..e as usize].to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
     pub(crate) fn new_typed(
         &self,
         ty: Ty,
@@ -310,15 +358,7 @@ impl Interp {
         // ----- ArrayBuffer -----
         let ab_proto = self.plain();
         self.rt.arraybuffer_proto = Some(ab_proto.clone());
-        let ab = self.native(|it, _, args| {
-            let n = it.num(&arg(args, 0));
-            let n = if n.is_nan() { 0.0 } else { n };
-            if !(0.0..=2f64.powi(32)).contains(&n) {
-                return it.throw_error("RangeError", "Array buffer allocation failed");
-            }
-            let data: Bytes = Rc::new(RefCell::new(vec![0; n as usize]));
-            Ok(Value::Object(it.new_array_buffer(data)))
-        });
+        let ab = self.native(|it, _, args| it.alloc_buffer(args, false));
         if let Value::Object(c) = &ab {
             put_hidden(c, "prototype", Value::Object(ab_proto.clone()));
             put_hidden(&ab_proto, "constructor", ab.clone());
@@ -330,30 +370,32 @@ impl Interp {
             let Some(data) = Self::bytes_of_buffer(this) else {
                 return it.throw_error("TypeError", "Receiver is not an ArrayBuffer");
             };
-            let n = data.borrow().len() as f64;
-            let rel = |it: &mut Interp, v: Value, d: f64| {
-                let x = if matches!(v, Value::Undefined) {
-                    d
-                } else {
-                    it.num(&v).trunc()
-                };
-                if x < 0.0 {
-                    (n + x).max(0.0)
-                } else {
-                    x.min(n)
-                }
-            };
-            let (s, e) = (rel(it, arg(a, 0), 0.0), rel(it, arg(a, 1), n));
-            let out = if e > s {
-                data.borrow()[s as usize..e as usize].to_vec()
-            } else {
-                Vec::new()
-            };
+            let out = Self::slice_bytes(it, &data, a);
             Ok(Value::Object(
                 it.new_array_buffer(Rc::new(RefCell::new(out))),
             ))
         });
         g.declare("ArrayBuffer", ab, true);
+
+        // ----- SharedArrayBuffer: same storage, own prototype (not an ArrayBuffer); byteLength is served by
+        // the ArrayBuffer fast path in lib.rs, the prelude adds the brand-checked accessors -----
+        let sab_proto = self.plain();
+        self.rt.sharedarraybuffer_proto = Some(sab_proto.clone());
+        let sab = self.native(|it, _, args| it.alloc_buffer(args, true));
+        if let Value::Object(c) = &sab {
+            put_hidden(c, "prototype", Value::Object(sab_proto.clone()));
+            put_hidden(&sab_proto, "constructor", sab.clone());
+        }
+        self.set_native(&sab_proto, "slice", |it, this, a| {
+            let Some(data) = Self::bytes_of_buffer(this) else {
+                return it.throw_error("TypeError", "Receiver is not a SharedArrayBuffer");
+            };
+            let out = Self::slice_bytes(it, &data, a);
+            Ok(Value::Object(
+                it.new_shared_buffer(Rc::new(RefCell::new(out))),
+            ))
+        });
+        g.declare("SharedArrayBuffer", sab, true);
 
         // ----- typed arrays -----
         let ta_proto = self.plain(); // %TypedArray%.prototype: methods come from the JS prelude
@@ -495,6 +537,16 @@ const TYPED_PRELUDE: &str = r#"
     if (!(this instanceof ArrayBuffer)) throw new TypeError('Receiver is not an ArrayBuffer');
     return this.byteLength;
   });
+  acc(SharedArrayBuffer.prototype, 'byteLength', function () {
+    if (!(this instanceof SharedArrayBuffer)) throw new TypeError('Receiver is not a SharedArrayBuffer');
+    return this.byteLength;
+  });
+  acc(SharedArrayBuffer.prototype, 'growable', function () { return false; });
+  acc(SharedArrayBuffer.prototype, 'maxByteLength', function () {
+    if (!(this instanceof SharedArrayBuffer)) throw new TypeError('Receiver is not a SharedArrayBuffer');
+    return this.byteLength;
+  });
+  Object.defineProperty(SharedArrayBuffer.prototype, TAG, { value: 'SharedArrayBuffer', configurable: true });
   ['forEach', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex', 'reduce', 'reduceRight', 'fill', 'at', 'toString', 'keys', 'values', 'entries'].forEach(function (n) {
     if (AP[n]) def(TP, n, AP[n]);
   });
