@@ -582,15 +582,30 @@ impl Interp {
     /// Route an exception that escaped a callback to `process.on('uncaughtException')`, if any.
     fn uncaught(&mut self, e: Ctl) -> R<()> {
         match e {
-            Ctl::Throw(v)
+            Ctl::Throw(v) => {
+                // Node: every `uncaughtExceptionMonitor` listener runs first, then the `uncaughtException` handler
+                if self
+                    .rt
+                    .listeners
+                    .get("uncaughtExceptionMonitor")
+                    .is_some_and(|l| !l.is_empty())
+                {
+                    self.emit(
+                        "uncaughtExceptionMonitor",
+                        &[v.clone(), Value::str("uncaughtException")],
+                    )?;
+                }
                 if self
                     .rt
                     .listeners
                     .get("uncaughtException")
-                    .is_some_and(|l| !l.is_empty()) =>
-            {
-                self.emit("uncaughtException", &[v, Value::str("uncaughtException")])?;
-                Ok(())
+                    .is_some_and(|l| !l.is_empty())
+                {
+                    self.emit("uncaughtException", &[v, Value::str("uncaughtException")])?;
+                    Ok(())
+                } else {
+                    Err(Ctl::Throw(v))
+                }
             }
             e => Err(e),
         }
@@ -606,11 +621,7 @@ impl Interp {
     pub fn run_jobs(&mut self) -> R<()> {
         loop {
             loop {
-                while let Some((fr, f, a)) = self.rt.ticks.pop_front() {
-                    if let Err(e) = self.in_frame(fr, |it| it.call(&f, &Value::Undefined, &a)) {
-                        self.uncaught(e)?;
-                    }
-                }
+                self.drain_ticks()?;
                 while let Some((fr, j)) = self.rt.micro.pop_front() {
                     self.in_frame(fr, |it| it.run_job(j))?;
                 }
@@ -655,6 +666,39 @@ impl Interp {
             if self.rt.ticks.is_empty() && self.rt.micro.is_empty() {
                 return Ok(());
             }
+        }
+    }
+
+    /// Run queued `nextTick` callbacks only (promise jobs stay queued). The routed entry drains ticks before
+    /// the native promise queue, as Node does for a main's own ticks.
+    pub fn drain_ticks(&mut self) -> R<()> {
+        while let Some((fr, f, a)) = self.rt.ticks.pop_front() {
+            if let Err(e) = self.in_frame(fr, |it| it.call(&f, &Value::Undefined, &a)) {
+                self.uncaught(e)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fatal exit of a routed build: queued timers, immediates and jobs are dropped (Node runs none of them
+    /// after an uncaught exception).
+    pub(crate) fn drop_pending_work(&mut self) {
+        self.rt.timers.clear();
+        self.rt.immediates.clear();
+        self.rt.ticks.clear();
+        self.rt.micro.clear();
+    }
+
+    /// Whether this realm already emitted `exit` (it runs no more work after that).
+    pub(crate) fn exit_emitted(&self) -> bool {
+        self.rt.exit_emitted
+    }
+
+    /// One native-continuation checkpoint (`turn_hook`), if the host installed one. The compiled runtime
+    /// drains its promise jobs here, so a promise a due timer queued runs before the next due timer.
+    fn turn_checkpoint(&mut self) {
+        if let Some(hook) = self.turn_hook {
+            hook(self);
         }
     }
 
@@ -1008,6 +1052,7 @@ impl Interp {
                 }
             }
             self.run_jobs()?;
+            self.turn_checkpoint();
         }
     }
 
@@ -1024,6 +1069,7 @@ impl Interp {
                 self.uncaught(e)?;
             }
             self.run_jobs()?;
+            self.turn_checkpoint();
         }
         self.rt.cleared.clear();
         Ok(())
@@ -1231,6 +1277,10 @@ impl Interp {
     /// Run the event loop until no referenced timer/immediate remains, emitting `beforeExit` and
     /// `exit`. Returns the process exit code; an uncaught exception comes back as `Err`.
     pub fn run_event_loop(&mut self) -> R<i32> {
+        // an exited realm runs nothing more (a routed build calls the loop once per terminal pass)
+        if self.rt.exit_emitted {
+            return Ok(self.exit_code());
+        }
         let mut code = None;
         loop {
             match self.loop_inner() {
@@ -1262,6 +1312,20 @@ impl Interp {
         self.set_exit_code(Some(code as f64));
         self.emit_exit_event(code)?;
         Ok(self.exit_code())
+    }
+
+    /// `run_event_loop` without `beforeExit`/`exit`: a routed build's pass runs the loop and leaves the exit
+    /// events to its idle pass, which runs once no native watch or server is left. A fatal error still emits
+    /// `exit` with code 1, as `run_event_loop` does.
+    pub(crate) fn run_loop_only(&mut self) -> R<i32> {
+        match self.loop_inner() {
+            Ok(()) => Ok(0),
+            Err(Ctl::Exit(c)) => {
+                self.set_exit_code(Some(c as f64));
+                Ok(c)
+            }
+            Err(e) => self.fatal(e),
+        }
     }
 
     /// Emits `exit` with `code` unless this realm already did.

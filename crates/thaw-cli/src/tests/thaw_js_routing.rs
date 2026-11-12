@@ -169,6 +169,13 @@ fn thaw_js_run(output: &Path) -> String {
 /// `thaw_js_run` with a 20 s guard: a hung binary is killed, its captured output is printed, and the test
 /// panics instead of stalling the whole test run.
 fn thaw_js_run_guarded(output: &Path) -> String {
+    let (stdout, stderr, code) = thaw_js_run_guarded_status(output);
+    assert!(code == Some(0), "{stderr}");
+    stdout
+}
+
+/// `thaw_js_run_guarded` without the success assertion: returns stdout, stderr and the exit code.
+fn thaw_js_run_guarded_status(output: &Path) -> (String, String, Option<i32>) {
     use std::io::Read;
     use std::process::Stdio;
     let mut child = Command::new(output)
@@ -204,12 +211,11 @@ fn thaw_js_run_guarded(output: &Path) -> String {
     let status = child.wait().unwrap();
     let stdout = stdout_reader.join().unwrap();
     let stderr = stderr_reader.join().unwrap();
-    assert!(
-        status.success(),
-        "{}",
-        String::from_utf8_lossy(&stderr)
-    );
-    String::from_utf8_lossy(&stdout).into_owned()
+    (
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+        status.code(),
+    )
 }
 
 #[test]
@@ -1003,4 +1009,58 @@ fn thaw_js_route_all_attempts_thaw_js_for_a_plain_any_program_and_names_the_fall
         assert_eq!(thaw_js_run_guarded(&output).trim(), "1");
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// node-compat tick, timer and lifecycle cases (sources from tests/node-compat.json; the manifest has no
+/// expected-output field, so each expected text is derived from Node's semantics for that source).
+#[test]
+fn routed_tick_timer_and_lifecycle_order_matches_node() {
+    let cases: [(&str, &str, &str, Option<i32>); 6] = [
+        (
+            "nextTick precedes promise and microtask queues",
+            "async function main(): Promise<void> { const order: string[] = []; process.nextTick(() => order.push('tick')); Promise.resolve().then(() => order.push('promise')); queueMicrotask(() => order.push('microtask')); await new Promise<void>((resolve) => setImmediate(resolve)); console.log(order.join(',')); }",
+            "tick,promise,microtask\n",
+            Some(0),
+        ),
+        (
+            "commonjs program runs nextTick before promises",
+            "function main(): void { console.log('sync'); process.nextTick((): void => console.log('tick')); Promise.resolve().then((): void => console.log('promise')); queueMicrotask((): void => console.log('microtask')); }",
+            "sync\ntick\npromise\nmicrotask\n",
+            Some(0),
+        ),
+        (
+            "timers: each due timer gets a microtask checkpoint",
+            "async function main(): Promise<void> {\n    const events: string[] = [];\n    setTimeout(() => {\n        events.push(\"timer-1\");\n        Promise.resolve().then(() => {\n            events.push(\"promise\");\n        });\n    }, 0);\n    setTimeout(() => {\n        events.push(\"timer-2\");\n    }, 0);\n    await new Promise<void>((resolve) => setTimeout(resolve, 20));\n    console.log(events.join(\",\"));\n}\n",
+            "timer-1,promise,timer-2\n",
+            Some(0),
+        ),
+        (
+            "process beforeExit re-arm and exit event",
+            "function main(): void { let n: number = 0; process.on('beforeExit', (code: number): void => { console.log('beforeExit', code, n); if (n++ < 1) setTimeout((): void => console.log('more'), 1); }); process.on('exit', (code: number): void => console.log('exit', code)); console.log('main'); }",
+            "main\nbeforeExit 0 0\nmore\nbeforeExit 0 1\nexit 0\n",
+            Some(0),
+        ),
+        (
+            "sync throw in main skips registered timers and exit sees code 1",
+            "function main(): void { process.on('exit', (code: number) => console.log('exit', code)); setTimeout(() => console.log('timer'), 5); console.log('a'); throw new Error('boom'); }",
+            "a\nexit 1\n",
+            Some(1),
+        ),
+        (
+            "uncaught exception monitor precedes handler",
+            "function main(): void { const order: string[] = []; process.on('uncaughtExceptionMonitor', () => order.push('monitor')); process.on('uncaughtException', () => { order.push('handler'); console.log(order.join(',')); }); queueMicrotask(() => { throw new Error('boom'); }); }",
+            "monitor,handler\n",
+            Some(0),
+        ),
+    ];
+    for (name, body, expected, code) in cases {
+        let _env = RouteAllEnv::set();
+        let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-tick-{slug}"), body);
+        let output = entry.with_file_name("app");
+        let manifest = thaw_js_build(&entry, &output, &registry, true);
+        assert_eq!(manifest["quickjs"], false, "{name} linked QuickJS: {manifest}");
+        let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+        assert_eq!((stdout.as_str(), status), (expected, code), "{name}: {stderr}");
+    }
 }
