@@ -6709,6 +6709,58 @@ fn ident_hint_mask_collision_resolves_both_names() {
     it.hint_stats.on = false;
 }
 
+#[test]
+fn ident_hint_mask_collision_continues_the_hop() {
+    // Same collision as above, but the colliding scope is passed on the way to the outer name,
+    // so the exact membership test must clear it and the hop must continue to a hinted hit.
+    let mut pair = None;
+    'search: for i in 0..200 {
+        for j in i + 1..200 {
+            let (a, b) = (format!("q{i}"), format!("q{j}"));
+            if name_bit(&a) == name_bit(&b) {
+                pair = Some((a, b));
+                break 'search;
+            }
+        }
+    }
+    let (a, b) = pair.expect("two names share a filter bit");
+    let src = format!(
+        "let {a} = 'outer'; function f() {{ let {b} = 'inner'; const out = []; for (let k = 0; k < 3; k++) out.push({a}, {b}); return out.join(','); }} console.log(f(), f());"
+    );
+    let mut it = Interp::new();
+    it.hint_stats.on = true;
+    let _ = it.run(&src);
+    assert_eq!(
+        it.out,
+        vec!["outer,inner,outer,inner,outer,inner outer,inner,outer,inner,outer,inner".to_string()]
+    );
+    assert!(
+        it.hint_stats.mask_false_positive_resolved.get() > 0,
+        "no false-positive mask hit was resolved by membership: {}",
+        it.hint_stats.summary()
+    );
+    it.hint_stats.on = false;
+}
+
+#[test]
+fn hinted_reads_through_large_scopes_keep_the_visible_binding() {
+    // 100 outer names fill the hash index; `x` is shadowed one hop below the closure that reads it.
+    let decls: String = (0..100).map(|i| format!("let w{i} = {i};")).collect();
+    let src = format!(
+        "let x = 'outer'; {decls} function f() {{ let x = 'inner'; const out = []; for (let k = 0; k < 3; k++) {{ const g = () => x + w5 + w99; out.push(g()); }} return out.join(','); }} function h() {{ const out = []; for (let k = 0; k < 3; k++) out.push(x + w0); return out.join(','); }} console.log(f(), h());"
+    );
+    let expected = "inner599,inner599,inner599 outer0,outer0,outer0".to_string();
+    let mut it = Interp::new();
+    it.hint_stats.on = true;
+    let _ = it.run(&src);
+    assert_eq!(it.out, vec![expected.clone()]);
+    assert!(it.hint_stats.hit.get() > 0, "{}", it.hint_stats.summary());
+    it.hint_stats.on = false;
+    let mut plain = Interp::new();
+    let _ = plain.run(&src);
+    assert_eq!(plain.out, vec![expected]);
+}
+
 // ----- no `prototype` object for methods, accessors and async functions (R5a) -----
 
 #[test]

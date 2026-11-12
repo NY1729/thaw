@@ -61,6 +61,8 @@ pub(crate) struct HintStats {
     pub(crate) hit: Cell<u64>,
     pub(crate) miss_nohint: Cell<u64>,
     pub(crate) miss_mid_mask: Cell<u64>,
+    /// A mask hit that the membership test cleared: the hop continued (no by-name walk).
+    pub(crate) mask_false_positive_resolved: Cell<u64>,
     pub(crate) miss_target: Cell<u64>,
     pub(crate) miss_key: Cell<u64>,
     /// Hints stored (every record that reaches the slot).
@@ -100,7 +102,7 @@ impl HintStats {
         format!(
             "hint stats: reads={reads} hit={hit} ({pct:.1}%) miss_nohint={} miss_mid_mask={} \
              miss_target={} miss_key={} record={} record_same={} record_changed={} \
-             unrecorded_with={} unannotated={}",
+             unrecorded_with={} unannotated={} mask_fp_resolved={}",
             self.miss_nohint.get(),
             self.miss_mid_mask.get(),
             self.miss_target.get(),
@@ -110,6 +112,7 @@ impl HintStats {
             self.record_changed.get(),
             self.unrecorded_with.get(),
             self.unannotated.get(),
+            self.mask_false_positive_resolved.get(),
         )
     }
 }
@@ -202,12 +205,20 @@ impl Interp {
         let hops = (packed >> HINT_IDX_BITS) - 1;
         let idx = (packed & HINT_IDX_MASK) as usize;
         let bit = slot.bit;
+        let stored_name = slot.name.borrow();
         let mut cur: &Scope = scope;
         for _ in 0..hops {
-            // an intermediate scope that may hold `name` decides the lookup, not the hint
             if cur.mask.get() & bit != 0 {
                 st.bump(&st.miss_mid_mask);
-                return None;
+                // a mask hit is only a maybe: an exact membership test tells a collision from a
+                // real binding (a `with` object matches every name, so it always decides)
+                let Some(name) = stored_name.as_deref() else {
+                    return None;
+                };
+                if cur.with.is_some() || cur.vars.borrow().contains_key(name) {
+                    return None;
+                }
+                st.bump(&st.mask_false_positive_resolved);
             }
             let Some(parent) = cur.parent.as_deref() else {
                 st.bump(&st.miss_target);
