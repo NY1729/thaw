@@ -1418,6 +1418,7 @@ impl Interp {
                     Kind::Plain
                     | Kind::Global
                     | Kind::Generator(_)
+                    | Kind::CollIter(_)
                     | Kind::Proxy(_)
                     | Kind::RawJson(_) => "[object Object]",
                 },

@@ -269,6 +269,8 @@ enum Kind {
     Global,
     Map(collections::MapData),
     Set(collections::SetData),
+    /// A `Map`/`Set` iterator (`keys()`, `values()`, `entries()`), live over its collection.
+    CollIter(collections::CollIterData),
     Symbol {
         id: u64,
         desc: Option<Rc<str>>,
@@ -1399,6 +1401,7 @@ impl Interp {
                     | Kind::Global
                     | Kind::Map(_)
                     | Kind::Set(_)
+                    | Kind::CollIter(_)
                     | Kind::Generator(_)
                     | Kind::Proxy(_)
                     | Kind::RawJson(_)
