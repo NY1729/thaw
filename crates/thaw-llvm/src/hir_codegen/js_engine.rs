@@ -20,7 +20,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn js_mark_handles_used(&mut self) {
         match self.js_engine() {
             JsEngine::QuickJs => {
-                self.uses_quickjs = true;
+                self.note_quickjs("handles");
                 self.uses_quickjs_handles = true;
             }
             JsEngine::ThawJs => {
@@ -30,15 +30,35 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
+    /// Mark the build as needing QuickJS and record why (`site:<name>`), so a routed build that falls
+    /// back says which lowering demanded it (`quickjs_blockers`).
+    pub(crate) fn note_quickjs(&mut self, site: &'static str) {
+        self.note_quickjs_blocker(format!("site:{site}"));
+    }
+
     /// After the thaw-js renames: a routed build still calling a QuickJS symbol needs QuickJS, so
-    /// the build falls back to it instead of failing to link.
-    fn js_unported_symbols_used(&mut self) {
-        let called = self.module.get_functions().any(|function| {
-            function.get_name().to_string_lossy().starts_with("thaw_js_")
-                && function.as_global_value().as_pointer_value().get_first_use().is_some()
-        });
-        if called {
-            self.uses_quickjs = true;
+    /// the build falls back to it instead of failing to link. Every such symbol is recorded
+    /// (`unported:<name>`), not only the first.
+    pub(crate) fn js_unported_symbols_used(&mut self) {
+        let mut called: Vec<String> = self
+            .module
+            .get_functions()
+            .filter(|function| {
+                function.get_name().to_string_lossy().starts_with("thaw_js_")
+                    && function.as_global_value().as_pointer_value().get_first_use().is_some()
+            })
+            .map(|function| function.get_name().to_string_lossy().into_owned())
+            .collect();
+        called.sort();
+        for name in called {
+            self.note_quickjs_blocker(format!("unported:{name}"));
+        }
+    }
+
+    fn note_quickjs_blocker(&mut self, blocker: String) {
+        self.uses_quickjs = true;
+        if !self.quickjs_blockers.contains(&blocker) {
+            self.quickjs_blockers.push(blocker);
         }
     }
 
