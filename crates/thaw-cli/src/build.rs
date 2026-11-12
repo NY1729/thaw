@@ -1059,10 +1059,10 @@ fn build_with_native_mode_routed(
         }
     }
     if let Some(object) = manifest.as_object_mut() {
-        let other = object.remove("quickjs_without_user_source") == Some(true.into());
-        if thaw_js_route && compiler.uses_thaw_js() && !uses_quickjs && !other {
-            object.insert("quickjs".into(), false.into());
-        }
+        // The flag must name the archive this build links. The pre-compile guess above misses
+        // JsValue dynamic operations (e.g. `(globalThis as any).fetch`), which link QuickJS anyway.
+        object.remove("quickjs_without_user_source");
+        object.insert("quickjs".into(), uses_quickjs.into());
     }
     runtime_features.extend(module_graph::runtime_features(input, &user_source)?);
     runtime_features.extend(thaw_bridge::required_runtime_features(&shim_source));
