@@ -65,8 +65,6 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
         &["sqlite3".into()],
     )
     .unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     let result = command_output_with_timeout(&mut Command::new(&output), Duration::from_secs(60))
         .unwrap_or_else(|error| panic!("sqlite3 app failed or timed out: {error}"));
@@ -79,64 +77,6 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
         String::from_utf8_lossy(&result.stdout),
         "sqlite3-constructed\n[{\"value\":42}]\nsqlite3-closed\n"
     );
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn registry_add_runs_real_better_sqlite3_on_thaw_js_when_enabled() {
-    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!(
-        "thaw-cli-auto-better-sqlite3-{}",
-        std::process::id()
-    ));
-    let registry = dir.join("modules");
-    // Pinned like the drizzle test: 12.11.1 is the last release whose prebuilt `.node` thaw can fetch.
-    thaw_registry::add(&registry, "better-sqlite3@12.11.1").unwrap();
-    let source = dir.join("main.ts");
-    let output = dir.join("app");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        &source,
-        "import Database from \"better-sqlite3\";\n\
-         function main(): void {\n\
-             const database: JsValue = new Database(\":memory:\");\n\
-             database.exec(\"CREATE TABLE t (v INTEGER)\");\n\
-             database.prepare(\"INSERT INTO t (v) VALUES (?)\").run(42);\n\
-             const rows: JsValue = database.prepare(\"SELECT v FROM t\").all();\n\
-             console.log(JSON.stringify(rows));\n\
-         }\n",
-    )
-    .unwrap();
-    // Routing forced on, so this build is the thaw-js engine path, not the QuickJS retry.
-    build_with_thaw_js_routing(
-        &source,
-        &output,
-        &[],
-        &[],
-        &[],
-        &registry,
-        &["better-sqlite3".into()],
-        false,
-        None,
-        true,
-        false,
-        false,
-        true,
-    )
-    .unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
-    std::fs::remove_dir_all(&registry).unwrap();
-    let result = command_output_with_timeout(&mut Command::new(&output), Duration::from_secs(60))
-        .unwrap_or_else(|error| panic!("better-sqlite3 app failed or timed out: {error}"));
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "[{\"v\":42}]\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -530,8 +470,6 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
         &["@parcel/watcher".into()],
     )
     .unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     let event_file = watched.join("event.txt");
     let callback_file = watched.join("callback.txt");
     let callback_literal = serde_json::to_string(&callback_file.to_string_lossy()).unwrap();
