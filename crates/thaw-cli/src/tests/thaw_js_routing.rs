@@ -860,3 +860,12 @@ fn thaw_js_routed_node_http_get_from_listen_callback_refused() {
     assert_eq!(thaw_js_run_guarded(&output), "err ECONNREFUSED\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn thaw_js_unready_addon_blocker_keeps_live_owner_and_subscription_addons_on_quickjs() {
+    assert!(thaw_js_unready_addon_blocker("argon2").is_some());
+    assert!(thaw_js_unready_addon_blocker("@parcel/watcher").is_some());
+    assert!(thaw_js_unready_addon_blocker("bcrypt").is_none());
+    assert!(thaw_js_unready_addon_blocker("sqlite3").is_none());
+    assert!(thaw_js_unready_addon_blocker("some-unrelated-package").is_none());
+}

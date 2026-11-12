@@ -554,6 +554,13 @@ fn thaw_js_perf_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'sta
     .then_some("performance marks/measures/observers are not implemented on thaw-js yet")
 }
 
+/// Native addons thaw-js cannot serve yet: `argon2` needs a live owner for its native exports, and
+/// `@parcel/watcher` subscription events are never delivered on thaw-js. Both stay on QuickJS.
+fn thaw_js_unready_addon_blocker(pkg_name: &str) -> Option<&'static str> {
+    matches!(pkg_name, "argon2" | "@parcel/watcher")
+        .then_some("native addon export live-owner / subscription events are not supported on thaw-js yet")
+}
+
 /// The bundle text thaw-js loads for a package: the registered thaw-js form of a path builtin, else the
 /// bundle itself (a plain script is wrapped into a one-module registry bundle).
 fn thaw_js_bundle_form<'a>(
@@ -687,6 +694,9 @@ fn thaw_js_package_eligible(
     // A native addon is hosted by thaw-napi's thaw-js engine; its bundle is scanned in addon mode below.
     if pkg.name.starts_with("node:") && !THAW_JS_BUILTIN_MODULES.contains(&pkg.name.as_str()) {
         return reject("builtin module not validated on thaw-js".into());
+    }
+    if let Some(why) = thaw_js_unready_addon_blocker(&pkg.name) {
+        return reject(why.into());
     }
     if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
         return reject(why.into());

@@ -474,7 +474,8 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
     )
     .unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    // @parcel/watcher stays on QuickJS until subscription events are delivered on thaw-js
+    assert_eq!(manifest["quickjs"], true, "{manifest}");
     let event_file = watched.join("event.txt");
     let callback_file = watched.join("callback.txt");
     let callback_literal = serde_json::to_string(&callback_file.to_string_lossy()).unwrap();
