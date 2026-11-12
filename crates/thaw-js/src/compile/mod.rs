@@ -64,6 +64,7 @@ use std::rc::Rc;
 use super::{Ctl, FuncDef, Interp, Scope, Value, R};
 
 pub(crate) use analyze::analyze;
+use analyze::has_loop;
 
 /// `THAW_JS_COMPILE=off|on|check`. Unknown values mean `Off`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -814,6 +815,7 @@ impl Interp {
     /// A realm for running programs: the closure compiler is on unless `THAW_JS_COMPILE` says otherwise
     /// (`off`, `check`). `Interp::new()` keeps `Off` as its default so embedders and tests are unchanged.
     pub fn runtime() -> Interp {
+        tune_malloc();
         let mut it = Interp::new();
         // unset or empty means the shipped default (a workflow cannot unset a variable, only blank it)
         if std::env::var("THAW_JS_COMPILE").map_or(true, |v| v.trim().is_empty()) {
@@ -843,7 +845,14 @@ impl Interp {
     ) -> Option<R<Value>> {
         let mut st = def.cstate.borrow_mut();
         self.cstats.calls += 1;
-        if st.on_call(self.compile_after) {
+        // A function with a loop is analysed on its first call, so a loop that runs once (main, a driver)
+        // still runs compiled. Other functions wait for `compile_after` calls, as before.
+        let after = if matches!(*st, CState::Cold(0)) && has_loop(def) {
+            1
+        } else {
+            self.compile_after
+        };
+        if st.on_call(after) {
             let plan = analyze(def);
             let name = def.name.as_deref().unwrap_or("<anonymous>");
             match plan.verdict() {
@@ -920,4 +929,28 @@ impl Interp {
         }
         Some(c.run_shared(self, f, scope, this, args))
     }
+}
+
+/// glibc malloc tuning, once per process, before the first realm is built: keep freed heap memory for
+/// reuse instead of trimming it back to the OS after every burst, and grow the heap in larger steps.
+/// No allocator override: thaw-js is one of several static archives linked into a program.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn tune_malloc() -> bool {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    static OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    ONCE.call_once(|| {
+        // SAFETY: mallopt only sets glibc tunables; it touches no allocation.
+        let ok = unsafe {
+            libc::mallopt(libc::M_TRIM_THRESHOLD, 64 << 20) == 1
+                && libc::mallopt(libc::M_TOP_PAD, 16 << 20) == 1
+                && libc::mallopt(libc::M_MMAP_THRESHOLD, 1 << 20) == 1
+        };
+        OK.store(ok, std::sync::atomic::Ordering::Relaxed);
+    });
+    OK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn tune_malloc() -> bool {
+    false
 }
