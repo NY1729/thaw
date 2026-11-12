@@ -2241,7 +2241,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// JS call into exactly the JSON-string-in/JSON-string-out shape the
     /// adapter expects, then retains and returns it the same way any
     /// other live value gets a permanent handle.
-    fn compile_register_native_method_callback_graph(
+    pub(super) fn compile_register_native_method_callback_graph(
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {

@@ -4,8 +4,8 @@
 #[test]
 fn thaw_js_bytes_result_gate_switches_off_for_node_http_and_tls_programs() {
     let bytes = "declare function __thaw_typed_js_6d73(path: string): Uint8Array;";
-    assert!(!thaw_js_declaration_plain_with(bytes, false));
-    assert!(thaw_js_declaration_plain_with(bytes, true));
+    assert!(!thaw_js_declaration_plain_with(bytes, false, false));
+    assert!(thaw_js_declaration_plain_with(bytes, true, false));
     assert!(thaw_js_declaration_plain(bytes));
     // a Uint8Array result under a Promise follows the same switch
     let async_bytes = "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;";
@@ -13,7 +13,7 @@ fn thaw_js_bytes_result_gate_switches_off_for_node_http_and_tls_programs() {
     assert!(thaw_js_async_declaration_plain_with(async_bytes, true));
     // the switch only relaxes the bare bytes result, never a rejected parameter
     let buffer_param = "declare function __thaw_typed_js_6d73(v: Buffer): Uint8Array;";
-    assert!(!thaw_js_declaration_plain_with(buffer_param, true));
+    assert!(!thaw_js_declaration_plain_with(buffer_param, true, false));
 
     assert!(thaw_js_bytes_result_allowed("import fs from 'node:fs';\nfs.readFileSync(p);"));
     assert!(!thaw_js_bytes_result_allowed("import https from 'node:https';\nhttps.get(u);"));
@@ -859,6 +859,18 @@ fn thaw_js_routed_node_http_get_from_listen_callback_refused() {
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "err ECONNREFUSED\n");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_ctor_option_callback_declaration_is_plain_only_for_constructors() {
+    let ctor = "declare function __thaw_typed_tjs_246e6577246e6f64653a73747265616d3a3a5772697461626c6524617269747931(opts: { write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }): JsValue;";
+    let method = "declare function __thaw_typed_tjs_246d6574686f64246e6f64653a73747265616d3a3a5772697461626c6524777269746524617269747931(opts: { write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }): JsValue;";
+    // a constructor's option object may carry callbacks (`new Writable({ write })`)
+    assert!(thaw_js_declaration_plain_with(ctor, true, true));
+    // the same signature is still rejected by default, and for a method operation
+    assert!(!thaw_js_declaration_plain_with(ctor, true, false));
+    assert!(!thaw_js_declaration_plain(ctor));
+    assert!(!thaw_js_declaration_plain_with(method, false, false));
 }
 
 #[test]
