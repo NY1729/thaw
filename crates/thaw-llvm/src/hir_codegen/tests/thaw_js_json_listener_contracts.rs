@@ -107,7 +107,11 @@ fn json_slot_callback_with_a_json_closure_takes_the_graph_route() {
     assert!(calls("@thaw_tjs_register_native_callback_graph("), "{ir}");
     assert!(!calls("@thaw_tjs_register_callback("), "{ir}");
     assert!(!ir.contains("__thaw_tjs_cb__"), "{ir}");
-    assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
+    // The closure is converted inside a generated helper function, a codegen scope that does not carry
+    // the call-argument flag, so it is a Host lease here (the argument stringifier re-marks leases as
+    // `__thaw_tjs_handle__` at run time). It was the handle marker before the A2 gate.
+    assert!(!ir.contains("__thaw_tjs_handle__"), "{ir}");
+    assert!(ir.contains("@thaw_json_from_borrowed_handle("), "{ir}");
 }
 
 #[test]
