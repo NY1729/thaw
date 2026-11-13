@@ -69,6 +69,8 @@ mod web_abort;
 mod web_async_hooks;
 #[path = "web/blob.rs"]
 mod web_blob;
+#[path = "web/console.rs"]
+mod web_console;
 #[path = "web/crypto.rs"]
 mod web_crypto;
 #[path = "web/dom_exception.rs"]
@@ -1116,6 +1118,7 @@ impl Interp {
             web_wasm::install(&mut it);
             web_crypto::install(&mut it);
             web_navigator::install(&mut it);
+            web_console::install(&mut it);
             node_crypto::install(&mut it);
             it.install_url();
             #[cfg(feature = "intl")]

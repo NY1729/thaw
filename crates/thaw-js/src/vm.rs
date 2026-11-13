@@ -32,6 +32,7 @@ const HOST_ONLY: &[&str] = &[
     "performance",
     "navigator",
     "Navigator",
+    "Console",
 ];
 
 /// Globals every context shares with the host instead of building its own.
