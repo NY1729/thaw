@@ -1,0 +1,7 @@
+cleared timeout true
+unref then clear false
+ref after clear true
+cleared interval true
+cleared immediate false
+unref clear live false
+fired timeout true

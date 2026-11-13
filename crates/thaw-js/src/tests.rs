@@ -3390,6 +3390,36 @@ fn timer_handle_ref_methods_scan_clean_and_run() {
     );
 }
 
+// Recorded from node v22.23.1: a cleared/fired Timeout keeps its ref state (true unless unref'd),
+// a cleared/fired Immediate reports false.
+#[test]
+fn cleared_timer_has_ref_matches_node22() {
+    assert_eq!(
+        one("const t = setTimeout(() => {}, 1000); clearTimeout(t); console.log(t.hasRef());"),
+        "true"
+    );
+    assert_eq!(
+        one("const t = setTimeout(() => {}, 1000); t.unref(); clearTimeout(t); console.log(t.hasRef());"),
+        "false"
+    );
+    assert_eq!(
+        one("const t = setTimeout(() => {}, 1000); clearTimeout(t); t.ref(); console.log(t.hasRef());"),
+        "true"
+    );
+    assert_eq!(
+        one("const i = setInterval(() => {}, 1000); clearInterval(i); console.log(i.hasRef());"),
+        "true"
+    );
+    assert_eq!(
+        one("const i = setImmediate(() => {}); clearImmediate(i); console.log(i.hasRef());"),
+        "false"
+    );
+    assert_eq!(
+        one("const i = setImmediate(() => {}); i.unref(); clearImmediate(i); console.log(i.hasRef());"),
+        "false"
+    );
+}
+
 #[test]
 fn webassembly_stub_is_typeof_safe_and_scan_blocks_real_use() {
     assert_eq!(
