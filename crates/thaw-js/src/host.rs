@@ -731,6 +731,12 @@ enum ClassOp<'a> {
         receiver: i64,
         name: &'a str,
     },
+    /// `$setter$pkg::Class$name$overloadK$arity1`: `receiver[name] = value` under strict mode; the
+    /// result is the assigned value
+    Setter {
+        receiver: i64,
+        name: &'a str,
+    },
     Static {
         class: &'a str,
         name: &'a str,
@@ -776,6 +782,10 @@ fn class_call(
             receiver,
             name: member.unwrap_or(""),
         },
+        "setter" => ClassOp::Setter {
+            receiver,
+            name: member.unwrap_or(""),
+        },
         "staticmethod" | "staticmethodvoid" => ClassOp::Static {
             class: class_path,
             name: member.unwrap_or(""),
@@ -787,9 +797,11 @@ fn class_call(
         }
     };
     let package_handle = match &op {
-        ClassOp::Method { receiver, .. } => slot(*receiver as u64)
-            .map(|(p, _)| p)
-            .ok_or_else(|| HostError::Bundle(stale_handle(*receiver as u64)))?,
+        ClassOp::Method { receiver, .. } | ClassOp::Setter { receiver, .. } => {
+            slot(*receiver as u64)
+                .map(|(p, _)| p)
+                .ok_or_else(|| HostError::Bundle(stale_handle(*receiver as u64)))?
+        }
         _ => BY_NAME
             .with(|m| m.borrow().get(package).copied())
             .ok_or_else(|| HostError::Bundle(not_loaded(package)))?,
@@ -817,6 +829,13 @@ fn class_call(
                     return Err(not_callable(it, message));
                 }
                 it.call(&f, &this, &args).map_err(|c| classify(it, c))?
+            }
+            ClassOp::Setter { receiver, name } => {
+                let this = slot(receiver as u64).map_or(Value::Undefined, |(_, v)| v);
+                let it = &mut p.interp;
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                strict_host_set(it, &this, name, value.clone()).map_err(|c| classify(it, c))?;
+                value
             }
             ClassOp::Static { class, name } => {
                 let ctor = p.exports_member(class)?;
