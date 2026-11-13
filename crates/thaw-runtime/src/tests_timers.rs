@@ -48,3 +48,40 @@ fn unref_timer_does_not_keep_the_loop_alive_and_interval_repeats_until_cleared()
     assert_eq!(TIMER_LOG.with(|log| log.borrow().len()), count);
     assert_eq!(thaw_runtime_async_work_pending(), 0);
 }
+
+thread_local! {
+    static INTERVAL_RUNS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static INTERVAL_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static INTERVAL_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+extern "C" fn interval_rearm_run(_: *mut u8) {
+    let n = INTERVAL_COUNT.with(|count| {
+        count.set(count.get() + 1);
+        count.get()
+    });
+    INTERVAL_RUNS.with(|runs| runs.borrow_mut().push(format!("iv{n}")));
+    if n == 1 {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(30) {}
+    }
+    if n == 2 {
+        thaw_timer_clear(INTERVAL_ID.with(std::cell::Cell::get));
+    }
+}
+
+extern "C" fn interval_rearm_t30(_: *mut u8) {
+    INTERVAL_RUNS.with(|runs| runs.borrow_mut().push("t30".into()));
+}
+
+#[test]
+fn interval_rearm_is_based_on_the_clock_before_its_callback() {
+    // the first interval run busy-waits 30 ms: its next run is due 10 ms after it started, so it
+    // runs before the 30 ms timer (Node prints iv1 iv2 t30); re-armed from the clock after the
+    // callback it would come after t30
+    let id = thaw_timer_set(TIMER_INTERVAL, 10.0, interval_rearm_run, std::ptr::null_mut());
+    INTERVAL_ID.with(|slot| slot.set(id));
+    thaw_timer_set(TIMER_TIMEOUT, 30.0, interval_rearm_t30, std::ptr::null_mut());
+    while thaw_runtime_run_one_event() {}
+    INTERVAL_RUNS.with(|runs| assert_eq!(runs.borrow().join("|"), "iv1|iv2|t30"));
+}
