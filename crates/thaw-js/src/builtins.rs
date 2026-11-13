@@ -854,6 +854,7 @@ impl Interp {
                             's' => match v {
                                 Value::Str(s) => out.push_str(s),
                                 Value::BigInt(b) => out.push_str(&format!("{b}n")),
+                                Value::Number(n) => out.push_str(&format_number_text(*n)),
                                 Value::Object(_) => out.push_str(&self.inspect(v, false)),
                                 other => out.push_str(&self.to_str(other)),
                             },
@@ -862,20 +863,23 @@ impl Interp {
                                 Value::Object(_) => out.push_str("NaN"),
                                 other => {
                                     let n = self.num(other);
-                                    out.push_str(&number_to_string(n));
+                                    out.push_str(&format_number_text(n));
                                 }
                             },
-                            'i' => {
-                                let n = self.num(v).trunc();
-                                out.push_str(&number_to_string(if n.is_finite() {
-                                    n
-                                } else {
-                                    f64::NAN
-                                }));
-                            }
+                            'i' => match v {
+                                Value::BigInt(b) => out.push_str(&format!("{b}n")),
+                                _ => {
+                                    let n = self.num(v).trunc();
+                                    out.push_str(&format_number_text(if n.is_finite() {
+                                        n
+                                    } else {
+                                        f64::NAN
+                                    }));
+                                }
+                            },
                             'f' => {
                                 let n = string_to_number(&self.to_str(v));
-                                out.push_str(&number_to_string(n));
+                                out.push_str(&format_number_text(n));
                             }
                             'j' => {
                                 let json = self
@@ -2861,5 +2865,14 @@ fn own_array_elem(o: &Obj, key: &str) -> bool {
                     .is_some_and(|v| !matches!(v, Value::Hole))
         }
         _ => false,
+    }
+}
+
+/// A number as `util.format` prints it: unlike `String(n)`, negative zero keeps its sign.
+fn format_number_text(n: f64) -> String {
+    if n == 0.0 && n.is_sign_negative() {
+        "-0".into()
+    } else {
+        number_to_string(n)
     }
 }
