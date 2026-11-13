@@ -94,3 +94,23 @@ fn vm_realm_construct_cheaper_than_host() {
         "vm realms {vm:?} not cheaper than host realms {host:?}"
     );
 }
+
+#[test]
+fn vm_realm_has_bigint_typed_arrays() {
+    // Node 22: the BigInt64Array / BigUint64Array constructors are ES globals, so a new context has them too.
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        "console.log(runInNewContext(\"[typeof BigInt64Array, typeof BigUint64Array, BigInt64Array.BYTES_PER_ELEMENT, new BigUint64Array([-1n])[0]].join(',')\", {}));"
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec!["function,function,8,18446744073709551615".to_string()]
+    );
+}
+
+#[test]
+fn util_types_know_the_bigint_typed_arrays() {
+    // Node 22 `util.types` (checked with node 22.23.1): the 64-bit checks match only their own array kind.
+    let src = "const t = globalThis.__thaw_util_types;\nconsole.log([t.isBigInt64Array(new BigInt64Array(1)), t.isBigUint64Array(new BigInt64Array(1)), t.isBigUint64Array(new BigUint64Array(1)), t.isBigInt64Array(new Int8Array(1))].join(','));";
+    assert_eq!(run_lines(src), vec!["true,false,true,false".to_string()]);
+}
