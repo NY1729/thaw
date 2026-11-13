@@ -219,7 +219,7 @@ impl Interp {
     }
 
     /// ToBigInt for a BigInt64Array / BigUint64Array store: unlike `BigInt(v)`, a Number is a TypeError.
-    pub(crate) fn to_bigint_element(&mut self, v: &Value) -> R<BigInt> {
+    pub(crate) fn bigint_element_of(&mut self, v: &Value) -> R<BigInt> {
         let p = self.primitive_of(v, extras::Hint::Number)?;
         if let Value::Number(n) = &p {
             let shown = number_to_string(*n);

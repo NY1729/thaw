@@ -141,7 +141,7 @@ impl TypedArr {
     /// for a Number). An out-of-range index is a no-op after the conversion, as the spec orders it.
     pub(crate) fn set_value(&self, it: &mut Interp, i: usize, v: &Value) -> R<()> {
         if self.ty.is_big() {
-            let x = it.to_bigint_element(v)?;
+            let x = it.bigint_element_of(v)?;
             self.set_big(i, &x);
         } else {
             let n = it.num(v);
@@ -510,7 +510,7 @@ impl Interp {
                 it.check_mix(s.ty, t.ty)?;
                 s.to_values()
             } else {
-                let items = match it.iter_items(&arg(a, 0)) {
+                match it.iter_items(&arg(a, 0)) {
                     Some(i) => i,
                     None => {
                         let n = it.get(&arg(a, 0), "length")?;
@@ -521,8 +521,7 @@ impl Interp {
                         }
                         v
                     }
-                };
-                items
+                }
             };
             if off + src.len() > t.len {
                 return it.throw_error("RangeError", "offset is out of bounds");
