@@ -980,12 +980,15 @@ impl Interp {
     fn build(host: bool) -> Interp {
         let object_proto = new_obj(None, Kind::Plain);
         let mk = |op: &Obj| new_obj(Some(op.clone()), Kind::Plain);
-        let (function_proto, array_proto, string_proto, regexp_proto) = (
-            mk(&object_proto),
-            mk(&object_proto),
-            mk(&object_proto),
-            mk(&object_proto),
+        // Function.prototype is itself callable (typeof "function"), as in JS.
+        let function_proto = new_obj(
+            Some(object_proto.clone()),
+            Kind::Native(Rc::new(
+                |_: &mut Interp, _: &Value, _: &[Value]| -> R<Value> { Ok(Value::Undefined) },
+            )),
         );
+        let (array_proto, string_proto, regexp_proto) =
+            (mk(&object_proto), mk(&object_proto), mk(&object_proto));
         let (number_proto, bool_proto) = (mk(&object_proto), mk(&object_proto));
         let mut it = Interp {
             global: Scope::new(None),
