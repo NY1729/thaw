@@ -5,12 +5,12 @@
 //!
 //! - `PlainTjs`: a compiled thaw-js call argument, serialised by `thaw_json_stringify_tjs`. Each lease
 //!   becomes `{"__thaw_tjs_handle__": id}`, which `to_value` maps back to the live value (host.rs).
-//! - `GraphWire`: a graph wire, serialised by `thaw_json_graph_encode`. A lease becomes an `hdl` token
+//! - `Graph`: a graph wire, serialised by `thaw_json_graph_encode`. A lease becomes an `hdl` token
 //!   that `graph_token` resolves.
 //! - `NativeScalar`: a key or scalar wire that compiled code builds from native strings, so no lease can
 //!   appear in it.
 //! - `NoCompiledProducer`: called only by this crate's tests and by embedders, never by compiled code.
-//! - `NapiWire`: an N-API argument wire, which is not a thaw-js JSON argument.
+//! - `Napi`: an N-API argument wire, which is not a thaw-js JSON argument.
 //!
 //! The table is the contract. The test scans the extern source text for every `extern "C" fn thaw_tjs_*`
 //! with a JSON parameter and fails when one is not classified, so a new JSON-argument extern cannot ship
@@ -23,10 +23,10 @@ use std::collections::BTreeSet;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Wire {
     PlainTjs,
-    GraphWire,
+    Graph,
     NativeScalar,
     NoCompiledProducer,
-    NapiWire,
+    Napi,
 }
 
 /// Every thaw-js extern with a JSON parameter, with its wire family.
@@ -35,53 +35,41 @@ const TABLE: &[(&str, Wire)] = &[
     ("thaw_tjs_class_call", Wire::PlainTjs),
     ("thaw_tjs_new_function", Wire::PlainTjs),
     ("thaw_tjs_call", Wire::NoCompiledProducer),
-    ("thaw_tjs_call_graph_result", Wire::GraphWire),
-    ("thaw_tjs_retain_graph_result", Wire::GraphWire),
-    ("thaw_tjs_call_method_graph_result", Wire::GraphWire),
-    (
-        "thaw_tjs_call_selected_method_graph_result",
-        Wire::GraphWire,
-    ),
+    ("thaw_tjs_call_graph_result", Wire::Graph),
+    ("thaw_tjs_retain_graph_result", Wire::Graph),
+    ("thaw_tjs_call_method_graph_result", Wire::Graph),
+    ("thaw_tjs_call_selected_method_graph_result", Wire::Graph),
     (
         "thaw_tjs_call_selected_method_handle_graph_args_result",
-        Wire::GraphWire,
+        Wire::Graph,
     ),
-    (
-        "thaw_tjs_construct_handle_graph_args_result",
-        Wire::GraphWire,
-    ),
-    (
-        "thaw_tjs_call_handle_handle_graph_args_result",
-        Wire::GraphWire,
-    ),
-    ("thaw_tjs_call_handle_graph_result", Wire::GraphWire),
+    ("thaw_tjs_construct_handle_graph_args_result", Wire::Graph),
+    ("thaw_tjs_call_handle_handle_graph_args_result", Wire::Graph),
+    ("thaw_tjs_call_handle_graph_result", Wire::Graph),
     (
         "thaw_tjs_call_handle_with_this_graph_wire_result",
-        Wire::GraphWire,
+        Wire::Graph,
     ),
-    ("thaw_tjs_call_handle_mixed_graph_result", Wire::GraphWire),
+    ("thaw_tjs_call_handle_mixed_graph_result", Wire::Graph),
     (
         "thaw_tjs_call_handle_mixed_exact_consuming_result",
-        Wire::GraphWire,
+        Wire::Graph,
     ),
     (
         "thaw_tjs_call_handle_mixed_exact_resolved_consuming_result",
-        Wire::GraphWire,
+        Wire::Graph,
     ),
     (
         "thaw_tjs_call_handle_mixed_handle_graph_args_result",
-        Wire::GraphWire,
+        Wire::Graph,
     ),
     (
         "thaw_tjs_call_handle_mixed_handle_graph_args_consuming_result",
-        Wire::GraphWire,
+        Wire::Graph,
     ),
-    (
-        "thaw_tjs_call_method_handle_graph_args_result",
-        Wire::GraphWire,
-    ),
-    ("thaw_tjs_set_property_json_graph_result", Wire::GraphWire),
-    ("thaw_tjs_set_property_graph_result", Wire::GraphWire),
+    ("thaw_tjs_call_method_handle_graph_args_result", Wire::Graph),
+    ("thaw_tjs_set_property_json_graph_result", Wire::Graph),
+    ("thaw_tjs_set_property_graph_result", Wire::Graph),
     ("thaw_tjs_get_property_json_key_result", Wire::NativeScalar),
     (
         "thaw_tjs_property_predicate_json_key_result",
@@ -92,36 +80,33 @@ const TABLE: &[(&str, Wire)] = &[
         "thaw_tjs_string_from_utf16_units_result",
         Wire::NativeScalar,
     ),
-    ("thaw_tjs_call_reference", Wire::NapiWire),
-    ("thaw_tjs_call_reference_graph", Wire::NapiWire),
-    ("thaw_tjs_napi_call_reference_graph", Wire::NapiWire),
-    (
-        "thaw_tjs_call_handle_with_this_graph_result",
-        Wire::NapiWire,
-    ),
+    ("thaw_tjs_call_reference", Wire::Napi),
+    ("thaw_tjs_call_reference_graph", Wire::Napi),
+    ("thaw_tjs_napi_call_reference_graph", Wire::Napi),
+    ("thaw_tjs_call_handle_with_this_graph_result", Wire::Napi),
     (
         "thaw_tjs_napi_construct_handle_graph_args_result",
-        Wire::NapiWire,
+        Wire::Napi,
     ),
     (
         "thaw_tjs_get_property_json_key_with_exception_result",
-        Wire::NapiWire,
+        Wire::Napi,
     ),
     (
         "thaw_tjs_set_property_graph_with_exception_result",
-        Wire::NapiWire,
+        Wire::Napi,
     ),
     (
         "thaw_tjs_set_receiver_data_graph_with_exception_result",
-        Wire::NapiWire,
+        Wire::Napi,
     ),
     (
         "thaw_tjs_set_property_key_handle_graph_with_exception_result",
-        Wire::NapiWire,
+        Wire::Napi,
     ),
     (
         "thaw_tjs_define_data_property_key_handle_graph_result",
-        Wire::NapiWire,
+        Wire::Napi,
     ),
 ];
 
