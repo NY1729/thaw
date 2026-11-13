@@ -79,6 +79,8 @@ mod web_fetch;
 mod web_messaging;
 #[path = "web/napi_proxy.rs"]
 mod web_napi_proxy;
+#[path = "web/performance.rs"]
+mod web_performance;
 #[path = "web/streams.rs"]
 mod web_streams;
 #[path = "web/text_codec.rs"]
@@ -1091,6 +1093,7 @@ impl Interp {
             web_text_codec::install(&mut it);
             web_event_target::install(&mut it);
             web_messaging::install(&mut it);
+            web_performance::install(&mut it);
             web_worker_stream::install(&mut it);
             web_worker_wire::install(&mut it);
             web_worker_threads::install(&mut it);

@@ -1,0 +1,11 @@
+0 ["dns","function","gc","http","http2","mark","measure","net","resource"]
+undefined undefined
+[object PerformanceObserver] function function
+PerformanceObserver { connected: false, pending: false, entryTypes: [], buffer: [] }
+PerformanceObserver { connected: true, pending: false, entryTypes: [ 'mark' ], buffer: [] }
+PerformanceObserver {
+  connected: true,
+  pending: false,
+  entryTypes: [ 'mark', 'measure' ],
+  buffer: []
+}
