@@ -1025,54 +1025,6 @@ impl<'a> FnLowerer<'a> {
                         // intercepted by `lower_call` reading the callee
                         // name directly, which never routes through this
                         // bare-identifier expression lowering at all.
-                        global @ ("Atomics" | "crypto" | "process" | "AbortSignal" | "String"
-                        | "Number" | "Boolean" | "globalThis"
-                        // Standard namespace objects used as values (`typeof
-                        // JSON !== "undefined"`, `const ns = Math`): the realm
-                        // has the real global. A known member call
-                        // (`JSON.stringify`, `Math.floor`) is intercepted
-                        // earlier by name.
-                        | "JSON" | "Math" | "Reflect" | "Intl"
-                        // Web / WHATWG globals (thaw's QuickJS platform
-                        // globals provide them). Naming one bare --
-                        // `typeof Headers`, `const Ctor = URL` -- yields the
-                        // real global as an opaque dynamic value; the
-                        // `new`/call positions are intercepted earlier.
-                        | "structuredClone"
-                        | "queueMicrotask"
-                        | "Buffer"
-                        | "performance"
-                        | "fetch"
-                        | "navigator"
-                        | "WebAssembly"
-                        | "clearImmediate"
-                        | "URL"
-                        | "URLSearchParams"
-                        | "Headers"
-                        | "Request"
-                        | "Response"
-                        | "Blob"
-                        | "File"
-                        | "FormData"
-                        | "Event"
-                        | "CustomEvent"
-                        | "EventTarget"
-                        | "MessageEvent"
-                        | "MessageChannel"
-                        | "MessagePort"
-                        | "BroadcastChannel"
-                        | "DOMException"
-                        | "ReadableStream"
-                        | "WritableStream"
-                        | "TransformStream"
-                        | "TextEncoder"
-                        | "TextDecoder"
-                        | "AbortController") => {
-                            return Ok(HirExpr::Call(
-                                Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                                vec![HirExpr::Lit(HirLit::Str(global.to_string()))],
-                            ))
-                        }
                         // A bare standard-library *constructor* used as a
                         // value (`assert.throws(TypeError, ...)`,
                         // `Object.getPrototypeOf(x) === Array.prototype`):
@@ -1106,6 +1058,16 @@ impl<'a> FnLowerer<'a> {
                             {
                                 return self.lower_expr(&statement.expr.clone());
                             }
+                        }
+                        // Every other standard global in the platform table
+                        // (`platform_globals.rs`): the realm has the real global, so a
+                        // bare reference is an opaque dynamic value. Placed after the
+                        // arms above so their own lowering keeps precedence.
+                        global if platform_global(global).is_some() => {
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                                vec![HirExpr::Lit(HirLit::Str(global.to_string()))],
+                            ))
                         }
                         _ => {}
                     }
@@ -6270,38 +6232,11 @@ impl<'a> FnLowerer<'a> {
                         let target = self.lower_expr(&target.expr)?;
                         return Ok(HirExpr::ArrayLit(vec![target]));
                     }
-                    if matches!(
-                        class.sym.as_ref(),
-                        "FinalizationRegistry"
-                            | "Proxy"
-                            | "DisposableStack"
-                            | "AsyncDisposableStack"
-                            // Web / WHATWG constructors with no compiled
-                            // layout: build the real QuickJS global (thaw's
-                            // platform globals provide these) and keep it as
-                            // an opaque dynamic handle, so `new URL(...)`,
-                            // `new Headers(...)`, `new Response(...)`, ...
-                            // work and their methods read back dynamically.
-                            | "URL"
-                            | "URLSearchParams"
-                            | "Headers"
-                            | "Request"
-                            | "Response"
-                            | "Blob"
-                            | "File"
-                            | "FormData"
-                            | "Event"
-                            | "CustomEvent"
-                            | "EventTarget"
-                            | "MessageEvent"
-                            | "MessageChannel"
-                            | "MessagePort"
-                            | "BroadcastChannel"
-                            | "DOMException"
-                            | "ReadableStream"
-                            | "WritableStream"
-                            | "TransformStream"
-                    ) {
+                    let class_binding = self.resolve_binding(class.sym.as_ref());
+                    if DYNAMIC_NEW_CTORS.contains(&class.sym.as_ref())
+                        && !self.scope.contains_key(&class_binding)
+                        && !self.signatures.contains_key(&class_binding)
+                    {
                         // No compiled object model exists for these, so
                         // construct the real QuickJS global and keep it as
                         // a dynamic handle instead of approximating it:
