@@ -268,46 +268,6 @@ pub(crate) const EXTRAS: &str = r#"
 })();
 "#;
 
-impl crate::Interp {
-    /// Give every native function a `name` (`String.name`, `Object.keys.name`, ...), like V8 does.
-    pub(crate) fn name_builtins(&mut self) {
-        use crate::{find_own, put_hidden, Kind, Slot, Value};
-        let globals: Vec<(std::rc::Rc<str>, Value)> = self
-            .global
-            .vars
-            .borrow()
-            .iter()
-            .map(|(k, b)| (k.clone(), b.value.clone()))
-            .collect();
-        let is_native = |v: &Value| matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Native(_)));
-        let mut work: Vec<(crate::Obj, std::rc::Rc<str>)> = Vec::new();
-        for (name, v) in &globals {
-            let Value::Object(o) = v else { continue };
-            if is_native(v) {
-                work.push((o.clone(), name.clone()));
-            }
-            let mut holders = vec![o.clone()];
-            if let Some((Slot::Data(Value::Object(p)), _)) = find_own(o, "prototype") {
-                holders.push(p);
-            }
-            for h in holders {
-                for p in h.props().borrow().iter() {
-                    if let Slot::Data(pv @ Value::Object(po)) = &p.slot {
-                        if is_native(pv) {
-                            work.push((po.clone(), p.key.clone()));
-                        }
-                    }
-                }
-            }
-        }
-        for (o, name) in work {
-            if find_own(&o, "name").is_none() && !name.starts_with("@@") {
-                put_hidden(&o, "name", Value::Str(name.into()));
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Hint {
     Default,

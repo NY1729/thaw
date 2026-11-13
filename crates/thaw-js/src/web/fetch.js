@@ -76,9 +76,10 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
           pairs = normalizedHeaderEntries(this);
         }
       }
-      [Symbol.iterator]() { return headerIterator(this, 'entry'); }
       get [Symbol.toStringTag]() { return 'Headers'; }
     }
+    // Node: Headers.prototype[Symbol.iterator] is the entries function itself
+    Object.defineProperty(Headers.prototype, Symbol.iterator, { value: Headers.prototype.entries, writable: true, configurable: true });
     for (const name of ['append', 'delete', 'get', 'has', 'set', 'getSetCookie', 'keys', 'values', 'entries', 'forEach']) {
       const descriptor = Object.getOwnPropertyDescriptor(Headers.prototype, name); descriptor.enumerable = true; Object.defineProperty(Headers.prototype, name, descriptor);
     }
@@ -809,8 +810,9 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
           [Symbol.asyncIterator]() { return this; }
         };
       }
-      [Symbol.asyncIterator]() { return this.values(); }
     };
+    // Node: ReadableStream.prototype[Symbol.asyncIterator] is the values function itself
+    Object.defineProperty(globalThis.ReadableStream.prototype, Symbol.asyncIterator, { value: globalThis.ReadableStream.prototype.values, writable: true, configurable: true });
     globalThis.ReadableStreamDefaultController = ReadableStreamDefaultController;
     globalThis.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
     globalThis.ReadableByteStreamController = ReadableByteStreamController;
@@ -1089,10 +1091,11 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
           entries = formDataList(this);
         }
       }
-      [Symbol.iterator]() { return formDataIterator(this, 'entry'); }
       get [Symbol.toStringTag]() { return 'FormData'; }
     }
     globalThis.FormData = FormData;
+    // Node: FormData.prototype[Symbol.iterator] is the entries function itself
+    Object.defineProperty(FormData.prototype, Symbol.iterator, { value: FormData.prototype.entries, writable: true, configurable: true });
     Object.defineProperty(globalThis, '__thaw_form_data_entries', {
       configurable: true,
       value(value) { return formDataList(value).slice(); }

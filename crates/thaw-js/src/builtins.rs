@@ -1450,7 +1450,17 @@ impl Interp {
                 arg(args, 0),
                 args.get(1..).unwrap_or(&[]).to_vec(),
             );
-            Ok(it.native(move |it, _, call_args| {
+            let (target0, bound_count) = (target.clone(), bound_args.len());
+            // `bound f` and `max(0, length - bound args)`, as V8 derives them
+            let name = match it.get(&target0, "name") {
+                Ok(Value::Str(n)) => n.to_string(),
+                _ => String::new(),
+            };
+            let length = match it.get(&target0, "length") {
+                Ok(Value::Number(n)) => (n - bound_count as f64).max(0.0),
+                _ => 0.0,
+            };
+            let bound_fn = it.native(move |it, _, call_args| {
                 let mut all = bound_args.clone();
                 all.extend_from_slice(call_args);
                 // `new bound(...)` constructs the target. ponytail: newTarget is the target itself, not the bound
@@ -1459,7 +1469,19 @@ impl Interp {
                     return it.construct_with(&target, &all, &target);
                 }
                 it.call(&target, &bound_this, &all)
-            }))
+            });
+            if let Value::Object(b) = &bound_fn {
+                put_with(b, "length", Value::Number(length), false, false, true);
+                put_with(
+                    b,
+                    "name",
+                    Value::str(&format!("bound {name}")),
+                    false,
+                    false,
+                    true,
+                );
+            }
+            Ok(bound_fn)
         });
         self.set_native(&fp, "toString", |it, this, _| {
             if !this.is_callable() {
@@ -1467,7 +1489,9 @@ impl Interp {
             }
             // a script function prints its source text, a native one `function name() { [native code] }`
             if let Value::Object(o) = this {
-                if let Kind::Closure { def, .. } = &*o.kind.borrow() {
+                // a prelude closure Node implements natively (`native_text`) prints like a native
+                if let (Kind::Closure { def, .. }, false) = (&*o.kind.borrow(), o.native_text.get())
+                {
                     let (run, lo, hi) = def.src;
                     if let Some(text) = it.sources.get(&run).and_then(|s| {
                         s.get(lo.saturating_sub(1) as usize..hi.saturating_sub(1) as usize)

@@ -572,23 +572,24 @@ impl Interp {
                 zone_long_name(&zone_abbrev(t))
             )))
         });
-        for name in ["toUTCString", "toGMTString"] {
-            self.set_native(dp, name, |it, this, _| {
-                let t = it.date_time(this)?;
-                if t.is_nan() {
-                    return Ok(Value::str("Invalid Date"));
-                }
-                let c = civil(t);
-                Ok(Value::str(&format!(
-                    "{}, {:02} {} {} {} GMT",
-                    DAYS[c[7] as usize],
-                    c[2],
-                    MONTHS[c[1] as usize],
-                    year_str(c[0]),
-                    time_part(&c)
-                )))
-            });
-        }
+        // Node: toGMTString is toUTCString, one function object
+        let utc = self.native(|it, this, _| {
+            let t = it.date_time(this)?;
+            if t.is_nan() {
+                return Ok(Value::str("Invalid Date"));
+            }
+            let c = civil(t);
+            Ok(Value::str(&format!(
+                "{}, {:02} {} {} {} GMT",
+                DAYS[c[7] as usize],
+                c[2],
+                MONTHS[c[1] as usize],
+                year_str(c[0]),
+                time_part(&c)
+            )))
+        });
+        put_hidden(dp, "toUTCString", utc.clone());
+        put_hidden(dp, "toGMTString", utc);
         // en-US only; honours `{ timeZone: 'UTC' }`, ignores the rest of the options
         for (name, date, time) in [
             ("toLocaleDateString", true, false),

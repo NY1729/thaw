@@ -92,8 +92,12 @@ function visit(obj, p, depth) {
         row.hasPrototype = Object.prototype.hasOwnProperty.call(v, 'prototype') ? '1' : '0';
       }
       if (kn === '@@toStringTag' && typeof v === 'string') row.tag = v;
+      // an owner's own length/name value, so a builtin whose function row is not in the table (a root) gets it too
+      if (kn === 'length' && typeof v === 'number') row.length = String(v);
+      if (kn === 'name' && typeof v === 'string') row.name = v;
       const child = row.obj;
-      if (child && !seen.has(child) && depth < MAX_DEPTH && !Array.isArray(child) && child !== globalThis) {
+      // Array.prototype is itself an array: walk it, but not the elements of any other array.
+      if (child && !seen.has(child) && depth < MAX_DEPTH && (!Array.isArray(child) || child === Array.prototype) && child !== globalThis) {
         const cp = p + '.' + kn;
         if (!DENY.has(cp)) visit(child, cp, depth + 1);
       }
