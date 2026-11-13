@@ -4187,6 +4187,15 @@ impl<'a> FnLowerer<'a> {
                         };
                         Ok(HirExpr::Lit(HirLit::Str(name.to_string())))
                     }
+                    // Any other static property of a function/class value (`EventEmitter.captureRejections`)
+                    // has no compile-time shape: read it through the dynamic property path.
+                    HirType::Function(..) | HirType::CallableFunction(..) => {
+                        let object = self.coerce_to_declared(&HirType::JsValue, obj)?;
+                        self.lower_dynamic_value_property_read(
+                            object,
+                            HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
+                        )
+                    }
                     other => Err(format!(
                         "unsupported property access `.{}` on a value of type {other:?}",
                         prop.sym
