@@ -194,20 +194,35 @@ fn thaw_js_class_promise_of_a_handle_wraps_the_handle_in_a_resolved_promise() {
 }
 
 #[test]
-fn thaw_js_class_property_getters_are_still_refused_at_build_time() {
-    // No thaw-js getter operation yet: the build error makes the CLI rebuild on QuickJS (never silent)
-    let getter = thaw_js_class_symbol_hex("$getter$k::Box$v");
+fn thaw_js_class_property_getters_and_static_accessors_compile_to_the_class_call() {
+    // Instance getter (receiver handle only), static getter (no arguments) and static setter (value in,
+    // value out) all lower to the same `@thaw_tjs_class_call` as methods: no build refusal, no QuickJS.
+    let getter = "$getter$k::Box$v";
+    let static_getter = "$staticgetter$k::Box$w";
+    let static_setter = "$staticsetter$k::Box$w";
     let new = thaw_js_class_symbol_hex("$new$k::Box$arity0");
     let source = format!(
-        "declare function __thaw_typed_tjs_{getter}(receiver: JsValue): number;
+        "declare function __thaw_typed_tjs_{getter_hex}(receiver: JsValue): number;
+         declare function __thaw_typed_tjs_{static_getter_hex}(): number;
+         declare function __thaw_typed_tjs_{static_setter_hex}(value: number): number;
          declare function __thaw_typed_tjs_{new}(): JsValue;
          function main(): void {{
            const box = __thaw_typed_tjs_{new}();
-           console.log(__thaw_typed_tjs_{getter}(box));
-         }}"
+           console.log(__thaw_typed_tjs_{getter_hex}(box));
+           console.log(__thaw_typed_tjs_{static_setter_hex}(3));
+           console.log(__thaw_typed_tjs_{static_getter_hex}());
+         }}",
+        getter_hex = thaw_js_class_symbol_hex(getter),
+        static_getter_hex = thaw_js_class_symbol_hex(static_getter),
+        static_setter_hex = thaw_js_class_symbol_hex(static_setter),
     );
-    let error = compile_thaw_js_class_source(&source).unwrap_err();
-    assert!(error.contains("cannot cross the thaw-js boundary"), "{error}");
+    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_class_source(&source).unwrap_or_else(|e| panic!("{e}"));
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(!ir.contains("cannot cross the thaw-js boundary"), "{ir}");
+    assert!(ir.contains("@thaw_tjs_class_call("), "{ir}");
+    for symbol in [getter, static_getter, static_setter] {
+        assert!(ir.contains(symbol), "{symbol} missing from:\n{ir}");
+    }
 }
 
 #[test]

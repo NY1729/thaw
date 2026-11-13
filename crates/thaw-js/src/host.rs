@@ -737,6 +737,21 @@ enum ClassOp<'a> {
         receiver: i64,
         name: &'a str,
     },
+    /// `$getter$pkg::Class$name`: `receiver[name]`, read through the instance handle
+    Getter {
+        receiver: i64,
+        name: &'a str,
+    },
+    /// `$staticgetter$pkg::Class$name`: `Class[name]`, read from the class constructor
+    StaticGetter {
+        class: &'a str,
+        name: &'a str,
+    },
+    /// `$staticsetter$pkg::Class$name`: `Class[name] = value` under strict mode; the result is the value
+    StaticSetter {
+        class: &'a str,
+        name: &'a str,
+    },
     Static {
         class: &'a str,
         name: &'a str,
@@ -786,6 +801,18 @@ fn class_call(
             receiver,
             name: member.unwrap_or(""),
         },
+        "getter" => ClassOp::Getter {
+            receiver,
+            name: member.unwrap_or(""),
+        },
+        "staticgetter" => ClassOp::StaticGetter {
+            class: class_path,
+            name: member.unwrap_or(""),
+        },
+        "staticsetter" => ClassOp::StaticSetter {
+            class: class_path,
+            name: member.unwrap_or(""),
+        },
         "staticmethod" | "staticmethodvoid" => ClassOp::Static {
             class: class_path,
             name: member.unwrap_or(""),
@@ -797,11 +824,11 @@ fn class_call(
         }
     };
     let package_handle = match &op {
-        ClassOp::Method { receiver, .. } | ClassOp::Setter { receiver, .. } => {
-            slot(*receiver as u64)
-                .map(|(p, _)| p)
-                .ok_or_else(|| HostError::Bundle(stale_handle(*receiver as u64)))?
-        }
+        ClassOp::Method { receiver, .. }
+        | ClassOp::Setter { receiver, .. }
+        | ClassOp::Getter { receiver, .. } => slot(*receiver as u64)
+            .map(|(p, _)| p)
+            .ok_or_else(|| HostError::Bundle(stale_handle(*receiver as u64)))?,
         _ => BY_NAME
             .with(|m| m.borrow().get(package).copied())
             .ok_or_else(|| HostError::Bundle(not_loaded(package)))?,
@@ -837,6 +864,23 @@ fn class_call(
                 strict_host_set(it, &this, name, value.clone()).map_err(|c| classify(it, c))?;
                 value
             }
+            ClassOp::Getter { receiver, name } => {
+                let this = slot(receiver as u64).map_or(Value::Undefined, |(_, v)| v);
+                let it = &mut p.interp;
+                it.get(&this, name).map_err(|c| classify(it, c))?
+            }
+            ClassOp::StaticGetter { class, name } => {
+                let ctor = p.exports_member(class)?;
+                let it = &mut p.interp;
+                it.get(&ctor, name).map_err(|c| classify(it, c))?
+            }
+            ClassOp::StaticSetter { class, name } => {
+                let ctor = p.exports_member(class)?;
+                let it = &mut p.interp;
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                strict_host_set(it, &ctor, name, value.clone()).map_err(|c| classify(it, c))?;
+                value
+            }
             ClassOp::Static { class, name } => {
                 let ctor = p.exports_member(class)?;
                 let it = &mut p.interp;
@@ -862,8 +906,8 @@ fn class_call(
     })
 }
 
-/// Run a class operation (see `parse_class_symbol`): construct (`receiver` 0), call a method on an
-/// instance handle, or call a static method. The result is JSON text, or a decimal handle id when
+/// Run a class operation (see `parse_class_symbol`): construct (`receiver` 0), call or read/write a member
+/// of an instance handle, or call or read/write a static member of the class. The result is JSON text, or a decimal handle id when
 /// bit 0 of `flags` is set (the class instance stays in the thaw-js heap); bit 1 awaits a Promise result,
 /// bit 2 awaits one only for a union return type (see `class_call`).
 #[no_mangle]

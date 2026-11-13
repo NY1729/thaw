@@ -7529,40 +7529,157 @@ fn class_setter_op_assigns_through_strict_set_and_throws_on_a_frozen_receiver() 
     );
 }
 
+/// The `"$kind$` markers a generator source emits (`"$getter$`, `"$staticmethod$`, ...); a `$name$` in a doc
+/// comment is not preceded by a quote and is skipped.
+fn generated_class_op_kinds(source: &str) -> std::collections::BTreeSet<String> {
+    let mut kinds = std::collections::BTreeSet::new();
+    for (index, _) in source.match_indices("\"$") {
+        let rest = &source[index + 2..];
+        let kind: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase())
+            .collect();
+        if !kind.is_empty() && rest[kind.len()..].starts_with('$') {
+            kinds.insert(kind);
+        }
+    }
+    kinds
+}
+
 #[test]
-fn every_generated_class_op_kind_has_a_thaw_js_handling_or_a_build_refusal() {
-    // The kinds the registry/bridge generate: shim_generation.rs (`$getter$`, `$setter$`, `$staticgetter$`,
-    // `$staticsetter$`, `$value$`), shim_support.rs (`$new$`, `$method$`, `$methodvoid$`, `$staticmethod$`,
-    // `$staticmethodvoid$`) and thaw-hir lower.rs (the same prefixes). A kind listed in neither table makes
-    // this test fail: add it here and to class_call, or to the thaw-llvm refusal list (a build error the CLI
-    // answers by rebuilding on QuickJS), so a new kind can never fall back silently.
-    const HANDLED: &[&str] = &[
-        "new",
-        "value",
-        "method",
-        "methodvoid",
-        "staticmethod",
-        "staticmethodvoid",
-        "setter",
-    ];
-    const REFUSED_AT_BUILD: &[&str] = &["getter", "staticgetter", "staticsetter"];
-    for kind in HANDLED {
+fn every_generated_class_op_kind_is_handled_by_thaw_js() {
+    // The kinds are read from the generator sources, not listed by hand: a kind emitted by shim_support.rs,
+    // shim_generation.rs or thaw-hir lower.rs that class_call does not handle fails here (its "unsupported
+    // class operation" error is the one the thaw-llvm build refusal used to stand for).
+    let generated: std::collections::BTreeSet<String> = [
+        include_str!("../../thaw-cli/src/registry_integration/shim_support.rs"),
+        include_str!("../../thaw-cli/src/registry_integration/shim_generation.rs"),
+        include_str!("../../thaw-hir/src/lower.rs"),
+    ]
+    .into_iter()
+    .flat_map(generated_class_op_kinds)
+    .collect();
+    assert!(
+        [
+            "new",
+            "method",
+            "getter",
+            "setter",
+            "staticgetter",
+            "staticsetter"
+        ]
+        .iter()
+        .all(|kind| generated.contains(*kind)),
+        "scanner found {generated:?}"
+    );
+    for kind in &generated {
         let symbol = format!("${kind}$s::Cell$v$overload0$arity0");
         if let Err(error) = class_call_with_flags(&symbol, "[]", 0, 0) {
             assert!(
                 !error.contains("unsupported class operation"),
-                "{symbol}: {error}"
+                "{symbol} (generated kind `{kind}`): {error}"
             );
         }
     }
-    for kind in REFUSED_AT_BUILD {
-        let symbol = format!("${kind}$s::Cell$v$overload0$arity0");
-        let error = class_call_with_flags(&symbol, "[]", 0, 0).unwrap_err();
-        assert!(
-            error.contains(&format!("unsupported class operation `{kind}`")),
-            "{symbol}: {error}"
-        );
-    }
+}
+
+const GETTER_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"g/index.js": function(module, exports, require) {
+  class Box {
+    constructor() { this.n = 4; }
+    get doubled() { return this.n * 2; }
+  }
+  class Cfg {
+    static freeze() { Object.freeze(this); }
+    static get w() { return 'w:' + Cfg.v; }
+  }
+  Cfg.v = 'a';
+  exports.Box = Box;
+  exports.Cfg = Cfg;
+},
+};
+var __thaw_bundle_require_maps = { "g/index.js": {}, };
+var __thaw_bundle_entry_key = "g/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn class_getter_op_reads_the_property_through_the_receiver_handle() {
+    use std::ffi::CString;
+    let (name, source) = (
+        CString::new("gi").unwrap(),
+        CString::new(GETTER_BUNDLE).unwrap(),
+    );
+    assert_eq!(
+        crate::host::thaw_tjs_register(name.as_ptr(), source.as_ptr()),
+        1
+    );
+    let box_handle: i64 = class_call_with_flags("$new$gi::Box$arity0", "[]", 0, 1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        class_call_with_flags("$getter$gi::Box$doubled", "[]", box_handle, 0).unwrap(),
+        "8"
+    );
+    assert_eq!(
+        class_call_with_flags("$getter$gi::Box$n", "[]", box_handle, 0).unwrap(),
+        "4"
+    );
+}
+
+#[test]
+fn static_getter_op_reads_from_the_class_constructor() {
+    use std::ffi::CString;
+    let (name, source) = (
+        CString::new("sg").unwrap(),
+        CString::new(GETTER_BUNDLE).unwrap(),
+    );
+    assert_eq!(
+        crate::host::thaw_tjs_register(name.as_ptr(), source.as_ptr()),
+        1
+    );
+    assert_eq!(
+        class_call_with_flags("$staticgetter$sg::Cfg$v", "[]", 0, 0).unwrap(),
+        "\"a\""
+    );
+    assert_eq!(
+        class_call_with_flags("$staticgetter$sg::Cfg$w", "[]", 0, 0).unwrap(),
+        "\"w:a\""
+    );
+}
+
+#[test]
+fn static_setter_op_assigns_on_the_constructor_and_throws_on_a_frozen_one() {
+    use std::ffi::CString;
+    let (name, source) = (
+        CString::new("ss").unwrap(),
+        CString::new(GETTER_BUNDLE).unwrap(),
+    );
+    assert_eq!(
+        crate::host::thaw_tjs_register(name.as_ptr(), source.as_ptr()),
+        1
+    );
+    // the setter returns the assigned value; the write is visible to the static getter
+    assert_eq!(
+        class_call_with_flags("$staticsetter$ss::Cfg$v", "[\"b\"]", 0, 0).unwrap(),
+        "\"b\""
+    );
+    assert_eq!(
+        class_call_with_flags("$staticgetter$ss::Cfg$v", "[]", 0, 0).unwrap(),
+        "\"b\""
+    );
+    // strict: a write to a frozen constructor throws (Interp::set alone would ignore it)
+    class_call_with_flags("$staticmethod$ss::Cfg$freeze$overload0$arity0", "[]", 0, 0).unwrap();
+    let error = class_call_with_flags("$staticsetter$ss::Cfg$v", "[\"c\"]", 0, 0).unwrap_err();
+    assert!(
+        error.contains("Cannot assign to read only property 'v'"),
+        "{error}"
+    );
+    assert_eq!(
+        class_call_with_flags("$staticgetter$ss::Cfg$v", "[]", 0, 0).unwrap(),
+        "\"b\""
+    );
 }
 
 // Node 22 prints: tick1, uncaught:boom, tick2, tick3, done (exit 0).

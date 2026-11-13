@@ -444,22 +444,9 @@ fn generates_typed_napi_tuple_class_shims() {
     assert_eq!(methods.len(), 1);
     assert_eq!(methods[0].4, vec![tuple.clone()]);
     let property = &class.properties[0];
-    assert!(generate_napi_class_property_getter(
-        &class.name,
-        &property.name,
-        &property.ty,
-        false,
-        &mut shim,
-    )
+    assert!(generate_napi_class_property_getter(&class.name, &property.name, &property.ty, false, "napi", &mut shim,)
     .is_some());
-    assert!(generate_napi_class_property_setter(
-        &class.name,
-        &property.name,
-        &property.ty,
-        false,
-        true,
-        &mut shim,
-    )
+    assert!(generate_napi_class_property_setter(&class.name, &property.name, &property.ty, false, "napi", &mut shim,)
     .is_some());
     assert!(shim.contains("value: [number, string]"));
     assert!(shim.contains("): [string, number]"));
@@ -529,22 +516,9 @@ fn generates_typed_napi_recursive_array_shims() {
         vec![thaw_hir::HirType::Array(Box::new(strings.clone()))]
     );
     let property = &class.properties[0];
-    assert!(generate_napi_class_property_getter(
-        &class.name,
-        &property.name,
-        &property.ty,
-        false,
-        &mut shim,
-    )
+    assert!(generate_napi_class_property_getter(&class.name, &property.name, &property.ty, false, "napi", &mut shim,)
     .is_some());
-    assert!(generate_napi_class_property_setter(
-        &class.name,
-        &property.name,
-        &property.ty,
-        false,
-        true,
-        &mut shim,
-    )
+    assert!(generate_napi_class_property_setter(&class.name, &property.name, &property.ty, false, "napi", &mut shim,)
     .is_some());
     assert!(shim.contains("value: { name: string }[]"));
     assert!(shim.contains("values: boolean[]"));
@@ -602,22 +576,9 @@ fn generates_typed_napi_nullable_shims() {
     );
     assert_eq!(methods[0].4, vec![nullable]);
     let property = &class.properties[0];
-    assert!(generate_napi_class_property_getter(
-        &class.name,
-        &property.name,
-        &property.ty,
-        false,
-        &mut shim,
-    )
+    assert!(generate_napi_class_property_getter(&class.name, &property.name, &property.ty, false, "napi", &mut shim,)
     .is_some());
-    assert!(generate_napi_class_property_setter(
-        &class.name,
-        &property.name,
-        &property.ty,
-        false,
-        true,
-        &mut shim,
-    )
+    assert!(generate_napi_class_property_setter(&class.name, &property.name, &property.ty, false, "napi", &mut shim,)
     .is_some());
     assert!(shim.contains("value: string | null"));
     assert!(shim.contains("): string | null"));
@@ -666,22 +627,9 @@ fn generates_typed_napi_optional_and_nullish_shims() {
     assert_eq!(methods[0].4, vec![optional]);
     assert_eq!(methods[1].4, vec![nullish]);
     let property = &class.properties[0];
-    assert!(generate_napi_class_property_getter(
-        &class.name,
-        &property.name,
-        &property.ty,
-        false,
-        &mut shim,
-    )
+    assert!(generate_napi_class_property_getter(&class.name, &property.name, &property.ty, false, "napi", &mut shim,)
     .is_some());
-    assert!(generate_napi_class_property_setter(
-        &class.name,
-        &property.name,
-        &property.ty,
-        false,
-        true,
-        &mut shim,
-    )
+    assert!(generate_napi_class_property_setter(&class.name, &property.name, &property.ty, false, "napi", &mut shim,)
     .is_some());
     assert!(shim.contains("value: string | undefined"));
     assert!(shim.contains("value: string | null | undefined"));
@@ -719,14 +667,14 @@ fn generates_napi_class_property_accessor_helpers() {
     let mut shim = String::new();
     let ty = thaw_bridge::DtsType::Native(thaw_hir::HirType::Str);
     let instance_getter =
-        generate_napi_class_property_getter("Client", "name", &ty, false, &mut shim).unwrap();
+        generate_napi_class_property_getter("Client", "name", &ty, false, "napi", &mut shim).unwrap();
     let (instance_setter, setter_type) =
-        generate_napi_class_property_setter("Client", "name", &ty, false, true, &mut shim)
+        generate_napi_class_property_setter("Client", "name", &ty, false, "napi", &mut shim)
             .unwrap();
     let static_getter =
-        generate_napi_class_property_getter("Client", "version", &ty, true, &mut shim).unwrap();
+        generate_napi_class_property_getter("Client", "version", &ty, true, "napi", &mut shim).unwrap();
     let (static_setter, _) =
-        generate_napi_class_property_setter("Client", "version", &ty, true, true, &mut shim)
+        generate_napi_class_property_setter("Client", "version", &ty, true, "napi", &mut shim)
             .unwrap();
 
     assert_eq!(setter_type, thaw_hir::HirType::Str);
@@ -740,16 +688,57 @@ fn generates_napi_class_property_accessor_helpers() {
     assert!(shim.contains(&format!(
         "declare function {static_setter}(value: string): string;"
     )));
-    assert!(generate_napi_class_property_getter(
-        "Client",
-        "optional",
-        &thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+    assert!(generate_napi_class_property_getter("Client", "optional", &thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
             thaw_hir::HirType::Str,
-        ))),
-        false,
-        &mut shim,
-    )
+        ))), false, "napi", &mut shim,)
     .is_some());
+}
+
+#[test]
+fn class_accessor_declarations_follow_the_requested_backend() {
+    let class = thaw_bridge::parse_dts_classes(
+        r#"export class Box {
+                n: number;
+                static w: number;
+            }"#,
+    )
+    .unwrap()
+    .remove(0);
+    let hex = |key: &str| {
+        key.as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    for backend in ["napi", "tjs"] {
+        let mut shim = String::new();
+        let accessors =
+            generate_class_accessor_declarations("pkg::Box", &class, "q", backend, &mut shim);
+        let prefix = format!("__thaw_typed_{backend}_");
+        assert_eq!(accessors.getters.len(), 1);
+        assert_eq!(
+            accessors.getters[0].2,
+            format!("{prefix}{}", hex("$getter$pkg::Box$n"))
+        );
+        assert_eq!(accessors.setters.len(), 1);
+        assert_eq!(
+            accessors.setters[0].2,
+            format!("{prefix}{}", hex("$setter$pkg::Box$n"))
+        );
+        assert_eq!(accessors.static_getters.len(), 1);
+        assert_eq!(
+            accessors.static_getters[0].3,
+            format!("{prefix}{}", hex("$staticgetter$pkg::Box$w"))
+        );
+        assert_eq!(accessors.static_setters.len(), 1);
+        assert_eq!(
+            accessors.static_setters[0].3,
+            format!("{prefix}{}", hex("$staticsetter$pkg::Box$w"))
+        );
+        assert!(shim.contains(&format!("declare function {prefix}")));
+        let other = if backend == "napi" { "__thaw_typed_tjs_" } else { "__thaw_typed_napi_" };
+        assert!(!shim.contains(other), "{shim}");
+    }
 }
 
 #[test]

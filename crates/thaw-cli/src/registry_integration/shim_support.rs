@@ -299,11 +299,13 @@ fn generate_class_constructor_dispatcher(
     Some(name)
 }
 
+/// `backend` is the symbol family: `napi` for a native addon's class, `tjs` for a thaw-js-routed one.
 fn generate_napi_class_property_getter(
     class: &str,
     property: &str,
     ty: &thaw_bridge::DtsType,
     is_static: bool,
+    backend: &str,
     shim: &mut String,
 ) -> Option<String> {
     let thaw_bridge::DtsType::Native(ty) = ty else {
@@ -317,7 +319,7 @@ fn generate_napi_class_property_getter(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let symbol = format!("__thaw_typed_napi_{encoded}");
+    let symbol = format!("__thaw_typed_{backend}_{encoded}");
     shim.push_str(&format!(
         "declare function {symbol}({}): {rendered};\n",
         if is_static { "" } else { "receiver: JsValue" }
@@ -330,7 +332,7 @@ fn generate_napi_class_property_setter(
     property: &str,
     ty: &thaw_bridge::DtsType,
     is_static: bool,
-    napi: bool,
+    backend: &str,
     shim: &mut String,
 ) -> Option<(String, thaw_hir::HirType)> {
     let thaw_bridge::DtsType::Native(ty) = ty else {
@@ -344,16 +346,231 @@ fn generate_napi_class_property_setter(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let symbol = format!(
-        "__thaw_typed_{}_{}",
-        if napi { "napi" } else { "js" },
-        encoded
-    );
+    let symbol = format!("__thaw_typed_{backend}_{encoded}");
     shim.push_str(&format!(
         "declare function {symbol}({}value: {rendered}): {rendered};\n",
         if is_static { "" } else { "receiver: JsValue, " }
     ));
     Some((symbol, ty.clone()))
+}
+
+/// Per-class accessor rewrites produced by `generate_class_accessor_declarations`.
+#[derive(Default)]
+struct ClassAccessorRewrites {
+    getters: Vec<(String, String, String)>,
+    setters: Vec<ClassSetterRewrite>,
+    static_getters: Vec<(String, String, String, String)>,
+    static_setters: Vec<(String, String, String, String, thaw_hir::HirType)>,
+}
+
+/// Declares the instance/static getter and setter symbols of `class` (accessor methods and plain
+/// properties) under `backend` (`napi` for a native addon's class, `tjs` for a thaw-js-routed one).
+/// `runtime_name` is the `pkg::Class` key the runtime looks the class up by; `qualifier` is the
+/// package's qualifier identifier.
+fn generate_class_accessor_declarations(
+    runtime_name: &str,
+    class: &thaw_bridge::DtsClass,
+    qualifier: &str,
+    backend: &str,
+    shim: &mut String,
+) -> ClassAccessorRewrites {
+    let mut accessors = ClassAccessorRewrites::default();
+        for getter in class.methods.iter().filter(|method| {
+            !method.is_static
+                && method.kind == thaw_bridge::DtsMethodKind::Getter
+                && method.params.is_empty()
+                && supported_class_method_return(&method.ret)
+        }) {
+            let thaw_bridge::DtsType::Native(return_type) = &getter.ret else {
+                continue;
+            };
+            let Some(return_type) = render_dynamic_type(return_type) else {
+                continue;
+            };
+            let runtime_key = format!(
+                "$getter${}{}",
+                runtime_name,
+                format_args!("${}", getter.name)
+            );
+            let encoded = runtime_key
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let symbol = format!("__thaw_typed_{backend}_{encoded}");
+            shim.push_str(&format!(
+                "declare function {symbol}(receiver: JsValue): {return_type};\n"
+            ));
+            accessors.getters.push((
+                format!("{qualifier}::{}", class.name),
+                getter.name.clone(),
+                symbol,
+            ));
+        }
+        for setter in class.methods.iter().filter(|method| {
+            !method.is_static
+                && method.kind == thaw_bridge::DtsMethodKind::Setter
+                && method.params.len() == 1
+                && supported_class_method_param(&method.params[0].1, 0, 1)
+        }) {
+            let thaw_bridge::DtsType::Native(value_type) = &setter.params[0].1 else {
+                continue;
+            };
+            let Some(rendered_type) = render_dynamic_type(value_type) else {
+                continue;
+            };
+            let runtime_key = format!(
+                "$setter${}{}",
+                runtime_name,
+                format_args!("${}", setter.name)
+            );
+            let encoded = runtime_key
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let symbol = format!("__thaw_typed_{backend}_{encoded}");
+            shim.push_str(&format!(
+                "declare function {symbol}(receiver: JsValue, value: {rendered_type}): {rendered_type};\n"
+            ));
+            accessors.setters.push((
+                format!("{qualifier}::{}", class.name),
+                setter.name.clone(),
+                symbol,
+                value_type.clone(),
+            ));
+        }
+        for getter in class.methods.iter().filter(|method| {
+            method.is_static
+                && method.kind == thaw_bridge::DtsMethodKind::Getter
+                && method.params.is_empty()
+                && supported_class_method_return(&method.ret)
+        }) {
+            let thaw_bridge::DtsType::Native(return_type) = &getter.ret else {
+                continue;
+            };
+            let Some(return_type) = render_dynamic_type(return_type) else {
+                continue;
+            };
+            let runtime_key = format!(
+                "$staticgetter${}{}",
+                runtime_name,
+                format_args!("${}", getter.name)
+            );
+            let encoded = runtime_key
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let symbol = format!("__thaw_typed_{backend}_{encoded}");
+            shim.push_str(&format!("declare function {symbol}(): {return_type};\n"));
+            accessors.static_getters.push((
+                qualifier.to_string(),
+                class.name.clone(),
+                getter.name.clone(),
+                symbol,
+            ));
+        }
+        for setter in class.methods.iter().filter(|method| {
+            method.is_static
+                && method.kind == thaw_bridge::DtsMethodKind::Setter
+                && method.params.len() == 1
+                && supported_class_method_param(&method.params[0].1, 0, 1)
+        }) {
+            let thaw_bridge::DtsType::Native(value_type) = &setter.params[0].1 else {
+                continue;
+            };
+            let Some(rendered_type) = render_dynamic_type(value_type) else {
+                continue;
+            };
+            let runtime_key = format!(
+                "$staticsetter${}{}",
+                runtime_name,
+                format_args!("${}", setter.name)
+            );
+            let encoded = runtime_key
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let symbol = format!("__thaw_typed_{backend}_{encoded}");
+            shim.push_str(&format!(
+                "declare function {symbol}(value: {rendered_type}): {rendered_type};\n"
+            ));
+            accessors.static_setters.push((
+                qualifier.to_string(),
+                class.name.clone(),
+                setter.name.clone(),
+                symbol,
+                value_type.clone(),
+            ));
+        }
+        for property in &class.properties {
+            let has_getter = class.methods.iter().any(|method| {
+                method.name == property.name
+                    && method.is_static == property.is_static
+                    && method.kind == thaw_bridge::DtsMethodKind::Getter
+            });
+            if !has_getter {
+                if let Some(symbol) = generate_napi_class_property_getter(
+                    runtime_name,
+                    &property.name,
+                    &property.ty,
+                    property.is_static,
+                    backend,
+                    shim,
+                ) {
+                    if property.is_static {
+                        accessors.static_getters.push((
+                            qualifier.to_string(),
+                            class.name.clone(),
+                            property.name.clone(),
+                            symbol,
+                        ));
+                    } else {
+                        accessors.getters.push((
+                            format!("{qualifier}::{}", class.name),
+                            property.name.clone(),
+                            symbol,
+                        ));
+                    }
+                }
+            }
+
+            let has_setter = class.methods.iter().any(|method| {
+                method.name == property.name
+                    && method.is_static == property.is_static
+                    && method.kind == thaw_bridge::DtsMethodKind::Setter
+            });
+            if !property.readonly && !has_setter {
+                if let Some((symbol, value_type)) = generate_napi_class_property_setter(
+                    runtime_name,
+                    &property.name,
+                    &property.ty,
+                    property.is_static,
+                    backend,
+                    shim,
+                ) {
+                    if property.is_static {
+                        accessors.static_setters.push((
+                            qualifier.to_string(),
+                            class.name.clone(),
+                            property.name.clone(),
+                            symbol,
+                            value_type,
+                        ));
+                    } else {
+                        accessors.setters.push((
+                            format!("{qualifier}::{}", class.name),
+                            property.name.clone(),
+                            symbol,
+                            value_type,
+                        ));
+                    }
+                }
+            }
+        }
+    accessors
 }
 
 /// Generates one `declare function __thaw_typed_{napi,js}_<hex>(...)`
