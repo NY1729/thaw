@@ -710,22 +710,26 @@ fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
 
 #[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
-    // Same pinned scenario as `thaw_js_routing_falls_back_when_a_class_instance_needs_live_property_access`:
-    // the routed build is rebuilt on QuickJS, and the artifact still carries the blockers key.
+    // A `node:worker_threads` program that names `SharedArrayBuffer` (a worker option thaw-js does not serve
+    // yet) keeps that module on QuickJS; the build falls back and the artifact reports the blocker.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "blockers-fallback",
         "import { Counter } from 'tjs-ctr';\n\
+         import { isMainThread } from 'node:worker_threads';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
-           c.n = 40;\n\
-           console.log(c.add(2), c.n);\n\
+           const shared = new SharedArrayBuffer(4);\n\
+           console.log(c.add(2), isMainThread, shared.byteLength);\n\
          }\n",
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
     assert_eq!(manifest["quickjs"], true, "{manifest}");
-    assert_eq!(manifest["thaw_js_routed"], serde_json::json!([]));
-    assert!(manifest["thaw_js_blockers"].is_array(), "{manifest}");
+    let blockers = manifest["thaw_js_blockers"].as_array().unwrap_or_else(|| panic!("{manifest}"));
+    assert!(
+        blockers.iter().any(|blocker| blocker["package"] == "node:worker_threads"),
+        "{manifest}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
