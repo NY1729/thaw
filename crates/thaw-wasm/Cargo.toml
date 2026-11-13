@@ -1,0 +1,17 @@
+[package]
+name = "thaw-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Engine-neutral WebAssembly runtime (wasmi 1.1.0 interpreter). No rquickjs or
+# thaw-js types: the thaw-js natives (feature `wasm`) wrap this crate. `wat`
+# (text format) is deliberately off: Node never accepts text bytes.
+[features]
+default = ["simd"]
+simd = ["wasmi/simd"]
+wasi = ["dep:wasmi_wasi"]
+
+[dependencies]
+wasmi = { version = "1.1.0", default-features = false, features = ["std"] }
+wasmi_wasi = { version = "1.1.0", optional = true }
