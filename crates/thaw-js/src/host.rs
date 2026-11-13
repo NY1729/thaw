@@ -2814,7 +2814,12 @@ pub extern "C" fn thaw_tjs_call_handle_value_graph_result(
     argument: u64,
 ) -> ThawResult {
     graph_result((|| {
-        let argument = on_handle(argument, |_, _, v| Ok(v))?;
+        // Handle 0 is an absent global (`typeof navigator`): pass `undefined` rather than failing.
+        let argument = if argument == 0 {
+            Value::Undefined
+        } else {
+            on_handle(argument, |_, _, v| Ok(v))?
+        };
         on_handle(handle, |p, owner, f| {
             let it = &mut p.interp;
             check_handle_callable(it, &f)?;
@@ -5992,6 +5997,19 @@ mod handle_value_graph_await_tests {
             .unwrap()
             .to_owned();
         assert!(wire.contains(r#""root":{"v":5}"#), "{wire}");
+    }
+
+    #[test]
+    fn call_handle_value_graph_result_passes_undefined_for_handle_zero() {
+        // Handle 0 is what an absent global yields; `typeof <absent global>` passes it as a value.
+        let f = function_handle("return typeof a");
+        let result = thaw_tjs_call_handle_value_graph_result(f, 0);
+        assert!(result.error.is_null());
+        let wire = unsafe { CStr::from_ptr(result.value) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(wire.contains(r#""v":"undefined""#), "{wire}");
     }
 
     #[test]

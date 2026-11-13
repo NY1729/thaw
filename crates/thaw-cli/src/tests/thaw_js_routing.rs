@@ -952,6 +952,21 @@ fn routed_uncaught_and_rejection_reports_reach_thaw_js_process_listeners() {
     }
 }
 
+/// `typeof` of absent globals and statics read off imported classes must reach the live values, not an
+/// `invalid JavaScript handle` error or a fresh native wrapper (r5b). Added unrun: no thaw-cli e2e here.
+#[test]
+fn routed_typeof_absent_global_and_imported_class_static_reads() {
+    let body = "import EventEmitter from 'node:events';\nfunction main(): void { console.log(typeof navigator, typeof NopeNope, typeof Math); console.log(typeof EventEmitter.captureRejections, EventEmitter.defaultMaxListeners); }";
+    let _env = RouteAllEnv::set();
+    let (_dir, registry, entry) = thaw_js_fixture("route-typeof-static", body);
+    let output = entry.with_file_name("app");
+    thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(
+        thaw_js_run_guarded(&output),
+        "undefined undefined object\nboolean 10\n"
+    );
+}
+
 /// Turns route-all on for the calling thread only (the same effect as `THAW_JS_ROUTE_ALL=1`, without
 /// touching the process env that parallel tests share). Off again on drop, even when the test panics.
 struct RouteAllEnv;

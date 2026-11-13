@@ -4190,7 +4190,24 @@ impl<'a> FnLowerer<'a> {
                     // Any other static property of a function/class value (`EventEmitter.captureRejections`)
                     // has no compile-time shape: read it through the dynamic property path.
                     HirType::Function(..) | HirType::CallableFunction(..) => {
-                        let object = self.coerce_to_declared(&HirType::JsValue, obj)?;
+                        // An imported/ambient class or function (not a local binding) is read as its
+                        // live value by global name: wrapping it as a native callback loses its statics.
+                        let imported = match member.obj.as_ref() {
+                            Expr::Ident(ident) => {
+                                let name = self.resolve_binding(ident.sym.as_ref());
+                                let local = self.scope.contains_key(&name);
+                                let declared_here = self.signatures.get(&name).is_some_and(|s| !s.is_extern);
+                                (!local && !declared_here).then_some(name)
+                            }
+                            _ => None,
+                        };
+                        let object = match imported {
+                            Some(name) => HirExpr::Call(
+                                Box::new(HirExpr::Var("getDynamicValue".into())),
+                                vec![HirExpr::Lit(HirLit::Str(name))],
+                            ),
+                            None => self.coerce_to_declared(&HirType::JsValue, obj)?,
+                        };
                         self.lower_dynamic_value_property_read(
                             object,
                             HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
