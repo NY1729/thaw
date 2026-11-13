@@ -1,0 +1,9 @@
+true false
+5 8 -2147483647 3 0
+0 2 function function 0() { [native code] }
+0 true true
+true add
+[object WebAssembly.Instance] [object Function] [object WebAssembly]
+false true
+[Function: 0] set ok
+TypeError WebAssembly.Instance.exports(): Receiver is not a WebAssembly.Instance

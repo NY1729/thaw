@@ -1,0 +1,6 @@
+3 -3
+true RuntimeError divide by zero true
+RuntimeError divide result unrepresentable
+RuntimeError custom RuntimeError: custom true
+LinkError true 1
+CompileError bad true false

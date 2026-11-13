@@ -1,0 +1,11 @@
+2 null null 2 3
+true 42 null
+TypeError
+RangeError WebAssembly.Table.get(): invalid index 9 into funcref table of size 3
+RangeError WebAssembly.Table.set(): invalid index 9 into funcref table of size 3
+TypeError WebAssembly.Table(): Descriptor property 'element' must be a WebAssembly reference type
+TypeError WebAssembly.Table(): Property 'initial' is required
+hello undefined 42 1 z 2
+RangeError WebAssembly.Table.grow(): failed to grow table by 1
+[object WebAssembly.Table] constructor,length,grow,set,get
+2 null true

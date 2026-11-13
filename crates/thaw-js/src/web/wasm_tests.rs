@@ -497,3 +497,143 @@ fn memory_grow_by_zero_replaces_the_buffer() {
     );
     assert_eq!(run(&src), "1 0 false 65536");
 }
+
+// ---- the JS-visible WebAssembly API (webassembly.js) ----------------------------------------
+
+#[test]
+fn webassembly_api_add_export_is_callable_with_v8_names_and_lengths() {
+    let src = format!(
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module({}));
+         const add = inst.exports.add;
+         console.log(add.name, add.length, add(2, 3), add('7', 1), add(2147483648, 1));
+         console.log(inst.exports.add === add, Object.isFrozen(inst.exports), Object.prototype.toString.call(inst));",
+        js_bytes(&add_module())
+    );
+    assert_eq!(
+        run(&src),
+        "0 2 5 8 -2147483647|true true [object WebAssembly.Instance]"
+    );
+}
+
+#[test]
+fn webassembly_api_exports_getter_is_on_the_prototype_only() {
+    let src = format!(
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module({}));
+         console.log(Object.getOwnPropertyNames(inst).length, Object.getPrototypeOf(inst.exports) === null);
+         try {{ WebAssembly.Instance.prototype.exports; }} catch (e) {{ console.log(e.name, e.message); }}",
+        js_bytes(&add_module())
+    );
+    assert_eq!(
+        run(&src),
+        "0 true|TypeError WebAssembly.Instance.exports(): Receiver is not a WebAssembly.Instance"
+    );
+}
+
+#[test]
+fn webassembly_api_module_constructor_checks_match_v8() {
+    let src = "try { WebAssembly.Module(new Uint8Array(8)); } catch (e) { console.log(e.name, e.message); }
+         try { new WebAssembly.Module(); } catch (e) { console.log(e.name, e.message); }
+         try { new WebAssembly.Module(new Uint8Array([0,97,115,109,2,0,0,0])); } catch (e) { console.log(e.name, e.message); }";
+    assert_eq!(
+        run(src),
+        "TypeError WebAssembly.Module(): WebAssembly.Module must be invoked with 'new'|TypeError WebAssembly.Module(): Argument 0 must be a buffer source|CompileError WebAssembly.Module(): expected version 01 00 00 00, found 02 00 00 00 @+4"
+    );
+}
+
+#[test]
+fn webassembly_api_error_classes_have_node_names_and_proto_chain() {
+    let src = "const e = new WebAssembly.LinkError('m');
+         console.log(e.name, e.message, e instanceof Error, e instanceof WebAssembly.LinkError, Object.getPrototypeOf(WebAssembly.RuntimeError) === Error);
+         console.log(String(new WebAssembly.CompileError('c')), Object.prototype.toString.call(e));";
+    assert_eq!(
+        run(src),
+        "LinkError m true true true|CompileError: c [object Error]"
+    );
+}
+
+#[test]
+fn webassembly_api_trap_becomes_runtime_error() {
+    let src = format!(
+        "const div = new WebAssembly.Instance(new WebAssembly.Module({})).exports.div;
+         try {{ div(7, 0); }} catch (e) {{ console.log(e instanceof WebAssembly.RuntimeError, e.name, e.message); }}",
+        js_bytes(&div_module())
+    );
+    assert_eq!(run(&src), "true RuntimeError divide by zero");
+}
+
+#[test]
+fn webassembly_api_memory_buffer_detaches_on_grow() {
+    let src = "const m = new WebAssembly.Memory({ initial: 1, maximum: 3 });
+         const b = m.buffer;
+         console.log(b.byteLength, m.buffer === b);
+         console.log(m.grow(1), b.byteLength, m.buffer.byteLength, m.buffer === b);
+         try { m.grow(5); } catch (e) { console.log(e.name, e.message); }";
+    assert_eq!(
+        run(src),
+        "65536 true|1 0 131072 false|RangeError WebAssembly.Memory.grow(): Maximum memory size exceeded"
+    );
+}
+
+#[test]
+fn webassembly_api_global_value_and_immutability() {
+    let src = "const g = new WebAssembly.Global({ value: 'i32', mutable: true }, 7);
+         g.value = 9;
+         console.log(g.value, g.valueOf());
+         const c = new WebAssembly.Global({ value: 'i64' }, 5n);
+         try { c.value = 3n; } catch (e) { console.log(e.name, e.message); }";
+    assert_eq!(
+        run(src),
+        "9 9|TypeError set WebAssembly.Global.value: Can't set the value of an immutable global."
+    );
+}
+
+#[test]
+fn webassembly_api_table_funcref_identity_and_errors() {
+    let src = format!(
+        "const add = new WebAssembly.Instance(new WebAssembly.Module({})).exports.add;
+         const t = new WebAssembly.Table({{ element: 'anyfunc', initial: 2 }});
+         console.log(t.length, t.get(0), t.grow(1), t.length);
+         t.set(0, add);
+         console.log(t.get(0) === add, t.get(0)(20, 22));
+         try {{ t.set(0, () => 1); }} catch (e) {{ console.log(e.name); }}
+         try {{ t.get(9); }} catch (e) {{ console.log(e.name, e.message); }}",
+        js_bytes(&add_module())
+    );
+    assert_eq!(
+        run(&src),
+        "2 null 2 3|true 42|TypeError|RangeError WebAssembly.Table.get(): invalid index 9 into funcref table of size 3"
+    );
+}
+
+#[test]
+fn webassembly_api_host_import_round_trip_and_link_errors() {
+    let src = format!(
+        "const mod = new WebAssembly.Module({});
+         const run = new WebAssembly.Instance(mod, {{ env: {{ g: (x) => x * 10 }} }}).exports.run;
+         console.log(run(4));
+         try {{ new WebAssembly.Instance(mod, {{ env: {{ g: 5 }} }}); }} catch (e) {{ console.log(e.name, e.message); }}
+         try {{ new WebAssembly.Instance(mod); }} catch (e) {{ console.log(e.name, e.message); }}",
+        js_bytes(&import_module())
+    );
+    assert_eq!(
+        run(&src),
+        "41|LinkError WebAssembly.Instance(): Import #0 module=\"env\" function=\"g\": function import requires a callable|TypeError WebAssembly.Instance(): Imports argument must be present and must be an object"
+    );
+}
+
+#[test]
+fn webassembly_api_namespace_is_tagged_and_ordered() {
+    assert_eq!(
+        run("console.log(Object.getOwnPropertyNames(WebAssembly).slice(0, 4).join(','), Object.prototype.toString.call(WebAssembly));"),
+        "compile,validate,instantiate,Module [object WebAssembly]"
+    );
+}
+
+#[test]
+fn webassembly_api_rejects_a_dataview_as_a_buffer_source_like_node() {
+    assert_eq!(
+        run("try { new WebAssembly.Module(new DataView(new ArrayBuffer(8))); } catch (e) { console.log(e.name, e.message); }
+             console.log(String(WebAssembly.Module.exports).includes('native code'), Object.getOwnPropertyDescriptor(WebAssembly.Module.exports, 'prototype'));"),
+        "TypeError WebAssembly.Module(): Argument 0 must be a buffer source|true undefined"
+    );
+}
