@@ -3879,6 +3879,25 @@ fn is_branded_wrapper(value: &Value) -> bool {
         .is_some_and(|identity| WRAPPER_BRANDS.with(|brands| brands.borrow().contains(&identity)))
 }
 
+/// The bytes of a branded Buffer wrapper (`{"type":"Buffer","data":[...]}`), or `None` for
+/// any other value. A plain object with the same shape is not a Buffer (Node prints it as
+/// `[object Object]`), so the brand is required.
+fn branded_buffer_bytes(value: &Value) -> Option<Vec<u8>> {
+    if !is_branded_wrapper(value) || thaw_json_is_buffer_shape(value as *const Value) != 1 {
+        return None;
+    }
+    let items = value
+        .as_object()
+        .and_then(|fields| fields.get(b"data".as_slice()))
+        .and_then(Value::as_array)?;
+    Some(
+        items
+            .iter()
+            .map(|item| item.as_f64().unwrap_or(0.0) as u8)
+            .collect(),
+    )
+}
+
 fn is_graph_plain_object(value: &Value) -> bool {
     object_identity_key(value).is_some_and(|identity| {
         GRAPH_PLAIN_OBJECTS.with(|objects| objects.borrow().contains(&identity))
@@ -5790,18 +5809,7 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
     if let Value::Host(lease) = value {
         return host_inspect_node(lease, stack);
     }
-    if is_branded_wrapper(value) && thaw_json_is_buffer_shape(value as *const Value) == 1 {
-        let bytes = value
-            .as_object()
-            .and_then(|fields| fields.get(b"data".as_slice()))
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| item.as_f64().unwrap_or(0.0) as u8)
-                    .collect()
-            })
-            .unwrap_or_default();
+    if let Some(bytes) = branded_buffer_bytes(value) {
         return Node::Buffer(bytes);
     }
     let id = object_identity_key(value).unwrap_or(0);
@@ -7819,7 +7827,11 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
             return unsafe { thaw_json_array_join(value, c",".as_ptr()) };
         }
         other @ Value::Object(_) if is_native_iterator(other) => "[object Generator]".to_string(),
-        Value::Object(_) => "[object Object]".to_string(),
+        // A branded Buffer wrapper stringifies as its utf8 text, as `Buffer#toString()` does.
+        Value::Object(_) => match branded_buffer_bytes(value) {
+            Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            None => "[object Object]".to_string(),
+        },
         Value::Host(lease) => {
             let encoded = host_query(lease, 3).unwrap_or_else(|| "\"\"".into());
             match JsonParser::new(encoded.as_bytes()).parse() {
@@ -13610,6 +13622,47 @@ mod tests {
             read_c_string(thaw_json_stringify_tjs(root)),
             r#"{"b":{"__thaw_tjs_bytes__":{"k":"Buffer","data":[1,2]}},"p":{"type":"Buffer","data":[3]}}"#
         );
+    }
+
+    // Expected strings are from `node v22.23.1`: `String(Buffer.from('a'))` is "a",
+    // `String(Buffer.from([0xe3,0x81,0x82]))` is "あ", `String(Buffer.alloc(0))` is "",
+    // `String(Buffer.from([0xff,0x41]))` is "\u{FFFD}A", `[Buffer.from('ab')].join()` is "ab",
+    // `String(new Uint8Array([1,2]))` is "1,2", and a plain `{type:'Buffer',data:[97]}` is "[object Object]".
+    fn branded_buffer(data: &str) -> *mut Value {
+        thaw_json_brand_wrapper(parse(&format!(r#"{{"type":"Buffer","data":{data}}}"#)))
+    }
+
+    #[test]
+    fn branded_buffer_stringifies_as_its_utf8_text() {
+        assert_eq!(
+            read_c_string(thaw_json_as_string(branded_buffer("[97]"))),
+            "a"
+        );
+        assert_eq!(
+            read_c_string(thaw_json_as_string(branded_buffer("[227,129,130]"))),
+            "\u{3042}"
+        );
+        assert_eq!(read_c_string(thaw_json_as_string(branded_buffer("[]"))), "");
+        assert_eq!(
+            read_c_string(thaw_json_as_string(branded_buffer("[255,65]"))),
+            "\u{FFFD}A"
+        );
+    }
+
+    #[test]
+    fn unbranded_buffer_shaped_object_stays_object_text() {
+        let plain = parse(r#"{"type":"Buffer","data":[97]}"#);
+        assert_eq!(read_c_string(thaw_json_as_string(plain)), "[object Object]");
+    }
+
+    #[test]
+    fn array_join_of_branded_buffer_and_typed_array_keeps_join_semantics() {
+        let array = thaw_json_array_new();
+        thaw_json_array_push_json(array, branded_buffer("[97,98]"));
+        assert_eq!(read_c_string(thaw_json_as_string(array)), "ab");
+
+        let numbers = parse("[1,2]");
+        assert_eq!(read_c_string(thaw_json_as_string(numbers)), "1,2");
     }
 
     #[test]
