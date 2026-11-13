@@ -4192,21 +4192,24 @@ impl<'a> FnLowerer<'a> {
                     HirType::Function(..) | HirType::CallableFunction(..) => {
                         // An imported/ambient class or function (not a local binding) is read as its
                         // live value by global name: wrapping it as a native callback loses its statics.
-                        let imported = match member.obj.as_ref() {
+                        // A JS-realm class reached through its generated dispatcher is read by its
+                        // `<pkg>::<Class>` key, before the declared-here test (the dispatcher is a real fn).
+                        let (class_key, imported) = match member.obj.as_ref() {
                             Expr::Ident(ident) => {
                                 let name = self.resolve_binding(ident.sym.as_ref());
+                                let class_key = imported_class_key(&name);
                                 let local = self.scope.contains_key(&name);
                                 let declared_here = self.signatures.get(&name).is_some_and(|s| !s.is_extern);
-                                (!local && !declared_here).then_some(name)
+                                (class_key, (!local && !declared_here).then_some(name))
                             }
-                            _ => None,
+                            _ => (None, None),
                         };
-                        let object = match imported {
-                            Some(name) => HirExpr::Call(
+                        let object = match (class_key, imported) {
+                            (Some(key), _) | (None, Some(key)) => HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".into())),
-                                vec![HirExpr::Lit(HirLit::Str(name))],
+                                vec![HirExpr::Lit(HirLit::Str(key))],
                             ),
-                            None => self.coerce_to_declared(&HirType::JsValue, obj)?,
+                            (None, None) => self.coerce_to_declared(&HirType::JsValue, obj)?,
                         };
                         self.lower_dynamic_value_property_read(
                             object,
