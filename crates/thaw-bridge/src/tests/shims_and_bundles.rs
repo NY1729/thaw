@@ -341,6 +341,9 @@ fn large_module_init_preserves_intl_requirements_as_metadata() {
         let source = format!("new Intl.{constructor}('de')");
         assert!(required_runtime_features(&source).contains("intl"));
     }
+    // A bare `Intl` reference (e.g. console.log(Intl)) and Intl.DisplayNames must also link it.
+    assert!(required_runtime_features("console.log(Intl)").contains("intl"));
+    assert!(required_runtime_features("new Intl.DisplayNames(['en'], { type: 'language' })").contains("intl"));
 }
 
 /// `p-queue`'s actual published shape: `module.exports = PQueue;

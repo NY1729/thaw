@@ -1372,6 +1372,27 @@ impl Interp {
         out.into()
     }
 
+    /// The string `Symbol.toStringTag` of a plain object on `Object.prototype` (Node prints it as
+    /// `Object [Tag] {..}`); `None` for anything else.
+    pub(crate) fn tagged_plain(&mut self, o: &Obj) -> Option<Rc<str>> {
+        if !matches!(&*o.kind.borrow(), Kind::Plain) {
+            return None;
+        }
+        let on_object_proto = o
+            .proto
+            .borrow()
+            .as_ref()
+            .is_none_or(|q| Rc::ptr_eq(q, &self.object_proto));
+        if !on_object_proto {
+            return None;
+        }
+        let key = self.well_known_key("toStringTag");
+        match find_in_chain(o, &key) {
+            Some(Slot::Data(Value::Str(tag))) => Some(tag.into_rc()),
+            _ => None,
+        }
+    }
+
     /// `console.log`-style rendering (a small subset of Node's util.inspect).
     pub fn inspect(&mut self, v: &Value, top: bool) -> String {
         match v {
@@ -1517,8 +1538,12 @@ impl Interp {
                         indexed.sort_by_key(|p| array_index(&p.key));
                         indexed.extend(rest);
                         let props = indexed;
+                        let head = match self.tagged_plain(o) {
+                            Some(tag) => format!("Object [{tag}] "),
+                            None => String::new(),
+                        };
                         if props.is_empty() {
-                            "{}".into()
+                            format!("{head}{{}}")
                         } else {
                             let parts: Vec<String> = props
                                 .iter()
@@ -1533,7 +1558,7 @@ impl Interp {
                                     }
                                 })
                                 .collect();
-                            format!("{{ {} }}", parts.join(", "))
+                            format!("{head}{{ {} }}", parts.join(", "))
                         }
                     }
                 }
