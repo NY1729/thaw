@@ -104,3 +104,30 @@ fn frozen_lists_only_name_platform_constructors_and_exclude_compiled_models() {
         assert!(!platform_globals::DYNAMIC_OPAQUE_CTORS.contains(&name), "`{name}` in DYNAMIC_OPAQUE_CTORS");
     }
 }
+
+// Erased TS wrappers around a special builtin/class object must not hide the special case.
+
+#[test]
+fn cast_wrapped_error_stack_trace_limit_lowers_like_the_bare_builtin() {
+    let bare = lowered_debug("function main(): void { Error.stackTraceLimit = 0; }");
+    assert!(bare.contains("__thaw_error_set_stack_trace_limit"), "bare Error.stackTraceLimit not special-cased");
+    for wrapped in [
+        "function main(): void { (Error as any).stackTraceLimit = 0; }",
+        "function main(): void { (Error as unknown as any).stackTraceLimit = 0; }",
+        "function main(): void { (<any>Error).stackTraceLimit = 0; }",
+    ] {
+        assert_eq!(lowered_debug(wrapped), bare, "{wrapped}");
+    }
+}
+
+#[test]
+fn cast_wrapped_class_static_getter_only_is_still_rejected_as_readonly() {
+    let source = |target: &str| {
+        format!(
+            "class Box {{ static get current(): number {{ return 1; }} }} function main(): void {{ {target}.current = 2; }}"
+        )
+    };
+    let bare = lowering_error(&source("Box")).expect("bare readonly static assignment should be rejected");
+    assert!(bare.contains("readonly static member `Box.current`"), "unexpected error: {bare}");
+    assert_eq!(lowering_error(&source("(Box as any)")).as_deref(), Some(bare.as_str()));
+}

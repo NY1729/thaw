@@ -757,7 +757,7 @@ impl<'a> FnLowerer<'a> {
         // `Error.stackTraceLimit = n` sets the native limit `stack` generation reads.
         if assign.op == AssignOp::Assign {
             if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
-                if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Error")
+                if matches!(peel_type_wrappers(&member.obj), Expr::Ident(object) if object.sym == *"Error")
                     && member_property_name(&member.prop).as_deref() == Some("stackTraceLimit")
                     && !self.scope.contains_key("Error")
                 {
@@ -800,7 +800,7 @@ impl<'a> FnLowerer<'a> {
         };
         if self.unbound_this_context {
             if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
-                if matches!(member.obj.as_ref(), Expr::This(_)) {
+                if matches!(peel_type_wrappers(&member.obj), Expr::This(_)) {
                     let property = member_property_name(&member.prop)
                         .ok_or("unbound `this` assignment requires a statically known property")?;
                     if assign.op != AssignOp::Assign {
@@ -867,7 +867,7 @@ impl<'a> FnLowerer<'a> {
             }
         }
         if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
-            let static_class = match member.obj.as_ref() {
+            let static_class = match peel_type_wrappers(&member.obj) {
                 Expr::Ident(receiver) => Some(receiver.sym.to_string()),
                 Expr::This(_) if self.class_static_context => self.class_context.clone(),
                 _ => None,
@@ -940,7 +940,7 @@ impl<'a> FnLowerer<'a> {
             }
             if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
                 if let (Expr::Ident(receiver), Some(property)) =
-                    (member.obj.as_ref(), member_property_name(&member.prop))
+                    (peel_type_wrappers(&member.obj), member_property_name(&member.prop))
                 {
                     let static_symbol = class_setter_symbol(receiver.sym.as_ref(), &property, true);
                     if self.signatures.contains_key(&static_symbol) {
@@ -964,7 +964,7 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 if let (Expr::This(_), Some(property)) =
-                    (member.obj.as_ref(), member_property_name(&member.prop))
+                    (peel_type_wrappers(&member.obj), member_property_name(&member.prop))
                 {
                     if self.class_static_context {
                         let class = self
