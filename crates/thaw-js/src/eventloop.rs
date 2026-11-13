@@ -1605,6 +1605,25 @@ impl Interp {
                 Ok(Value::Bool(it.set_ref(this, None)))
             });
         }
+        // Node: a Timeout/Interval converts to its numeric id (`+t`, `${t}`, `'a' + t`), and
+        // `[Symbol.dispose]` clears it. Immediates have no toPrimitive; both classes get dispose.
+        let to_prim = self.well_known_key("toPrimitive");
+        let dispose = self.well_known_key("dispose");
+        let tp = self.native(|it, this, _| {
+            Ok(it
+                .timer_id(this)
+                .map_or(Value::Undefined, |id| Value::Number(id as f64)))
+        });
+        put_hidden(&timeout_proto, &to_prim, tp);
+        for (proto, immediate) in [(&timeout_proto, false), (&immediate_proto, true)] {
+            let d = self.native(move |it, this, _| {
+                if let Some(id) = it.timer_id(this) {
+                    it.clear_timer_anywhere(id, immediate);
+                }
+                Ok(Value::Undefined)
+            });
+            put_hidden(proto, &dispose, d);
+        }
         self.set_native(&timeout_proto, "refresh", |it, this, _| {
             if let Some(id) = it.timer_id(this) {
                 it.refresh_timer(id);
