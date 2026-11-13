@@ -20,6 +20,7 @@ NORMALISERS = [
     (re.compile(r'/home/[^\s\'"]*'), '<path>'),
     (re.compile(r'\b0x[0-9a-fA-F]+\b'), '<addr>'),
     (re.compile(r'\b\d+(\.\d+)?ms\b'), '<ms>'),
+    (re.compile(r'_idleStart"?: ?-?\d+'), '_idleStart: <ms>'),   # Timeout inspect: wall-clock ms since start
 ]
 
 def normalise(value):

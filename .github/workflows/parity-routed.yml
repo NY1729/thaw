@@ -1,0 +1,196 @@
+name: parity-routed
+
+# Non-gating H2 check (plan-q9-systematic-parity.md section 3): one generated probe matrix
+# (tools/parity/gen_routed.py) compiled ONCE by thaw with THAW_JS_ROUTE_ALL=1, run, and diffed
+# against node (the oracle) with tools/parity/diff.py. Records gaps only; never fails the PR.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "tools/parity/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parity-routed-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  routed:
+    name: parity routed matrix (thaw route-all vs node, non-gating)
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Build the thaw CLI
+        run: cargo build -p thaw-cli
+      - name: Generate the matrix (one TS program, its node twin, the expected probe names)
+        run: |
+          W="$RUNNER_TEMP/parity-routed"
+          mkdir -p "$W"
+          python3 tools/parity/gen_routed.py "$W" | tee "$W/gen.log"
+      - name: Compile the matrix with thaw (route-all, wire trace)
+        env:
+          THAW_JS_ROUTE_ALL: "1"
+          THAW_JS_TRACE_WIRE: "1"
+        run: |
+          W="$RUNNER_TEMP/parity-routed"
+          # The compile may fail (that is a finding, not a harness error): record it and keep going.
+          rc=0
+          target/debug/thaw build "$W/matrix.ts" -o "$W/matrix" > "$W/build.log" 2>&1 || rc=$?
+          echo "$rc" > "$W/build.rc"
+          echo "thaw build exit $rc"
+          tail -n 40 "$W/build.log" || true
+      - name: Run the thaw binary and node, then diff
+        env:
+          THAW_JS_ROUTE_ALL: "1"
+          THAW_JS_TRACE_WIRE: "1"
+        run: |
+          W="$RUNNER_TEMP/parity-routed"
+          rc=0
+          if [ -x "$W/matrix" ]; then
+            timeout 300 "$W/matrix" > "$W/thaw.stdout" 2> "$W/thaw.stderr" || rc=$?
+          else
+            : > "$W/thaw.stdout"; : > "$W/thaw.stderr"; rc=missing
+          fi
+          echo "$rc" > "$W/run.rc"
+          node "$W/matrix.node.js" > "$W/node.stdout" 2> "$W/node.stderr"
+          echo "node exit $?"
+          # diff.py compares <dir>/<corpus>.txt; no baseline, so every gap is reported (exit 1 is expected).
+          mkdir -p "$W/diff/node" "$W/diff/thaw"
+          cp "$W/node.stdout" "$W/diff/node/matrix.txt"
+          cp "$W/thaw.stdout" "$W/diff/thaw/matrix.txt"
+          python3 tools/parity/diff.py --node-dir "$W/diff/node" --thaw-dir "$W/diff/thaw" \
+            --gaps "$W/gaps.json" > "$W/diff.txt" 2>&1 || echo "diff.py exit $?" >> "$W/diff.txt"
+          tail -n 3 "$W/diff.txt" || true
+      - name: Summarise the routed parity matrix
+        if: always()
+        run: |
+          W="$RUNNER_TEMP/parity-routed"
+          {
+            echo "## parity routed matrix (thaw route-all vs node, NON-GATING)"
+            echo
+            echo "- probes expected: $(wc -l < "$W/probes.txt" 2>/dev/null || echo unknown)"
+            echo "- thaw build exit: \`$(cat "$W/build.rc" 2>/dev/null || echo unknown)\`"
+            echo "- thaw run exit: \`$(cat "$W/run.rc" 2>/dev/null || echo unknown)\`"
+            echo "- thaw lines: $(wc -l < "$W/thaw.stdout" 2>/dev/null || echo 0), node lines: $(wc -l < "$W/node.stdout" 2>/dev/null || echo 0)"
+            if [ -s "$W/gaps.json" ]; then
+              echo "- gaps: $(jq '.gaps | length' "$W/gaps.json")"
+              echo
+              echo "| family | probes | gaps |"
+              echo "|---|---|---|"
+              for fam in F3 F5 F6; do
+                total=$(grep -c "^$fam\." "$W/probes.txt" || true)
+                gaps=$(jq --arg f "$fam" '[.gaps[] | select(.probe | startswith($f + "."))] | length' "$W/gaps.json")
+                echo "| $fam | $total | $gaps |"
+              done
+            else
+              echo "- no gaps.json produced; see the build and run logs in the artifact"
+            fi
+            echo
+            if [ -s "$W/build.log" ] && [ "$(cat "$W/build.rc" 2>/dev/null)" != "0" ]; then
+              echo "<details><summary>thaw build log (tail)</summary>"
+              echo
+              echo '```'
+              tail -c 8000 "$W/build.log"
+              echo '```'
+              echo
+              echo "</details>"
+            fi
+            echo "<details><summary>diff table (first 300 lines)</summary>"
+            echo
+            echo '```'
+            head -n 300 "$W/diff.txt" 2>/dev/null || true
+            echo '```'
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-routed
+          path: |
+            ${{ runner.temp }}/parity-routed/matrix.ts
+            ${{ runner.temp }}/parity-routed/matrix.node.js
+            ${{ runner.temp }}/parity-routed/probes.txt
+            ${{ runner.temp }}/parity-routed/build.log
+            ${{ runner.temp }}/parity-routed/build.rc
+            ${{ runner.temp }}/parity-routed/run.rc
+            ${{ runner.temp }}/parity-routed/thaw.stdout
+            ${{ runner.temp }}/parity-routed/thaw.stderr
+            ${{ runner.temp }}/parity-routed/node.stdout
+            ${{ runner.temp }}/parity-routed/node.stderr
+            ${{ runner.temp }}/parity-routed/diff.txt
+            ${{ runner.temp }}/parity-routed/gaps.json
+          if-no-files-found: ignore
