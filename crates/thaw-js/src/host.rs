@@ -1627,12 +1627,9 @@ impl WireOut {
         if self.plain {
             let bytes = match &v {
                 Value::Object(o) => match &*o.kind.borrow() {
-                    Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8) => Some(
-                        t.data.borrow()[t.off..t.off + t.len]
-                            .iter()
-                            .map(u8::to_string)
-                            .collect::<Vec<_>>(),
-                    ),
+                    Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8) => {
+                        Some(t.window().iter().map(u8::to_string).collect::<Vec<_>>())
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -4715,9 +4712,7 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
             // a Buffer or Uint8Array crosses as `{"type":"Buffer","data":[...]}`, the shape the compiled
             // side decodes as `Bytes` (both flavours share it: the compiled side has one byte type)
             let bytes = match &*o.kind.borrow() {
-                Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8) => {
-                    Some(t.data.borrow()[t.off..t.off + t.len].to_vec())
-                }
+                Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8) => Some(t.window()),
                 _ => None,
             };
             if let Some(bytes) = bytes {

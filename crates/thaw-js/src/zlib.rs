@@ -226,7 +226,7 @@ pub(crate) fn install(it: &mut Interp) {
         let Some(buf) = Interp::typed_of(&arg(a, 2)) else {
             return it.throw_error("TypeError", "zlib input must be a typed array");
         };
-        let input = buf.data.borrow()[buf.off..buf.off + buf.len * buf.ty.size()].to_vec();
+        let input = buf.window();
         let options = ZlibOptions::parse(&it.to_str(&arg(a, 3)));
         Ok(Value::Number(f64::from(start(
             op,

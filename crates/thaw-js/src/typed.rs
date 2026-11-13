@@ -4,7 +4,7 @@
 use crate::*;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Ty {
@@ -84,7 +84,41 @@ const ALL: [Ty; 11] = [
     Ty::U64,
 ];
 
-pub(crate) type Bytes = Rc<RefCell<Vec<u8>>>;
+/// An ArrayBuffer's storage. `detached` is set by `detach_bytes` (ArrayBuffer.prototype.transfer and
+/// the wasm memory grow path); a detached store is empty and its views clamp to length 0.
+#[derive(Default)]
+pub(crate) struct Store {
+    cell: RefCell<Vec<u8>>,
+    detached: Cell<bool>,
+}
+
+impl std::ops::Deref for Store {
+    type Target = RefCell<Vec<u8>>;
+    fn deref(&self) -> &RefCell<Vec<u8>> {
+        &self.cell
+    }
+}
+
+pub(crate) type Bytes = Rc<Store>;
+
+/// A fresh, attached storage owning `v`.
+pub(crate) fn new_bytes(v: Vec<u8>) -> Bytes {
+    Rc::new(Store {
+        cell: RefCell::new(v),
+        detached: Cell::new(false),
+    })
+}
+
+/// Detach a storage: its bytes are released (length 0) and it reports `detached`. Idempotent.
+pub(crate) fn detach_bytes(b: &Bytes) {
+    *b.cell.borrow_mut() = Vec::new();
+    b.detached.set(true);
+}
+
+/// True once `detach_bytes` has run on this storage.
+pub(crate) fn is_detached(b: &Bytes) -> bool {
+    b.detached.get()
+}
 
 #[derive(Clone)]
 pub(crate) struct TypedArr {
@@ -96,6 +130,39 @@ pub(crate) struct TypedArr {
 }
 
 impl TypedArr {
+    /// The view's window still lies inside its buffer (false once the buffer is detached).
+    #[inline]
+    pub(crate) fn live(&self) -> bool {
+        self.off + self.len * self.ty.size() <= self.data.borrow().len()
+    }
+
+    /// The length a script sees: 0 for a detached buffer, `len` otherwise.
+    pub(crate) fn cur_len(&self) -> usize {
+        if self.live() {
+            self.len
+        } else {
+            0
+        }
+    }
+
+    /// The offset a script sees: 0 for a detached buffer, `off` otherwise.
+    pub(crate) fn cur_off(&self) -> usize {
+        if self.live() {
+            self.off
+        } else {
+            0
+        }
+    }
+
+    /// A copy of the bytes the view covers (empty when detached).
+    pub(crate) fn window(&self) -> Vec<u8> {
+        if !self.live() {
+            return Vec::new();
+        }
+        let d = self.data.borrow();
+        d[self.off..self.off + self.len * self.ty.size()].to_vec()
+    }
+
     #[inline]
     pub(crate) fn get(&self, i: usize) -> Option<f64> {
         if i >= self.len {
@@ -152,7 +219,7 @@ impl TypedArr {
 
     /// Wraps modulo 2^64 like the spec's BigInt64 / BigUint64 stores.
     fn set_big(&self, i: usize, x: &BigInt) {
-        if i >= self.len {
+        if i >= self.len || !self.live() {
             return;
         }
         let low = (x & BigInt::from(u64::MAX)).to_u64().unwrap_or(0);
@@ -162,7 +229,7 @@ impl TypedArr {
 
     /// Numeric store. The 64-bit types never reach it: `set_value` takes the BigInt path.
     pub(crate) fn set(&self, i: usize, v: f64) {
-        if i >= self.len {
+        if i >= self.len || !self.live() {
             return;
         }
         if self.ty.is_big() {
@@ -236,7 +303,8 @@ impl Interp {
         }
     }
 
-    fn new_array_buffer(&self, data: Bytes) -> Obj {
+    /// An `ArrayBuffer` object over an existing storage (shares its bytes; the wasm memory path uses it).
+    pub(crate) fn new_array_buffer(&self, data: Bytes) -> Obj {
         new_obj(self.rt.arraybuffer_proto.clone(), Kind::ArrayBuffer(data))
     }
 
@@ -249,6 +317,65 @@ impl Interp {
         )
     }
 
+    /// The storage behind an ArrayBuffer receiver (a SharedArrayBuffer is not one: V8 rejects it too).
+    fn ab_receiver(&mut self, this: &Value, method: &str) -> R<Bytes> {
+        let shared = match this {
+            Value::Object(o) => match (&*o.proto.borrow(), &self.rt.sharedarraybuffer_proto) {
+                (Some(op), Some(sp)) => Rc::ptr_eq(op, sp),
+                _ => false,
+            },
+            _ => false,
+        };
+        match Self::bytes_of_buffer(this) {
+            Some(b) if !shared => Ok(b),
+            _ => {
+                let desc = match this {
+                    Value::Object(_) if shared => "#<SharedArrayBuffer>".to_string(),
+                    _ => "#<Object>".to_string(),
+                };
+                self.throw_error(
+                    "TypeError",
+                    &format!("Method {method} called on incompatible receiver {desc}"),
+                )
+            }
+        }
+    }
+
+    /// `transfer(newLength?)` / `transferToFixedLength(newLength?)`: a new buffer with the same bytes
+    /// (zero-extended or truncated) and the source detached. Resizable buffers are not modelled.
+    fn ab_transfer(&mut self, this: &Value, a: &[Value], method: &str) -> R<Value> {
+        let data = self.ab_receiver(this, method)?;
+        if is_detached(&data) {
+            return self.throw_error(
+                "TypeError",
+                &format!("Cannot perform {method} on a detached ArrayBuffer"),
+            );
+        }
+        let cur = data.borrow().len();
+        let new_len = match arg(a, 0) {
+            Value::Undefined => cur,
+            v => {
+                let n = self.num(&v);
+                let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                if n < 0.0 {
+                    return self.throw_error("RangeError", "Invalid array buffer length");
+                }
+                if n > 9007199254740991.0 {
+                    return self
+                        .throw_error("RangeError", &format!("{method}: Invalid length parameter"));
+                }
+                if n > 2f64.powi(32) {
+                    return self.throw_error("RangeError", "Array buffer allocation failed");
+                }
+                n as usize
+            }
+        };
+        let mut out = data.borrow().clone();
+        out.resize(new_len, 0);
+        detach_bytes(&data);
+        Ok(Value::Object(self.new_array_buffer(new_bytes(out))))
+    }
+
     /// `new ArrayBuffer(n)` / `new SharedArrayBuffer(n)`: zero-filled, `n` truncated, NaN = 0.
     fn alloc_buffer(&mut self, args: &[Value], shared: bool) -> R<Value> {
         let n = self.num(&arg(args, 0));
@@ -256,7 +383,7 @@ impl Interp {
         if !(0.0..=2f64.powi(32)).contains(&n) {
             return self.throw_error("RangeError", "Array buffer allocation failed");
         }
-        let data: Bytes = Rc::new(RefCell::new(vec![0; n as usize]));
+        let data: Bytes = new_bytes(vec![0; n as usize]);
         let obj = if shared {
             self.new_shared_buffer(data)
         } else {
@@ -311,7 +438,7 @@ impl Interp {
 
     /// A fresh zero-filled typed array.
     pub(crate) fn typed_with_len(&self, ty: Ty, len: usize) -> Value {
-        let data: Bytes = Rc::new(RefCell::new(vec![0; len * ty.size()]));
+        let data: Bytes = new_bytes(vec![0; len * ty.size()]);
         let abuf = self.new_array_buffer(data.clone());
         self.new_typed(ty, abuf, data, 0, len)
     }
@@ -319,21 +446,20 @@ impl Interp {
     /// The bytes a typed array views (its window, not the whole buffer) or an `ArrayBuffer` holds; None for anything else.
     pub(crate) fn view_bytes(v: &Value) -> Option<Vec<u8>> {
         if let Some(t) = Self::typed_of(v) {
-            let d = t.data.borrow();
-            return Some(d[t.off..t.off + t.len * t.ty.size()].to_vec());
+            return Some(t.window());
         }
         Self::bytes_of_buffer(v).map(|b| b.borrow().clone())
     }
 
     /// An `ArrayBuffer` owning `bytes`.
     pub(crate) fn array_buffer_from_vec(&self, bytes: Vec<u8>) -> Value {
-        Value::Object(self.new_array_buffer(Rc::new(RefCell::new(bytes))))
+        Value::Object(self.new_array_buffer(new_bytes(bytes)))
     }
 
     /// A `Uint8Array` over a copy of `bytes`.
     pub(crate) fn u8_from_vec(&self, bytes: Vec<u8>) -> Value {
         let len = bytes.len();
-        let data: Bytes = Rc::new(RefCell::new(bytes));
+        let data: Bytes = new_bytes(bytes);
         let abuf = self.new_array_buffer(data.clone());
         self.new_typed(Ty::U8, abuf, data, 0, len)
     }
@@ -364,6 +490,12 @@ impl Interp {
             }
             Value::Object(o) => {
                 if let Some(data) = Self::bytes_of_buffer(&a0) {
+                    if is_detached(&data) {
+                        return self.throw_error(
+                            "TypeError",
+                            "Cannot perform Construct on a detached ArrayBuffer",
+                        );
+                    }
                     let total = data.borrow().len();
                     let off = match arg(args, 1) {
                         Value::Undefined => 0,
@@ -451,14 +583,27 @@ impl Interp {
             });
         }
         self.set_native(&ab_proto, "slice", |it, this, a| {
-            let Some(data) = Self::bytes_of_buffer(this) else {
-                return it.throw_error("TypeError", "Receiver is not an ArrayBuffer");
-            };
+            let data = it.ab_receiver(this, "ArrayBuffer.prototype.slice")?;
+            if is_detached(&data) {
+                return it.throw_error(
+                    "TypeError",
+                    "Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer",
+                );
+            }
             let out = Self::slice_bytes(it, &data, a);
-            Ok(Value::Object(
-                it.new_array_buffer(Rc::new(RefCell::new(out))),
-            ))
+            Ok(Value::Object(it.new_array_buffer(new_bytes(out))))
         });
+        self.set_native(&ab_proto, "transfer", |it, this, a| {
+            it.ab_transfer(this, a, "ArrayBuffer.prototype.transfer")
+        });
+        self.set_native(&ab_proto, "transferToFixedLength", |it, this, a| {
+            it.ab_transfer(this, a, "ArrayBuffer.prototype.transferToFixedLength")
+        });
+        let detached_get = self.native(|it, this, _| {
+            let data = it.ab_receiver(this, "get ArrayBuffer.prototype.detached")?;
+            Ok(Value::Bool(is_detached(&data)))
+        });
+        define_accessor(&ab_proto, "detached", Some(detached_get), None, false);
         g.declare("ArrayBuffer", ab, true);
 
         // ----- SharedArrayBuffer: same storage, own prototype (not an ArrayBuffer); byteLength is served by
@@ -475,9 +620,7 @@ impl Interp {
                 return it.throw_error("TypeError", "Receiver is not a SharedArrayBuffer");
             };
             let out = Self::slice_bytes(it, &data, a);
-            Ok(Value::Object(
-                it.new_shared_buffer(Rc::new(RefCell::new(out))),
-            ))
+            Ok(Value::Object(it.new_shared_buffer(new_bytes(out))))
         });
         g.declare("SharedArrayBuffer", sab, true);
 
@@ -502,6 +645,12 @@ impl Interp {
             let Some(t) = Self::typed_of(this) else {
                 return it.throw_error("TypeError", "this is not a typed array.");
             };
+            if is_detached(&t.data) {
+                return it.throw_error(
+                    "TypeError",
+                    "Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer",
+                );
+            }
             let off = match arg(a, 1) {
                 Value::Undefined => 0,
                 v => it.num(&v) as usize,
@@ -535,6 +684,12 @@ impl Interp {
             let Some(t) = Self::typed_of(this) else {
                 return it.throw_error("TypeError", "this is not a typed array.");
             };
+            if is_detached(&t.data) {
+                return it.throw_error(
+                    "TypeError",
+                    "Cannot perform Construct on a detached ArrayBuffer",
+                );
+            }
             let n = t.len as f64;
             let rel = |it: &mut Interp, v: Value, d: f64| {
                 let x = if matches!(v, Value::Undefined) {
@@ -567,6 +722,12 @@ impl Interp {
             let Some(t) = Self::typed_of(this) else {
                 return it.throw_error("TypeError", "this is not a typed array.");
             };
+            if is_detached(&t.data) {
+                return it.throw_error(
+                    "TypeError",
+                    "Cannot perform %TypedArray%.prototype.slice on a detached ArrayBuffer",
+                );
+            }
             let n = t.len as f64;
             let rel = |it: &mut Interp, v: Value, d: f64| {
                 let x = if matches!(v, Value::Undefined) {
@@ -628,6 +789,11 @@ const TYPED_PRELUDE: &str = r#"
     if (!(this instanceof SharedArrayBuffer)) throw new TypeError('Receiver is not a SharedArrayBuffer');
     return this.byteLength;
   });
+  // The native getter, captured before any script can replace it; views over a detached buffer
+  // clamp to length 0 and the methods below throw V8's messages (recorded from Node 22).
+  var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
+  function gone(t) { return isTA(t) && detGet.call(t.buffer); }
+  acc(ArrayBuffer.prototype, 'resizable', function () { return false; });
   acc(SharedArrayBuffer.prototype, 'growable', function () { return false; });
   acc(SharedArrayBuffer.prototype, 'maxByteLength', function () {
     if (!(this instanceof SharedArrayBuffer)) throw new TypeError('Receiver is not a SharedArrayBuffer');
@@ -698,5 +864,22 @@ const TYPED_PRELUDE: &str = r#"
     });
     def(C, 'of', function () { return new this(Array.from(arguments)); });
   });
+  // Detached-buffer guard for the methods V8 checks (message names as V8 prints them).
+  var detachedNames = { forEach: 'forEach', some: 'some', every: 'every', find: 'find', findIndex: 'findIndex',
+    findLast: 'findLast', findLastIndex: 'findIndexLast', reduce: 'reduce', reduceRight: 'reduceRight', fill: 'fill',
+    at: 'at', keys: 'keys', values: 'values', entries: 'entries', join: 'join', includes: 'includes',
+    indexOf: 'indexOf', lastIndexOf: 'lastIndexOf', map: 'map', filter: 'filter', sort: 'sort',
+    toSorted: 'toSorted', toReversed: 'toReversed', reverse: 'reverse', copyWithin: 'copyWithin',
+    toString: 'join' };
+  Object.keys(detachedNames).forEach(function (n) {
+    var orig = TP[n];
+    if (typeof orig !== 'function') return;
+    def(TP, n, function () {
+      if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.' + detachedNames[n] + ' on a detached ArrayBuffer');
+      return orig.apply(this, arguments);
+    });
+  });
+  // Spec: %TypedArray%.prototype[Symbol.iterator] is the `values` function (the guarded one now).
+  def(TP, Symbol.iterator, TP.values);
 })();
 "#;
