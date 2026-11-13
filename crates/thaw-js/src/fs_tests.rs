@@ -396,3 +396,48 @@ fn fs_readdir_entries_sorted_by_name_bytes() {
         .collect();
     assert_eq!(rel, expected_rel);
 }
+
+// Numeric `#bits[,mode]` open flags, as tar and other packages issue them (131649 =
+// O_NOFOLLOW|O_TRUNC|O_CREAT|O_WRONLY in the shim's Linux/x86 values).
+#[test]
+fn fd_open_numeric_flags_create_write_read() {
+    let d = scratch("fd-numeric-create");
+    let path = d.join("n.txt");
+    let w = call("fd_open", &path, "#131649,438");
+    assert_eq!(w["ok"], true, "open: {w}");
+    let fd = w["fd"].as_u64().unwrap().to_string();
+    assert_eq!(fd_call("fd_write_all", &fd, "68656c6c6f")["ok"], true);
+    assert_eq!(fd_call("fd_close", &fd, "")["ok"], true);
+    assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+}
+
+#[test]
+fn fd_open_numeric_nofollow_rejects_symlink() {
+    let d = scratch("fd-numeric-nofollow");
+    std::fs::write(d.join("target.txt"), b"hi").unwrap();
+    let link = d.join("link");
+    std::os::unix::fs::symlink(d.join("target.txt"), &link).unwrap();
+    assert_eq!(call("fd_open", &link, "#131649,438")["code"], "ELOOP");
+}
+
+#[test]
+fn fd_open_numeric_rdonly_reads_and_excl_refuses_existing() {
+    let d = scratch("fd-numeric-rdonly-excl");
+    let path = d.join("r.txt");
+    std::fs::write(&path, b"hi").unwrap();
+    let r = call("fd_open", &path, "#0,438");
+    assert_eq!(r["ok"], true, "open rdonly: {r}");
+    let rfd = r["fd"].as_u64().unwrap().to_string();
+    assert_eq!(fd_call("fd_read_all", &rfd, "")["data"], "6869");
+    assert_eq!(fd_call("fd_close", &rfd, "")["ok"], true);
+    // O_CREAT|O_EXCL|O_WRONLY on an existing file
+    assert_eq!(call("fd_open", &path, "#193,438")["code"], "EEXIST");
+}
+
+#[test]
+fn fd_open_numeric_invalid_bits_are_einval() {
+    let d = scratch("fd-numeric-invalid");
+    let path = d.join("x.txt");
+    assert_eq!(call("fd_open", &path, "#abc,438")["code"], "EINVAL");
+    assert_eq!(call("fd_open", &path, "#3,438")["code"], "EINVAL");
+}
