@@ -5950,7 +5950,7 @@ mod handle_identity_tests {
     use super::*;
 
     fn eval(it: &mut Interp, src: &str) -> Value {
-        it.run(src).ok().expect("script failed")
+        it.run(src).unwrap_or_else(|_| panic!("script failed"))
     }
 
     fn refs_of(id: i64) -> u32 {
