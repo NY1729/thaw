@@ -1,10 +1,10 @@
-setTimeout(() => console.log('t10'), 10);
-setTimeout(() => console.log('t5'), 5);
-setTimeout(() => console.log('t5b'), 5);
+setTimeout(() => console.log('t200'), 200);
+setTimeout(() => console.log('t100'), 100);
+setTimeout(() => console.log('t100b'), 100);
 setTimeout(() => console.log('t1'), 1);
 setTimeout(() => console.log('t0'), 0);
-const t = setTimeout(() => console.log('cleared'), 3);
+const t = setTimeout(() => console.log('cleared'), 30);
 clearTimeout(t);
 let n = 0;
-const iv = setInterval(() => { console.log('iv', ++n); if (n === 3) clearInterval(iv); }, 4);
+const iv = setInterval(() => { console.log('iv', ++n); if (n === 3) clearInterval(iv); }, 80);
 setTimeout((a, b) => console.log('args', a, b), 2, 'x', 'y');

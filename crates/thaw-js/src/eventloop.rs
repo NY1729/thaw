@@ -228,7 +228,11 @@ pub(crate) struct Rt {
     /// Every symbol by id, so `Object.getOwnPropertySymbols` can map `@@sym:<id>` keys back.
     pub(crate) symbols: HashMap<u64, Obj>,
     seq: u64,
+    /// The loop turn's clock: the due test for timers. Timers take their start from the live clock.
     now: f64,
+    /// True until the first loop turn starts: timers armed before it (by the main script) get a 2 ms
+    /// head start, so that delays of 2 ms or less are due on the first turn, ahead of `setImmediate`.
+    first_turn: bool,
     listeners: HashMap<String, Vec<(Value, bool)>>,
     promise_proto: Option<Obj>,
     timeout_proto: Option<Obj>,
@@ -945,7 +949,8 @@ impl Interp {
         put_hidden(&obj, "@@tid", Value::Number(id as f64));
         self.rt.timers.push(Timer {
             id,
-            expiry: self.rt.now + delay,
+            // the head start is for timers armed before the first loop turn only
+            expiry: clock_ms() + delay - if self.rt.first_turn { 2.0 } else { 0.0 },
             seq: self.rt.seq,
             delay,
             repeat,
@@ -1067,13 +1072,13 @@ impl Interp {
 
     /// `Timeout.refresh`: restart the delay, in the owning realm (using its clock).
     fn refresh_timer(&mut self, id: u64) {
-        let now = self.rt.now;
+        let now = clock_ms();
         if let Some(t) = self.rt.timers.iter_mut().find(|t| t.id == id) {
             t.expiry = now + t.delay;
             return;
         }
         crate::host::for_other_realms(self, |other| {
-            let now = other.rt.now;
+            let now = clock_ms();
             if let Some(t) = other.rt.timers.iter_mut().find(|t| t.id == id) {
                 t.expiry = now + t.delay;
             }
@@ -1115,14 +1120,16 @@ impl Interp {
                 }
                 r
             };
+            // a repeat restarts from the clock read before its callback runs (as Node does)
+            let start = if repeat { clock_ms() } else { 0.0 };
             if let Err(e) = self.in_frame(frame, |it| it.call(&cb, &Value::Object(obj), &args)) {
                 self.uncaught(e)?;
             }
             if repeat {
                 self.rt.seq += 1;
-                let (now, seq) = (self.rt.now, self.rt.seq);
+                let seq = self.rt.seq;
                 if let Some(t) = self.rt.timers.iter_mut().find(|t| t.id == id) {
-                    t.expiry = now + delay;
+                    t.expiry = start + delay;
                     t.seq = seq;
                 }
             }
@@ -1166,6 +1173,7 @@ impl Interp {
             if !self.loop_alive() {
                 return Ok(None);
             }
+            self.rt.first_turn = false;
             self.rt.now = clock_ms();
             self.run_timers()?;
             // the loop's own platform poll: a worker's exit (or child/zlib result) settles promises too
@@ -1295,6 +1303,7 @@ impl Interp {
                     }
                 }
             }
+            self.rt.first_turn = false;
             self.rt.now = clock_ms();
             self.poll_platform_events()?;
             self.run_timers()?;
@@ -1532,15 +1541,10 @@ impl Interp {
 
     // ----- installation -----
 
-    /// Advance the timer base by `ms` (start-up work that must not count against program timers).
-    #[cfg(feature = "intl")]
-    pub(crate) fn skip_timer_clock(&mut self, ms: f64) {
-        self.rt.now += ms;
-    }
-
     pub(crate) fn install_eventloop(&mut self) {
         let g = self.global.clone();
-        self.rt.now = clock_ms() - 2.0;
+        self.rt.now = clock_ms();
+        self.rt.first_turn = true;
         let promise_proto = self.plain();
         self.rt.promise_proto = Some(promise_proto.clone());
 

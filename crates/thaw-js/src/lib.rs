@@ -1114,13 +1114,7 @@ impl Interp {
             node_crypto::install(&mut it);
             it.install_url();
             #[cfg(feature = "intl")]
-            {
-                // timers are scheduled against `rt.now`, which only the event loop advances: do not let the
-                // polyfill's evaluation time make a timer created by the program overdue at the first turn
-                let started = std::time::Instant::now();
-                it.install_intl();
-                it.skip_timer_clock(started.elapsed().as_secs_f64() * 1000.0);
-            }
+            it.install_intl();
         }
         it.run(extras::EXTRAS_LATE)
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
