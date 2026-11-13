@@ -1,0 +1,664 @@
+name: route-all
+
+# Non-gating measurement of the QuickJS-free routing: every program is routed through thaw-js
+# (THAW_JS_ROUTE_ALL=1). Reports, per case, whether the built binary still links QuickJS, the recorded
+# quickjsReasons, and the cases whose output or classification differs from Node. Nothing here fails
+# a build or belongs in a required-checks list. Runs on demand (workflow_dispatch), or on a pull request
+# that carries the `route-all-measure` label.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      node_compat:
+        description: node-compat manifests (node-compat and others groups)
+        type: boolean
+        default: true
+      corpus:
+        description: corpus measure.sh run with THAW_JS_ROUTE_ALL=1
+        type: boolean
+        default: false
+      engine_tests:
+        description: engine-tests shards (thaw-llvm and thaw-cli, 4 shards each)
+        type: boolean
+        default: false
+      npm_integration:
+        description: npm-integration shards (4)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: route-all-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-compat:
+    # The node-compat manifest (group node-compat) and the `others` group that ci.yml's
+    # node-compat-thaw-js-others leg runs (typescript-compat via `compat`, the rest via node-compat).
+    # Label path runs node-compat only; workflow_dispatch runs this job when its input is true.
+    if: (github.event_name == 'workflow_dispatch' && inputs.node_compat) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'route-all-measure'))
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: node-compat
+            manifests: "node-compat"
+          - group: others
+            manifests: "typescript-runtime-compat builtins-compat path-contracts-compat process-credentials-compat text-encoding-contracts-compat"
+    name: route-all node-compat (${{ matrix.group }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Run node-compat manifests with THAW_JS_ROUTE_ALL=1 (${{ matrix.group }})
+        env:
+          MANIFESTS: ${{ matrix.manifests }}
+          GROUP: ${{ matrix.group }}
+          THAW_JS_ROUTE_ALL: "1"
+          THAW_JS_ENGINE: thaw-js
+          THAW_NODE_COMPAT_JOBS: "4"
+        run: |
+          reports="$RUNNER_TEMP/reports"
+          mkdir -p "$reports"
+          run_one() {
+            local label="$1"; shift
+            # Case mismatches must not fail the job: record the exit status and keep going.
+            local rc=0
+            "$@" > "$reports/$label.json" 2> "$reports/$label.stderr.log" || rc=$?
+            echo "$rc" > "$reports/$label.exit-status"
+          }
+          if [[ "$GROUP" == others ]]; then
+            run_one typescript-compat cargo run -p thaw-cli -- compat tests/typescript-compat.json
+          fi
+          for m in $MANIFESTS; do
+            run_one "$m" cargo run -p thaw-cli -- node-compat "tests/$m.json"
+          done
+          exit 0
+      - name: Summarize route-all (${{ matrix.group }})
+        if: always()
+        env:
+          REPORTS: ${{ runner.temp }}/reports
+          OUT: ${{ runner.temp }}/routeall
+          LEG: ${{ matrix.group }}
+        run: |
+          python3 -I - "$REPORTS" "$LEG" "$OUT" <<'PY' >> "$GITHUB_STEP_SUMMARY" || true
+          import glob, json, os, re, sys
+          from collections import Counter
+
+          reports_dir, leg, out_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+          os.makedirs(out_dir, exist_ok=True)
+          MARK = "thaw-js routing needs QuickJS: "
+
+          def clean(text, limit):
+              # One line, no tabs: the output files are tab-separated.
+              return " ".join(str(text).split())[:limit]
+
+          def norm(text):
+              text = re.sub(r'/tmp/\S+', '<path>', text)
+              text = re.sub(r'\b\d+(:\d+)?\b', 'N', text)
+              text = re.sub(r'`[^`]*`', '`...`', text)
+              return text[:160]
+
+          def blocker_keys(reason):
+              # Same logic as the q9 aggregate: a THAW_JS_MIXED fallback lists its QuickJS blockers
+              # after the marker, one key per token; anything else is normalised.
+              if MARK in reason:
+                  tokens = [t.strip() for t in reason.split(MARK, 1)[1].split(",") if t.strip()]
+                  if tokens:
+                      return {t[:160] for t in tokens}
+              return {norm(reason)}
+
+          mismatch_lines, linking_lines, per_file = [], [], []
+          hist = Counter()
+          total = linked = nonmatched = 0
+          for path in sorted(glob.glob(os.path.join(reports_dir, "*.json"))):
+              label = os.path.basename(path)[:-len(".json")]
+              manifest = label + ".json"
+              try:
+                  exit_status = open(os.path.join(reports_dir, label + ".exit-status"), encoding="utf-8").read().strip()
+              except OSError:
+                  exit_status = "not-run"
+              try:
+                  with open(path, encoding="utf-8") as handle:
+                      report = json.load(handle)
+              except Exception as error:
+                  per_file.append(f"- {manifest}: exit {exit_status}, no readable JSON ({type(error).__name__})")
+                  continue
+              results = report.get("results") if isinstance(report, dict) else None
+              if not isinstance(results, list):
+                  per_file.append(f"- {manifest}: exit {exit_status}, no results array")
+                  continue
+              file_linked = file_nonmatched = 0
+              for case in results:
+                  total += 1
+                  name = clean(case.get("name", ""), 300)
+                  if case.get("linksQuickjs") is True:
+                      linked += 1
+                      file_linked += 1
+                      reasons = [clean(r, 2000) for r in (case.get("quickjsReasons") or [])]
+                      linking_lines.append(f"{manifest}\t{name}\tquickjs_blockers: " + " | ".join(reasons))
+                      seen = set()
+                      for reason in reasons:
+                          seen |= blocker_keys(reason)
+                      hist.update(seen)
+                  if case.get("classification") != "matched":
+                      nonmatched += 1
+                      file_nonmatched += 1
+                      classification = clean(case.get("classification", ""), 200)
+                      detail = clean(case.get("detail") or "", 200)
+                      mismatch_lines.append(f"{manifest}\t{name}\t{classification}" + (f": {detail}" if detail else ""))
+              per_file.append(f"- {manifest}: exit {exit_status}, cases {len(results)}, linksQuickjs true {file_linked}, not matched {file_nonmatched}")
+
+          for fname, lines in (("routeall_mismatches.txt", mismatch_lines), ("routeall_quickjs_linking.txt", linking_lines)):
+              with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as handle:
+                  handle.write("\n".join(lines) + ("\n" if lines else ""))
+
+          print(f"### route-all {leg} (THAW_JS_ROUTE_ALL=1)")
+          print("")
+          print("\n".join(per_file))
+          print("")
+          print(f"Totals: cases {total}, linksQuickjs true {linked}, not matched {nonmatched}")
+          print("")
+          print("Blocker histogram (cases per normalised quickjsReasons entry, top 80):")
+          print("")
+          print("| cases | blocker |")
+          print("|---:|---|")
+          for blocker, count in hist.most_common(80):
+              print(f"| {count} | {blocker.replace('|', '/')} |")
+          PY
+          for f in routeall_mismatches.txt routeall_quickjs_linking.txt; do
+            {
+              echo ""
+              echo "#### $f: $(wc -l < "$OUT/$f" 2>/dev/null || echo 0) lines (first 300 shown, cut to 600 chars; full file in the artifact)"
+              echo '```text'
+              head -n 300 "$OUT/$f" 2>/dev/null | cut -c1-600
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY" || true
+          done
+      - name: Upload route-all reports (${{ matrix.group }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: route-all-${{ matrix.group }}
+          path: |
+            ${{ runner.temp }}/reports
+            ${{ runner.temp }}/routeall
+          if-no-files-found: ignore
+
+  corpus:
+    # Same corpus and measure.sh as jsengine-bench's corpus-ratio job, with THAW_JS_ROUTE_ALL=1.
+    # Reports pass/fail counts and the links-QuickjS count only (no ratios).
+    if: (github.event_name == 'workflow_dispatch' && inputs.corpus) || (github.event_name == 'pull_request' && false)
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      THAW_JS_RUNTIME: "1"
+      THAW_JS_ROUTE_ALL: "1"
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # measure.sh runs the reference with node --experimental-strip-types (Node 22.6+).
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev time; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Cache cargo registry and release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: route-all-corpus-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            route-all-corpus-${{ runner.os }}-
+      - name: Build thaw CLI and thaw-js-scan (release)
+        run: |
+          cargo build --release -p thaw-cli
+          cargo build --release -p thaw-js --bin thaw-js-scan
+      - name: Check for corpus programs
+        id: corpus
+        run: |
+          corpus="$GITHUB_WORKSPACE/tools/quickjs-removal/corpus"
+          for need in "$corpus/pk" "$corpus/versions.txt"; do
+            if [ ! -e "$need" ]; then
+              echo "corpus input not found: $need" >&2
+              echo "corpus input not found: $need" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
+          echo "present=1" >> "$GITHUB_OUTPUT"
+      - name: Run corpus measurement with THAW_JS_ROUTE_ALL=1
+        if: steps.corpus.outputs.present == '1'
+        env:
+          THAW: ${{ github.workspace }}/target/release/thaw
+          THAW_SCAN: ${{ github.workspace }}/target/release/thaw-js-scan
+          SCRATCH: ${{ runner.temp }}/routeall-corpus
+          PK_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/pk
+          VERSIONS: ${{ github.workspace }}/tools/quickjs-removal/corpus/versions.txt
+          MEASURE_RUNS: "5"
+        run: |
+          tools/quickjs-removal/measure.sh --skip-node-compat -o "$RUNNER_TEMP/corpus.tsv" || true
+      - name: Summarize corpus pass/fail (thaw-js, route-all)
+        if: always()
+        run: |
+          tsv="$RUNNER_TEMP/corpus.tsv"
+          {
+            echo "### route-all corpus (thaw-js, THAW_JS_ROUTE_ALL=1)"
+            if [ ! -s "$tsv" ]; then
+              echo "No corpus.tsv was produced; see the jsengine-corpus-logs artifact."
+            else
+              awk -F'\t' '
+                $1 == "program" && $3 == "thaw-js" { v[$2 SUBSEP $4] = $5; if (!($2 in seen)) { seen[$2] = 1; n++ } }
+                END {
+                  for (p in seen) {
+                    ok = v[p SUBSEP "build_ok"] == "1" && v[p SUBSEP "run_exit"] == "0" && v[p SUBSEP "stdout_eq_node"] == "1"
+                    if (ok) pass++; else { fail++; failed = failed "- " p "\n" }
+                    if (v[p SUBSEP "links_quickjs"] == "1") linked++
+                  }
+                  printf "\nPrograms %d: pass %d, fail %d (build, run exit, or stdout differs from Node). Linking QuickJS: %d\n", n + 0, pass + 0, fail + 0, linked + 0
+                  if (fail) printf "\nFailing programs:\n%s", failed
+                }' "$tsv"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: route-all-corpus-tsv
+          path: ${{ runner.temp }}/corpus.tsv
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: route-all-corpus-logs
+          path: ${{ runner.temp }}/routeall-corpus/out
+          if-no-files-found: ignore
+
+  engine-tests:
+    # Shards of ci.yml's engine-tests job (thaw-llvm and thaw-cli), run with THAW_JS_ROUTE_ALL=1.
+    # Reports pass/fail counts only.
+    if: (github.event_name == 'workflow_dispatch' && inputs.engine_tests) || (github.event_name == 'pull_request' && false)
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [thaw-llvm, thaw-cli]
+        shard: [0, 1, 2, 3]
+    name: route-all engine-tests ${{ matrix.crate }} (shard ${{ matrix.shard }} of 4)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      THAW_JS_ROUTE_ALL: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Test ${{ matrix.crate }} with THAW_JS_ROUTE_ALL=1 (shard ${{ matrix.shard }} of 4)
+        env:
+          CRATE: ${{ matrix.crate }}
+          SHARD: ${{ matrix.shard }}
+          TEST_THREADS: ${{ matrix.crate == 'thaw-llvm' && '2' || '1' }}
+        run: |
+          # Same split as ci.yml engine-tests: every fourth test of the --list output, one process per shard.
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/routeall"
+          log="$RUNNER_TEMP/routeall/test-output.log"
+          listing=$(cargo test -p "$CRATE" -- --list 2>/dev/null) || listing=""
+          mapfile -t tests < <(sed -n 's/: test$//p' <<< "$listing")
+          selected=()
+          for index in "${!tests[@]}"; do
+            if (( index % 4 == SHARD )); then
+              selected+=("${tests[$index]}")
+            fi
+          done
+          echo "Running ${#selected[@]} of ${#tests[@]} $CRATE tests" | tee "$log"
+          if (( ${#selected[@]} > 0 )); then
+            cargo test -p "$CRATE" -- --exact --test-threads="$TEST_THREADS" "${selected[@]}" 2>&1 | tee -a "$log" || true
+          fi
+      - name: Summarize engine-tests pass/fail (${{ matrix.crate }}, shard ${{ matrix.shard }})
+        if: always()
+        run: |
+          log="$RUNNER_TEMP/routeall/test-output.log"
+          {
+            echo "### route-all engine-tests ${{ matrix.crate }} shard ${{ matrix.shard }} (THAW_JS_ROUTE_ALL=1)"
+            if [ -s "$log" ] && grep -q '^test result:' "$log"; then
+              awk '/^test result:/ { p += $4; f += $6; n++ } END { printf "test result lines %d: passed %d, failed %d\n", n, p, f }' "$log"
+            else
+              echo "no test result line (listing, build, or a crashed test binary): see the artifact"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload route-all engine-tests log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: route-all-engine-tests-${{ matrix.crate }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/routeall
+          if-no-files-found: ignore
+
+  npm-integration:
+    # Shards of ci.yml's npm-integration job, with the same weighted split and THAW_RUN_NPM_INTEGRATION=1,
+    # run with THAW_JS_ROUTE_ALL=1. Reports pass/fail counts only.
+    if: (github.event_name == 'workflow_dispatch' && inputs.npm_integration) || (github.event_name == 'pull_request' && false)
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    name: route-all npm-integration (shard ${{ matrix.shard }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      THAW_RUN_NPM_INTEGRATION: "1"
+      THAW_SOAK_SECONDS: "30"
+      THAW_JS_ROUTE_ALL: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Cache npm packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('crates/thaw-cli/src/tests/**') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Test real web applications and packages with THAW_JS_ROUTE_ALL=1 (shard ${{ matrix.shard }})
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          # Same split as ci.yml npm-integration: each test gets a 20-minute cap, two run at a time, and
+          # the duration-weighted split comes from .github/npm-shard-weights.txt.
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/routeall"
+          listing=$(cargo test -p thaw-cli registry_add -- --list 2>/dev/null) || listing=""
+          mapfile -t tests < <(sed -n 's/: test$//p' <<< "$listing")
+          tests+=(tests::node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled)
+          declare -A weight
+          while read -r sec name; do weight[$name]=$sec; done < .github/npm-shard-weights.txt
+          shards=4
+          loads=(); for ((i = 0; i < shards; i++)); do loads+=(0); done
+          mine=()
+          while read -r wt t; do
+            best=0
+            for ((i = 1; i < shards; i++)); do
+              if (( loads[i] < loads[best] )); then best=$i; fi
+            done
+            loads[best]=$(( loads[best] + wt ))
+            if (( best == SHARD )); then mine+=("$t"); fi
+          done < <(for t in "${tests[@]}"; do
+                     [[ "$t" == *postgres* ]] && continue
+                     echo "${weight[$t]:-5} $t"
+                   done | LC_ALL=C sort -k1,1nr -k2,2)
+          if (( ${#mine[@]} == 0 )); then
+            echo "Shard $SHARD has no tests" | tee "$RUNNER_TEMP/routeall/test-output.log"
+            exit 0
+          fi
+          cargo test -p thaw-cli --no-run || true
+          run_one() {
+            local t="$1" log rc
+            log="$RUNNER_TEMP/routeall/test-$$-${t//::/_}.log"
+            set +e
+            timeout --kill-after=30s 20m cargo test -p thaw-cli "$t" -- --exact --test-threads=1 --nocapture > "$log" 2>&1
+            rc=$?
+            set -e
+            { echo "::group::$t (rc=$rc)"; cat "$log"; echo "::endgroup::"; } >> "$RUNNER_TEMP/routeall/test-output.log"
+            return "$rc"
+          }
+          export -f run_one
+          printf '%s\n' "${mine[@]}" | xargs -P2 -I{} bash -c 'run_one "$1"' _ {} || true
+      - name: Summarize npm-integration pass/fail (shard ${{ matrix.shard }})
+        if: always()
+        run: |
+          log="$RUNNER_TEMP/routeall/test-output.log"
+          {
+            echo "### route-all npm-integration shard ${{ matrix.shard }} (THAW_JS_ROUTE_ALL=1)"
+            if [ -s "$log" ] && grep -q '^test result:' "$log"; then
+              awk '/^test result:/ { p += $4; f += $6; n++ } END { printf "test result lines %d: passed %d, failed %d\n", n, p, f }' "$log"
+            else
+              echo "no test result line: see the artifact"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload route-all npm-integration log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: route-all-npm-integration-${{ matrix.shard }}
+          path: ${{ runner.temp }}/routeall
+          if-no-files-found: ignore
