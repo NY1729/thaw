@@ -250,6 +250,48 @@ pub(crate) struct Rt {
     pub(crate) stdin_started: bool,
 }
 
+/// Node's `process.kill` signal names with their Linux numbers (the QuickJS runtime.js table).
+const PROCESS_SIGNALS: [(&str, i32); 15] = [
+    ("SIGHUP", libc::SIGHUP),
+    ("SIGINT", libc::SIGINT),
+    ("SIGQUIT", libc::SIGQUIT),
+    ("SIGABRT", libc::SIGABRT),
+    ("SIGKILL", libc::SIGKILL),
+    ("SIGUSR1", libc::SIGUSR1),
+    ("SIGSEGV", libc::SIGSEGV),
+    ("SIGUSR2", libc::SIGUSR2),
+    ("SIGPIPE", libc::SIGPIPE),
+    ("SIGALRM", libc::SIGALRM),
+    ("SIGTERM", libc::SIGTERM),
+    ("SIGCHLD", libc::SIGCHLD),
+    ("SIGCONT", libc::SIGCONT),
+    ("SIGSTOP", libc::SIGSTOP),
+    ("SIGTSTP", libc::SIGTSTP),
+];
+
+/// A Node-style error of `kind` with a `code` property, ready to throw.
+fn node_error(it: &mut Interp, kind: &str, code: &str, msg: &str) -> Ctl {
+    match it.make_error(kind, msg) {
+        Ok(e) => {
+            if let Value::Object(o) = &e {
+                put(o, "code", Value::str(code));
+            }
+            Ctl::Throw(e)
+        }
+        Err(c) => c,
+    }
+}
+
+/// Resident set size in bytes: the second `/proc/self/statm` field (pages); 0 when unreadable.
+fn process_rss_bytes() -> u64 {
+    let pages = std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .unwrap_or(0);
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+    pages * page
+}
+
 /// Monotonic nanoseconds for `process.hrtime` and `process.hrtime.bigint` (offset by 1s, as before).
 fn hrtime_ns() -> u64 {
     (clock_ms() * 1e6) as u64 + 1_000_000_000
@@ -1797,12 +1839,135 @@ impl Interp {
             });
         }
         put_hidden(&p, "hrtime", hrtime);
-        self.set_native(&p, "memoryUsage", |it, _, _| {
+        let memory_usage = self.native(|it, _, _| {
             let o = it.plain();
             for k in ["rss", "heapTotal", "heapUsed", "external", "arrayBuffers"] {
                 put(&o, k, Value::Number(0.0));
             }
             Ok(Value::Object(o))
+        });
+        if let Value::Object(f) = &memory_usage {
+            self.set_native(f, "rss", |_, _, _| {
+                Ok(Value::Number(process_rss_bytes() as f64))
+            });
+        }
+        put_hidden(&p, "memoryUsage", memory_usage);
+        self.set_native(&p, "getuid", |_, _, _| {
+            Ok(Value::Number(unsafe { libc::getuid() } as f64))
+        });
+        self.set_native(&p, "geteuid", |_, _, _| {
+            Ok(Value::Number(unsafe { libc::geteuid() } as f64))
+        });
+        self.set_native(&p, "getgid", |_, _, _| {
+            Ok(Value::Number(unsafe { libc::getgid() } as f64))
+        });
+        self.set_native(&p, "getegid", |_, _, _| {
+            Ok(Value::Number(unsafe { libc::getegid() } as f64))
+        });
+        self.set_native(&p, "umask", |it, _, a| {
+            let mask = match arg(a, 0) {
+                Value::Undefined => None,
+                Value::Number(n) => Some(n as libc::mode_t),
+                v => {
+                    let text = it.to_str(&v).to_string();
+                    match u32::from_str_radix(text.trim(), 8) {
+                        Ok(m) => Some(m as libc::mode_t),
+                        Err(_) => {
+                            return Err(node_error(
+                                it,
+                                "TypeError",
+                                "ERR_INVALID_ARG_VALUE",
+                                &format!(
+                                "The argument 'mask' must be an octal string. Received '{text}'"
+                            ),
+                            ))
+                        }
+                    }
+                }
+            };
+            // Setting a mask returns the previous one; a read sets 0 and restores it.
+            let old = match mask {
+                Some(m) => unsafe { libc::umask(m) },
+                None => {
+                    let cur = unsafe { libc::umask(0) };
+                    unsafe { libc::umask(cur) };
+                    cur
+                }
+            };
+            Ok(Value::Number(old as f64))
+        });
+        self.set_native(&p, "kill", |it, _, a| {
+            let pid = match arg(a, 0) {
+                Value::Number(n) if n.fract() == 0.0 => n as i32,
+                _ => {
+                    return Err(node_error(
+                        it,
+                        "TypeError",
+                        "ERR_INVALID_ARG_TYPE",
+                        "The \"pid\" argument must be of type number.",
+                    ))
+                }
+            };
+            let sig = arg(a, 1);
+            let number: i32 = match &sig {
+                Value::Undefined => libc::SIGTERM,
+                Value::Number(n) => *n as i32,
+                v => {
+                    let text = it.to_str(v).to_string();
+                    match PROCESS_SIGNALS.iter().find(|(name, _)| *name == text) {
+                        Some((_, n)) => *n,
+                        None => {
+                            return Err(node_error(
+                                it,
+                                "TypeError",
+                                "ERR_UNKNOWN_SIGNAL",
+                                &format!("Unknown signal: {text}"),
+                            ))
+                        }
+                    }
+                }
+            };
+            let name = PROCESS_SIGNALS
+                .iter()
+                .find(|(_, n)| *n == number)
+                .map(|(name, _)| *name);
+            // A signal to this process with a listener is delivered as the listener's event, on the tick queue.
+            if let Some(name) = name.filter(|name| {
+                number != 0 && pid as u32 == std::process::id() && it.has_process_listeners(name)
+            }) {
+                let event = name.to_string();
+                let deliver = it.native(move |it, _, _| {
+                    it.emit(&event, &[Value::str(&event)])?;
+                    Ok(Value::Undefined)
+                });
+                it.rt.ticks.push_back((it.rt.actx.clone(), deliver, vec![]));
+                return Ok(Value::Bool(true));
+            }
+            if unsafe { libc::kill(pid, number) } != 0 {
+                let raw = std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EINVAL);
+                let errno = if raw == libc::ESRCH || raw == libc::EPERM {
+                    raw
+                } else {
+                    libc::EINVAL
+                };
+                let code = if errno == libc::ESRCH {
+                    "ESRCH"
+                } else if errno == libc::EPERM {
+                    "EPERM"
+                } else {
+                    "EINVAL"
+                };
+                let e = it.make_error("Error", &format!("kill {code}"))?;
+                if let Value::Object(o) = &e {
+                    put(o, "errno", Value::Number(-(errno as f64)));
+                    put(o, "code", Value::str(code));
+                    put(o, "syscall", Value::str("kill"));
+                }
+                return Err(Ctl::Throw(e));
+            }
+            Ok(Value::Bool(true))
         });
         self.set_native(&p, "nextTick", |it, _, a| {
             let cb = arg(a, 0);
@@ -2268,6 +2433,63 @@ mod process_state_tests {
         assert_eq!(
             output(&mut it, "console.log(typeof process.stdout.isTTY)"),
             expected
+        );
+    }
+
+    fn main_output(src: &str) -> String {
+        let mut it = Interp::new();
+        it.run_main(src)
+            .unwrap_or_else(|_| panic!("program must run: {src}"));
+        it.out.join("|")
+    }
+
+    #[test]
+    fn process_ids_umask_and_rss_are_numbers() {
+        assert_eq!(
+            main_output(
+                "console.log(typeof process.getuid(), typeof process.geteuid(), typeof process.getgid(), typeof process.getegid(), typeof process.umask(), typeof process.memoryUsage.rss())"
+            ),
+            "number number number number number number"
+        );
+    }
+
+    #[test]
+    fn process_kill_own_pid_with_listener_is_delivered_on_the_tick_queue() {
+        assert_eq!(
+            main_output(
+                "process.on('SIGUSR2', (s) => console.log('got', s)); console.log(process.kill(process.pid, 'SIGUSR2')); console.log('sync');"
+            ),
+            "true|sync|got SIGUSR2"
+        );
+    }
+
+    #[test]
+    fn process_kill_signal_zero_and_bad_arguments_match_node_errors() {
+        assert_eq!(
+            main_output("console.log(process.kill(process.pid, 0));"),
+            "true"
+        );
+        assert_eq!(
+            main_output(
+                "try { process.kill(process.pid, 'SIGFOO'); } catch (e) { console.log(e.code); }"
+            ),
+            "ERR_UNKNOWN_SIGNAL"
+        );
+        assert_eq!(
+            main_output("try { process.kill('1'); } catch (e) { console.log(e.code); }"),
+            "ERR_INVALID_ARG_TYPE"
+        );
+        assert_eq!(
+            main_output("try { process.kill(2147483646, 0); } catch (e) { console.log(e.code, e.syscall, e.errno); }"),
+            "ESRCH kill -3"
+        );
+    }
+
+    #[test]
+    fn process_env_assignment_reads_back() {
+        assert_eq!(
+            main_output("process.env.THAW_W4_PROBE = 'hello'; console.log(process.env.THAW_W4_PROBE, typeof process.env.THAW_W4_PROBE); delete process.env.THAW_W4_PROBE; console.log(process.env.THAW_W4_PROBE === undefined);"),
+            "hello string|true"
         );
     }
 
