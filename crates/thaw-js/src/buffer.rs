@@ -15,10 +15,7 @@ impl Interp {
             let Some(t) = Self::typed_of(&arg(a, 0)) else {
                 return it.throw_error("TypeError", "argument must be a typed array");
             };
-            let bytes: Vec<u8> = {
-                let d = t.data.borrow();
-                d[t.off..t.off + t.len * t.ty.size()].to_vec()
-            };
+            let bytes: Vec<u8> = t.window();
             let start = (it.num(&arg(a, 1)).max(0.0) as usize).min(bytes.len());
             let end = match arg(a, 2) {
                 Value::Undefined => bytes.len(),

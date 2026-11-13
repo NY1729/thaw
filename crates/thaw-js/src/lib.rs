@@ -1445,6 +1445,9 @@ impl Interp {
                         Value::Bool(b) => format!("[Boolean: {b}]"),
                         _ => "[Object]".into(),
                     }),
+                    Kind::ArrayBuffer(b) if typed::is_detached(b) => {
+                        K::Bytes("ArrayBuffer { (detached), [byteLength]: 0 }".into())
+                    }
                     Kind::ArrayBuffer(b) => {
                         let b = b.borrow();
                         let shown: Vec<String> =
@@ -1616,7 +1619,7 @@ impl Interp {
                     );
                 }
                 if let Kind::Typed(t) = &*o.kind.borrow() {
-                    keys.extend((0..t.len).map(|i| Rc::from(i.to_string())));
+                    keys.extend((0..t.cur_len()).map(|i| Rc::from(i.to_string())));
                 }
                 if let Kind::Wrapper(Value::Str(s)) = &*o.kind.borrow() {
                     keys.extend((0..builtins::str_len(s)).map(|i| Rc::from(i.to_string())));
@@ -1722,9 +1725,11 @@ impl Interp {
                         }
                     }
                     Kind::Typed(t) => match key {
-                        "length" => Fast::Hit(Value::Number(t.len as f64)),
-                        "byteLength" => Fast::Hit(Value::Number((t.len * t.ty.size()) as f64)),
-                        "byteOffset" => Fast::Hit(Value::Number(t.off as f64)),
+                        "length" => Fast::Hit(Value::Number(t.cur_len() as f64)),
+                        "byteLength" => {
+                            Fast::Hit(Value::Number((t.cur_len() * t.ty.size()) as f64))
+                        }
+                        "byteOffset" => Fast::Hit(Value::Number(t.cur_off() as f64)),
                         "buffer" => Fast::Hit(Value::Object(t.abuf.clone())),
                         _ => array_index(key).map_or(Fast::Chain, |i| {
                             Fast::Hit(t.get_value(i).unwrap_or(Value::Undefined))
@@ -4405,6 +4410,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
     }
 }
 
+#[cfg(test)]
+mod arraybuffer_detach_tests;
 #[cfg(test)]
 mod builtin_table_tests;
 #[cfg(all(test, unix))]

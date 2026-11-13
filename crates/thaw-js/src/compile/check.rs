@@ -38,10 +38,10 @@ fn snapshot(it: &mut Interp, v: &Value) -> Option<Value> {
         return None;
     }
     if let Some(t) = Interp::typed_of(v) {
-        let copy = it.typed_with_len(t.ty, t.len);
+        let copy = it.typed_with_len(t.ty, t.cur_len());
         let ct = Interp::typed_of(&copy)?;
-        let n = t.len * t.ty.size();
-        ct.data.borrow_mut()[..n].copy_from_slice(&t.data.borrow()[t.off..t.off + n]);
+        let src = t.window();
+        ct.data.borrow_mut()[..src.len()].copy_from_slice(&src);
         return Some(copy);
     }
     let items = match &*o.kind.borrow() {
