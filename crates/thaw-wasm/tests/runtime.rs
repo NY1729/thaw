@@ -246,7 +246,7 @@ fn host_import_is_called_and_returns_values() {
     let mut store = Store::new(&engine);
     let instance = store
         .instantiate(&module, &[Import::Host(7)], &mut NoHost)
-        .map_or_else(|_| panic!("import instantiates"), |i| i);
+        .unwrap_or_else(|_| panic!("import instantiates"));
     let run = func(&store, instance, "run");
     let mut host = Doubler::default();
     assert_eq!(
