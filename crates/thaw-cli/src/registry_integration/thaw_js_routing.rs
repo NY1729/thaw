@@ -370,10 +370,11 @@ fn thaw_js_async_declaration_plain_with(line: &str, bytes_result_ok: bool) -> bo
 }
 
 /// Whether a program may get the bare `Uint8Array` result relaxation on thaw-js. A program that
-/// touches `node:http`/`node:https`/`node:http2` or `node:tls` (substring match) keeps those results
-/// on QuickJS: its thaw-js client path (ky over node:https) hangs with bytes results. Batch 2 fixes it.
+/// touches `node:http`/`node:https`/`node:http2` (substring match, so `node:https` is covered) keeps
+/// those results on QuickJS: its thaw-js client path (ky over node:https) hangs with bytes results.
+/// Drop the `node:http` part once plan-q9-newly-routed-failures.md P6 (the ky timeout) is fixed.
 fn thaw_js_bytes_result_allowed(user_source: &str) -> bool {
-    !(user_source.contains("node:http") || user_source.contains("node:tls"))
+    !user_source.contains("node:http")
 }
 
 /// Whether `line` declares an operation of `package`'s class `class` (`$new$`, `$method$`,
@@ -574,6 +575,7 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:domain",
     "node:stream/promises",
     "node:test",
+    "node:cluster",
 ];
 
 /// `node:perf_hooks` marks, measures, observers, timerify and entries exist only on QuickJS's performance.js.
@@ -591,6 +593,13 @@ fn thaw_js_perf_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'sta
         .iter()
         .any(|name| thaw_js_mentions(user_source, name)))
     .then_some("performance marks/measures/observers are not implemented on thaw-js yet")
+}
+
+/// `node:cluster` worker processes (`cluster.fork()`) need child-process IPC that thaw-js does not run yet,
+/// so a program that forks stays on QuickJS. Metadata-only use (`isPrimary`, `settings`, ...) routes.
+fn thaw_js_cluster_fork_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
+    (pkg_name == "node:cluster" && thaw_js_mentions(user_source, "fork"))
+        .then_some("cluster.fork() worker processes with IPC are not supported on thaw-js yet")
 }
 
 /// `node:test` mock timers exist only on QuickJS's runtime.js (`__thaw_test_mock_timers_*`), so a program
@@ -743,6 +752,9 @@ fn thaw_js_package_eligible(
         return reject(why.into());
     }
     if let Some(why) = thaw_js_perf_hooks_blocker(&pkg.name, user_source) {
+        return reject(why.into());
+    }
+    if let Some(why) = thaw_js_cluster_fork_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_test_blocker(&pkg.name, user_source) {
@@ -961,4 +973,14 @@ fn thaw_js_perf_hooks_blocker_keeps_marks_on_quickjs() {
     assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "performance.eventLoopUtilization();").is_none());
     assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "const marked = 1;").is_none());
     assert!(thaw_js_perf_hooks_blocker("node:path", marks).is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_cluster_fork_blocker_keeps_only_forking_programs_on_quickjs() {
+    let fork = "import cluster from 'node:cluster';\ncluster.fork();";
+    assert!(thaw_js_cluster_fork_blocker("node:cluster", fork).is_some());
+    let metadata = "import cluster from 'node:cluster';\nconsole.log(cluster.isPrimary, cluster.settings);";
+    assert!(thaw_js_cluster_fork_blocker("node:cluster", metadata).is_none());
+    assert!(thaw_js_cluster_fork_blocker("node:path", fork).is_none());
 }

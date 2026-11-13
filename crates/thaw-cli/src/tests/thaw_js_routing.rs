@@ -2,7 +2,7 @@
 // directly so the tests never touch the process environment.
 
 #[test]
-fn thaw_js_bytes_result_gate_switches_off_for_node_http_and_tls_programs() {
+fn thaw_js_bytes_result_gate_switches_off_for_node_http_programs() {
     let bytes = "declare function __thaw_typed_js_6d73(path: string): Uint8Array;";
     assert!(!thaw_js_declaration_plain_with(bytes, false, false));
     assert!(thaw_js_declaration_plain_with(bytes, true, false));
@@ -18,8 +18,17 @@ fn thaw_js_bytes_result_gate_switches_off_for_node_http_and_tls_programs() {
     assert!(thaw_js_bytes_result_allowed("import fs from 'node:fs';\nfs.readFileSync(p);"));
     assert!(!thaw_js_bytes_result_allowed("import https from 'node:https';\nhttps.get(u);"));
     assert!(!thaw_js_bytes_result_allowed("import http from 'node:http';"));
-    assert!(!thaw_js_bytes_result_allowed("import tls from 'node:tls';"));
+    // old: `assert!(!thaw_js_bytes_result_allowed("import tls from 'node:tls';"))`; new: allowed (the guard is node:http only)
+    assert!(thaw_js_bytes_result_allowed("import tls from 'node:tls';"));
     assert!(!thaw_js_bytes_result_allowed("import http2 from 'node:http2';"));
+}
+
+#[test]
+fn thaw_js_bytes_result_gate_allows_tls_fs_child_process_but_not_node_https() {
+    // the r2c shape: node:tls + node:fs + node:child_process and no node:http substring routes bytes results
+    assert!(thaw_js_bytes_result_allowed("import tls from 'node:tls';\nimport fs from 'node:fs';\nimport { execFile } from 'node:child_process';\nfs.readFileSync(p);"));
+    // the ky shape: node:https contains the node:http substring, so it stays on QuickJS
+    assert!(!thaw_js_bytes_result_allowed("import https from 'node:https';\nhttps.get(u);"));
 }
 
 #[test]
@@ -216,6 +225,55 @@ fn thaw_js_run_guarded_status(output: &Path) -> (String, String, Option<i32>) {
         String::from_utf8_lossy(&stderr).into_owned(),
         status.code(),
     )
+}
+
+fn builtin_routing_package(name: &str) -> ResolvedPackage {
+    ResolvedPackage {
+        name: name.into(),
+        commonjs_export_name: None,
+        commonjs_export_assignment: None,
+        called_commonjs_namespace_properties: Default::default(),
+        functions: Vec::new(),
+        values: Vec::new(),
+        classes: Vec::new(),
+        classifications: Vec::new(),
+        native_lib: None,
+        native_addon: None,
+        native_dependencies: Vec::new(),
+        platform_executable: None,
+        bundle_js: None,
+        factory_class_returns: Default::default(),
+        namespace_self_aliases: Default::default(),
+        type_only_exports: Default::default(),
+        internal_support_classes: Default::default(),
+        type_only_value_names: Default::default(),
+        nested_namespaces: Default::default(),
+    }
+}
+
+#[test]
+fn thaw_js_newly_allowlisted_builtins_route_to_thaw_js() {
+    // the module added to THAW_JS_BUILTIN_MODULES: a metadata-only program must be eligible for thaw-js
+    // old: four cases (node:v8, node:console, node:test/reporters, node:cluster); new: node:cluster only
+    let cases = [
+        ("node:cluster", "import cluster from 'node:cluster';\nconsole.log(cluster.isPrimary, cluster.settings);\n"),
+    ];
+    for (module, user) in cases {
+        let bundle = thaw_registry::builtin_bundle_with(module, &[]).unwrap();
+        assert!(
+            thaw_js_package_eligible(&builtin_routing_package(module), &bundle, user, &Default::default(), ""),
+            "{module}"
+        );
+    }
+}
+
+#[test]
+fn thaw_js_cluster_program_that_forks_stays_on_quickjs() {
+    // old: node:cluster was not allowlisted, so every cluster program stayed on QuickJS;
+    // new: metadata-only programs route, a program calling cluster.fork() still does not
+    let bundle = thaw_registry::builtin_bundle_with("node:cluster", &[]).unwrap();
+    let forks = "import cluster from 'node:cluster';\nif (cluster.isPrimary) { cluster.fork(); }\n";
+    assert!(!thaw_js_package_eligible(&builtin_routing_package("node:cluster"), &bundle, forks, &Default::default(), ""));
 }
 
 #[test]
@@ -512,8 +570,8 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
-    // modules not yet validated on thaw-js (e.g. node:cluster) stay on QuickJS
-    assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:cluster"), "node:cluster");
+    // old: `assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:cluster"), "node:cluster")`; new: allowlisted (fork is blocked separately)
+    assert!(THAW_JS_BUILTIN_MODULES.contains(&"node:cluster"), "node:cluster");
 }
 
 #[test]
