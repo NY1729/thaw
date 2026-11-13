@@ -3248,6 +3248,7 @@ dependencies = [
  "signature 2.2.0",
  "swc_ecma_visit",
  "thaw-arena",
+ "thaw-hir",
  "thaw-intl",
  "thaw-parser",
  "webpki-roots",

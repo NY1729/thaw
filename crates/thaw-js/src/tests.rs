@@ -1652,16 +1652,18 @@ fn class_instances_live_behind_handles_and_can_be_passed_back() {
         class_call("$method$k::Box$get$overload0$arity0", "[]", id, false).unwrap(),
         "40"
     );
-    // a method returning `this` hands out a second handle to the same object
+    // a method returning `this` leases the same handle: one live object, one id
     let same: i64 = class_call("$method$k::Box$add$overload0$arity1", "[2]", id, true)
         .unwrap()
         .parse()
         .unwrap();
-    assert_ne!(same, id);
+    assert_eq!(same, id);
     assert_eq!(
         class_call("$method$k::Box$get$overload0$arity0", "[]", same, false).unwrap(),
         "42"
     );
+    // drop the lease `add` returned: the id still holds the object for `id`
+    assert_eq!(crate::host::thaw_tjs_release_handle(same), 1);
     // an instance handle passed as an argument arrives as the object itself
     let other: i64 = class_call("$staticmethod$k::Box$of$overload0$arity1", "[7]", 0, true)
         .unwrap()
@@ -7876,4 +7878,78 @@ fn host_for_in_keys_walk_prototype_chain_with_shadowing() {
         .run("const p = {a: 1, b: 2, s: 3}; const o = Object.create(p); Object.defineProperty(o, 's', {value: 9, enumerable: false}); o.c = 4; console.log(__thaw_json_host_enumerate(o, 9).join(','));")
         .is_ok());
     assert_eq!(it.out.join("|"), "c,a,b");
+}
+
+/// Standard globals that thaw-hir lowers by name (`platform_globals`) must
+/// exist in the thaw-js realm, or be listed here. Shrink-only: an entry is
+/// removed in the PR that implements it, and a stale entry fails this test.
+const ABSENT_IN_THAW_JS: &[&str] = &[
+    "navigator",
+    "fetch",
+    "WebSocket",
+    "PerformanceObserver",
+    "Crypto",
+    "CryptoKey",
+    "SubtleCrypto",
+    "Navigator",
+    "BigInt64Array",
+    "BigUint64Array",
+    "Performance",
+    "PerformanceEntry",
+    "PerformanceMark",
+    "PerformanceMeasure",
+    "PerformanceObserverEntryList",
+    "PerformanceResourceTiming",
+    "DisposableStack",
+    "AsyncDisposableStack",
+];
+
+#[test]
+fn platform_globals_exist_in_thaw_js_realm_or_are_ledgered() {
+    // ES typed arrays are lowered by thaw-hir's intrinsic arm, not the table.
+    let names: Vec<&str> = thaw_hir::platform_globals::PLATFORM_GLOBALS
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(["BigInt64Array", "BigUint64Array"])
+        .collect();
+    let list = names
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    // `Intl` is installed only with the `intl` feature.
+    let intl_gated: &[&str] = if cfg!(feature = "intl") {
+        &[]
+    } else {
+        &["Intl"]
+    };
+    let expected: Vec<&str> = ABSENT_IN_THAW_JS
+        .iter()
+        .chain(intl_gated)
+        .copied()
+        .collect();
+    let mut it = Interp::new();
+    it.run(&format!(
+        "const missing = []; for (const n of [{list}]) if (typeof globalThis[n] === 'undefined') missing.push(n); console.log(missing.join(' '));"
+    ))
+    .expect("probe runs");
+    let missing: Vec<&str> = it
+        .out
+        .last()
+        .expect("probe prints")
+        .split_whitespace()
+        .collect();
+    let unexpected: Vec<&&str> = missing
+        .iter()
+        .filter(|name| !expected.contains(name))
+        .collect();
+    let stale: Vec<&&str> = expected
+        .iter()
+        .filter(|name| !missing.contains(name))
+        .collect();
+    assert!(unexpected.is_empty(), "platform globals missing from the thaw-js realm (add to ABSENT_IN_THAW_JS or implement): {unexpected:?}");
+    assert!(
+        stale.is_empty(),
+        "ABSENT_IN_THAW_JS entries now exist; remove them: {stale:?}"
+    );
 }

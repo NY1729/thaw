@@ -470,6 +470,9 @@ mod tests {
     use std::process::Command;
 
     fn strict_identity(left: &Value, right: &Value) -> bool {
+        if let (Some(left), Some(right)) = (json_handle_ref(left), json_handle_ref(right)) {
+            return left == right;
+        }
         match (left, right) {
             (Value::Array(left), Value::Array(right)) => Rc::ptr_eq(left, right),
             (Value::Object(left), Value::Object(right)) => Rc::ptr_eq(left, right),

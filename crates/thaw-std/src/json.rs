@@ -598,8 +598,9 @@ fn canonical_bigint_decimal(value: &str) -> bool {
 }
 
 fn host_value_from_owned_handle(handle: u64) -> Option<Value> {
+    // Handle 0 is `undefined` at every thaw-js boundary; it holds no reference to retain or release.
     if handle == 0 {
-        return None;
+        return Some(napi_undefined_value());
     }
     let ops = HOST_OPERATIONS.with(|slot| slot.get())?;
     let lease = HostLease {
@@ -659,8 +660,11 @@ fn host_value_from_owned_handle(handle: u64) -> Option<Value> {
 }
 
 fn host_value_from_borrowed_handle(handle: u64) -> Option<Value> {
+    if handle == 0 {
+        return Some(napi_undefined_value());
+    }
     let ops = HOST_OPERATIONS.with(|slot| slot.get())?;
-    if handle == 0 || without_typed_decode_scope(|| (ops.retain)(handle)) == 0 {
+    if without_typed_decode_scope(|| (ops.retain)(handle)) == 0 {
         return None;
     }
     let lease = HostLease {
@@ -719,12 +723,13 @@ pub extern "C" fn thaw_json_adopt_handle_marker(value: *mut Value) -> *mut Value
         .filter(|fields| fields.len() == 1)
         .and_then(|fields| fields.get(b"__thaw_tjs_handle__".as_slice()))
         .and_then(Value::as_f64)
-        .filter(|handle| handle.is_finite() && *handle > 0.0 && handle.fract() == 0.0)
+        // Id 0 is `undefined` (see `host_value_from_owned_handle`), so it adopts too.
+        .filter(|handle| handle.is_finite() && *handle >= 0.0 && handle.fract() == 0.0)
         .map(|handle| handle as u64);
     let Some(handle) = handle else {
         return revive_framed_errors_in_place(value);
     };
-    if HOST_OPERATIONS.with(|slot| slot.get()).is_none() {
+    if handle != 0 && HOST_OPERATIONS.with(|slot| slot.get()).is_none() {
         return revive_framed_errors_in_place(value);
     }
     match host_value_from_owned_handle(handle) {
@@ -741,11 +746,20 @@ pub extern "C" fn thaw_json_adopt_handle_marker(value: *mut Value) -> *mut Value
 /// lease retains its own reference; the caller keeps its handle.
 #[no_mangle]
 pub extern "C" fn thaw_json_from_borrowed_handle(handle: u64) -> *mut Value {
+    // Handle 0 is `undefined`: nothing to retain, so no host operations are needed.
+    if handle == 0 {
+        return match host_value_from_owned_handle(0) {
+            Some(value) => {
+                thaw_json_track_arena_owned_root(leak(materialize_native_wrapper(value)))
+            }
+            None => std::ptr::null_mut(),
+        };
+    }
     let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) else {
         set_host_error("Host operations unavailable".into());
         return std::ptr::null_mut();
     };
-    if handle == 0 || without_typed_decode_scope(|| (ops.retain)(handle)) == 0 {
+    if without_typed_decode_scope(|| (ops.retain)(handle)) == 0 {
         if trace_wire() {
             eprintln!("from_borrowed: retain failed handle={handle}");
         }
@@ -9600,6 +9614,34 @@ fn same_string(left: &Value, right: &Value) -> Option<bool> {
     Some(json_strings_same(string_bytes(left)?, string_bytes(right)?))
 }
 
+/// The live handle a value stands for: a host lease, or the one-key `{"__thaw_tjs_handle__": id}` marker
+/// thaw-js hands back for a live object. Two values with the same id are the same object (the host gives
+/// one live object one id). Id 0 (`undefined`) is not a handle here, so the callers' undefined checks keep it.
+fn json_handle_ref(value: &Value) -> Option<u64> {
+    match value {
+        Value::Host(lease) => Some(lease.handle).filter(|&id| id != 0),
+        _ => value
+            .as_object()
+            .filter(|fields| fields.len() == 1)
+            .and_then(|fields| fields.get(b"__thaw_tjs_handle__".as_slice()))
+            .and_then(Value::as_f64)
+            .filter(|id| id.is_finite() && *id >= 1.0 && id.fract() == 0.0)
+            .map(|id| id as u64),
+    }
+}
+
+/// Identity of two handle-backed values (see `json_handle_ref`): equal ids are the same object. A marker
+/// is thaw-js's canonical id, so a marker with another id is a different object; two leases with different
+/// ids fall back to the host's own identity (`None`), as other engines' leases may name one object twice.
+fn same_json_handle(left: &Value, right: &Value) -> Option<bool> {
+    let (left_id, right_id) = (json_handle_ref(left)?, json_handle_ref(right)?);
+    if left_id == right_id {
+        return Some(true);
+    }
+    let marker = matches!(left, Value::Object(_)) || matches!(right, Value::Object(_));
+    marker.then_some(false)
+}
+
 #[no_mangle]
 /// # Safety
 ///
@@ -9617,6 +9659,9 @@ pub unsafe extern "C" fn thaw_json_object_is(left: *const Value, right: *const V
                     .zip(right_number)
                     .is_some_and(|(left, right)| json_number_is(left, right)),
             );
+        }
+        if let Some(same) = same_json_handle(left, right) {
+            return u8::from(same);
         }
     }
     let result = match (unsafe { left.as_ref() }, unsafe { right.as_ref() }) {
@@ -9677,6 +9722,9 @@ pub unsafe extern "C" fn thaw_json_strict_equal(a: *const Value, b: *const Value
     if a_non_finite.is_some() || b_non_finite.is_some() {
         return u8::from(a_non_finite.is_some() && a_non_finite == b_non_finite);
     }
+    if let Some(same) = same_json_handle(a_val, b_val) {
+        return u8::from(same);
+    }
     u8::from(match (a_val, b_val) {
         (Value::Null, Value::Null) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
@@ -9719,6 +9767,9 @@ pub unsafe extern "C" fn thaw_json_same_value_zero(a: *const Value, b: *const Va
             _ => false,
         });
     }
+    if let Some(same) = same_json_handle(a_val, b_val) {
+        return u8::from(same);
+    }
     u8::from(match (a_val, b_val) {
         (Value::Null, Value::Null) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
@@ -9756,6 +9807,11 @@ pub unsafe extern "C" fn thaw_json_identity_key(value: *const Value) -> u64 {
 }
 
 fn collection_key_identity(value: &Value) -> u64 {
+    // A marker compares by its thaw-js id (`same_json_handle`), so it shares the scalar bucket that
+    // a host lease with that id hashes to under thaw-js (`host_query` 25 answers "0" there).
+    if matches!(value, Value::Object(_)) && json_handle_ref(value).is_some() {
+        return 0;
+    }
     let serial = match value {
         Value::Host(lease) => host_query(lease, 25)
             .and_then(|serial| serial.parse::<u64>().ok())
@@ -13951,6 +14007,76 @@ mod tests {
         assert_eq!(unsafe { thaw_json_strict_equal(surrogate, surrogate) }, 1);
     }
 
+    extern "C" fn no_release(_handle: u64) -> u8 {
+        1
+    }
+
+    fn marker_value(id: u64) -> *mut Value {
+        parse(&format!(r#"{{"__thaw_tjs_handle__": {id}}}"#))
+    }
+
+    fn lease_value(id: u64) -> *mut Value {
+        leak(Value::Host(Rc::new(HostLease {
+            handle: id,
+            release: no_release,
+        })))
+    }
+
+    #[test]
+    fn handle_markers_and_leases_compare_by_id() {
+        let (a, same_id, other_id) = (marker_value(7), marker_value(7), marker_value(8));
+        let (lease7, lease8) = (lease_value(7), lease_value(8));
+        let strict = |x, y| unsafe { thaw_json_strict_equal(x, y) };
+        let object_is = |x, y| unsafe { thaw_json_object_is(x, y) };
+        let zero = |x, y| unsafe { thaw_json_same_value_zero(x, y) };
+        // marker == marker and marker == lease with the same id; different ids stay unequal
+        assert_eq!(strict(a, same_id), 1);
+        assert_eq!(strict(a, lease7), 1);
+        assert_eq!(strict(lease7, a), 1);
+        assert_eq!(strict(a, other_id), 0);
+        assert_eq!(strict(a, lease8), 0);
+        assert_eq!(object_is(a, same_id), 1);
+        assert_eq!(object_is(a, lease7), 1);
+        assert_eq!(object_is(a, other_id), 0);
+        assert_eq!(object_is(a, lease8), 0);
+        assert_eq!(zero(a, same_id), 1);
+        assert_eq!(zero(a, lease7), 1);
+        assert_eq!(zero(a, other_id), 0);
+        assert_eq!(zero(a, lease8), 0);
+        // a marker-shaped object with another key is ordinary data, not a handle
+        let extra = parse(r#"{"__thaw_tjs_handle__": 7, "x": 1}"#);
+        assert_eq!(strict(a, extra), 0);
+        assert_eq!(object_is(a, extra), 0);
+        assert_eq!(zero(a, extra), 0);
+        // the Map/Set hash of a marker is the scalar bucket, so equal keys hash alike
+        assert_eq!(unsafe { thaw_json_identity_key(a) }, unsafe {
+            thaw_json_identity_key(same_id)
+        });
+    }
+
+    #[test]
+    fn handle_identity_drives_includes_and_index_of_style_scans() {
+        // `Array.prototype.includes` / `indexOf` over an `any[]` compare each element with
+        // thaw_json_strict_equal (indexOf) or thaw_json_same_value_zero (includes).
+        let elements = [marker_value(3), lease_value(4), marker_value(5)];
+        let index_of = |key| {
+            elements
+                .iter()
+                .position(|e| unsafe { thaw_json_strict_equal(*e, key) } != 0)
+        };
+        assert_eq!(index_of(lease_value(4)), Some(1));
+        assert_eq!(index_of(marker_value(5)), Some(2));
+        assert_eq!(index_of(marker_value(6)), None);
+        let includes = |key| {
+            elements
+                .iter()
+                .any(|e| unsafe { thaw_json_same_value_zero(*e, key) } != 0)
+        };
+        assert!(includes(marker_value(3)));
+        assert!(includes(lease_value(4)));
+        assert!(!includes(lease_value(9)));
+    }
+
     #[test]
     fn dynamic_array_holes_and_string_sources() {
         let array = parse("[1,2]");
@@ -15160,5 +15286,47 @@ mod tests {
             message(&cyclic(5)),
             "Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    |     property 'k0' -> object with constructor 'Object'\n    |     property 'k1' -> object with constructor 'Object'\n    |     ...\n    |     property 'k4' -> object with constructor 'Object'\n    --- property 'back' closes the circle"
         );
+    }
+}
+
+#[cfg(test)]
+mod handle_zero_undefined_tests {
+    use super::*;
+
+    /// Handle 0 is `undefined` at every thaw-js boundary: it materializes the undefined sentinel and
+    /// never retains (so host operations are not needed for it either).
+    #[test]
+    fn handle_zero_materializes_undefined_without_retaining() {
+        std::thread::spawn(|| {
+            HOST_ERROR.with(|error| error.borrow_mut().take());
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+
+            let borrowed = thaw_json_from_borrowed_handle(0);
+            assert!(!borrowed.is_null());
+            assert!(is_napi_undefined(unsafe { &*borrowed }));
+            assert!(HOST_ERROR.with(|error| error.borrow().is_none()));
+
+            assert!(host_value_from_owned_handle(0).is_some_and(|v| is_napi_undefined(&v)));
+            assert!(host_value_from_borrowed_handle(0).is_some_and(|v| is_napi_undefined(&v)));
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// The one-key marker `{"__thaw_tjs_handle__": 0}` adopts to `undefined`, not to a plain marker.
+    #[test]
+    fn handle_zero_marker_adopts_to_undefined() {
+        std::thread::spawn(|| {
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+            let marker = leak(Value::shared_object(indexmap::IndexMap::from([(
+                b"__thaw_tjs_handle__".to_vec(),
+                number_value(0.0),
+            )])));
+            let adopted = thaw_json_adopt_handle_marker(marker);
+            assert!(!adopted.is_null());
+            assert!(is_napi_undefined(unsafe { &*adopted }));
+        })
+        .join()
+        .unwrap();
     }
 }
