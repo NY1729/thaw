@@ -7891,8 +7891,6 @@ const ABSENT_IN_THAW_JS: &[&str] = &[
     "CryptoKey",
     "SubtleCrypto",
     "Navigator",
-    "BigInt64Array",
-    "BigUint64Array",
     "DisposableStack",
     "AsyncDisposableStack",
 ];

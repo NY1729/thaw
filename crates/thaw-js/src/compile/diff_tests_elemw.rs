@@ -249,7 +249,9 @@ fn elemw_store_counters_and_negative_controls() {
         ("5", "0", "7", false),
         ("undefined", "0", "7", false),
         ("null", "0", "7", false),
+        // a Number store throws ToBigInt's TypeError on the slow path; a BigInt store is slow too (no f64 form)
         ("new BigInt64Array(2)", "1", "7", false),
+        ("new BigUint64Array(2)", "1", "7n", false),
     ];
     for &(base, key, val, fast) in cases {
         let src = format!(
@@ -262,10 +264,7 @@ fn elemw_store_counters_and_negative_controls() {
         let (got, ok, it) = run(&src, CompileMode::On);
         assert_eq!(got, want, "{base} [{key}] = {val}");
         assert_eq!(ok, ok_want, "{base} [{key}] = {val}");
-        // BigInt64Array rows: `w` is not counted as compiled (not investigated; the output still matches Off)
-        if !base.contains("BigInt64") {
-            assert!(it.cstats.elem_built() >= 1, "{base} [{key}]: a gated store");
-        }
+        assert!(it.cstats.elem_built() >= 1, "{base} [{key}]: a gated store");
         let (f, s) = (it.cstats.elem_store_fast(), it.cstats.elem_store_slow());
         if fast {
             assert_eq!(
@@ -273,9 +272,6 @@ fn elemw_store_counters_and_negative_controls() {
                 (1, 0),
                 "{base} [{key}] = {val}: fast store expected"
             );
-        } else if base.contains("BigInt64") {
-            // `w` is not compiled for this base (cause not investigated): no store counter moves
-            assert_eq!((f, s), (0, 0), "{base} [{key}] = {val}");
         } else {
             assert_eq!(
                 (f, s),
