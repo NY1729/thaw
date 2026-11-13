@@ -135,5 +135,29 @@ fn thaw_js_jsvalue_leaf_inside_an_object_param_crosses_as_a_handle_marker() {
     let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
     assert!(uses_thaw_js && !uses_quickjs, "{ir}");
     assert!(!ir.contains("cannot cross the thaw-js boundary"), "{ir}");
-    assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
+    // The field is a Host lease inside the container (no in-IR marker any more); the call argument is
+    // serialised by the shared tjs stringifier, which re-marks the lease at run time.
+    assert!(ir.contains("@thaw_json_from_borrowed_handle("), "{ir}");
+    assert!(ir.contains("@thaw_json_stringify_tjs("), "{ir}");
+    assert!(!ir.contains("__thaw_tjs_handle__"), "{ir}");
+}
+
+#[test]
+fn every_thaw_js_json_argument_backend_takes_the_marker_serializer() {
+    use crate::hir_codegen::json_argument_stringifier;
+    // Plain thaw-js backends re-mark leases; graph backends keep the graph wire; other engines are unchanged.
+    for symbol in [
+        "thaw_tjs_call_typed_result",
+        "thaw_tjs_class_call",
+        "thaw_tjs_new_function",
+    ] {
+        assert_eq!(json_argument_stringifier(symbol), "thaw_json_stringify_tjs", "{symbol}");
+    }
+    for symbol in ["thaw_tjs_call_method_graph_result", "thaw_napi_call_typed_graph_result"] {
+        assert_eq!(json_argument_stringifier(symbol), "thaw_json_graph_encode", "{symbol}");
+    }
+    for symbol in ["thaw_js_new_function", "thaw_napi_call_with_functions_typed_graph_result"] {
+        assert!(json_argument_stringifier(symbol) != "thaw_json_stringify_tjs", "{symbol}");
+    }
+    assert_eq!(json_argument_stringifier("thaw_js_new_function"), "thaw_json_stringify");
 }

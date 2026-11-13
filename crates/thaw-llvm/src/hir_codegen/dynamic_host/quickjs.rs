@@ -427,10 +427,19 @@ impl<'ctx> HirCompiler<'ctx> {
             return Err("newDynamicFunction expects exactly one argument".into());
         };
         let call_args = self.compile_expr(call_args)?;
+        // Under thaw-js this is `thaw_tjs_new_function`, so its arguments take the same serializer as every
+        // other thaw-js JSON argument (a JsValue argument crosses as a handle marker, not a copy).
+        let new_function_symbol = if self.js_engine() == JsEngine::ThawJs {
+            "thaw_tjs_new_function"
+        } else {
+            "thaw_js_new_function"
+        };
         let args_json = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_stringify").unwrap(),
+                self.module
+                    .get_function(json_argument_stringifier(new_function_symbol))
+                    .unwrap(),
                 &[call_args.into()],
                 "new_function_args",
             )
