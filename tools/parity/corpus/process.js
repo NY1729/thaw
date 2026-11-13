@@ -1,0 +1,47 @@
+const r=[];
+function t(n,f){let v;try{v=f();}catch(e){v="THROW "+(e&&e.name)+": "+String(e&&e.message).slice(0,60);}r.push(n+" = "+String(v).replace(/\n/g,"\\n").slice(0,160));}
+function G(p){return p.split(".").reduce((o,k)=>o==null?undefined:o[k],globalThis);}
+// process members, typeof and value shapes (no side effects: no exit, kill, chdir, setuid)
+const names=['argv','argv0','execArgv','execPath','abort','arch','chdir','config','cpuUsage','cwd','debugPort','dlopen','emit','emitWarning','env','eventNames','exit','exitCode','features','getActiveResourcesInfo','getBuiltinModule','getegid','geteuid','getgid','getgroups','getuid','hasUncaughtExceptionCaptureCallback','hrtime','kill','listeners','memoryUsage','nextTick','off','on','once','pid','platform','ppid','prependListener','prependOnceListener','release','report','resourceUsage','rawListeners','removeAllListeners','removeListener','setMaxListeners','getMaxListeners','setUncaughtExceptionCaptureCallback','stderr','stdin','stdout','title','umask','uptime','version','versions','allowedNodeEnvironmentFlags','availableMemory','constrainedMemory','binding','_getActiveHandles','_linkedBinding','setSourceMapsEnabled','sourceMapsEnabled','throwDeprecation','traceDeprecation','noDeprecation','mainModule','channel','connected','send','disconnect','isBun','permission','threadCpuUsage','setegid','seteuid','setgid','setuid','setgroups','initgroups','getMaxListeners','addListener','rawListeners','emit'];
+for (const k of [...new Set(names)]) t('process.'+k+' typeof',()=>typeof process[k]);
+t('process.env string coercion',()=>{process.env.PARITY_X=5;const v=typeof process.env.PARITY_X;delete process.env.PARITY_X;return v;});
+t('process.env delete',()=>{process.env.PARITY_Y='a';const d=delete process.env.PARITY_Y;return d+' '+process.env.PARITY_Y;});
+t('process.env in',()=>{process.env.PARITY_Z='a';const v=('PARITY_Z' in process.env);delete process.env.PARITY_Z;return v;});
+t('process.env missing is undefined',()=>process.env.PARITY_NOPE_XYZ);
+t('process.argv is array',()=>Array.isArray(process.argv));
+t('process.argv0 string',()=>typeof process.argv0);
+t('process.versions.node string',()=>typeof process.versions.node);
+t('process.release.name',()=>process.release.name);
+t('process.platform value',()=>process.platform);
+t('process.exitCode default',()=>process.exitCode);
+t('process.hrtime length',()=>process.hrtime().length);
+t('process.hrtime.bigint typeof',()=>typeof process.hrtime.bigint());
+t('process.memoryUsage keys',()=>Object.keys(process.memoryUsage()).join());
+t('process.memoryUsage.rss typeof',()=>typeof process.memoryUsage.rss);
+t('process.cpuUsage keys',()=>Object.keys(process.cpuUsage()).join());
+t('process.resourceUsage keys',()=>Object.keys(process.resourceUsage()).sort().join());
+t('process.umask() call result typeof',()=>typeof process.umask());
+t('process.features keys',()=>Object.keys(process.features).sort().join());
+t('process.stdout.isTTY typeof',()=>typeof process.stdout.isTTY);
+t('process.stdout.fd',()=>process.stdout.fd);
+t('process.stdout.write typeof',()=>typeof process.stdout.write);
+t('process.stderr.fd',()=>process.stderr.fd);
+t('process.stdin.fd',()=>process.stdin.fd);
+t('process ctor name',()=>process.constructor.name);
+t('process tag',()=>Object.prototype.toString.call(process));
+t('process.emit returns bool',()=>typeof process.emit('parity_noop_event'));
+t('process.listeners array',()=>Array.isArray(process.listeners('parity_noop')));
+t('process.on returns process',()=>{const f=()=>{};const p=process.on('parity_noop',f);process.off('parity_noop',f);return p===process;});
+t('process.nextTick queued',()=>typeof process.nextTick(()=>{}));
+t('process.emitWarning fn typeof',()=>typeof process.emitWarning);
+t('process.getBuiltinModule fn typeof',()=>typeof process.getBuiltinModule);
+t('process.binding fn typeof',()=>typeof process.binding);
+t('process.setMaxListeners returns process',()=>process.setMaxListeners(20)===process);
+t('process.getMaxListeners number',()=>typeof process.getMaxListeners());
+t('process.title string',()=>typeof process.title);
+t('process.pid number',()=>typeof process.pid);
+t('process.ppid number',()=>typeof process.ppid);
+t('process.getuid number',()=>typeof process.getuid());
+t('process.uptime number',()=>typeof process.uptime());
+t('process.cwd string',()=>typeof process.cwd());
+console.log(r.join("\n"));
