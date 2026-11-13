@@ -1,0 +1,5 @@
+# Builtin table rows that thaw-js does not provide yet (the ratchet for builtin_table.tsv).
+# One row per line as `owner<TAB>key`, spelled exactly as in builtin_table.tsv. Lines starting with # are ignored.
+# The WI-1b conformance test checks both directions: a listed row must be absent from thaw-js, and every absent row
+# must be listed. A row thaw-js gains must be removed from this file in the same change, and this list only shrinks.
+# Regenerate it from the test output, not by hand. Empty until WI-1b lands the test.
