@@ -1,4 +1,18 @@
 
+/// The one serializer for a JSON argument that crosses into a host backend. A `_graph_result` backend takes
+/// the graph wire (a lease is an `hdl` token). Every other `thaw_tjs_*` backend takes
+/// `thaw_json_stringify_tjs`, which re-marks each Host lease as `{"__thaw_tjs_handle__": id}`; thaw-js
+/// `to_value` maps the marker back to the live value. Anything else is a QuickJS/N-API plain stringify.
+pub(crate) fn json_argument_stringifier(backend_symbol: &str) -> &'static str {
+    if backend_symbol.ends_with("_graph_result") {
+        "thaw_json_graph_encode"
+    } else if backend_symbol.starts_with("thaw_tjs_") {
+        "thaw_json_stringify_tjs"
+    } else {
+        "thaw_json_stringify"
+    }
+}
+
 impl<'ctx> HirCompiler<'ctx> {
     fn compile_json_backend_call(
         &mut self,
@@ -75,15 +89,10 @@ impl<'ctx> HirCompiler<'ctx> {
         extra: &[BasicMetadataValueEnum<'ctx>],
         owned_handles: &[FreshEventKeyHandle<'ctx>],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let stringify_fn = self.module.get_function(
-            if backend_symbol.ends_with("_graph_result") {
-                "thaw_json_graph_encode"
-            } else if matches!(backend_symbol, "thaw_tjs_call_typed_result" | "thaw_tjs_class_call") {
-                "thaw_json_stringify_tjs"
-            } else {
-                "thaw_json_stringify"
-            }
-        ).unwrap();
+        let stringify_fn = self
+            .module
+            .get_function(json_argument_stringifier(backend_symbol))
+            .unwrap();
         let args_json_str = self
             .builder
             .build_call(
@@ -1644,9 +1653,10 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         handle: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        // thaw-js has no reviver either, but its host cannot read a Host lease (it serializes the object as
-        // plain data), so it takes the handle marker through the unchecked path below.
-        if !self.compiling_quickjs_dynamic_arguments && self.js_engine() != JsEngine::ThawJs {
+        // thaw-js keeps a JsValue outside call arguments as a Host lease too, so console, String(), equality
+        // and the rest read it through the host queries. A thaw-js call argument is serialised by
+        // `json_argument_stringifier`, which re-marks every lease as `{"__thaw_tjs_handle__": id}`.
+        if !self.compiling_quickjs_dynamic_arguments && !self.thaw_js_call_arguments {
             // No QuickJS reviver downstream: embed the live value itself (a Json Host lease).
             self.js_mark_handles_used();
             self.tracks_owned_json_roots = true;
