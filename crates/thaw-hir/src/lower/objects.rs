@@ -4187,6 +4187,28 @@ impl<'a> FnLowerer<'a> {
                         };
                         Ok(HirExpr::Lit(HirLit::Str(name.to_string())))
                     }
+                    // Any other static property of a function/class value (`EventEmitter.captureRejections`)
+                    // has no compile-time shape: read it through the dynamic property path.
+                    HirType::Function(..) | HirType::CallableFunction(..) => {
+                        // An imported JS-realm class is read as its live class value by its `<pkg>::<Class>` key
+                        // (recovered from the generated constructor dispatcher name): wrapping it as a native
+                        // callback would lose its statics.
+                        let class_key = match member.obj.as_ref() {
+                            Expr::Ident(ident) => imported_class_key(&self.resolve_binding(ident.sym.as_ref())),
+                            _ => None,
+                        };
+                        let object = match class_key {
+                            Some(key) => HirExpr::Call(
+                                Box::new(HirExpr::Var("getDynamicValue".into())),
+                                vec![HirExpr::Lit(HirLit::Str(key))],
+                            ),
+                            None => self.coerce_to_declared(&HirType::JsValue, obj)?,
+                        };
+                        self.lower_dynamic_value_property_read(
+                            object,
+                            HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
+                        )
+                    }
                     other => Err(format!(
                         "unsupported property access `.{}` on a value of type {other:?}",
                         prop.sym
