@@ -2,7 +2,9 @@
 //! real uses on QuickJS). With it: the real namespace (web/webassembly.js) over the `__thaw_wasm_*`
 //! natives, which are installed first.
 
-use crate::{Interp, Value};
+use crate::Interp;
+#[cfg(feature = "wasm")]
+use crate::Value;
 
 #[cfg(not(feature = "wasm"))]
 const STUB: &str = include_str!("wasm.js");
