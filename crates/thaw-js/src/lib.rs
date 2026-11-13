@@ -4375,6 +4375,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 #[cfg(all(test, unix))]
 mod fs_tests;
 #[cfg(test)]
+mod handle_zero_tests;
+#[cfg(test)]
 mod napi_bridge_tests;
 #[cfg(test)]
 mod napi_eval_tests;
