@@ -202,7 +202,7 @@ jobs:
             ~/.cargo/git
             target/release
             target/thaw-*
-          key: jsengine-corpus-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: jsengine-corpus-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             jsengine-corpus-${{ runner.os }}-
       - name: Build thaw CLI and thaw-js-scan (release)

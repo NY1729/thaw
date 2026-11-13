@@ -8,7 +8,7 @@ license.workspace = true
 # Number/Date toLocale*String. Linked into a compiled program only when the
 # generated code calls a `thaw_intl_*` symbol (thaw-cli build.rs), because the
 # baked CLDR data (thaw-icu-data) dwarfs the rest of the runtime. The icu4x
-# primitives are `include!`d from thaw-quickjs so both hosts share one copy of
+# primitives are `include!`d from this crate (moved out of thaw-quickjs) so thaw-quickjs and thaw-js share one copy of
 # the logic; the pins below must match thaw-quickjs's.
 [lib]
 crate-type = ["staticlib", "rlib"]

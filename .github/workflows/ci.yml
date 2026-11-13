@@ -66,7 +66,7 @@ jobs:
           # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
           # so an unchanged runtime reuses the archives and any other change still
           # starts from the newest compatible cache through restore-keys.
-          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
       - name: Restore LLVM 22 cache
@@ -180,7 +180,7 @@ jobs:
           # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
           # so an unchanged runtime reuses the archives and any other change still
           # starts from the newest compatible cache through restore-keys.
-          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
       - name: Restore LLVM 22 cache
@@ -311,7 +311,7 @@ jobs:
           # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
           # so an unchanged runtime reuses the archives and any other change still
           # starts from the newest compatible cache through restore-keys.
-          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
       - name: Restore LLVM 22 cache
@@ -449,7 +449,7 @@ jobs:
           # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
           # so an unchanged runtime reuses the archives and any other change still
           # starts from the newest compatible cache through restore-keys.
-          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
       - name: Restore LLVM 22 cache
@@ -599,7 +599,7 @@ jobs:
           # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
           # so an unchanged runtime reuses the archives and any other change still
           # starts from the newest compatible cache through restore-keys.
-          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
       - name: Restore LLVM 22 cache
@@ -739,7 +739,7 @@ jobs:
           # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
           # so an unchanged runtime reuses the archives and any other change still
           # starts from the newest compatible cache through restore-keys.
-          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
       - name: Restore LLVM 22 cache
@@ -876,7 +876,7 @@ jobs:
           # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
           # so an unchanged runtime reuses the archives and any other change still
           # starts from the newest compatible cache through restore-keys.
-          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
       - name: Cache npm packages

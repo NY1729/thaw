@@ -1,5 +1,5 @@
 // The single native primitive backing thaw's `Intl` polyfill
-// (`platform_globals/intl.js`): given an IANA timezone name and an
+// (`thaw-js/src/web/intl.js`): given an IANA timezone name and an
 // instant, returns that instant's local (zone-adjusted) date/time
 // broken down into fields, plus the zone's UTC offset and short
 // abbreviation at that instant. Real, DST-aware IANA timezone math

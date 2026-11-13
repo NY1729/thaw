@@ -64,7 +64,7 @@ jobs:
             ~/.cargo/git
             target/release
             target/thaw-*
-          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
       - name: Restore LLVM 22 cache

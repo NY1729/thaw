@@ -1,4 +1,4 @@
-// Real BCP-47 locale resolution for `Intl` (`platform_globals/intl.js`),
+// Real BCP-47 locale resolution for `Intl` (`thaw-js/src/web/intl.js`),
 // backed by `icu4x` + `thaw-icu-data`'s curated CLDR dataset -- see
 // `docs/design/intl-polyfill.md`'s "Real CLDR data via icu4x" section.
 //

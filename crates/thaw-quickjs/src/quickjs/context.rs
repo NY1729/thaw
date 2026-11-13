@@ -2508,10 +2508,10 @@ fn ensure_context() {
                         .expect("failed to create JavaScript OS network interface source");
                 let dns_lookup_function = Function::new(ctx.clone(), dns_lookup_json)
                     .expect("failed to create JavaScript DNS lookup source");
-                // Backs `Intl.DateTimeFormat` (`platform_globals/intl.js`) --
+                // Backs `Intl.DateTimeFormat` (`thaw-js/src/web/intl.js`) --
                 // the one native primitive needed to compute a real,
                 // DST-aware IANA timezone offset/breakdown for a given
-                // instant. See `quickjs/intl.rs`'s own doc comment.
+                // instant. See `thaw-intl/src/intl.rs`'s own doc comment.
                 let intl_zoned_parts_function = Function::new(
                     ctx.clone(),
                     |tz_name: String, timestamp_ms: f64| {

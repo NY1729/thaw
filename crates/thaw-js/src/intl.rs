@@ -1,9 +1,9 @@
-//! `Intl` for thaw-js (cargo feature `intl`): the same `platform_globals/intl.js` polyfill thaw-quickjs
+//! `Intl` for thaw-js (cargo feature `intl`): the `web/intl.js` polyfill (shared with thaw-quickjs)
 //! runs, over the same icu4x natives (`thaw_intl::js_native`, a leaf crate with no thaw-runtime/std dep).
 
 use crate::{arg, Interp, Value};
 
-const POLYFILL: &str = include_str!("../../thaw-quickjs/src/quickjs/platform_globals/intl.js");
+const POLYFILL: &str = include_str!("web/intl.js");
 
 impl Interp {
     pub(crate) fn install_intl(&mut self) {
