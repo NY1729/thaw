@@ -51,3 +51,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = "1.0"
 x509-parser = "0.18"
 serde_json = "1"
+
+[dev-dependencies]
+thaw-hir = { path = "../thaw-hir" }

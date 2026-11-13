@@ -7877,3 +7877,77 @@ fn host_for_in_keys_walk_prototype_chain_with_shadowing() {
         .is_ok());
     assert_eq!(it.out.join("|"), "c,a,b");
 }
+
+/// Standard globals that thaw-hir lowers by name (`platform_globals`) must
+/// exist in the thaw-js realm, or be listed here. Shrink-only: an entry is
+/// removed in the PR that implements it, and a stale entry fails this test.
+const ABSENT_IN_THAW_JS: &[&str] = &[
+    "navigator",
+    "fetch",
+    "WebSocket",
+    "PerformanceObserver",
+    "Crypto",
+    "CryptoKey",
+    "SubtleCrypto",
+    "Navigator",
+    "BigInt64Array",
+    "BigUint64Array",
+    "Performance",
+    "PerformanceEntry",
+    "PerformanceMark",
+    "PerformanceMeasure",
+    "PerformanceObserverEntryList",
+    "PerformanceResourceTiming",
+    "DisposableStack",
+    "AsyncDisposableStack",
+];
+
+#[test]
+fn platform_globals_exist_in_thaw_js_realm_or_are_ledgered() {
+    // ES typed arrays are lowered by thaw-hir's intrinsic arm, not the table.
+    let names: Vec<&str> = thaw_hir::platform_globals::PLATFORM_GLOBALS
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(["BigInt64Array", "BigUint64Array"])
+        .collect();
+    let list = names
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    // `Intl` is installed only with the `intl` feature.
+    let intl_gated: &[&str] = if cfg!(feature = "intl") {
+        &[]
+    } else {
+        &["Intl"]
+    };
+    let expected: Vec<&str> = ABSENT_IN_THAW_JS
+        .iter()
+        .chain(intl_gated)
+        .copied()
+        .collect();
+    let mut it = Interp::new();
+    it.run(&format!(
+        "const missing = []; for (const n of [{list}]) if (typeof globalThis[n] === 'undefined') missing.push(n); console.log(missing.join(' '));"
+    ))
+    .expect("probe runs");
+    let missing: Vec<&str> = it
+        .out
+        .last()
+        .expect("probe prints")
+        .split_whitespace()
+        .collect();
+    let unexpected: Vec<&&str> = missing
+        .iter()
+        .filter(|name| !expected.contains(name))
+        .collect();
+    let stale: Vec<&&str> = expected
+        .iter()
+        .filter(|name| !missing.contains(name))
+        .collect();
+    assert!(unexpected.is_empty(), "platform globals missing from the thaw-js realm (add to ABSENT_IN_THAW_JS or implement): {unexpected:?}");
+    assert!(
+        stale.is_empty(),
+        "ABSENT_IN_THAW_JS entries now exist; remove them: {stale:?}"
+    );
+}

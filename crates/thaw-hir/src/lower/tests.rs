@@ -58,6 +58,7 @@ fn unstage_let(statement: &HirStmt) -> HirStmt {
 }
 
 include!("tests/async.rs");
+include!("tests/platform_globals.rs");
 include!("tests/classes.rs");
 include!("tests/control_flow.rs");
 include!("tests/core.rs");
