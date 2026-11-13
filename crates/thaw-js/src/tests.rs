@@ -1652,16 +1652,18 @@ fn class_instances_live_behind_handles_and_can_be_passed_back() {
         class_call("$method$k::Box$get$overload0$arity0", "[]", id, false).unwrap(),
         "40"
     );
-    // a method returning `this` hands out a second handle to the same object
+    // a method returning `this` leases the same handle: one live object, one id
     let same: i64 = class_call("$method$k::Box$add$overload0$arity1", "[2]", id, true)
         .unwrap()
         .parse()
         .unwrap();
-    assert_ne!(same, id);
+    assert_eq!(same, id);
     assert_eq!(
         class_call("$method$k::Box$get$overload0$arity0", "[]", same, false).unwrap(),
         "42"
     );
+    // drop the lease `add` returned: the id still holds the object for `id`
+    assert_eq!(crate::host::thaw_tjs_release_handle(same), 1);
     // an instance handle passed as an argument arrives as the object itself
     let other: i64 = class_call("$staticmethod$k::Box$of$overload0$arity1", "[7]", 0, true)
         .unwrap()

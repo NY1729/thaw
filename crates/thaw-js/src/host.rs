@@ -553,9 +553,34 @@ fn trace_h(op: &str, handle: i64) {
     }
 }
 
+/// Take a lease on `value` in `package`. An object (or Symbol, which is an object here) that already has a
+/// live handle in that package leases the same id again, so every read of one object names one id;
+/// a primitive always gets a fresh slot. Ids are never reused, and the id dies with its last lease.
 pub(crate) fn store_handle(package: usize, value: Value) -> i64 {
-    HANDLE_REFS.with(|r| r.borrow_mut().push(1));
     let object = object_key(&value);
+    if let Some(key) = object {
+        let live = LIVE_BY_OBJECT.with(|m| {
+            m.borrow().get(&key).and_then(|ids| {
+                ids.iter().copied().find(|&id| {
+                    HANDLES.with(|h| {
+                        h.borrow()
+                            .get((id as usize).wrapping_sub(1))
+                            .is_some_and(|e| e.0 == package)
+                    })
+                })
+            })
+        });
+        if let Some(id) = live {
+            HANDLE_REFS.with(|r| {
+                if let Some(refs) = r.borrow_mut().get_mut((id as usize).wrapping_sub(1)) {
+                    *refs += 1;
+                }
+            });
+            trace_h("store", id as i64);
+            return id as i64;
+        }
+    }
+    HANDLE_REFS.with(|r| r.borrow_mut().push(1));
     let id = HANDLES.with(|h| {
         let mut h = h.borrow_mut();
         h.push((package, value));
@@ -5917,6 +5942,109 @@ mod live_result_lease_tests {
         // drop the wire's lease, then the handle itself
         thaw_tjs_release_handle(id as i64);
         thaw_tjs_release_handle(id as i64);
+    }
+}
+
+#[cfg(test)]
+mod handle_identity_tests {
+    use super::*;
+
+    fn eval(it: &mut Interp, src: &str) -> Value {
+        it.run(src).unwrap_or_else(|_| panic!("script failed"))
+    }
+
+    fn refs_of(id: i64) -> u32 {
+        HANDLE_REFS.with(|r| r.borrow()[id as usize - 1])
+    }
+
+    #[test]
+    fn one_object_read_twice_names_one_id() {
+        let mut it = Interp::new();
+        let a = store_handle(0, eval(&mut it, "Buffer"));
+        let b = store_handle(0, eval(&mut it, "globalThis.Buffer"));
+        assert_eq!(a, b);
+        assert_eq!(refs_of(a), 2);
+        assert!(handle_is_live(a));
+    }
+
+    #[test]
+    fn releasing_one_of_two_leases_keeps_the_value() {
+        let mut it = Interp::new();
+        let v = eval(&mut it, "({k: 1})");
+        let id = store_handle(0, v.clone());
+        assert_eq!(store_handle(0, v), id);
+        assert_eq!(thaw_tjs_release_handle(id), 1);
+        assert_eq!(refs_of(id), 1);
+        assert!(matches!(slot(id as u64), Some((0, Value::Object(_)))));
+        // the last release frees the slot and the object binding
+        assert_eq!(thaw_tjs_release_handle(id), 1);
+        assert!(!handle_is_live(id));
+        assert!(matches!(slot(id as u64), Some((0, Value::Undefined))));
+        assert_eq!(thaw_tjs_release_handle(id), 0);
+    }
+
+    #[test]
+    fn retain_counts_as_one_more_lease_on_the_same_id() {
+        let mut it = Interp::new();
+        let v = eval(&mut it, "[1, 2]");
+        let id = store_handle(0, v.clone());
+        assert_eq!(thaw_tjs_retain_handle(id), 1);
+        assert_eq!(store_handle(0, v), id);
+        assert_eq!(refs_of(id), 3);
+        for _ in 0..3 {
+            assert_eq!(thaw_tjs_release_handle(id), 1);
+        }
+        assert!(!handle_is_live(id));
+    }
+
+    #[test]
+    fn released_then_recreated_object_gets_a_fresh_id() {
+        let mut it = Interp::new();
+        let v = eval(&mut it, "({k: 2})");
+        let id = store_handle(0, v.clone());
+        assert_eq!(thaw_tjs_release_handle(id), 1);
+        let again = store_handle(0, v.clone());
+        assert_ne!(again, id);
+        assert!(handle_is_live(again));
+        assert!(!handle_is_live(id));
+        assert_eq!(thaw_tjs_release_handle(again), 1);
+    }
+
+    #[test]
+    fn primitives_never_intern() {
+        let a = store_handle(0, Value::Number(1.0));
+        let b = store_handle(0, Value::Number(1.0));
+        assert_ne!(a, b);
+        assert_eq!(refs_of(a), 1);
+        assert_eq!(refs_of(b), 1);
+        thaw_tjs_release_handle(a);
+        thaw_tjs_release_handle(b);
+    }
+
+    #[test]
+    fn symbols_intern_by_identity() {
+        let mut it = Interp::new();
+        let sym = eval(&mut it, "Symbol('s')");
+        let a = store_handle(0, sym.clone());
+        assert_eq!(store_handle(0, sym), a);
+        // a distinct symbol with the same description is a different identity
+        let other = store_handle(0, eval(&mut it, "Symbol('s')"));
+        assert_ne!(other, a);
+        thaw_tjs_release_handle(a);
+        thaw_tjs_release_handle(a);
+        thaw_tjs_release_handle(other);
+    }
+
+    #[test]
+    fn same_object_in_another_package_keeps_its_own_lease() {
+        let mut it = Interp::new();
+        let v = eval(&mut it, "({k: 3})");
+        let a = store_handle(0, v.clone());
+        let b = store_handle(7, v);
+        assert_ne!(a, b);
+        assert!(matches!(slot(b as u64), Some((7, _))));
+        thaw_tjs_release_handle(a);
+        thaw_tjs_release_handle(b);
     }
 }
 
