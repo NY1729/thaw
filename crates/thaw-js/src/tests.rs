@@ -7824,3 +7824,39 @@ fn atomics_wait_and_notify_match_node() {
         "true [object Atomics]"
     );
 }
+
+/// Host property predicates 3 (own and enumerable) and 4 (hide). Lookups and the `missing` key
+/// must not create a property.
+#[test]
+fn host_property_predicates_enumerable_and_hide() {
+    let mut it = Interp::new();
+    assert!(it
+        .run("var o = {a: 1}; Object.defineProperty(o, 'h', {value: 2, enumerable: false});")
+        .is_ok());
+    let o = it.lookup(&it.global.clone(), "o").unwrap();
+    let pred = |it: &mut Interp, key: &str, op: u8| {
+        crate::host::property_predicate_value(it, &o, key, op).ok()
+    };
+    assert_eq!(pred(&mut it, "a", 3), Some(1));
+    assert_eq!(pred(&mut it, "h", 3), Some(0));
+    assert_eq!(pred(&mut it, "missing", 3), Some(0));
+    assert_eq!(pred(&mut it, "missing", 4), Some(0));
+    assert_eq!(pred(&mut it, "missing", 1), Some(0));
+    assert_eq!(pred(&mut it, "a", 4), Some(1));
+    assert_eq!(pred(&mut it, "a", 3), Some(0));
+    assert_eq!(pred(&mut it, "a", 1), Some(1));
+    assert!(it.run("console.log(Object.keys(o).length, o.a);").is_ok());
+    assert_eq!(it.out.join("|"), "0 1");
+}
+
+/// for-in keys (prelude operation 9): enumerable string keys along the prototype chain, with a
+/// shadowing non-enumerable own property hiding the inherited name.
+#[test]
+fn host_for_in_keys_walk_prototype_chain_with_shadowing() {
+    let mut it = Interp::new();
+    assert!(it.run_sloppy(include_str!("dynamic_prelude.js")).is_ok());
+    assert!(it
+        .run("const p = {a: 1, b: 2, s: 3}; const o = Object.create(p); Object.defineProperty(o, 's', {value: 9, enumerable: false}); o.c = 4; console.log(__thaw_json_host_enumerate(o, 9).join(','));")
+        .is_ok());
+    assert_eq!(it.out.join("|"), "c,a,b");
+}
