@@ -2245,10 +2245,10 @@ impl FnLowerer<'_> {
         let arguments = self.wrap_native_value_as_json(HirExpr::ArrayLit(vec![value]), HirType::Array(Box::new(HirType::Json)))?;
         let live = HirExpr::Call(Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())), vec![
             HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-                vec![HirExpr::Lit(HirLit::Str("__thaw_storage_value".into()))]),
+                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::STORAGE_VALUE.into()))]),
             arguments, HirExpr::ArrayLit(Vec::new()),
         ]);
-        Ok(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_host_from_dynamic".into())), vec![live]))
+        Ok(HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_HOST_FROM_DYNAMIC.into())), vec![live]))
     }
 }
 
@@ -2321,7 +2321,7 @@ impl FnLowerer<'_> {
         let value = HirExpr::Call(Box::new(HirExpr::Var("constructDynamicValue".into())), vec![
             HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())), vec![HirExpr::Lit(HirLit::Str(name.sym.to_string()))]), arguments,
         ]);
-        Ok(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_host_from_dynamic".into())), vec![value]))
+        Ok(HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_HOST_FROM_DYNAMIC.into())), vec![value]))
     }
 }
 

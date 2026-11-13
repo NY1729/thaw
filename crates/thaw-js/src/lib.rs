@@ -4410,6 +4410,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 
 #[cfg(test)]
 mod builtin_table_tests;
+#[cfg(test)]
+mod dynamic_helper_contract_tests;
 #[cfg(all(test, unix))]
 mod fs_tests;
 #[cfg(test)]

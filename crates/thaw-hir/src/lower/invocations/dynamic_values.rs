@@ -476,7 +476,7 @@ impl<'a> FnLowerer<'a> {
         let intrinsic = match (property, expected) {
             ("toString", _) => "__thaw_call_selected_dynamic_method",
             (_, Some(HirType::Dynamic)) => "__thaw_call_selected_dynamic_method_raw",
-            (_, Some(HirType::JsValue)) => "__thaw_call_selected_dynamic_method_handle",
+            (_, Some(HirType::JsValue)) => crate::compiler_helpers::CALL_SELECTED_DYNAMIC_METHOD_HANDLE,
             _ => "__thaw_call_selected_dynamic_method",
         };
         // The receiver must always come back as a genuine handle here,
@@ -805,7 +805,7 @@ impl<'a> FnLowerer<'a> {
                 ));
             }
             if callee_name == "Number" && ty == HirType::JsValue {
-                return self.dynamic_value_to_number(value, "__thaw_number_constructor");
+                return self.dynamic_value_to_number(value, crate::compiler_helpers::NUMBER_CONSTRUCTOR);
             }
             if callee_name == "Number"
                 && matches!(ty, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)

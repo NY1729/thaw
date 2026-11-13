@@ -272,7 +272,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_receiver_bigint"
                         | "__thaw_error_get_prop"
                         | "__thaw_json_from_consumed_dynamic"
-                        | "__thaw_json_host_from_dynamic"
+                        | thaw_hir::compiler_helpers::JSON_HOST_FROM_DYNAMIC
                         | "__thaw_dynamic_object_literal"
                         | "__thaw_json_host_from_borrowed_dynamic" => return Some(HirType::Json),
                         // `Object.keys`/`Object.getOwnPropertyNames`/
@@ -425,7 +425,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "constructDynamicValue"
                         | "callDynamicMethodHandle"
                         | "callDynamicMethodHandleRaw"
-                        | "__thaw_call_selected_dynamic_method_handle"
+                        | thaw_hir::compiler_helpers::CALL_SELECTED_DYNAMIC_METHOD_HANDLE
                         | "__thaw_call_selected_dynamic_method_raw"
                         | "registerNativeCallback"
                         | "registerNativeCallbackGraph"

@@ -1813,7 +1813,7 @@ impl<'a> FnLowerer<'a> {
             );
             let constructor = HirExpr::Call(
                 Box::new(HirExpr::Var("getDynamicValue".into())),
-                vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_BIGINT.into()))],
             );
             let arguments =
                 self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![digits]))?;

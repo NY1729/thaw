@@ -1015,7 +1015,7 @@ impl<'a> FnLowerer<'a> {
                 value_type = producer_type;
             } else if value_type == HirType::JsValue {
                 let iterator = HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_to_iterator_exact".into())),
+                    Box::new(HirExpr::Var(crate::compiler_helpers::TO_ITERATOR_EXACT.into())),
                     vec![value],
                 );
                 let name = format!("__thaw_iterator_{}", self.next_binding);
@@ -2316,7 +2316,7 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var(if for_of.is_await {
                                 "__thaw_to_async_iterator_exact"
                             } else {
-                                "__thaw_to_iterator_exact"
+                                crate::compiler_helpers::TO_ITERATOR_EXACT
                             }.into())),
                             vec![values.clone()],
                         );

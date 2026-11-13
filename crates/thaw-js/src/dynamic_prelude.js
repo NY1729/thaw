@@ -54,8 +54,84 @@
   const thawSetIteratorPrototype = thawGraphGetPrototypeOf(new Set().values());
   const thawMapIteratorNext = thawMapIteratorPrototype.next;
   const thawSetIteratorNext = thawSetIteratorPrototype.next;
-  // Symbol-keyed static properties are not encoded across this boundary yet.
-  globalThis.__thaw_property_key = (key) => key;
+  // Verbatim port of QuickJS dates.js `thawPropertyKey`: unique/registered Symbol wire text maps to one
+  // cached Symbol per text, well-known `\u001f@@name` / `__thaw_symbol_name` text to the intrinsic Symbol.
+  const thawSymbols = new Map();
+  const nativeSymbol = Symbol;
+  const nativeSymbolFor = Symbol.for.bind(Symbol);
+  const thawPropertyKey = (value) => {
+    if (typeof value !== 'string') return value;
+    if (value.startsWith('\u001f@@')) return Symbol[value.slice(3)] || value;
+    if (value.startsWith('__thaw_symbol_')) return Symbol[value.slice(14)] || value;
+    if (value.charCodeAt(0) !== 3) return value;
+    if (!thawSymbols.has(value)) {
+      const separator = value.indexOf(':');
+      const registered = value.charCodeAt(1) === 82; // native `\u0003R{id}:description`
+      if (registered && !/^\u0003R[0-9]+:/.test(value)) return value;
+      const description = separator < 0 ? undefined : value.slice(separator + 1);
+      thawSymbols.set(value, registered ? nativeSymbolFor(description) : nativeSymbol(description));
+    }
+    return thawSymbols.get(value);
+  };
+  thawGraphDefineProperty(globalThis, '__thaw_property_key', {
+    value: thawPropertyKey, writable: false, configurable: false, enumerable: true,
+  });
+  // Verbatim ports of the QuickJS bootstrap helpers (runtime.js ~2662-2735, ~268, ~39, ~649-656).
+  // Symbol-keyed wire properties are dropped from every stringify, as QuickJS does.
+  const thawSymbolKeyWire = (key) => /^\u0003R?\d+(:|$)/.test(key);
+  const thawGraphStringify = JSON.stringify;
+  const thawStringifyWithoutSymbolKeys = (value, replacer, space) => {
+    if (Array.isArray(replacer)) return thawGraphStringify(value, replacer, space);
+    return thawGraphStringify(value, function (key, item) {
+      if (typeof key === 'string' && thawSymbolKeyWire(key)) return undefined;
+      return typeof replacer === 'function' ? thawGraphApply(replacer, this, [key, item]) : item;
+    }, space);
+  };
+  thawGraphDefineProperty(globalThis, '__thaw_accessor_descriptor', {
+    value: (readable, writable, flags, getter, setter) => ({
+      get: readable ? getter : undefined,
+      set: writable ? setter : undefined,
+      enumerable: !!(flags & 2),
+      configurable: !!(flags & 4),
+    }),
+    writable: false, configurable: false, enumerable: true,
+  });
+  thawGraphDefineProperty(globalThis, '__thaw_data_descriptor', {
+    value: (value, flags = 7) => ({
+      value,
+      writable: !!(flags & 1),
+      enumerable: !!(flags & 2),
+      configurable: !!(flags & 4),
+    }),
+    writable: false, configurable: false, enumerable: true,
+  });
+  thawGraphDefineProperty(globalThis, '__thaw_json_stringify_native_accessors', {
+    value: (replacer, space, value) => thawStringifyWithoutSymbolKeys(value, replacer, space),
+    writable: false, configurable: false, enumerable: true,
+  });
+  // A native function replacer receives the live native owner as its `this`.
+  thawGraphDefineProperty(globalThis, '__thaw_json_stringify_live_replacer', {
+    value: (space, value, replacer) => thawStringifyWithoutSymbolKeys(value, function (key, item) {
+      return thawGraphApply(replacer, this, [key, item]);
+    }, space),
+    writable: false, configurable: false, enumerable: true,
+  });
+  // A retained replacer may be either a function or an array: the captured stringify decides.
+  thawGraphDefineProperty(globalThis, '__thaw_json_stringify_live_dynamic_replacer', {
+    value: (space, value, replacer) => thawStringifyWithoutSymbolKeys(value, replacer, space),
+    writable: false, configurable: false, enumerable: true,
+  });
+  const thawGraphNumberCtor = Number;
+  thawGraphDefineProperty(globalThis, '__thaw_number_constructor', {
+    value: value => thawGraphNumberCtor(value),
+    writable: false, configurable: false,
+  });
+  const thawDateConstructor = Date;
+  const thawDateGetTime = Date.prototype.getTime;
+  thawGraphDefineProperty(globalThis, '__thaw_date_from_live_value', {
+    value: value => thawDateApply(thawDateGetTime, new thawDateConstructor(value), []),
+    writable: false, configurable: false,
+  });
   globalThis.__thaw_storage_value = (values) => values;
   globalThis.__thaw_json_host_instanceof = (value, constructor) => value instanceof constructor;
   thawGraphDefineProperty(globalThis, '__thaw_object_with_native_getters', {
@@ -510,8 +586,11 @@
       }
       const fn = callbacks[callback++];
       if (kind === 'method') {
+        // Name the wrapper after its key (verbatim from QuickJS runtime.js; the descriptor would name it `value`).
+        const method = function (...args) { return fn(this, ...args); };
+        thawGraphDefineProperty(method, 'name', { value: typeof key === 'symbol' ? '[' + (key.description || '') + ']' : thawGraphString(key), configurable: true });
         Object.defineProperty(object, key, {
-          value: function (...args) { return fn(this, ...args); },
+          value: method,
           writable: true, enumerable: true, configurable: true,
         });
         continue;
