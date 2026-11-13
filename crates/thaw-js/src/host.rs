@@ -3391,6 +3391,14 @@ fn handle_marker_json(id: i64) -> String {
 fn handle_text(handle: u64, bigint_suffix: bool) -> *const c_char {
     let text = on_handle(handle, |p, _, v| {
         let it = &mut p.interp;
+        // a tagged plain object (`Math`) prints as `Object [Math] {}`, not its `[object Math]` string
+        if bigint_suffix {
+            if let Value::Object(o) = &v {
+                if it.tagged_plain(o).is_some() {
+                    return Ok(it.inspect(&v, false));
+                }
+            }
+        }
         let text = it.to_str(&v).to_string();
         Ok(if bigint_suffix && matches!(v, Value::BigInt(_)) {
             format!("{text}n")
@@ -3414,17 +3422,52 @@ pub extern "C" fn thaw_tjs_handle_to_console_string(handle: u64) -> *const c_cha
     handle_text(handle, true)
 }
 
+/// Whether every element of array `o` is a primitive, a plain object, or a plain array. A nested
+/// array already on `ancestors` (a cycle) counts as plain, keeping the old Json path for it.
+fn array_elements_are_plain(it: &mut Interp, o: &Obj, ancestors: &mut Vec<usize>) -> bool {
+    let ptr = Rc::as_ptr(o) as usize;
+    if ancestors.contains(&ptr) {
+        return true;
+    }
+    let items = match &*o.kind.borrow() {
+        Kind::Array(items) => items.clone(),
+        _ => return false,
+    };
+    ancestors.push(ptr);
+    let plain = items.iter().all(|x| match x {
+        Value::Object(e) if matches!(&*e.kind.borrow(), Kind::Array(_)) => {
+            array_elements_are_plain(it, e, ancestors)
+        }
+        Value::Object(e) => {
+            matches!(&*e.kind.borrow(), Kind::Plain)
+                && e.proto
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(|q| Rc::ptr_eq(q, &it.object_proto))
+                && it.tagged_plain(e).is_none()
+        }
+        _ => true,
+    });
+    ancestors.pop();
+    plain
+}
+
 /// 1 for a plain array or plain object (`console.log` inspects those like a native `Json`).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_handle_is_plain_data(handle: u64) -> u8 {
     on_handle(handle, |p, _, v| {
         Ok(match &v {
-            Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => 1,
+            // an array is data only if no element is a non-plain object (it would print as a handle)
+            Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
+                u8::from(array_elements_are_plain(&mut p.interp, o, &mut Vec::new()))
+            }
             Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Plain) => u8::from(
                 o.proto
                     .borrow()
                     .as_ref()
-                    .is_none_or(|q| Rc::ptr_eq(q, &p.interp.object_proto)),
+                    .is_none_or(|q| Rc::ptr_eq(q, &p.interp.object_proto))
+                    // a tagged object (`Math`) is inspected by the interpreter, not as data
+                    && p.interp.tagged_plain(o).is_none(),
             ),
             _ => 0,
         })
@@ -5801,6 +5844,41 @@ mod live_result_lease_tests {
         // drop the wire's lease, then the handle itself
         thaw_tjs_release_handle(id as i64);
         thaw_tjs_release_handle(id as i64);
+    }
+}
+
+#[cfg(test)]
+mod namespace_tag_handle_tests {
+    use super::*;
+    use std::ffi::{CStr, CString};
+
+    #[test]
+    fn math_handle_is_not_plain_data_and_prints_as_a_tagged_object() {
+        let math = thaw_tjs_get_global(CString::new("Math").unwrap().as_ptr());
+        assert_ne!(math, 0, "Math is not defined");
+        assert_eq!(thaw_tjs_handle_is_plain_data(math as u64), 0);
+        let text = thaw_tjs_handle_to_console_string(math as u64);
+        assert_eq!(
+            unsafe { CStr::from_ptr(text) }.to_str().unwrap(),
+            "Object [Math] {}"
+        );
+    }
+
+    #[test]
+    fn array_holding_a_non_plain_object_is_not_plain_data() {
+        let mut it = Interp::new();
+        let array = |it: &mut Interp, src: &str| match it.run(src).unwrap() {
+            Value::Object(o) => o,
+            other => panic!("not an object: {}", it.to_str(&other)),
+        };
+        let with_math = array(&mut it, "[Math]");
+        assert!(!array_elements_are_plain(
+            &mut it,
+            &with_math,
+            &mut Vec::new()
+        ));
+        let nested = array(&mut it, "[1, 'a', [2, { b: 3 }]]");
+        assert!(array_elements_are_plain(&mut it, &nested, &mut Vec::new()));
     }
 }
 
