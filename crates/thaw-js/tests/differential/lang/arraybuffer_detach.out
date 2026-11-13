@@ -1,0 +1,64 @@
+pre 8 false 4 2 4 4 1
+after transfer 0 true 8 false false 7 false
+u8 len 0
+u8 off 0
+u8 bl 0
+u8 get undefined
+u8 set undefined
+u8 buffer true
+dv bl THREW TypeError "Cannot perform get DataView.prototype.byteLength on a detached ArrayBuffer" undefined
+dv bo THREW TypeError "Cannot perform get DataView.prototype.byteOffset on a detached ArrayBuffer" undefined
+dv getUint8 THREW TypeError "Cannot perform DataView.prototype.getUint8 on a detached ArrayBuffer" undefined
+dv setUint8 THREW TypeError "Cannot perform DataView.prototype.setUint8 on a detached ArrayBuffer" undefined
+dv getBigInt64 THREW TypeError "Cannot perform DataView.prototype.getBigInt64 on a detached ArrayBuffer" undefined
+dv setBigInt64 THREW TypeError "Cannot perform DataView.prototype.setBigInt64 on a detached ArrayBuffer" undefined
+dv buffer true
+ab slice THREW TypeError "Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer" undefined
+u8 slice THREW TypeError "Cannot perform %TypedArray%.prototype.slice on a detached ArrayBuffer" undefined
+u8 subarray THREW TypeError "Cannot perform Construct on a detached ArrayBuffer" undefined
+u8 fill THREW TypeError "Cannot perform %TypedArray%.prototype.fill on a detached ArrayBuffer" undefined
+u8 join THREW TypeError "Cannot perform %TypedArray%.prototype.join on a detached ArrayBuffer" undefined
+u8 toString THREW TypeError "Cannot perform %TypedArray%.prototype.join on a detached ArrayBuffer" undefined
+u8 set THREW TypeError "Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer" undefined
+u8 map THREW TypeError "Cannot perform %TypedArray%.prototype.map on a detached ArrayBuffer" undefined
+u8 forEach THREW TypeError "Cannot perform %TypedArray%.prototype.forEach on a detached ArrayBuffer" undefined
+u8 findLastIndex THREW TypeError "Cannot perform %TypedArray%.prototype.findIndexLast on a detached ArrayBuffer" undefined
+u8 reduce THREW TypeError "Cannot perform %TypedArray%.prototype.reduce on a detached ArrayBuffer" undefined
+u8 values THREW TypeError "Cannot perform %TypedArray%.prototype.values on a detached ArrayBuffer" undefined
+u8 from THREW TypeError "Cannot perform %TypedArray%.prototype.values on a detached ArrayBuffer" undefined
+u8 spread THREW TypeError "Cannot perform %TypedArray%.prototype.values on a detached ArrayBuffer" undefined
+u8 sort THREW TypeError "Cannot perform %TypedArray%.prototype.sort on a detached ArrayBuffer" undefined
+u8 copyWithin THREW TypeError "Cannot perform %TypedArray%.prototype.copyWithin on a detached ArrayBuffer" undefined
+u8 includes THREW TypeError "Cannot perform %TypedArray%.prototype.includes on a detached ArrayBuffer" undefined
+u8 indexOf THREW TypeError "Cannot perform %TypedArray%.prototype.indexOf on a detached ArrayBuffer" undefined
+u8 reverse THREW TypeError "Cannot perform %TypedArray%.prototype.reverse on a detached ArrayBuffer" undefined
+new u8 on detached THREW TypeError "Cannot perform Construct on a detached ArrayBuffer" undefined
+new dv on detached THREW TypeError "Cannot perform DataView constructor on a detached ArrayBuffer" undefined
+clone ab THREW DOMException "An ArrayBuffer is detached and could not be cloned." 25
+clone u8 THREW DOMException "An ArrayBuffer is detached and could not be cloned." 25
+clone dv THREW DOMException "An ArrayBuffer is detached and could not be cloned." 25
+transfer again THREW TypeError "Cannot perform ArrayBuffer.prototype.transfer on a detached ArrayBuffer" undefined
+transferToFixedLength again THREW TypeError "Cannot perform ArrayBuffer.prototype.transferToFixedLength on a detached ArrayBuffer" undefined
+transferToFixedLength 5
+transfer grow [ 10, true, 0 ]
+transferFixed shrink [ 2, true, false ]
+transfer zero [ 0, 0 ]
+transfer keeps bytes 1,2,3,0,0
+transfer NaN 0
+transfer string 3
+transfer negative THREW RangeError "Invalid array buffer length" undefined
+transfer big THREW RangeError "ArrayBuffer.prototype.transfer: Invalid length parameter" undefined
+transferFixed negative THREW RangeError "Invalid array buffer length" undefined
+transfer receiver THREW TypeError "Method ArrayBuffer.prototype.transfer called on incompatible receiver #<Object>" undefined
+transfer shared undefined
+slice receiver shared THREW TypeError "Method ArrayBuffer.prototype.slice called on incompatible receiver #<SharedArrayBuffer>" undefined
+detached on shared undefined
+detached receiver THREW TypeError "Method get ArrayBuffer.prototype.detached called on incompatible receiver #<Object>" undefined
+detached fresh false
+Buffer.from detached THREW TypeError "Cannot perform Construct on a detached ArrayBuffer" undefined
+dv detached length 0
+dv get after detach THREW TypeError "Cannot perform DataView.prototype.getUint8 on a detached ArrayBuffer" undefined
+bigint view detached [ 0, undefined ]
+keys of detached 0
+isView detached true
+ab tag [object ArrayBuffer]

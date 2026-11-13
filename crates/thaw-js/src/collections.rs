@@ -322,6 +322,8 @@ impl Interp {
                         return Some(items.iter().map(|v| unhole(Some(v))).collect())
                     }
                     Kind::Set(set) => return Some(set.items.clone()),
+                    // a detached view has no elements to enumerate: the protocol path throws V8's TypeError
+                    Kind::Typed(t) if crate::typed::is_detached(&t.data) => return None,
                     Kind::Typed(t) => return Some(t.to_values()),
                     Kind::Map(map) => map.entries.clone(),
                     _ => return None,

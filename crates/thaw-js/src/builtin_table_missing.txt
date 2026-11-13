@@ -195,18 +195,10 @@ Array.prototype.toLocaleString	length
 Array.prototype.toLocaleString	name
 ArrayBuffer	@@species
 ArrayBuffer.prototype	@@toStringTag
-ArrayBuffer.prototype	detached
 ArrayBuffer.prototype	maxByteLength
-ArrayBuffer.prototype	resizable
 ArrayBuffer.prototype	resize
-ArrayBuffer.prototype	transfer
-ArrayBuffer.prototype	transferToFixedLength
 ArrayBuffer.prototype.resize	length
 ArrayBuffer.prototype.resize	name
-ArrayBuffer.prototype.transfer	length
-ArrayBuffer.prototype.transfer	name
-ArrayBuffer.prototype.transferToFixedLength	length
-ArrayBuffer.prototype.transferToFixedLength	name
 Atomics	waitAsync
 Atomics.waitAsync	length
 Atomics.waitAsync	name
@@ -429,8 +421,6 @@ DOMException.prototype.@@messaging_clone_symbol	name
 DOMException.prototype.@@messaging_deserialize_symbol	length
 DOMException.prototype.@@messaging_deserialize_symbol	name
 DataView.prototype	buffer
-DataView.prototype	byteLength
-DataView.prototype	byteOffset
 Date.prototype	@@toPrimitive
 Date.prototype	setYear
 Date.prototype.@@toPrimitive	length

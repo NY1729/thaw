@@ -32,7 +32,9 @@ pub(crate) fn install(interp: &mut Interp) {
             return it.throw_error("TypeError", "argument must be an integer typed array");
         };
         let size = t.ty.size();
-        fill_os_random(&mut t.data.borrow_mut()[t.off..t.off + t.len * size]);
+        if t.live() {
+            fill_os_random(&mut t.data.borrow_mut()[t.off..t.off + t.len * size]);
+        }
         Ok(arg(a, 0))
     });
     let hash = interp.native(|it, _, a| {
@@ -41,10 +43,12 @@ pub(crate) fn install(interp: &mut Interp) {
         else {
             return it.throw_error("TypeError", "hash data must be a Uint8Array");
         };
-        let Some(sum) = digest(&alg, &d.data.borrow()[d.off..d.off + d.len]) else {
+        let Some(sum) = digest(&alg, &d.window()) else {
             return Ok(Value::Bool(false));
         };
-        o.data.borrow_mut()[o.off..o.off + sum.len()].copy_from_slice(&sum);
+        if o.live() && o.len >= sum.len() {
+            o.data.borrow_mut()[o.off..o.off + sum.len()].copy_from_slice(&sum);
+        }
         Ok(Value::Bool(true))
     });
     interp.global.declare("__thaw_hash", hash, true);

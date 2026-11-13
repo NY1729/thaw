@@ -271,7 +271,7 @@ pub(crate) fn own_entries(o: &Obj) -> Vec<(Rc<str>, u32)> {
             out.push(("length".into(), u32::from(o.len_writable())));
         }
         Kind::Typed(t) => {
-            for i in 0..t.len {
+            for i in 0..t.cur_len() {
                 out.push((i.to_string().into(), 2 | writable | configurable));
             }
         }

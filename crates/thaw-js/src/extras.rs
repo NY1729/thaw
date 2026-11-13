@@ -345,11 +345,19 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     if (off < 0 || off > total) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
     var len = byteLength === undefined ? total - off : (Math.trunc(byteLength) || 0);
     if (len < 0 || off + len > total) throw new RangeError('Invalid DataView length ' + len);
+    if (buffer instanceof ArrayBuffer && detGet.call(buffer)) throw new TypeError('Cannot perform DataView constructor on a detached ArrayBuffer');
     def(this, 'buffer', buffer);
-    def(this, 'byteOffset', off);
-    def(this, 'byteLength', len);
+    def(this, '__off', off);
+    def(this, '__len', len);
     def(this, '__bytes', new Uint8Array(buffer, off, len));
   }
+  // byteOffset / byteLength are accessors (a detached buffer makes them throw, as in V8).
+  function dvLive(dv, what) {
+    if (dv.buffer instanceof ArrayBuffer && detGet.call(dv.buffer)) throw new TypeError('Cannot perform ' + what + ' on a detached ArrayBuffer');
+  }
+  Object.defineProperty(DataView.prototype, 'byteLength', { enumerable: false, configurable: true, get: function () { dvLive(this, 'get DataView.prototype.byteLength'); return this.__len; } });
+  Object.defineProperty(DataView.prototype, 'byteOffset', { enumerable: false, configurable: true, get: function () { dvLive(this, 'get DataView.prototype.byteOffset'); return this.__off; } });
+  var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
   var scratch = new Uint8Array(8);
   var kinds = {
     Int8: [1, Int8Array], Uint8: [1, Uint8Array], Int16: [2, Int16Array], Uint16: [2, Uint16Array],
@@ -357,17 +365,19 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   };
   function check(dv, index, size) {
     index = Math.trunc(index) || 0;
-    if (index < 0 || index + size > dv.byteLength) throw new RangeError('Offset is outside the bounds of the DataView');
+    if (index < 0 || index + size > dv.__len) throw new RangeError('Offset is outside the bounds of the DataView');
     return index;
   }
   Object.keys(kinds).forEach(function (name) {
     var size = kinds[name][0], View = kinds[name][1], view = new View(scratch.buffer, 0, 1);
     def(DataView.prototype, 'get' + name, function (index, little) {
+      dvLive(this, 'DataView.prototype.get' + name);
       index = check(this, index, size);
       for (var i = 0; i < size; i++) scratch[little ? i : size - 1 - i] = this.__bytes[index + i];
       return view[0];
     });
     def(DataView.prototype, 'set' + name, function (index, value, little) {
+      dvLive(this, 'DataView.prototype.set' + name);
       index = check(this, index, size);
       view[0] = value;
       for (var i = 0; i < size; i++) this.__bytes[index + i] = scratch[little ? i : size - 1 - i];
@@ -375,12 +385,14 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   });
   [['BigInt64', true], ['BigUint64', false]].forEach(function (k) {
     def(DataView.prototype, 'get' + k[0], function (index, little) {
+      dvLive(this, 'DataView.prototype.get' + k[0]);
       index = check(this, index, 8);
       var v = 0n;
       for (var i = 0; i < 8; i++) v = (v << 8n) | BigInt(this.__bytes[index + (little ? 7 - i : i)]);
       return k[1] ? BigInt.asIntN(64, v) : v;
     });
     def(DataView.prototype, 'set' + k[0], function (index, value, little) {
+      dvLive(this, 'DataView.prototype.set' + k[0]);
       index = check(this, index, 8);
       var v = BigInt.asUintN(64, BigInt(value));
       for (var i = 7; i >= 0; i--) { this.__bytes[index + (little ? 7 - i : i)] = Number(v & 255n); v >>= 8n; }
@@ -412,6 +424,11 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       if (v instanceof RegExp) { out = new RegExp(v.source, v.flags); seen.set(v, out); return out; }
       if (v instanceof Map) { out = new Map(); seen.set(v, out); v.forEach(function (x, k) { out.set(clone(k), clone(x)); }); return out; }
       if (v instanceof Set) { out = new Set(); seen.set(v, out); v.forEach(function (x) { out.add(clone(x)); }); return out; }
+      var backing = v instanceof DataView || ArrayBuffer.isView(v) ? v.buffer : v;
+      if (backing instanceof ArrayBuffer && detGet.call(backing)) {
+        var dce = typeof DOMException === 'function' ? new DOMException('An ArrayBuffer is detached and could not be cloned.', 'DataCloneError') : new Error('An ArrayBuffer is detached and could not be cloned.');
+        throw dce;
+      }
       if (v instanceof ArrayBuffer) { out = v.slice(0); seen.set(v, out); return out; }
       if (v instanceof DataView) { var cb = clone(v.buffer); out = new DataView(cb, v.byteOffset, v.byteLength); seen.set(v, out); return out; }
       if (ArrayBuffer.isView(v)) { out = new v.constructor(v); seen.set(v, out); return out; }
