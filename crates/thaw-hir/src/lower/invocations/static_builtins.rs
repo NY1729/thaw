@@ -1126,7 +1126,7 @@ impl<'a> FnLowerer<'a> {
                     self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![value]))?;
                             let object = HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                                vec![HirExpr::Lit(HirLit::Str("Object".to_string()))],
+                                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_OBJECT.into()))],
                             );
                             let result = HirExpr::Call(
                     Box::new(HirExpr::Var("callDynamicMethodHandle".to_string())),
@@ -1150,7 +1150,7 @@ impl<'a> FnLowerer<'a> {
                             )?;
                             let object = HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                                vec![HirExpr::Lit(HirLit::Str("Object".to_string()))],
+                                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_OBJECT.into()))],
                             );
                             let dynamic = HirExpr::Call(
                                 Box::new(HirExpr::Var("callDynamicMethod".to_string())),
@@ -1199,7 +1199,7 @@ impl<'a> FnLowerer<'a> {
                     .coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![value.clone()]))?;
                             let object = HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                                vec![HirExpr::Lit(HirLit::Str("Object".to_string()))],
+                                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_OBJECT.into()))],
                             );
                             let result = HirExpr::JsonAsBool(Box::new(HirExpr::Call(
                                 Box::new(HirExpr::Var("callDynamicMethod".to_string())),
@@ -1218,7 +1218,7 @@ impl<'a> FnLowerer<'a> {
                             )?;
                             let object = HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                                vec![HirExpr::Lit(HirLit::Str("Object".to_string()))],
+                                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_OBJECT.into()))],
                             );
                             let dynamic = HirExpr::JsonAsBool(Box::new(HirExpr::Call(
                                 Box::new(HirExpr::Var("callDynamicMethod".to_string())),
@@ -1480,7 +1480,7 @@ impl<'a> FnLowerer<'a> {
                             .coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_values))?;
                         let object = HirExpr::Call(
                             Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                            vec![HirExpr::Lit(HirLit::Str("Object".to_string()))],
+                            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_OBJECT.into()))],
                         );
                         let result = HirExpr::Call(
                             Box::new(HirExpr::Var("callDynamicMethodHandle".to_string())),
@@ -1535,7 +1535,7 @@ impl<'a> FnLowerer<'a> {
                     .coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![target.clone()]))?;
                 let holder = HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                    vec![HirExpr::Lit(HirLit::Str("Object".to_string()))],
+                    vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_OBJECT.into()))],
                 );
                 let dynamic = HirExpr::Call(
                     Box::new(HirExpr::Var("callDynamicMethod".to_string())),
@@ -1619,7 +1619,7 @@ impl<'a> FnLowerer<'a> {
                             )?;
                             let holder = HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                                vec![HirExpr::Lit(HirLit::Str("Object".to_string()))],
+                                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_OBJECT.into()))],
                             );
                             let result = HirExpr::Call(
                                 Box::new(HirExpr::Var("callDynamicMethodHandle".to_string())),
@@ -1643,7 +1643,7 @@ impl<'a> FnLowerer<'a> {
                 )?;
                 let holder = HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                    vec![HirExpr::Lit(HirLit::Str("Object".to_string()))],
+                    vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_OBJECT.into()))],
                 );
                 let dynamic = HirExpr::Call(
                     Box::new(HirExpr::Var("callDynamicMethod".to_string())),
@@ -1679,7 +1679,7 @@ impl<'a> FnLowerer<'a> {
                     .coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![target.clone()]))?;
                             let object = HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                                vec![HirExpr::Lit(HirLit::Str("Object".to_string()))],
+                                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_OBJECT.into()))],
                             );
                             let result = HirExpr::Call(
                     Box::new(HirExpr::Var("callDynamicMethodHandle".to_string())),
@@ -3375,7 +3375,7 @@ impl<'a> FnLowerer<'a> {
                                     HirExpr::Call(
                                         Box::new(HirExpr::Var("getDynamicValue".into())),
                                         vec![HirExpr::Lit(HirLit::Str(
-                                            "__thaw_json_stringify_direct".into(),
+                                            crate::compiler_helpers::JSON_STRINGIFY_DIRECT.into(),
                                         ))],
                                     ),
                                     empty,
@@ -3438,7 +3438,7 @@ impl<'a> FnLowerer<'a> {
                         )
                     ) {
                                         (
-                                            "__thaw_json_stringify_live_replacer",
+                                            crate::compiler_helpers::JSON_STRINGIFY_LIVE_REPLACER,
                             self.coerce_to_declared(
                                 &HirType::Json,
                                 HirExpr::ArrayLit(vec![space_json]),
@@ -3453,7 +3453,7 @@ impl<'a> FnLowerer<'a> {
                                         )
                                     } else if replacer_type == Some(HirType::JsValue) {
                                         (
-                                            "__thaw_json_stringify_live_dynamic_replacer",
+                                            crate::compiler_helpers::JSON_STRINGIFY_LIVE_DYNAMIC_REPLACER,
                             self.coerce_to_declared(
                                 &HirType::Json,
                                 HirExpr::ArrayLit(vec![space_json]),
@@ -3472,7 +3472,7 @@ impl<'a> FnLowerer<'a> {
                         let replacer_json =
                             self.coerce_to_declared(&HirType::Json, replacer.unwrap())?;
                                         (
-                                            "__thaw_json_stringify_native_accessors",
+                                            crate::compiler_helpers::JSON_STRINGIFY_NATIVE_ACCESSORS,
                             self.coerce_to_declared(
                                 &HirType::Json,
                                 HirExpr::ArrayLit(vec![replacer_json, space_json]),
@@ -3525,7 +3525,7 @@ impl<'a> FnLowerer<'a> {
                                         HirExpr::Call(
                                             Box::new(HirExpr::Var("getDynamicValue".to_string())),
                                             vec![HirExpr::Lit(HirLit::Str(
-                                                "__thaw_json_stringify_direct".to_string(),
+                                                crate::compiler_helpers::JSON_STRINGIFY_DIRECT.to_string(),
                                             ))],
                                         ),
                                         json_arguments,
@@ -3770,7 +3770,7 @@ impl<'a> FnLowerer<'a> {
                             let (helper, json_arguments, direct_arguments) =
                                 if let Some(replacer) = replacer_function {
                                     (
-                                        "__thaw_json_stringify_live_replacer",
+                                        crate::compiler_helpers::JSON_STRINGIFY_LIVE_REPLACER,
                                         self.coerce_to_declared(
                                             &HirType::Json,
                                             HirExpr::ArrayLit(vec![space_json]),
@@ -3787,7 +3787,7 @@ impl<'a> FnLowerer<'a> {
                         let replacer = replacer_array.unwrap_or(HirExpr::Lit(HirLit::Null));
                         let replacer_json = self.coerce_to_declared(&HirType::Json, replacer)?;
                                     (
-                                        "__thaw_json_stringify_native_accessors",
+                                        crate::compiler_helpers::JSON_STRINGIFY_NATIVE_ACCESSORS,
                                         self.coerce_to_declared(
                                             &HirType::Json,
                                             HirExpr::ArrayLit(vec![replacer_json, space_json]),
@@ -3824,7 +3824,7 @@ impl<'a> FnLowerer<'a> {
                                     HirExpr::Call(
                                         Box::new(HirExpr::Var("getDynamicValue".into())),
                                         vec![HirExpr::Lit(HirLit::Str(
-                                            "__thaw_json_stringify_live_replacer".into(),
+                                            crate::compiler_helpers::JSON_STRINGIFY_LIVE_REPLACER.into(),
                                         ))],
                                     ),
                                     json_arguments,
@@ -3910,7 +3910,7 @@ impl<'a> FnLowerer<'a> {
             let args = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![source]))?;
                         let iterator_from = HirExpr::Call(
                             Box::new(HirExpr::Var("getDynamicValue".into())),
-                            vec![HirExpr::Lit(HirLit::Str("__thaw_iterator_from".into()))],
+                            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::ITERATOR_FROM.into()))],
                         );
                         let result = HirExpr::Call(
                             Box::new(HirExpr::Var("callDynamicValueHandle".into())),
@@ -4341,7 +4341,7 @@ impl<'a> FnLowerer<'a> {
                                     HirStmt::Return(Some(HirExpr::Var(array_name))),
                                 ]);
                                 let iterator = HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_to_iterator_exact".into())),
+                                    Box::new(HirExpr::Var(crate::compiler_helpers::TO_ITERATOR_EXACT.into())),
                                     vec![source],
                                 );
                                 let source = HirExpr::Call(

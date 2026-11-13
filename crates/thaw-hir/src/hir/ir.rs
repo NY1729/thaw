@@ -386,7 +386,7 @@ pub fn caught_native_object_json(active: HirExpr) -> HirExpr {
             Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
         )),
         Box::new(call(
-            "__thaw_json_host_from_dynamic",
+            crate::compiler_helpers::JSON_HOST_FROM_DYNAMIC,
             vec![HirExpr::Call(
                 Box::new(HirExpr::OptionalValue(Box::new(projector), projector_type)),
                 Vec::new(),
@@ -496,7 +496,7 @@ pub fn caught_exception_json_adapter() -> HirExpr {
             1 => call("__thaw_json_receiver_bigint", vec![active]),
             2 => call("__thaw_json_receiver_bool", vec![active]),
             3 => call("__thaw_json_receiver_string", vec![active]),
-            4 => call("__thaw_json_undefined", Vec::new()),
+            4 => call(crate::compiler_helpers::JSON_UNDEFINED, Vec::new()),
             5 => call("__thaw_json_null", Vec::new()),
             6 => caught_native_object_json(active),
             7 => active,
@@ -539,7 +539,11 @@ pub fn caught_exception_json_adapter() -> HirExpr {
                     body = by_tag(tag_value, empty_object(), body);
                 }
                 for tag_value in [28, 20] {
-                    body = by_tag(tag_value, call("__thaw_json_undefined", Vec::new()), body);
+                    body = by_tag(
+                        tag_value,
+                        call(crate::compiler_helpers::JSON_UNDEFINED, Vec::new()),
+                        body,
+                    );
                 }
                 HirExpr::Call(
                     Box::new(HirExpr::Lambda(

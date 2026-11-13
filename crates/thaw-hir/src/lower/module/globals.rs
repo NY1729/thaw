@@ -209,7 +209,7 @@ fn lower_top_level_initializers(
                                     vec![
                                         HirExpr::Call(
                                             Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                                            vec![HirExpr::Lit(HirLit::Str("globalThis".into()))],
+                                            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_THIS.into()))],
                                         ),
                                         HirExpr::Lit(HirLit::Str(class_constructor_bridge_name(class_name))),
                                         bridge,
@@ -230,7 +230,7 @@ fn lower_top_level_initializers(
                                     vec![
                                         HirExpr::Call(
                                             Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                                            vec![HirExpr::Lit(HirLit::Str("globalThis".into()))],
+                                            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_THIS.into()))],
                                         ),
                                         HirExpr::Lit(HirLit::Str(name)),
                                         bridge,
@@ -1186,7 +1186,7 @@ fn class_value_js_script(declaration: &swc_ecma_ast::ClassDecl, class_tokens: &H
 fn class_decorator_token_init(lowerer: &mut FnLowerer<'_>) -> Result<HirExpr, String> {
     let constructor = HirExpr::Call(
         Box::new(HirExpr::Var("getDynamicValue".to_string())),
-        vec![HirExpr::Lit(HirLit::Str("Function".to_string()))],
+        vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_FUNCTION.into()))],
     );
     let no_args = lowerer.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(Vec::new()))?;
     Ok(HirExpr::Call(

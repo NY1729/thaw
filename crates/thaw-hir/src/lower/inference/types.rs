@@ -1630,7 +1630,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     "__thaw_error_message"
                     | "__thaw_error_name"
-                    | "__thaw_error_constructor_name"
+                    | crate::compiler_helpers::ERROR_CONSTRUCTOR_NAME
                     | "__thaw_error_cause"
                     | "__thaw_error_code"
                     | "__thaw_error_stack"
@@ -2720,7 +2720,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         return self.infer_expr_type(value);
                     }
-                    "__thaw_json_undefined" | "__thaw_json_null" => {
+                    crate::compiler_helpers::JSON_UNDEFINED | "__thaw_json_null" => {
                         if !args.is_empty() {
                             return Err(format!("{name} expects no operands"));
                         }
@@ -2785,7 +2785,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Json);
                     }
-                    "__thaw_json_host_from_dynamic" => {
+                    crate::compiler_helpers::JSON_HOST_FROM_DYNAMIC => {
                         let [value] = args.as_slice() else {
                             return Err("live JSON host conversion expects one handle".into());
                         };
@@ -3090,7 +3090,7 @@ impl<'a> FnLowerer<'a> {
                     "getDynamicValue" => return Ok(HirType::JsValue),
                     "callDynamicValue" => return Ok(HirType::Json),
                     "callNativeAddonValue" => return Ok(HirType::Json),
-                    "callDynamicValueHandle" | "__thaw_to_iterator_exact" | "__thaw_to_async_iterator_exact" =>
+                    "callDynamicValueHandle" | crate::compiler_helpers::TO_ITERATOR_EXACT | "__thaw_to_async_iterator_exact" =>
                         return Ok(HirType::JsValue),
                     "resolveDynamicValue" => return Ok(HirType::JsValue),
                     "callDynamicValueWithValue" => return Ok(HirType::Json),
@@ -3116,7 +3116,7 @@ impl<'a> FnLowerer<'a> {
                     // data -- see `lower_dynamic_value_method_call`'s doc
                     // comment for how a call chooses between the two.
                     "callDynamicMethodHandle" | "callDynamicMethodHandleRaw"
-                    | "__thaw_call_selected_dynamic_method_handle"
+                    | crate::compiler_helpers::CALL_SELECTED_DYNAMIC_METHOD_HANDLE
                     | "__thaw_call_selected_dynamic_method_raw"
                     | "__thaw_call_selected_static_method_handle"
                     | "__thaw_call_selected_static_method_raw" => {
