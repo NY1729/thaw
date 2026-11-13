@@ -30,6 +30,8 @@ const HOST_ONLY: &[&str] = &[
     "EventTarget",
     "Event",
     "performance",
+    "navigator",
+    "Navigator",
 ];
 
 /// Globals every context shares with the host instead of building its own.

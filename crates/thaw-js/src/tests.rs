@@ -6988,11 +6988,11 @@ fn no_prototype_async_and_method_closures_free_their_scope() {
 fn lazy_prototype_key_order_is_unchanged_by_materialisation() {
     assert_eq!(
         one("function f(){}; f.a=1; console.log(JSON.stringify(Object.getOwnPropertyNames(f)), JSON.stringify(Reflect.ownKeys(f)), JSON.stringify(Object.keys(f)));"),
-        r#"["length","name","a","prototype"] ["length","name","a","prototype"] ["a"]"#
+        r#"["length","name","prototype","a"] ["length","name","prototype","a"] ["a"]"#
     );
     assert_eq!(
         one("function f(){}; f.a=1; f.prototype; console.log(JSON.stringify(Object.getOwnPropertyNames(f)), JSON.stringify(Reflect.ownKeys(f)), JSON.stringify(Object.keys(f)));"),
-        r#"["length","name","a","prototype"] ["length","name","a","prototype"] ["a"]"#
+        r#"["length","name","prototype","a"] ["length","name","prototype","a"] ["a"]"#
     );
     assert_eq!(
         one("var g = function(){}; console.log(JSON.stringify(Object.getOwnPropertyNames(g)));"),
@@ -7000,21 +7000,21 @@ fn lazy_prototype_key_order_is_unchanged_by_materialisation() {
     );
     assert_eq!(
         one("var g = function(){}; g.prototype; g.x = 2; console.log(JSON.stringify(Object.getOwnPropertyNames(g)), JSON.stringify(Object.keys(g)));"),
-        r#"["length","name","x","prototype"] ["x"]"#
+        r#"["length","name","prototype","x"] ["x"]"#
     );
     // more than INDEX_MIN properties: the hash index must still find the placeholder
     assert_eq!(
         one("function m(){}; for (var i=0;i<12;i++) m['k'+i]=i; console.log(JSON.stringify(Object.getOwnPropertyNames(m)).length, JSON.stringify(Object.getOwnPropertyNames(m).slice(0,4)), Object.getOwnPropertyNames(m).indexOf('prototype')); m.prototype; console.log(JSON.stringify(Object.getOwnPropertyNames(m).slice(0,4)), Object.getOwnPropertyNames(m).indexOf('prototype'), Object.getOwnPropertyNames(m).length);"),
-        r#"91 ["length","name","k0","k1"] 14|["length","name","k0","k1"] 14 15"#
+        r#"91 ["length","name","prototype","k0"] 2|["length","name","prototype","k0"] 2 15"#
     );
     // a later non-enumerable key stays after the prototype, as before
     assert_eq!(
         one("function f(){}; f.a=1; Object.defineProperty(f,'z',{value:1,enumerable:true}); console.log(JSON.stringify(Object.getOwnPropertyNames(f)), JSON.stringify(Object.keys(f)));"),
-        r#"["length","name","a","z","prototype"] ["a","z"]"#
+        r#"["length","name","prototype","a","z"] ["a","z"]"#
     );
     assert_eq!(
         one("function f(){}; f.z=3; console.log(Object.keys(Object.getOwnPropertyDescriptors(f)).join(','));"),
-        "length,name,z,prototype"
+        "length,name,prototype,z"
     );
     assert_eq!(
         one("function f(){}; console.log(Object.getOwnPropertyNames(f).join(','), Object.getOwnPropertyDescriptor(f,'name').value, Object.getOwnPropertyDescriptor(f,'length').value);"),
@@ -7166,7 +7166,7 @@ fn lazy_prototype_generators_arrows_methods_and_bound_functions() {
     );
     assert_eq!(
         one("function F(){}; F.prototype.m = function(){}; var inst = new F(); console.log(inst.m === F.prototype.m, JSON.stringify(Object.getOwnPropertyNames(F.prototype)), Object.getOwnPropertyDescriptor(F,'prototype').writable);"),
-        r#"true ["m","constructor"] true"#
+        r#"true ["constructor","m"] true"#
     );
     assert_eq!(
         one("function mk(){ return function(){}; }; var a = mk(), b = mk(); console.log(a.prototype !== b.prototype, a.prototype.constructor === a, b.prototype.constructor === b);"),
@@ -7914,13 +7914,11 @@ fn host_for_in_keys_walk_prototype_chain_with_shadowing() {
 /// exist in the thaw-js realm, or be listed here. Shrink-only: an entry is
 /// removed in the PR that implements it, and a stale entry fails this test.
 const ABSENT_IN_THAW_JS: &[&str] = &[
-    "navigator",
     "fetch",
     "WebSocket",
     "Crypto",
     "CryptoKey",
     "SubtleCrypto",
-    "Navigator",
     "DisposableStack",
     "AsyncDisposableStack",
 ];

@@ -154,7 +154,12 @@ impl Interp {
                         proto_scope.clone()
                     };
                     let key = self.prop_name(&cm.key, &mscope)?;
-                    let f = self.method_value(Some(key.clone()), &cm.function, &mscope)?;
+                    let shown: Rc<str> = match cm.kind {
+                        a::MethodKind::Getter => format!("get {key}").into(),
+                        a::MethodKind::Setter => format!("set {key}").into(),
+                        a::MethodKind::Method => key.clone(),
+                    };
+                    let f = self.method_value(Some(shown), &cm.function, &mscope)?;
                     match cm.kind {
                         a::MethodKind::Method => put_hidden(target, &key, f),
                         a::MethodKind::Getter => {
@@ -181,7 +186,11 @@ impl Interp {
                         proto_scope.clone()
                     };
                     let key: Rc<str> = format!("@@priv:{}", &*pm.key.name).into();
-                    let shown: Rc<str> = format!("#{}", &*pm.key.name).into();
+                    let shown: Rc<str> = match pm.kind {
+                        a::MethodKind::Getter => format!("get #{}", &*pm.key.name).into(),
+                        a::MethodKind::Setter => format!("set #{}", &*pm.key.name).into(),
+                        a::MethodKind::Method => format!("#{}", &*pm.key.name).into(),
+                    };
                     let f = self.method_value(Some(shown), &pm.function, &mscope)?;
                     match pm.kind {
                         a::MethodKind::Method => put_hidden(target, &key, f),
