@@ -536,3 +536,31 @@ fn routed_typed_quickjs_call_names_its_site_in_the_blockers() {
         ["site:typed_calls:quickjs_backend".to_string()]
     );
 }
+
+#[test]
+fn routed_async_main_drives_thaw_js_and_releases_its_completion_only_once_settled() {
+    let module = thaw_parser::parse_typescript(
+        "declare function __thaw_typed_tjs_6d733a3a6d73(value: string, scale: number): Json;
+         async function main(): Promise<void> { console.log(__thaw_typed_tjs_6d733a3a6d73(\"2 days\", 1)); }",
+    )
+    .unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_async_main_release");
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(compiler.uses_thaw_js() && !compiler.uses_quickjs(), "{ir}");
+    let entry = &ir[ir.find("define i32 @main(").unwrap_or_else(|| panic!("no entry: {ir}"))..];
+    let destroy = entry
+        .find("@thaw_promise_destroy(")
+        .unwrap_or_else(|| panic!("async main never releases its completion: {ir}"));
+    let event_loop = entry
+        .find("@thaw_tjs_run_event_loop(")
+        .unwrap_or_else(|| panic!("routed async main has no thaw-js event loop call: {ir}"));
+    assert!(event_loop < destroy, "thaw-js must run before the completion is released: {ir}");
+    let guard = entry[..destroy]
+        .rfind("@thaw_promise_state(")
+        .unwrap_or_else(|| panic!("completion is released without a settled-state check: {ir}"));
+    assert!(entry[guard..destroy].contains("br i1"), "the release must be conditional on the state: {ir}");
+}
