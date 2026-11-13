@@ -108,7 +108,7 @@ fn builtin_table_descriptors_match_node_and_missing_list_is_exact() {
                     };
                     let got_name = own(f, "name")
                         .as_ref()
-                        .and_then(|p| data(p))
+                        .and_then(data)
                         .as_ref()
                         .and_then(text);
                     let got_len = own(f, "length").as_ref().and_then(data);
@@ -227,8 +227,6 @@ fn builtin_names_lengths_and_native_text_match_node() {
     let expected = "bound max\n1\nget size\nvalues\ntrue\nentries\nfunction hasOwn() { [native code] }\nlength,name\n{\"value\":\"max\",\"writable\":false,\"enumerable\":false,\"configurable\":true}\n{\"value\":2,\"writable\":false,\"enumerable\":false,\"configurable\":true}";
     assert_eq!(it.out.join("\n"), expected);
 }
-
-/// Startup cost of `Interp::new()` (run with `--ignored --nocapture`; not a pass/fail check).
 
 /// Startup cost of `Interp::new()` (run with `--ignored --nocapture`; not a pass/fail check).
 #[test]
