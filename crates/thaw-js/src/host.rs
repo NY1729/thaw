@@ -695,10 +695,11 @@ pub extern "C" fn thaw_tjs_release_handle(handle: i64) -> u8 {
 /// or create handles, so the scan repeats until none is live. Returns the number released.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_release_all_handles() -> u64 {
-    // one thaw-js Error per native id is a live reference too
+    // one thaw-js Error per native id, and each thrown carrier's packet, are live references too
     PACKAGES.with(|ps| {
         for package in ps.borrow_mut().iter_mut().flatten() {
             package.interp.native_errors.clear();
+            package.interp.native_packets.clear();
         }
     });
     let mut released = 0;
@@ -1582,6 +1583,12 @@ pub extern "C" fn thaw_tjs_get_property_exact_result(
 #[no_mangle]
 pub extern "C" fn thaw_tjs_exception_native_token(handle: u64) -> u64 {
     on_handle(handle, |p, _owner, v| {
+        // the carrier's own packet first: it stays live through `native_packets`, unlike an identity lookup
+        if let Ok(Value::Number(n)) = p.interp.get(&v, PACKET_KEY) {
+            if n >= 1.0 && thaw_arena::exception::is_live(n as u64) {
+                return Ok(n as u64);
+            }
+        }
         let id = match p.interp.get(&v, NATIVE_ID_KEY) {
             Ok(Value::Number(n)) if n >= 1.0 => n as usize,
             _ => 0,
@@ -3878,19 +3885,46 @@ fn callback_value(it: &mut Interp, id: usize) -> Value {
 
 /// Rebuild a thrown error from the compiled side's `\u{1}Name\u{1}message` framing.
 pub(crate) fn tagged_error(it: &mut Interp, tagged: &str) -> Ctl {
-    match error_object(it, tagged) {
+    match error_object(it, tagged, None) {
         Ok(err) => Ctl::Throw(err),
+        Err(c) => c,
+    }
+}
+
+/// The thrown value of a callback's error result. With a native packet it is a carrier: the Error takes the
+/// packet's native identity as its id hint, names the packet in a hidden `\0pkt`, and the interpreter retains
+/// the packet until `thaw_tjs_release_all_handles`, so the native side still resolves it by token.
+fn packet_error(
+    it: &mut Interp,
+    packet: Option<Rc<thaw_arena::exception::ExceptionPacket>>,
+    tagged: &str,
+) -> Ctl {
+    let hint = packet
+        .as_deref()
+        .map(|p| p.native_error_identity as u64)
+        .filter(|&id| id != 0);
+    match error_object(it, tagged, hint) {
+        Ok(err) => {
+            if let (Some(packet), Value::Object(o)) = (packet, &err) {
+                crate::put_hidden(o, PACKET_KEY, Value::Number(packet.id as f64));
+                it.native_packets.insert(packet.id, packet);
+            }
+            Ctl::Throw(err)
+        }
         Err(c) => c,
     }
 }
 
 /// Reserved bag key of a native Error's identity (`thaw_error_json_text`); kept as a hidden property.
 const NATIVE_ID_KEY: &str = "\u{0}id";
+/// Hidden property of a thrown carrier: the id of the native exception packet it was built from.
+const PACKET_KEY: &str = "\u{0}pkt";
 
 /// The error object for a framed error string (`\u{1}Name\u{1}message`, or the tagged `\u{1}Name\u{1}\u{1e}E1:..`
 /// form), with its `\u{3}code`, `\u{5}<json>` own properties and `\u{2}` cause; `Err` is what the construction
 /// raised. One object per native id: a repeat crossing of the same native Error returns the cached object.
-fn error_object(it: &mut Interp, tagged: &str) -> Result<Value, Ctl> {
+/// `id_hint` is the native id of a packet's Error when the text carries no `\0id` bag entry.
+fn error_object(it: &mut Interp, tagged: &str, id_hint: Option<u64>) -> Result<Value, Ctl> {
     let tagged = tagged.strip_prefix('\u{2}').unwrap_or(tagged);
     // a native error token (`\u{1}Name\u{1}\u{1e}E1:<units>:-:<message>`): the name, the message and the suffix it frames
     let framed = thaw_arena::error_wire::parse_tagged(tagged.as_bytes()).and_then(|f| {
@@ -3916,10 +3950,13 @@ fn error_object(it: &mut Interp, tagged: &str) -> Result<Value, Ctl> {
         Some(Ok(Native::Object(fields))) => fields,
         _ => Vec::new(),
     };
-    let native_id = fields.iter().find_map(|(k, v)| match v {
-        Native::Number(n) if k == NATIVE_ID_KEY && *n >= 1.0 => Some(*n as u64),
-        _ => None,
-    });
+    let native_id = fields
+        .iter()
+        .find_map(|(k, v)| match v {
+            Native::Number(n) if k == NATIVE_ID_KEY && *n >= 1.0 => Some(*n as u64),
+            _ => None,
+        })
+        .or(id_hint);
     // a cached error keeps its identity only while its name and message still match (a reused arena id
     // of another Error is not this one)
     let cached = native_id.and_then(|id| {
@@ -3997,7 +4034,7 @@ fn framed_error(it: &mut Interp, s: &str) -> Option<Value> {
     if bytes.first() != Some(&1) || !bytes[1..].contains(&1) {
         return None;
     }
-    error_object(it, s).ok()
+    error_object(it, s, None).ok()
 }
 
 fn throw_type_error<T>(it: &mut Interp, message: &str) -> R<T> {
@@ -4118,7 +4155,7 @@ pub(crate) fn take_callback_result(
         return Err(Ctl::Throw(reason));
     }
     if packet.is_some() || out.starts_with('\u{2}') {
-        return Err(tagged_error(it, &out));
+        return Err(packet_error(it, packet, &out));
     }
     Ok((!out.is_empty()).then_some(out))
 }
@@ -4459,7 +4496,7 @@ fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<
         return Err(Ctl::Throw(original));
     }
     if packet.is_some() || out.starts_with('\u{2}') {
-        return Err(tagged_error(it, &out));
+        return Err(packet_error(it, packet, &out));
     }
     if out.is_empty() {
         return Ok(Value::Undefined);

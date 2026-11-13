@@ -938,6 +938,9 @@ pub struct Interp {
     /// One thaw-js Error per native Error id: `(name, message, error)`, so a native Error that crosses
     /// twice is the same object (`error_object`).
     pub(crate) native_errors: HashMap<u64, (String, String, Value)>,
+    /// Native exception packets a thrown carrier names (`\0pkt`, host.rs `packet_error`), by packet id. The
+    /// arena keeps packets weakly, so this keeps a carrier's packet resolvable until release_all.
+    pub(crate) native_packets: HashMap<u64, Rc<thaw_arena::exception::ExceptionPacket>>,
     /// The intrinsic `Symbol` constructor, its `Symbol.for` registry and the well-known symbols, captured at
     /// realm setup (collections.rs `install_collections`), so Rust never looks `Symbol` up in the global scope.
     pub(crate) symbol_ctor: Option<Obj>,
@@ -1060,6 +1063,7 @@ impl Interp {
             yielded: false,
             callback_values: HashMap::new(),
             native_errors: HashMap::new(),
+            native_packets: HashMap::new(),
             symbol_ctor: None,
             symbol_registry: None,
             well_known: Vec::new(),

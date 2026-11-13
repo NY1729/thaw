@@ -1221,6 +1221,100 @@ fn native_error_token_round_trips_through_the_hidden_id() {
     assert_eq!(thaw_tjs_exception_native_token(made.value), 0);
 }
 
+/// A packet built from a native Error identity (`native_error_identity`), as a native throw publishes it.
+fn identified_packet(
+    identity: usize,
+    tag: i64,
+    object: usize,
+) -> thaw_arena::exception::ExceptionPacket {
+    let mut packet = primitive_exception_packet(tag, 0.0, 0, false, object);
+    packet.native_error_identity = identity;
+    packet
+}
+
+/// Runs a native throw's callback result (`text`, carrying `packet`) through `take_callback_result` on the
+/// default realm, with every outside `Rc` of the packet dropped. Returns the thrown value and its hidden
+/// `\0pkt` property.
+fn thrown_through_callback(
+    packet: thaw_arena::exception::ExceptionPacket,
+    text: &[u8],
+) -> (Value, Value) {
+    let pointer = thaw_arena::owned_string(text);
+    let (_, packet) = thaw_arena::exception::register_packet(packet).unwrap();
+    assert!(thaw_arena::bind_owned_exception(pointer, packet));
+    crate::host::with_package(crate::host::default_realm(), |p| {
+        let thrown = match crate::host::take_callback_result(&mut p.interp, pointer) {
+            Err(Ctl::Throw(v)) => v,
+            _ => panic!("expected a throw"),
+        };
+        let pkt = p
+            .interp
+            .get(&thrown, "\u{0}pkt")
+            .unwrap_or(Value::Undefined);
+        Ok((thrown, pkt))
+    })
+    .unwrap_or_else(|_| panic!("the default realm is unavailable"))
+}
+
+/// A native Error thrown through a callback keeps its packet: the carrier names it with a hidden `\0pkt`,
+/// the native token resolves to it after the caller's `Rc` is gone, and one framed native Error crossing
+/// twice is one object.
+#[test]
+fn native_error_throw_carrier_keeps_its_packet() {
+    use crate::host::{store_handle, thaw_tjs_exception_native_token};
+    let identity = 0x7f00_0020_usize;
+    let (first, pkt) =
+        thrown_through_callback(identified_packet(identity, 4, 0), b"\x02\x01Error\x01boom");
+    let Value::Number(id) = pkt else {
+        panic!("the thrown carrier has no hidden \\0pkt");
+    };
+    let id = id as u64;
+    assert!(thaw_arena::exception::is_live(id));
+    let handle = store_handle(crate::host::default_realm(), first.clone()) as u64;
+    assert_eq!(thaw_tjs_exception_native_token(handle), id);
+    let (second, _) =
+        thrown_through_callback(identified_packet(identity, 4, 0), b"\x02\x01Error\x01boom");
+    assert!(
+        matches!((&first, &second), (Value::Object(a), Value::Object(b)) if Rc::ptr_eq(a, b)),
+        "the same native Error must be the same thrown object"
+    );
+}
+
+/// An untracked plain object thrown from a native callback keeps a live packet on its placeholder carrier,
+/// so the native side can restore the original value by token.
+#[test]
+fn native_thrown_object_carrier_names_its_packet() {
+    use crate::host::{store_handle, thaw_tjs_exception_native_token};
+    let (thrown, pkt) = thrown_through_callback(
+        primitive_exception_packet(7, 0.0, 0, false, 0x1234),
+        b"\x02[native exception value]",
+    );
+    assert!(matches!(thrown, Value::Object(_)));
+    let Value::Number(id) = pkt else {
+        panic!("the thrown carrier has no hidden \\0pkt");
+    };
+    let id = id as u64;
+    assert!(thaw_arena::exception::is_live(id));
+    let handle = store_handle(crate::host::default_realm(), thrown) as u64;
+    assert_eq!(thaw_tjs_exception_native_token(handle), id);
+}
+
+/// A packet retained by a thrown carrier is released by `thaw_tjs_release_all_handles`.
+#[test]
+fn release_all_drops_packets_retained_by_thrown_carriers() {
+    let (_, pkt) = thrown_through_callback(
+        identified_packet(0x7f00_0030, 4, 0),
+        b"\x02\x01Error\x01gone",
+    );
+    let Value::Number(id) = pkt else {
+        panic!("the thrown carrier has no hidden \\0pkt");
+    };
+    let id = id as u64;
+    assert!(thaw_arena::exception::is_live(id));
+    crate::host::thaw_tjs_release_all_handles();
+    assert!(!thaw_arena::exception::is_live(id));
+}
+
 /// Node 22.23.1: `Object.keys(e)` is `["extra"]`, `JSON.stringify(e)` is `{"extra":1}` and the cause
 /// is a non-enumerable own data property (the source of the `keys`/`json`/`cause` checks above).
 #[test]
