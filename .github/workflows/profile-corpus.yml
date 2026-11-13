@@ -124,7 +124,7 @@ jobs:
             target/release
             target/thaw-*
           # separate key family: RUSTFLAGS differ from the bench job, so its cache would be useless here
-          key: profile-corpus-${{ runner.os }}-${{ inputs.debuginfo }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: profile-corpus-${{ runner.os }}-${{ inputs.debuginfo }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             profile-corpus-${{ runner.os }}-${{ inputs.debuginfo }}-
       - name: Build thaw CLI

@@ -58,7 +58,7 @@ LOCALE_DIR_FALLBACK = {
 
 
 def curated_locales():
-    src = open(os.path.join(REPO, "crates/thaw-quickjs/src/quickjs/intl_locale.rs")).read()
+    src = open(os.path.join(REPO, "crates/thaw-intl/src/intl_locale.rs")).read()
     m = re.search(r"const CURATED_LOCALES: &\[&str\] = &\[(.*?)\];", src, re.S)
     if not m:
         raise SystemExit("could not find CURATED_LOCALES in intl_locale.rs")

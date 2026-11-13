@@ -1,8 +1,8 @@
 //! Native (AOT, QuickJS-free) ECMA-402 subset: `String.prototype.localeCompare`,
 //! `Number.prototype.toLocaleString` and `Date.prototype.toLocale*String`.
 //!
-//! The icu4x primitives are the same source files thaw-quickjs's `Intl` polyfill
-//! uses (`include!`d below) so both hosts share one implementation; this file only
+//! The icu4x primitives (the `intl*.rs` files here, `include!`d below) are the ones the shared
+//! `Intl` polyfill reaches through the `__thaw_intl_*` natives; this file only
 //! adds the option resolution that polyfill does in JavaScript. thaw-cli links this
 //! archive only when the generated program references a `thaw_intl_*` symbol.
 //!
@@ -17,18 +17,18 @@ use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
 use thaw_arena::wtf8_decode_utf16 as arena_wtf8_decode_utf16;
 
-include!("../../thaw-quickjs/src/quickjs/intl.rs");
-include!("../../thaw-quickjs/src/quickjs/intl_time_zone_names.rs");
-include!("../../thaw-quickjs/src/quickjs/intl_locale.rs");
-include!("../../thaw-quickjs/src/quickjs/intl_datetime_skeleton.rs");
-include!("../../thaw-quickjs/src/quickjs/intl_datetime.rs");
-include!("../../thaw-quickjs/src/quickjs/intl_number.rs");
-include!("../../thaw-quickjs/src/quickjs/intl_number_style.rs");
-include!("../../thaw-quickjs/src/quickjs/intl_collator.rs");
-include!("../../thaw-quickjs/src/quickjs/intl_list.rs");
-include!("../../thaw-quickjs/src/quickjs/intl_plurals.rs");
-include!("../../thaw-quickjs/src/quickjs/intl_relative_time.rs");
-include!("../../thaw-quickjs/src/quickjs/intl_segmenter.rs");
+include!("intl.rs");
+include!("intl_time_zone_names.rs");
+include!("intl_locale.rs");
+include!("intl_datetime_skeleton.rs");
+include!("intl_datetime.rs");
+include!("intl_number.rs");
+include!("intl_number_style.rs");
+include!("intl_collator.rs");
+include!("intl_list.rs");
+include!("intl_plurals.rs");
+include!("intl_relative_time.rs");
+include!("intl_segmenter.rs");
 
 unsafe fn bytes<'a>(value: *const c_char) -> &'a [u8] {
     if value.is_null() {
@@ -511,7 +511,7 @@ pub unsafe extern "C" fn thaw_intl_date(
     to_native(&format_date(timestamp, &locale, &options, kind as i32))
 }
 
-/// The `__thaw_intl_*` natives the shared `Intl` polyfill (`thaw-quickjs`'s `platform_globals/intl.js`)
+/// The `__thaw_intl_*` natives the shared `Intl` polyfill (`thaw-js/src/web/intl.js`)
 /// feature-detects, for embedders (thaw-js) that hold JS values themselves. Every argument arrives as a
 /// string (numbers in `f64` display form, booleans as `"true"`/`"false"`); `None` = unknown name.
 /// `currencyFractionDigits` answers `""` for an unknown currency, `collator_compare` the decimal `-1/0/1`.
