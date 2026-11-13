@@ -15,7 +15,7 @@ DIFF=(python3 "$HERE/diff.py" --node-dir "$W/node" --thaw-dir "$W/thaw")
 # 1. synthetic missing member must fail the gate
 printf 'a = 1\nb = 2\n' > "$W/node/c.txt"; printf 'a = 1\n' > "$W/thaw/c.txt"
 "${DIFF[@]}" --baseline "$W/empty.json" --gaps "$W/g.json" >"$W/o1" 2>&1 ; check "missing member fails gate" 1 $?
-grep -q 'MISSING' "$W/o1" && grep -q 'c::b' "$W/o1" || { echo "FAIL report does not name c::b"; fail=1; }
+grep -q 'MISSING' "$W/o1" && grep -q 'c::b' "$W/o1" || { echo "FAIL report does not name c::c.b"; fail=1; }
 python3 -c "import json,sys; g=json.load(open('$W/g.json'))['gaps']; assert [x['id'] for x in g]==['c::b'] and g[0]['kind']=='MISSING'" && echo "ok   gaps.json records c::b MISSING" || { echo "FAIL gaps.json content"; fail=1; }
 
 # 2. the same gap, recorded in a baseline, passes
@@ -49,6 +49,25 @@ printf 'a = 1\nb = 2\n' > "$W/thaw/c.txt"
 printf 'a = 1\n' > "$W/thaw/c.txt"
 printf '{"gaps":[]}\n' > "$W/rec2.json"
 "${DIFF[@]}" --baseline "$W/rec2.json" >/dev/null 2>&1 ; check "gap not in baseline fails again" 1 $?
+
+# 7. --blocks: `@@ name` delimited blocks, values may span lines
+BDIFF=("${DIFF[@]}" --blocks --baseline "$W/empty.json")
+rm -f "$W"/node/*.txt "$W"/thaw/*.txt "$W/rec.json" "$W/rec2.json"
+printf '@@ c.a\nclass K {\n  constructor(...a){\n  }\n}\n@@ c.b\n[ 1,\n  2 ]\n@@ c.c\nplain\n' > "$W/node/c.txt"
+printf '@@ c.a\nclass K {\n  constructor(...a){\n  }\n}   \n@@ c.b\n[ 1,\n  2 ]\n\n@@ c.c\nplain\n' > "$W/thaw/c.txt"
+"${BDIFF[@]}" >/dev/null 2>&1 ; check "multi-line identical blocks pass (trailing ws ignored)" 0 $?
+printf '@@ c.a\nclass K {\n  constructor(...a){\n  }\n}\n@@ c.b\n[ 1,\n  3 ]\n@@ c.c\nplain\n' > "$W/thaw/c.txt"
+"${BDIFF[@]}" >/dev/null 2>&1 ; check "multi-line different block fails" 1 $?
+"${BDIFF[@]}" >"$W/ob" 2>&1; grep -q 'DIFFERENT' "$W/ob" && grep -q 'c::c.b' "$W/ob" || { echo "FAIL block report does not name c::c.b DIFFERENT"; fail=1; }
+printf '@@ c.a\nclass K {\n  constructor(...a){\n  }\n}\n@@ c.c\nplain\n' > "$W/thaw/c.txt"
+"${BDIFF[@]}" >"$W/ob" 2>&1 ; check "missing block fails" 1 $?
+grep -q 'MISSING' "$W/ob" && grep -q 'c::c.b' "$W/ob" || { echo "FAIL block report does not name c::c.b MISSING"; fail=1; }
+printf '@@ c.a\nx\n@@ c.a\nx\n' > "$W/thaw/c.txt"
+"${BDIFF[@]}" >/dev/null 2>&1 ; check "duplicate block is harness error" 2 $?
+printf 'THROW TypeError: multi\nline message\n' > "$W/node/t.txt"
+rm -f "$W/node/c.txt" "$W/thaw/c.txt"; printf '@@ t.x\nTHROW TypeError: a\nmore\n' > "$W/node/t.txt"; printf '@@ t.x\nTHROW TypeError: b\n' > "$W/thaw/t.txt"
+"${BDIFF[@]}" >/dev/null 2>&1 ; check "block THROW message text ignored" 0 $?
+rm -f "$W/node/t.txt" "$W/thaw/t.txt"
 
 if [ $fail -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit $fail

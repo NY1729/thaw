@@ -4,6 +4,12 @@
 Inputs are two directories holding one `<corpus>.txt` per corpus. Each probe is a
 line `name = value`; a line without ` = ` is a raw probe keyed by the whole line.
 
+--blocks: each probe is a block that starts with a header line `@@ <name>`; the block is every
+following line up to the next header (so a value may span several lines). Block value = its lines
+with trailing whitespace removed and trailing blank lines dropped, joined with `\n`. A THROW block is
+compared by its first line only (messages differ by engine, the error name does not). Lines before
+the first header are ignored.
+
 Gaps:
   MISSING    probe in node output, absent from thaw output
   DIFFERENT  present in both, normalised values differ
@@ -28,6 +34,42 @@ def normalise(value):
     for rx, rep in NORMALISERS:
         v = rx.sub(rep, v)
     return v
+
+BLOCK_HEADER = '@@ '
+
+def block_normalise(value):
+    """Block values keep their line structure; only the masks apply, per line."""
+    if value.startswith('THROW '):
+        return normalise(value.split('\n', 1)[0])
+    lines = []
+    for line in value.split('\n'):
+        for rx, rep in NORMALISERS:
+            line = rx.sub(rep, line)
+        lines.append(line)
+    return '\n'.join(lines)
+
+def load_blocks(path):
+    probes, name, lines = {}, None, []
+    def close():
+        if name is None:
+            return
+        while lines and not lines[-1].strip():
+            lines.pop()
+        value = '\n'.join(l.rstrip() for l in lines)
+        if name in probes:
+            sys.stderr.write(f'harness error: duplicate probe {name!r} in {path}\n')
+            sys.exit(2)
+        probes[name] = value
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for raw in fh:
+            line = raw.rstrip('\n')
+            if line.startswith(BLOCK_HEADER):
+                close()
+                name, lines = line[len(BLOCK_HEADER):], []
+            elif name is not None:
+                lines.append(line)
+    close()
+    return probes
 
 def load(path):
     probes = {}
@@ -65,7 +107,11 @@ def main():
     ap.add_argument('--write-baseline', action='store_true')
     ap.add_argument('--gaps', help='where to write the gaps.json report')
     ap.add_argument('--skip', help='file of regexes; matching probe names are dropped from both sides')
+    ap.add_argument('--blocks', action='store_true',
+                    help='probes are `@@ <name>` delimited blocks that may span lines (see module doc)')
     args = ap.parse_args()
+    read = load_blocks if args.blocks else load
+    norm = block_normalise if args.blocks else normalise
 
     skips = load_skips(args.skip)
     node_files = sorted(glob.glob(os.path.join(args.node_dir, '*.txt')))
@@ -76,9 +122,9 @@ def main():
     gaps, counts, skipped = [], {}, 0
     for npath in node_files:
         corpus = os.path.basename(npath)[:-4]
-        node = load(npath)
+        node = read(npath)
         tpath = os.path.join(args.thaw_dir, corpus + '.txt')
-        thaw = load(tpath) if os.path.exists(tpath) else {}
+        thaw = read(tpath) if os.path.exists(tpath) else {}
         c = {'probes': 0, 'MISSING': 0, 'DIFFERENT': 0, 'EXTRA': 0}
         for name in node:
             if any(p.search(name) for p in skips):
@@ -87,7 +133,7 @@ def main():
             c['probes'] += 1
             if name not in thaw:
                 kind, t = 'MISSING', '<no line>'
-            elif normalise(thaw[name]) != normalise(node[name]):
+            elif norm(thaw[name]) != norm(node[name]):
                 kind, t = 'DIFFERENT', thaw[name]
             else:
                 continue
@@ -117,7 +163,8 @@ def main():
         status = 'known' if g['id'] in baseline_ids else 'NEW'
         if args.write_baseline:
             status = '-'
-        print(f'{status:<8}{g["kind"]:<11}{g["id"][:58]:<60}{g["node"][:38]:<40}{g["thaw"][:60]}')
+        flat = lambda v: v.replace('\n', '\\n')   # block values may span lines; keep one table row
+        print(f'{status:<8}{g["kind"]:<11}{g["id"][:58]:<60}{flat(g["node"])[:38]:<40}{flat(g["thaw"])[:60]}')
     print()
     print(f'gaps: {len(gaps)}  baseline: {len(baseline_ids)}  new: {len(new)}  fixed since baseline: {len(fixed)}')
     if fixed:

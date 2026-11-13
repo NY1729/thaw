@@ -11,8 +11,10 @@ Why chunks: thaw is a typed compiler, so one compile error stops a whole program
 to an undeclared global is `unknown variable`, a compile error by design). With N probes per program,
 a bad probe only hides its own chunk, not the whole matrix.
 
-Every probe prints one line `name = result` (a throw prints `name = THROW <Name>: <message>`),
-so diff.py compares the concatenated stdouts directly (node/matrix.txt vs thaw/matrix.txt).
+Every probe prints a header line `@@ <name>` and then its result with one console.log (a throw prints
+`THROW <Name>: <message>`). The result may span several lines (console.log of a class or function prints its
+source), so diff.py --blocks delimits probes by the `@@ ` headers instead of by line.
+The concatenated stdouts (node/matrix.txt vs thaw/matrix.txt) are compared with `diff.py --blocks`.
 
 Families (plan-q9-systematic-parity.md sections 2 and 3, H2):
   F3  handle 0 / absent globals: each name x {typeof, === undefined, == null, String(), truthiness}
@@ -65,8 +67,8 @@ VALUES = [
 ]
 # (id, template over v). console containers go through console.log's own formatter (native printer under
 # test); string containers are one line by construction. A throwing container is a probe result.
-# process.versions and Timeout print over several lines in node under console.log, which would break
-# one-line-per-probe, so they only get the string containers.
+# process.versions and Timeout print over several lines in node under console.log; they only get the string
+# containers (their one-line string forms are easier to read in a diff, not needed for delimiting).
 WIDE = "{ breakLength: Infinity }"
 CONSOLE_CONTAINERS = [
     ("bare", "v"),
@@ -137,8 +139,9 @@ def iife(body):
 
 
 def probe(name, body):
-    return (f'try {{ console.log("{name} =", {iife(body)}); }} '
-            f'catch (e: any) {{ console.log("{name} =", "THROW", e.name + ": " + e.message); }}')
+    return (f'console.log("@@ {name}"); '
+            f'try {{ console.log({iife(body)}); }} '
+            f'catch (e: any) {{ console.log("THROW", e.name + ": " + e.message); }}')
 
 
 def build_probes():
@@ -204,6 +207,7 @@ def render_chunk(chunk):
           + "}\n")
     js = to_js(ts) + "\nmain();\n"
     assert ts.count("try {") == len(chunk) and js.count("try {") == len(chunk)
+    assert ts.count('console.log("@@ ') == len(chunk) and js.count('console.log("@@ ') == len(chunk)
     return ts, js
 
 
