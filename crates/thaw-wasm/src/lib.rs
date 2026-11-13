@@ -4,6 +4,7 @@
 //! embedder (thaw-js) can keep ids in its own tables without holding wasmi
 //! types. Host imports call back through [`HostCallbacks`].
 
+mod defined_memory;
 mod error;
 mod memory;
 #[cfg(feature = "wasi")]
@@ -145,16 +146,34 @@ pub struct Module {
     imports: Vec<ImportDesc>,
     exports: Vec<ExportDesc>,
     custom: Vec<(String, Vec<u8>)>,
+    /// Limits of the module's own memory when it was rewritten to import a
+    /// memory the embedder creates (see `defined_memory`).
+    hidden_memory: Option<(u32, Option<u32>)>,
 }
 
 impl Module {
     /// Validates and compiles binary wasm. Text input is rejected like Node does.
     pub fn compile(engine: &Engine, bytes: &[u8]) -> Result<Self, CompileError> {
         check_header(bytes)?;
-        let inner = wasmi::Module::new(&engine.inner, bytes)
+        let original = wasmi::Module::new(&engine.inner, bytes)
             .map_err(|e| CompileError::new(e.to_string()))?;
+        // A defined memory becomes an import of the embedder's memory. Fall back
+        // to wasmi's own memory if the rewrite does not apply or does not compile.
+        let rewritten = defined_memory::externalize(bytes, &original).and_then(|r| {
+            let limits = (r.min, r.max);
+            wasmi::Module::new(&engine.inner, &r.bytes)
+                .ok()
+                .map(|module| (module, limits))
+        });
+        let (inner, hidden_memory) = match rewritten {
+            Some((module, limits)) => (module, Some(limits)),
+            None => (original, None),
+        };
         let imports = inner
             .imports()
+            .filter(|import| {
+                hidden_memory.is_none() || import.module() != defined_memory::HIDDEN_MODULE
+            })
             .map(|import| ImportDesc {
                 module: import.module().to_string(),
                 name: import.name().to_string(),
@@ -185,6 +204,7 @@ impl Module {
             imports,
             exports,
             custom,
+            hidden_memory,
         })
     }
 
@@ -646,6 +666,15 @@ impl Store {
                 ),
             }));
         }
+        // The hidden memory import (see `defined_memory`) is backed by a memory the
+        // store creates, so the embedder can share its bytes.
+        let hidden = match module.hidden_memory {
+            Some((min, max)) => Some(
+                self.new_memory(min, max)
+                    .map_err(|e| link_error(false, e))?,
+            ),
+            None => None,
+        };
         let mut linker = wasmi::Linker::<HostState>::new(&self.inner.engine().clone());
         #[cfg(feature = "wasi")]
         if wasi {
@@ -653,6 +682,17 @@ impl Store {
         }
         #[cfg(not(feature = "wasi"))]
         let _ = wasi;
+
+        if let Some(id) = hidden {
+            let memory = wasmi::Extern::Memory(self.mem(id));
+            linker
+                .define(
+                    defined_memory::HIDDEN_MODULE,
+                    defined_memory::HIDDEN_FIELD,
+                    memory,
+                )
+                .map_err(|e| link_error(false, e.to_string()))?;
+        }
 
         for (index, (desc, import)) in module.imports.iter().zip(imports).enumerate() {
             let is_wasi = cfg!(feature = "wasi") && wasi && desc.module == "wasi_snapshot_preview1";

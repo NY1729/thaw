@@ -351,7 +351,7 @@ fn externref_handles_round_trip() {
 }
 
 #[test]
-fn module_defined_memory_is_wasm_owned() {
+fn module_defined_memory_is_shared() {
     let engine = Engine::default();
     let module = compile(&engine, &asm::defined_memory_module());
     let mut store = Store::new(&engine);
@@ -360,9 +360,10 @@ fn module_defined_memory_is_wasm_owned() {
         panic!("memory export")
     };
     assert_eq!(store.memory_pages(mem), 1);
-    assert!(
-        store.memory_buffer(mem).is_none(),
-        "no shared buffer for module-defined memory yet"
+    assert_eq!(
+        store.memory_buffer(mem).map(|b| b.borrow().len()),
+        Some(65536),
+        "module-defined memory is shared (see defined_memory.rs)"
     );
     assert_eq!(store.with_memory_bytes(mem, |bytes| bytes.len()), 65536);
     let load = func(&store, instance, "load");
