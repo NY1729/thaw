@@ -919,6 +919,9 @@ pub(crate) fn graph_token(
             Ok(Value::str(&crate::builtins::units_str(&units)))
         }
         ("r", Native::Number(i)) => graph_node(it, *i as usize, nodes, cx),
+        ("bi", Native::Str(decimal)) => Ok(Value::BigInt(Rc::new(
+            crate::bigint::parse_bigint(decimal).ok_or("malformed graph bigint")?,
+        ))),
         _ => Err(format!("unsupported graph token `{key}`")),
     }
 }
@@ -1582,6 +1585,9 @@ impl WireOut {
                 crate::builtins::json_quote(s, &mut q);
                 format!("{{\"v\":{q}}}")
             }
+            Value::BigInt(_) if !self.plain => {
+                format!("{{\"bi\":\"{}\"}}", it.to_str(&v))
+            }
             Value::BigInt(_) => {
                 return Err(HostError::Thrown(
                     "TypeError: Do not know how to serialize a BigInt".into(),
@@ -1973,6 +1979,26 @@ pub(crate) fn json_key(key_json: *const c_char) -> Result<String, String> {
     }
 }
 
+/// Host-side `target[key] = value` under strict mode (compiled code is strict): a write to a frozen object
+/// or a new key on a non-extensible one throws, where `Interp::set` silently ignores it.
+fn strict_host_set(it: &mut Interp, target: &Value, key: &str, value: Value) -> R<()> {
+    if let Value::Object(o) = target {
+        if o.frozen.get() {
+            return it.throw_error(
+                "TypeError",
+                &format!("Cannot assign to read only property '{key}' of object"),
+            );
+        }
+        if o.ext.get() != 0 && crate::find_in_chain(o, key).is_none() {
+            return it.throw_error(
+                "TypeError",
+                &format!("Cannot add property {key}, object is not extensible"),
+            );
+        }
+    }
+    it.set(target, key, value)
+}
+
 /// `handle[key] = value` with the key as JSON text and the value a graph wire; the result value is 1.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_set_property_graph_result(
@@ -1985,7 +2011,7 @@ pub extern "C" fn thaw_tjs_set_property_graph_result(
         let (_, value) = decode_wire(&cstr(graph_json).ok_or("invalid graph")?)?;
         on_handle(handle, |p, _, target| {
             let it = &mut p.interp;
-            it.set(&target, &key, value).map_err(|c| classify(it, c))?;
+            strict_host_set(it, &target, &key, value).map_err(|c| classify(it, c))?;
             Ok(1)
         })
     })())
@@ -2072,7 +2098,7 @@ pub extern "C" fn thaw_tjs_set_property_result(
         let value = on_handle(value_handle, |_, _, v| Ok(v))?;
         on_handle(handle, |p, _, target| {
             let it = &mut p.interp;
-            it.set(&target, &name, value).map_err(|c| classify(it, c))?;
+            strict_host_set(it, &target, &name, value).map_err(|c| classify(it, c))?;
             Ok(1)
         })
     })())
@@ -3029,8 +3055,7 @@ pub extern "C" fn thaw_tjs_set_property_json_graph_result(
                 .into_iter()
                 .next()
                 .unwrap_or(Value::Undefined);
-            it.set(&target, &name, value.clone())
-                .map_err(|c| classify(it, c))?;
+            strict_host_set(it, &target, &name, value.clone()).map_err(|c| classify(it, c))?;
             let mut out = WireOut {
                 owner,
                 plain: false,
@@ -5942,6 +5967,26 @@ mod handle_call_kind_tests {
         }
         let undefined = Value::Undefined;
         assert!(check_handle_callable(&mut it, &undefined).is_err());
+    }
+}
+
+#[cfg(test)]
+mod strict_host_set_tests {
+    use super::*;
+
+    #[test]
+    fn host_set_on_a_frozen_object_throws_and_keeps_the_value() {
+        let mut it = Interp::new();
+        let obj = it.run("Object.freeze({value: 1})").unwrap();
+        assert!(strict_host_set(&mut it, &obj, "value", Value::Number(99.0)).is_err());
+        assert!(matches!(it.get(&obj, "value"), Ok(Value::Number(n)) if n == 1.0));
+    }
+
+    #[test]
+    fn typeof_function_prototype_is_function() {
+        let mut it = Interp::new();
+        let kind = it.run("typeof Function.prototype").unwrap();
+        assert_eq!(it.to_str(&kind).to_string(), "function");
     }
 }
 
