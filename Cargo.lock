@@ -3180,6 +3180,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "thaw-inspect"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "thaw-intl"
 version = "0.1.0"
 dependencies = [
@@ -3419,6 +3426,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thaw-arena",
+ "thaw-inspect",
  "thaw-runtime",
  "ureq",
 ]
