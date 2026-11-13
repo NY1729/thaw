@@ -186,12 +186,13 @@ fn run_one_native_timer() -> bool {
             // A one-shot is gone before its callback runs; `hasRef` of it is false inside.
             thaw_timer_clear(id);
         }
+        // A repeat is re-armed from the clock read before its callback runs (as Node does).
+        let start = if kind == TIMER_INTERVAL { timer_now_ms() } else { 0.0 };
         callback(context);
         if kind == TIMER_INTERVAL {
-            let now = timer_now_ms();
             // Still registered (not cleared by its own callback): schedule the next run.
             with_timer(id, |timer| {
-                timer.due = now + timer.delay;
+                timer.due = start + timer.delay;
                 timer.seq = NEXT_TIMER_ID.with(|next| {
                     let seq = next.get();
                     next.set(seq + 1);

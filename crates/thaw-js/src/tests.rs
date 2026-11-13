@@ -515,7 +515,14 @@ fn scan_reports_reachable_blockers_only() {
 
 /// Run `src` as a program (event loop included); console lines plus the exit code.
 fn main_run(src: &str) -> (Vec<String>, i32) {
+    main_run_after_gap(src, 0)
+}
+
+/// `main_run` with `gap_ms` of wall-clock time between interpreter install and the program's start
+/// (what a loaded runner can stretch: prelude work, thread descheduling).
+fn main_run_after_gap(src: &str, gap_ms: u64) -> (Vec<String>, i32) {
     let mut it = Box::new(Interp::new());
+    std::thread::sleep(std::time::Duration::from_millis(gap_ms));
     let r = it.run_main(src);
     it.flush_partial();
     match r {
@@ -631,6 +638,127 @@ fn timers_fire_in_expiry_order_and_intervals_repeat() {
          clearTimeout(setTimeout(() => console.log('never'), 2));",
     );
     assert_eq!(out.join("|"), "early|i1|i2|late");
+}
+
+#[test]
+fn timer_base_is_script_start_not_interpreter_install() {
+    // same program as timers_fire_in_expiry_order_and_intervals_repeat, but the program starts 450 ms
+    // after the interpreter was installed: its timers must count from the program's start, so the
+    // 5 ms interval still fires before the 400 ms timer
+    let (out, _) = main_run_after_gap(
+        "var n = 0; var h = setInterval(() => { console.log('i' + ++n); if (n == 2) clearInterval(h); }, 5);
+         setTimeout(() => console.log('late'), 400);
+         setTimeout(() => console.log('early'), 1);
+         clearTimeout(setTimeout(() => console.log('never'), 2));",
+        450,
+    );
+    assert_eq!(out.join("|"), "early|i1|i2|late");
+}
+
+#[test]
+fn rejected_await_timers_count_from_script_start_after_a_gap() {
+    // same program as rejected_await_in_try_catch_inside_timer_driven_async_listener, started 300 ms
+    // after install: the 150 ms follow-up is armed after the 10/20 ms listeners run, so it must
+    // still come before the 400 ms printer
+    let (out, code) = main_run_after_gap(
+        "var out = [];
+         function statLike(p) {
+           return new Promise(function (res, rej) {
+             queueMicrotask(function () {
+               if (p === 'missing') rej(Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }));
+               else res({ size: 1 });
+             });
+           });
+         }
+         var listener = async function (path) {
+           try {
+             var s = await statLike(path);
+             out.push('stat:' + s.size);
+           } catch (e) {
+             out.push('catch:' + e.code);
+             setTimeout(function () { out.push('unlink:' + path); }, 150);
+           }
+         };
+         setTimeout(function () { listener('missing'); }, 10);
+         setTimeout(function () { listener('present'); }, 20);
+         setTimeout(function () { console.log(out.join('|')); }, 400);",
+        300,
+    );
+    assert_eq!(out.join("|"), "catch:ENOENT|stat:1|unlink:missing");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn timer_start_is_the_live_clock_at_the_call() {
+    // the 2 ms timer is armed after 60 ms of busy work, so it is due 62 ms in: it runs after the
+    // 5 ms timer armed before the busy work (Node prints A B)
+    let (out, _) = main_run(
+        "var s = Date.now();
+         setTimeout(function () { console.log('A'); }, 5);
+         while (Date.now() - s < 60);
+         setTimeout(function () { console.log('B'); }, 2);",
+    );
+    assert_eq!(out.join("|"), "A|B");
+}
+
+#[test]
+fn interval_rearm_start_is_read_before_the_callback() {
+    // the interval's first run busy-waits 30 ms: its re-arm starts from the clock read before that
+    // callback (due 20 ms), so the second run precedes the 30 ms timer (Node prints iv1 iv2 t)
+    let (out, _) = main_run(
+        "var n = 0; var h = setInterval(function () {
+           console.log('iv' + ++n);
+           if (n == 1) { var s = Date.now(); while (Date.now() - s < 30); }
+           if (n == 2) clearInterval(h);
+         }, 10);
+         setTimeout(function () { console.log('t'); }, 30);",
+    );
+    assert_eq!(out.join("|"), "iv1|iv2|t");
+}
+
+#[test]
+fn interval_rearm_start_is_live_not_turn_cached() {
+    // a 1 ms timer busy-waits 400 ms in the first turn; the 2 ms interval runs after it in that same
+    // turn and re-arms from the live clock (due ~402 ms in), so the 300 ms timer runs between its two
+    // runs (Node prints iv1 t iv2). A re-arm from the turn's cached clock would be due at ~4 ms
+    let (out, _) = main_run(
+        "setTimeout(function () { var s = Date.now(); while (Date.now() - s < 400); }, 1);
+         var n = 0; var h = setInterval(function () {
+           console.log('iv' + ++n);
+           if (n == 2) clearInterval(h);
+         }, 2);
+         setTimeout(function () { console.log('t'); }, 300);",
+    );
+    assert_eq!(out.join("|"), "iv1|t|iv2");
+}
+
+#[test]
+fn timer_created_in_callback_after_busy_wait_uses_live_clock() {
+    // inside a 1 ms callback: arm a 40 ms timer, busy-wait 60 ms, then arm a 5 ms timer. The 5 ms one
+    // is due ~65 ms in, after the 40 ms timer (Node prints t40 x)
+    let (out, _) = main_run(
+        "setTimeout(function () {
+           setTimeout(function () { console.log('t40'); }, 40);
+           var s = Date.now(); while (Date.now() - s < 60);
+           setTimeout(function () { console.log('x'); }, 5);
+         }, 1);",
+    );
+    assert_eq!(out.join("|"), "t40|x");
+}
+
+#[test]
+fn refresh_uses_live_clock() {
+    // inside a 1 ms callback: arm a 20 ms timer and a 40 ms timer, busy-wait 30 ms, then refresh the
+    // 20 ms one: it is due ~51 ms in, after the 40 ms timer (Node prints b a)
+    let (out, _) = main_run(
+        "setTimeout(function () {
+           var a = setTimeout(function () { console.log('a'); }, 20);
+           setTimeout(function () { console.log('b'); }, 40);
+           var s = Date.now(); while (Date.now() - s < 30);
+           a.refresh();
+         }, 1);",
+    );
+    assert_eq!(out.join("|"), "b|a");
 }
 
 #[test]
@@ -4428,7 +4556,7 @@ fn performance_now_is_sub_millisecond_and_monotonic() {
 fn loop_stats_are_zero_before_the_loop_and_split_idle_after() {
     let (out, _) = main_run(
         "const a = __thaw_loop_stats(); console.log(a[0] === 0 && a[1] === 0);
-         // armed from a loop callback: a timer armed in the main script is scheduled from a stale rt.now
+         // armed from a loop callback
          setTimeout(() => setTimeout(() => { const s = __thaw_loop_stats(); console.log(s[1] > 0, s[0] >= 0); }, 15), 0);",
     );
     assert_eq!(out.join("|"), "true|true true");
