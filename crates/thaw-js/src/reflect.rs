@@ -426,5 +426,12 @@ impl Interp {
             it.construct_with(&target, &list, &nt)
         });
         self.global.declare("Reflect", Value::Object(r), true);
+        // namespace-like globals carry `Symbol.toStringTag` (Node prints them as `Object [Math] {}`)
+        let tag = self.well_known_key("toStringTag");
+        for name in ["Math", "JSON", "Reflect"] {
+            if let Some(Value::Object(o)) = self.lookup(&self.global.clone(), name) {
+                put_hidden(&o, &tag, Value::str(name));
+            }
+        }
     }
 }

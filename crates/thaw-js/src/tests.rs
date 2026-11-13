@@ -1805,6 +1805,23 @@ fn symbol_keyed_define_property_and_to_string_tag() {
     );
 }
 
+#[test]
+fn namespace_globals_carry_to_string_tag_and_inspect_as_tagged_objects() {
+    assert_eq!(
+        one("console.log(Object.prototype.toString.call(Math), Object.prototype.toString.call(JSON), Object.prototype.toString.call(Reflect))"),
+        "[object Math] [object JSON] [object Reflect]"
+    );
+    assert_eq!(
+        one("console.log(Math, JSON, Reflect)"),
+        "Object [Math] {} Object [JSON] {} Object [Reflect] {}"
+    );
+    assert_eq!(one("console.log([Math])"), "[ Object [Math] {} ]");
+    assert_eq!(
+        one("console.log([1, 'a', [2, { b: 3 }]])"),
+        "[ 1, 'a', [ 2, { b: 3 } ] ]"
+    );
+}
+
 // ----- static blocks (expected text recorded from Node 22) -----
 
 #[test]
