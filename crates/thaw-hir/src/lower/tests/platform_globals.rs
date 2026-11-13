@@ -66,3 +66,41 @@ fn a_user_binding_named_like_a_platform_constructor_is_not_captured() {
         "declare function makeSocket(): any; function main(): void { const WebSocket: any = makeSocket(); const socket: any = new WebSocket(); }",
     );
 }
+
+// The table must not shadow the pre-table lowering of names with a compiled model.
+
+fn lowered_debug(source: &str) -> String {
+    let module = thaw_parser::parse_typescript(source).expect("parse error");
+    format!("{:?}", lower_module(&module).expect("lowering failed"))
+}
+
+#[test]
+fn compiled_models_keep_their_lowering_under_the_table() {
+    let weak = lowered_debug(
+        "function main(): void { const target: object = { value: 1 }; const reference: WeakRef<object> = new WeakRef(target); const same: boolean = reference.deref() === target; }",
+    );
+    assert!(!weak.contains("constructDynamicValue"), "WeakRef lowered as a realm construction");
+    let typed = lowered_debug(
+        "function main(): void { const parts: string = Uint8Array.from([1, 2, 3]).join(\",\"); }",
+    );
+    assert!(!typed.contains("\"Uint8Array\""), "Uint8Array.from read through the realm global");
+    // `new Buffer(...)` has no compiled constructor: pre-table lowering rejects it, so it still does.
+    let buffer_error = lowering_error("function main(): void { const made: any = new Buffer(4); }")
+        .expect("new Buffer should not lower");
+    assert!(buffer_error.contains("`new Buffer`"), "unexpected error: {buffer_error}");
+}
+
+#[test]
+fn frozen_lists_only_name_platform_constructors_and_exclude_compiled_models() {
+    for name in platform_globals::DYNAMIC_NEW_CTORS.iter().chain(platform_globals::DYNAMIC_OPAQUE_CTORS) {
+        assert_eq!(
+            platform_globals::platform_global(name),
+            Some(platform_globals::GlobalKind::Ctor),
+            "`{name}` is frozen as a dynamic constructor but is not a table constructor"
+        );
+    }
+    for name in ["WeakRef", "Buffer", "Uint8Array"] {
+        assert!(!platform_globals::DYNAMIC_NEW_CTORS.contains(&name), "`{name}` in DYNAMIC_NEW_CTORS");
+        assert!(!platform_globals::DYNAMIC_OPAQUE_CTORS.contains(&name), "`{name}` in DYNAMIC_OPAQUE_CTORS");
+    }
+}

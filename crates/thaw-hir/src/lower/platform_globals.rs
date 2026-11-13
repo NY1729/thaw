@@ -174,6 +174,73 @@ pub const TYPE_ONLY_NAMES: &[&str] = &[
     "XMLHttpRequest",
 ];
 
+/// Constructors that `new X(...)` lowers to the realm constructor. Frozen at the
+/// pre-table `new` arm: a table constructor outside this list keeps its earlier
+/// lowering (`new WeakRef`, `new Buffer`, ...). ponytail: frozen list, add a name
+/// here (and a test) when it needs the opaque `new` path.
+pub const DYNAMIC_NEW_CTORS: &[&str] = &[
+    "FinalizationRegistry",
+    "Proxy",
+    "DisposableStack",
+    "AsyncDisposableStack",
+    "URL",
+    "URLSearchParams",
+    "Headers",
+    "Request",
+    "Response",
+    "Blob",
+    "File",
+    "FormData",
+    "Event",
+    "CustomEvent",
+    "EventTarget",
+    "MessageEvent",
+    "MessageChannel",
+    "MessagePort",
+    "BroadcastChannel",
+    "DOMException",
+    "ReadableStream",
+    "WritableStream",
+    "TransformStream",
+];
+
+/// Constructor names that a TypeScript annotation treats as an opaque `JsValue`.
+/// Frozen at the pre-table annotation check: `WeakRef<T>` (a native array model)
+/// and `Buffer` (native bytes) are deliberately absent.
+pub const DYNAMIC_OPAQUE_CTORS: &[&str] = &[
+    "AbortController",
+    "AbortSignal",
+    "Blob",
+    "BroadcastChannel",
+    "Crypto",
+    "CryptoKey",
+    "CustomEvent",
+    "DOMException",
+    "Event",
+    "EventTarget",
+    "File",
+    "FormData",
+    "Headers",
+    "MessageChannel",
+    "MessageEvent",
+    "MessagePort",
+    "Navigator",
+    "Performance",
+    "PerformanceEntry",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "Request",
+    "Response",
+    "SubtleCrypto",
+    "TextDecoder",
+    "TextEncoder",
+    "TransformStream",
+    "URL",
+    "URLSearchParams",
+    "WebSocket",
+    "WritableStream",
+];
+
 pub const NODE_ONLY_NOT_GLOBAL: &[(&str, &str)] = &[
     ("__dirname", "CommonJS module-wrapper binding; a script or ESM program has no such global (thaw: commonjs_global_error)"),
     ("__filename", "CommonJS module-wrapper binding; a script or ESM program has no such global (thaw: commonjs_global_error)"),
