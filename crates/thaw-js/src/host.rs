@@ -3596,14 +3596,16 @@ pub extern "C" fn thaw_tjs_handle_typed_array_probe(handle: u64) -> *const c_cha
         if crate::find_in_chain(o, "__isBuffer").is_some() {
             return Ok(None);
         }
+        // BigInt elements print with the `n` suffix, as Node's inspect does
         let items: Vec<String> = t
-            .to_vec()
-            .into_iter()
-            .map(|x| {
-                let text = if x == 0.0 && x.is_sign_negative() {
-                    "-0".to_string()
-                } else {
-                    crate::number_to_string(x)
+            .to_values()
+            .iter()
+            .map(|v| {
+                let text = match v {
+                    Value::BigInt(b) => format!("{b}n"),
+                    Value::Number(x) if *x == 0.0 && x.is_sign_negative() => "-0".to_string(),
+                    Value::Number(x) => crate::number_to_string(*x),
+                    _ => String::new(),
                 };
                 format!("\"{text}\"")
             })
