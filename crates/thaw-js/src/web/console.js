@@ -81,59 +81,63 @@ const METHODS = ['log', 'info', 'debug', 'warn', 'error', 'dir', 'time', 'timeEn
   'assert', 'clear', 'count', 'countReset', 'group', 'groupEnd', 'table', 'dirxml', 'groupCollapsed'];
 Console.prototype = Object.create(Object.prototype, {
   constructor: { value: Console, writable: true, configurable: true },
-  log: { value: function log(...args) { emit(this, kStateOf.get(this).stdout, fmt(...args)); }, writable: true, configurable: true },
-  info: { value: function info(...args) { this.log(...args); }, writable: true, configurable: true },
-  debug: { value: function debug(...args) { this.log(...args); }, writable: true, configurable: true },
-  warn: { value: function warn(...args) { emit(this, kStateOf.get(this).stderr, fmt(...args)); }, writable: true, configurable: true },
-  error: { value: function error(...args) { this.warn(...args); }, writable: true, configurable: true },
-  dir: { value: function dir(object) { this.log(fmt('%O', object)); }, writable: true, configurable: true },
-  time: { value: function time(label = 'default') {
+});
+// Shorthand methods (no own `prototype`, enumerable as in Node). Node's dirxml IS log and
+// groupCollapsed IS group (one object at two paths): the builtin table applier would make a second
+// path reuse the first path's object, so the aliases are set here, not as delegating wrappers.
+Object.assign(Console.prototype, {
+  log(...args) { emit(this, kStateOf.get(this).stdout, fmt(...args)); },
+  info(...args) { this.log(...args); },
+  debug(...args) { this.log(...args); },
+  warn(...args) { emit(this, kStateOf.get(this).stderr, fmt(...args)); },
+  error(...args) { this.warn(...args); },
+  dir(object) { this.log(fmt('%O', object)); },
+  time(label = 'default') {
     label = `${label}`;
     const timers = kStateOf.get(this).timers;
     if (!timers.has(label)) timers.set(label, now());
-  }, writable: true, configurable: true },
-  timeEnd: { value: function timeEnd(label = 'default') {
+  },
+  timeEnd(label = 'default') {
     this.timeLog(label);
     kStateOf.get(this).timers.delete(`${label}`);
-  }, writable: true, configurable: true },
-  timeLog: { value: function timeLog(label = 'default', ...data) {
+  },
+  timeLog(label = 'default', ...data) {
     label = `${label}`;
     const start = kStateOf.get(this).timers.get(label);
     if (start !== undefined) this.log(`${label}: ${formatTime(now() - start)}`, ...data);
-  }, writable: true, configurable: true },
-  trace: { value: function trace(...args) {
+  },
+  trace(...args) {
     const msg = fmt(...args);
     const stack = String((new Error(msg)).stack || '').split('\n').slice(1);
     this.error(['Trace' + (msg ? ': ' + msg : ''), ...stack].join('\n'));
-  }, writable: true, configurable: true },
-  assert: { value: function assert(expression, ...args) {
+  },
+  assert(expression, ...args) {
     if (expression) return;
     if (typeof args[0] === 'string') args[0] = 'Assertion failed: ' + args[0];
     else args.unshift('Assertion failed');
     this.warn(...args);
-  }, writable: true, configurable: true },
-  clear: { value: function clear() {}, writable: true, configurable: true },
-  count: { value: function count(label = 'default') {
+  },
+  clear() {},
+  count(label = 'default') {
     label = `${label}`;
     const counts = kStateOf.get(this).counts;
     const n = (counts.get(label) || 0) + 1;
     counts.set(label, n);
     this.log(`${label}: ${n}`);
-  }, writable: true, configurable: true },
-  countReset: { value: function countReset(label = 'default') {
+  },
+  countReset(label = 'default') {
     kStateOf.get(this).counts.delete(`${label}`);
-  }, writable: true, configurable: true },
-  group: { value: function group(...data) {
+  },
+  group(...data) {
     if (data.length) this.log(...data);
     const st = kStateOf.get(this);
     st.indent += ' '.repeat(st.groupIndentation);
-  }, writable: true, configurable: true },
-  groupCollapsed: { value: function groupCollapsed(...data) { this.group(...data); }, writable: true, configurable: true },
-  groupEnd: { value: function groupEnd() {
+  },
+  groupEnd() {
     const st = kStateOf.get(this);
     st.indent = st.indent.slice(0, Math.max(0, st.indent.length - st.groupIndentation));
-  }, writable: true, configurable: true },
-  table: { value: function table(tabularData, properties) {
+  },
+  table(tabularData, properties) {
     if (tabularData === null || typeof tabularData !== 'object') return this.log(tabularData);
     const map = Object.create(null);
     const valuesColumn = [];
@@ -161,9 +165,10 @@ Console.prototype = Object.create(Object.prototype, {
     head.unshift('(index)');
     columns.unshift(indexColumn);
     this.log(renderTable(head, columns));
-  }, writable: true, configurable: true },
-  dirxml: { value: function dirxml(...data) { this.log(...data); }, writable: true, configurable: true },
+  },
 });
+Console.prototype.dirxml = Console.prototype.log;
+Console.prototype.groupCollapsed = Console.prototype.group;
 
 Object.defineProperty(globalThis, 'Console', { value: Console, writable: true, enumerable: false, configurable: true });
 Object.defineProperty(console, 'Console', { value: Console, writable: true, enumerable: true, configurable: true });
