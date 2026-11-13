@@ -2890,14 +2890,11 @@ fn ordered_json(value: &Value) -> Value {
             )]));
         }
     }
-    // A thaw-js call argument that cannot survive a copy (a typed array other than Uint8Array, an
-    // ArrayBuffer, a Map or a Set held by thaw-js, or a plain object or array (op 30)) stays a live
-    // handle: thaw-js resolves `{"__thaw_tjs_handle__": id}` back to the same object.
+    // A thaw-js call argument keeps every live Host lease (id != 0) as a handle, never a copy: thaw-js
+    // resolves `{"__thaw_tjs_handle__": id}` back to the same object (thaw-js `to_value`).
     if DATE_WIRE.with(Cell::get) {
         if let Value::Host(lease) = value {
-            if host_query(lease, 29).as_deref() == Some("1")
-                || host_query(lease, 30).as_deref() == Some("1")
-            {
+            if lease.handle != 0 {
                 return Value::shared_object(indexmap::IndexMap::from([(
                     b"__thaw_tjs_handle__".to_vec(),
                     number_value(lease.handle as f64),
@@ -4811,7 +4808,8 @@ pub extern "C" fn thaw_json_stringify(value: *mut Value) -> *const c_char {
 }
 
 /// `thaw_json_stringify` for a thaw-js call's argument array: a Date-shaped value becomes
-/// `{"__thaw_tjs_date__": ms}` (`"NaN"` for an Invalid Date) so thaw-js revives a real `Date`.
+/// `{"__thaw_tjs_date__": ms}` (`"NaN"` for an Invalid Date) so thaw-js revives a real `Date`, and every
+/// live Host lease becomes `{"__thaw_tjs_handle__": id}` so thaw-js passes the same live object.
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify_tjs(value: *mut Value) -> *const c_char {
     DATE_WIRE.with(|flag| flag.set(true));
@@ -13706,10 +13704,10 @@ mod tests {
             let root = thaw_json_object_new();
             thaw_json_object_set_json(root, CString::new("live").unwrap().as_ptr(), live);
             thaw_json_object_set_json(root, CString::new("copied").unwrap().as_ptr(), copied);
-            // the tjs argument form keeps the live value as a handle and copies the other
+            // the tjs argument form keeps every live lease as a handle (a copyable one too, not only typed hosts)
             assert_eq!(
                 read_c_string(thaw_json_stringify_tjs(root)),
-                r#"{"live":{"__thaw_tjs_handle__":7},"copied":{"0":0,"1":0}}"#
+                r#"{"live":{"__thaw_tjs_handle__":7},"copied":{"__thaw_tjs_handle__":8}}"#
             );
             // the ordinary stringifier (op 8 for both) is unaffected
             assert_eq!(
@@ -13759,15 +13757,93 @@ mod tests {
             let root = thaw_json_object_new();
             thaw_json_object_set_json(root, CString::new("plain").unwrap().as_ptr(), plain);
             thaw_json_object_set_json(root, CString::new("copied").unwrap().as_ptr(), copied);
+            // every live lease is a marker now, including the copyable handle 7 (op 30 answers "0")
             assert_eq!(
                 read_c_string(thaw_json_stringify_tjs(root)),
-                r#"{"plain":{"__thaw_tjs_handle__":9},"copied":{"a":1}}"#
+                r#"{"plain":{"__thaw_tjs_handle__":9},"copied":{"__thaw_tjs_handle__":7}}"#
             );
             // the ordinary stringifier does not ask op 30 at all
             assert_eq!(
                 read_c_string(thaw_json_stringify(root)),
                 r#"{"plain":{"a":1},"copied":{"a":1}}"#
             );
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// A `Math` namespace held by the host: an ordinary object (op 0 "object") whose `String()` is
+    /// `[object Math]` (op 3, JSON text) and that has no own enumerable keys.
+    extern "C" fn math_namespace_query(_: u64, operation: u8) -> HostTextResult {
+        let value: &[u8] = match operation {
+            0 => b"object",
+            3 => b"\"[object Math]\"",
+            _ => b"0",
+        };
+        HostTextResult {
+            value: thaw_arena::owned_string(value),
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn math_namespace_enumerate(_: u64, _: u8) -> HostTextResult {
+        HostTextResult {
+            value: thaw_arena::owned_string(br#"{"root":{"r":0},"nodes":[{"a":[]}]}"#),
+            error: std::ptr::null(),
+        }
+    }
+
+    fn install_math_namespace_host() {
+        HOST_OPERATIONS.with(|slot| {
+            slot.set(Some(HostOperations {
+                retain: host_array_test_retain,
+                release: host_array_test_release,
+                get: host_array_test_get,
+                query: math_namespace_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: math_namespace_enumerate,
+            }))
+        });
+    }
+
+    #[test]
+    fn host_lease_inside_an_array_or_object_inspects_as_its_host_namespace() {
+        std::thread::spawn(|| {
+            install_math_namespace_host();
+            let lease = || {
+                leak(Value::Host(Rc::new(HostLease {
+                    handle: 21,
+                    release: host_array_test_release,
+                })))
+            };
+            let array = thaw_json_array_new();
+            thaw_json_array_push_json(array, lease());
+            assert_eq!(
+                read_c_string(unsafe { thaw_json_inspect(array) }),
+                "[ Object [Math] {} ]"
+            );
+            let object = thaw_json_object_new();
+            thaw_json_object_set_json(object, CString::new("k").unwrap().as_ptr(), lease());
+            assert_eq!(
+                read_c_string(unsafe { thaw_json_inspect(object) }),
+                "{ k: Object [Math] {} }"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn host_lease_string_conversion_is_the_host_string_query() {
+        std::thread::spawn(|| {
+            install_math_namespace_host();
+            let lease = leak(Value::Host(Rc::new(HostLease {
+                handle: 21,
+                release: host_array_test_release,
+            })));
+            assert_eq!(read_c_string(thaw_json_as_string(lease)), "[object Math]");
         })
         .join()
         .unwrap();
