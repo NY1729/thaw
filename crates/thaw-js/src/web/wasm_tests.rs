@@ -312,3 +312,188 @@ fn global_ops_coerce_and_enforce_mutability() {
         "9|5|TypeError set WebAssembly.Global.value: Can't set the value of an immutable global.|TypeError Cannot convert 5 to a BigInt"
     );
 }
+
+// ---- re-entrancy (a host import calls back into the running store) ----------
+
+/// inner(x) = k(x) * 2 (imports k = func 1); outer(x) = h(x) + 1 (imports h = func 0).
+fn chain_module() -> Vec<u8> {
+    module(&[
+        section(1, vector(&[functype(&[I32], &[I32])])),
+        section(
+            2,
+            vector(&[import_func("env", "h", 0), import_func("env", "k", 0)]),
+        ),
+        func_section(&[0, 0]),
+        section(7, vector(&[export("inner", 0, 2), export("outer", 0, 3)])),
+        section(
+            10,
+            vector(&[
+                code(&[0x20, 0, 0x10, 1, 0x41, 2, 0x6c]),
+                code(&[0x20, 0, 0x10, 0, 0x41, 1, 0x6a]),
+            ]),
+        ),
+    ])
+}
+
+/// grow_then_call(n): memory.grow(n), then h(0). Memory 1..4 pages, exported as "memory".
+fn grow_module() -> Vec<u8> {
+    module(&[
+        section(
+            1,
+            vector(&[functype(&[I32], &[I32]), functype(&[I32], &[])]),
+        ),
+        section(2, vector(&[import_func("env", "h", 0)])),
+        func_section(&[1]),
+        section(5, vector(&[limits(1, Some(4))])),
+        section(
+            7,
+            vector(&[export("grow_then_call", 0, 1), export("memory", 2, 0)]),
+        ),
+        section(
+            10,
+            vector(&[code(&[0x20, 0, 0x40, 0x00, 0x1a, 0x41, 0, 0x10, 0, 0x1a])]),
+        ),
+    ])
+}
+
+/// bad(x) = x / 0 (traps), outer(x) = h(x) + 1, ok(x) = x + 1. h = func 0.
+fn trap_module() -> Vec<u8> {
+    module(&[
+        section(1, vector(&[functype(&[I32], &[I32])])),
+        section(2, vector(&[import_func("env", "h", 0)])),
+        func_section(&[0, 0, 0]),
+        section(
+            7,
+            vector(&[
+                export("bad", 0, 1),
+                export("outer", 0, 2),
+                export("ok", 0, 3),
+            ]),
+        ),
+        section(
+            10,
+            vector(&[
+                code(&[0x20, 0, 0x41, 0, 0x6d]),
+                code(&[0x20, 0, 0x10, 0, 0x41, 1, 0x6a]),
+                code(&[0x20, 0, 0x41, 1, 0x6a]),
+            ]),
+        ),
+    ])
+}
+
+/// recurse(n) = h(n - 1) + 1 when n != 0, else 0. h = func 0 (calls back into recurse).
+fn recurse_module() -> Vec<u8> {
+    module(&[
+        section(1, vector(&[functype(&[I32], &[I32])])),
+        section(2, vector(&[import_func("env", "h", 0)])),
+        func_section(&[0]),
+        section(7, vector(&[export("recurse", 0, 1)])),
+        section(
+            10,
+            vector(&[code(&[
+                0x20, 0, 0x45, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x10, 0, 0x41, 1,
+                0x6a, 0x0b,
+            ])]),
+        ),
+    ])
+}
+
+#[test]
+fn reentry_import_calls_export_and_result_flows_back_through_two_levels() {
+    // node 22 gives "1019 18" for the same bytes.
+    let src = format!(
+        "const mod = __thaw_wasm_compile({});
+         let inst;
+         inst = __thaw_wasm_instantiate(mod, [
+           ['env', 'h', 'function', (x) => __thaw_wasm_call(inst, 'inner', [x]) + 1000],
+           ['env', 'k', 'function', (x) => x + 5]]);
+         console.log(__thaw_wasm_call(inst, 'outer', [4]), __thaw_wasm_call(inst, 'inner', [4]));",
+        js_bytes(&chain_module())
+    );
+    assert_eq!(run(&src), "1019 18");
+}
+
+#[test]
+fn reentry_import_exception_passes_through_both_wasm_frames_unchanged() {
+    // node 22 gives "true TypeError boom|1019".
+    let src = format!(
+        "const err = new TypeError('boom');
+         const mod = __thaw_wasm_compile({});
+         let inst;
+         inst = __thaw_wasm_instantiate(mod, [
+           ['env', 'h', 'function', (x) => __thaw_wasm_call(inst, 'inner', [x]) + 1000],
+           ['env', 'k', 'function', (x) => {{ if (x === 7) throw err; return x + 5; }}]]);
+         try {{ __thaw_wasm_call(inst, 'outer', [7]); }}
+         catch (e) {{ console.log(e === err, e.name, e.message); }}
+         console.log(__thaw_wasm_call(inst, 'outer', [4]));",
+        js_bytes(&chain_module())
+    );
+    assert_eq!(run(&src), "true TypeError boom|1019");
+}
+
+#[test]
+fn reentry_import_reads_memory_grown_in_the_same_call() {
+    // node 22 gives "131072,2,0,false": the import sees the grown size, and the buffer from
+    // before the call is detached (byteLength 0) and is not the current buffer.
+    let src = format!(
+        "const mod = __thaw_wasm_compile({});
+         let memh = -1;
+         let old;
+         const seen = [];
+         const inst = __thaw_wasm_instantiate(mod, [['env', 'h', 'function', (x) => {{
+           const b = __thaw_wasm_memory_buffer(memh);
+           seen.push(b.byteLength, __thaw_wasm_memory_size(memh), old.byteLength, b === old);
+           return 0;
+         }}]]);
+         memh = __thaw_wasm_instance_exports(inst).find((e) => e.name === 'memory').handle;
+         old = __thaw_wasm_memory_buffer(memh);
+         __thaw_wasm_call(inst, 'grow_then_call', [1]);
+         console.log(seen.join(','));",
+        js_bytes(&grow_module())
+    );
+    assert_eq!(run(&src), "131072,2,0,false");
+}
+
+#[test]
+fn reentry_nested_trap_is_a_runtime_error_and_the_outer_call_unwinds() {
+    // node 22 gives "RuntimeError divide by zero|42".
+    let src = format!(
+        "const mod = __thaw_wasm_compile({});
+         let inst;
+         inst = __thaw_wasm_instantiate(mod, [['env', 'h', 'function', (x) => __thaw_wasm_call(inst, 'bad', [x])]]);
+         try {{ __thaw_wasm_call(inst, 'outer', [3]); }}
+         catch (e) {{ console.log(e.__wasmErrorKind, e.message); }}
+         console.log(__thaw_wasm_call(inst, 'ok', [41]));",
+        js_bytes(&trap_module())
+    );
+    assert_eq!(run(&src), "RuntimeError divide by zero|42");
+}
+
+#[test]
+fn reentry_depth_guard_is_a_range_error_not_a_rust_overflow() {
+    // node 22 gives "20" and "no error" (node has no limit this low). thaw traps first at the
+    // interpreter JS depth limit (MAX_DEPTH 100, about 2 JS frames per level), as a RangeError.
+    let src = format!(
+        "const mod = __thaw_wasm_compile({});
+         let inst;
+         inst = __thaw_wasm_instantiate(mod, [['env', 'h', 'function', (x) => __thaw_wasm_call(inst, 'recurse', [x])]]);
+         console.log(__thaw_wasm_call(inst, 'recurse', [20]));
+         try {{ __thaw_wasm_call(inst, 'recurse', [150]); console.log('no error'); }}
+         catch (e) {{ console.log(e.name, e.message); }}",
+        js_bytes(&recurse_module())
+    );
+    assert_eq!(run(&src), "20|RangeError Maximum call stack size exceeded");
+}
+
+#[test]
+fn memory_grow_by_zero_replaces_the_buffer() {
+    // node 22 gives "1 0 false 65536".
+    let src = format!(
+        "const inst = __thaw_wasm_instantiate(__thaw_wasm_compile({}), [['env', 'h', 'function', () => 0]]);
+         const memh = __thaw_wasm_instance_exports(inst).find((e) => e.name === 'memory').handle;
+         const old = __thaw_wasm_memory_buffer(memh);
+         console.log(__thaw_wasm_memory_grow(memh, 0), old.byteLength, __thaw_wasm_memory_buffer(memh) === old, __thaw_wasm_memory_buffer(memh).byteLength);",
+        js_bytes(&grow_module())
+    );
+    assert_eq!(run(&src), "1 0 false 65536");
+}

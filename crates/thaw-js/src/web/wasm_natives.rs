@@ -5,11 +5,16 @@
 //! Values: i32 -> Number, i64 -> BigInt, f32/f64 -> Number, funcref -> Number handle or null,
 //! externref -> the JS value itself (or null). Multi-value results are arrays.
 //!
-//! Re-entry: while a call runs, the engine is borrowed. A host import that calls back into a
-//! `__thaw_wasm_*` native gets a TypeError instead (ponytail: re-entrant store access, add when needed).
+//! Re-entry: a host import may call any native. The store is borrowed by the outermost wasm call,
+//! so while an import runs its `Access` (the running store, from `thaw-wasm`) is recorded in
+//! `Shared::reentry` and natives reach the store through it (`with_store`). Interp-side tables
+//! (`Rt`) are borrowed only briefly and never across a JS call, so nested natives can use them.
+//! Conversions that can run JS (valueOf, toString) happen outside any store borrow.
+//! A nested call deeper than the limit traps as a stack overflow (RangeError), see `thaw-wasm`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 use num_bigint::BigInt;
@@ -17,15 +22,14 @@ use num_traits::ToPrimitive;
 #[cfg(feature = "wasi")]
 use thaw_wasm::wasi::WasiOptions;
 use thaw_wasm::{
-    CallError, CompileError, Engine, Extern, ExternKind, FuncId, GlobalId, HostCallbacks, Import,
-    ImportDesc, InstanceId, InstantiateError, LinkError, MemoryId, Module as WModule,
+    Access, CallError, CompileError, Engine, Extern, ExternKind, FuncId, GlobalId, HostCallbacks,
+    Import, ImportDesc, InstanceId, InstantiateError, LinkError, MemoryId, Module as WModule,
     Store as WStore, TableId, Trap, Val, ValType,
 };
 
 use crate::typed::{same_shared, shared_bytes, Bytes};
 use crate::{arg, put, to_int32, Ctl, Interp, Obj, Value, R};
 
-const BUSY: &str = "WebAssembly is busy: re-entering it from a host import is not supported";
 const INCOMPAT: &str = "type incompatibility when transforming from/to JS";
 
 /// A JS function imported by a module (`Import::Host(index)`).
@@ -34,8 +38,7 @@ struct Host {
     results: Vec<ValType>,
 }
 
-/// Interp-side tables. Kept apart from the engine store so a host call can use them while the
-/// engine is borrowed.
+/// Interp-side tables. Borrowed only briefly, never across a JS call.
 #[derive(Default)]
 struct Rt {
     modules: HashMap<u32, Rc<WModule>>,
@@ -52,25 +55,66 @@ struct Rt {
     next_module: u32,
 }
 
-struct Wasm {
+/// State shared by all natives of one Interp.
+struct Shared {
     engine: Engine,
-    store: WStore,
-    rt: Rt,
+    /// Borrowed for the outermost engine call. Nested natives never borrow it (see `with_store`).
+    store: RefCell<WStore>,
+    rt: RefCell<Rt>,
+    /// The `Access` of the host import that is running, if any (installed by `call_import`).
+    reentry: Cell<Option<NonNull<Access<'static, 'static>>>>,
 }
 
-/// Engine calls back into JS through this, with the interpreter lent for the duration of the call.
+/// Runs `f` on the store. While a host import runs, the store is the one that import was given;
+/// otherwise the owned store is free.
+fn with_store<R>(sh: &Shared, f: impl FnOnce(&mut Access<'_, '_>) -> R) -> R {
+    if let Some(ptr) = sh.reentry.get() {
+        // SAFETY: `reentry` is set by `Callbacks::call_import` to the `Access` it was given, and
+        // cleared (restored) before that call returns. So while it is set, the `&mut Access` from
+        // the running host import is alive and no other reference to the store is in use: the
+        // owned `RefCell` borrow is held by the outer call, which does not touch the store until
+        // the import returns. The pointer is only used here, one access at a time.
+        let access: &mut Access<'_, '_> = unsafe { &mut *ptr.as_ptr().cast() };
+        return f(access);
+    }
+    // No wasm call is running, so the owned store is not borrowed.
+    let mut store = sh.store.borrow_mut();
+    f(&mut store.access())
+}
+
+/// Clears the exception table at the start of an outermost call. A nested call (from a host
+/// import) must keep the entries its enclosing import is still unwinding through.
+fn begin_call(sh: &Shared) {
+    if sh.reentry.get().is_none() {
+        sh.rt.borrow_mut().pending.clear();
+    }
+}
+
+/// The JS side of host imports. `shared` is the Interp's state; `it` is lent for the call.
 struct Callbacks<'a> {
     it: &'a mut Interp,
-    rt: &'a mut Rt,
+    shared: &'a Shared,
 }
 
 impl HostCallbacks for Callbacks<'_> {
-    fn call_import(&mut self, id: u32, args: &[Val]) -> Result<Vec<Val>, u32> {
-        match self.invoke(id, args) {
+    fn call_import(
+        &mut self,
+        store: &mut Access<'_, '_>,
+        id: u32,
+        args: &[Val],
+    ) -> Result<Vec<Val>, u32> {
+        // Nested natives reach the running store through this pointer until the import returns
+        // (see `with_store`). `store` itself is not used again during the JS call.
+        let installed = NonNull::from(store).cast::<Access<'static, 'static>>();
+        let previous = self.shared.reentry.replace(Some(installed));
+        let outcome = self.invoke(id, args);
+        self.shared.reentry.set(previous);
+        match outcome {
             Ok(values) => Ok(values),
             Err(ctl) => {
-                self.rt.pending.push(ctl);
-                Err((self.rt.pending.len() - 1) as u32)
+                let mut rt = self.shared.rt.borrow_mut();
+                rt.pending.push(ctl);
+                Err((rt.pending.len() - 1) as u32)
             }
         }
     }
@@ -79,17 +123,18 @@ impl HostCallbacks for Callbacks<'_> {
 impl Callbacks<'_> {
     fn invoke(&mut self, id: u32, args: &[Val]) -> R<Vec<Val>> {
         let (func, results) = {
-            let host = &self.rt.hosts[id as usize];
+            let rt = self.shared.rt.borrow();
+            let host = &rt.hosts[id as usize];
             (host.func.clone(), host.results.clone())
         };
         let mut js = Vec::with_capacity(args.len());
         for v in args {
-            js.push(to_js(self.it, self.rt, v)?);
+            js.push(to_js(self.it, &self.shared.rt, v)?);
         }
         let ret = self.it.call(&func, &Value::Undefined, &js)?;
         match results.len() {
             0 => Ok(Vec::new()),
-            1 => Ok(vec![to_wasm(self.it, self.rt, &ret, results[0])?]),
+            1 => Ok(vec![to_wasm(self.it, &self.shared.rt, &ret, results[0])?]),
             n => {
                 if !matches!(ret, Value::Object(_)) {
                     return self
@@ -99,7 +144,7 @@ impl Callbacks<'_> {
                 let mut out = Vec::with_capacity(n);
                 for (i, ty) in results.iter().enumerate() {
                     let item = self.it.get(&ret, &i.to_string())?;
-                    out.push(to_wasm(self.it, self.rt, &item, *ty)?);
+                    out.push(to_wasm(self.it, &self.shared.rt, &item, *ty)?);
                 }
                 Ok(out)
             }
@@ -111,19 +156,15 @@ impl Callbacks<'_> {
 pub(crate) fn install(it: &mut Interp) {
     let engine = Engine::default();
     let store = WStore::new(&engine);
-    let state = Rc::new(RefCell::new(Wasm {
+    let shared = Rc::new(Shared {
         engine,
-        store,
-        rt: Rt::default(),
-    }));
-    let def = |it: &mut Interp, name: &str, f: fn(&mut Interp, &mut Wasm, &[Value]) -> R<Value>| {
-        let st = state.clone();
-        let native = it.native(move |it, _, a| {
-            let Ok(mut w) = st.try_borrow_mut() else {
-                return it.throw_error("TypeError", BUSY);
-            };
-            f(it, &mut w, a)
-        });
+        store: RefCell::new(store),
+        rt: RefCell::new(Rt::default()),
+        reentry: Cell::new(None),
+    });
+    let def = |it: &mut Interp, name: &str, f: fn(&mut Interp, &Shared, &[Value]) -> R<Value>| {
+        let sh = shared.clone();
+        let native = it.native(move |it, _, a| f(it, &sh, a));
         it.global.clone().declare(name, native, true);
     };
     def(it, "__thaw_wasm_validate", n_validate);
@@ -240,8 +281,9 @@ fn wrap_i64(big: &BigInt) -> i64 {
     (big & &mask).to_u64().unwrap_or(0) as i64
 }
 
-/// JS -> wasm (ToWebAssemblyValue). Numeric coercions can run user code (valueOf), as in V8.
-fn to_wasm(it: &mut Interp, rt: &mut Rt, v: &Value, ty: ValType) -> R<Val> {
+/// JS -> wasm (ToWebAssemblyValue). Numeric coercions can run user code (valueOf), as in V8, so
+/// callers must not hold a store or `Rt` borrow across this.
+fn to_wasm(it: &mut Interp, rt: &RefCell<Rt>, v: &Value, ty: ValType) -> R<Val> {
     Ok(match ty {
         ValType::I32 => Val::I32(to_int32(it.num(v))),
         ValType::I64 => Val::I64(wrap_i64(&it.bigint_element_of(v)?)),
@@ -256,6 +298,7 @@ fn to_wasm(it: &mut Interp, rt: &mut Rt, v: &Value, ty: ValType) -> R<Val> {
         ValType::ExternRef => match v {
             Value::Null => Val::ExternRef(None),
             _ => {
+                let mut rt = rt.borrow_mut();
                 rt.externs.push(Some(v.clone()));
                 Val::ExternRef(Some((rt.externs.len() - 1) as u32))
             }
@@ -264,7 +307,7 @@ fn to_wasm(it: &mut Interp, rt: &mut Rt, v: &Value, ty: ValType) -> R<Val> {
 }
 
 /// wasm -> JS (ToJSValue).
-fn to_js(it: &mut Interp, rt: &Rt, v: &Val) -> R<Value> {
+fn to_js(it: &mut Interp, rt: &RefCell<Rt>, v: &Val) -> R<Value> {
     Ok(match v {
         Val::I32(n) => Value::Number(f64::from(*n)),
         Val::I64(n) => crate::bigint::big(BigInt::from(*n)),
@@ -274,6 +317,7 @@ fn to_js(it: &mut Interp, rt: &Rt, v: &Val) -> R<Value> {
         Val::FuncRef(None) | Val::ExternRef(None) => Value::Null,
         Val::FuncRef(Some(id)) => Value::Number(f64::from(id.index())),
         Val::ExternRef(Some(h)) => rt
+            .borrow()
             .externs
             .get(*h as usize)
             .cloned()
@@ -306,16 +350,22 @@ fn compile_error(it: &mut Interp, prefix: &str, error: CompileError) -> Ctl {
     plain_error(it, "CompileError", &format!("{prefix}: {}", error.message))
 }
 
-fn call_error(it: &mut Interp, rt: &mut Rt, error: CallError) -> Ctl {
+fn call_error(it: &mut Interp, rt: &RefCell<Rt>, error: CallError) -> Ctl {
     match error {
         CallError::Trap(Trap::StackOverflow) => {
             error_ctl(it, "RangeError", Trap::StackOverflow.message())
         }
         CallError::Trap(trap) => plain_error(it, "RuntimeError", trap.message()),
-        CallError::Exception(id) if (id as usize) < rt.pending.len() => {
-            rt.pending.swap_remove(id as usize)
+        CallError::Exception(id) => {
+            let found = {
+                let mut rt = rt.borrow_mut();
+                ((id as usize) < rt.pending.len()).then(|| rt.pending.swap_remove(id as usize))
+            };
+            match found {
+                Some(ctl) => ctl,
+                None => plain_error(it, "RuntimeError", "host exception was lost"),
+            }
         }
-        CallError::Exception(_) => plain_error(it, "RuntimeError", "host exception was lost"),
         CallError::Exit(code) => {
             let obj = it.plain();
             put_str(&obj, "__wasmErrorKind", "Exit");
@@ -326,7 +376,12 @@ fn call_error(it: &mut Interp, rt: &mut Rt, error: CallError) -> Ctl {
     }
 }
 
-fn instantiate_error(it: &mut Interp, rt: &mut Rt, prefix: &str, error: InstantiateError) -> Ctl {
+fn instantiate_error(
+    it: &mut Interp,
+    rt: &RefCell<Rt>,
+    prefix: &str,
+    error: InstantiateError,
+) -> Ctl {
     match error {
         InstantiateError::Link(LinkError {
             type_error,
@@ -345,39 +400,41 @@ fn instantiate_error(it: &mut Interp, rt: &mut Rt, prefix: &str, error: Instanti
 
 // ---- modules --------------------------------------------------------------
 
-fn compile_module(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<u32> {
+fn compile_module(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<u32> {
     let prefix = prefix(it, a, 1, "WebAssembly.Module()");
     let bytes = bytes_of(it, a, &prefix)?;
-    match WModule::compile(&w.engine, &bytes) {
+    match WModule::compile(&sh.engine, &bytes) {
         Ok(module) => {
-            let id = w.rt.next_module;
-            w.rt.next_module += 1;
-            w.rt.modules.insert(id, Rc::new(module));
+            let mut rt = sh.rt.borrow_mut();
+            let id = rt.next_module;
+            rt.next_module += 1;
+            rt.modules.insert(id, Rc::new(module));
             Ok(id)
         }
         Err(error) => Err(compile_error(it, &prefix, error)),
     }
 }
 
-fn module_of(it: &mut Interp, w: &Wasm, a: &[Value]) -> R<Rc<WModule>> {
+fn module_of(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Rc<WModule>> {
     let id = handle(it, a, 0);
-    match w.rt.modules.get(&id) {
-        Some(module) => Ok(module.clone()),
+    let found = sh.rt.borrow().modules.get(&id).cloned();
+    match found {
+        Some(module) => Ok(module),
         None => it.throw_error("TypeError", "WebAssembly.Module: module was released"),
     }
 }
 
-fn n_validate(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_validate(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let bytes = bytes_of(it, a, "WebAssembly.validate()")?;
-    Ok(Value::Bool(WModule::validate(&w.engine, &bytes).is_ok()))
+    Ok(Value::Bool(WModule::validate(&sh.engine, &bytes).is_ok()))
 }
 
-fn n_compile(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
-    Ok(Value::Number(f64::from(compile_module(it, w, a)?)))
+fn n_compile(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
+    Ok(Value::Number(f64::from(compile_module(it, sh, a)?)))
 }
 
-fn n_module_imports(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
-    let module = module_of(it, w, a)?;
+fn n_module_imports(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
+    let module = module_of(it, sh, a)?;
     let mut items = Vec::new();
     for import in module.imports() {
         let o = it.plain();
@@ -389,8 +446,8 @@ fn n_module_imports(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
     Ok(it.array(items))
 }
 
-fn n_module_exports(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
-    let module = module_of(it, w, a)?;
+fn n_module_exports(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
+    let module = module_of(it, sh, a)?;
     let mut items = Vec::new();
     for export in module.exports() {
         let o = it.plain();
@@ -401,8 +458,8 @@ fn n_module_exports(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
     Ok(it.array(items))
 }
 
-fn n_custom_sections(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
-    let module = module_of(it, w, a)?;
+fn n_custom_sections(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
+    let module = module_of(it, sh, a)?;
     let name = text(it, a, 1);
     let sections: Vec<Vec<u8>> = module
         .custom_sections(&name)
@@ -424,7 +481,7 @@ fn n_custom_sections(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
 /// `globalValue` (a plain value for a new global), `missing` and `missingModule`.
 fn build_imports(
     it: &mut Interp,
-    rt: &mut Rt,
+    rt: &RefCell<Rt>,
     descs: &[ImportDesc],
     linkage: &Value,
 ) -> R<Vec<Import>> {
@@ -452,6 +509,7 @@ fn build_imports(
                     ExternKind::Func { results, .. } => results.clone(),
                     _ => Vec::new(),
                 };
+                let mut rt = rt.borrow_mut();
                 rt.hosts.push(Host {
                     func: value,
                     results,
@@ -481,19 +539,18 @@ fn build_imports(
 
 fn instantiate_module(
     it: &mut Interp,
-    w: &mut Wasm,
+    sh: &Shared,
     a: &[Value],
     #[cfg(feature = "wasi")] wasi: Option<WasiOptions>,
 ) -> R<Value> {
     let prefix = prefix(it, a, 2, "WebAssembly.Instance()");
-    let module = module_of(it, w, a)?;
-    let Wasm { store, rt, .. } = w;
-    let imports = build_imports(it, rt, module.imports(), &arg(a, 1))?;
-    rt.pending.clear();
-    let result = {
+    let module = module_of(it, sh, a)?;
+    let imports = build_imports(it, &sh.rt, module.imports(), &arg(a, 1))?;
+    begin_call(sh);
+    let result = with_store(sh, |store| {
         let mut cb = Callbacks {
             it: &mut *it,
-            rt: &mut *rt,
+            shared: sh,
         };
         #[cfg(feature = "wasi")]
         match &wasi {
@@ -502,26 +559,26 @@ fn instantiate_module(
         }
         #[cfg(not(feature = "wasi"))]
         store.instantiate(&module, &imports, &mut cb)
-    };
+    });
     match result {
         Ok(instance) => {
             let id = instance.index();
-            rt.instances.insert(id, module);
+            sh.rt.borrow_mut().instances.insert(id, module);
             Ok(Value::Number(f64::from(id)))
         }
-        Err(error) => Err(instantiate_error(it, rt, &prefix, error)),
+        Err(error) => Err(instantiate_error(it, &sh.rt, &prefix, error)),
     }
 }
 
-fn n_instantiate(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_instantiate(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     #[cfg(feature = "wasi")]
-    return instantiate_module(it, w, a, None);
+    return instantiate_module(it, sh, a, None);
     #[cfg(not(feature = "wasi"))]
-    instantiate_module(it, w, a)
+    instantiate_module(it, sh, a)
 }
 
 #[cfg(feature = "wasi")]
-fn n_instantiate_wasi(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_instantiate_wasi(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     // options: {args: [string], env: [[k, v]], preopens: [[guestPath, hostPath]]}
     let options = arg(a, 2);
     let mut wasi = WasiOptions {
@@ -551,7 +608,7 @@ fn n_instantiate_wasi(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
     }
     instantiate_module(
         it,
-        w,
+        sh,
         &[arg(a, 0), arg(a, 1), Value::str("WebAssembly.Instance()")],
         Some(wasi),
     )
@@ -559,15 +616,23 @@ fn n_instantiate_wasi(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
 
 /// `[{name, kind, handle, ...}]` for the instance's exports, in declaration order. Functions carry
 /// `params`/`results`; globals `type`/`mutable`; tables `element`.
-fn n_instance_exports(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_instance_exports(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let id = handle(it, a, 0);
-    let Some(module) = w.rt.instances.get(&id).cloned() else {
+    let module = sh.rt.borrow().instances.get(&id).cloned();
+    let Some(module) = module else {
         return it.throw_error("TypeError", "WebAssembly.Instance: instance was released");
     };
     let instance = InstanceId::from_index(id);
+    let found: Vec<Option<Extern>> = with_store(sh, |store| {
+        module
+            .exports()
+            .iter()
+            .map(|export| store.export(instance, &export.name))
+            .collect()
+    });
     let mut items = Vec::new();
-    for export in module.exports() {
-        let Some(ext) = w.store.export(instance, &export.name) else {
+    for (export, ext) in module.exports().iter().zip(found) {
+        let Some(ext) = ext else {
             continue;
         };
         let o = it.plain();
@@ -589,12 +654,18 @@ fn n_instance_exports(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
                 put(&o, "results", r);
             }
             ExternKind::Global { ty, mutable } => {
-                w.rt.global_types.insert(handle_value, (*ty, *mutable));
+                sh.rt
+                    .borrow_mut()
+                    .global_types
+                    .insert(handle_value, (*ty, *mutable));
                 put_str(&o, "type", type_name(*ty));
                 put(&o, "mutable", Value::Bool(*mutable));
             }
             ExternKind::Table { element, .. } => {
-                w.rt.table_types.insert(handle_value, *element);
+                sh.rt
+                    .borrow_mut()
+                    .table_types
+                    .insert(handle_value, *element);
                 put_str(&o, "element", type_name(*element));
             }
             ExternKind::Memory { .. } => {}
@@ -605,28 +676,27 @@ fn n_instance_exports(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
 }
 
 /// Runs a call with JS arguments coerced to the parameter types (missing ones are undefined).
-fn invoke(it: &mut Interp, w: &mut Wasm, func: FuncId, args: &Value) -> R<Value> {
-    let (params, _) = w.store.func_type(func);
+fn invoke(it: &mut Interp, sh: &Shared, func: FuncId, args: &Value) -> R<Value> {
+    let (params, _) = with_store(sh, |store| store.func_type(func));
     let mut values = list_of(it, args)?;
     values.resize(params.len(), Value::Undefined);
     let mut inputs = Vec::with_capacity(params.len());
     for (v, ty) in values.iter().zip(&params) {
-        inputs.push(to_wasm(it, &mut w.rt, v, *ty)?);
+        inputs.push(to_wasm(it, &sh.rt, v, *ty)?);
     }
-    let Wasm { store, rt, .. } = w;
-    rt.pending.clear();
-    let result = {
+    begin_call(sh);
+    let result = with_store(sh, |store| {
         let mut cb = Callbacks {
             it: &mut *it,
-            rt: &mut *rt,
+            shared: sh,
         };
         store.call_func(func, &inputs, &mut cb)
-    };
+    });
     match result {
         Ok(outputs) => {
             let mut out = Vec::with_capacity(outputs.len());
             for v in &outputs {
-                out.push(to_js(it, rt, v)?);
+                out.push(to_js(it, &sh.rt, v)?);
             }
             Ok(match out.len() {
                 0 => Value::Undefined,
@@ -634,28 +704,28 @@ fn invoke(it: &mut Interp, w: &mut Wasm, func: FuncId, args: &Value) -> R<Value>
                 _ => it.array(out),
             })
         }
-        Err(error) => Err(call_error(it, rt, error)),
+        Err(error) => Err(call_error(it, &sh.rt, error)),
     }
 }
 
-fn n_call(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_call(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let id = handle(it, a, 0);
     let name = text(it, a, 1);
-    match w.store.export(InstanceId::from_index(id), &name) {
-        Some(Extern::Func(func)) => invoke(it, w, func, &arg(a, 2)),
+    match with_store(sh, |store| store.export(InstanceId::from_index(id), &name)) {
+        Some(Extern::Func(func)) => invoke(it, sh, func, &arg(a, 2)),
         Some(_) => it.throw_error("TypeError", &format!("export '{name}' is not a function")),
         None => it.throw_error("TypeError", &format!("no export named '{name}'")),
     }
 }
 
-fn n_call_func(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_call_func(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let func = FuncId::from_index(handle(it, a, 0));
-    invoke(it, w, func, &arg(a, 1))
+    invoke(it, sh, func, &arg(a, 1))
 }
 
-fn n_func_type(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_func_type(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let func = FuncId::from_index(handle(it, a, 0));
-    let (params, results) = w.store.func_type(func);
+    let (params, results) = with_store(sh, |store| store.func_type(func));
     let o = it.plain();
     let p = params.iter().map(|t| Value::str(type_name(*t))).collect();
     let r = results.iter().map(|t| Value::str(type_name(*t))).collect();
@@ -667,13 +737,13 @@ fn n_func_type(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
 
 // ---- memory ---------------------------------------------------------------
 
-fn n_memory_create(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_memory_create(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let initial = handle(it, a, 0);
     let maximum = match arg(a, 1) {
         Value::Undefined => None,
         _ => Some(handle(it, a, 1)),
     };
-    match w.store.new_memory(initial, maximum) {
+    match with_store(sh, |store| store.new_memory(initial, maximum)) {
         Ok(id) => Ok(Value::Number(f64::from(id.index()))),
         Err(_) => it.throw_error(
             "RangeError",
@@ -684,32 +754,32 @@ fn n_memory_create(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
 
 /// The memory's ArrayBuffer. The same object until the memory grows; after that a new one, and the
 /// old one reads as detached (its storage is emptied by the engine).
-fn n_memory_buffer(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_memory_buffer(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let id = handle(it, a, 0);
-    let Some(shared) = w.store.memory_buffer(MemoryId::from_index(id)) else {
+    let Some(shared) = with_store(sh, |store| store.memory_buffer(MemoryId::from_index(id))) else {
         return it.throw_error(
             "TypeError",
             "WebAssembly.Memory: memory is not shared with the embedder",
         );
     };
-    if let Some((obj, data)) = w.rt.buffers.get(&id) {
-        if same_shared(data, &shared) {
-            return Ok(Value::Object(obj.clone()));
+    let cached = sh.rt.borrow().buffers.get(&id).cloned();
+    if let Some((obj, data)) = cached {
+        if same_shared(&data, &shared) {
+            return Ok(Value::Object(obj));
         }
     }
     let data: Bytes = shared_bytes(shared);
     let obj = it.new_array_buffer(data.clone());
-    w.rt.buffers.insert(id, (obj.clone(), data));
+    sh.rt.borrow_mut().buffers.insert(id, (obj.clone(), data));
     Ok(Value::Object(obj))
 }
 
-fn n_memory_grow(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_memory_grow(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let id = handle(it, a, 0);
     let delta = handle(it, a, 1);
-    match w
-        .store
-        .memory_grow(MemoryId::from_index(id), u64::from(delta))
-    {
+    match with_store(sh, |store| {
+        store.memory_grow(MemoryId::from_index(id), u64::from(delta))
+    }) {
         Ok(old) => Ok(Value::Number(old as f64)),
         Err(_) => it.throw_error(
             "RangeError",
@@ -718,16 +788,16 @@ fn n_memory_grow(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
     }
 }
 
-fn n_memory_size(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_memory_size(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let id = handle(it, a, 0);
     Ok(Value::Number(
-        w.store.memory_pages(MemoryId::from_index(id)) as f64,
+        with_store(sh, |store| store.memory_pages(MemoryId::from_index(id))) as f64,
     ))
 }
 
 // ---- table ----------------------------------------------------------------
 
-fn n_table_create(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_table_create(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let element = {
         let name = text(it, a, 0);
         match parse_type(&name) {
@@ -740,10 +810,12 @@ fn n_table_create(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
         Value::Undefined => None,
         _ => Some(handle(it, a, 2)),
     };
-    let init = to_wasm(it, &mut w.rt, &arg(a, 3), element)?;
-    match w.store.new_table(element, initial, maximum, &init) {
+    let init = to_wasm(it, &sh.rt, &arg(a, 3), element)?;
+    match with_store(sh, |store| {
+        store.new_table(element, initial, maximum, &init)
+    }) {
         Ok(id) => {
-            w.rt.table_types.insert(id.index(), element);
+            sh.rt.borrow_mut().table_types.insert(id.index(), element);
             Ok(Value::Number(f64::from(id.index())))
         }
         Err(_) => it.throw_error(
@@ -753,25 +825,30 @@ fn n_table_create(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
     }
 }
 
-fn table_kind(w: &Wasm, id: TableId) -> ValType {
-    w.rt.table_types
+fn table_kind(sh: &Shared, id: TableId) -> ValType {
+    sh.rt
+        .borrow()
+        .table_types
         .get(&id.index())
         .copied()
         .unwrap_or(ValType::FuncRef)
 }
 
-fn n_table_length(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_table_length(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let id = TableId::from_index(handle(it, a, 0));
-    Ok(Value::Number(w.store.table_size(id) as f64))
+    Ok(Value::Number(
+        with_store(sh, |store| store.table_size(id)) as f64
+    ))
 }
 
-fn n_table_get(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_table_get(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let id = TableId::from_index(handle(it, a, 0));
     let index = num(it, a, 1) as u64;
-    match w.store.table_get(id, index) {
-        Some(v) => to_js(it, &w.rt, &v),
+    match with_store(sh, |store| store.table_get(id, index)) {
+        Some(v) => to_js(it, &sh.rt, &v),
         None => {
-            let (size, kind) = (w.store.table_size(id), table_kind(w, id));
+            let size = with_store(sh, |store| store.table_size(id));
+            let kind = table_kind(sh, id);
             let what = if kind == ValType::ExternRef {
                 "externref"
             } else {
@@ -785,15 +862,15 @@ fn n_table_get(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
     }
 }
 
-fn n_table_set(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_table_set(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let id = TableId::from_index(handle(it, a, 0));
     let index = num(it, a, 1) as u64;
-    let kind = table_kind(w, id);
-    let value = to_wasm(it, &mut w.rt, &arg(a, 2), kind)?;
-    match w.store.table_set(id, index, &value) {
+    let kind = table_kind(sh, id);
+    let value = to_wasm(it, &sh.rt, &arg(a, 2), kind)?;
+    match with_store(sh, |store| store.table_set(id, index, &value)) {
         Ok(()) => Ok(Value::Undefined),
         Err(_) => {
-            let size = w.store.table_size(id);
+            let size = with_store(sh, |store| store.table_size(id));
             let what = if kind == ValType::ExternRef {
                 "externref"
             } else {
@@ -807,12 +884,12 @@ fn n_table_set(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
     }
 }
 
-fn n_table_grow(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_table_grow(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let id = TableId::from_index(handle(it, a, 0));
     let delta = num(it, a, 1) as u64;
-    let kind = table_kind(w, id);
-    let init = to_wasm(it, &mut w.rt, &arg(a, 2), kind)?;
-    match w.store.table_grow(id, delta, &init) {
+    let kind = table_kind(sh, id);
+    let init = to_wasm(it, &sh.rt, &arg(a, 2), kind)?;
+    match with_store(sh, |store| store.table_grow(id, delta, &init)) {
         Ok(old) => Ok(Value::Number(old as f64)),
         Err(_) => it.throw_error(
             "RangeError",
@@ -823,7 +900,7 @@ fn n_table_grow(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
 
 // ---- global ---------------------------------------------------------------
 
-fn n_global_create(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_global_create(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let name = text(it, a, 0);
     let Some(ty) = parse_type(&name) else {
         return it.throw_error(
@@ -834,42 +911,48 @@ fn n_global_create(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
     let mutable = arg(a, 1).truthy();
     let value = match (arg(a, 2), ty) {
         (Value::Undefined, ValType::ExternRef) => Val::ExternRef(Some({
-            w.rt.externs.push(Some(Value::Undefined));
-            (w.rt.externs.len() - 1) as u32
+            let mut rt = sh.rt.borrow_mut();
+            rt.externs.push(Some(Value::Undefined));
+            (rt.externs.len() - 1) as u32
         })),
         (Value::Undefined, ValType::FuncRef) => Val::FuncRef(None),
         (Value::Undefined, ValType::I64) => Val::I64(0),
         (Value::Undefined, ValType::F32) => Val::F32(0.0),
         (Value::Undefined, ValType::F64) => Val::F64(0.0),
         (Value::Undefined, _) => Val::I32(0),
-        (v, ty) => to_wasm(it, &mut w.rt, &v, ty)?,
+        (v, ty) => to_wasm(it, &sh.rt, &v, ty)?,
     };
-    let id = w.store.new_global(mutable, &value);
-    w.rt.global_types.insert(id.index(), (ty, mutable));
+    let id = with_store(sh, |store| store.new_global(mutable, &value));
+    sh.rt
+        .borrow_mut()
+        .global_types
+        .insert(id.index(), (ty, mutable));
     Ok(Value::Number(f64::from(id.index())))
 }
 
-fn n_global_get(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_global_get(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let id = GlobalId::from_index(handle(it, a, 0));
-    let v = w.store.global_get(id);
-    to_js(it, &w.rt, &v)
+    let v = with_store(sh, |store| store.global_get(id));
+    to_js(it, &sh.rt, &v)
 }
 
-fn n_global_set(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_global_set(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let id = GlobalId::from_index(handle(it, a, 0));
-    let (ty, mutable) =
-        w.rt.global_types
-            .get(&id.index())
-            .copied()
-            .unwrap_or((ValType::I32, true));
+    let (ty, mutable) = sh
+        .rt
+        .borrow()
+        .global_types
+        .get(&id.index())
+        .copied()
+        .unwrap_or((ValType::I32, true));
     if !mutable {
         return it.throw_error(
             "TypeError",
             "set WebAssembly.Global.value: Can't set the value of an immutable global.",
         );
     }
-    let value = to_wasm(it, &mut w.rt, &arg(a, 1), ty)?;
-    match w.store.global_set(id, &value) {
+    let value = to_wasm(it, &sh.rt, &arg(a, 1), ty)?;
+    match with_store(sh, |store| store.global_set(id, &value)) {
         Ok(()) => Ok(Value::Undefined),
         Err(message) => it.throw_error(
             "TypeError",
@@ -882,20 +965,21 @@ fn n_global_set(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
 
 /// Drops the Interp-side record for a handle. The engine itself frees nothing until the store
 /// is dropped (wasmi keeps entities alive for the store's lifetime).
-fn n_release(it: &mut Interp, w: &mut Wasm, a: &[Value]) -> R<Value> {
+fn n_release(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
     let kind = text(it, a, 0);
     let id = handle(it, a, 1);
+    let mut rt = sh.rt.borrow_mut();
     match kind.as_str() {
         "module" => {
-            w.rt.modules.remove(&id);
+            rt.modules.remove(&id);
         }
         "externref" => {
-            if let Some(slot) = w.rt.externs.get_mut(id as usize) {
+            if let Some(slot) = rt.externs.get_mut(id as usize) {
                 *slot = None;
             }
         }
         "memory" => {
-            w.rt.buffers.remove(&id);
+            rt.buffers.remove(&id);
         }
         _ => {}
     }
