@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Self-test for diff.py: synthetic node/thaw outputs prove the gate fails on a missing member.
+# Self-test for diff.py, threeway.py and the builtin table: synthetic outputs prove the gates fail on a missing member.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 BASE=${PARITY_SCRATCH:-${RUNNER_TEMP:-${TMPDIR:-/home/fedora/work/thaw-tmp/parity-scratch}}}
@@ -81,6 +81,15 @@ for row in "F3.a | 1 | 1 | 1 | SAME-AS-NODE" "F3.b | 2 | 2 | 0 | THAWJS-REGRESSI
   grep -qxF "$row" "$W/tw/table.txt"; check "threeway row: $row" 0 $?
 done
 "${TW[@]}" --node "$W/tw/node.txt" --qjs "$W/tw/qjs.txt" --thaw "$W/tw/missing.txt" >/dev/null 2>&1 ; check "threeway missing input is harness error" 2 $?
+
+# 9. builtin table: generator is deterministic; the staleness check passes on the checked-in table and fails on a mutated copy
+GEN="$HERE/gen_builtin_table.js"; CHK="$HERE/check_builtin_table.sh"
+TSV="$HERE/../../crates/thaw-js/src/builtin_table.tsv"
+node "$GEN" "$W/bt1.tsv" && node "$GEN" "$W/bt2.tsv" && cmp -s "$W/bt1.tsv" "$W/bt2.tsv"; check "builtin table generator is deterministic" 0 $?
+bash "$CHK" >/dev/null 2>&1; check "checked-in builtin_table.tsv is current" 0 $?
+sed '10s/$/\tmutated/' "$TSV" > "$W/bt-mut-cell.tsv"; bash "$CHK" "$W/bt-mut-cell.tsv" >/dev/null 2>&1; check "check fails on a mutated cell" 1 $?
+sed '10d' "$TSV" > "$W/bt-mut-row.tsv"; bash "$CHK" "$W/bt-mut-row.tsv" >/dev/null 2>&1; check "check fails on a deleted row" 1 $?
+bash "$CHK" "$W/no-such-table.tsv" >/dev/null 2>&1; check "check on a missing table is harness error" 2 $?
 
 if [ $fail -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit $fail

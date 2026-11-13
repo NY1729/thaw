@@ -19,7 +19,7 @@ Plan: `designs/plan-q9-systematic-parity.md` sections 0, 3 (H1), 6 (item 1-2).
 - `seed/`: the original probes (sib.js, surf2.js), kept as reference only.
 - `run.sh`: runs every corpus on node and on the runner, then `diff.py`.
 - `diff.py`: normalise, diff, print a table, write gaps.json, gate against a baseline.
-- `selftest.sh`: proves the gate on synthetic outputs (12 checks).
+- `selftest.sh`: proves the gates on synthetic outputs, plus the builtin table generator and staleness check.
 - `known-gaps.json`: recorded baseline. Gaps may only shrink.
 - `skip.txt`: probe-name regexes dropped from both sides (bare-runner limits, not gaps).
 
@@ -74,3 +74,17 @@ names (`require`, `fs`, `util`, ...). Those are not script globals; they are
 listed in `NODE_ONLY_NOT_GLOBAL` in `platform_globals.rs`. A new Node release
 that adds a global fails `every_node_global_is_classified` until it is added to
 `PLATFORM_GLOBALS` or documented in one of the exception lists.
+
+## builtin_table.tsv
+
+`crates/thaw-js/src/builtin_table.tsv` is the Node 22 descriptor table of the builtin surface: one row per own key of each global, intrinsic, and their members and `.prototype`s (depth 2). Columns: `owner`, `key` (symbols as `@@name`), `kind` (`data`|`accessor`), `flags` (`w e c` as letters or `-`; accessors have `-` for w), `vtype` (typeof; primitive values are not recorded), `length`/`name` (functions; accessors give `get x|set x`), `hasPrototype`, `alias` (same object reached by two paths shares an id), `tag` (`Symbol.toStringTag` string value on that owner). Roots come from `node_globals.json` plus `%TypedArray%`, `%IteratorPrototype%`, `%GeneratorFunction%` and similar. `process.env`, `process.versions` and similar are not walked. The output is deterministic and machine-independent.
+
+Regenerate after a Node 22 change, or when a builtin changes shape, and commit the result:
+
+    node tools/parity/gen_builtin_table.js crates/thaw-js/src/builtin_table.tsv
+
+The generator refuses to run on any Node other than 22. Check that the checked-in copy is current (also run non-gating in `parity.yml`):
+
+    tools/parity/check_builtin_table.sh          # exit 0 current, 1 drift, 2 generator/harness error
+
+`crates/thaw-js/src/builtin_table_missing.txt` is the ratchet list of rows thaw-js does not provide yet; it is filled by the WI-1b conformance test, not by hand. Plan: `designs/plan-q9-f1-builtin-surface.md` sections 2.1 and 2.4.
