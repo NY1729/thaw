@@ -2002,27 +2002,50 @@ pub extern "C" fn thaw_tjs_property_predicate_json_key_result(
     handle_result((|| {
         let key = json_key(key_json)?;
         on_handle(handle, |p, _, target| {
-            let it = &mut p.interp;
-            let result = match operation {
-                0 => it
-                    .has_property(&target, &key)
-                    .map_err(|c| classify(it, c))?,
-                1 => matches!(&target, Value::Object(o) if crate::find_own(o, &key).is_some()),
-                2 => match &target {
-                    Value::Object(o) => {
-                        crate::reflect::delete_own(it, o, &key).map_err(|c| classify(it, c))?
-                    }
-                    _ => true,
-                },
-                _ => {
-                    return Err(HostError::Unsupported(
-                        "property enumerability queries".into(),
-                    ))
-                }
-            };
-            Ok(i64::from(result))
+            property_predicate_value(&mut p.interp, &target, &key, operation)
         })
     })())
+}
+
+/// Shared body of `thaw_tjs_property_predicate_json_key_result`: operations 0 (has), 1 (own),
+/// 2 (delete), 3 (own and enumerable) and 4 (hide: make the own property non-enumerable).
+pub(crate) fn property_predicate_value(
+    it: &mut Interp,
+    target: &Value,
+    key: &str,
+    operation: u8,
+) -> Result<i64, HostError> {
+    let result = match operation {
+        0 => it.has_property(target, key).map_err(|c| classify(it, c))?,
+        1 => matches!(target, Value::Object(o) if crate::find_own(o, key).is_some()),
+        2 => match target {
+            Value::Object(o) => {
+                crate::reflect::delete_own(it, o, key).map_err(|c| classify(it, c))?
+            }
+            _ => true,
+        },
+        3 => {
+            matches!(target, Value::Object(o) if crate::find_own(o, key).is_some_and(|(_, enumerable)| enumerable))
+        }
+        4 => match target {
+            Value::Object(o) => {
+                if crate::find_own(o, key).is_none() {
+                    return Ok(0);
+                }
+                let desc = it.plain();
+                crate::put(&desc, "enumerable", Value::Bool(false));
+                it.try_define(o, key, &Value::Object(desc))
+                    .map_err(|c| classify(it, c))?
+            }
+            _ => false,
+        },
+        _ => {
+            return Err(HostError::Unsupported(
+                "property enumerability queries".into(),
+            ))
+        }
+    };
+    Ok(i64::from(result))
 }
 
 /// `handle[name](...args)`; a returned Promise is awaited and the result is a plain graph wire.
