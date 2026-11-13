@@ -96,6 +96,14 @@ fn vm_realm_construct_cheaper_than_host() {
 }
 
 #[test]
+fn vm_realm_hides_navigator() {
+    let out = run_lines(&format!(
+        "{VM_PRELUDE}\nconsole.log(runInNewContext(\"[typeof navigator, typeof Navigator].join(',')\", {{}}));"
+    ));
+    assert_eq!(out, vec!["undefined,undefined".to_string()]);
+}
+
+#[test]
 fn vm_realm_has_bigint_typed_arrays() {
     // Node 22: the BigInt64Array / BigUint64Array constructors are ES globals, so a new context has them too.
     let src = format!(

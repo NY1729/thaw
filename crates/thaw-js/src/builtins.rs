@@ -1156,22 +1156,30 @@ impl Interp {
                         return Ok(it.array(names));
                     }
                 }
+                // Insertion order over all own string keys, enumerable or not (V8 order). Array and
+                // typed-array indices come from `own_keys` and lead; raw props follow in insertion order.
+                let raw: Vec<Rc<str>> = match &t {
+                    Value::Object(o) => o
+                        .raw_props
+                        .borrow()
+                        .iter()
+                        .filter(|p| !p.key.starts_with("@@"))
+                        .map(|p| p.key.clone())
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let raw_set: std::collections::HashSet<&str> = raw.iter().map(|k| &**k).collect();
                 let mut names: Vec<Value> = it
                     .own_keys(&t)
                     .into_iter()
+                    .filter(|k| !raw_set.contains(&**k))
                     .map(|k| Value::Str(k.into()))
                     .collect();
+                names.extend(order_keys(raw).into_iter().map(|k| Value::Str(k.into())));
                 if matches!(t, Value::Str(_)) {
                     names.push(Value::str("length"));
                 }
                 if let Value::Object(o) = &t {
-                    names.extend(
-                        o.raw_props
-                            .borrow()
-                            .iter()
-                            .filter(|p| !p.enumerable && !p.key.starts_with("@@"))
-                            .map(|p| Value::Str(p.key.clone().into())),
-                    );
                     if matches!(&*o.kind.borrow(), Kind::Array(_)) {
                         names.push(Value::str("length"));
                     }

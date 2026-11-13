@@ -1214,6 +1214,15 @@ MessagePort.prototype.start	length	data	--c	number	0	-	-	-	-
 MessagePort.prototype.start	name	data	--c	string	-	start	-	-	-
 MessagePort.prototype.unref	length	data	--c	number	0	-	-	-	-
 MessagePort.prototype.unref	name	data	--c	string	-	unref	-	-	-
+Navigator	length	data	--c	number	0	-	-	-	-
+Navigator	name	data	--c	string	-	Navigator	-	-	-
+Navigator	prototype	data	---	object	-	-	-	-	-
+Navigator.prototype	constructor	data	w-c	function	0	Navigator	1	97	-
+Navigator.prototype	hardwareConcurrency	accessor	-ec	-	-	get hardwareConcurrency|-	-	-	-
+Navigator.prototype	language	accessor	-ec	-	-	get language|-	-	-	-
+Navigator.prototype	languages	accessor	-ec	-	-	get languages|-	-	-	-
+Navigator.prototype	platform	accessor	-ec	-	-	get platform|-	-	-	-
+Navigator.prototype	userAgent	accessor	-ec	-	-	get userAgent|-	-	-	-
 Number	EPSILON	data	---	number	-	-	-	-	-
 Number	MAX_SAFE_INTEGER	data	---	number	-	-	-	-	-
 Number	MAX_VALUE	data	---	number	-	-	-	-	-

@@ -80,6 +80,8 @@ mod web_fetch;
 mod web_messaging;
 #[path = "web/napi_proxy.rs"]
 mod web_napi_proxy;
+#[path = "web/navigator.rs"]
+mod web_navigator;
 #[path = "web/performance.rs"]
 mod web_performance;
 #[path = "web/streams.rs"]
@@ -1108,6 +1110,7 @@ impl Interp {
             web_async_hooks::install(&mut it);
             web_wasm::install(&mut it);
             web_crypto::install(&mut it);
+            web_navigator::install(&mut it);
             node_crypto::install(&mut it);
             it.install_url();
             #[cfg(feature = "intl")]
@@ -1557,7 +1560,11 @@ impl Interp {
                         let props = indexed;
                         let head = match self.tagged_plain(o) {
                             Some(tag) => format!("Object [{tag}] "),
-                            None => String::new(),
+                            // a class instance shows its constructor name, as in Node (`Navigator {}`)
+                            None => match class_instance_name(self, o) {
+                                Some(name) => format!("{name} "),
+                                None => String::new(),
+                            },
                         };
                         if props.is_empty() {
                             format!("{head}{{}}")
@@ -3248,12 +3255,20 @@ impl Interp {
                             }
                             a::Prop::Getter(g) => {
                                 let k = self.prop_name(&g.key, scope)?;
-                                let f = self.method_value(Some(k.clone()), &g.function, scope)?;
+                                let f = self.method_value(
+                                    Some(format!("get {k}").into()),
+                                    &g.function,
+                                    scope,
+                                )?;
                                 define_accessor(&obj, &k, Some(f), None, true);
                             }
                             a::Prop::Setter(s) => {
                                 let k = self.prop_name(&s.key, scope)?;
-                                let f = self.method_value(Some(k.clone()), &s.function, scope)?;
+                                let f = self.method_value(
+                                    Some(format!("set {k}").into()),
+                                    &s.function,
+                                    scope,
+                                )?;
                                 define_accessor(&obj, &k, None, Some(f), true);
                             }
                             a::Prop::Assign(_) => return unsupported("shorthand default"),
@@ -4139,6 +4154,19 @@ pub(crate) fn array_index(k: &str) -> Option<usize> {
 }
 
 /// Enumeration order of own keys: array indices ascending, then the rest in insertion order.
+/// The name of the class whose prototype `o` directly inherits from, if it is a named class other than
+/// `Object` (`class A {}; new A()` -> "A"). Null-prototype and plain objects give None.
+fn class_instance_name(it: &mut Interp, o: &Obj) -> Option<Rc<str>> {
+    let proto = o.proto.borrow().clone()?;
+    let Some((Slot::Data(c @ Value::Object(_)), _)) = find_own(&proto, "constructor") else {
+        return None;
+    };
+    match it.get(&c, "name") {
+        Ok(Value::Str(name)) if !name.is_empty() && &*name != "Object" => Some(name.into_rc()),
+        _ => None,
+    }
+}
+
 pub(crate) fn order_keys(keys: Vec<Rc<str>>) -> Vec<Rc<str>> {
     if !keys.iter().any(|k| array_index(k).is_some()) {
         return keys;

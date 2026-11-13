@@ -683,15 +683,6 @@ MessagePort.prototype.@@oninit	name
 MessagePort.prototype.@@oninit	prototype
 MessagePort.prototype.close	prototype
 MessagePort.prototype.hasRef	prototype
-Navigator	length
-Navigator	name
-Navigator	prototype
-Navigator.prototype	constructor
-Navigator.prototype	hardwareConcurrency
-Navigator.prototype	language
-Navigator.prototype	languages
-Navigator.prototype	platform
-Navigator.prototype	userAgent
 Object.prototype	__defineGetter__
 Object.prototype	__defineSetter__
 Object.prototype	__lookupGetter__

@@ -1,0 +1,16 @@
+object function
+length,name,prototype
+constructor,hardwareConcurrency,language,languages,userAgent,platform
+0 Navigator object
+true true undefined function get platform
+false
+undefined
+Navigator {}
+[object Object]
+0 0
+true true
+number true
+string true
+true 1 true
+true true
+Node.js/22 true
