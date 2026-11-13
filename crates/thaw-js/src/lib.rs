@@ -933,6 +933,9 @@ pub struct Interp {
     pub(crate) yielded: bool,
     /// Function values made for compiled callbacks, by callback id (host.rs `callback_value`): stable identity.
     pub(crate) callback_values: HashMap<usize, Value>,
+    /// One thaw-js Error per native Error id: `(name, message, error)`, so a native Error that crosses
+    /// twice is the same object (`error_object`).
+    pub(crate) native_errors: HashMap<u64, (String, String, Value)>,
     /// The intrinsic `Symbol` constructor, its `Symbol.for` registry and the well-known symbols, captured at
     /// realm setup (collections.rs `install_collections`), so Rust never looks `Symbol` up in the global scope.
     pub(crate) symbol_ctor: Option<Obj>,
@@ -1054,6 +1057,7 @@ impl Interp {
             slice_end: None,
             yielded: false,
             callback_values: HashMap::new(),
+            native_errors: HashMap::new(),
             symbol_ctor: None,
             symbol_registry: None,
             well_known: Vec::new(),

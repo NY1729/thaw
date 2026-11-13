@@ -695,6 +695,12 @@ pub extern "C" fn thaw_tjs_release_handle(handle: i64) -> u8 {
 /// or create handles, so the scan repeats until none is live. Returns the number released.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_release_all_handles() -> u64 {
+    // one thaw-js Error per native id is a live reference too
+    PACKAGES.with(|ps| {
+        for package in ps.borrow_mut().iter_mut().flatten() {
+            package.interp.native_errors.clear();
+        }
+    });
     let mut released = 0;
     loop {
         let live: Vec<i64> = HANDLE_REFS.with(|r| {
@@ -1571,10 +1577,18 @@ pub extern "C" fn thaw_tjs_get_property_exact_result(
     }
 }
 
-/// Thrown carrier errors of native packets do not exist in thaw-js: always 0 ("no native token").
+/// The native packet a thrown thaw-js Error was built from: its hidden native id, while that packet is
+/// live; 0 for any other value (a plain Error, or a packet already released).
 #[no_mangle]
-pub extern "C" fn thaw_tjs_exception_native_token(_handle: u64) -> u64 {
-    0
+pub extern "C" fn thaw_tjs_exception_native_token(handle: u64) -> u64 {
+    on_handle(handle, |p, _owner, v| {
+        let id = match p.interp.get(&v, NATIVE_ID_KEY) {
+            Ok(Value::Number(n)) if n >= 1.0 => n as usize,
+            _ => 0,
+        };
+        Ok(thaw_arena::exception::packet_for_identity(id).unwrap_or(0))
+    })
+    .unwrap_or(0)
 }
 
 /// Graph-wire builder for a result value. `plain` copies arrays and objects deeply (symbols become
@@ -3870,8 +3884,12 @@ pub(crate) fn tagged_error(it: &mut Interp, tagged: &str) -> Ctl {
     }
 }
 
+/// Reserved bag key of a native Error's identity (`thaw_error_json_text`); kept as a hidden property.
+const NATIVE_ID_KEY: &str = "\u{0}id";
+
 /// The error object for a framed error string (`\u{1}Name\u{1}message`, or the tagged `\u{1}Name\u{1}\u{1e}E1:..`
-/// form), with its `\u{3}code` and `\u{5}<json>` own properties; `Err` is what the construction raised.
+/// form), with its `\u{3}code`, `\u{5}<json>` own properties and `\u{2}` cause; `Err` is what the construction
+/// raised. One object per native id: a repeat crossing of the same native Error returns the cached object.
 fn error_object(it: &mut Interp, tagged: &str) -> Result<Value, Ctl> {
     let tagged = tagged.strip_prefix('\u{2}').unwrap_or(tagged);
     // a native error token (`\u{1}Name\u{1}\u{1e}E1:<units>:-:<message>`): the name, the message and the suffix it frames
@@ -3893,23 +3911,63 @@ fn error_object(it: &mut Interp, tagged: &str) -> Result<Value, Ctl> {
         Some(parts) => parts,
         None => ("Error", tagged, ""),
     };
-    let global = it.global.clone();
-    let ctor = it
-        .lookup(&global, name)
-        .filter(|c| c.is_callable())
-        .or_else(|| it.lookup(&global, "Error"))
-        .unwrap_or(Value::Undefined);
-    let err = it.construct(&ctor, &[Value::str(message)])?;
     // the `\u{5}<json>` bag of the error's own properties (`isAxiosError`, `response`, ...); its key order is the error's own order
-    let mut has_code = false;
-    if let Some(bag) = suffix_segment(suffix, '\u{5}') {
-        if let Ok(Native::Object(fields)) = crate::json::parse_native(bag) {
-            for (k, v) in fields {
-                if k != "name" && k != "message" && k != "stack" {
-                    has_code |= k == "code";
-                    let v = to_value(it, &v);
-                    let _ = it.set(&err, &k, v);
+    let fields = match suffix_segment(suffix, '\u{5}').map(crate::json::parse_native) {
+        Some(Ok(Native::Object(fields))) => fields,
+        _ => Vec::new(),
+    };
+    let native_id = fields.iter().find_map(|(k, v)| match v {
+        Native::Number(n) if k == NATIVE_ID_KEY && *n >= 1.0 => Some(*n as u64),
+        _ => None,
+    });
+    // a cached error keeps its identity only while its name and message still match (a reused arena id
+    // of another Error is not this one)
+    let cached = native_id.and_then(|id| {
+        it.native_errors
+            .get(&id)
+            .filter(|(n, m, _)| n.as_str() == name && m.as_str() == message)
+            .map(|(_, _, err)| err.clone())
+    });
+    let err = match cached {
+        Some(err) => err,
+        None => {
+            let global = it.global.clone();
+            let ctor = it
+                .lookup(&global, name)
+                .filter(|c| c.is_callable())
+                .or_else(|| it.lookup(&global, "Error"))
+                .unwrap_or(Value::Undefined);
+            let err = it.construct(&ctor, &[Value::str(message)])?;
+            if let (Some(id), Value::Object(o)) = (native_id, &err) {
+                crate::put_hidden(o, NATIVE_ID_KEY, Value::Number(id as f64));
+                it.native_errors
+                    .insert(id, (name.to_string(), message.to_string(), err.clone()));
+            }
+            // the native `\u{2}<cause>` segment (up to the code marker) is `.cause`: a tagged text is an Error
+            if let (Value::Object(o), Some(cause)) = (&err, suffix_segment(suffix, '\u{2}')) {
+                if !cause.is_empty() {
+                    let cause = if cause.starts_with('\u{1}') {
+                        framed_error(it, cause).unwrap_or_else(|| Value::str(cause))
+                    } else {
+                        Value::str(cause)
+                    };
+                    crate::put_hidden(o, "cause", cause);
                 }
+            }
+            err
+        }
+    };
+    let mut has_code = false;
+    for (k, v) in fields {
+        if k != "name" && k != "message" && k != "stack" && !k.starts_with('\u{0}') {
+            has_code |= k == "code";
+            let v = to_value(it, &v);
+            if k == "\u{2}cause" {
+                if let Value::Object(o) = &err {
+                    crate::put_hidden(o, "cause", v);
+                }
+            } else {
+                let _ = it.set(&err, &k, v);
             }
         }
     }

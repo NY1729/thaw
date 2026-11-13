@@ -74,6 +74,23 @@ pub fn is_live(id: u64) -> bool {
     packet(id).is_some()
 }
 
+/// The newest live packet built from the framed Error at `identity` (a thaw-js Error carries it as
+/// its hidden native id). ponytail: linear scan of the live packets; index by identity if this gets hot.
+pub fn packet_for_identity(identity: usize) -> Option<u64> {
+    if identity == 0 {
+        return None;
+    }
+    PACKETS.with(|packets| {
+        packets
+            .borrow()
+            .values()
+            .filter_map(Weak::upgrade)
+            .filter(|packet| packet.native_error_identity == identity)
+            .map(|packet| packet.id)
+            .max()
+    })
+}
+
 /// Returns a field only while some authenticated owner still keeps the packet alive.
 pub fn field(id: u64, index: u32) -> Option<u64> {
     let packet = packet(id)?;
