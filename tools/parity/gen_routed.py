@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
-"""Generate the routed parity matrix from ONE probe table.
+"""Generate the routed parity matrix from ONE probe table, split into independent programs.
 
-Writes OUT_DIR/matrix.ts (compiled by thaw with THAW_JS_ROUTE_ALL=1) and OUT_DIR/matrix.node.js
-(the same probes as plain CommonJS, the node oracle), plus OUT_DIR/probes.txt (expected names).
+For every chunk i (zero-padded), OUT_DIR gets:
+  matrix_cNN.ts       compiled by thaw with THAW_JS_ROUTE_ALL=1 (its own main())
+  matrix_cNN.node.js  the same probes as plain CommonJS, the node oracle
+  probes_cNN.txt      the expected probe names of that chunk
+plus OUT_DIR/probes.txt (all expected names, emission order).
+
+Why chunks: thaw is a typed compiler, so one compile error stops a whole program (a bare reference
+to an undeclared global is `unknown variable`, a compile error by design). With N probes per program,
+a bad probe only hides its own chunk, not the whole matrix.
+
 Every probe prints one line `name = result` (a throw prints `name = THROW <Name>: <message>`),
-so diff.py compares the two stdouts directly (node/matrix.txt vs thaw/matrix.txt).
+so diff.py compares the concatenated stdouts directly (node/matrix.txt vs thaw/matrix.txt).
 
 Families (plan-q9-systematic-parity.md sections 2 and 3, H2):
   F3  handle 0 / absent globals: each name x {typeof, === undefined, == null, String(), truthiness}
+      (NopeNope is not declared in the prelude, so it only gets the typeof probe)
   F5  printing: value x container (bare console.log, array, object, template, String, JSON, concat, inspect)
   F6  identity/aliasing: imported or global object x identity operations (through any, arrays, Map, Set, Object.is)
 
-Usage: gen_routed.py OUT_DIR
+Usage: gen_routed.py OUT_DIR [--chunk N]     (N probes per program, default 10)
 Self-check (asserts before writing): names unique, no " = " inside a name, per-family counts as expected.
 """
+import argparse
 import os
 import re
 import sys
@@ -25,6 +35,9 @@ ABSENT_GLOBALS = [
     "atob", "btoa", "File", "FormData", "Headers", "Request", "Response", "DOMException",
     "CustomEvent", "require",
 ]
+# Not declared in the TS prelude: a bare reference is a compile error in thaw by design (node gives a
+# runtime ReferenceError), so these only keep the typeof probe, the one form that is legal on an undeclared name.
+UNDECLARED_GLOBALS = {"NopeNope"}
 ABSENT_OPS = [
     ("typeof", "return typeof {x};"),
     ("eqUndef", "return {x} === undefined;"),
@@ -132,7 +145,8 @@ def build_probes():
     """Return [(family, name, body)] in emission order."""
     out = []
     for g in ABSENT_GLOBALS:
-        for op_id, tpl in ABSENT_OPS:
+        ops = [op for op in ABSENT_OPS if op[0] == "typeof"] if g in UNDECLARED_GLOBALS else ABSENT_OPS
+        for op_id, tpl in ops:
             out.append(("F3", f"F3.{g}.{op_id}", tpl.format(x=g)))
     for vid, vexpr in VALUES:
         cont = STRING_CONTAINERS if vid in MULTILINE_VALUES else CONSOLE_CONTAINERS + STRING_CONTAINERS
@@ -154,7 +168,8 @@ def selfcheck(probes):
     counts = {}
     for fam, _, _ in probes:
         counts[fam] = counts.get(fam, 0) + 1
-    assert counts["F3"] == len(ABSENT_GLOBALS) * len(ABSENT_OPS)
+    n3 = sum(1 if g in UNDECLARED_GLOBALS else len(ABSENT_OPS) for g in ABSENT_GLOBALS)
+    assert counts["F3"] == n3
     n5 = sum(len(STRING_CONTAINERS) if v in MULTILINE_VALUES else len(CONSOLE_CONTAINERS) + len(STRING_CONTAINERS)
              for v, _ in VALUES)
     assert counts["F5"] == n5
@@ -178,45 +193,48 @@ def to_js(ts):
     return s
 
 
-def render(probes):
-    """Return (ts, js) text. Each family is its own function so main() stays small."""
-    def fam_fn(fam, fn):
-        body = []
-        for f, name, pbody in probes:
-            if f == fam:
-                body.append("  " + probe(name, pbody))
-        return f"function {fn}(): void {{\n" + "\n".join(body) + "\n}\n"
-
+def render_chunk(chunk):
+    """Return (ts, js) text for one program: the header, the helpers, `probes()` and its own main()."""
+    body = "\n".join("  " + probe(name, pbody) for _, name, pbody in chunk)
     ts = (TS_HEADER + TS_HELPERS
-          + fam_fn("F3", "probesF3") + fam_fn("F5", "probesF5") + fam_fn("F6", "probesF6")
+          + "function probes(): void {\n" + body + "\n}\n"
           + "function main(): void {\n"
           + "  (Error as any).stackTraceLimit = 0;\n"
-          + "  probesF3();\n  probesF5();\n  probesF6();\n"
+          + "  probes();\n"
           + "}\n")
     js = to_js(ts) + "\nmain();\n"
+    assert ts.count("try {") == len(chunk) and js.count("try {") == len(chunk)
     return ts, js
 
 
+def write(path, text):
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
 def main(argv):
-    if len(argv) != 2:
-        sys.stderr.write(__doc__)
-        return 2
-    out_dir = argv[1]
+    ap = argparse.ArgumentParser(description="Generate the routed parity matrix as independent programs.")
+    ap.add_argument("out_dir")
+    ap.add_argument("--chunk", type=int, default=10, help="probes per program (default 10)")
+    args = ap.parse_args(argv)
+    if args.chunk < 1:
+        ap.error("--chunk must be >= 1")
     probes = build_probes()
     counts = selfcheck(probes)
-    ts, js = render(probes)
-    assert ts.count("try {") == len(probes) and js.count("try {") == len(probes)
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "matrix.ts"), "w", encoding="utf-8") as fh:
-        fh.write(ts)
-    with open(os.path.join(out_dir, "matrix.node.js"), "w", encoding="utf-8") as fh:
-        fh.write(js)
-    with open(os.path.join(out_dir, "probes.txt"), "w", encoding="utf-8") as fh:
-        fh.write("\n".join(p[1] for p in probes) + "\n")
-    print(f"probes: {len(probes)} (F3 {counts['F3']}, F5 {counts['F5']}, F6 {counts['F6']})")
-    print(f"wrote {out_dir}/matrix.ts, matrix.node.js, probes.txt")
+    os.makedirs(args.out_dir, exist_ok=True)
+    chunks = [probes[i:i + args.chunk] for i in range(0, len(probes), args.chunk)]
+    for i, chunk in enumerate(chunks):
+        ts, js = render_chunk(chunk)
+        stem = os.path.join(args.out_dir, f"matrix_c{i:02d}")
+        write(stem + ".ts", ts)
+        write(stem + ".node.js", js)
+        write(os.path.join(args.out_dir, f"probes_c{i:02d}.txt"), "\n".join(p[1] for p in chunk) + "\n")
+    write(os.path.join(args.out_dir, "probes.txt"), "\n".join(p[1] for p in probes) + "\n")
+    print(f"probes: {len(probes)} (F3 {counts['F3']}, F5 {counts['F5']}, F6 {counts['F6']}) "
+          f"in {len(chunks)} programs of <= {args.chunk}")
+    print(f"wrote {args.out_dir}/matrix_c00..matrix_c{len(chunks) - 1:02d} (.ts, .node.js), probes_cNN.txt, probes.txt")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    sys.exit(main(sys.argv[1:]))

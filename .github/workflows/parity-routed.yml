@@ -95,42 +95,63 @@ jobs:
           echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
       - name: Build the thaw CLI
         run: cargo build -p thaw-cli
-      - name: Generate the matrix (one TS program, its node twin, the expected probe names)
+      - name: Generate the matrix (independent chunk programs, their node twins, the expected probe names)
         run: |
           W="$RUNNER_TEMP/parity-routed"
-          mkdir -p "$W"
-          python3 tools/parity/gen_routed.py "$W" | tee "$W/gen.log"
-      - name: Compile the matrix with thaw (route-all, wire trace)
+          mkdir -p "$W/bin"
+          # 10 probes per program: a compile error only hides its own chunk (see gen_routed.py).
+          python3 tools/parity/gen_routed.py "$W" --chunk 10 | tee "$W/gen.log"
+      - name: Compile each chunk with thaw (route-all, wire trace)
         env:
           THAW_JS_ROUTE_ALL: "1"
           THAW_JS_TRACE_WIRE: "1"
         run: |
           W="$RUNNER_TEMP/parity-routed"
-          # The compile may fail (that is a finding, not a harness error): record it and keep going.
-          rc=0
-          target/debug/thaw build "$W/matrix.ts" -o "$W/matrix" > "$W/build.log" 2>&1 || rc=$?
-          echo "$rc" > "$W/build.rc"
-          echo "thaw build exit $rc"
-          tail -n 40 "$W/build.log" || true
-      - name: Run the thaw binary and node, then diff
+          # A compile failure is a finding, not a harness error: record it per program and keep going.
+          for f in "$W"/matrix_c*.ts; do
+            base=$(basename "$f" .ts)
+            rc=0
+            target/debug/thaw build "$f" -o "$W/bin/$base" > "$W/$base.build.log" 2>&1 || rc=$?
+            echo "$rc" > "$W/$base.build.rc"
+            echo "$base: thaw build exit $rc"
+            if [ "$rc" != 0 ]; then
+              {
+                echo "### $base: thaw build failed (exit $rc), first 40 lines of build.log"
+                echo '```'
+                head -n 40 "$W/$base.build.log"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          exit 0
+      - name: Run each chunk with thaw and node, then diff
         env:
           THAW_JS_ROUTE_ALL: "1"
           THAW_JS_TRACE_WIRE: "1"
         run: |
           W="$RUNNER_TEMP/parity-routed"
-          rc=0
-          if [ -x "$W/matrix" ]; then
-            timeout 300 "$W/matrix" > "$W/thaw.stdout" 2> "$W/thaw.stderr" || rc=$?
-          else
-            : > "$W/thaw.stdout"; : > "$W/thaw.stderr"; rc=missing
-          fi
-          echo "$rc" > "$W/run.rc"
-          node "$W/matrix.node.js" > "$W/node.stdout" 2> "$W/node.stderr"
-          echo "node exit $?"
-          # diff.py compares <dir>/<corpus>.txt; no baseline, so every gap is reported (exit 1 is expected).
+          for f in "$W"/matrix_c*.ts; do
+            base=$(basename "$f" .ts)
+            rc=missing
+            : > "$W/$base.thaw.stdout"; : > "$W/$base.thaw.stderr"
+            if [ -x "$W/bin/$base" ]; then
+              rc=0
+              timeout 120 "$W/bin/$base" > "$W/$base.thaw.stdout" 2> "$W/$base.thaw.stderr" || rc=$?
+            fi
+            echo "$rc" > "$W/$base.run.rc"
+            echo "$base: thaw run exit $rc"
+            # node is the oracle; its exit code is recorded, not fatal
+            node "$W/$base.node.js" > "$W/$base.node.stdout" 2> "$W/$base.node.stderr" || echo "node exit $?" >> "$W/$base.node.stderr"
+          done
+          # Concatenate in chunk order: a missing program contributes no lines, so only its probes become MISSING.
           mkdir -p "$W/diff/node" "$W/diff/thaw"
-          cp "$W/node.stdout" "$W/diff/node/matrix.txt"
-          cp "$W/thaw.stdout" "$W/diff/thaw/matrix.txt"
+          : > "$W/diff/node/matrix.txt"; : > "$W/diff/thaw/matrix.txt"
+          for f in "$W"/matrix_c*.ts; do
+            base=$(basename "$f" .ts)
+            cat "$W/$base.node.stdout" >> "$W/diff/node/matrix.txt"
+            cat "$W/$base.thaw.stdout" >> "$W/diff/thaw/matrix.txt"
+          done
+          # diff.py compares node/<corpus>.txt with thaw/<corpus>.txt; no baseline, so every gap is reported (exit 1 is expected).
           python3 tools/parity/diff.py --node-dir "$W/diff/node" --thaw-dir "$W/diff/thaw" \
             --gaps "$W/gaps.json" > "$W/diff.txt" 2>&1 || echo "diff.py exit $?" >> "$W/diff.txt"
           tail -n 3 "$W/diff.txt" || true
@@ -141,13 +162,22 @@ jobs:
           {
             echo "## parity routed matrix (thaw route-all vs node, NON-GATING)"
             echo
-            echo "- probes expected: $(wc -l < "$W/probes.txt" 2>/dev/null || echo unknown)"
-            echo "- thaw build exit: \`$(cat "$W/build.rc" 2>/dev/null || echo unknown)\`"
-            echo "- thaw run exit: \`$(cat "$W/run.rc" 2>/dev/null || echo unknown)\`"
-            echo "- thaw lines: $(wc -l < "$W/thaw.stdout" 2>/dev/null || echo 0), node lines: $(wc -l < "$W/node.stdout" 2>/dev/null || echo 0)"
+            echo "- probes expected: $(wc -l < "$W/probes.txt" 2>/dev/null || echo unknown) in $(ls "$W"/matrix_c*.ts 2>/dev/null | wc -l) programs"
             if [ -s "$W/gaps.json" ]; then
               echo "- gaps: $(jq '.gaps | length' "$W/gaps.json")"
-              echo
+            else
+              echo "- no gaps.json produced; see the build and run logs in the artifact"
+            fi
+            echo
+            echo "| program | probes | build exit | run exit | thaw lines | node lines |"
+            echo "|---|---|---|---|---|---|"
+            for f in "$W"/matrix_c*.ts; do
+              base=$(basename "$f" .ts)
+              n=$(wc -l < "$W/probes_${base#matrix_}.txt" 2>/dev/null || echo 0)
+              echo "| $base | $n | \`$(cat "$W/$base.build.rc" 2>/dev/null || echo unknown)\` | \`$(cat "$W/$base.run.rc" 2>/dev/null || echo unknown)\` | $(wc -l < "$W/$base.thaw.stdout" 2>/dev/null || echo 0) | $(wc -l < "$W/$base.node.stdout" 2>/dev/null || echo 0) |"
+            done
+            echo
+            if [ -s "$W/gaps.json" ]; then
               echo "| family | probes | gaps |"
               echo "|---|---|---|"
               for fam in F3 F5 F6; do
@@ -155,19 +185,21 @@ jobs:
                 gaps=$(jq --arg f "$fam" '[.gaps[] | select(.probe | startswith($f + "."))] | length' "$W/gaps.json")
                 echo "| $fam | $total | $gaps |"
               done
-            else
-              echo "- no gaps.json produced; see the build and run logs in the artifact"
-            fi
-            echo
-            if [ -s "$W/build.log" ] && [ "$(cat "$W/build.rc" 2>/dev/null)" != "0" ]; then
-              echo "<details><summary>thaw build log (tail)</summary>"
               echo
-              echo '```'
-              tail -c 8000 "$W/build.log"
-              echo '```'
-              echo
-              echo "</details>"
             fi
+            for f in "$W"/matrix_c*.ts; do
+              base=$(basename "$f" .ts)
+              if [ "$(cat "$W/$base.build.rc" 2>/dev/null)" != "0" ] && [ -s "$W/$base.build.log" ]; then
+                echo "<details><summary>$base build log (first 40 lines)</summary>"
+                echo
+                echo '```'
+                head -n 40 "$W/$base.build.log"
+                echo '```'
+                echo
+                echo "</details>"
+                echo
+              fi
+            done
             echo "<details><summary>diff table (first 300 lines)</summary>"
             echo
             echo '```'
@@ -181,16 +213,6 @@ jobs:
         with:
           name: parity-routed
           path: |
-            ${{ runner.temp }}/parity-routed/matrix.ts
-            ${{ runner.temp }}/parity-routed/matrix.node.js
-            ${{ runner.temp }}/parity-routed/probes.txt
-            ${{ runner.temp }}/parity-routed/build.log
-            ${{ runner.temp }}/parity-routed/build.rc
-            ${{ runner.temp }}/parity-routed/run.rc
-            ${{ runner.temp }}/parity-routed/thaw.stdout
-            ${{ runner.temp }}/parity-routed/thaw.stderr
-            ${{ runner.temp }}/parity-routed/node.stdout
-            ${{ runner.temp }}/parity-routed/node.stderr
-            ${{ runner.temp }}/parity-routed/diff.txt
-            ${{ runner.temp }}/parity-routed/gaps.json
+            ${{ runner.temp }}/parity-routed/
+            !${{ runner.temp }}/parity-routed/bin/
           if-no-files-found: ignore
