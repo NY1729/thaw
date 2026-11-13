@@ -65,6 +65,8 @@ enum Job {
         then: Value,
     },
     Call(Value, Vec<Value>),
+    /// Native-continuation barrier (see `drain_to_job_barrier`): a no-op when run as a plain job.
+    Barrier(u64),
 }
 
 struct Timer {
@@ -209,6 +211,8 @@ pub(crate) struct Co {
 pub(crate) struct Rt {
     micro: VecDeque<(Option<Value>, Job)>,
     ticks: VecDeque<(Option<Value>, Value, Vec<Value>)>,
+    /// Barrier ids this realm popped while draining another barrier (so that drain is already done).
+    barriers_seen: std::collections::HashSet<u64>,
     unhandled: Vec<Obj>,
     /// The AsyncLocalStorage frame (an opaque JS value; None = undefined) in effect right now.
     pub(crate) actx: Option<Value>,
@@ -629,6 +633,47 @@ impl Interp {
                 Err(e) => self.uncaught(e),
                 Ok(_) => Ok(()),
             },
+            Job::Barrier(_) => Ok(()),
+        }
+    }
+
+    /// Whether this realm has jobs queued that a native continuation must run behind.
+    pub(crate) fn has_job_work(&self) -> bool {
+        !self.rt.micro.is_empty() || !self.rt.ticks.is_empty()
+    }
+
+    /// Queue the barrier marker `id` behind every job pending now.
+    pub(crate) fn push_job_barrier(&mut self, id: u64) {
+        self.rt.micro.push_back((None, Job::Barrier(id)));
+    }
+
+    /// Run this realm's jobs in FIFO order up to the marker `id`, so every job queued before it runs and
+    /// none after it. A realm without that marker (it had no work when the barrier was queued) does nothing.
+    pub(crate) fn drain_to_job_barrier(&mut self, id: u64) -> R<()> {
+        if self.rt.barriers_seen.remove(&id) {
+            return Ok(());
+        }
+        if !self
+            .rt
+            .micro
+            .iter()
+            .any(|(_, j)| matches!(j, Job::Barrier(b) if *b == id))
+        {
+            return Ok(());
+        }
+        loop {
+            self.drain_ticks()?;
+            let Some((fr, job)) = self.rt.micro.pop_front() else {
+                return Ok(());
+            };
+            match job {
+                Job::Barrier(b) if b == id => return Ok(()),
+                // a barrier of an older drain: its jobs ran already, so remember it instead of running on
+                Job::Barrier(b) => {
+                    self.rt.barriers_seen.insert(b);
+                }
+                job => self.in_frame(fr, |it| it.run_job(job))?,
+            }
         }
     }
 
