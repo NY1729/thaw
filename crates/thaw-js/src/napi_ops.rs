@@ -7,21 +7,15 @@ use std::ffi::c_char;
 use std::rc::Rc;
 
 use crate::host::{
-    classify, cstr, default_realm, error_text, handle_result, on_handle, store_handle,
-    with_package, HandleResult, HostError, HANDLES,
+    classify, cstr, default_realm, error_text, handle_result, on_handle_strict, slot_strict,
+    store_handle, with_package, HandleResult, HostError,
 };
 use crate::napi_graph::decode_napi_wire;
 use crate::{builtins, strict_equals, Interp, Kind, Obj, Value, R};
 
 /// The value behind a handle id, for a read that is not an operation on it.
 pub(crate) fn handle_value(handle: u64) -> Result<Value, String> {
-    HANDLES
-        .with(|h| {
-            h.borrow()
-                .get((handle as usize).wrapping_sub(1))
-                .map(|(_, v)| v.clone())
-        })
-        .ok_or_else(|| "invalid JavaScript handle".to_string())
+    slot_strict(handle).map(|(_, v)| v)
 }
 
 /// `[[GetPrototypeOf]]`, honouring a proxy's trap.
@@ -127,7 +121,7 @@ fn set_prototype(it: &mut Interp, object: &Value, prototype: &Value) -> R<bool> 
 pub extern "C" fn thaw_tjs_strict_equal_handles_result(left: u64, right: u64) -> HandleResult {
     handle_result((|| {
         let right = handle_value(right)?;
-        on_handle(left, |_, _, left| {
+        on_handle_strict(left, |_, _, left| {
             Ok(i64::from(strict_equals(&left, &right)))
         })
     })())
@@ -165,7 +159,7 @@ pub extern "C" fn thaw_tjs_strict_equal_handle_scalar_result(
             }
             _ => return Err("TypeError: Invalid native scalar kind".to_string()),
         };
-        on_handle(handle, |_, _, left| {
+        on_handle_strict(handle, |_, _, left| {
             Ok(i64::from(strict_equals(&left, &scalar)))
         })
     })())
@@ -179,7 +173,7 @@ pub extern "C" fn thaw_tjs_instanceof_handles_result(
 ) -> HandleResult {
     handle_result((|| {
         let constructor = handle_value(constructor)?;
-        on_handle(object, |p, _, object| {
+        on_handle_strict(object, |p, _, object| {
             let it = &mut p.interp;
             let answer = instance_of(it, &object, &constructor).map_err(|c| classify(it, c))?;
             Ok(i64::from(answer))
@@ -214,7 +208,7 @@ pub extern "C" fn thaw_tjs_napi_construct_handle_graph_args_result(
     handle_result((|| {
         let args_json = cstr(args_json).ok_or("invalid arguments")?;
         let (_, args) = decode_napi_wire(&args_json)?;
-        on_handle(handle, |p, owner, ctor| {
+        on_handle_strict(handle, |p, owner, ctor| {
             let it = &mut p.interp;
             let args = it.array_items(&args);
             let value = it.construct(&ctor, &args).map_err(|c| classify(it, c))?;
@@ -226,7 +220,7 @@ pub extern "C" fn thaw_tjs_napi_construct_handle_graph_args_result(
 /// Whether the value behind `handle` is a native Promise (no `instanceof` or user property is read).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_handle_is_promise_result(handle: u64) -> HandleResult {
-    handle_result(on_handle(handle, |_, _, v| {
+    handle_result(on_handle_strict(handle, |_, _, v| {
         let promise =
             matches!(&v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Promise(_)));
         Ok(i64::from(promise))
@@ -236,7 +230,7 @@ pub extern "C" fn thaw_tjs_handle_is_promise_result(handle: u64) -> HandleResult
 /// `Reflect.getPrototypeOf` of the object behind `handle`: a new handle (null for no prototype).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_get_prototype_handle_result(handle: u64) -> HandleResult {
-    handle_result(on_handle(handle, |p, owner, object| {
+    handle_result(on_handle_strict(handle, |p, owner, object| {
         let Value::Object(object) = &object else {
             return Err(HostError::Thrown(
                 "TypeError: Reflect.getPrototypeOf called on non-object".into(),
@@ -258,7 +252,7 @@ pub extern "C" fn thaw_tjs_set_prototype_graph_result(
     handle_result((|| {
         let wire = cstr(prototype_graph).ok_or("invalid graph")?;
         let (_, arguments) = decode_napi_wire(&wire)?;
-        on_handle(handle, |p, _, object| {
+        on_handle_strict(handle, |p, _, object| {
             let it = &mut p.interp;
             let prototype = it.get(&arguments, "0").map_err(|c| classify(it, c))?;
             let changed = set_prototype(it, &object, &prototype).map_err(|c| classify(it, c))?;
@@ -271,7 +265,7 @@ pub extern "C" fn thaw_tjs_set_prototype_graph_result(
 /// Returns 1 on success.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_host_object_integrity_result(handle: u64, freeze: u8) -> HandleResult {
-    handle_result(on_handle(handle, |_, _, v| {
+    handle_result(on_handle_strict(handle, |_, _, v| {
         let Value::Object(object) = &v else {
             return Err(HostError::Thrown(format!(
                 "TypeError: JavaScript value handle {handle} is not an object"

@@ -10,8 +10,8 @@ use std::rc::Rc;
 
 use crate::extras::Hint;
 use crate::host::{
-    classify, cstr, decode_wire, graph_result, handle_result, json_key, on_handle, store_handle,
-    HandleResult, HostError, Native, ThawResult, WireOut,
+    classify, cstr, decode_wire, graph_result, handle_result, json_key, on_handle_strict,
+    store_handle, HandleResult, HostError, Native, ThawResult, WireOut,
 };
 use crate::napi_graph::{decode_napi_wire, encode_napi_graph};
 use crate::napi_ops::{handle_value, prototype_of};
@@ -70,7 +70,7 @@ fn exact<T>(
     handle: u64,
     op: impl FnOnce(&mut Interp, usize, Value) -> R<T>,
 ) -> Result<Exact<T>, String> {
-    on_handle(handle, |p, owner, target| {
+    on_handle_strict(handle, |p, owner, target| {
         let it = &mut p.interp;
         match op(it, owner, target) {
             Ok(value) => Ok(Exact::Done(value)),
@@ -433,7 +433,7 @@ pub extern "C" fn thaw_tjs_property_predicate_key_handle_result(
 ) -> HandleResult {
     handle_result((|| {
         let key = handle_value(key_handle)?;
-        on_handle(handle, |p, _, target| {
+        on_handle_strict(handle, |p, _, target| {
             let it = &mut p.interp;
             let key = it.key_of(&key);
             let answer = predicate(it, &target, &key, operation).map_err(|c| classify(it, c))?;
@@ -497,7 +497,7 @@ pub extern "C" fn thaw_tjs_define_data_property_key_handle_graph_result(
     handle_result((|| {
         let key = handle_value(key_handle)?;
         let (_, value) = decode_wire(&cstr(graph_json).ok_or("invalid graph")?)?;
-        on_handle(handle, |p, _, target| {
+        on_handle_strict(handle, |p, _, target| {
             let it = &mut p.interp;
             let key = it.key_of(&key);
             define_slot(
@@ -597,7 +597,7 @@ pub extern "C" fn thaw_tjs_define_callback_property_key_handle_result(
 ) -> HandleResult {
     handle_result((|| {
         let key = handle_value(key_handle)?;
-        on_handle(handle, |p, owner, target| {
+        on_handle_strict(handle, |p, owner, target| {
             let it = &mut p.interp;
             let key = it.key_of(&key);
             let enumerable = attributes & 2 != 0;
@@ -819,7 +819,7 @@ pub extern "C" fn thaw_tjs_host_property_names_result(
     key_filter: u32,
     key_conversion: i32,
 ) -> ThawResult {
-    graph_result(on_handle(handle, |p, owner, target| {
+    graph_result(on_handle_strict(handle, |p, owner, target| {
         let it = &mut p.interp;
         let array = own_property_names(it, &target, key_mode, key_filter, key_conversion)?;
         let mut wire = WireOut {
@@ -846,7 +846,7 @@ pub extern "C" fn thaw_tjs_napi_host_property_names_result(
     key_filter: u32,
     key_conversion: i32,
 ) -> ThawResult {
-    graph_result(on_handle(handle, |p, owner, target| {
+    graph_result(on_handle_strict(handle, |p, owner, target| {
         let it = &mut p.interp;
         let array = own_property_names(it, &target, key_mode, key_filter, key_conversion)?;
         encode_napi_graph(it, owner, &array, 0, true, None)
