@@ -3400,23 +3400,121 @@ fn handle_marker_json(id: i64) -> String {
 fn handle_text(handle: u64, bigint_suffix: bool) -> *const c_char {
     let text = on_handle(handle, |p, _, v| {
         let it = &mut p.interp;
-        // a tagged plain object (`Math`) prints as `Object [Math] {}`, not its `[object Math]` string
         if bigint_suffix {
-            if let Value::Object(o) = &v {
-                if it.tagged_plain(o).is_some() {
-                    return Ok(it.inspect(&v, false));
-                }
-            }
+            return Ok(console_text(it, &v));
         }
-        let text = it.to_str(&v).to_string();
-        Ok(if bigint_suffix && matches!(v, Value::BigInt(_)) {
-            format!("{text}n")
-        } else {
-            text
-        })
+        Ok(it.to_str(&v).to_string())
     })
     .unwrap_or_else(|_| "[invalid JsValue]".to_string());
     thaw_arena::owned_string(text)
+}
+
+fn is_function_value(v: &Value) -> bool {
+    matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Closure { .. } | Kind::Native(_)))
+}
+
+/// `console.log` text of `v`: a bigint with its `n`, a tagged plain object as `Object [Tag] {}`, a
+/// function or class as Node prints it, and an object's `Symbol.for('nodejs.util.inspect.custom')`
+/// result when it is a string. A failing getter or custom inspector falls back to `String(v)`.
+fn console_text(it: &mut Interp, v: &Value) -> String {
+    if let Value::Object(o) = v {
+        if it.tagged_plain(o).is_some() {
+            return it.inspect(v, false);
+        }
+        if let Some(text) = console_function_text(it, v).ok().flatten() {
+            return text;
+        }
+        if let Some(text) = console_custom_text(it, v).ok().flatten() {
+            return text;
+        }
+    }
+    match v {
+        Value::BigInt(_) => format!("{}n", it.to_str(v)),
+        _ => it.to_str(v).to_string(),
+    }
+}
+
+/// `[class NAME extends BASE] { k: v }`, `[Function: NAME]` or `[Function (anonymous)]`; `None` when
+/// `v` is not callable.
+fn console_function_text(it: &mut Interp, v: &Value) -> R<Option<String>> {
+    let is_class = match v {
+        Value::Object(o) => match &*o.kind.borrow() {
+            Kind::Closure { def, .. } => def.class.is_some(),
+            Kind::Native(_) => false,
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let name = match it.get(v, "name")? {
+        Value::Str(s) => s.to_string(),
+        _ => String::new(),
+    };
+    if !is_class {
+        return Ok(Some(if name.is_empty() {
+            "[Function (anonymous)]".to_string()
+        } else {
+            format!("[Function: {name}]")
+        }));
+    }
+    let mut text = format!(
+        "[class {}",
+        if name.is_empty() {
+            "(anonymous)"
+        } else {
+            &name
+        }
+    );
+    if let Value::Object(o) = v {
+        let base = o.proto.borrow().clone();
+        if let Some(base) = base.filter(|b| !Rc::ptr_eq(b, &it.function_proto)) {
+            if let Value::Str(base_name) = it.get(&Value::Object(base), "name")? {
+                if !base_name.is_empty() {
+                    text.push_str(&format!(" extends {base_name}"));
+                }
+            }
+        }
+    }
+    text.push(']');
+    let keys: Vec<Rc<str>> = it
+        .own_keys(v)
+        .into_iter()
+        .filter(|k| !k.starts_with("__thaw"))
+        .collect();
+    if !keys.is_empty() {
+        let mut parts = Vec::with_capacity(keys.len());
+        for key in keys {
+            let val = it.get(v, &key)?;
+            let shown = match &val {
+                Value::Str(s) => format!("'{s}'"),
+                f if is_function_value(f) => {
+                    let fname = it.get(f, "name")?;
+                    format!("[Function: {}]", it.to_str(&fname))
+                }
+                other => it.to_str(other).to_string(),
+            };
+            parts.push(format!("{key}: {shown}"));
+        }
+        text.push_str(&format!(" {{ {} }}", parts.join(", ")));
+    }
+    Ok(Some(text))
+}
+
+/// The string an object's `nodejs.util.inspect.custom` method returns; `None` otherwise.
+fn console_custom_text(it: &mut Interp, v: &Value) -> R<Option<String>> {
+    let sym = it.symbol_for("nodejs.util.inspect.custom".into())?;
+    let key = it.key_of(&sym);
+    let custom = it.get(v, &key)?;
+    if !is_function_value(&custom) {
+        return Ok(None);
+    }
+    let opts = Value::Object(it.plain());
+    it.set(&opts, "breakLength", Value::Number(80.0))?;
+    it.set(&opts, "depth", Value::Number(2.0))?;
+    let result = it.call(&custom, v, &[Value::Number(2.0), opts, Value::Undefined])?;
+    Ok(match result {
+        Value::Str(s) => Some(s.to_string()),
+        _ => None,
+    })
 }
 
 /// `String(value)` of the value behind `handle`.
@@ -5982,6 +6080,36 @@ mod namespace_tag_handle_tests {
         ));
         let nested = array(&mut it, "[1, 'a', [2, { b: 3 }]]");
         assert!(array_elements_are_plain(&mut it, &nested, &mut Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod console_function_text_tests {
+    use super::*;
+
+    fn console(it: &mut Interp, src: &str) -> String {
+        let v = it.run(src).unwrap();
+        console_text(it, &v)
+    }
+
+    #[test]
+    fn classes_and_functions_print_like_node() {
+        let mut it = Interp::new();
+        assert_eq!(
+            console(&mut it, "(class A { static x = 1 })"),
+            "[class A] { x: 1 }"
+        );
+        assert_eq!(console(&mut it, "Number"), "[Function: Number]");
+        assert_eq!(console(&mut it, "String"), "[Function: String]");
+        assert_eq!(
+            console(&mut it, "(function () {})"),
+            "[Function (anonymous)]"
+        );
+        assert_eq!(
+            console(&mut it, "(class B extends (class A {}) {})"),
+            "[class B extends A]"
+        );
+        assert_eq!(console(&mut it, "12n"), "12n");
     }
 }
 
