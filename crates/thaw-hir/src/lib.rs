@@ -24,6 +24,7 @@ mod closure_analysis;
 pub use closure_analysis::*;
 
 mod lower;
+pub use lower::platform_globals;
 
 /// Bit pattern of the quiet NaN a class field that was never assigned reads as through a
 /// structural live view (`{ n: number }` over an instance); observed reads turn it into `undefined`.

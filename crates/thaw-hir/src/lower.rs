@@ -568,5 +568,8 @@ impl<'a> FnLowerer<'a> {}
 
 include!("lower/generic_calls.rs");
 
+pub mod platform_globals;
+use platform_globals::{platform_global, GlobalKind, TYPE_ONLY_NAMES};
+
 #[cfg(test)]
 mod tests;

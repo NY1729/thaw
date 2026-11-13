@@ -79,93 +79,10 @@ fn is_builtin_prototype_owner(name: &str) -> bool {
 /// reference" error. `.d.ts` files and user annotations reference
 /// `URL`/`Response`/`AbortSignal`/... constantly.
 fn is_opaque_global_type(name: &str) -> bool {
-    matches!(
-        name,
-        // Web / WHATWG APIs.
-        "URL"
-            | "URLSearchParams"
-            | "Headers"
-            | "HeadersInit"
-            | "Request"
-            | "RequestInit"
-            | "RequestInfo"
-            | "RequestRedirect"
-            | "Response"
-            | "ResponseInit"
-            | "ResponseType"
-            | "BodyInit"
-            | "Blob"
-            | "BlobPart"
-            | "File"
-            | "FileList"
-            | "FormData"
-            | "FormDataEntryValue"
-            | "Event"
-            | "EventInit"
-            | "EventTarget"
-            | "CustomEvent"
-            | "MessageEvent"
-            | "MessageEventInit"
-            | "MessagePort"
-            | "MessageChannel"
-            | "BroadcastChannel"
-            | "CloseEvent"
-            | "ErrorEvent"
-            | "ProgressEvent"
-            | "DOMException"
-            | "AbortSignal"
-            | "AbortController"
-            | "ReadableStream"
-            | "ReadableStreamDefaultReader"
-            | "ReadableStreamReadResult"
-            | "WritableStream"
-            | "TransformStream"
-            | "WebSocket"
-            | "XMLHttpRequest"
-            | "Worker"
-            | "SharedWorker"
-            | "Storage"
-            | "Location"
-            | "Navigator"
-            | "Document"
-            | "Window"
-            | "ImageData"
-            | "Performance"
-            | "PerformanceEntry"
-            | "DOMHighResTimeStamp"
-            | "Crypto"
-            | "CryptoKey"
-            | "SubtleCrypto"
-            | "CryptoKeyPair"
-            | "Transferable"
-            | "StructuredSerializeOptions"
-            | "TextEncoder"
-            | "TextDecoder"
-            // Buffers / views outside the `Uint8Array`/`Buffer` bytes path.
-            | "ArrayBuffer"
-            | "ArrayBufferLike"
-            | "ArrayBufferView"
-            | "SharedArrayBuffer"
-            | "DataView"
-            | "BufferSource"
-            // Non-`Uint8Array` typed arrays stay real QuickJS typed
-            // arrays (`JsValue`): that keeps their per-element-width
-            // coercion (Int8 wrap, Uint8Clamped clamp, Float32 rounding,
-            // ...) exact, which a flat `Bytes`/`Array(F64)` model cannot
-            // reproduce. `Uint8Array`/`Buffer` are the only spellings
-            // routed to native `Bytes`.
-            | "Int8Array"
-            | "Uint8ClampedArray"
-            | "Int16Array"
-            | "Uint16Array"
-            | "Int32Array"
-            | "Uint32Array"
-            | "Float16Array"
-            | "Float32Array"
-            | "Float64Array"
-            | "BigInt64Array"
-            | "BigUint64Array"
-    )
+    // `Buffer` is a platform constructor, but its annotation is the native
+    // bytes type: type_resolution resolves `Buffer`/`Uint8Array` after this check.
+    TYPE_ONLY_NAMES.contains(&name)
+        || (name != "Buffer" && platform_global(name) == Some(GlobalKind::Ctor))
 }
 
 /// Builds the HIR literal for a source string given its WTF-8 bytes: a
