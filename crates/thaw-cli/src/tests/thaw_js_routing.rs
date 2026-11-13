@@ -952,6 +952,27 @@ fn routed_uncaught_and_rejection_reports_reach_thaw_js_process_listeners() {
     }
 }
 
+/// Q9 route-all round 3 W4: node-compat `process hrtime bigint ids release and kill` (source from
+/// tests/node-compat.json; expected text is Node's output). The `process.env` write case stays open: routed
+/// `process.env.NAME` is a libc getenv read (thaw-llvm operators.rs compile_env_var), so JS writes are not seen.
+#[test]
+fn routed_process_ids_and_kill_match_node() {
+    let cases = [
+        (
+            "hrtime bigint ids release and kill",
+            "function main(): void {\n  const b = process.hrtime.bigint();\n  console.log(typeof b, b > 0n, process.hrtime.bigint() >= b);\n  console.log(typeof process.uptime(), typeof process.memoryUsage.rss(), typeof process.getuid(), typeof process.getgid(), typeof process.umask());\n  console.log(process.release.name, process.kill(process.pid, 0));\n  process.on(\"SIGUSR2\", () => { console.log(\"got sig\"); });\n  process.kill(process.pid, \"SIGUSR2\");\n  setTimeout(() => console.log(\"end\"), 20);\n}\n",
+            "bigint true true\nnumber number number number number\nnode true\ngot sig\nend\n",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let _env = RouteAllEnv::set();
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-w4-{}", name.len()), body);
+        let output = entry.with_file_name("app");
+        thaw_js_build(&entry, &output, &registry, true);
+        assert_eq!(thaw_js_run_guarded(&output), expected, "{name}");
+    }
+}
+
 /// Turns route-all on for the calling thread only (the same effect as `THAW_JS_ROUTE_ALL=1`, without
 /// touching the process env that parallel tests share). Off again on drop, even when the test panics.
 struct RouteAllEnv;
