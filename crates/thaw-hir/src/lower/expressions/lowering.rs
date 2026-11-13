@@ -7115,6 +7115,20 @@ pub(in crate::lower) fn peel_parens(mut expr: &Expr) -> &Expr {
     expr
 }
 
+/// Looks through parentheses and erased TS wrappers (`x as T`, `<T>x`, `x!`, `x as const`).
+pub(in crate::lower) fn peel_type_wrappers(mut expr: &Expr) -> &Expr {
+    loop {
+        expr = match expr {
+            Expr::Paren(paren) => &paren.expr,
+            Expr::TsAs(assertion) => &assertion.expr,
+            Expr::TsTypeAssertion(assertion) => &assertion.expr,
+            Expr::TsNonNull(assertion) => &assertion.expr,
+            Expr::TsConstAssertion(assertion) => &assertion.expr,
+            _ => return expr,
+        };
+    }
+}
+
 /// The operand and asserted type of `x as T` / `<T>x`, looking through parentheses.
 pub(in crate::lower) fn split_type_assertion(expr: &Expr) -> Option<(&Expr, &TsType)> {
     match expr {
