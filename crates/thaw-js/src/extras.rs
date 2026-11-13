@@ -515,8 +515,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   def(globalThis, '__thaw_util_types', utilTypes);
 
   // ----- Iterator global and iterator helpers. Iterator.prototype is the IterProto base of the
-  // array/String/RegExp iterators (EXTRAS above) and the prototype of generator objects. Map/Set
-  // iterators are arrays here, so they do not inherit the helpers. -----
+  // array/String/RegExp iterators (EXTRAS above), the prototype of generator objects and of the
+  // native Map/Set iterators (collections.rs). -----
   var ITP = Object.getPrototypeOf([].values());
   var GENP = Object.getPrototypeOf(Object.getPrototypeOf((function* () {})()));
   function isObj(v) { return v !== null && (typeof v === 'object' || typeof v === 'function'); }
@@ -526,6 +526,11 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   Iterator.prototype = ITP;
   def(ITP, 'constructor', Iterator);
   Object.setPrototypeOf(GENP, ITP);
+  var MapIterP = Object.getPrototypeOf(new Map().keys()), SetIterP = Object.getPrototypeOf(new Set().values());
+  def(MapIterP, Symbol.toStringTag, 'Map Iterator');
+  def(SetIterP, Symbol.toStringTag, 'Set Iterator');
+  Object.setPrototypeOf(MapIterP, ITP);
+  Object.setPrototypeOf(SetIterP, ITP);
   def(globalThis, 'Iterator', Iterator);
   function requireObj(v, name) {
     if (!isObj(v)) throw new TypeError('Iterator.prototype.' + name + ' called on non-object');

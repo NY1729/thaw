@@ -35,6 +35,8 @@ const HASH_MIN: usize = 16;
 pub(crate) struct MapData {
     pub(crate) entries: Vec<(Value, Value)>,
     index: Option<FxMap<HKey, usize>>,
+    /// Positions of live iterators, kept in step with `delete`/`clear`.
+    cursors: Vec<Weak<Cell<usize>>>,
 }
 
 impl MapData {
@@ -80,11 +82,13 @@ impl MapData {
         };
         self.entries.remove(i);
         self.index = None;
+        shift_cursors(&mut self.cursors, i);
         true
     }
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.index = None;
+        reset_cursors(&mut self.cursors);
     }
 }
 
@@ -93,6 +97,8 @@ impl MapData {
 pub(crate) struct SetData {
     pub(crate) items: Vec<Value>,
     index: Option<FxMap<HKey, usize>>,
+    /// Positions of live iterators, kept in step with `delete`/`clear`.
+    cursors: Vec<Weak<Cell<usize>>>,
 }
 
 impl SetData {
@@ -130,12 +136,123 @@ impl SetData {
         };
         self.items.remove(i);
         self.index = None;
+        shift_cursors(&mut self.cursors, i);
         true
     }
     pub(crate) fn clear(&mut self) {
         self.items.clear();
         self.index = None;
+        reset_cursors(&mut self.cursors);
     }
+}
+
+/// State of a live `Map`/`Set` iterator from `keys()`, `values()` or `entries()`.
+pub(crate) struct CollIterData {
+    src: Obj,
+    is_map: bool,
+    /// 0 keys, 1 values, 2 entries.
+    mode: u8,
+    /// Number of entries already visited; shared with the collection so it can be fixed up.
+    cursor: Rc<Cell<usize>>,
+    done: Cell<bool>,
+}
+
+// ponytail: Vec<Weak> scanned on every delete/clear, O(live iterators); pruned on register.
+fn register_cursor(cursors: &mut Vec<Weak<Cell<usize>>>, cursor: &Rc<Cell<usize>>) {
+    cursors.retain(|w| w.strong_count() > 0);
+    cursors.push(Rc::downgrade(cursor));
+}
+
+/// An entry at `removed` went away: cursors past it step back, so no unvisited entry is skipped.
+fn shift_cursors(cursors: &mut Vec<Weak<Cell<usize>>>, removed: usize) {
+    cursors.retain(|w| match w.upgrade() {
+        Some(c) => {
+            if removed < c.get() {
+                c.set(c.get() - 1);
+            }
+            true
+        }
+        None => false,
+    });
+}
+
+/// `clear()`: live iterators continue from the start of whatever is added later.
+fn reset_cursors(cursors: &mut Vec<Weak<Cell<usize>>>) {
+    cursors.retain(|w| match w.upgrade() {
+        Some(c) => {
+            c.set(0);
+            true
+        }
+        None => false,
+    });
+}
+
+/// A live cursor registered with the collection behind `src` (a Map or Set).
+fn live_cursor(src: &Obj) -> Rc<Cell<usize>> {
+    let cursor = Rc::new(Cell::new(0usize));
+    match &mut *src.kind.borrow_mut() {
+        Kind::Map(m) => register_cursor(&mut m.cursors, &cursor),
+        Kind::Set(s) => register_cursor(&mut s.cursors, &cursor),
+        _ => {}
+    }
+    cursor
+}
+
+/// The `(key, value)` at `i` of a Map or Set (for a Set both are the item).
+fn entry_at(src: &Obj, i: usize) -> Option<(Value, Value)> {
+    match &*src.kind.borrow() {
+        Kind::Map(m) => m.entries.get(i).cloned(),
+        Kind::Set(s) => s.items.get(i).map(|v| (v.clone(), v.clone())),
+        _ => None,
+    }
+}
+
+/// `next()` of a `Map Iterator` (`is_map`) or `Set Iterator`.
+fn coll_iter_next(it: &mut Interp, this: &Value, is_map: bool) -> R<Value> {
+    let Value::Object(o) = this else {
+        return it.throw_error(
+            "TypeError",
+            "Method Map Iterator.prototype.next called on incompatible receiver",
+        );
+    };
+    let (src, mode, cursor, finished) = match &*o.kind.borrow() {
+        Kind::CollIter(c) if c.is_map == is_map => {
+            (c.src.clone(), c.mode, c.cursor.clone(), c.done.get())
+        }
+        _ => {
+            let name = if is_map { "Map" } else { "Set" };
+            return it.throw_error(
+                "TypeError",
+                &format!("Method {name} Iterator.prototype.next called on incompatible receiver"),
+            );
+        }
+    };
+    let result = it.plain();
+    let entry = if finished {
+        None
+    } else {
+        entry_at(&src, cursor.get())
+    };
+    match entry {
+        Some((k, v)) => {
+            cursor.set(cursor.get() + 1);
+            let value = match mode {
+                0 => k,
+                1 => v,
+                _ => it.array(vec![k, v]),
+            };
+            put(&result, "value", value);
+            put(&result, "done", Value::Bool(false));
+        }
+        None => {
+            if let Kind::CollIter(c) = &*o.kind.borrow() {
+                c.done.set(true);
+            }
+            put(&result, "value", Value::Undefined);
+            put(&result, "done", Value::Bool(true));
+        }
+    }
+    Ok(Value::Object(result))
 }
 
 pub(crate) fn same_value_zero(a: &Value, b: &Value) -> bool {
@@ -144,30 +261,51 @@ pub(crate) fn same_value_zero(a: &Value, b: &Value) -> bool {
 }
 
 impl Interp {
-    /// An array that also behaves like an iterator (`next()` returns `{ value, done }`), so
-    /// `map.keys().next().value` works while `for-of`/spread still see plain elements.
-    pub(crate) fn iterator_array(&self, items: Vec<Value>) -> Value {
-        let state = Rc::new((items.clone(), Cell::new(0usize)));
-        let arr = self.array(items);
-        if let Value::Object(o) = &arr {
-            self.set_native(o, "next", move |it, _, _| {
-                let (items, pos) = &*state;
-                let result = it.plain();
-                match items.get(pos.get()) {
-                    Some(v) => {
-                        pos.set(pos.get() + 1);
-                        put(&result, "value", v.clone());
-                        put(&result, "done", Value::Bool(false));
-                    }
-                    None => {
-                        put(&result, "value", Value::Undefined);
-                        put(&result, "done", Value::Bool(true));
-                    }
-                }
-                Ok(Value::Object(result))
-            });
+    /// A live `Map`/`Set` iterator over `this` (`mode`: 0 keys, 1 values, 2 entries), or a
+    /// TypeError if `this` is not the right kind of collection.
+    pub(crate) fn coll_iterator(
+        &mut self,
+        this: &Value,
+        is_map: bool,
+        mode: u8,
+        proto: &Obj,
+    ) -> R<Value> {
+        let Value::Object(src) = this else {
+            return self.throw_error(
+                "TypeError",
+                "Method Map.prototype called on incompatible receiver",
+            );
+        };
+        let cursor = Rc::new(Cell::new(0usize));
+        let ok = match &mut *src.kind.borrow_mut() {
+            Kind::Map(m) if is_map => {
+                register_cursor(&mut m.cursors, &cursor);
+                true
+            }
+            Kind::Set(s) if !is_map => {
+                register_cursor(&mut s.cursors, &cursor);
+                true
+            }
+            _ => false,
+        };
+        if !ok {
+            let name = if is_map { "Map" } else { "Set" };
+            return self.throw_error(
+                "TypeError",
+                &format!("Method {name}.prototype called on incompatible receiver"),
+            );
         }
-        arr
+        let data = CollIterData {
+            src: src.clone(),
+            is_map,
+            mode,
+            cursor,
+            done: Cell::new(false),
+        };
+        Ok(Value::Object(new_obj(
+            Some(proto.clone()),
+            Kind::CollIter(data),
+        )))
     }
 
     /// Elements of an iterable that the evaluator can enumerate without iterator objects.
@@ -489,24 +627,31 @@ impl Interp {
         });
         define_accessor(&mp, "size", Some(size), None, false);
         self.set_native(&mp, "forEach", |it, this, args| {
-            let entries = with_map!(this, it, |e| e.entries.clone());
-            for (k, v) in entries {
+            let Value::Object(src) = this else {
+                return it.throw_error(
+                    "TypeError",
+                    "Method Map.prototype.forEach called on incompatible receiver",
+                );
+            };
+            with_map!(this, it, |_e| ());
+            let cursor = live_cursor(src);
+            while let Some((k, v)) = entry_at(src, cursor.get()) {
+                cursor.set(cursor.get() + 1);
                 it.call(&arg(args, 0), &arg(args, 1), &[v, k, this.clone()])?;
             }
             Ok(Value::Undefined)
         });
-        self.set_native(&mp, "keys", |it, this, _| {
-            let e = with_map!(this, it, |e| e.entries.clone());
-            Ok(it.iterator_array(e.into_iter().map(|(k, _)| k).collect()))
+        // Iterator prototypes; `next` is native, tags and the Iterator.prototype parent are set in extras.
+        let map_iter_proto = self.plain();
+        self.set_native(&map_iter_proto, "next", |it, this, _| {
+            coll_iter_next(it, this, true)
         });
-        self.set_native(&mp, "values", |it, this, _| {
-            let e = with_map!(this, it, |e| e.entries.clone());
-            Ok(it.iterator_array(e.into_iter().map(|(_, v)| v).collect()))
-        });
-        self.set_native(&mp, "entries", |it, this, _| {
-            let items = it.iter_items(this).unwrap_or_default();
-            Ok(it.iterator_array(items))
-        });
+        for (name, mode) in [("keys", 0u8), ("values", 1), ("entries", 2)] {
+            let proto = map_iter_proto.clone();
+            self.set_native(&mp, name, move |it, this, _| {
+                it.coll_iterator(this, true, mode, &proto)
+            });
+        }
 
         // ----- Set -----
         let sp = self.plain();
@@ -567,26 +712,30 @@ impl Interp {
             .native(|it, this, _| Ok(Value::Number(with_set!(this, it, |e| e.items.len()) as f64)));
         define_accessor(&sp, "size", Some(size), None, false);
         self.set_native(&sp, "forEach", |it, this, args| {
-            let items = with_set!(this, it, |e| e.items.clone());
-            for v in items {
+            let Value::Object(src) = this else {
+                return it.throw_error(
+                    "TypeError",
+                    "Method Set.prototype.forEach called on incompatible receiver",
+                );
+            };
+            with_set!(this, it, |_e| ());
+            let cursor = live_cursor(src);
+            while let Some((v, _)) = entry_at(src, cursor.get()) {
+                cursor.set(cursor.get() + 1);
                 it.call(&arg(args, 0), &arg(args, 1), &[v.clone(), v, this.clone()])?;
             }
             Ok(Value::Undefined)
         });
-        for name in ["values", "keys"] {
-            self.set_native(&sp, name, |it, this, _| {
-                let e = with_set!(this, it, |e| e.items.clone());
-                Ok(it.iterator_array(e))
+        let set_iter_proto = self.plain();
+        self.set_native(&set_iter_proto, "next", |it, this, _| {
+            coll_iter_next(it, this, false)
+        });
+        for (name, mode) in [("values", 0u8), ("keys", 0), ("entries", 2)] {
+            let proto = set_iter_proto.clone();
+            self.set_native(&sp, name, move |it, this, _| {
+                it.coll_iterator(this, false, mode, &proto)
             });
         }
-        self.set_native(&sp, "entries", |it, this, _| {
-            let e = with_set!(this, it, |e| e.items.clone());
-            Ok(it.iterator_array(
-                e.into_iter()
-                    .map(|v| it.array(vec![v.clone(), v]))
-                    .collect(),
-            ))
-        });
 
         // ----- URI helpers -----
         for (name, keep) in [
