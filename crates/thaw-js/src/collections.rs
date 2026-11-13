@@ -728,12 +728,17 @@ impl Interp {
         self.set_native(&set_iter_proto, "next", |it, this, _| {
             coll_iter_next(it, this, false)
         });
-        for (name, mode) in [("values", 0u8), ("keys", 0), ("entries", 2)] {
+        // Node: Set.prototype.keys is Set.prototype.values (and @@iterator), one function object
+        let values = self.native({
             let proto = set_iter_proto.clone();
-            self.set_native(&sp, name, move |it, this, _| {
-                it.coll_iterator(this, false, mode, &proto)
-            });
-        }
+            move |it, this, _| it.coll_iterator(this, false, 0, &proto)
+        });
+        put_hidden(&sp, "keys", values.clone());
+        put_hidden(&sp, "values", values);
+        let entries_proto = set_iter_proto.clone();
+        self.set_native(&sp, "entries", move |it, this, _| {
+            it.coll_iterator(this, false, 2, &entries_proto)
+        });
 
         // ----- URI helpers -----
         for (name, keep) in [
