@@ -28,6 +28,10 @@ macro_rules! id_type {
             pub fn index(self) -> u32 {
                 self.0
             }
+            /// The id with this index (an embedder handle that came from `index`).
+            pub fn from_index(index: u32) -> Self {
+                Self(index)
+            }
         }
     )*};
 }

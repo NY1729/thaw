@@ -3251,6 +3251,7 @@ dependencies = [
  "thaw-hir",
  "thaw-intl",
  "thaw-parser",
+ "thaw-wasm",
  "webpki-roots",
  "x25519-dalek",
  "x509-parser",

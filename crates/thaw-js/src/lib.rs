@@ -91,6 +91,12 @@ mod web_streams;
 mod web_text_codec;
 #[path = "web/wasm.rs"]
 mod web_wasm;
+#[cfg(feature = "wasm")]
+#[path = "web/wasm_natives.rs"]
+mod web_wasm_natives;
+#[cfg(all(test, feature = "wasm"))]
+#[path = "web/wasm_tests.rs"]
+mod web_wasm_tests;
 #[path = "web/worker_stream.rs"]
 mod web_worker_stream;
 #[path = "web/worker_threads.rs"]
@@ -1114,6 +1120,8 @@ impl Interp {
             web_streams::install(&mut it);
             web_async_hooks::install(&mut it);
             web_wasm::install(&mut it);
+            #[cfg(feature = "wasm")]
+            web_wasm_natives::install(&mut it);
             web_crypto::install(&mut it);
             web_navigator::install(&mut it);
             node_crypto::install(&mut it);
