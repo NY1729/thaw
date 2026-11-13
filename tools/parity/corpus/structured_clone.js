@@ -1,0 +1,45 @@
+const r=[];
+function t(n,f){let v;try{v=f();}catch(e){v="THROW "+(e&&e.name)+": "+String(e&&e.message).slice(0,60);}r.push(n+" = "+String(v).replace(/\n/g,"\\n").slice(0,160));}
+function G(p){return p.split(".").reduce((o,k)=>o==null?undefined:o[k],globalThis);}
+// structuredClone behaviour (and exceptions) for every value family
+t('sc number',()=>structuredClone(1));
+t('sc string',()=>structuredClone('s'));
+t('sc bigint',()=>typeof structuredClone(1n));
+t('sc Date',()=>structuredClone(new Date(5)).getTime());
+t('sc RegExp flags',()=>structuredClone(/a/gi).flags);
+t('sc Map',()=>structuredClone(new Map([[1,{a:1}]])).get(1).a);
+t('sc Set',()=>structuredClone(new Set([1,2])).size);
+t('sc nested cycle',()=>{const a={};a.s=a;const b=structuredClone(a);return b.s===b;});
+t('sc array holes',()=>structuredClone([1,,3]).length);
+t('sc Error name',()=>structuredClone(new RangeError('x')).name);
+t('sc Error message',()=>structuredClone(new RangeError('x')).message);
+t('sc Error cause',()=>structuredClone(new Error('x',{cause:7})).cause);
+t('sc Boolean boxed',()=>typeof structuredClone(Object(true)));
+t('sc Number boxed',()=>typeof structuredClone(Object(3)));
+t('sc String boxed',()=>typeof structuredClone(Object('s')));
+t('sc BigInt boxed ctor',()=>structuredClone(Object(1n)).constructor.name);
+t('sc function throws',()=>{structuredClone(()=>{});return 'no throw';});
+t('sc function error name',()=>{try{structuredClone(()=>{});}catch(e){return e.name;}return 'none';});
+t('sc function error is DOMException',()=>{try{structuredClone(()=>{});}catch(e){return e instanceof DOMException;}return 'none';});
+t('sc symbol throws',()=>{try{structuredClone(Symbol('q'));}catch(e){return e.name;}return 'none';});
+t('sc symbol key dropped',()=>JSON.stringify(structuredClone({[Symbol('k')]:1,b:2})));
+t('sc class instance loses prototype',()=>{class A{constructor(){this.x=1;}m(){}};const c=structuredClone(new A());return c.constructor.name+' '+typeof c.m;});
+t('sc own enumerable only',()=>{const o=Object.defineProperty({a:1},'h',{value:2,enumerable:false});return JSON.stringify(structuredClone(o));});
+t('sc getter invoked once',()=>{let n=0;const o={get g(){n++;return 1;}};structuredClone(o);return n;});
+t('sc Map with object keys identity',()=>{const k={};const m=structuredClone(new Map([[k,1]]));const key=[...m.keys()][0];return key!==k && typeof key==='object';});
+t('sc ArrayBuffer',()=>structuredClone(new ArrayBuffer(4)).byteLength);
+t('sc Uint8Array keeps kind',()=>Object.prototype.toString.call(structuredClone(new Uint8Array([1,2]))));
+t('sc Uint8Array values',()=>Array.from(structuredClone(new Uint8Array([1,2]))).join());
+t('sc DataView',()=>Object.prototype.toString.call(structuredClone(new DataView(new ArrayBuffer(2)))));
+t('sc Blob throws or clones',()=>{try{return typeof structuredClone(new Blob(['a']));}catch(e){return e.name;}});
+t('sc transfer option',()=>structuredClone(new ArrayBuffer(4),{transfer:[]}).byteLength);
+t('sc transfer detaches source',()=>{const b=new ArrayBuffer(4);structuredClone(b,{transfer:[b]});return b.byteLength;});
+t('sc WeakMap throws',()=>{try{structuredClone(new WeakMap());return 'no throw';}catch(e){return e.name;}});
+t('sc Promise throws',()=>{try{structuredClone(Promise.resolve());return 'no throw';}catch(e){return e.name;}});
+t('sc Proxy throws',()=>{try{structuredClone(new Proxy({},{}));return 'no throw';}catch(e){return e.name;}});
+t('sc undefined',()=>structuredClone(undefined));
+t('sc null proto object',()=>Object.getPrototypeOf(structuredClone(Object.create(null)))===Object.prototype);
+t('sc -0',()=>Object.is(structuredClone(-0),-0));
+t('sc sparse length kept',()=>structuredClone(new Array(5)).length);
+t('sc string with lone surrogate',()=>structuredClone('\uD800').length);
+console.log(r.join("\n"));
