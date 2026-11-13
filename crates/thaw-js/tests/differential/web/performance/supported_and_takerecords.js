@@ -1,0 +1,12 @@
+const k = Symbol.for('nodejs.util.inspect.custom');
+const o = new PerformanceObserver(() => {});
+console.log(o.takeRecords().length, JSON.stringify(PerformanceObserver.supportedEntryTypes));
+console.log(o.observe({ type: 'mark' }), o.observe({ type: 'mark' }));
+console.log(Object.prototype.toString.call(o), typeof o.disconnect, typeof o.takeRecords);
+console.log(new PerformanceObserver(() => {})[k](2, {}));
+const o2 = new PerformanceObserver(() => {});
+o2.observe({ entryTypes: ['mark'] });
+console.log(o2[k](2, {}));
+const o3 = new PerformanceObserver(() => {});
+o3.observe({ entryTypes: ['mark', 'measure'] });
+console.log(o3[k](2, {}));

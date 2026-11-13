@@ -1,0 +1,37 @@
+entry TypeError ERR_ILLEGAL_CONSTRUCTOR "Illegal constructor"
+measure TypeError ERR_ILLEGAL_CONSTRUCTOR "Illegal constructor"
+performance TypeError ERR_ILLEGAL_CONSTRUCTOR "Illegal constructor"
+list TypeError ERR_ILLEGAL_CONSTRUCTOR "Illegal constructor"
+resource TypeError ERR_ILLEGAL_CONSTRUCTOR "Illegal constructor"
+mark-noname TypeError ERR_MISSING_ARGS "The \"name\" argument must be specified"
+mark-named pm
+mark-named no throw
+observer-nofn TypeError ERR_INVALID_ARG_TYPE "The \"callback\" argument must be of type function. Received undefined"
+observer-str TypeError ERR_INVALID_ARG_TYPE "The \"callback\" argument must be of type function. Received type string ('x')"
+mark-noname-call TypeError ERR_MISSING_ARGS "The \"name\" argument must be specified"
+mark-neg TypeError ERR_PERFORMANCE_INVALID_TIMESTAMP "-1 is not a valid timestamp"
+mark-str-start TypeError ERR_INVALID_ARG_TYPE "The \"startTime\" argument must be of type number. Received type string ('x')"
+mark-opts-str TypeError ERR_INVALID_ARG_TYPE "The \"options\" argument must be of type object. Received type string ('x')"
+measure-missing SyntaxError 12 "The \"nope\" performance mark has not been set"
+measure-missing-end SyntaxError 12 "The \"nope2\" performance mark has not been set"
+measure-all-three TypeError ERR_PERFORMANCE_MEASURE_INVALID_OPTIONS "Must not have options.start, options.end, and options.duration specified"
+measure-endmark TypeError ERR_PERFORMANCE_MEASURE_INVALID_OPTIONS "endMark must not be specified"
+measure-neg-start TypeError ERR_PERFORMANCE_INVALID_TIMESTAMP "-5 is not a valid timestamp"
+measure-name-undef TypeError ERR_INVALID_ARG_TYPE "The \"name\" argument must be of type string. Received undefined"
+measure-name-num TypeError ERR_INVALID_ARG_TYPE "The \"name\" argument must be of type string. Received type number (7)"
+bytype-missing TypeError ERR_MISSING_ARGS "The \"type\" argument must be specified"
+byname-missing TypeError ERR_MISSING_ARGS "The \"name\" argument must be specified"
+observe-none TypeError ERR_MISSING_ARGS "The \"options.entryTypes\" and \"options.type\" arguments must be specified"
+observe-both TypeError ERR_INVALID_ARG_VALUE "The property 'options.entryTypes' options.entryTypes can not set with options.type together. Received [ 'mark' ]"
+observe-str-entrytypes TypeError ERR_INVALID_ARG_TYPE "The \"options.entryTypes\" property must be string[]. Received type string ('mark')"
+unknown-type undefined
+observe-unknown-type no throw
+empty undefined
+observe-empty-entrytypes no throw
+observe-mode-change InvalidModificationError 13 "PerformanceObserver can not change to single observation"
+observe-mode-change-2 InvalidModificationError 13 "PerformanceObserver can not change to multiple observations"
+type-twice ok
+observe-type-twice no throw
+timerify-none TypeError ERR_INVALID_ARG_TYPE "The \"fn\" argument must be of type function. Received undefined"
+detail-function DataCloneError 25 "() => 1 could not be cloned."
+detail-symbol DataCloneError 25 "Symbol(s) could not be cloned."

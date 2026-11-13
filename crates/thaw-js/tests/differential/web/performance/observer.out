@@ -1,0 +1,1 @@
+A-sync-end ; B-sync-take=1 ; B-after-disconnect=0 ; A-micro ; A-cb:a1|a2|b1|x|y same=true ; o1:2 ; o2:1/3 ; A-immediate ; t1 ; A-cb:later same=true ; o1:1 ; o2:0/1
