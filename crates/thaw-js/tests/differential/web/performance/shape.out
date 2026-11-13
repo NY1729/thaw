@@ -1,0 +1,21 @@
+object [object Performance] true 0
+true true
+clearMarks clearMeasures clearResourceTimings constructor eventLoopUtilization getEntries getEntriesByName getEntriesByType mark markResourceTiming measure nodeTiming now onresourcetimingbufferfull setResourceTimingBufferSize timeOrigin timerify toJSON
+function function function function function function
+0 0 1 0 1 0 0
+Performance PerformanceMark PerformanceObserver
+[object Performance] [object PerformanceObserver] [object PerformanceObserverEntryList] [object PerformanceResourceTiming]
+[object PerformanceMark] [object PerformanceMeasure]
+true true
+true true
+["dns","function","gc","http","http2","mark","measure","net","resource"] true
+function number true true
+object function function function
+eventLoopUtilization,nodeTiming,timeOrigin
+idle,active,utilization
+true true [object PerformanceMark] 0
+shape-mark mark 1 0 null
+name,entryType,startTime,duration,detail
+true false [object PerformanceMeasure] measure 2
+true true
+object,function,function,function
