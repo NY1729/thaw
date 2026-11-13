@@ -1,0 +1,1 @@
+["a|7.5|7|3.25|{\"x\":1}|{ y: 1 }|{ z: 2 }||%\n","NaN %s\n","a% 1\n","{ a: 1 } extra\n","1n null undefined [ 1, 'a' ] { a: { b: 1 } }\n","1n 3n NaN\n","1n null\n","\"custom\"\n","only:%s\n","%s after\n","-7 %d\n","'str'\n","-0\n","true function\n"]

@@ -1121,6 +1121,122 @@ var __thaw_bundle_entry_key = "fr/index.js";
     );
 }
 
+/// Node 22.23.1 records for an Error with an extra own property and a `cause`:
+/// `Object.keys` is `["extra"]`, `JSON.stringify` is `{"extra":1}`, and the cause descriptor is
+/// `{"value":"x","writable":true,"enumerable":false,"configurable":true}`.
+#[test]
+fn native_error_frames_keep_one_object_per_id_and_hide_the_id_and_restore_cause() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "ei/index.js": function(module, exports, require) {
+  exports.same = function (a, b) { return String(a === b); };
+  exports.keys = function (e) { return Object.keys(e).join(","); };
+  exports.json = function (e) { return JSON.stringify(e); };
+  exports.cause = function (e) { return String(e.cause); };
+  exports.causeEnum = function (e) { return String(Object.prototype.propertyIsEnumerable.call(e, "cause")); };
+  exports.causeMsg = function (e) { return String(e.cause && e.cause.message) + "|" + String(e.cause instanceof Error); };
+}, };
+var __thaw_bundle_require_maps = { "ei/index.js": {}, };
+var __thaw_bundle_entry_key = "ei/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("ei").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    // `\u{5}` bag with the native identity `\0id` (JSON-escaped in the argument text)
+    let frame = |id: u32, bag: &str| {
+        format!(r#""\u0001Error\u0001\u001eE1:4:-:boom\u0005{{\"\\u0000id\":{id}{bag}}}""#)
+    };
+    // the same native Error crossing twice is one object
+    let args = format!("[{},{}]", frame(4096, ""), frame(4096, ""));
+    assert_eq!(typed_call("ei::same", &args), Ok(r#""true""#.into()));
+    let args = format!("[{},{}]", frame(4096, ""), frame(8192, ""));
+    assert_eq!(typed_call("ei::same", &args), Ok(r#""false""#.into()));
+    // the id is not an own enumerable key and not JSON; the extra property is
+    let extra = r#",\"extra\":1"#;
+    assert_eq!(
+        typed_call("ei::keys", &format!("[{}]", frame(4096, extra))),
+        Ok(r#""extra""#.into())
+    );
+    assert_eq!(
+        typed_call("ei::json", &format!("[{}]", frame(4096, extra))),
+        Ok(r#""{\"extra\":1}""#.into())
+    );
+    // the `\u{2}cause` bag entry becomes a non-enumerable own `cause`
+    let cause = r#",\"\\u0002cause\":\"why\""#;
+    assert_eq!(
+        typed_call("ei::cause", &format!("[{}]", frame(4097, cause))),
+        Ok(r#""why""#.into())
+    );
+    assert_eq!(
+        typed_call("ei::causeEnum", &format!("[{}]", frame(4097, cause))),
+        Ok(r#""false""#.into())
+    );
+    // a `\u{2}` cause segment in the frame suffix is restored as a tagged Error
+    let nested = r#""\u0001Error\u0001\u001eE1:4:-:boom\u0002\u0001Error\u0001\u001eE1:2:-:in""#;
+    assert_eq!(
+        typed_call("ei::causeMsg", &format!("[{nested}]")),
+        Ok(r#""in|true""#.into())
+    );
+}
+
+/// `thaw_tjs_exception_native_token` reads the hidden native id of a thrown Error back to the live
+/// native packet it was built from; 0 for anything else, and 0 once the packet is gone.
+#[test]
+fn native_error_token_round_trips_through_the_hidden_id() {
+    use crate::host::{thaw_tjs_error_from_tagged_handle, thaw_tjs_exception_native_token};
+    use std::ffi::CString;
+    let identity = 0x7f00_0010_usize;
+    let (id, packet) =
+        thaw_arena::exception::register_packet(thaw_arena::exception::ExceptionPacket {
+            id: 0,
+            pending: 0,
+            native_text: 0,
+            native_error_identity: identity,
+            object: 0,
+            native: 0,
+            aggregate: 0,
+            tag: 0,
+            number: 0,
+            bigint: 0,
+            boolean: 0,
+            _roots: Vec::new(),
+            _owned_bytes: Vec::new(),
+            _leases: Vec::new(),
+        })
+        .unwrap();
+    let framed = CString::new(format!(
+        "\u{1}Error\u{1}\u{1e}E1:4:-:boom\u{5}{{\"\\u0000id\":{identity}}}"
+    ))
+    .unwrap();
+    let made = thaw_tjs_error_from_tagged_handle(framed.as_ptr());
+    assert!(made.error.is_null());
+    assert_eq!(thaw_tjs_exception_native_token(made.value), id);
+    // a plain Error (no hidden id) has no native token
+    let plain = CString::new("\u{1}Error\u{1}boom").unwrap();
+    let plain = thaw_tjs_error_from_tagged_handle(plain.as_ptr());
+    assert_eq!(thaw_tjs_exception_native_token(plain.value), 0);
+    // not an object at all
+    assert_eq!(thaw_tjs_exception_native_token(0), 0);
+    drop(packet);
+    assert_eq!(thaw_tjs_exception_native_token(made.value), 0);
+}
+
+/// Node 22.23.1: `Object.keys(e)` is `["extra"]`, `JSON.stringify(e)` is `{"extra":1}` and the cause
+/// is a non-enumerable own data property (the source of the `keys`/`json`/`cause` checks above).
+#[test]
+fn error_extra_props_and_cause_enumerate_like_node() {
+    assert_eq!(
+        one(r#"const e = new Error('m', { cause: 'x' }); e.extra = 1;
+Object.defineProperty(e, 'hid', { value: 2, enumerable: false });
+console.log(JSON.stringify(Object.keys(e)), JSON.stringify(e), JSON.stringify(Object.getOwnPropertyDescriptor(e, 'cause')));"#),
+        r#"["extra"] {"extra":1} {"value":"x","writable":true,"enumerable":false,"configurable":true}"#
+    );
+    assert_eq!(
+        one("const c = new Error('m2', { cause: new Error('in') }); console.log(JSON.stringify(Object.keys(c)), c.cause.message, Object.getOwnPropertyDescriptor(c, 'cause').enumerable)"),
+        "[] in false"
+    );
+}
+
 thread_local! {
     /// The argument JSON of the last `capture_adapter` call.
     static CAPTURED_ARGS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };

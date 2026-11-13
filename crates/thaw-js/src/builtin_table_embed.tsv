@@ -169,9 +169,17 @@ ArrayBuffer.isView	length	data	--c	number	1	-	-	-	-
 ArrayBuffer.isView	name	data	--c	string	-	isView	-	-	-
 ArrayBuffer.prototype	byteLength	accessor	--c	-	-	get byteLength|-	-	-	-
 ArrayBuffer.prototype	constructor	data	w-c	function	1	ArrayBuffer	1	16	-
+ArrayBuffer.prototype	detached	accessor	--c	-	-	get detached|-	-	-	-
+ArrayBuffer.prototype	resizable	accessor	--c	-	-	get resizable|-	-	-	-
 ArrayBuffer.prototype	slice	data	w-c	function	2	slice	0	-	-
+ArrayBuffer.prototype	transfer	data	w-c	function	0	transfer	0	-	-
+ArrayBuffer.prototype	transferToFixedLength	data	w-c	function	0	transferToFixedLength	0	-	-
 ArrayBuffer.prototype.slice	length	data	--c	number	2	-	-	-	-
 ArrayBuffer.prototype.slice	name	data	--c	string	-	slice	-	-	-
+ArrayBuffer.prototype.transfer	length	data	--c	number	0	-	-	-	-
+ArrayBuffer.prototype.transfer	name	data	--c	string	-	transfer	-	-	-
+ArrayBuffer.prototype.transferToFixedLength	length	data	--c	number	0	-	-	-	-
+ArrayBuffer.prototype.transferToFixedLength	name	data	--c	string	-	transferToFixedLength	-	-	-
 Atomics	@@toStringTag	data	--c	string	-	-	-	-	Atomics
 Atomics	add	data	w-c	function	3	add	0	-	-
 Atomics	and	data	w-c	function	3	and	0	-	-
@@ -583,6 +591,8 @@ DataView	length	data	--c	number	1	-	-	-	-
 DataView	name	data	--c	string	-	DataView	-	-	-
 DataView	prototype	data	---	object	-	-	-	-	-
 DataView.prototype	@@toStringTag	data	--c	string	-	-	-	-	DataView
+DataView.prototype	byteLength	accessor	--c	-	-	get byteLength|-	-	-	-
+DataView.prototype	byteOffset	accessor	--c	-	-	get byteOffset|-	-	-	-
 DataView.prototype	constructor	data	w-c	function	1	DataView	1	61	-
 DataView.prototype	getBigInt64	data	w-c	function	1	getBigInt64	0	-	-
 DataView.prototype	getBigUint64	data	w-c	function	1	getBigUint64	0	-	-
@@ -2277,12 +2287,36 @@ clearInterval	length	data	--c	number	1	-	-	-	-
 clearInterval	name	data	--c	string	-	clearInterval	-	-	-
 clearTimeout	length	data	--c	number	1	-	-	-	-
 clearTimeout	name	data	--c	string	-	clearTimeout	-	-	-
+console	Console	data	wec	function	1	Console	1	170	-
 console	debug	data	wec	function	0	debug	0	-	-
 console	error	data	wec	function	0	error	0	-	-
 console	info	data	wec	function	0	info	0	-	-
 console	log	data	wec	function	0	log	0	-	-
 console	trace	data	wec	function	0	trace	0	-	-
 console	warn	data	wec	function	0	warn	0	-	-
+console.Console	length	data	--c	number	1	-	-	-	-
+console.Console	name	data	--c	string	-	Console	-	-	-
+console.Console	prototype	data	w--	object	-	-	-	-	-
+console.Console.prototype	assert	data	wec	function	1	assert	0	-	-
+console.Console.prototype	clear	data	wec	function	0	clear	0	-	-
+console.Console.prototype	constructor	data	w-c	function	1	Console	1	170	-
+console.Console.prototype	count	data	wec	function	0	count	0	-	-
+console.Console.prototype	countReset	data	wec	function	0	countReset	0	-	-
+console.Console.prototype	debug	data	wec	function	0	debug	0	-	-
+console.Console.prototype	dir	data	wec	function	2	dir	0	-	-
+console.Console.prototype	dirxml	data	wec	function	0	log	0	171	-
+console.Console.prototype	error	data	wec	function	0	error	0	-	-
+console.Console.prototype	group	data	wec	function	0	group	0	172	-
+console.Console.prototype	groupCollapsed	data	wec	function	0	group	0	172	-
+console.Console.prototype	groupEnd	data	wec	function	0	groupEnd	0	-	-
+console.Console.prototype	info	data	wec	function	0	info	0	-	-
+console.Console.prototype	log	data	wec	function	0	log	0	171	-
+console.Console.prototype	table	data	wec	function	2	table	0	-	-
+console.Console.prototype	time	data	wec	function	0	time	0	-	-
+console.Console.prototype	timeEnd	data	wec	function	0	timeEnd	0	-	-
+console.Console.prototype	timeLog	data	wec	function	0	timeLog	0	-	-
+console.Console.prototype	trace	data	wec	function	0	trace	1	-	-
+console.Console.prototype	warn	data	wec	function	0	warn	0	-	-
 console.debug	length	data	--c	number	0	-	-	-	-
 console.debug	name	data	--c	string	-	debug	-	-	-
 console.error	length	data	--c	number	0	-	-	-	-
