@@ -46,6 +46,10 @@ jobs:
         run: cargo build --release -p thaw-js --bin thaw-js-node
       - name: Harness self-test
         run: bash tools/parity/selftest.sh
+      - name: Builtin table is current (non-gating)
+        # Regenerates builtin_table.tsv under Node 22 and fails on drift. Non-gating like the rest of this job.
+        continue-on-error: true
+        run: bash tools/parity/check_builtin_table.sh
       - name: Run parity (no baseline gate, records gaps only)
         # run.sh always runs diff.py with the committed known-gaps.json as the gate, and that file is stale,
         # so the exit code (1 = gaps not in baseline) is captured and reported, not used to fail the step.
