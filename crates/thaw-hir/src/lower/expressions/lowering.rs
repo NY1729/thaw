@@ -6233,7 +6233,7 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirExpr::ArrayLit(vec![target]));
                     }
                     let class_binding = self.resolve_binding(class.sym.as_ref());
-                    if platform_global(class.sym.as_ref()) == Some(GlobalKind::Ctor)
+                    if DYNAMIC_NEW_CTORS.contains(&class.sym.as_ref())
                         && !self.scope.contains_key(&class_binding)
                         && !self.signatures.contains_key(&class_binding)
                     {

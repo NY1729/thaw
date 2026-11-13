@@ -79,10 +79,7 @@ fn is_builtin_prototype_owner(name: &str) -> bool {
 /// reference" error. `.d.ts` files and user annotations reference
 /// `URL`/`Response`/`AbortSignal`/... constantly.
 fn is_opaque_global_type(name: &str) -> bool {
-    // `Buffer` is a platform constructor, but its annotation is the native
-    // bytes type: type_resolution resolves `Buffer`/`Uint8Array` after this check.
-    TYPE_ONLY_NAMES.contains(&name)
-        || (name != "Buffer" && platform_global(name) == Some(GlobalKind::Ctor))
+    TYPE_ONLY_NAMES.contains(&name) || DYNAMIC_OPAQUE_CTORS.contains(&name)
 }
 
 /// Builds the HIR literal for a source string given its WTF-8 bytes: a
