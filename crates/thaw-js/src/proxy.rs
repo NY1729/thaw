@@ -7,6 +7,8 @@ pub(crate) struct ProxyData {
     pub(crate) target: Value,
     pub(crate) handler: RefCell<Value>,
     pub(crate) callable: bool,
+    /// `process.env`: inspection renders the live environment (see process_env.rs).
+    pub(crate) env_view: bool,
 }
 
 impl Interp {
@@ -342,6 +344,7 @@ impl Interp {
                 target: target.clone(),
                 handler: RefCell::new(handler.clone()),
                 callable,
+                env_view: false,
             })),
         )))
     }

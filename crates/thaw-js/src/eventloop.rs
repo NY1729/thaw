@@ -1807,11 +1807,7 @@ impl Interp {
         put(&p, "argv", argv);
         let exec_argv = self.array(node_exec_argv.iter().map(|a| Value::str(a)).collect());
         put(&p, "execArgv", exec_argv);
-        let env = self.plain();
-        for (k, v) in std::env::vars() {
-            put(&env, &k, Value::str(&v));
-        }
-        put(&p, "env", Value::Object(env));
+        put(&p, "env", self.make_process_env());
         self.set_native(&p, "cwd", |_, _, _| {
             Ok(Value::str(
                 &std::env::current_dir()
