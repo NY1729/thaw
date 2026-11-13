@@ -7621,6 +7621,107 @@ fn builtin_iterators_inherit_iterator_prototype() {
     );
 }
 
+/// Node: `Map`/`Set` `keys()`/`values()`/`entries()` return real iterator objects (not arrays), with
+/// `Map Iterator`/`Set Iterator` tags and the `Iterator.prototype` helpers.
+#[test]
+fn map_set_iterators_are_real_iterator_objects() {
+    assert_eq!(
+        one(
+            r#"const it=new Map([[1,2]]).keys(); const si=new Set([1]).values();
+console.log(Array.isArray(it), Object.prototype.toString.call(it), it instanceof Iterator, typeof it.map, it[Symbol.iterator]()===it, Object.prototype.toString.call(si), si instanceof Iterator, Object.getPrototypeOf(new Map().entries()) === Object.getPrototypeOf(new Map().keys()));"#
+        ),
+        "false [object Map Iterator] true function true [object Set Iterator] true true"
+    );
+}
+
+/// Node: map/set iterators are live: additions and deletions during iteration are observed, and
+/// `clear()` followed by `set()` keeps the old iterator going over the new entries.
+#[test]
+fn map_set_iterators_are_live() {
+    assert_eq!(
+        one(
+            r#"const m=new Map(); m.set("a",1); m.set("b",2); m.set("c",3);
+const k=m.keys(), v=m.values(), e=m.entries();
+console.log(k.next().value, v.next().value, JSON.stringify(e.next().value));
+m.delete("b"); m.set("c",30); m.set("d",4);
+console.log(k.next().value, v.next().value, JSON.stringify(e.next().value));
+m.clear(); m.set("a",10);
+console.log(k.next().value, v.next().value, JSON.stringify(e.next().value));
+console.log(k.next().done); m.set("e",5); console.log(k.next().done);
+console.log(v.next().value, JSON.stringify(e.next().value));
+const seen=[]; m.forEach((x,y)=>{seen.push(y+"="+x); if(y==="a"){m.delete("e"); m.set("f",6);}}); console.log(seen.join(","));
+const s=new Set([1,2,3]); const si=s.values(), se=s.entries();
+console.log(si.next().value, JSON.stringify(se.next().value));
+s.delete(2); s.delete(1); s.add(1); s.add(4);
+console.log(si.next().value, JSON.stringify(se.next().value));
+console.log(si.next().value, JSON.stringify(se.next().value));
+s.clear(); s.add(5);
+console.log(si.next().value, JSON.stringify(se.next().value));
+const sv=[]; s.forEach(x=>{sv.push(x); if(x===5) s.add(6);}); console.log(sv.join(","));"#
+        ),
+        [
+            r#"a 1 ["a",1]"#,
+            r#"c 30 ["c",30]"#,
+            r#"a 10 ["a",10]"#,
+            "true",
+            "true",
+            r#"5 ["e",5]"#,
+            "a=10,f=6",
+            "1 [1,1]",
+            "3 [3,3]",
+            "1 [1,1]",
+            "5 [5,5]",
+            "5,6",
+        ]
+        .join("|")
+    );
+}
+
+/// Node: a cursor survives deletion of an already-visited entry, and `clear()` restarts it.
+#[test]
+fn map_iterator_cursor_survives_delete_and_clear() {
+    assert_eq!(
+        one(
+            r#"const m=new Map([[1,1],[2,2],[3,3]]); const it=m.keys(); console.log(it.next().value); m.delete(1); console.log(it.next().value, it.next().value, it.next().done);
+const m2=new Map([['a',1]]); const it2=m2.keys(); it2.next(); m2.clear(); m2.set('b',2); console.log(it2.next().value, it2.next().done);"#
+        ),
+        "1|2 3 true|b true"
+    );
+}
+
+/// Node: `next` on an incompatible receiver throws a TypeError; `next.call` on a real iterator works.
+#[test]
+fn collection_iterator_next_validates_receiver() {
+    assert_eq!(
+        one(
+            r#"const n=new Map().keys().next; try{n()}catch(e){console.log(e instanceof TypeError)} try{n.call(new Set().values())}catch(e){console.log(e instanceof TypeError)} console.log(n.call(new Map([['x',1]]).keys()).value);"#
+        ),
+        "true|true|x"
+    );
+}
+
+/// Node: spread over a map iterator calls its own (overridden) `next`, so its error propagates.
+#[test]
+fn collection_iterator_spread_honours_overridden_next() {
+    assert_eq!(
+        one(
+            r#"const it=new Map([[1,2]]).keys(); it.next=()=>{throw new Error('next failed')}; try{[...it]}catch(e){console.log(e.message)}"#
+        ),
+        "next failed"
+    );
+}
+
+/// Node: iterator helpers chain over map/set iterators.
+#[test]
+fn map_set_iterator_helpers_chain() {
+    assert_eq!(
+        one(
+            r#"console.log(new Map([['a',1],['b',2]]).keys().map(x=>x+'!').toArray().join(), new Set([1,2,3]).values().filter(x=>x>1).take(1).toArray().join());"#
+        ),
+        "a!,b! 2"
+    );
+}
+
 /// Node: `JSON.rawJSON` values serialize as their raw text and are frozen null-prototype objects.
 #[test]
 fn json_raw_json_matches_node() {
