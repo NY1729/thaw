@@ -919,6 +919,9 @@ pub(crate) fn graph_token(
             Ok(Value::str(&crate::builtins::units_str(&units)))
         }
         ("r", Native::Number(i)) => graph_node(it, *i as usize, nodes, cx),
+        ("bi", Native::Str(decimal)) => Ok(Value::BigInt(Rc::new(
+            crate::bigint::parse_bigint(decimal).ok_or("malformed graph bigint")?,
+        ))),
         _ => Err(format!("unsupported graph token `{key}`")),
     }
 }
@@ -1582,6 +1585,9 @@ impl WireOut {
                 crate::builtins::json_quote(s, &mut q);
                 format!("{{\"v\":{q}}}")
             }
+            Value::BigInt(_) if !self.plain => {
+                format!("{{\"bi\":\"{}\"}}", it.to_str(&v))
+            }
             Value::BigInt(_) => {
                 return Err(HostError::Thrown(
                     "TypeError: Do not know how to serialize a BigInt".into(),
@@ -1973,6 +1979,26 @@ pub(crate) fn json_key(key_json: *const c_char) -> Result<String, String> {
     }
 }
 
+/// Host-side `target[key] = value` under strict mode (compiled code is strict): a write to a frozen object
+/// or a new key on a non-extensible one throws, where `Interp::set` silently ignores it.
+fn strict_host_set(it: &mut Interp, target: &Value, key: &str, value: Value) -> R<()> {
+    if let Value::Object(o) = target {
+        if o.frozen.get() {
+            return it.throw_error(
+                "TypeError",
+                &format!("Cannot assign to read only property '{key}' of object"),
+            );
+        }
+        if o.ext.get() != 0 && crate::find_in_chain(o, key).is_none() {
+            return it.throw_error(
+                "TypeError",
+                &format!("Cannot add property {key}, object is not extensible"),
+            );
+        }
+    }
+    it.set(target, key, value)
+}
+
 /// `handle[key] = value` with the key as JSON text and the value a graph wire; the result value is 1.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_set_property_graph_result(
@@ -1985,7 +2011,7 @@ pub extern "C" fn thaw_tjs_set_property_graph_result(
         let (_, value) = decode_wire(&cstr(graph_json).ok_or("invalid graph")?)?;
         on_handle(handle, |p, _, target| {
             let it = &mut p.interp;
-            it.set(&target, &key, value).map_err(|c| classify(it, c))?;
+            strict_host_set(it, &target, &key, value).map_err(|c| classify(it, c))?;
             Ok(1)
         })
     })())
@@ -2095,7 +2121,7 @@ pub extern "C" fn thaw_tjs_set_property_result(
         let value = on_handle(value_handle, |_, _, v| Ok(v))?;
         on_handle(handle, |p, _, target| {
             let it = &mut p.interp;
-            it.set(&target, &name, value).map_err(|c| classify(it, c))?;
+            strict_host_set(it, &target, &name, value).map_err(|c| classify(it, c))?;
             Ok(1)
         })
     })())
@@ -3057,8 +3083,7 @@ pub extern "C" fn thaw_tjs_set_property_json_graph_result(
                 .into_iter()
                 .next()
                 .unwrap_or(Value::Undefined);
-            it.set(&target, &name, value.clone())
-                .map_err(|c| classify(it, c))?;
+            strict_host_set(it, &target, &name, value.clone()).map_err(|c| classify(it, c))?;
             let mut out = WireOut {
                 owner,
                 plain: false,
@@ -3371,6 +3396,14 @@ fn handle_marker_json(id: i64) -> String {
 fn handle_text(handle: u64, bigint_suffix: bool) -> *const c_char {
     let text = on_handle(handle, |p, _, v| {
         let it = &mut p.interp;
+        // a tagged plain object (`Math`) prints as `Object [Math] {}`, not its `[object Math]` string
+        if bigint_suffix {
+            if let Value::Object(o) = &v {
+                if it.tagged_plain(o).is_some() {
+                    return Ok(it.inspect(&v, false));
+                }
+            }
+        }
         let text = it.to_str(&v).to_string();
         Ok(if bigint_suffix && matches!(v, Value::BigInt(_)) {
             format!("{text}n")
@@ -3394,17 +3427,52 @@ pub extern "C" fn thaw_tjs_handle_to_console_string(handle: u64) -> *const c_cha
     handle_text(handle, true)
 }
 
+/// Whether every element of array `o` is a primitive, a plain object, or a plain array. A nested
+/// array already on `ancestors` (a cycle) counts as plain, keeping the old Json path for it.
+fn array_elements_are_plain(it: &mut Interp, o: &Obj, ancestors: &mut Vec<usize>) -> bool {
+    let ptr = Rc::as_ptr(o) as usize;
+    if ancestors.contains(&ptr) {
+        return true;
+    }
+    let items = match &*o.kind.borrow() {
+        Kind::Array(items) => items.clone(),
+        _ => return false,
+    };
+    ancestors.push(ptr);
+    let plain = items.iter().all(|x| match x {
+        Value::Object(e) if matches!(&*e.kind.borrow(), Kind::Array(_)) => {
+            array_elements_are_plain(it, e, ancestors)
+        }
+        Value::Object(e) => {
+            matches!(&*e.kind.borrow(), Kind::Plain)
+                && e.proto
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(|q| Rc::ptr_eq(q, &it.object_proto))
+                && it.tagged_plain(e).is_none()
+        }
+        _ => true,
+    });
+    ancestors.pop();
+    plain
+}
+
 /// 1 for a plain array or plain object (`console.log` inspects those like a native `Json`).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_handle_is_plain_data(handle: u64) -> u8 {
     on_handle(handle, |p, _, v| {
         Ok(match &v {
-            Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => 1,
+            // an array is data only if no element is a non-plain object (it would print as a handle)
+            Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
+                u8::from(array_elements_are_plain(&mut p.interp, o, &mut Vec::new()))
+            }
             Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Plain) => u8::from(
                 o.proto
                     .borrow()
                     .as_ref()
-                    .is_none_or(|q| Rc::ptr_eq(q, &p.interp.object_proto)),
+                    .is_none_or(|q| Rc::ptr_eq(q, &p.interp.object_proto))
+                    // a tagged object (`Math`) is inspected by the interpreter, not as data
+                    && p.interp.tagged_plain(o).is_none(),
             ),
             _ => 0,
         })
@@ -5785,6 +5853,41 @@ mod live_result_lease_tests {
 }
 
 #[cfg(test)]
+mod namespace_tag_handle_tests {
+    use super::*;
+    use std::ffi::{CStr, CString};
+
+    #[test]
+    fn math_handle_is_not_plain_data_and_prints_as_a_tagged_object() {
+        let math = thaw_tjs_get_global(CString::new("Math").unwrap().as_ptr());
+        assert_ne!(math, 0, "Math is not defined");
+        assert_eq!(thaw_tjs_handle_is_plain_data(math as u64), 0);
+        let text = thaw_tjs_handle_to_console_string(math as u64);
+        assert_eq!(
+            unsafe { CStr::from_ptr(text) }.to_str().unwrap(),
+            "Object [Math] {}"
+        );
+    }
+
+    #[test]
+    fn array_holding_a_non_plain_object_is_not_plain_data() {
+        let mut it = Interp::new();
+        let array = |it: &mut Interp, src: &str| match it.run(src).unwrap() {
+            Value::Object(o) => o,
+            other => panic!("not an object: {}", it.to_str(&other)),
+        };
+        let with_math = array(&mut it, "[Math]");
+        assert!(!array_elements_are_plain(
+            &mut it,
+            &with_math,
+            &mut Vec::new()
+        ));
+        let nested = array(&mut it, "[1, 'a', [2, { b: 3 }]]");
+        assert!(array_elements_are_plain(&mut it, &nested, &mut Vec::new()));
+    }
+}
+
+#[cfg(test)]
 mod host_query_live_tests {
     use super::*;
     use std::ffi::{CStr, CString};
@@ -5970,6 +6073,26 @@ mod handle_call_kind_tests {
         }
         let undefined = Value::Undefined;
         assert!(check_handle_callable(&mut it, &undefined).is_err());
+    }
+}
+
+#[cfg(test)]
+mod strict_host_set_tests {
+    use super::*;
+
+    #[test]
+    fn host_set_on_a_frozen_object_throws_and_keeps_the_value() {
+        let mut it = Interp::new();
+        let obj = it.run("Object.freeze({value: 1})").unwrap();
+        assert!(strict_host_set(&mut it, &obj, "value", Value::Number(99.0)).is_err());
+        assert!(matches!(it.get(&obj, "value"), Ok(Value::Number(n)) if n == 1.0));
+    }
+
+    #[test]
+    fn typeof_function_prototype_is_function() {
+        let mut it = Interp::new();
+        let kind = it.run("typeof Function.prototype").unwrap();
+        assert_eq!(it.to_str(&kind).to_string(), "function");
     }
 }
 
