@@ -1014,21 +1014,40 @@ impl Interp {
         });
     }
 
-    /// ref/unref/hasRef on a Timeout/Immediate. `Some(r)` sets, `None` reads. Here first, else in the realm that owns it.
+    /// ref/unref/hasRef on a Timeout/Immediate. `Some(r)` sets, `None` reads. Here first, else in the realm that owns it,
+    /// else (entry already cleared or fired) the value stored on the object.
     fn set_ref(&mut self, this: &Value, refd: Option<bool>) -> bool {
         let Some(id) = self.timer_id(this) else {
             return false;
         };
-        if let Some(r) = self.set_ref_local(id, refd) {
-            return r;
+        // The flag also lives on the object, so a cleared timer (no table entry) still reports it.
+        if let (Some(r), Value::Object(o)) = (refd, this) {
+            put_hidden(o, "@@refd", Value::Bool(r));
         }
-        let mut out = false;
-        crate::host::for_other_realms(self, |other| {
-            if let Some(r) = other.set_ref_local(id, refd) {
-                out = r;
+        let mut found = self.set_ref_local(id, refd);
+        if found.is_none() {
+            crate::host::for_other_realms(self, |other| {
+                if let Some(r) = other.set_ref_local(id, refd) {
+                    found = Some(r);
+                }
+            });
+        }
+        found.unwrap_or_else(|| self.stored_ref(this))
+    }
+
+    /// Ref state of a timer whose table entry is gone: the last `ref`/`unref` value, else Node's default
+    /// (Timeout/Interval true; Immediate false, as Node reports for a cleared or fired one).
+    fn stored_ref(&self, this: &Value) -> bool {
+        let Value::Object(o) = this else {
+            return false;
+        };
+        match find_own(o, "@@refd") {
+            Some((Slot::Data(Value::Bool(b)), _)) => b,
+            _ => {
+                let proto = o.proto.borrow().clone();
+                matches!((proto, &self.rt.timeout_proto), (Some(p), Some(t)) if Rc::ptr_eq(&p, t))
             }
-        });
-        out
+        }
     }
 
     /// `None` when `id` is not in this realm's tables.
@@ -1604,6 +1623,25 @@ impl Interp {
             self.set_native(proto, "hasRef", |it, this, _| {
                 Ok(Value::Bool(it.set_ref(this, None)))
             });
+        }
+        // Node: a Timeout/Interval converts to its numeric id (`+t`, `${t}`, `'a' + t`), and
+        // `[Symbol.dispose]` clears it. Immediates have no toPrimitive; both classes get dispose.
+        let to_prim = self.well_known_key("toPrimitive");
+        let dispose = self.well_known_key("dispose");
+        let tp = self.native(|it, this, _| {
+            Ok(it
+                .timer_id(this)
+                .map_or(Value::Undefined, |id| Value::Number(id as f64)))
+        });
+        put_hidden(&timeout_proto, &to_prim, tp);
+        for (proto, immediate) in [(&timeout_proto, false), (&immediate_proto, true)] {
+            let d = self.native(move |it, this, _| {
+                if let Some(id) = it.timer_id(this) {
+                    it.clear_timer_anywhere(id, immediate);
+                }
+                Ok(Value::Undefined)
+            });
+            put_hidden(proto, &dispose, d);
         }
         self.set_native(&timeout_proto, "refresh", |it, this, _| {
             if let Some(id) = it.timer_id(this) {

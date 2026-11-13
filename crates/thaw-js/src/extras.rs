@@ -423,7 +423,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     def(DataView.prototype, 'set' + k[0], function (index, value, little) {
       index = check(this, index, 8);
       var v = BigInt.asUintN(64, BigInt(value));
-      for (var i = 7; i >= 0; i--) { this.__bytes[index + (little ? i : 7 - i)] = Number(v & 255n); v >>= 8n; }
+      for (var i = 7; i >= 0; i--) { this.__bytes[index + (little ? 7 - i : i)] = Number(v & 255n); v >>= 8n; }
     });
   });
   def(DataView.prototype, Symbol.toStringTag, 'DataView');
@@ -491,8 +491,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     isInt32Array: function (v) { return v instanceof Int32Array; },
     isFloat32Array: function (v) { return v instanceof Float32Array; },
     isFloat64Array: function (v) { return v instanceof Float64Array; },
-    isBigInt64Array: function () { return false; },
-    isBigUint64Array: function () { return false; },
+    isBigInt64Array: function (v) { return v instanceof BigInt64Array; },
+    isBigUint64Array: function (v) { return v instanceof BigUint64Array; },
     isNativeError: function (v) { return v instanceof Error; },
     isArgumentsObject: function (v) { return tag(v) === '[object Arguments]'; },
     isNumberObject: function (v) { return tag(v) === '[object Number]' && typeof v === 'object'; },
@@ -719,7 +719,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   // ----- Atomics. One agent: every read-modify-write is atomic by construction, and each op returns the
   // old value (store returns the stored integer). ponytail: no other agent can touch a SharedArrayBuffer
   // (worker.rs runs a separate Interp, so Atomics.wait can only time out and notify wakes nobody); add
-  // cross-worker waiters when worker SAB sharing lands. BigInt64Array is not supported yet. -----
+  // cross-worker waiters when worker SAB sharing lands. ponytail: ledgered, not implemented: Atomics on
+  // BigInt64Array / BigUint64Array (intTA refuses them with a TypeError; Node accepts BigInt operands). -----
   var Atomics = {};
   function intTA(ta, op) {
     if (!(ta instanceof Int8Array || ta instanceof Uint8Array || ta instanceof Int16Array ||
