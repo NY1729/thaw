@@ -1,0 +1,21 @@
+// Timeout/Interval convert to their numeric id; Immediate has no toPrimitive; both have dispose.
+const t = setTimeout(() => console.log('timeout fired'), 5);
+const i = setInterval(() => {}, 1000);
+const im = setImmediate(() => {});
+console.log(typeof t[Symbol.toPrimitive], typeof i[Symbol.toPrimitive], typeof im[Symbol.toPrimitive]);
+console.log(typeof String(t), String(t) === String(+t), `${t}` === String(+t));
+console.log('a' + t === 'a' + String(+t), typeof (+t), typeof t[Symbol.toPrimitive]());
+console.log(t[Symbol.toPrimitive]() === +t, i[Symbol.toPrimitive]() === +i, +t !== +i);
+console.log(t == +t, Number.isInteger(+t), +t > 0);
+console.log(typeof Symbol.dispose, typeof t[Symbol.dispose], typeof i[Symbol.dispose], typeof im[Symbol.dispose]);
+const iid = i[Symbol.toPrimitive]();
+clearInterval(iid);
+const imid = +im;
+clearImmediate(im);
+console.log('immediate id number', typeof imid);
+const dead = setTimeout(() => console.log('never'), 5);
+dead[Symbol.dispose]();
+t[Symbol.dispose]();
+console.log('disposed');
+const later = setTimeout(() => console.log('never: String id cleared'), 5);
+clearTimeout(String(later));
