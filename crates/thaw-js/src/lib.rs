@@ -53,6 +53,7 @@ mod napi_symbols;
 mod net;
 mod node_crypto;
 mod numfmt;
+mod process_env;
 mod procstate;
 mod proxy;
 mod reflect;
@@ -1407,10 +1408,13 @@ impl Interp {
             Value::Str(s) => format!("'{s}'"),
             Value::Object(o) => {
                 let proxied = match &*o.kind.borrow() {
-                    Kind::Proxy(p) => Some(p.target.clone()),
+                    Kind::Proxy(p) => Some((p.target.clone(), p.env_view)),
                     _ => None,
                 };
-                if let Some(target) = proxied {
+                if let Some((target, env_view)) = proxied {
+                    if env_view {
+                        return self.inspect(&Value::Object(self.process_env_view()), top);
+                    }
                     return self.inspect(&target, top);
                 }
                 enum K {
@@ -4431,6 +4435,8 @@ mod napi_symbol_protocol_tests;
 mod napi_symbols_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod process_env_tests;
 #[cfg(test)]
 mod prop_array_length_tests;
 #[cfg(test)]

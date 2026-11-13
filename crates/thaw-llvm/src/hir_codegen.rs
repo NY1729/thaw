@@ -1321,6 +1321,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 ("thaw_js_drain_next_ticks", "thaw_tjs_drain_next_ticks"),
                 ("thaw_js_fatal_exit", "thaw_tjs_fatal_exit"),
                 ("thaw_js_run_cli", "thaw_tjs_run_cli"),
+                ("thaw_js_set_process_env", "thaw_tjs_set_process_env"),
                 (
                     "thaw_js_terminal_work_pending",
                     "thaw_tjs_terminal_work_pending",
