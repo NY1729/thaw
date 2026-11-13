@@ -198,9 +198,9 @@ fn thaw_js_routing_keeps_package_class_instances_in_the_thaw_js_heap() {
 }
 
 #[test]
-fn thaw_js_routing_falls_back_when_a_class_instance_needs_live_property_access() {
-    // A property write (and the read after it) is not one of the typed thaw-js class operations:
-    // the program is rebuilt on QuickJS and still prints what Node prints.
+fn thaw_js_routing_serves_a_class_instance_property_write() {
+    // A property write (and the read after it) on a class instance of a routed package is served on
+    // thaw-js (the `$setter$` class op); the program still prints what Node prints.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "class-property",
         "import { Counter } from 'tjs-ctr';\n\
@@ -212,8 +212,8 @@ fn thaw_js_routing_falls_back_when_a_class_instance_needs_live_property_access()
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
-    assert_eq!(manifest["thaw_js_routed"], serde_json::json!([]));
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-ctr"]));
     assert_eq!(thaw_js_run(&output), "42 42\n");
     let _ = std::fs::remove_dir_all(dir);
 }

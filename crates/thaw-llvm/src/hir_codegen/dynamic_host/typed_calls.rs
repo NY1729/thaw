@@ -2319,13 +2319,20 @@ impl<'ctx> HirCompiler<'ctx> {
         let is_value = symbol.starts_with("$value$");
         let is_new = symbol.starts_with("$new$") || is_value;
         let is_static = symbol.starts_with("$staticmethod$") || symbol.starts_with("$staticmethodvoid$");
-        let is_method = symbol.starts_with("$method$") || symbol.starts_with("$methodvoid$");
+        // `$setter$` takes the receiver handle and the new value, like a one-argument method
+        let is_method = symbol.starts_with("$method$")
+            || symbol.starts_with("$methodvoid$")
+            || symbol.starts_with("$setter$");
         let handle_param = |ty: &HirType| *ty == HirType::JsValue;
         let ret_handle = signature.ret == HirType::JsValue;
         let is_promise = matches!(signature.ret, HirType::Promise(_));
         let awaited = thaw_js_awaited_type(&signature.ret);
+        // `Promise<JsValue>` (a method result): the host settles the Promise and hands back the value's handle,
+        // which is wrapped in a resolved native promise (bit 0 and bit 1 together)
+        let promise_handle = is_promise && *awaited == HirType::JsValue && !is_new;
         let supported = (is_new || is_static || is_method)
             && (ret_handle
+                || promise_handle
                 || ((!is_new || is_value)
                     && thaw_js_plain_type(awaited)
                     && !(is_promise && thaw_js_date_type(awaited))))
@@ -2431,7 +2438,9 @@ impl<'ctx> HirCompiler<'ctx> {
         // bit 2: await a returned Promise only for a union return (`$await` runtime-key suffix)
         let union_promise = ret_handle && symbol.ends_with("$await");
         let want_handle = self.context.i8_type().const_int(
-            u64::from(ret_handle) | (u64::from(is_promise) << 1) | (u64::from(union_promise) << 2),
+            u64::from(ret_handle || promise_handle)
+                | (u64::from(is_promise) << 1)
+                | (u64::from(union_promise) << 2),
             false,
         );
         let json = self.compile_json_backend_values_with_extra(
@@ -2441,14 +2450,34 @@ impl<'ctx> HirCompiler<'ctx> {
             &[receiver.into(), want_handle.into()],
             &[],
         )?;
-        if ret_handle {
+        if ret_handle || promise_handle {
             self.uses_thaw_js_handles = true;
             let id = self.compile_json_value_to_native(json, &HirType::F64)?.into_float_value();
-            return Ok(self
+            let handle = self
                 .builder
                 .build_float_to_signed_int(id, self.context.i64_type(), "thaw_js_class_handle")
+                .map_err(|error| error.to_string())?;
+            if ret_handle {
+                return Ok(handle.into());
+            }
+            let promise = self
+                .builder
+                .build_call(self.module.get_function("thaw_promise_new").unwrap(), &[], "thaw_js_class_promise")
                 .map_err(|error| error.to_string())?
-                .into());
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_promise_new returned no value")?
+                .into_pointer_value();
+            let slot = self.allocate_arena_cell(self.basic_type(&HirType::JsValue)?, "thaw_js_class_promise_result")?;
+            self.builder.build_store(slot, handle).map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_promise_resolve").unwrap(),
+                    &[promise.into(), slot.into()],
+                    "resolve_thaw_js_class_promise",
+                )
+                .map_err(|error| error.to_string())?;
+            return Ok(promise.into());
         }
         self.compile_typed_dynamic_result(json, &signature.ret)
     }

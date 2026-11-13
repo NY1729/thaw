@@ -138,28 +138,75 @@ fn thaw_js_class_operations_call_the_class_abi_and_keep_instances_as_handles() {
     assert!(!ir.contains("@thaw_js_release_handle(") || ir.contains("@thaw_tjs_release_handle("), "{ir}");
 }
 
-#[test]
-fn thaw_js_class_properties_are_not_class_operations() {
-    // A property write has no thaw-js operation: compiling one is an error the CLI answers by
-    // rebuilding the program on QuickJS.
-    let source = format!(
-        "declare function __thaw_typed_tjs_{}(receiver: JsValue, value: number): number;
-         declare function __thaw_typed_tjs_{}(v: number): JsValue;
-         function main(): void {{
-           const box = __thaw_typed_tjs_{}(1);
-           console.log(__thaw_typed_tjs_{}(box, 2));
-         }}",
-        "$setter$k::Box$v".as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        "$new$k::Box$arity1".as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        "$new$k::Box$arity1".as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        "$setter$k::Box$v".as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>(),
-    );
-    let module = thaw_parser::parse_typescript(&source).unwrap();
+fn thaw_js_class_symbol_hex(symbol: &str) -> String {
+    symbol.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>()
+}
+
+fn compile_thaw_js_class_source(source: &str) -> Result<(bool, bool, String), String> {
+    let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "thaw_js_class_setter");
+    let mut compiler = HirCompiler::new(&context, "thaw_js_class_op");
     compiler.set_thaw_js_routed(true);
-    let error = compiler.compile_program(&program).unwrap_err();
+    compiler.compile_program(&program)?;
+    let ir = compiler.print_to_string();
+    Ok((compiler.uses_thaw_js(), compiler.uses_quickjs(), ir))
+}
+
+#[test]
+fn thaw_js_class_setters_are_class_operations_and_not_build_errors() {
+    // `receiver[name] = value` (`[JsValue, Str] -> Str`): the same class-call ABI as a method
+    let setter = thaw_js_class_symbol_hex("$setter$k::Box$v$overload0$arity1");
+    let new = thaw_js_class_symbol_hex("$new$k::Box$arity0");
+    let source = format!(
+        "declare function __thaw_typed_tjs_{setter}(receiver: JsValue, value: string): string;
+         declare function __thaw_typed_tjs_{new}(): JsValue;
+         function main(): void {{
+           const box = __thaw_typed_tjs_{new}();
+           console.log(__thaw_typed_tjs_{setter}(box, \"b\"));
+         }}"
+    );
+    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_class_source(&source).unwrap_or_else(|e| panic!("{e}"));
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(!ir.contains("cannot cross the thaw-js boundary"), "{ir}");
+    assert!(ir.contains("@thaw_tjs_class_call("), "{ir}");
+    assert!(ir.contains("$setter$k::Box$v$overload0$arity1"), "{ir}");
+}
+
+#[test]
+fn thaw_js_class_promise_of_a_handle_wraps_the_handle_in_a_resolved_promise() {
+    // `later(n): Promise<JsValue>` on an instance: the host awaits it and returns the value's handle
+    let later = thaw_js_class_symbol_hex("$method$k::Box$later$overload0$arity1");
+    let new = thaw_js_class_symbol_hex("$new$k::Box$arity0");
+    let source = format!(
+        "declare function __thaw_typed_tjs_{later}(receiver: JsValue, n: number): Promise<JsValue>;
+         declare function __thaw_typed_tjs_{new}(): JsValue;
+         function main(): void {{
+           const box = __thaw_typed_tjs_{new}();
+           __thaw_typed_tjs_{later}(box, 1);
+         }}"
+    );
+    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_class_source(&source).unwrap_or_else(|e| panic!("{e}"));
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(!ir.contains("cannot cross the thaw-js boundary"), "{ir}");
+    assert!(ir.contains("@thaw_promise_new("), "{ir}");
+    assert!(ir.contains("@thaw_promise_resolve("), "{ir}");
+}
+
+#[test]
+fn thaw_js_class_property_getters_are_still_refused_at_build_time() {
+    // No thaw-js getter operation yet: the build error makes the CLI rebuild on QuickJS (never silent)
+    let getter = thaw_js_class_symbol_hex("$getter$k::Box$v");
+    let new = thaw_js_class_symbol_hex("$new$k::Box$arity0");
+    let source = format!(
+        "declare function __thaw_typed_tjs_{getter}(receiver: JsValue): number;
+         declare function __thaw_typed_tjs_{new}(): JsValue;
+         function main(): void {{
+           const box = __thaw_typed_tjs_{new}();
+           console.log(__thaw_typed_tjs_{getter}(box));
+         }}"
+    );
+    let error = compile_thaw_js_class_source(&source).unwrap_err();
     assert!(error.contains("cannot cross the thaw-js boundary"), "{error}");
 }
 
