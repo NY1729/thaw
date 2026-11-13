@@ -13,6 +13,7 @@ crate-type = ["staticlib", "rlib"]
 serde = "1.0"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 thaw-arena = { version = "0.1.0", path = "../thaw-arena" }
+thaw-inspect = { version = "0.1.0", path = "../thaw-inspect" }
 ureq = "3.4.0"
 # The same insertion-order-preserving map `serde_json::Map` itself wraps
 # under its own `preserve_order` feature -- used directly here (instead

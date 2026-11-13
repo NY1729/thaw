@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 
 /// The subset of Node's `inspect` options that `console.log` can reach with defaults.
 #[derive(Clone, Debug)]
-pub(crate) struct InspectOptions {
+pub struct InspectOptions {
     /// `None` is `depth: null` (unlimited).
     pub depth: Option<usize>,
     pub break_length: usize,
@@ -39,7 +39,7 @@ impl Default for InspectOptions {
 // Variants mirror Node's inspect kinds; not every one is produced by the converters yet.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum FnKind {
+pub enum FnKind {
     Function,
     Async,
     Generator,
@@ -52,7 +52,7 @@ pub(crate) enum FnKind {
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Ctor {
+pub enum Ctor {
     /// `Object` (no prefix).
     Plain,
     /// A named constructor other than `Object` (`Foo {}`).
@@ -65,7 +65,7 @@ pub(crate) enum Ctor {
 /// cycle detection (`0` = never referenced again); `Circular(id)` is a back reference
 /// to a container that is currently being formatted.
 #[derive(Clone, Debug)]
-pub(crate) enum Node {
+pub enum Node {
     Undefined,
     Null,
     Bool(bool),
@@ -177,7 +177,7 @@ fn pad_end(text: &str, target: usize) -> String {
 }
 
 /// `Number.prototype.toString()` for finite non-negative-zero values (sign handled here).
-pub(crate) fn js_number_string(value: f64) -> String {
+pub fn js_number_string(value: f64) -> String {
     if value.is_nan() {
         return "NaN".into();
     }
@@ -239,7 +239,7 @@ fn meta(point: u16) -> String {
 
 /// `strEscape`: quote choice plus escaping of control characters, the backslash, the
 /// chosen quote and lone surrogates.
-pub(crate) fn str_escape(text: &[u16]) -> String {
+pub fn str_escape(text: &[u16]) -> String {
     let has = |unit: u16| text.contains(&unit);
     let has_dollar_brace = text
         .windows(2)
@@ -387,7 +387,7 @@ enum Extras {
     ArrayExtras,
 }
 
-pub(crate) fn inspect(node: &Node, opts: &InspectOptions) -> String {
+pub fn inspect(node: &Node, opts: &InspectOptions) -> String {
     let mut ctx = Ctx {
         opts,
         seen: Vec::new(),

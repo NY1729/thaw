@@ -8,7 +8,8 @@
 mod fetch;
 mod fs;
 mod http;
-mod inspect;
-mod inspect_width;
+mod inspect {
+    pub use thaw_inspect::inspect::*;
+}
 mod json;
 mod json_parse_error;
