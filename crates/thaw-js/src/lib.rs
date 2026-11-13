@@ -61,6 +61,7 @@ pub mod scan;
 mod sysio;
 mod tls;
 mod typed;
+pub(crate) use typed::TypedKey;
 mod url;
 mod vm;
 #[path = "web/abort.rs"]
@@ -1738,9 +1739,13 @@ impl Interp {
                         }
                         "byteOffset" => Fast::Hit(Value::Number(t.cur_off() as f64)),
                         "buffer" => Fast::Hit(Value::Object(t.abuf.clone())),
-                        _ => array_index(key).map_or(Fast::Chain, |i| {
-                            Fast::Hit(t.get_value(i).unwrap_or(Value::Undefined))
-                        }),
+                        _ => match t.key(key) {
+                            TypedKey::Index(i) => {
+                                Fast::Hit(t.get_value(i).unwrap_or(Value::Undefined))
+                            }
+                            TypedKey::Invalid => Fast::Hit(Value::Undefined),
+                            TypedKey::Ordinary => Fast::Chain,
+                        },
                     },
                     Kind::ArrayBuffer(b) if key == "byteLength" => {
                         Fast::Hit(Value::Number(b.borrow().len() as f64))
@@ -1842,9 +1847,19 @@ impl Interp {
             Kind::Typed(t) => Some(t.clone()),
             _ => None,
         };
-        if let (Some(t), Some(i)) = (typed, array_index(key)) {
-            t.set_value(self, i, &value)?;
-            return Ok(());
+        if let Some(t) = typed {
+            match t.key(key) {
+                TypedKey::Index(i) => {
+                    t.set_value(self, i, &value)?;
+                    return Ok(());
+                }
+                // a non-element numeric key: the conversion still runs, the store is dropped (out of range)
+                TypedKey::Invalid => {
+                    t.set_value(self, usize::MAX, &value)?;
+                    return Ok(());
+                }
+                TypedKey::Ordinary => {}
+            }
         }
         match find_in_chain(o, key) {
             Some(Slot::Accessor { set, .. }) => {
@@ -4161,6 +4176,21 @@ pub(crate) fn array_index(k: &str) -> Option<usize> {
         .ok()
         .filter(|n| *n != u32::MAX)
         .map(|n| n as usize)
+}
+
+/// CanonicalNumericIndexString (spec 7.1.21): `-0`, or a key whose ToString(ToNumber(k)) is k itself
+/// (`"-1"`, `"1.5"`, `"NaN"`, `"Infinity"`). Typed arrays route these keys away from ordinary properties.
+pub(crate) fn canonical_numeric_index(k: &str) -> Option<f64> {
+    if k == "-0" {
+        return Some(-0.0);
+    }
+    // cheap reject: every canonical numeric string starts with a digit, '-', 'I' or 'N'
+    match k.as_bytes().first()? {
+        b'0'..=b'9' | b'-' | b'I' | b'N' => {}
+        _ => return None,
+    }
+    let n = string_to_number(k);
+    (number_to_string(n) == k).then_some(n)
 }
 
 /// Enumeration order of own keys: array indices ascending, then the rest in insertion order.
