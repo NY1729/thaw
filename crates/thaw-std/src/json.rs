@@ -598,8 +598,9 @@ fn canonical_bigint_decimal(value: &str) -> bool {
 }
 
 fn host_value_from_owned_handle(handle: u64) -> Option<Value> {
+    // Handle 0 is `undefined` at every thaw-js boundary; it holds no reference to retain or release.
     if handle == 0 {
-        return None;
+        return Some(napi_undefined_value());
     }
     let ops = HOST_OPERATIONS.with(|slot| slot.get())?;
     let lease = HostLease {
@@ -659,8 +660,11 @@ fn host_value_from_owned_handle(handle: u64) -> Option<Value> {
 }
 
 fn host_value_from_borrowed_handle(handle: u64) -> Option<Value> {
+    if handle == 0 {
+        return Some(napi_undefined_value());
+    }
     let ops = HOST_OPERATIONS.with(|slot| slot.get())?;
-    if handle == 0 || without_typed_decode_scope(|| (ops.retain)(handle)) == 0 {
+    if without_typed_decode_scope(|| (ops.retain)(handle)) == 0 {
         return None;
     }
     let lease = HostLease {
@@ -719,12 +723,13 @@ pub extern "C" fn thaw_json_adopt_handle_marker(value: *mut Value) -> *mut Value
         .filter(|fields| fields.len() == 1)
         .and_then(|fields| fields.get(b"__thaw_tjs_handle__".as_slice()))
         .and_then(Value::as_f64)
-        .filter(|handle| handle.is_finite() && *handle > 0.0 && handle.fract() == 0.0)
+        // Id 0 is `undefined` (see `host_value_from_owned_handle`), so it adopts too.
+        .filter(|handle| handle.is_finite() && *handle >= 0.0 && handle.fract() == 0.0)
         .map(|handle| handle as u64);
     let Some(handle) = handle else {
         return revive_framed_errors_in_place(value);
     };
-    if HOST_OPERATIONS.with(|slot| slot.get()).is_none() {
+    if handle != 0 && HOST_OPERATIONS.with(|slot| slot.get()).is_none() {
         return revive_framed_errors_in_place(value);
     }
     match host_value_from_owned_handle(handle) {
@@ -741,11 +746,20 @@ pub extern "C" fn thaw_json_adopt_handle_marker(value: *mut Value) -> *mut Value
 /// lease retains its own reference; the caller keeps its handle.
 #[no_mangle]
 pub extern "C" fn thaw_json_from_borrowed_handle(handle: u64) -> *mut Value {
+    // Handle 0 is `undefined`: nothing to retain, so no host operations are needed.
+    if handle == 0 {
+        return match host_value_from_owned_handle(0) {
+            Some(value) => {
+                thaw_json_track_arena_owned_root(leak(materialize_native_wrapper(value)))
+            }
+            None => std::ptr::null_mut(),
+        };
+    }
     let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) else {
         set_host_error("Host operations unavailable".into());
         return std::ptr::null_mut();
     };
-    if handle == 0 || without_typed_decode_scope(|| (ops.retain)(handle)) == 0 {
+    if without_typed_decode_scope(|| (ops.retain)(handle)) == 0 {
         if trace_wire() {
             eprintln!("from_borrowed: retain failed handle={handle}");
         }
@@ -15160,5 +15174,47 @@ mod tests {
             message(&cyclic(5)),
             "Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    |     property 'k0' -> object with constructor 'Object'\n    |     property 'k1' -> object with constructor 'Object'\n    |     ...\n    |     property 'k4' -> object with constructor 'Object'\n    --- property 'back' closes the circle"
         );
+    }
+}
+
+#[cfg(test)]
+mod handle_zero_undefined_tests {
+    use super::*;
+
+    /// Handle 0 is `undefined` at every thaw-js boundary: it materializes the undefined sentinel and
+    /// never retains (so host operations are not needed for it either).
+    #[test]
+    fn handle_zero_materializes_undefined_without_retaining() {
+        std::thread::spawn(|| {
+            HOST_ERROR.with(|error| error.borrow_mut().take());
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+
+            let borrowed = thaw_json_from_borrowed_handle(0);
+            assert!(!borrowed.is_null());
+            assert!(is_napi_undefined(unsafe { &*borrowed }));
+            assert!(HOST_ERROR.with(|error| error.borrow().is_none()));
+
+            assert!(host_value_from_owned_handle(0).is_some_and(|v| is_napi_undefined(&v)));
+            assert!(host_value_from_borrowed_handle(0).is_some_and(|v| is_napi_undefined(&v)));
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// The one-key marker `{"__thaw_tjs_handle__": 0}` adopts to `undefined`, not to a plain marker.
+    #[test]
+    fn handle_zero_marker_adopts_to_undefined() {
+        std::thread::spawn(|| {
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+            let marker = leak(Value::shared_object(indexmap::IndexMap::from([(
+                b"__thaw_tjs_handle__".to_vec(),
+                number_value(0.0),
+            )])));
+            let adopted = thaw_json_adopt_handle_marker(marker);
+            assert!(!adopted.is_null());
+            assert!(is_napi_undefined(unsafe { &*adopted }));
+        })
+        .join()
+        .unwrap();
     }
 }
