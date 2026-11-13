@@ -138,7 +138,7 @@ impl Interp {
                     set_fn_head(&owner, name, length);
                 }
             }
-            if !self.table_row_present(&owner, &key, &row) {
+            if !self.table_row_present(&owner, &key, row) {
                 continue;
             }
             owner.force_key(&key);
