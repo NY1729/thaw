@@ -7,9 +7,40 @@
 use crate::{find_own, Interp, Kind, Obj, Prop, Slot, Value};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 /// The rows applied at startup.
 pub(crate) const EMBED: &str = include_str!("builtin_table_embed.tsv");
+
+/// The embedded table, parsed once per process (every realm applies it).
+pub(crate) struct Table {
+    pub rows: Vec<Row<'static>>,
+    /// Runs of consecutive rows (`rows[start..end]`) with one owner path.
+    pub runs: Vec<(usize, usize)>,
+    heads: HashMap<&'static str, (Option<f64>, Option<&'static str>)>,
+}
+
+static TABLE: OnceLock<Table> = OnceLock::new();
+#[cfg(test)]
+pub(crate) static PARSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn embedded() -> &'static Table {
+    TABLE.get_or_init(|| {
+        #[cfg(test)]
+        PARSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let rows = parse_rows(EMBED);
+        let mut runs = Vec::new();
+        let mut start = 0;
+        for i in 1..=rows.len() {
+            if i == rows.len() || rows[i].owner != rows[start].owner {
+                runs.push((start, i));
+                start = i;
+            }
+        }
+        let heads = own_heads(&rows);
+        Table { rows, runs, heads }
+    })
+}
 
 /// One row of the table, parsed. Cells are in the order of the generator's header.
 pub(crate) struct Row<'a> {
@@ -71,7 +102,7 @@ fn dash(cell: &str) -> Option<&str> {
 }
 
 /// Owner path -> the object it names (`None` when thaw-js lacks it). Memoised per application.
-type Owners = HashMap<String, Option<Obj>>;
+type Owners<'a> = HashMap<&'a str, Option<Obj>>;
 
 /// Set a function's own `length` and `name` as the first two properties, as V8 orders them, both
 /// non-writable, non-enumerable, configurable. Removes any previous ones.
@@ -113,90 +144,98 @@ fn is_function(o: &Obj) -> bool {
 impl Interp {
     /// Apply the embedded table to this realm. Called last in `build`, after every prelude.
     pub(crate) fn apply_builtin_table(&mut self) {
+        let table = embedded();
+        let heads = &table.heads;
         let mut owners = Owners::new();
+        let mut keys: HashMap<&'static str, Option<Rc<str>>> = HashMap::new();
         let mut canon: HashMap<u32, Obj> = HashMap::new();
-        let rows = parse_rows(EMBED);
-        let heads = own_heads(&rows);
-        for row in &rows {
-            let Some(owner) = self.table_owner(row.owner, &mut owners) else {
+        for &(start, end) in &table.runs {
+            // an owner thaw-js lacks (a host-only class in a vm realm) skips its whole run
+            let Some(owner) = self.table_owner(table.rows[start].owner, &mut owners) else {
                 continue;
             };
-            let Some(key) = self.table_key(row.key) else {
-                continue;
-            };
-            // a root builtin function (`setTimeout`, `Array`) has no function row of its own: its
-            // `length`/`name` rows carry the values, so they are created here when absent
-            if matches!(row.key, "length" | "name")
-                && matches!(
-                    &*owner.kind.borrow(),
-                    Kind::Closure { .. } | Kind::Native(_)
-                )
-                && find_own(&owner, "length").is_none()
-                && find_own(&owner, "name").is_none()
-            {
-                if let Some(&(Some(length), Some(name))) = heads.get(row.owner) {
-                    set_fn_head(&owner, name, length);
+            for row in &table.rows[start..end] {
+                let Some(key) = keys
+                    .entry(row.key)
+                    .or_insert_with(|| self.table_key(row.key))
+                    .clone()
+                else {
+                    continue;
+                };
+                // a root builtin function (`setTimeout`, `Array`) has no function row of its own: its
+                // `length`/`name` rows carry the values, so they are created here when absent
+                if matches!(row.key, "length" | "name")
+                    && matches!(
+                        &*owner.kind.borrow(),
+                        Kind::Closure { .. } | Kind::Native(_)
+                    )
+                    && find_own(&owner, "length").is_none()
+                    && find_own(&owner, "name").is_none()
+                {
+                    if let Some(&(Some(length), Some(name))) = heads.get(row.owner) {
+                        set_fn_head(&owner, name, length);
+                    }
                 }
-            }
-            if !self.table_row_present(&owner, &key, row) {
-                continue;
-            }
-            owner.force_key(&key);
-            let Some(pos) = owner.position(&key) else {
-                continue;
-            };
-            let slot = owner.raw_props.borrow()[pos].slot.clone();
-            {
-                let mut props = owner.raw_props.borrow_mut();
-                let p = &mut props[pos];
-                if !row.accessor {
-                    p.writable = row.writable;
+                if !self.table_row_present(&owner, &key, row) {
+                    continue;
                 }
-                p.enumerable = row.enumerable;
-                p.configurable = row.configurable;
-            }
-            match slot {
-                Slot::Accessor { get, set } => {
-                    let (g, s) = row.name.split_once('|').unwrap_or((row.name, "-"));
-                    for (f, name, len) in [(get, g, 0.0), (set, s, 1.0)] {
-                        if let (Some(Value::Object(f)), true) = (f, name != "-") {
-                            if is_function(&f) {
-                                set_fn_head(&f, name, len);
+                owner.force_key(&key);
+                let Some(pos) = owner.position(&key) else {
+                    continue;
+                };
+                let slot = owner.raw_props.borrow()[pos].slot.clone();
+                {
+                    let mut props = owner.raw_props.borrow_mut();
+                    let p = &mut props[pos];
+                    if !row.accessor {
+                        p.writable = row.writable;
+                    }
+                    p.enumerable = row.enumerable;
+                    p.configurable = row.configurable;
+                }
+                match slot {
+                    Slot::Accessor { get, set } => {
+                        let (g, s) = row.name.split_once('|').unwrap_or((row.name, "-"));
+                        for (f, name, len) in [(get, g, 0.0), (set, s, 1.0)] {
+                            if let (Some(Value::Object(f)), true) = (f, name != "-") {
+                                if is_function(&f) {
+                                    set_fn_head(&f, name, len);
+                                }
                             }
                         }
                     }
-                }
-                Slot::Data(Value::Object(o)) => {
-                    // A later path to an object already seen is the same object: take the first path's.
-                    if let Some(first) = row.alias.and_then(|id| canon.get(&id)) {
-                        owner.raw_props.borrow_mut()[pos].slot =
-                            Slot::Data(Value::Object(first.clone()));
-                        continue;
-                    }
-                    if let Some(id) = row.alias {
-                        canon.insert(id, o.clone());
-                    }
-                    if is_function(&o) {
-                        o.native_text.set(true);
-                        let length = row.length.unwrap_or(0.0);
-                        set_fn_head(&o, row.name, length);
-                        if row.has_prototype == Some(false) {
-                            o.remove_prop("prototype");
+                    Slot::Data(Value::Object(o)) => {
+                        // A later path to an object already seen is the same object: take the first path's.
+                        if let Some(first) = row.alias.and_then(|id| canon.get(&id)) {
+                            owner.raw_props.borrow_mut()[pos].slot =
+                                Slot::Data(Value::Object(first.clone()));
+                            continue;
+                        }
+                        if let Some(id) = row.alias {
+                            canon.insert(id, o.clone());
+                        }
+                        if is_function(&o) {
+                            o.native_text.set(true);
+                            let length = row.length.unwrap_or(0.0);
+                            set_fn_head(&o, row.name, length);
+                            if row.has_prototype == Some(false) {
+                                o.remove_prop("prototype");
+                            }
                         }
                     }
-                }
-                Slot::Data(_) => {
-                    if let (Some(tag), "@@toStringTag") = (row.tag, row.key) {
-                        owner.raw_props.borrow_mut()[pos].slot = Slot::Data(Value::str(tag));
+                    Slot::Data(_) => {
+                        if let (Some(tag), "@@toStringTag") = (row.tag, row.key) {
+                            owner.raw_props.borrow_mut()[pos].slot = Slot::Data(Value::str(tag));
+                        }
                     }
+                    Slot::LazyProto { .. } => {}
                 }
-                Slot::LazyProto { .. } => {}
             }
         }
     }
 
     /// The object at owner path `path` (`Array.prototype`, `%TypedArray%`, `process.env`), or `None`.
-    pub(crate) fn table_owner(&self, path: &str, owners: &mut Owners) -> Option<Obj> {
+    pub(crate) fn table_owner<'a>(&self, path: &'a str, owners: &mut Owners<'a>) -> Option<Obj> {
         if let Some(hit) = owners.get(path) {
             return hit.clone();
         }
@@ -218,7 +257,7 @@ impl Interp {
             }
             found
         };
-        owners.insert(path.to_string(), found.clone());
+        owners.insert(path, found.clone());
         found
     }
 

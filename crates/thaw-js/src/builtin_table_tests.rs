@@ -242,3 +242,22 @@ fn startup_cost_of_interp_new() {
         t.elapsed() / n
     );
 }
+
+/// Every realm applies the table, but the embedded text is parsed once per process: the parse is
+/// cached, so a second and later realm pays no parse cost.
+#[test]
+fn builtin_table_is_parsed_once_for_all_realms() {
+    let _ = Interp::new_vm_realm();
+    let _ = Interp::new();
+    let parses = crate::builtin_table::PARSES.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(parses, 1, "the embedded table is parsed once per process");
+    for _ in 0..3 {
+        drop(Interp::new_vm_realm());
+        drop(Interp::new());
+    }
+    assert_eq!(
+        crate::builtin_table::PARSES.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "later realms re-parsed the embedded table"
+    );
+}
