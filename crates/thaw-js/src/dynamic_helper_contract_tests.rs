@@ -24,7 +24,7 @@ fn run_realm(src: &str) -> Vec<String> {
     let mut it = default_realm();
     if let Err(Ctl::Throw(v)) = it.run(src) {
         let message = it.get(&v, "message").unwrap_or(Value::Undefined);
-        panic!("helper program threw: {}", it.to_str(&message).to_string());
+        panic!("helper program threw: {}", it.to_str(&message));
     }
     it.out
 }
