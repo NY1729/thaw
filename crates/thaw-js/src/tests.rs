@@ -747,6 +747,32 @@ fn timer_created_in_callback_after_busy_wait_uses_live_clock() {
 }
 
 #[test]
+fn immediate_runs_before_a_one_ms_interval_second_tick() {
+    // a 1 ms interval armed by the main script re-arms from the live clock, so its second tick is due
+    // only in a later loop turn, after the check phase runs the immediate (Node: the immediate is
+    // recorded before tick 2)
+    let (out, _) = main_run(
+        "var n = 0; var h = setInterval(function () {
+           console.log('tick' + (++n));
+           if (n == 2) clearInterval(h);
+         }, 1);
+         setImmediate(function () { console.log('imm'); });",
+    );
+    let pos = |name: &str| out.iter().position(|l| l == name).unwrap();
+    assert!(pos("imm") < pos("tick2"), "order was {}", out.join("|"));
+}
+
+#[test]
+fn zero_delay_timer_from_main_still_runs_before_immediate() {
+    // a main-script timer of 0 ms is due on the first turn, ahead of setImmediate
+    let (out, _) = main_run(
+        "setImmediate(function () { console.log('imm'); });
+         setTimeout(function () { console.log('t0'); }, 0);",
+    );
+    assert_eq!(out.join("|"), "t0|imm");
+}
+
+#[test]
 fn refresh_uses_live_clock() {
     // inside a 1 ms callback: arm a 20 ms timer and a 40 ms timer, busy-wait 30 ms, then refresh the
     // 20 ms one: it is due ~51 ms in, after the 40 ms timer (Node prints b a)

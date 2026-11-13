@@ -230,7 +230,8 @@ pub(crate) struct Rt {
     seq: u64,
     /// The loop turn's clock: the due test for timers. Timers take their start from the live clock.
     now: f64,
-    /// True until the first loop turn: timers of 2 ms or less are due then (ahead of `setImmediate`).
+    /// True until the first loop turn starts: timers armed before it (by the main script) get a 2 ms
+    /// head start, so that delays of 2 ms or less are due on the first turn, ahead of `setImmediate`.
     first_turn: bool,
     listeners: HashMap<String, Vec<(Value, bool)>>,
     promise_proto: Option<Obj>,
@@ -948,7 +949,8 @@ impl Interp {
         put_hidden(&obj, "@@tid", Value::Number(id as f64));
         self.rt.timers.push(Timer {
             id,
-            expiry: clock_ms() + delay,
+            // the head start is for timers armed before the first loop turn only
+            expiry: clock_ms() + delay - if self.rt.first_turn { 2.0 } else { 0.0 },
             seq: self.rt.seq,
             delay,
             repeat,
@@ -1171,7 +1173,8 @@ impl Interp {
             if !self.loop_alive() {
                 return Ok(None);
             }
-            self.rt.now = self.turn_clock();
+            self.rt.first_turn = false;
+            self.rt.now = clock_ms();
             self.run_timers()?;
             // the loop's own platform poll: a worker's exit (or child/zlib result) settles promises too
             self.poll_platform_events()?;
@@ -1300,7 +1303,8 @@ impl Interp {
                     }
                 }
             }
-            self.rt.now = self.turn_clock();
+            self.rt.first_turn = false;
+            self.rt.now = clock_ms();
             self.poll_platform_events()?;
             self.run_timers()?;
             // the compiled host's native continuations: a timer just resolved a native Promise they wait on
@@ -1536,17 +1540,6 @@ impl Interp {
     }
 
     // ----- installation -----
-
-    /// The clock for a loop turn's due test; the first turn gets 2 ms of slack, so that a timer of
-    /// 2 ms or less armed by the main script is due before `setImmediate`.
-    fn turn_clock(&mut self) -> f64 {
-        let slack = if std::mem::replace(&mut self.rt.first_turn, false) {
-            2.0
-        } else {
-            0.0
-        };
-        clock_ms() + slack
-    }
 
     pub(crate) fn install_eventloop(&mut self) {
         let g = self.global.clone();
