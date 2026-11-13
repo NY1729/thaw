@@ -380,7 +380,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   // ----- DataView -----
   function DataView(buffer, byteOffset, byteLength) {
     if (!(this instanceof DataView)) throw new TypeError("Constructor DataView requires 'new'");
-    if (!(buffer instanceof ArrayBuffer)) throw new TypeError('First argument to DataView constructor must be an ArrayBuffer');
+    if (!(buffer instanceof ArrayBuffer || buffer instanceof SharedArrayBuffer)) throw new TypeError('First argument to DataView constructor must be an ArrayBuffer');
     var off = byteOffset === undefined ? 0 : (Math.trunc(byteOffset) || 0), total = buffer.byteLength;
     if (off < 0 || off > total) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
     var len = byteLength === undefined ? total - off : (Math.trunc(byteLength) || 0);
@@ -478,7 +478,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     isWeakSet: function (v) { return v instanceof WeakSet; },
     isPromise: function (v) { return v instanceof Promise; },
     isArrayBuffer: function (v) { return v instanceof ArrayBuffer; },
-    isAnyArrayBuffer: function (v) { return v instanceof ArrayBuffer; },
+    isAnyArrayBuffer: function (v) { return v instanceof ArrayBuffer || v instanceof SharedArrayBuffer; },
     isArrayBufferView: function (v) { return ArrayBuffer.isView(v); },
     isDataView: function (v) { return v instanceof DataView; },
     isTypedArray: function (v) { return ArrayBuffer.isView(v) && !(v instanceof DataView); },
@@ -720,5 +720,77 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   if (typeof performance === 'undefined') {
     globalThis.performance = { now: function now() { return typeof __thaw_perf_now === 'function' ? __thaw_perf_now() : Date.now() - start; }, timeOrigin: start };
   }
+
+  // ----- Atomics. One agent: every read-modify-write is atomic by construction, and each op returns the
+  // old value (store returns the stored integer). ponytail: no other agent can touch a SharedArrayBuffer
+  // (worker.rs runs a separate Interp, so Atomics.wait can only time out and notify wakes nobody); add
+  // cross-worker waiters when worker SAB sharing lands. BigInt64Array is not supported yet. -----
+  var Atomics = {};
+  function intTA(ta, op) {
+    if (!(ta instanceof Int8Array || ta instanceof Uint8Array || ta instanceof Int16Array ||
+          ta instanceof Uint16Array || ta instanceof Int32Array || ta instanceof Uint32Array)) {
+      throw new TypeError('Atomics.' + op + ' requires an integer typed array');
+    }
+    return ta;
+  }
+  function atomicIndex(ta, i) {
+    var n = Math.trunc(Number(i)) || 0;
+    if (n < 0 || n >= ta.length) throw new RangeError('Invalid atomic access index');
+    return n;
+  }
+  function toInt(v) { return Math.trunc(Number(v)) || 0; }
+  // the element-typed value of `v` (wraps like a store), so compareExchange compares what memory would hold
+  function elementOf(ta, v) { var t = new ta.constructor(1); t[0] = v; return t[0]; }
+  function rmw(name, combine) {
+    def(Atomics, name, function (ta, i, v) {
+      intTA(ta, name);
+      var k = atomicIndex(ta, i), old = ta[k];
+      ta[k] = combine(old, toInt(v));
+      return old;
+    });
+  }
+  rmw('add', function (a, b) { return a + b; });
+  rmw('sub', function (a, b) { return a - b; });
+  rmw('and', function (a, b) { return a & b; });
+  rmw('or', function (a, b) { return a | b; });
+  rmw('xor', function (a, b) { return a ^ b; });
+  rmw('exchange', function (a, b) { return b; });
+  def(Atomics, 'load', function (ta, i) {
+    intTA(ta, 'load');
+    return ta[atomicIndex(ta, i)];
+  });
+  def(Atomics, 'store', function (ta, i, v) {
+    intTA(ta, 'store');
+    var k = atomicIndex(ta, i), n = toInt(v);
+    ta[k] = n;
+    return n;
+  });
+  def(Atomics, 'compareExchange', function (ta, i, expected, replacement) {
+    intTA(ta, 'compareExchange');
+    var k = atomicIndex(ta, i), old = ta[k];
+    if (old === elementOf(ta, toInt(expected))) ta[k] = toInt(replacement);
+    return old;
+  });
+  def(Atomics, 'isLockFree', function (n) { n = toInt(n); return n === 1 || n === 2 || n === 4 || n === 8; });
+  def(Atomics, 'wait', function (ta, i, v, timeout) {
+    if (!(ta instanceof Int32Array) || !(ta.buffer instanceof SharedArrayBuffer)) {
+      throw new TypeError('Atomics.wait requires a shared Int32Array');
+    }
+    var k = atomicIndex(ta, i);
+    if (ta[k] !== (Number(v) | 0)) return 'not-equal';
+    var ms = timeout === undefined ? Infinity : Number(timeout);
+    if (ms !== ms) ms = Infinity;
+    // ponytail: no other agent can notify, so an infinite wait would hang forever; refuse it instead
+    if (ms === Infinity) throw new RangeError('Atomics.wait with no timeout would block forever');
+    __thaw_sleep_ms(Math.max(ms, 0));
+    return 'timed-out';
+  });
+  def(Atomics, 'notify', function (ta, i) {
+    intTA(ta, 'notify');
+    atomicIndex(ta, i);
+    return 0;
+  });
+  Object.defineProperty(Atomics, Symbol.toStringTag, { value: 'Atomics', configurable: true });
+  def(globalThis, 'Atomics', Atomics);
 })();
 "#;

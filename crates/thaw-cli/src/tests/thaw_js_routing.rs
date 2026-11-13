@@ -1173,3 +1173,98 @@ fn routed_iterator_and_raw_json_cases_match_node() {
         assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
     }
 }
+
+
+/// Q9 cluster B1: a native Error caught as `any` or collected in an AggregateError, in a program that loads
+/// no package, goes through the error factory, which must work with an empty package table. The sources are
+/// tests/node-compat.json; the manifests carry no expected-output field, so the expected text is Node's output.
+#[test]
+fn routed_error_factory_runs_in_a_program_with_no_package() {
+    let cases = [
+        (
+            "typinggaps catch any property assign",
+            "function main(): void {\n  try { throw new TypeError(\"boom\"); } catch (e: any) { e.k = 2; e.code = \"E1\"; console.log(e.k, e.code, e.message, e.name); }\n  try { throw { a: 1 }; } catch (e: any) { e.k = 2; console.log(e.k, e.a); }\n  try { throw new Error(\"rethrow\"); } catch (e: any) { e.k = 1; try { throw e; } catch (e2: any) { console.log(e2.k, e2.message); } }\n}\n",
+            "2 E1 boom TypeError\n2 1\n1 rethrow\n",
+        ),
+        (
+            "caught Error keeps pointer identity under strict equality",
+            "function main(): void {\n  const a = new Error(\"x\");\n  const b = new Error(\"x\");\n  try { throw a; } catch (e: any) { console.log(e === a, e === b, e !== a); }\n  try { throw a; } catch (e) { console.log(e === a, e === b); }\n}\n",
+            "true false false\ntrue false\n",
+        ),
+        (
+            "Promise.any rejection exposes the errors of every input",
+            "async function f(n: number): Promise<number> { await Promise.resolve(); throw new Error('f' + n); }\nasync function main(): Promise<void> {\n  try {\n    await Promise.any([f(1), Promise.reject('b'), Promise.reject(7), Promise.reject(null)]);\n  } catch (e: any) {\n    console.log(e.name, e.message, e instanceof AggregateError);\n    console.log(e.errors.length, e.errors[0].message, e.errors[1], e.errors[2], e.errors[3]);\n  }\n  const v = await Promise.any([Promise.reject(new Error('z')), Promise.resolve(5)]);\n  console.log(v);\n  try { await Promise.any([]); } catch (e: any) { console.log(e.name, e.errors.length); }\n}",
+            "AggregateError All promises were rejected true\n4 f1 b 7 null\n5\nAggregateError 0\n",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let _env = RouteAllEnv::set();
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("error-factory-{}", name.len()), body);
+        let output = entry.with_file_name("app");
+        thaw_js_build(&entry, &output, &registry, true);
+        assert_eq!(thaw_js_run_guarded(&output), expected, "{name}");
+    }
+}
+
+
+/// builtins / node-compat / typescript-runtime / text-encoding SharedArrayBuffer and Atomics cases
+/// (sources from tests/*.json; the manifests have no expected-output field, so each expected text is
+/// derived from Node 22 semantics for that source). Cross-worker SAB sharing is not covered here.
+#[test]
+fn routed_shared_array_buffer_and_atomics_match_node() {
+    let cases: [(&str, &str, &str); 9] = [
+        (
+            "sab-byte-length",
+            "function main(): void { const b: SharedArrayBuffer = new SharedArrayBuffer(16); console.log(b.byteLength, b.slice(4).byteLength); }",
+            "16 12\n",
+        ),
+        (
+            "atomics-add",
+            "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); console.log(Atomics.add(a,0,1)); }",
+            "0\n",
+        ),
+        (
+            "atomics-compare-exchange",
+            "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); Atomics.store(a,0,5); console.log(Atomics.compareExchange(a,0,5,9), Atomics.load(a,0)); }",
+            "5 9\n",
+        ),
+        (
+            "atomics-exchange",
+            "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); Atomics.store(a,0,5); console.log(Atomics.exchange(a,0,7), Atomics.load(a,0)); }",
+            "5 7\n",
+        ),
+        (
+            "atomics-load-store",
+            "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(8)); console.log(Atomics.store(a,0,42), Atomics.load(a,0)); }",
+            "42 42\n",
+        ),
+        (
+            "atomics-sub",
+            "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); Atomics.store(a,0,10); console.log(Atomics.sub(a,0,3), Atomics.load(a,0)); }",
+            "10 7\n",
+        ),
+        (
+            "shared-array-buffer-atomics",
+            "function main(): void { const buffer = new SharedArrayBuffer(8); const values = new Int32Array(buffer); Atomics.store(values, 0, 20); console.log(Atomics.add(values, 0, 22), Atomics.load(values, 0), buffer.byteLength); }",
+            "20 42 8\n",
+        ),
+        (
+            "atomics-wait-main-thread",
+            "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  console.log(Atomics.wait(ia, 0, 1, 0));\n  console.log(Atomics.wait(ia, 0, 0, 0));\n  console.log(Atomics.wait(ia, 0, 0, 5));\n}",
+            "not-equal\ntimed-out\ntimed-out\n",
+        ),
+        (
+            "text-decode-real-buffer-sources",
+            "function main(): void { const bytes = new Uint8Array([65, 66, 67, 68]); const buffer = bytes.buffer; const view = new DataView(buffer, 1, 2); const shared = new SharedArrayBuffer(2); new Uint8Array(shared).set([88, 89]); let invalid = ''; try { new TextDecoder().decode({ buffer: buffer, byteOffset: 0, byteLength: 4 } as any); } catch (error: any) { invalid = error.name; } console.log(JSON.stringify([new TextDecoder().decode(buffer), new TextDecoder().decode(view), new TextDecoder().decode(shared), invalid])); }",
+            "[\"ABCD\",\"BC\",\"XY\",\"TypeError\"]\n",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let _env = RouteAllEnv::set();
+        let (_dir, registry, entry) = thaw_js_fixture(&format!("route-sab-{name}"), body);
+        let output = entry.with_file_name("app");
+        thaw_js_build(&entry, &output, &registry, true);
+        let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+        assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
+    }
+}

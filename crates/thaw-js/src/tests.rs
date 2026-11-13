@@ -7747,3 +7747,80 @@ fn process_hrtime_bigint_is_monotonic_bigint() {
         "bigint true true"
     );
 }
+
+// A framed Error built with no package loaded (the registered error factory of a program with no JS values).
+#[test]
+fn thaw_tjs_error_from_tagged_handle_builds_with_no_package_loaded() {
+    use crate::host::*;
+    use std::ffi::CString;
+    std::thread::spawn(|| {
+        let framed = CString::new("\u{1}TypeError\u{1}boom").unwrap();
+        let made = thaw_tjs_error_from_tagged_handle(framed.as_ptr());
+        assert!(made.error.is_null());
+        assert_ne!(made.value, 0);
+        let key = CString::new("message").unwrap();
+        assert!(thaw_tjs_get_property_result(made.value, key.as_ptr())
+            .error
+            .is_null());
+    })
+    .join()
+    .unwrap();
+}
+
+/// Node: SharedArrayBuffer is its own constructor/prototype (not an ArrayBuffer), `slice` copies.
+#[test]
+fn shared_array_buffer_matches_node() {
+    assert_eq!(
+        one("const b=new SharedArrayBuffer(8); console.log(b.byteLength, b.slice(2).byteLength, b instanceof SharedArrayBuffer, b instanceof ArrayBuffer, Object.prototype.toString.call(b))"),
+        "8 6 true false [object SharedArrayBuffer]"
+    );
+    assert_eq!(
+        one("console.log(new Uint8Array(new SharedArrayBuffer(4)).length, new DataView(new SharedArrayBuffer(4), 1).byteLength)"),
+        "4 3"
+    );
+}
+
+/// Node: Atomics read-modify-write ops return the OLD value; store returns the stored value.
+#[test]
+fn atomics_return_old_value_matches_node() {
+    assert_eq!(
+        one("const a=new Int32Array(new SharedArrayBuffer(16)); console.log(Atomics.store(a,0,5), Atomics.add(a,0,3), Atomics.sub(a,0,2), Atomics.exchange(a,0,7), Atomics.compareExchange(a,0,7,9), Atomics.compareExchange(a,0,1,4), Atomics.load(a,0))"),
+        "5 5 8 6 7 9 9"
+    );
+    assert_eq!(
+        one("const a=new Int32Array(new SharedArrayBuffer(4)); Atomics.store(a,0,10); console.log(Atomics.and(a,0,6), Atomics.or(a,0,1), Atomics.xor(a,0,3), Atomics.load(a,0))"),
+        "10 2 3 0"
+    );
+}
+
+/// Node: Atomics rejects non-integer typed arrays (TypeError) and out-of-range indices (RangeError).
+#[test]
+fn atomics_argument_errors_match_node() {
+    assert_eq!(
+        one("try { Atomics.add(new Float64Array(2),0,1) } catch(e){ console.log(e.constructor.name) }"),
+        "TypeError"
+    );
+    assert_eq!(
+        one("try { Atomics.load(new Uint8ClampedArray(1),0) } catch(e){ console.log(e.constructor.name) }"),
+        "TypeError"
+    );
+    assert_eq!(
+        one(
+            "try { Atomics.load(new Int32Array(1),5) } catch(e){ console.log(e.constructor.name) }"
+        ),
+        "RangeError"
+    );
+}
+
+/// Node: Atomics.wait on the main thread returns "not-equal" or "timed-out"; notify with no waiters is 0.
+#[test]
+fn atomics_wait_and_notify_match_node() {
+    assert_eq!(
+        one("const ia=new Int32Array(new SharedArrayBuffer(8)); console.log(Atomics.wait(ia,0,1,0), Atomics.wait(ia,0,0,0), Atomics.wait(ia,0,0,5), Atomics.notify(ia,0,1))"),
+        "not-equal timed-out timed-out 0"
+    );
+    assert_eq!(
+        one("console.log(Atomics.isLockFree(4), Object.prototype.toString.call(Atomics))"),
+        "true [object Atomics]"
+    );
+}
