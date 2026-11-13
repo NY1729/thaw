@@ -49,8 +49,9 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CASES: ${{ inputs.cases }}
-      D: ${{ runner.temp }}/diag-cases
     steps:
+      - name: Export the scratch directory
+        run: echo "D=$RUNNER_TEMP/diag-cases" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
@@ -197,8 +198,9 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
-      D: ${{ runner.temp }}/diag-ky
     steps:
+      - name: Export the scratch directory
+        run: echo "D=$RUNNER_TEMP/diag-ky" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
