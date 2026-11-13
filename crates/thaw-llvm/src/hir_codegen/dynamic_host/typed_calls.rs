@@ -2306,8 +2306,9 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
-    /// A thaw-js class operation: `new Class(..)`, an instance method or a static method (symbols
-    /// `$new$..`, `$method$..`, `$staticmethod$..`). Instances are `JsValue` handles into the thaw-js
+    /// A thaw-js class operation: `new Class(..)`, an instance method, property accessor or a static
+    /// method/accessor (symbols `$new$..`, `$method$..`, `$getter$..`, `$setter$..`, `$staticmethod$..`,
+    /// `$staticgetter$..`, `$staticsetter$..`). Instances are `JsValue` handles into the thaw-js
     /// heap; arguments and results cross as JSON, with a handle marker for instances.
     fn compile_typed_thaw_js_class_call(
         &mut self,
@@ -2318,11 +2319,16 @@ impl<'ctx> HirCompiler<'ctx> {
         let symbol = signature.symbol.as_str();
         let is_value = symbol.starts_with("$value$");
         let is_new = symbol.starts_with("$new$") || is_value;
-        let is_static = symbol.starts_with("$staticmethod$") || symbol.starts_with("$staticmethodvoid$");
-        // `$setter$` takes the receiver handle and the new value, like a one-argument method
+        let is_static = symbol.starts_with("$staticmethod$")
+            || symbol.starts_with("$staticmethodvoid$")
+            || symbol.starts_with("$staticgetter$")
+            || symbol.starts_with("$staticsetter$");
+        // `$setter$` takes the receiver handle and the new value, like a one-argument method;
+        // `$getter$` takes just the receiver handle
         let is_method = symbol.starts_with("$method$")
             || symbol.starts_with("$methodvoid$")
-            || symbol.starts_with("$setter$");
+            || symbol.starts_with("$setter$")
+            || symbol.starts_with("$getter$");
         let handle_param = |ty: &HirType| *ty == HirType::JsValue;
         let ret_handle = signature.ret == HirType::JsValue;
         let is_promise = matches!(signature.ret, HirType::Promise(_));
