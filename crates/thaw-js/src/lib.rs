@@ -759,6 +759,16 @@ impl Value {
             None
         }
     }
+    /// Whether `new` accepts this value: the same test `construct_with` applies.
+    fn is_constructor(&self) -> bool {
+        matches!(self, Value::Object(o) if match &*o.kind.borrow() {
+            Kind::Closure { def, .. } => !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype,
+            Kind::Native(_) => true,
+            Kind::Proxy(p) => p.callable,
+            _ => false,
+        })
+    }
+
     fn is_callable(&self) -> bool {
         matches!(self, Value::Object(o) if match &*o.kind.borrow() {
             Kind::Closure { .. } | Kind::Native(_) => true,
@@ -2111,13 +2121,14 @@ impl Interp {
         if matches!(&*fo.kind.borrow(), Kind::Proxy(p) if p.callable) {
             return self.proxy_construct(fo, args, new_target);
         }
-        let (is_closure, is_native) = (
-            matches!(&*fo.kind.borrow(), Kind::Closure { def, .. } if !def.arrow),
-            matches!(&*fo.kind.borrow(), Kind::Native(_)),
-        );
+        // methods, accessors, async and generator functions have no [[Construct]]; arrows neither
+        let is_closure = matches!(&*fo.kind.borrow(), Kind::Closure { def, .. } if !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype);
+        // a host callback is a native, but a compiled function: it takes the ordinary [[Construct]] path below
+        let is_hostcb = find_own(fo, "@@hostcb").is_some();
+        let is_native = !is_hostcb && matches!(&*fo.kind.borrow(), Kind::Native(_));
         let is_class =
             matches!(&*fo.kind.borrow(), Kind::Closure { def, .. } if def.class.is_some());
-        if !is_closure && !is_native {
+        if !is_closure && !is_native && !is_hostcb {
             return self.throw_error("TypeError", "value is not a constructor");
         }
         let proto = match self.get(new_target, "prototype")? {
@@ -2146,7 +2157,8 @@ impl Interp {
             return Ok(r);
         }
         let this = Value::Object(new_obj(Some(proto), Kind::Plain));
-        self.rt.pending_nt = Some(new_target.clone());
+        // new.target reaches only closures (a host callback has no new.target of its own)
+        self.rt.pending_nt = (!is_hostcb).then(|| new_target.clone());
         let result = if is_class {
             self.init_instance(f, &this, args)
         } else {
@@ -3334,7 +3346,7 @@ impl Interp {
                     Some(args) => self.eval_args(args, scope)?,
                     None => Vec::new(),
                 };
-                if !f.is_callable() {
+                if !f.is_constructor() {
                     return self.throw_error(
                         "TypeError",
                         &format!("{} is not a constructor", expr_text(&n.callee)),

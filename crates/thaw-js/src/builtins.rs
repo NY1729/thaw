@@ -1345,20 +1345,7 @@ impl Interp {
         }
         g.declare("Object", object, true);
         self.set_native(&op, "hasOwnProperty", |it, this, args| {
-            let key = it.key_of(&arg(args, 0));
-            if let Value::Object(po) = this {
-                if matches!(&*po.kind.borrow(), Kind::Proxy(_)) {
-                    let object = it.lookup(&it.global.clone(), "Object").unwrap_or(Value::Undefined);
-                    let gopd = it.get(&object, "getOwnPropertyDescriptor")?;
-                    let d = it.call(&gopd, &object, &[this.clone(), arg(args, 0)])?;
-                    return Ok(Value::Bool(!matches!(d, Value::Undefined)));
-                }
-            }
-            Ok(Value::Bool(match this {
-                Value::Object(o) => find_own(o, &key).is_some() || synth_fn_own(o, &key).is_some() || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))) || *key == *"length"),
-                Value::Str(s) => array_index(&key).is_some_and(|i| i < str_len(s)),
-                _ => false,
-            }))
+            Ok(Value::Bool(it.has_own_property(this, &arg(args, 0))?))
         });
         self.set_native(&op, "isPrototypeOf", |_, this, args| {
             let (Value::Object(p), Value::Object(o)) = (this, arg(args, 0)) else {
@@ -1374,23 +1361,7 @@ impl Interp {
             Ok(Value::Bool(false))
         });
         self.set_native(&op, "propertyIsEnumerable", |it, this, args| {
-            if let Value::Object(po) = this {
-                if matches!(&*po.kind.borrow(), Kind::Proxy(_)) {
-                    let object = it.lookup(&it.global.clone(), "Object").unwrap_or(Value::Undefined);
-                    let gopd = it.get(&object, "getOwnPropertyDescriptor")?;
-                    let d = it.call(&gopd, &object, &[this.clone(), arg(args, 0)])?;
-                    if matches!(d, Value::Undefined) {
-                        return Ok(Value::Bool(false));
-                    }
-                    let e = it.get(&d, "enumerable")?;
-                    return Ok(Value::Bool(e.truthy()));
-                }
-            }
-            let key = it.to_str(&arg(args, 0));
-            Ok(Value::Bool(match this {
-                Value::Object(o) => find_own(o, &key).is_some_and(|(_, e)| e) || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole)))),
-                _ => false,
-            }))
+            Ok(Value::Bool(it.own_enumerable(this, &arg(args, 0))?))
         });
         self.set_native(&op, "valueOf", |_, this, _| Ok(this.clone()));
         self.set_native(&op, "toString", |it, this, _| {
@@ -2761,6 +2732,58 @@ struct PropDesc {
     configurable: Option<Value>,
     get: Option<Value>,
     set: Option<Value>,
+}
+
+impl Interp {
+    /// `Object.getOwnPropertyDescriptor(target, key)` for a Proxy: its `getOwnPropertyDescriptor` trap decides.
+    fn proxy_own_descriptor(&mut self, target: &Value, key: &Value) -> R<Value> {
+        let object = self
+            .lookup(&self.global.clone(), "Object")
+            .unwrap_or(Value::Undefined);
+        let gopd = self.get(&object, "getOwnPropertyDescriptor")?;
+        self.call(&gopd, &object, &[target.clone(), key.clone()])
+    }
+
+    /// The own-property test shared by `hasOwnProperty`, `Object.hasOwn` and the host predicates
+    /// (`property_predicate_value`). A Proxy answers through its descriptor trap; arrays answer for
+    /// their indices and `length`, strings for their indices, closures for synthesized `name`/`length`.
+    pub(crate) fn has_own_property(&mut self, target: &Value, key: &Value) -> R<bool> {
+        if matches!(target, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Proxy(_))) {
+            return Ok(!matches!(
+                self.proxy_own_descriptor(target, key)?,
+                Value::Undefined
+            ));
+        }
+        let key = self.key_of(key);
+        Ok(match target {
+            Value::Object(o) => {
+                find_own(o, &key).is_some()
+                    || synth_fn_own(o, &key).is_some()
+                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))) || *key == *"length")
+            }
+            Value::Str(s) => array_index(&key).is_some_and(|i| i < str_len(s)),
+            _ => false,
+        })
+    }
+
+    /// The own-and-enumerable test behind `propertyIsEnumerable` and the host enumerability predicate.
+    pub(crate) fn own_enumerable(&mut self, target: &Value, key: &Value) -> R<bool> {
+        if matches!(target, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Proxy(_))) {
+            let d = self.proxy_own_descriptor(target, key)?;
+            if matches!(d, Value::Undefined) {
+                return Ok(false);
+            }
+            return Ok(self.get(&d, "enumerable")?.truthy());
+        }
+        let key = self.key_of(key);
+        Ok(match target {
+            Value::Object(o) => {
+                find_own(o, &key).is_some_and(|(_, e)| e)
+                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))))
+            }
+            _ => false,
+        })
+    }
 }
 
 /// `Object.freeze` on `o`, also used by the napi integrity export: every own property becomes
