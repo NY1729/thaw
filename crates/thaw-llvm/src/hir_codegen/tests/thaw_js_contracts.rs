@@ -564,3 +564,29 @@ fn routed_async_main_drives_thaw_js_and_releases_its_completion_only_once_settle
         .unwrap_or_else(|| panic!("completion is released without a settled-state check: {ir}"));
     assert!(entry[guard..destroy].contains("br i1"), "the release must be conditional on the state: {ir}");
 }
+
+#[test]
+fn routed_set_process_env_declares_the_thaw_tjs_symbol_and_not_quickjs() {
+    let compile = |routed: bool| {
+        let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "thaw_js_set_process_env");
+        if routed {
+            compiler.uses_thaw_js = true;
+            compiler.uses_thaw_js_handles = true;
+            compiler.set_thaw_js_routed(true);
+        } else {
+            compiler.uses_quickjs = true;
+            compiler.uses_quickjs_handles = true;
+        }
+        compiler.compile_program(&program).unwrap();
+        compiler.print_to_string()
+    };
+    // the routed build aliases the setter into thaw-js's extern "C" definition (process_env.rs)
+    let routed = compile(true);
+    assert!(routed.contains("@thaw_tjs_set_process_env("), "{routed}");
+    assert!(!routed.contains("@thaw_js_set_process_env"), "{routed}");
+    let quickjs = compile(false);
+    assert!(quickjs.contains("@thaw_js_set_process_env("), "{quickjs}");
+}
