@@ -1,0 +1,98 @@
+name: parity
+
+# Non-gating differential parity check of thaw-js-node against Node (tools/parity). Node is the oracle.
+# The gate in diff.py is NOT enforced here: known-gaps.json was recorded on a stale runner, so this job
+# only records gaps (gaps.json, artifact, step summary) until the baseline is regenerated and committed.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "tools/parity/**"
+      - "crates/thaw-js/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parity:
+    name: parity diff (thaw-js-node vs node, non-gating)
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Cache cargo registry and release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+          key: parity-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-arena/**') }}
+          restore-keys: |
+            parity-${{ runner.os }}-
+      - name: Build thaw-js-node runner (release)
+        run: cargo build --release -p thaw-js --bin thaw-js-node
+      - name: Harness self-test
+        run: bash tools/parity/selftest.sh
+      - name: Run parity (no baseline gate, records gaps only)
+        # run.sh always runs diff.py with the committed known-gaps.json as the gate, and that file is stale,
+        # so the exit code (1 = gaps not in baseline) is captured and reported, not used to fail the step.
+        # Exit 2 (harness error) is still surfaced in the summary.
+        env:
+          THAW_JS_NODE: ${{ github.workspace }}/target/release/thaw-js-node
+          PARITY_TIMEOUT: "60"
+        run: |
+          out="$RUNNER_TEMP/parity-out"
+          rc=0
+          bash tools/parity/run.sh "$out" > "$RUNNER_TEMP/parity-table.txt" 2> "$RUNNER_TEMP/parity-err.txt" || rc=$?
+          cat "$RUNNER_TEMP/parity-table.txt" || true
+          cat "$RUNNER_TEMP/parity-err.txt" >&2 || true
+          echo "$rc" > "$RUNNER_TEMP/parity-rc"
+          test -s "$out/gaps.json" || { echo "no gaps.json produced (rc=$rc)" >&2; exit 1; }
+      - name: Summarise parity gaps
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/parity-out"
+          rc=$(cat "$RUNNER_TEMP/parity-rc" 2>/dev/null || echo "unknown")
+          {
+            echo "## parity vs node (thaw-js-node, NON-GATING)"
+            echo
+            echo "run.sh exit code: \`$rc\` (0 = no gaps, 1 = gaps not in the stale known-gaps.json baseline, 2 = harness error). Not enforced."
+            echo
+            if [ -s "$out/gaps.json" ]; then
+              echo "- total gaps: $(jq '.gaps | length' "$out/gaps.json")"
+              echo "- by kind: $(jq -r '[.gaps[].kind] | group_by(.) | map("\(.[0]) \(length)") | join(", ")' "$out/gaps.json")"
+              echo
+              echo "| corpus | gaps |"
+              echo "|---|---|"
+              jq -r '.gaps[].id | split("::")[0]' "$out/gaps.json" | sort | uniq -c | awk '{ printf "| %s | %s |\n", $2, $1 }'
+            else
+              echo "no gaps.json produced"
+            fi
+            echo
+            echo "<details><summary>diff table</summary>"
+            echo
+            echo '```'
+            head -c 60000 "$RUNNER_TEMP/parity-table.txt" 2>/dev/null || true
+            echo '```'
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-gaps
+          path: ${{ runner.temp }}/parity-out
+          if-no-files-found: ignore
