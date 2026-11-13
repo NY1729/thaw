@@ -114,3 +114,19 @@ fn util_types_know_the_bigint_typed_arrays() {
     let src = "const t = globalThis.__thaw_util_types;\nconsole.log([t.isBigInt64Array(new BigInt64Array(1)), t.isBigUint64Array(new BigInt64Array(1)), t.isBigUint64Array(new BigUint64Array(1)), t.isBigInt64Array(new Int8Array(1))].join(','));";
     assert_eq!(run_lines(src), vec!["true,false,true,false".to_string()]);
 }
+
+#[test]
+fn vm_realm_hides_performance_globals() {
+    // Node 22 `vm.runInNewContext`: performance and every user-timing class are undefined
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        "console.log(runInNewContext(\"[typeof performance, typeof Performance, typeof PerformanceEntry, typeof PerformanceMark, typeof PerformanceMeasure, typeof PerformanceObserver, typeof PerformanceObserverEntryList, typeof PerformanceResourceTiming].join(',')\", {}));"
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec![
+            "undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined"
+                .to_string()
+        ]
+    );
+}

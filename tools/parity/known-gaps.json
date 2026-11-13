@@ -1,0 +1,6461 @@
+{
+ "note": "gaps may only shrink; regenerate with --write-baseline only after a fix",
+ "gaps": [
+  {
+   "id": "errors::Error.prepareStackTrace typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "errors::captureStackTrace defines stack",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "errors::captureStackTrace own names",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "errors::captureStackTrace stack starts with message",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "errors::captureStackTrace on function arg",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "errors::captureStackTrace rejects non-object",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "errors::throw in prepareStackTrace is catchable",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "errors::prepareStackTrace receives callsites array",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "errors::callsite getFunctionName typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict frozen assign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict frozen add",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict frozen array push",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict frozen array index assign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict sealed delete",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict nonwritable assign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict getter-only assign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict non-extensible add",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict delete nonconfigurable",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::setPrototypeOf on frozen",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict string index assign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict primitive prop assign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::strict undeclared assign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::frozen array length set",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::frozen class instance strict",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::frozen fn property",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "invariants::freeze typed array element strict",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::Map iter shares IteratorPrototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::Set iter shares IteratorPrototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::generator shares IteratorPrototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::IteratorPrototype has Symbol.iterator",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::IteratorPrototype Symbol.iterator returns this",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::IteratorPrototype own names",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::IteratorPrototype symbols",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::Array iter proto own names",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::Array iter toStringTag",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::Array iter sees mutation",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::Set.prototype.keys === values",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::TypedArray iter proto tag",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::Generator proto chain to IteratorPrototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "iterators::AsyncIterator proto symbol",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Array",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Array.from",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Array.of",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Array.prototype.map",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Array.prototype.push",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Array.prototype.concat",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Array.prototype.splice",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Array.prototype.toSorted",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Array.prototype.with",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Object",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Object.assign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Object.defineProperty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Object.entries",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Object.freeze",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Object.groupBy",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Object.fromEntries",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Object.prototype.hasOwnProperty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Object.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Object.prototype.__defineGetter__",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Object.prototype.propertyIsEnumerable",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Function",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Function.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Function.prototype.call",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Function.prototype.apply",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Function.prototype.bind",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Function.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn String.prototype.padStart",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn String.prototype.replaceAll",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn String.prototype.at",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn String.fromCharCode",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn String.raw",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Number",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Number.parseFloat",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Number.isNaN",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Math.max",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Math.hypot",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Math.clz32",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn JSON.parse",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn JSON.stringify",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Reflect.apply",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Reflect.construct",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Reflect.ownKeys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Promise",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Promise.all",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Promise.allSettled",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Promise.any",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Promise.race",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Promise.withResolvers",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Promise.prototype.then",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Promise.prototype.finally",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Map",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Map.prototype.set",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Map.groupBy",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Set.prototype.union",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Set.prototype.add",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Symbol",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Symbol.for",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Symbol.keyFor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Symbol.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn BigInt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn BigInt.asIntN",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn BigInt64Array",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn BigUint64Array",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Date",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Date.UTC",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Date.prototype.getTime",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn RegExp",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn RegExp.prototype.exec",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Error",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Error.captureStackTrace",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn TypeError",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn AggregateError",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Proxy.revocable",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn ArrayBuffer.prototype.slice",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn DataView.prototype.getInt8",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Atomics.wait",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Uint8Array",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Uint8Array.from",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Uint8Array.prototype.set",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn globalThis.queueMicrotask",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn queueMicrotask",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn structuredClone",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn atob",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn btoa",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn setTimeout",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn setInterval",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn setImmediate",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn clearTimeout",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn clearInterval",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn clearImmediate",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn parseInt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn parseFloat",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn isNaN",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn isFinite",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn encodeURIComponent",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn decodeURIComponent",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn escape",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn unescape",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn eval",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn fetch",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn URL",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn URLSearchParams",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn Blob",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn WebSocket",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn navigator",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn name bound",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn name getter",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn name setter",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::fn name symbol method",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::Function.prototype own names",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::Function.prototype name empty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::Function.prototype length 0",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::Function.prototype callable",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::Function own names of plain fn",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::getter of Map.prototype.size name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::Symbol.prototype.description getter name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "names_lengths::Array.prototype[Symbol.unscopables] tag",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.argv0 typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.abort typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.cpuUsage typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.debugPort typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.dlopen typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.eventNames typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.features typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.getActiveResourcesInfo typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.getBuiltinModule typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.getegid typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.geteuid typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.getgid typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.getgroups typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.getuid typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.hasUncaughtExceptionCaptureCallback typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.kill typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.listeners typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.ppid typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.prependListener typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.prependOnceListener typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.report typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.resourceUsage typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.rawListeners typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.setMaxListeners typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.getMaxListeners typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.setUncaughtExceptionCaptureCallback typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.umask typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.allowedNodeEnvironmentFlags typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.availableMemory typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.constrainedMemory typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process._getActiveHandles typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process._linkedBinding typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.setSourceMapsEnabled typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.sourceMapsEnabled typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.mainModule typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.threadCpuUsage typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.setegid typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.seteuid typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.setgid typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.setuid typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.setgroups typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.initgroups typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.env string coercion",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.argv0 string",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.memoryUsage.rss typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.cpuUsage keys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.resourceUsage keys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.umask() call result typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.features keys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.stdout.fd",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.stderr.fd",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process ctor name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.listeners array",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.getBuiltinModule fn typeof",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.setMaxListeners returns process",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.getMaxListeners number",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.ppid number",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "process::process.getuid number",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "structured_clone::sc BigInt boxed ctor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "structured_clone::sc transfer detaches source",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "structured_clone::sc WeakMap throws",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "structured_clone::sc Promise throws",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "structured_clone::sc Proxy throws",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Object",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Function",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Array",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Number",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.parseFloat",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.parseInt",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Infinity",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.NaN",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.undefined",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Boolean",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.String",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Symbol",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Date",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Promise",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.RegExp",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Error",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.AggregateError",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.EvalError",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.RangeError",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.ReferenceError",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.SyntaxError",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.TypeError",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.URIError",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.globalThis",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.JSON",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Math",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.ArrayBuffer",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Uint8Array",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Int8Array",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Uint16Array",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Int16Array",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Uint32Array",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Int32Array",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Float32Array",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Float64Array",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Uint8ClampedArray",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.BigUint64Array",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.BigInt64Array",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.DataView",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Map",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.BigInt",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Set",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.WeakMap",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.WeakSet",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Proxy",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Reflect",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.FinalizationRegistry",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.WeakRef",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.decodeURI",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.decodeURIComponent",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.encodeURI",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.encodeURIComponent",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.escape",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.unescape",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.eval",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.isFinite",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.isNaN",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.console",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.SharedArrayBuffer",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.WebAssembly",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.globalThis.process",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.global",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Buffer",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.clearImmediate",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.setImmediate",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.URL",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.URLSearchParams",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.DOMException",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.AbortController",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.AbortSignal",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Event",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.EventTarget",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.TextEncoder",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.TextDecoder",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.TransformStream",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.TransformStreamDefaultController",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.WritableStream",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.WritableStreamDefaultController",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.WritableStreamDefaultWriter",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.ReadableStream",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.ReadableStreamDefaultReader",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.ReadableStreamBYOBReader",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.ReadableStreamBYOBRequest",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.ReadableByteStreamController",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.ReadableStreamDefaultController",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.ByteLengthQueuingStrategy",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.CountQueuingStrategy",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.TextEncoderStream",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.TextDecoderStream",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.CompressionStream",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.DecompressionStream",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.clearInterval",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.clearTimeout",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.setInterval",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.setTimeout",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.queueMicrotask",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.structuredClone",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.atob",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.btoa",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.BroadcastChannel",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.MessageChannel",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.MessagePort",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Blob",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.globalThis.File",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Performance",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.PerformanceEntry",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.PerformanceMark",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.PerformanceMeasure",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.PerformanceObserver",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.PerformanceObserverEntryList",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.PerformanceResourceTiming",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.performance",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.fetch",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.FormData",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Headers",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Request",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Response",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.MessageEvent",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.WebSocket",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Navigator",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.navigator",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.crypto",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.globalThis.Crypto",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.CryptoKey",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.SubtleCrypto",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.CustomEvent",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.globalThis.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.version",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.versions",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.arch",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.platform",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.release",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process._rawDebug",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.moduleLoadList",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.binding",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process._linkedBinding",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._events",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._eventsCount",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._maxListeners",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.domain",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._exiting",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.exitCode",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.config",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.dlopen",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.uptime",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process._getActiveRequests",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._getActiveHandles",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.getActiveResourcesInfo",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.reallyExit",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._kill",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.loadEnvFile",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.cpuUsage",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.threadCpuUsage",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.resourceUsage",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.memoryUsage",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.constrainedMemory",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.availableMemory",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.kill",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.exit",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.execve",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.ref",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.unref",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.finalization",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.hrtime",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.openStdin",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.getuid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.geteuid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.getgid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.getegid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.getgroups",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.allowedNodeEnvironmentFlags",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.assert",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.features",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._fatalException",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.setUncaughtExceptionCaptureCallback",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.hasUncaughtExceptionCaptureCallback",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.emitWarning",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.nextTick",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process._tickCallback",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.sourceMapsEnabled",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.setSourceMapsEnabled",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.getBuiltinModule",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._debugProcess",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._debugEnd",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._startProfilerIdleNotifier",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._stopProfilerIdleNotifier",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.stdout",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.stdin",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.stderr",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.abort",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.umask",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.chdir",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.cwd",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.initgroups",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.setgroups",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.setegid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.seteuid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.setgid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.setuid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.pid",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.process.ppid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.debugPort",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.argv0",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process._preload_modules",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.report",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.mainModule",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.[Symbol(shapeMode)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.[Symbol(kCapture)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.process.[Symbol(Symbol.toStringTag)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.version",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.versions",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.arch",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.platform",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.release",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process._rawDebug",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.moduleLoadList",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.binding",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process._linkedBinding",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._events",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._eventsCount",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._maxListeners",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.domain",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._exiting",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.exitCode",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.config",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.dlopen",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.uptime",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process._getActiveRequests",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._getActiveHandles",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.getActiveResourcesInfo",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.reallyExit",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._kill",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.loadEnvFile",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.cpuUsage",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.threadCpuUsage",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.resourceUsage",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.memoryUsage",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.constrainedMemory",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.availableMemory",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.kill",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.exit",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.execve",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.ref",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.unref",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.finalization",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.hrtime",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.openStdin",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.getuid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.geteuid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.getgid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.getegid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.getgroups",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.allowedNodeEnvironmentFlags",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.assert",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.features",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._fatalException",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.setUncaughtExceptionCaptureCallback",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.hasUncaughtExceptionCaptureCallback",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.emitWarning",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.nextTick",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process._tickCallback",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.sourceMapsEnabled",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.setSourceMapsEnabled",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.getBuiltinModule",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._debugProcess",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._debugEnd",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._startProfilerIdleNotifier",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._stopProfilerIdleNotifier",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.stdout",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.stdin",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.stderr",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.abort",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.umask",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.chdir",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.cwd",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.initgroups",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.setgroups",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.setegid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.seteuid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.setgid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.setuid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.pid",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::process.ppid",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.debugPort",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.argv0",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process._preload_modules",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.report",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.mainModule",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.[Symbol(shapeMode)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.[Symbol(kCapture)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::process.[Symbol(Symbol.toStringTag)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Object.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.assign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.getOwnPropertyDescriptor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.getOwnPropertyDescriptors",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.getOwnPropertyNames",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.getOwnPropertySymbols",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.hasOwn",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.is",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.preventExtensions",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.seal",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.create",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.defineProperties",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.defineProperty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.freeze",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.getPrototypeOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.setPrototypeOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.isExtensible",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.isFrozen",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.isSealed",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.keys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.entries",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.fromEntries",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.values",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Object.groupBy",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Object.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.assign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.getOwnPropertyDescriptor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.getOwnPropertyDescriptors",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.getOwnPropertyNames",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.getOwnPropertySymbols",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.hasOwn",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.is",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.preventExtensions",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.seal",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.create",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.defineProperties",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.defineProperty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.freeze",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.getPrototypeOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.setPrototypeOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.isExtensible",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.isFrozen",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.isSealed",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.keys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.entries",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.fromEntries",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.values",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.groupBy",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Function.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Function.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Function.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Function.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Function.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Function.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Array.isArray",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Array.from",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Array.of",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Array.fromAsync",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Array.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.isArray",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.from",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.of",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.fromAsync",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Array.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.String.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.String.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.String.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.String.fromCharCode",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.String.fromCodePoint",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.String.raw",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.fromCharCode",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.fromCodePoint",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.raw",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Number.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Number.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Number.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Number.isFinite",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Number.isInteger",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Number.isNaN",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Number.isSafeInteger",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Number.parseFloat",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Number.parseInt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Number.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.isFinite",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.isInteger",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.isNaN",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.isSafeInteger",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.parseFloat",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.parseInt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Boolean.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Boolean.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Boolean.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Boolean.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Boolean.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Boolean.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Symbol.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.for",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.keyFor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.asyncIterator",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.hasInstance",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.isConcatSpreadable",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.iterator",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.match",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.matchAll",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.replace",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.search",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.species",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.split",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.toPrimitive",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.toStringTag",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.unscopables",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.dispose",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Symbol.asyncDispose",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Symbol.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.for",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.keyFor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.asyncIterator",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.hasInstance",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.isConcatSpreadable",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.iterator",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.match",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.matchAll",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.replace",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.search",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.species",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.split",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.toPrimitive",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.toStringTag",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.unscopables",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.dispose",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.asyncDispose",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.BigInt.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.BigInt.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.BigInt.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.BigInt.asUintN",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.BigInt.asIntN",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::BigInt.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::BigInt.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::BigInt.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::BigInt.asUintN",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::BigInt.asIntN",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.abs",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.acos",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.acosh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.asin",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.asinh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.atan",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.atanh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.atan2",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.ceil",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.cbrt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.expm1",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.clz32",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.cos",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.cosh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.exp",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.floor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.fround",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.hypot",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.imul",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.log",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.log1p",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.log2",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.log10",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.max",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.min",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.pow",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.random",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.round",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.sign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.sin",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.sinh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.sqrt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.tan",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.tanh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.trunc",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Math.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Math.abs",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.acos",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.acosh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.asin",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.asinh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.atan",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.atanh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.atan2",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.ceil",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.cbrt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.expm1",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.clz32",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.cos",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.cosh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.exp",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.floor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.fround",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.hypot",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.imul",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.log",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.log1p",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.log2",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.log10",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.max",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.min",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.pow",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.random",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.round",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.sign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.sin",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.sinh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.sqrt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.tan",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.tanh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.trunc",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Math.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.JSON.parse",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.JSON.stringify",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.JSON.rawJSON",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.JSON.isRawJSON",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.JSON.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::JSON.parse",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::JSON.stringify",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::JSON.rawJSON",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::JSON.isRawJSON",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::JSON.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Reflect.defineProperty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.deleteProperty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.apply",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.construct",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.get",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.getOwnPropertyDescriptor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.getPrototypeOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.has",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.isExtensible",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.ownKeys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.preventExtensions",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.set",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.setPrototypeOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Reflect.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Reflect.defineProperty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.deleteProperty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.apply",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.construct",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.get",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.getOwnPropertyDescriptor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.getPrototypeOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.has",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.isExtensible",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.ownKeys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.preventExtensions",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.set",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.setPrototypeOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Reflect.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Atomics.load",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Atomics.store",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Atomics.add",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Atomics.sub",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Atomics.and",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Atomics.or",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Atomics.xor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Atomics.exchange",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Atomics.compareExchange",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Atomics.isLockFree",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Atomics.wait",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Atomics.waitAsync",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Atomics.notify",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.load",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.store",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.add",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.sub",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.and",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.or",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.xor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.exchange",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.compareExchange",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.isLockFree",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.wait",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Atomics.waitAsync",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Atomics.notify",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Date.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Date.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Date.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Date.now",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Date.parse",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Date.UTC",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Date.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.now",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.parse",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.UTC",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.RegExp.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.RegExp.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.RegExp.input",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$_",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.lastMatch",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$&",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.lastParen",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$+",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.leftContext",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$`",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.rightContext",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$'",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$1",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$2",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$3",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$4",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$5",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$6",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$7",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$8",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.$9",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.RegExp.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::RegExp.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::RegExp.input",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$_",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.lastMatch",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$&",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.lastParen",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$+",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.leftContext",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$`",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.rightContext",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$'",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$1",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$2",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$3",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$4",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$5",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$6",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$7",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$8",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.$9",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Error.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Error.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Error.captureStackTrace",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Error.prepareStackTrace",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Error.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Error.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Error.captureStackTrace",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Error.prepareStackTrace",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Map.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Map.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Map.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Map.groupBy",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Map.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Map.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Map.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.groupBy",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Set.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Set.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Set.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Set.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Set.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Set.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.WeakMap.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WeakMap.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WeakMap.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WeakMap.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WeakSet.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WeakSet.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WeakSet.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WeakSet.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WeakRef.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WeakRef.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.FinalizationRegistry.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::FinalizationRegistry.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Promise.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Promise.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Promise.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Promise.all",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Promise.allSettled",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Promise.any",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Promise.race",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Promise.resolve",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Promise.reject",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Promise.withResolvers",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Promise.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Promise.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Promise.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.all",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.allSettled",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.any",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.race",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.resolve",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.reject",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.withResolvers",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.ArrayBuffer.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.ArrayBuffer.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.ArrayBuffer.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.ArrayBuffer.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::ArrayBuffer.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::ArrayBuffer.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::ArrayBuffer.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::ArrayBuffer.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.SharedArrayBuffer.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.SharedArrayBuffer.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.SharedArrayBuffer.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.SharedArrayBuffer.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::SharedArrayBuffer.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::SharedArrayBuffer.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::SharedArrayBuffer.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::SharedArrayBuffer.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.DataView.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Uint8Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Uint8Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Uint8Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Uint8Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Uint8Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Uint8Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Uint8Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Uint8Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Int8Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Int8Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Int8Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Int8Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Int8Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Int8Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Int8Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Int8Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Uint16Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Uint16Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Uint16Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Uint16Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Uint16Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Uint16Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Uint16Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Uint16Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Int32Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Int32Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Int32Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Int32Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Int32Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Int32Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Int32Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Int32Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Float32Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Float32Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Float32Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Float32Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Float32Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Float32Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Float32Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Float32Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Float64Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Float64Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Float64Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Float64Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Float64Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Float64Array.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Float64Array.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Float64Array.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.BigInt64Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.BigInt64Array.name",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.BigInt64Array.prototype",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.BigInt64Array.BYTES_PER_ELEMENT",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::BigInt64Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::BigInt64Array.name",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::BigInt64Array.prototype",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::BigInt64Array.BYTES_PER_ELEMENT",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.BigUint64Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.BigUint64Array.name",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.BigUint64Array.prototype",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.BigUint64Array.BYTES_PER_ELEMENT",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::BigUint64Array.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::BigUint64Array.name",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::BigUint64Array.prototype",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::BigUint64Array.BYTES_PER_ELEMENT",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Proxy.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Proxy.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Proxy.revocable",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Proxy.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Proxy.name",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Proxy.revocable",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Iterator.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Iterator.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Buffer.poolSize",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Buffer.from",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Buffer.copyBytesFrom",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Buffer.of",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Buffer.alloc",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Buffer.allocUnsafe",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Buffer.allocUnsafeSlow",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Buffer.isBuffer",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Buffer.compare",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Buffer.isEncoding",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Buffer.concat",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Buffer.byteLength",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Buffer.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Buffer.[Symbol(kIsEncodingSymbol)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Buffer.poolSize",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Buffer.from",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Buffer.copyBytesFrom",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Buffer.of",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Buffer.alloc",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Buffer.allocUnsafe",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Buffer.allocUnsafeSlow",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Buffer.isBuffer",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Buffer.compare",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Buffer.isEncoding",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Buffer.concat",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Buffer.byteLength",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Buffer.[Symbol(Symbol.species)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Buffer.[Symbol(kIsEncodingSymbol)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.URL.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.URL.parse",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.URL.canParse",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.URL.createObjectURL",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.URL.revokeObjectURL",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::URL.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::URL.parse",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::URL.canParse",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::URL.createObjectURL",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::URL.revokeObjectURL",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.URLSearchParams.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::URLSearchParams.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.TextEncoder.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::TextEncoder.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.TextDecoder.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::TextDecoder.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.AbortController.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.AbortController.[Symbol(kMakeTransferable)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::AbortController.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::AbortController.[Symbol(kMakeTransferable)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.AbortSignal.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.AbortSignal.abort",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::AbortSignal.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::AbortSignal.abort",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Event.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Event.NONE",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Event.CAPTURING_PHASE",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Event.AT_TARGET",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.Event.BUBBLING_PHASE",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Event.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Event.NONE",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Event.CAPTURING_PHASE",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Event.AT_TARGET",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Event.BUBBLING_PHASE",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.EventTarget.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.EventTarget.[Symbol(nodejs.event_target)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::EventTarget.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::EventTarget.[Symbol(nodejs.event_target)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.DOMException.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DOMException.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Blob.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Blob.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Headers.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Headers.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Request.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Request.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Response.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Response.error",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Response.json",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.Response.redirect",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Response.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Response.error",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Response.json",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Response.redirect",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.console.log",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.console.info",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.console.debug",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.console.warn",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.console.error",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.console.dir",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.time",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.timeEnd",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.timeLog",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.trace",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.console.assert",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.clear",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.count",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.countReset",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.group",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.groupEnd",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.table",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.dirxml",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.groupCollapsed",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console._stdoutErrorHandler",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console._stderrErrorHandler",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console._ignoreErrors",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console._times",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.Console",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.profile",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.profileEnd",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.timeStamp",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.context",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.createTask",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console._stdout",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console._stderr",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(kBindStreamsEager)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(kBindStreamsLazy)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(kBindProperties)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(kWriteToConsole)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(kGetInspectOptions)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(kFormatForStdout)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(kFormatForStderr)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(counts)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(kColorMode)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(kIsConsole)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(kGroupIndentWidth)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(kGroupIndentationString)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.console.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.log",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::console.info",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::console.debug",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::console.warn",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::console.error",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::console.dir",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.time",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.timeEnd",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.timeLog",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.trace",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::console.assert",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.clear",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.count",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.countReset",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.group",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.groupEnd",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.table",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.dirxml",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.groupCollapsed",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console._stdoutErrorHandler",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console._stderrErrorHandler",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console._ignoreErrors",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console._times",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.Console",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.profile",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.profileEnd",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.timeStamp",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.context",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.createTask",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console._stdout",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console._stderr",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(kBindStreamsEager)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(kBindStreamsLazy)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(kBindProperties)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(kWriteToConsole)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(kGetInspectOptions)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(kFormatForStdout)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(kFormatForStderr)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(counts)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(kColorMode)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(kIsConsole)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(kGroupIndentWidth)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(kGroupIndentationString)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::console.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.performance.[Symbol(kEvents)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.performance.[Symbol(events.maxEventTargetListeners)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.performance.[Symbol(events.maxEventTargetListenersWarned)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.performance.[Symbol(kHandlers)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.performance.[Symbol(performance)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::performance.[Symbol(kEvents)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::performance.[Symbol(events.maxEventTargetListeners)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::performance.[Symbol(events.maxEventTargetListenersWarned)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::performance.[Symbol(kHandlers)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::performance.[Symbol(performance)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.compile",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.validate",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.instantiate",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.Module",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.Instance",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.Table",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.Memory",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.Global",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.Tag",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.JSTag",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.Exception",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.CompileError",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.LinkError",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.RuntimeError",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.compileStreaming",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.instantiateStreaming",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::globalThis.WebAssembly.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::WebAssembly.compile",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WebAssembly.validate",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WebAssembly.instantiate",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WebAssembly.Module",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WebAssembly.Instance",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WebAssembly.Table",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WebAssembly.Memory",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WebAssembly.Global",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WebAssembly.Tag",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::WebAssembly.JSTag",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::WebAssembly.Exception",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::WebAssembly.CompileError",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WebAssembly.LinkError",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WebAssembly.RuntimeError",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WebAssembly.compileStreaming",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::WebAssembly.instantiateStreaming",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::WebAssembly.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Object.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.prototype.__defineGetter__",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Object.prototype.__defineSetter__",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Object.prototype.hasOwnProperty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.prototype.__lookupGetter__",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Object.prototype.__lookupSetter__",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Object.prototype.isPrototypeOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.prototype.propertyIsEnumerable",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.prototype.valueOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Object.prototype.toLocaleString",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Function.prototype.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Function.prototype.name",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Function.prototype.arguments",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Function.prototype.caller",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Function.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Function.prototype.apply",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Function.prototype.bind",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Function.prototype.call",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Function.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Function.prototype.[Symbol(Symbol.hasInstance)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Array.prototype.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Array.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.at",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.concat",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.copyWithin",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.fill",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.find",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.findIndex",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.findLast",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.findLastIndex",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.lastIndexOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.pop",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.push",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.reverse",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.shift",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.unshift",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.slice",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.sort",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.splice",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.includes",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.indexOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.join",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.keys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.entries",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.values",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.forEach",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.filter",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.flat",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.flatMap",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.map",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.every",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.some",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.reduce",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.reduceRight",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.toReversed",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.toSorted",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.toSpliced",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.with",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.toLocaleString",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Array.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.[Symbol(Symbol.iterator)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Array.prototype.[Symbol(Symbol.unscopables)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.length",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.anchor",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.at",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.big",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.blink",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.bold",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.charAt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.charCodeAt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.codePointAt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.concat",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.endsWith",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.fontcolor",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.fontsize",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.fixed",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.includes",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.indexOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.isWellFormed",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.italics",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.lastIndexOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.link",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.localeCompare",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.match",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.matchAll",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.normalize",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.padEnd",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.padStart",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.repeat",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.replace",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.replaceAll",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.search",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.slice",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.small",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.split",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.strike",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.sub",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.substr",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.substring",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.sup",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.startsWith",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.toWellFormed",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::String.prototype.trim",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.trimStart",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.trimLeft",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.trimEnd",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.trimRight",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.toLocaleLowerCase",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.toLocaleUpperCase",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.toLowerCase",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.toUpperCase",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.valueOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::String.prototype.[Symbol(Symbol.iterator)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.prototype.toExponential",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.prototype.toFixed",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.prototype.toPrecision",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.prototype.valueOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Number.prototype.toLocaleString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Boolean.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Boolean.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Boolean.prototype.valueOf",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Symbol.prototype.constructor",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Symbol.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Symbol.prototype.valueOf",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Symbol.prototype.description",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Symbol.prototype.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Symbol.prototype.[Symbol(Symbol.toPrimitive)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::BigInt.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::BigInt.prototype.toLocaleString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::BigInt.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::BigInt.prototype.valueOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::BigInt.prototype.[Symbol(Symbol.toStringTag)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.toDateString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.toTimeString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.toISOString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.toUTCString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.toGMTString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getDate",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setDate",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getDay",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getFullYear",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setFullYear",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getHours",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setHours",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getMilliseconds",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setMilliseconds",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getMinutes",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setMinutes",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getMonth",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setMonth",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getSeconds",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setSeconds",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getTime",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setTime",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getTimezoneOffset",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getUTCDate",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setUTCDate",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getUTCDay",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getUTCFullYear",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setUTCFullYear",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getUTCHours",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setUTCHours",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getUTCMilliseconds",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setUTCMilliseconds",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getUTCMinutes",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setUTCMinutes",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getUTCMonth",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setUTCMonth",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getUTCSeconds",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setUTCSeconds",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.valueOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.getYear",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.setYear",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Date.prototype.toJSON",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.toLocaleString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.toLocaleDateString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.toLocaleTimeString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Date.prototype.[Symbol(Symbol.toPrimitive)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::RegExp.prototype.exec",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::RegExp.prototype.dotAll",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.flags",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.global",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.hasIndices",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.ignoreCase",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.multiline",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.source",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.sticky",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.unicode",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.compile",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::RegExp.prototype.test",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::RegExp.prototype.unicodeSets",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.[Symbol(Symbol.match)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.[Symbol(Symbol.matchAll)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.[Symbol(Symbol.replace)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.[Symbol(Symbol.search)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::RegExp.prototype.[Symbol(Symbol.split)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Error.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Error.prototype.toString",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.get",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.set",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.has",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.delete",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.clear",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.entries",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.forEach",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.keys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.values",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.[Symbol(Symbol.toStringTag)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Map.prototype.[Symbol(Symbol.iterator)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.has",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.add",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.delete",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.clear",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.entries",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.forEach",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.values",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.keys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.union",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.intersection",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.difference",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.symmetricDifference",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.isSubsetOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.isSupersetOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.isDisjointFrom",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.[Symbol(Symbol.toStringTag)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Set.prototype.[Symbol(Symbol.iterator)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WeakMap.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WeakMap.prototype.delete",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WeakMap.prototype.[Symbol(Symbol.toStringTag)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WeakSet.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WeakSet.prototype.delete",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::WeakSet.prototype.[Symbol(Symbol.toStringTag)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.prototype.then",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.prototype.catch",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.prototype.finally",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Promise.prototype.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::ArrayBuffer.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::ArrayBuffer.prototype.slice",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::ArrayBuffer.prototype.maxByteLength",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::ArrayBuffer.prototype.resizable",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::ArrayBuffer.prototype.resize",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::ArrayBuffer.prototype.transfer",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::ArrayBuffer.prototype.transferToFixedLength",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::ArrayBuffer.prototype.detached",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::ArrayBuffer.prototype.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::DataView.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.buffer",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::DataView.prototype.byteLength",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::DataView.prototype.byteOffset",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::DataView.prototype.getInt8",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.setInt8",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.getUint8",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.setUint8",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.getInt16",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.setInt16",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.getUint16",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.setUint16",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.getInt32",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.setInt32",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.getUint32",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.setUint32",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.getFloat32",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.setFloat32",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.getFloat64",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.setFloat64",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.getBigInt64",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.setBigInt64",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.getBigUint64",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.setBigUint64",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::DataView.prototype.[Symbol(Symbol.toStringTag)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Uint8Array.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Uint8Array.prototype.BYTES_PER_ELEMENT",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Iterator.prototype.constructor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Iterator.prototype.[Symbol(Symbol.iterator)]",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::Iterator.prototype.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Generator.prototype(instance-proto).constructor",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Generator.prototype(instance-proto).next",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Generator.prototype(instance-proto).return",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Generator.prototype(instance-proto).throw",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::Generator.prototype(instance-proto).[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::tagged.Math.abs",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.acos",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.acosh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.asin",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.asinh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.atan",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.atanh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.atan2",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.ceil",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.cbrt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.expm1",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.clz32",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.cos",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.cosh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.exp",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.floor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.fround",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.hypot",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.imul",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.log",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.log1p",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.log2",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.log10",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.max",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.min",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.pow",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.random",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.round",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.sign",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.sin",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.sinh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.sqrt",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.tan",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.tanh",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.trunc",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Math.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::tagged.JSON.parse",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.JSON.stringify",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.JSON.rawJSON",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.JSON.isRawJSON",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.JSON.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "surface::tagged.Reflect.defineProperty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.deleteProperty",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.apply",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.construct",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.get",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.getOwnPropertyDescriptor",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.getPrototypeOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.has",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.isExtensible",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.ownKeys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.preventExtensions",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.set",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.setPrototypeOf",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "surface::tagged.Reflect.[Symbol(Symbol.toStringTag)]",
+   "kind": "MISSING"
+  },
+  {
+   "id": "tags::tag Math",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag JSON",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag Reflect",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag WebAssembly",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag Symbol.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag Promise.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag ArrayBuffer.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag Function.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag globalThis",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag Iterator.prototype",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag console",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag performance",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag crypto",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag navigator",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag generator function",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag async function",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag async generator function",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag Buffer instance",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag URL",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag EventTarget",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag TextEncoder",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::tag TextDecoder",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::toStringTag Math value",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::toStringTag JSON value",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::toStringTag Reflect value",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::toStringTag Promise.prototype value",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::toStringTag Symbol.prototype value",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::toStringTag Generator.prototype value",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "tags::toStringTag AsyncFunction.prototype value",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "timers::Timeout typeof Symbol.toPrimitive",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "timers::Timeout typeof Symbol.dispose",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "timers::Timeout own keys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "timers::Timeout own names",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "timers::Timeout has _idleTimeout",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "timers::Timeout has _onTimeout",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "timers::Immediate typeof Symbol.dispose",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "timers::Immediate own keys",
+   "kind": "DIFFERENT"
+  },
+  {
+   "id": "timers::Interval typeof Symbol.toPrimitive",
+   "kind": "DIFFERENT"
+  }
+ ]
+}

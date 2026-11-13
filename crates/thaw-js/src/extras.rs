@@ -716,11 +716,6 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   // the native lowering of `Iterator.from` calls this platform global (thaw-hir static_builtins.rs)
   globalThis.__thaw_iterator_from = function (source) { return Iterator.from(source); };
 
-  var start = Date.now();
-  if (typeof performance === 'undefined') {
-    globalThis.performance = { now: function now() { return typeof __thaw_perf_now === 'function' ? __thaw_perf_now() : Date.now() - start; }, timeOrigin: start };
-  }
-
   // ----- Atomics. One agent: every read-modify-write is atomic by construction, and each op returns the
   // old value (store returns the stored integer). ponytail: no other agent can touch a SharedArrayBuffer
   // (worker.rs runs a separate Interp, so Atomics.wait can only time out and notify wakes nobody); add
