@@ -1872,14 +1872,16 @@ impl Interp {
                     let text = it.to_str(&v).to_string();
                     match u32::from_str_radix(text.trim(), 8) {
                         Ok(m) => Some(m as libc::mode_t),
-                        Err(_) => return Err(node_error(
-                            it,
-                            "TypeError",
-                            "ERR_INVALID_ARG_VALUE",
-                            &format!(
+                        Err(_) => {
+                            return Err(node_error(
+                                it,
+                                "TypeError",
+                                "ERR_INVALID_ARG_VALUE",
+                                &format!(
                                 "The argument 'mask' must be an octal string. Received '{text}'"
                             ),
-                        )),
+                            ))
+                        }
                     }
                 }
             };
