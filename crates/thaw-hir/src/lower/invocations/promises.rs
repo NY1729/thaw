@@ -585,7 +585,7 @@ impl<'a> FnLowerer<'a> {
         let args = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![inner]))?;
         let promise_global = HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".to_string())),
-            vec![HirExpr::Lit(HirLit::Str("Promise".to_string()))],
+            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_PROMISE.into()))],
         );
         Ok(Some(HirExpr::Call(
             Box::new(HirExpr::Var("callDynamicMethod".to_string())),
@@ -640,7 +640,7 @@ impl<'a> FnLowerer<'a> {
             vec![
                 HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                    vec![HirExpr::Lit(HirLit::Str("Promise".to_string()))],
+                    vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_PROMISE.into()))],
                 ),
                 HirExpr::Lit(HirLit::Str("resolve".to_string())),
                 args,
