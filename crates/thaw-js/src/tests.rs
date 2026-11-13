@@ -7476,6 +7476,95 @@ fn class_call_bit_two_settles_a_promise_result_only() {
     );
 }
 
+const SETTER_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"s/index.js": function(module, exports, require) {
+  class Cell {
+    constructor() { this.v = 'a'; }
+    get() { return this.v; }
+    freeze() { Object.freeze(this); return this; }
+  }
+  exports.Cell = Cell;
+},
+};
+var __thaw_bundle_require_maps = { "s/index.js": {}, };
+var __thaw_bundle_entry_key = "s/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn class_setter_op_assigns_through_strict_set_and_throws_on_a_frozen_receiver() {
+    use std::ffi::CString;
+    let (name, source) = (
+        CString::new("s").unwrap(),
+        CString::new(SETTER_BUNDLE).unwrap(),
+    );
+    assert_eq!(
+        crate::host::thaw_tjs_register(name.as_ptr(), source.as_ptr()),
+        1
+    );
+    let cell: i64 = class_call_with_flags("$new$s::Cell$arity0", "[]", 0, 1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    // the setter returns the assigned value; the write is visible to a method reading it back
+    assert_eq!(
+        class_call_with_flags("$setter$s::Cell$v$overload0$arity1", "[\"b\"]", cell, 0).unwrap(),
+        "\"b\""
+    );
+    assert_eq!(
+        class_call_with_flags("$method$s::Cell$get$overload0$arity0", "[]", cell, 0).unwrap(),
+        "\"b\""
+    );
+    // strict: a write to a frozen receiver throws (Interp::set alone would ignore it)
+    class_call_with_flags("$method$s::Cell$freeze$overload0$arity0", "[]", cell, 0).unwrap();
+    let error = class_call_with_flags("$setter$s::Cell$v$overload0$arity1", "[\"c\"]", cell, 0)
+        .unwrap_err();
+    assert!(
+        error.contains("Cannot assign to read only property 'v'"),
+        "{error}"
+    );
+    assert_eq!(
+        class_call_with_flags("$method$s::Cell$get$overload0$arity0", "[]", cell, 0).unwrap(),
+        "\"b\""
+    );
+}
+
+#[test]
+fn every_generated_class_op_kind_has_a_thaw_js_handling_or_a_build_refusal() {
+    // The kinds the registry/bridge generate: shim_generation.rs (`$getter$`, `$setter$`, `$staticgetter$`,
+    // `$staticsetter$`, `$value$`), shim_support.rs (`$new$`, `$method$`, `$methodvoid$`, `$staticmethod$`,
+    // `$staticmethodvoid$`) and thaw-hir lower.rs (the same prefixes). A kind listed in neither table makes
+    // this test fail: add it here and to class_call, or to the thaw-llvm refusal list (a build error the CLI
+    // answers by rebuilding on QuickJS), so a new kind can never fall back silently.
+    const HANDLED: &[&str] = &[
+        "new",
+        "value",
+        "method",
+        "methodvoid",
+        "staticmethod",
+        "staticmethodvoid",
+        "setter",
+    ];
+    const REFUSED_AT_BUILD: &[&str] = &["getter", "staticgetter", "staticsetter"];
+    for kind in HANDLED {
+        let symbol = format!("${kind}$s::Cell$v$overload0$arity0");
+        if let Err(error) = class_call_with_flags(&symbol, "[]", 0, 0) {
+            assert!(
+                !error.contains("unsupported class operation"),
+                "{symbol}: {error}"
+            );
+        }
+    }
+    for kind in REFUSED_AT_BUILD {
+        let symbol = format!("${kind}$s::Cell$v$overload0$arity0");
+        let error = class_call_with_flags(&symbol, "[]", 0, 0).unwrap_err();
+        assert!(
+            error.contains(&format!("unsupported class operation `{kind}`")),
+            "{symbol}: {error}"
+        );
+    }
+}
+
 // Node 22 prints: tick1, uncaught:boom, tick2, tick3, done (exit 0).
 #[test]
 fn set_interval_keeps_ticking_after_a_throwing_tick_under_uncaught_exception() {
