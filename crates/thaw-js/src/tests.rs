@@ -3421,6 +3421,29 @@ fn cleared_timer_has_ref_matches_node22() {
 }
 
 #[test]
+fn timeout_to_primitive_is_the_timer_id_and_immediate_has_none() {
+    assert_eq!(
+        one("const t = setTimeout(() => {}, 50); const i = setInterval(() => {}, 50); const m = setImmediate(() => {}); \
+             console.log(typeof t[Symbol.toPrimitive], typeof i[Symbol.toPrimitive], typeof m[Symbol.toPrimitive]); \
+             console.log(t[Symbol.toPrimitive]() === +t, typeof +t, String(t) === String(+t), `${i}` === String(+i)); \
+             clearTimeout(t); clearInterval(i); clearImmediate(m);"),
+        "function function undefined|true number true true"
+    );
+}
+
+#[test]
+fn timeout_to_primitive_id_clears_the_timer_and_dispose_clears_it() {
+    assert_eq!(
+        one("const t = setTimeout(() => console.log('never'), 20); clearTimeout(String(t)); \
+             const u = setTimeout(() => console.log('never'), 20); clearTimeout(+u + ''); \
+             const v = setTimeout(() => console.log('never'), 20); v[Symbol.dispose](); \
+             const m = setImmediate(() => console.log('never')); m[Symbol.dispose](); \
+             console.log(typeof Symbol.dispose, typeof v[Symbol.dispose], typeof m[Symbol.dispose]);"),
+        "symbol function function"
+    );
+}
+
+#[test]
 fn webassembly_stub_is_typeof_safe_and_scan_blocks_real_use() {
     assert_eq!(
         one("console.log(typeof WebAssembly, typeof WebAssembly.compile)"),
