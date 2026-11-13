@@ -7882,14 +7882,12 @@ fn host_for_in_keys_walk_prototype_chain_with_shadowing() {
 /// exist in the thaw-js realm, or be listed here. Shrink-only: an entry is
 /// removed in the PR that implements it, and a stale entry fails this test.
 const ABSENT_IN_THAW_JS: &[&str] = &[
-    "navigator",
     "fetch",
     "WebSocket",
     "PerformanceObserver",
     "Crypto",
     "CryptoKey",
     "SubtleCrypto",
-    "Navigator",
     "BigInt64Array",
     "BigUint64Array",
     "Performance",

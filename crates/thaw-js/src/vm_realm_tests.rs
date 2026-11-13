@@ -94,3 +94,11 @@ fn vm_realm_construct_cheaper_than_host() {
         "vm realms {vm:?} not cheaper than host realms {host:?}"
     );
 }
+
+#[test]
+fn vm_realm_hides_navigator() {
+    let out = run_lines(&format!(
+        "{VM_PRELUDE}\nconsole.log(runInNewContext(\"[typeof navigator, typeof Navigator].join(',')\", {{}}));"
+    ));
+    assert_eq!(out, vec!["undefined,undefined".to_string()]);
+}
