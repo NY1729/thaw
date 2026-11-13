@@ -1084,7 +1084,7 @@ impl<'a> FnLowerer<'a> {
                     HirExpr::Call(
                         Box::new(HirExpr::Var("getDynamicValue".into())),
                         vec![HirExpr::Lit(HirLit::Str(
-                            "__thaw_object_from_operations".into(),
+                            crate::compiler_helpers::OBJECT_FROM_OPERATIONS.into(),
                         ))],
                     ),
                 ),
@@ -1126,7 +1126,7 @@ impl<'a> FnLowerer<'a> {
                 ],
             );
             body.push(HirStmt::Return(Some(HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_json_host_from_dynamic".into())),
+                Box::new(HirExpr::Var(crate::compiler_helpers::JSON_HOST_FROM_DYNAMIC.into())),
                 vec![built],
             ))));
             let builder = self.wrap_call_argument_bindings(HirExpr::Block(body), &bindings)?;
@@ -1145,7 +1145,7 @@ impl<'a> FnLowerer<'a> {
                     HirExpr::Call(
                         Box::new(HirExpr::Var("getDynamicValue".into())),
                         vec![HirExpr::Lit(HirLit::Str(
-                            "__thaw_object_from_operations".into(),
+                            crate::compiler_helpers::OBJECT_FROM_OPERATIONS.into(),
                         ))],
                     ),
                     arguments,
@@ -2443,7 +2443,7 @@ impl<'a> FnLowerer<'a> {
             )),
         );
         let undefined = HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_json_undefined".into())),
+            Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())),
             Vec::new(),
         );
         let string_property = HirExpr::Conditional(
@@ -4652,7 +4652,7 @@ impl<'a> FnLowerer<'a> {
                     vec![var.clone()],
                 )),
                 Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_json_undefined".into())),
+                    Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())),
                     Vec::new(),
                 )),
                 Box::new(self.coerce_to_declared(&HirType::Json, var)?),
@@ -4674,7 +4674,7 @@ impl<'a> FnLowerer<'a> {
         )?;
         let result = HirExpr::Conditional(
             Box::new(HirExpr::OptionalIsNone(Box::new(var), payload)),
-            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())),
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new())),
             Box::new(present),
             HirType::Json,
         );
@@ -4744,7 +4744,7 @@ impl<'a> FnLowerer<'a> {
             let var = HirExpr::Var(name.clone());
             let result = HirExpr::Conditional(
                 Box::new(HirExpr::OptionalIsNone(Box::new(var.clone()), HirType::Json)),
-                Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())),
+                Box::new(HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new())),
                 Box::new(HirExpr::OptionalValue(Box::new(var), HirType::Json)),
                 HirType::Json,
             );
@@ -5095,7 +5095,7 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".into())),
                     vec![HirExpr::Lit(HirLit::Str(
-                        "__thaw_accessor_descriptor".into(),
+                        crate::compiler_helpers::ACCESSOR_DESCRIPTOR.into(),
                     ))],
                 ),
                 flags,
@@ -5127,7 +5127,7 @@ impl<'a> FnLowerer<'a> {
             vec![
                 HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".into())),
-                    vec![HirExpr::Lit(HirLit::Str("__thaw_data_descriptor".into()))],
+                    vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::DATA_DESCRIPTOR.into()))],
                 ),
                 arguments,
             ],
@@ -5532,7 +5532,7 @@ impl<'a> FnLowerer<'a> {
             let writable = !has_getter || has_setter;
             let absent_callback = || HirExpr::Call(
                 Box::new(HirExpr::Var("getDynamicValue".into())),
-                vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::UNDEFINED.into()))],
             );
             let mut is_method = false;
             let getter = if setter_only {
@@ -5809,7 +5809,7 @@ impl<'a> FnLowerer<'a> {
         body.push(HirStmt::Let(builder_name.clone(), HirType::JsValue,
             HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
                 vec![HirExpr::Lit(HirLit::Str(
-                    "__thaw_object_with_native_getters".into(),
+                    crate::compiler_helpers::OBJECT_WITH_NATIVE_GETTERS.into(),
                 ))])));
         // Keep the physical layout authoritative for callback receiver
         // recovery, including a later structural view in different order.
@@ -5893,7 +5893,7 @@ impl<'a> FnLowerer<'a> {
             body.push(push(&callbacks_name, getter));
             body.push(push(&callbacks_name, HirExpr::Call(
                 Box::new(HirExpr::Var("getDynamicValue".into())),
-                vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::UNDEFINED.into()))],
             )));
         }
         for (_, getter, setter) in &proto_accessors {
@@ -5921,7 +5921,7 @@ impl<'a> FnLowerer<'a> {
                     )
                 } else {
                     HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-                        vec![HirExpr::Lit(HirLit::Str("undefined".into()))])
+                        vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::UNDEFINED.into()))])
                 };
                 body.push(push(&callbacks_name, callback));
             }
@@ -5930,7 +5930,7 @@ impl<'a> FnLowerer<'a> {
             for _ in 0..2 {
                 body.push(push(&callbacks_name, HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".into())),
-                    vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+                    vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::UNDEFINED.into()))],
                 )));
             }
         }
@@ -5941,7 +5941,7 @@ impl<'a> FnLowerer<'a> {
             body.push(push(&callbacks_name, getter));
             body.push(push(&callbacks_name, HirExpr::Call(
                 Box::new(HirExpr::Var("getDynamicValue".into())),
-                vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::UNDEFINED.into()))],
             )));
         }
         // These callbacks read the same pointer-keyed integrity state used by
@@ -6019,7 +6019,7 @@ impl<'a> FnLowerer<'a> {
         {
             body.push(push(&callbacks_name, HirExpr::Call(
                 Box::new(HirExpr::Var("getDynamicValue".into())),
-                vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::UNDEFINED.into()))],
             )));
         }
         let callback_body = body.split_off(callback_start);
@@ -6118,7 +6118,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Lit(HirLit::F64(2.0))),
             );
             let json_undefined = || HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new());
+                Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new());
             let mut converted = converted?;
             if *element == HirType::Str {
                 // A null `Str` slot is a tagged template's invalid-escape cooked entry.
@@ -6163,7 +6163,7 @@ impl<'a> FnLowerer<'a> {
         };
         let undefined = || HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".into())),
-            vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::UNDEFINED.into()))],
         );
         // Objects and arrays written back are first resolved to the native owner behind a live
         // view (so `v[1] = c` stores `c` itself); anything else is decoded as a copy, which a
@@ -6416,7 +6416,7 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Let(args.clone(), HirType::Json, arguments),
             HirStmt::Let(builder.clone(), HirType::JsValue,
                 HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-                    vec![HirExpr::Lit(HirLit::Str("__thaw_array_with_native_view".into()))])),
+                    vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::ARRAY_WITH_NATIVE_VIEW.into()))])),
             HirStmt::Try(
                 [length, read, assign, push, resize, hole, present, raw].into_iter().map(push_callback).collect(),
                 failure.clone(),
@@ -6489,10 +6489,10 @@ impl<'a> FnLowerer<'a> {
         let void_body = |expr: HirExpr| HirExpr::Block(vec![HirStmt::Expr(expr), HirStmt::Return(None)]);
         let undefined = || HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".into())),
-            vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::UNDEFINED.into()))],
         );
         let json_undefined = || HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new());
+            Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new());
         let has_call = || HirExpr::Call(
             Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_has"))),
             vec![source_var(), key_var()],
@@ -6648,7 +6648,7 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Let(args.clone(), HirType::Json, arguments),
             HirStmt::Let(builder.clone(), HirType::JsValue,
                 HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-                    vec![HirExpr::Lit(HirLit::Str("__thaw_collection_with_native_view".into()))])),
+                    vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::COLLECTION_WITH_NATIVE_VIEW.into()))])),
             HirStmt::Try(
                 [size, has, get, set, delete, clear, keys, next_key].into_iter().map(push_callback).collect(),
                 failure.clone(),

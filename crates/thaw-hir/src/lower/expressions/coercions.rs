@@ -212,7 +212,7 @@ impl<'a> FnLowerer<'a> {
             HirType::JsValue => {
                 let callable = HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".into())),
-                    vec![string("__thaw_typeof_dynamic_value")],
+                    vec![string(crate::compiler_helpers::TYPEOF_DYNAMIC_VALUE)],
                 );
                 HirExpr::JsonAsString(Box::new(HirExpr::Call(
                     Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
@@ -285,7 +285,7 @@ impl<'a> FnLowerer<'a> {
                     HirExpr::Call(
                         Box::new(HirExpr::Var("getDynamicValue".into())),
                         vec![HirExpr::Lit(HirLit::Str(
-                            "__thaw_is_truthy_dynamic_value".into(),
+                            crate::compiler_helpers::IS_TRUTHY_DYNAMIC_VALUE.into(),
                         ))],
                     ),
                     value,
@@ -2308,7 +2308,7 @@ impl<'a> FnLowerer<'a> {
             self.strict_json_pair(left, right)?
         } else if lhs_type == HirType::JsValue && rhs_type == HirType::JsValue {
             self.call_dynamic_strict_comparator(
-                "__thaw_strict_equal_dynamic",
+                crate::compiler_helpers::STRICT_EQUAL_DYNAMIC,
                 Vec::new(),
                 vec![left, right],
             )?
@@ -2536,7 +2536,7 @@ impl<'a> FnLowerer<'a> {
         let left_handle = Self::strict_json_handle(left.clone());
         let right_handle = Self::strict_json_handle(right.clone());
         let both_handles = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_dynamic",
+            crate::compiler_helpers::STRICT_EQUAL_DYNAMIC,
             Vec::new(),
             vec![
                 Self::strict_handle_value(left_handle.clone()),
@@ -2619,7 +2619,7 @@ impl<'a> FnLowerer<'a> {
     fn strict_handle_vs_json(&mut self, handle: HirExpr, json: HirExpr) -> Result<HirExpr, String> {
         let borrowed = Self::strict_json_handle(json.clone());
         let both_handles = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_dynamic",
+            crate::compiler_helpers::STRICT_EQUAL_DYNAMIC,
             Vec::new(),
             vec![handle.clone(), Self::strict_handle_value(borrowed.clone())],
         )?;
@@ -2635,7 +2635,7 @@ impl<'a> FnLowerer<'a> {
             )
         };
         let string = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_dynamic",
+            crate::compiler_helpers::STRICT_EQUAL_DYNAMIC,
             vec![json.clone()],
             vec![handle.clone()],
         )?;
@@ -2645,7 +2645,7 @@ impl<'a> FnLowerer<'a> {
             &HirType::F64,
         )?;
         let boolean = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_dynamic",
+            crate::compiler_helpers::STRICT_EQUAL_DYNAMIC,
             vec![json.clone()],
             vec![handle.clone()],
         )?;
@@ -2671,7 +2671,7 @@ impl<'a> FnLowerer<'a> {
         // A native container reaches the JS realm as a shadow tagged with its origin serial, so a
         // live JS object is `===` to it exactly when it is that container's shadow.
         let identity = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_dynamic",
+            crate::compiler_helpers::STRICT_EQUAL_DYNAMIC,
             vec![json.clone()],
             vec![handle],
         )?;
@@ -2725,18 +2725,18 @@ impl<'a> FnLowerer<'a> {
                 ("__thaw_strict_equal_bigint_dynamic", vec![json])
             }
             HirType::Str => (
-                "__thaw_strict_equal_dynamic",
+                crate::compiler_helpers::STRICT_EQUAL_DYNAMIC,
                 vec![self.coerce_to_declared(&HirType::Json, native)?],
             ),
             HirType::StrLiteral(_) => (
-                "__thaw_strict_equal_dynamic",
+                crate::compiler_helpers::STRICT_EQUAL_DYNAMIC,
                 vec![self.coerce_to_declared(
                     &HirType::Json,
                     HirExpr::TypedClosure(HirType::Str, Box::new(native)),
                 )?],
             ),
             HirType::Bool => (
-                "__thaw_strict_equal_dynamic",
+                crate::compiler_helpers::STRICT_EQUAL_DYNAMIC,
                 vec![self.coerce_to_declared(&HirType::Json, native)?],
             ),
             HirType::Null => ("__thaw_strict_equal_null_dynamic", Vec::new()),
@@ -2832,9 +2832,9 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var("getDynamicValue".into())),
             vec![HirExpr::Lit(HirLit::Str(
                 if strict {
-                    "__thaw_strict_equal_dynamic"
+                    crate::compiler_helpers::STRICT_EQUAL_DYNAMIC
                 } else {
-                    "__thaw_native_loose_equal"
+                    crate::compiler_helpers::NATIVE_LOOSE_EQUAL
                 }
                 .into(),
             ))],
@@ -3661,7 +3661,7 @@ impl<'a> FnLowerer<'a> {
                 vec![HirExpr::TypedClosure(HirType::Str, Box::new(value))],
             )),
             HirType::Json => Ok(HirExpr::JsonAsNumber(Box::new(value))),
-            HirType::JsValue => self.dynamic_value_to_number(value, "__thaw_unary_plus"),
+            HirType::JsValue => self.dynamic_value_to_number(value, crate::compiler_helpers::UNARY_PLUS),
             HirType::Object(fields) => {
                 // Only the private Date layout follows Date valueOf
                 // semantics. A user object with a timestamp property
@@ -3861,7 +3861,7 @@ impl<'a> FnLowerer<'a> {
             vec![
                 HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".into())),
-                    vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+                    vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_BIGINT.into()))],
                 ),
                 arguments,
             ],
@@ -3886,7 +3886,7 @@ impl<'a> FnLowerer<'a> {
             vec![
                 HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".into())),
-                    vec![HirExpr::Lit(HirLit::Str("__thaw_dynamic_add".into()))],
+                    vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::DYNAMIC_ADD.into()))],
                 ),
                 empty_arguments,
                 HirExpr::ArrayLit(vec![
@@ -4375,7 +4375,7 @@ impl<'a> FnLowerer<'a> {
         )?;
         let callable = HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".into())),
-            vec![HirExpr::Lit(HirLit::Str("__thaw_dynamic_add".into()))],
+            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::DYNAMIC_ADD.into()))],
         );
         let result = HirExpr::Call(
             Box::new(HirExpr::Var("callDynamicValueMixed".into())),
@@ -4466,7 +4466,7 @@ impl<'a> FnLowerer<'a> {
             };
             let callable = HirExpr::Call(
                 Box::new(HirExpr::Var("getDynamicValue".into())),
-                vec![HirExpr::Lit(HirLit::Str("__thaw_dynamic_binary".into()))],
+                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::DYNAMIC_BINARY.into()))],
             );
             let operator = self.wrap_native_value_as_json(
                 HirExpr::ArrayLit(vec![HirExpr::Lit(HirLit::Str(symbol.into()))]),
@@ -4489,7 +4489,7 @@ impl<'a> FnLowerer<'a> {
         let digits = HirExpr::Call(Box::new(HirExpr::Var(intrinsic.into())), vec![left, right]);
         let constructor = HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".into())),
-            vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_BIGINT.into()))],
         );
         let arguments = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![digits]))?;
         Ok(Some(HirExpr::Call(
@@ -5200,7 +5200,7 @@ impl<'a> FnLowerer<'a> {
         let callable = HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".into())),
             vec![HirExpr::Lit(HirLit::Str(
-                "__thaw_instanceof_dynamic_value_by_name".into(),
+                crate::compiler_helpers::INSTANCEOF_DYNAMIC_VALUE_BY_NAME.into(),
             ))],
         );
         let json_args = self.wrap_native_value_as_json(
@@ -5231,7 +5231,7 @@ impl<'a> FnLowerer<'a> {
         let callable = HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".into())),
             vec![HirExpr::Lit(HirLit::Str(
-                "__thaw_instanceof_dynamic_value".into(),
+                crate::compiler_helpers::INSTANCEOF_DYNAMIC_VALUE.into(),
             ))],
         );
         let empty_arguments = self.wrap_native_value_as_json(
@@ -5347,7 +5347,7 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".into())),
                     vec![HirExpr::Lit(HirLit::Str(
-                        "__thaw_json_host_instanceof".into(),
+                        crate::compiler_helpers::JSON_HOST_INSTANCEOF.into(),
                     ))],
                 ),
                 json_arguments,

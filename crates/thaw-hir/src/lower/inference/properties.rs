@@ -50,7 +50,7 @@ impl<'a> FnLowerer<'a> {
         HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".into())),
             vec![HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_error_constructor_name".into())),
+                Box::new(HirExpr::Var(crate::compiler_helpers::ERROR_CONSTRUCTOR_NAME.into())),
                 vec![error],
             )],
         )
@@ -138,7 +138,7 @@ impl<'a> FnLowerer<'a> {
                         HirExpr::Conditional(
                             Box::new(deleted),
                             Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_json_undefined".into())),
+                                Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())),
                                 Vec::new(),
                             )),
                             Box::new(read),

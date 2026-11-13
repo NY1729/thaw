@@ -507,7 +507,7 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(name.clone(), HirType::Json);
         let result = self.lower_expr(&rewritten)?;
         let result = if self.infer_expr_type(&result)? == HirType::Void {
-            let undefined = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new());
+            let undefined = HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new());
             HirExpr::EvalThen(Box::new(result), Box::new(undefined))
         } else {
             self.coerce_to_declared(&HirType::Json, result)?
@@ -517,7 +517,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
                 vec![HirExpr::Var(name.clone())],
             )),
-            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())),
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new())),
             Box::new(result),
             HirType::Json,
         );

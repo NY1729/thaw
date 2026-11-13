@@ -925,7 +925,7 @@ impl<'a> FnLowerer<'a> {
                 vec![
                     HirExpr::Call(
                         Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                        vec![HirExpr::Lit(HirLit::Str("RegExp".to_string()))],
+                        vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_REGEXP.into()))],
                     ),
                     arguments,
                 ],

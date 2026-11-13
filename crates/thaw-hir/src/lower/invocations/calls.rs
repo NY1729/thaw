@@ -2361,7 +2361,7 @@ impl<'a> FnLowerer<'a> {
                     self.scope.insert(handle_name.clone(), HirType::I64);
                     let live_intrinsic = match expected_return_hint.as_ref() {
                         Some(HirType::Dynamic) => "__thaw_call_selected_dynamic_method_raw",
-                        Some(HirType::JsValue) => "__thaw_call_selected_dynamic_method_handle",
+                        Some(HirType::JsValue) => crate::compiler_helpers::CALL_SELECTED_DYNAMIC_METHOD_HANDLE,
                         _ => "__thaw_call_selected_dynamic_method",
                     };
                     let live = HirExpr::Call(
@@ -3388,9 +3388,9 @@ impl<'a> FnLowerer<'a> {
                     vec![
                         HirExpr::Call(
                             Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                            vec![HirExpr::Lit(HirLit::Str("globalThis".to_string()))],
+                            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_THIS.into()))],
                         ),
-                        HirExpr::Lit(HirLit::Str("__thaw_defer_thenable".to_string())),
+                        HirExpr::Lit(HirLit::Str(crate::compiler_helpers::DEFER_THENABLE.to_string())),
                         arguments,
                     ],
                 );
@@ -5627,7 +5627,7 @@ impl<'a> FnLowerer<'a> {
                 )),
                 Box::new(self.coerce_to_declared(&HirType::Json, captured)?),
                 Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_json_undefined".into())),
+                    Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())),
                     Vec::new(),
                 )),
                 HirType::Json,

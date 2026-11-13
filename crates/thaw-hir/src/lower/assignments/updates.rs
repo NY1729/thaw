@@ -129,7 +129,7 @@ impl<'a> FnLowerer<'a> {
         let update_helper = HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".into())),
             vec![HirExpr::Lit(HirLit::Str(
-                "__thaw_update_dynamic_value".into(),
+                crate::compiler_helpers::UPDATE_DYNAMIC_VALUE.into(),
             ))],
         );
         let updated_pair_handle = HirExpr::Call(

@@ -337,7 +337,7 @@ impl<'a> FnLowerer<'a> {
             None,
         )?;
         let result = if self.infer_expr_type(&result)? == HirType::Void {
-            let undefined = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new());
+            let undefined = HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new());
             HirExpr::EvalThen(Box::new(result), Box::new(undefined))
         } else {
             self.coerce_to_declared(&HirType::Json, result)?
@@ -511,7 +511,7 @@ impl<'a> FnLowerer<'a> {
             Err(_) if name == "forEach" => {
                 let live = self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span)?;
                 let live = if self.infer_expr_type(&live)? == HirType::Void {
-                    let undefined = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new());
+                    let undefined = HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new());
                     HirExpr::EvalThen(Box::new(live), Box::new(undefined))
                 } else {
                     self.coerce_to_declared(&HirType::Json, live)?
@@ -527,7 +527,7 @@ impl<'a> FnLowerer<'a> {
             self.coerce_to_declared(&array_type, HirExpr::Var(receiver_name.clone()))?,
         )];
         let void = native_type == HirType::Void;
-        let undefined = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new());
+        let undefined = HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new());
         let mut tail = HirExpr::Var(receiver_name.clone());
         if !returns_receiver {
             if void {

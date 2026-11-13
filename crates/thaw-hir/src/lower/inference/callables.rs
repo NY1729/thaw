@@ -128,7 +128,7 @@ impl<'a> FnLowerer<'a> {
                                 HirType::Json,
                             )),
                             Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_json_undefined".into())),
+                                Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())),
                                 Vec::new(),
                             )),
                             Box::new(HirExpr::OptionalValue(

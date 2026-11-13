@@ -360,7 +360,7 @@ fn generator_placeholder(ty: &HirType) -> Option<HirExpr> {
             Box::new(HirExpr::OptionalNone(ty.clone())), ty.clone(),
         ),
         // A dynamic local is `undefined` until its declaration runs.
-        HirType::Json => HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new()),
+        HirType::Json => HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new()),
         HirType::Dictionary(element) => HirExpr::JsonObjectLit(Vec::new(), element.as_ref().clone()),
         // A caught-exception carrier member: an empty pending native slot is
         // the inert initial value (it is only read after a throw publishes one).

@@ -290,7 +290,7 @@ const DYNAMIC_HELPERS: &str = r#"
       return v;
     });
   });
-  put('__thaw_json_stringify_direct', function (v) { return JSON.stringify(v); });
+  put('__thaw_json_stringify_direct', function (v) { return JSON.stringify(v, function (key, item) { return typeof key === 'string' && /^\u0003R?\d+(:|$)/.test(key) ? undefined : item; }); });
   put('__thaw_update_dynamic_value', function (value, increment) { var updated = value; var old = increment ? updated++ : updated--; return [old, updated]; });
   put('__thaw_dynamic_add', function (l, r) { return l + r; });
   put('__thaw_dynamic_binary', function (op, l, r) { switch (op) { case '-': return l - r; case '*': return l * r; case '/': return l / r; case '%': return l % r; case '&': return l & r; case '|': return l | r; case '^': return l ^ r; case '<<': return l << r; default: return l >> r; } });

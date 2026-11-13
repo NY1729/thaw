@@ -99,7 +99,7 @@ impl<'a> FnLowerer<'a> {
                     HirExpr::Call(
                         Box::new(HirExpr::Var("getDynamicValue".into())),
                         vec![HirExpr::Lit(HirLit::Str(
-                            "__thaw_date_from_live_value".into(),
+                            crate::compiler_helpers::DATE_FROM_LIVE_VALUE.into(),
                         ))],
                     ),
                     value,
@@ -142,7 +142,7 @@ impl<'a> FnLowerer<'a> {
                         HirExpr::Call(
                             Box::new(HirExpr::Var("getDynamicValue".into())),
                             vec![HirExpr::Lit(HirLit::Str(
-                                "__thaw_date_from_live_value".into(),
+                                crate::compiler_helpers::DATE_FROM_LIVE_VALUE.into(),
                             ))],
                         ),
                         HirExpr::TypedClosure(HirType::JsValue, Box::new(handle.clone())),
@@ -1040,7 +1040,7 @@ impl<'a> FnLowerer<'a> {
                         "global" => {
                             return Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                                vec![HirExpr::Lit(HirLit::Str("globalThis".to_string()))],
+                                vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_THIS.into()))],
                             ))
                         }
                         // A timer function passed or stored as a value: a forwarding arrow
@@ -2604,7 +2604,7 @@ impl<'a> FnLowerer<'a> {
                                     Box::new(HirExpr::Var("callDynamic".into())),
                                     vec![
                                         HirExpr::Lit(HirLit::Str(
-                                            "__thaw_instanceof_dynamic_value_by_name".into(),
+                                            crate::compiler_helpers::INSTANCEOF_DYNAMIC_VALUE_BY_NAME.into(),
                                         )),
                                         arguments,
                                     ],
@@ -3472,7 +3472,7 @@ impl<'a> FnLowerer<'a> {
                         // String(y)` would get wrong for a BigInt).
                         let callable = HirExpr::Call(
                             Box::new(HirExpr::Var("getDynamicValue".into())),
-                            vec![HirExpr::Lit(HirLit::Str("__thaw_dynamic_add".into()))],
+                            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::DYNAMIC_ADD.into()))],
                         );
                         let empty_arguments = self.wrap_native_value_as_json(
                             HirExpr::ArrayLit(Vec::new()),
@@ -3878,7 +3878,7 @@ impl<'a> FnLowerer<'a> {
                         );
                         let constructor = HirExpr::Call(
                             Box::new(HirExpr::Var("getDynamicValue".into())),
-                            vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+                            vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_BIGINT.into()))],
                         );
                         let arguments = self
                             .coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![digits]))?;
@@ -3918,7 +3918,7 @@ impl<'a> FnLowerer<'a> {
                         ) {
                             self.coerce_primitive_to_number(value)?
                         } else if matches!(value_type, HirType::Json | HirType::JsValue) {
-                            self.dynamic_value_to_number(value, "__thaw_unary_plus")?
+                            self.dynamic_value_to_number(value, crate::compiler_helpers::UNARY_PLUS)?
                         } else {
                             self.expect_type(&HirType::F64, &value, "unary plus")?;
                             value
@@ -4072,7 +4072,7 @@ impl<'a> FnLowerer<'a> {
                             let callable = HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".into())),
                                 vec![HirExpr::Lit(HirLit::Str(
-                                    "__thaw_typeof_dynamic_value".into(),
+                                    crate::compiler_helpers::TYPEOF_DYNAMIC_VALUE.into(),
                                 ))],
                             );
                             return Ok(HirExpr::JsonAsString(Box::new(HirExpr::Call(
@@ -4106,7 +4106,7 @@ impl<'a> FnLowerer<'a> {
                                                 HirExpr::Call(
                                                     Box::new(HirExpr::Var("getDynamicValue".into())),
                                                     vec![HirExpr::Lit(HirLit::Str(
-                                                        "__thaw_typeof_dynamic_value".into(),
+                                                        crate::compiler_helpers::TYPEOF_DYNAMIC_VALUE.into(),
                                                     ))],
                                                 ),
                                                 projected,
@@ -5045,7 +5045,7 @@ impl<'a> FnLowerer<'a> {
                                         | "callDynamicMethodHandle"
                                         | "callDynamicMethodHandleRaw"
                                         | "__thaw_call_selected_dynamic_method"
-                                        | "__thaw_call_selected_dynamic_method_handle"
+                                        | crate::compiler_helpers::CALL_SELECTED_DYNAMIC_METHOD_HANDLE
                                         | "__thaw_call_selected_dynamic_method_raw"
                                         // Invoking an arbitrary already-held
                                         // `JsValue` (e.g. a Hono middleware's
@@ -6086,7 +6086,7 @@ impl<'a> FnLowerer<'a> {
                                     Box::new(visible),
                                             Box::new(HirExpr::Call(
                                                 Box::new(HirExpr::Var(
-                                                    "__thaw_json_undefined".into(),
+                                                    crate::compiler_helpers::JSON_UNDEFINED.into(),
                                                 )),
                                                 Vec::new(),
                                             )),

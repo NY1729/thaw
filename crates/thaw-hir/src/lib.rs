@@ -3,6 +3,8 @@
 //! and control flow, and represents closures, tagged values, promises, FFI,
 //! and dynamic-host operations consumed by LLVM code generation.
 
+pub mod compiler_helpers;
+
 #[path = "hir/types.rs"]
 mod hir_types;
 pub use hir_types::*;

@@ -2339,5 +2339,5 @@ impl<'a> FnLowerer<'a> {
 
 /// The error channel of a generator resume is dynamic; `undefined` marks "no throw".
 fn undefined_json_placeholder() -> HirExpr {
-    HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())
+    HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new())
 }
