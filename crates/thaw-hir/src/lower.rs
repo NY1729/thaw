@@ -122,6 +122,34 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
         .map(|symbol| (backend, symbol))
 }
 
+/// The live-class key (`<pkg>::<Class>`) an imported class is read through, when `name` is a
+/// class's generated constructor: `__thaw_class_ctor_<hex of "$new$pkg::Class">` (a JS-realm class
+/// reached through its dispatcher) or a typed `$new$` symbol with optional `$overload`/`$arity` suffixes.
+fn imported_class_key(name: &str) -> Option<String> {
+    let name = match name
+        .strip_prefix("__thawmod")
+        .and_then(|rest| rest.split_once('_'))
+    {
+        Some((digits, original)) if digits.bytes().all(|byte| byte.is_ascii_digit()) => original,
+        _ => name,
+    };
+    let symbol = match name.strip_prefix("__thaw_class_ctor_") {
+        Some(hex) => {
+            let bytes = (0..hex.len() / 2)
+                .map(|index| u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok())
+                .collect::<Option<Vec<_>>>()?;
+            String::from_utf8(bytes).ok()?
+        }
+        None => dynamic_symbol(name)?.1,
+    };
+    let rest = symbol.strip_prefix("$new$")?;
+    let rest = rest
+        .rsplit_once("$overload")
+        .map_or(rest, |(class, _)| class);
+    let rest = rest.rsplit_once("$arity").map_or(rest, |(class, _)| class);
+    rest.contains("::").then(|| rest.to_string())
+}
+
 fn is_ordinary_quickjs_symbol(backend: DynamicBackend, symbol: &str) -> bool {
     // (thaw-js calls are deliberately not "ordinary QuickJS typed calls": they take plain data by
     // value, so none of the live-handle/dynamic-storage handling applies.)
