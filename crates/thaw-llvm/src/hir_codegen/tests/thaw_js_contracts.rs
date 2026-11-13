@@ -194,20 +194,35 @@ fn thaw_js_class_promise_of_a_handle_wraps_the_handle_in_a_resolved_promise() {
 }
 
 #[test]
-fn thaw_js_class_property_getters_are_still_refused_at_build_time() {
-    // No thaw-js getter operation yet: the build error makes the CLI rebuild on QuickJS (never silent)
-    let getter = thaw_js_class_symbol_hex("$getter$k::Box$v");
+fn thaw_js_class_property_getters_and_static_accessors_compile_to_the_class_call() {
+    // Instance getter (receiver handle only), static getter (no arguments) and static setter (value in,
+    // value out) all lower to the same `@thaw_tjs_class_call` as methods: no build refusal, no QuickJS.
+    let getter = "$getter$k::Box$v";
+    let static_getter = "$staticgetter$k::Box$w";
+    let static_setter = "$staticsetter$k::Box$w";
     let new = thaw_js_class_symbol_hex("$new$k::Box$arity0");
     let source = format!(
-        "declare function __thaw_typed_tjs_{getter}(receiver: JsValue): number;
+        "declare function __thaw_typed_tjs_{getter_hex}(receiver: JsValue): number;
+         declare function __thaw_typed_tjs_{static_getter_hex}(): number;
+         declare function __thaw_typed_tjs_{static_setter_hex}(value: number): number;
          declare function __thaw_typed_tjs_{new}(): JsValue;
          function main(): void {{
            const box = __thaw_typed_tjs_{new}();
-           console.log(__thaw_typed_tjs_{getter}(box));
-         }}"
+           console.log(__thaw_typed_tjs_{getter_hex}(box));
+           console.log(__thaw_typed_tjs_{static_setter_hex}(3));
+           console.log(__thaw_typed_tjs_{static_getter_hex}());
+         }}",
+        getter_hex = thaw_js_class_symbol_hex(getter),
+        static_getter_hex = thaw_js_class_symbol_hex(static_getter),
+        static_setter_hex = thaw_js_class_symbol_hex(static_setter),
     );
-    let error = compile_thaw_js_class_source(&source).unwrap_err();
-    assert!(error.contains("cannot cross the thaw-js boundary"), "{error}");
+    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_class_source(&source).unwrap_or_else(|e| panic!("{e}"));
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(!ir.contains("cannot cross the thaw-js boundary"), "{ir}");
+    assert!(ir.contains("@thaw_tjs_class_call("), "{ir}");
+    for symbol in [getter, static_getter, static_setter] {
+        assert!(ir.contains(symbol), "{symbol} missing from:\n{ir}");
+    }
 }
 
 #[test]
@@ -610,4 +625,30 @@ fn routed_async_main_drives_thaw_js_and_releases_its_completion_only_once_settle
         .rfind("@thaw_promise_state(")
         .unwrap_or_else(|| panic!("completion is released without a settled-state check: {ir}"));
     assert!(entry[guard..destroy].contains("br i1"), "the release must be conditional on the state: {ir}");
+}
+
+#[test]
+fn routed_set_process_env_declares_the_thaw_tjs_symbol_and_not_quickjs() {
+    let compile = |routed: bool| {
+        let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "thaw_js_set_process_env");
+        if routed {
+            compiler.uses_thaw_js = true;
+            compiler.uses_thaw_js_handles = true;
+            compiler.set_thaw_js_routed(true);
+        } else {
+            compiler.uses_quickjs = true;
+            compiler.uses_quickjs_handles = true;
+        }
+        compiler.compile_program(&program).unwrap();
+        compiler.print_to_string()
+    };
+    // the routed build aliases the setter into thaw-js's extern "C" definition (process_env.rs)
+    let routed = compile(true);
+    assert!(routed.contains("@thaw_tjs_set_process_env("), "{routed}");
+    assert!(!routed.contains("@thaw_js_set_process_env"), "{routed}");
+    let quickjs = compile(false);
+    assert!(quickjs.contains("@thaw_js_set_process_env("), "{quickjs}");
 }
