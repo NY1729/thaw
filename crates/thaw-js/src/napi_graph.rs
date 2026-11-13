@@ -674,6 +674,8 @@ impl NapiWireOut {
         }
         let bytes = match &*o.kind.borrow() {
             Kind::ArrayBuffer(bytes) => Some(bytes.borrow().clone()),
+            // ponytail: ledgered, not implemented: napi typedarray kinds for BigInt64Array (9) / BigUint64Array (10);
+            // the bytes here are the same either way, only the napi type enum is missing.
             Kind::Typed(t) => {
                 let end = t.off + t.len * t.ty.size();
                 Some(t.data.borrow()[t.off..end].to_vec())

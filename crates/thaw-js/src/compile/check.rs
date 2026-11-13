@@ -60,7 +60,7 @@ fn elems(v: &Value) -> Option<Vec<Value>> {
         return None;
     };
     if let Some(t) = Interp::typed_of(v) {
-        return Some(t.to_vec().into_iter().map(Value::Number).collect());
+        return Some(t.to_values());
     }
     match &*o.kind.borrow() {
         Kind::Array(items) => Some(items.clone()),

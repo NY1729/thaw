@@ -1483,8 +1483,15 @@ impl Interp {
                                 shown.join(" ")
                             ))
                         } else {
-                            let items: Vec<String> =
-                                t.to_vec().into_iter().map(number_to_string).collect();
+                            let items: Vec<String> = t
+                                .to_values()
+                                .iter()
+                                .map(|v| match v {
+                                    Value::BigInt(b) => format!("{b}n"),
+                                    Value::Number(n) => number_to_string(*n),
+                                    _ => String::new(),
+                                })
+                                .collect();
                             let name = t.ty.name();
                             K::Bytes(if items.is_empty() {
                                 format!("{name}(0) []")
@@ -1711,7 +1718,7 @@ impl Interp {
                         "byteOffset" => Fast::Hit(Value::Number(t.off as f64)),
                         "buffer" => Fast::Hit(Value::Object(t.abuf.clone())),
                         _ => array_index(key).map_or(Fast::Chain, |i| {
-                            Fast::Hit(t.get(i).map_or(Value::Undefined, Value::Number))
+                            Fast::Hit(t.get_value(i).unwrap_or(Value::Undefined))
                         }),
                     },
                     Kind::ArrayBuffer(b) if key == "byteLength" => {
@@ -1810,13 +1817,13 @@ impl Interp {
                 return Ok(());
             }
         }
-        if let Kind::Typed(t) = &*o.kind.borrow() {
-            if let Some(i) = array_index(key) {
-                let t = t.clone();
-                let n = self.num(&value);
-                t.set(i, n);
-                return Ok(());
-            }
+        let typed = match &*o.kind.borrow() {
+            Kind::Typed(t) => Some(t.clone()),
+            _ => None,
+        };
+        if let (Some(t), Some(i)) = (typed, array_index(key)) {
+            t.set_value(self, i, &value)?;
+            return Ok(());
         }
         match find_in_chain(o, key) {
             Some(Slot::Accessor { set, .. }) => {
@@ -3760,7 +3767,7 @@ impl Interp {
         if let Value::Object(o) = obj {
             match &*o.kind.borrow() {
                 Kind::Array(items) => return Ok(unhole(items.get(i))),
-                Kind::Typed(t) => return Ok(t.get(i).map_or(Value::Undefined, Value::Number)),
+                Kind::Typed(t) => return Ok(t.get_value(i).unwrap_or(Value::Undefined)),
                 _ => {}
             }
         }

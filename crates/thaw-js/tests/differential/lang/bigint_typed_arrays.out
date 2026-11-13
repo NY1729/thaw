@@ -1,0 +1,44 @@
+BigInt64Array(3) [ 1n, -2n, -9223372036854775808n ]
+3 24 8 8 8
+BigInt64Array 3 BigUint64Array 3
+[object BigInt64Array] 1,2 1|-2|-9223372036854775808
+BigInt64Array(2) [ 0n, 0n ] BigUint64Array(0) []
+BigInt64Array(1) [ 0n ]
+18446744073709551615n undefined
+-9223372036854775808,5,9223372036854775807,7
+18446744073709551614n 18446744073709551614
+BigInt64Array(3) [ 0n, 42n, 1n ] undefined [ '0', '1', '2' ]
+5 5n
+TypeError Cannot convert 1 to a BigInt
+TypeError Cannot convert 1.5 to a BigInt
+TypeError Cannot convert undefined to a BigInt
+TypeError Cannot convert null to a BigInt
+SyntaxError Cannot convert x to a BigInt
+TypeError Cannot convert 1 to a BigInt
+TypeError Cannot mix BigInt and other types, use explicit conversions
+TypeError Cannot mix BigInt and other types, use explicit conversions
+TypeError Cannot convert 1 to a BigInt
+TypeError Cannot mix BigInt and other types, use explicit conversions
+RangeError offset is out of bounds
+RangeError byte length of BigInt64Array should be a multiple of 8
+RangeError start offset of BigInt64Array should be a multiple of 8
+TypeError Do not know how to serialize a BigInt
+TypeError Cannot convert 1 to a BigInt
+5,6,1,2
+9,6,1,2
+9,-1,1,2 -1,1 8
+1,2 true
+-1,-2,-3
+1|18446744073709551615
+it 10n
+it 20n
+[ [ 0, 4n ] ]
+BigInt64Array(3) [ 6n, 2n, 4n ] BigInt64Array(2) [ 3n, 2n ]
+2 -1 true false 0 2n
+1,2,3 3,2,1 -7,-7,-7
+1,2 3 1
+-1 7
+BigInt64Array(2) [ -3n, 4n ] BigInt64Array
+BigUint64Array(1) [ 18446744073709551615n ]
+18446744073709551614n -2n
+2 0 258n 144396663052566528n
