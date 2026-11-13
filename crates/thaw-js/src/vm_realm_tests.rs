@@ -102,3 +102,19 @@ fn vm_realm_hides_navigator() {
     ));
     assert_eq!(out, vec!["undefined,undefined".to_string()]);
 }
+
+#[test]
+fn vm_realm_hides_performance_globals() {
+    // Node 22 `vm.runInNewContext`: performance and every user-timing class are undefined
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        "console.log(runInNewContext(\"[typeof performance, typeof Performance, typeof PerformanceEntry, typeof PerformanceMark, typeof PerformanceMeasure, typeof PerformanceObserver, typeof PerformanceObserverEntryList, typeof PerformanceResourceTiming].join(',')\", {}));"
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec![
+            "undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined"
+                .to_string()
+        ]
+    );
+}

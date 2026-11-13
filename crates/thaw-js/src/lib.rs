@@ -81,6 +81,8 @@ mod web_messaging;
 mod web_napi_proxy;
 #[path = "web/navigator.rs"]
 mod web_navigator;
+#[path = "web/performance.rs"]
+mod web_performance;
 #[path = "web/streams.rs"]
 mod web_streams;
 #[path = "web/text_codec.rs"]
@@ -1093,6 +1095,7 @@ impl Interp {
             web_text_codec::install(&mut it);
             web_event_target::install(&mut it);
             web_messaging::install(&mut it);
+            web_performance::install(&mut it);
             web_worker_stream::install(&mut it);
             web_worker_wire::install(&mut it);
             web_worker_threads::install(&mut it);
@@ -4395,6 +4398,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 
 #[cfg(all(test, unix))]
 mod fs_tests;
+#[cfg(test)]
+mod handle_json_argument_tests;
 #[cfg(test)]
 mod handle_zero_tests;
 #[cfg(test)]

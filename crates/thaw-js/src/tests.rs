@@ -7886,18 +7886,11 @@ fn host_for_in_keys_walk_prototype_chain_with_shadowing() {
 const ABSENT_IN_THAW_JS: &[&str] = &[
     "fetch",
     "WebSocket",
-    "PerformanceObserver",
     "Crypto",
     "CryptoKey",
     "SubtleCrypto",
     "BigInt64Array",
     "BigUint64Array",
-    "Performance",
-    "PerformanceEntry",
-    "PerformanceMark",
-    "PerformanceMeasure",
-    "PerformanceObserverEntryList",
-    "PerformanceResourceTiming",
     "DisposableStack",
     "AsyncDisposableStack",
 ];
