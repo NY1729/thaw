@@ -29,7 +29,7 @@ Plan: `designs/plan-q9-systematic-parity.md` sections 0, 3 (H1), 6 (item 1-2).
     tools/parity/run.sh [OUT_DIR]               # gate: exit 1 only on gaps not in known-gaps.json
     tools/parity/run.sh --write-baseline [OUT]  # record current gaps (only after a fix lands)
 
-Env: `THAW_JS_NODE` (runner; default `/home/fedora/work/thaw-tmp/ra8/target/release/thaw-js-node`), `NODE` (oracle, default `node`), `PARITY_TIMEOUT` (seconds per thaw corpus, default 60). Default OUT is `/home/fedora/work/thaw-tmp/parity-scratch/out`. Nothing is written into the repo except `known-gaps.json` on `--write-baseline`.
+Env: `THAW_JS_NODE` (runner; default `<repo>/target/release/thaw-js-node`, falling back to the ra8 prebuilt `/home/fedora/work/thaw-tmp/ra8/target/release/thaw-js-node` if that does not exist), `NODE` (oracle, default `node`), `PARITY_TIMEOUT` (seconds per thaw corpus, default 60), `PARITY_SCRATCH` (scratch base dir, created if missing; default `$RUNNER_TEMP`, then `$TMPDIR`, then `/home/fedora/work/thaw-tmp/parity-scratch`). Default OUT is `$PARITY_SCRATCH/out`; `selftest.sh` makes a fresh `mktemp -d` under the same base (or uses `PARITY_SELFTEST_DIR` if set). Nothing is written into the repo except `known-gaps.json` on `--write-baseline`.
 
 ## Output and exit codes
 

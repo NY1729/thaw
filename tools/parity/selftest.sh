@@ -2,7 +2,9 @@
 # Self-test for diff.py: synthetic node/thaw outputs prove the gate fails on a missing member.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-W=${PARITY_SELFTEST_DIR:-/home/fedora/work/thaw-tmp/parity-scratch/selftest}
+BASE=${PARITY_SCRATCH:-${RUNNER_TEMP:-${TMPDIR:-/home/fedora/work/thaw-tmp/parity-scratch}}}
+mkdir -p "$BASE"
+W=${PARITY_SELFTEST_DIR:-$(mktemp -d "$BASE/selftest.XXXXXX")}
 rm -rf "$W"; mkdir -p "$W/node" "$W/thaw"
 fail=0
 check() { # name expected_rc actual_rc

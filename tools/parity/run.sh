@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # Differential parity run: node is the oracle, thaw-js-node is the subject.
 # Usage: tools/parity/run.sh [--write-baseline] [OUT_DIR]
-#   OUT_DIR defaults to $PARITY_OUT or /home/fedora/work/thaw-tmp/parity-scratch/out
+#   OUT_DIR defaults to $PARITY_OUT, else $PARITY_SCRATCH/out (PARITY_SCRATCH
+#   defaults to $RUNNER_TEMP, then $TMPDIR, then the thaw-tmp dev path)
 #   NODE          oracle binary (default: node)
-#   THAW_JS_NODE  thaw-js runner binary (default: the ra8 prebuilt, see README)
+#   THAW_JS_NODE  thaw-js runner binary (default: repo target/release, else the ra8 prebuilt)
 #   PARITY_TIMEOUT  seconds per thaw corpus run (default 60)
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
+REPO=$(cd "$HERE/../.." && pwd)
 WRITE=()
 if [ "${1:-}" = "--write-baseline" ]; then WRITE=(--write-baseline); shift; fi
-OUT=${1:-${PARITY_OUT:-/home/fedora/work/thaw-tmp/parity-scratch/out}}
+BASE=${PARITY_SCRATCH:-${RUNNER_TEMP:-${TMPDIR:-/home/fedora/work/thaw-tmp/parity-scratch}}}
+OUT=${1:-${PARITY_OUT:-$BASE/out}}
 NODE=${NODE:-node}
-THAW_JS_NODE=${THAW_JS_NODE:-/home/fedora/work/thaw-tmp/ra8/target/release/thaw-js-node}
+default_thaw="$REPO/target/release/thaw-js-node"
+[ -x "$default_thaw" ] || default_thaw=/home/fedora/work/thaw-tmp/ra8/target/release/thaw-js-node
+THAW_JS_NODE=${THAW_JS_NODE:-$default_thaw}
 TIMEOUT=${PARITY_TIMEOUT:-60}
 
 mkdir -p "$OUT/node" "$OUT/thaw"
