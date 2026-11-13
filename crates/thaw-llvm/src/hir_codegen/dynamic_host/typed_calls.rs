@@ -2897,11 +2897,16 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     /// `JsValueAsJson(registerNativeCallback(closure))` inside a thaw-js call: the coercion of a
-    /// plain callback into a `Json` parameter. Anything else keeps the QuickJS meaning.
+    /// plain callback into a `Json` parameter. Outside call arguments the closure stays a live Host
+    /// lease (the caller's `thaw_json_from_borrowed_handle` path), so a closure held as `any` or stored
+    /// in a native container is callable, not an inert marker object.
     fn try_compile_thaw_js_callback_marker(
         &mut self,
         inner: &HirExpr,
     ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+        if !self.thaw_js_call_arguments {
+            return Ok(None);
+        }
         let HirExpr::Call(callee, args) = inner else { return Ok(None) };
         let (HirExpr::Var(name), [closure_expr @ HirExpr::TypedClosure(HirType::Function(params, ret), _)]) =
             (callee.as_ref(), args.as_slice())
