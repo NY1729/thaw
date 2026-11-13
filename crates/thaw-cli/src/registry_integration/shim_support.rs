@@ -513,7 +513,7 @@ fn generate_class_accessor_declarations(
             });
             if !has_getter {
                 if let Some(symbol) = generate_napi_class_property_getter(
-                    &runtime_name,
+                    runtime_name,
                     &property.name,
                     &property.ty,
                     property.is_static,
@@ -544,7 +544,7 @@ fn generate_class_accessor_declarations(
             });
             if !property.readonly && !has_setter {
                 if let Some((symbol, value_type)) = generate_napi_class_property_setter(
-                    &runtime_name,
+                    runtime_name,
                     &property.name,
                     &property.ty,
                     property.is_static,
