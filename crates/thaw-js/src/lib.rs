@@ -25,6 +25,7 @@ use thaw_parser::ast as a;
 
 mod bigint;
 mod buffer;
+mod builtin_table;
 mod builtins;
 mod child;
 mod classes;
@@ -152,6 +153,8 @@ pub struct ObjData {
     raw_props: RefCell<Vec<Prop>>,
     /// Set while a `Slot::LazyProto` placeholder may be in `raw_props`.
     lazy_proto: Cell<bool>,
+    /// A closure from a prelude that Node implements natively: `toString` prints `[native code]`.
+    native_text: Cell<bool>,
     proto: RefCell<Option<Obj>>,
     kind: RefCell<Kind>,
     frozen: Cell<bool>,
@@ -766,6 +769,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
     Rc::new(ObjData {
         raw_props: RefCell::new(Vec::new()),
         lazy_proto: Cell::new(false),
+        native_text: Cell::new(false),
         proto: RefCell::new(proto),
         kind: RefCell::new(kind),
         frozen: Cell::new(false),
@@ -1120,7 +1124,7 @@ impl Interp {
         }
         it.run(extras::EXTRAS_LATE)
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
-        it.name_builtins();
+        it.apply_builtin_table();
         it
     }
 
@@ -4057,7 +4061,7 @@ fn closure_name_or_length(def: &FuncDef, key: &str) -> Value {
 }
 
 /// The synthesized own `name`/`length` of closure `o` (`None` for any other key or object).
-/// Natives report neither (ceiling: no synthesized name/length for natives yet).
+/// Natives get theirs from the builtin table (`builtin_table.rs`), so only closures synthesize.
 pub(crate) fn synth_fn_own(o: &Obj, key: &str) -> Option<Value> {
     match &*o.kind.borrow() {
         Kind::Closure { def, .. }
@@ -4403,6 +4407,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
     }
 }
 
+#[cfg(test)]
+mod builtin_table_tests;
 #[cfg(all(test, unix))]
 mod fs_tests;
 #[cfg(test)]

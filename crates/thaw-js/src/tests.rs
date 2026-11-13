@@ -7181,7 +7181,7 @@ fn lazy_prototype_generators_arrows_methods_and_bound_functions() {
     );
     assert_eq!(
         one("function f(a){ this.k = a; }; var b = f.bind(null, 5); console.log(b.hasOwnProperty('prototype'), JSON.stringify(Object.getOwnPropertyNames(b)), new b().k, new b() instanceof f);"),
-        "false [] 5 true"
+        r#"false ["length","name"] 5 true"#
     );
     assert_eq!(
         one("function f(a,b){}; console.log(f.call(null), f.apply(null, []), f.name, f.length, JSON.stringify(Object.getOwnPropertyNames(f)));"),
