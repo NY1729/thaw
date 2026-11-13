@@ -2,17 +2,33 @@
 // directly so the tests never touch the process environment.
 
 #[test]
-fn thaw_js_bytes_result_is_plain_for_every_program() {
-    // old: `thaw_js_declaration_plain_with(bytes, false, false)` was false and `(bytes, true, false)` true
+fn thaw_js_bytes_result_gate_switches_off_for_node_http_programs() {
     let bytes = "declare function __thaw_typed_js_6d73(path: string): Uint8Array;";
-    assert!(thaw_js_declaration_plain_with(bytes, false));
+    assert!(!thaw_js_declaration_plain_with(bytes, false, false));
+    assert!(thaw_js_declaration_plain_with(bytes, true, false));
     assert!(thaw_js_declaration_plain(bytes));
-    // old: `thaw_js_async_declaration_plain_with(async_bytes, false)` was false
+    // a Uint8Array result under a Promise follows the same switch
     let async_bytes = "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;";
-    assert!(thaw_js_async_declaration_plain_with(async_bytes));
-    // the relaxation only covers the bare bytes result, never a rejected parameter
+    assert!(!thaw_js_async_declaration_plain_with(async_bytes, false));
+    assert!(thaw_js_async_declaration_plain_with(async_bytes, true));
+    // the switch only relaxes the bare bytes result, never a rejected parameter
     let buffer_param = "declare function __thaw_typed_js_6d73(v: Buffer): Uint8Array;";
-    assert!(!thaw_js_declaration_plain_with(buffer_param, false));
+    assert!(!thaw_js_declaration_plain_with(buffer_param, true, false));
+
+    assert!(thaw_js_bytes_result_allowed("import fs from 'node:fs';\nfs.readFileSync(p);"));
+    assert!(!thaw_js_bytes_result_allowed("import https from 'node:https';\nhttps.get(u);"));
+    assert!(!thaw_js_bytes_result_allowed("import http from 'node:http';"));
+    // old: `assert!(!thaw_js_bytes_result_allowed("import tls from 'node:tls';"))`; new: allowed (the guard is node:http only)
+    assert!(thaw_js_bytes_result_allowed("import tls from 'node:tls';"));
+    assert!(!thaw_js_bytes_result_allowed("import http2 from 'node:http2';"));
+}
+
+#[test]
+fn thaw_js_bytes_result_gate_allows_tls_fs_child_process_but_not_node_https() {
+    // the r2c shape: node:tls + node:fs + node:child_process and no node:http substring routes bytes results
+    assert!(thaw_js_bytes_result_allowed("import tls from 'node:tls';\nimport fs from 'node:fs';\nimport { execFile } from 'node:child_process';\nfs.readFileSync(p);"));
+    // the ky shape: node:https contains the node:http substring, so it stays on QuickJS
+    assert!(!thaw_js_bytes_result_allowed("import https from 'node:https';\nhttps.get(u);"));
 }
 
 #[test]
@@ -237,11 +253,9 @@ fn builtin_routing_package(name: &str) -> ResolvedPackage {
 
 #[test]
 fn thaw_js_newly_allowlisted_builtins_route_to_thaw_js() {
-    // one program per module added to THAW_JS_BUILTIN_MODULES: each must be eligible for thaw-js
+    // the module added to THAW_JS_BUILTIN_MODULES: a metadata-only program must be eligible for thaw-js
+    // old: four cases (node:v8, node:console, node:test/reporters, node:cluster); new: node:cluster only
     let cases = [
-        ("node:v8", "import v8 from 'node:v8';\nconsole.log(typeof v8.serialize);\n"),
-        ("node:console", "import { Console } from 'node:console';\nconst c = new Console(process.stdout);\nc.log('x');\n"),
-        ("node:test/reporters", "import { spec } from 'node:test/reporters';\nconsole.log(typeof spec);\n"),
         ("node:cluster", "import cluster from 'node:cluster';\nconsole.log(cluster.isPrimary, cluster.settings);\n"),
     ];
     for (module, user) in cases {
@@ -556,10 +570,8 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
-    // old: `assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:cluster"))`; new: allowlisted (fork is blocked separately)
-    for module in ["node:v8", "node:console", "node:test/reporters", "node:cluster"] {
-        assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
-    }
+    // old: `assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:cluster"), "node:cluster")`; new: allowlisted (fork is blocked separately)
+    assert!(THAW_JS_BUILTIN_MODULES.contains(&"node:cluster"), "node:cluster");
 }
 
 #[test]
@@ -960,13 +972,11 @@ fn thaw_js_ctor_option_callback_declaration_is_plain_only_for_constructors() {
     let ctor = "declare function __thaw_typed_tjs_246e6577246e6f64653a73747265616d3a3a5772697461626c6524617269747931(opts: { write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }): JsValue;";
     let method = "declare function __thaw_typed_tjs_246d6574686f64246e6f64653a73747265616d3a3a5772697461626c6524777269746524617269747931(opts: { write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }): JsValue;";
     // a constructor's option object may carry callbacks (`new Writable({ write })`)
-    // old: `(ctor, true, true)`; new: `(ctor, true)`
-    assert!(thaw_js_declaration_plain_with(ctor, true));
+    assert!(thaw_js_declaration_plain_with(ctor, true, true));
     // the same signature is still rejected by default, and for a method operation
-    // old: `(ctor, true, false)` and `(method, false, false)`; new: `(ctor, false)` and `(method, false)`
-    assert!(!thaw_js_declaration_plain_with(ctor, false));
+    assert!(!thaw_js_declaration_plain_with(ctor, true, false));
     assert!(!thaw_js_declaration_plain(ctor));
-    assert!(!thaw_js_declaration_plain_with(method, false));
+    assert!(!thaw_js_declaration_plain_with(method, false, false));
 }
 
 #[test]
