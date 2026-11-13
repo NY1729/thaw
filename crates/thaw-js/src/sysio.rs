@@ -494,8 +494,8 @@ impl Interp {
 // ----- `globalThis.__thaw_fs(operation, path, value, recursive)` -----
 // The synchronous subset of the QuickJS host's filesystem bridge that the registry's `node:fs`
 // shim needs for whole-file reads/writes, directory listing and stat. Descriptor operations
-// (string-flag `fd_open`, read/write/stat/sync/truncate/tell/chmod/utimes/statfs) and chown/lchown
-// answer ENOSYS where not ported.
+// (string- and numeric-flag `fd_open`, read/write/stat/sync/truncate/tell/chmod/utimes/statfs) and
+// chown/lchown answer ENOSYS where not ported.
 // ponytail: add the rest when a package needs them; chown/lchown stay ENOSYS until the pinned test
 // `os_tty_process_and_fs_host_functions` is updated (it asserts ENOSYS for chown).
 
@@ -894,8 +894,65 @@ fn fds() -> std::sync::MutexGuard<'static, (u32, std::collections::BTreeMap<u32,
     FDS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// `fd_open` (string flags: `r`, `w`, `a+`, `wx`, ...) and the `fd_*` operations on the files it opened.
-// ponytail: numeric (`#bits`) open flags and fd_chown are not ported (chown stays ENOSYS, see below)
+/// Numeric open flags (`#bits`, the shim's Linux/x86 O_* values) as `libc::open`, translated bit by bit
+/// to the host's own O_* values (aarch64 differs, e.g. O_NOFOLLOW). Unknown bits or a bad number are EINVAL.
+#[cfg(unix)]
+fn open_numeric_flags(
+    p: &std::path::Path,
+    bits: &str,
+    mode: u32,
+) -> std::io::Result<std::fs::File> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let einval = || std::io::Error::from_raw_os_error(libc::EINVAL);
+    let bits: i32 = bits.parse().map_err(|_| einval())?;
+    if bits < 0 || bits & 3 == 3 {
+        return Err(einval());
+    }
+    let mut native = match bits & 3 {
+        0 => libc::O_RDONLY,
+        1 => libc::O_WRONLY,
+        _ => libc::O_RDWR,
+    };
+    // (shim value, host value); multi-bit entries (O_SYNC) match only when all their bits are set.
+    const TABLE: [(i32, i32); 10] = [
+        (64, libc::O_CREAT),
+        (128, libc::O_EXCL),
+        (256, libc::O_NOCTTY),
+        (512, libc::O_TRUNC),
+        (1024, libc::O_APPEND),
+        (2048, libc::O_NONBLOCK),
+        (65536, libc::O_DIRECTORY),
+        (131072, libc::O_NOFOLLOW),
+        (524288, libc::O_CLOEXEC),
+        (1052672, libc::O_SYNC),
+    ];
+    let mut known = 3;
+    for (shim, host) in TABLE {
+        known |= shim;
+        if bits & shim == shim {
+            native |= host;
+        }
+    }
+    if bits & !known != 0 {
+        return Err(einval());
+    }
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| einval())?;
+    let raw = unsafe { libc::open(c.as_ptr(), native | libc::O_CLOEXEC, mode as libc::mode_t) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(raw) })
+}
+
+#[cfg(not(unix))]
+fn open_numeric_flags(_: &std::path::Path, _: &str, _: u32) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+}
+
+/// `fd_open` (string flags: `r`, `w`, `a+`, `wx`, ...; numeric `#bits[,mode]`) and the `fd_*` operations
+/// on the files it opened.
+// ponytail: fd_chown is not ported (chown stays ENOSYS, see below)
 fn fd_op(op: &str, p: &std::path::Path, path: &str, value: &str) -> std::io::Result<String> {
     use std::io::{Read, Seek, SeekFrom};
     let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, m.to_string());
@@ -903,26 +960,31 @@ fn fd_op(op: &str, p: &std::path::Path, path: &str, value: &str) -> std::io::Res
         let (flag, mode) = value
             .split_once(',')
             .ok_or_else(|| bad("missing open mode"))?;
-        let mut o = std::fs::OpenOptions::new();
-        match flag {
-            "r" | "rs" => o.read(true),
-            "r+" | "rs+" => o.read(true).write(true),
-            "w" => o.write(true).create(true).truncate(true),
-            "wx" | "xw" => o.write(true).create_new(true),
-            "w+" => o.read(true).write(true).create(true).truncate(true),
-            "wx+" | "xw+" => o.read(true).write(true).create_new(true),
-            "a" | "as" => o.append(true).create(true),
-            "ax" | "xa" => o.append(true).create_new(true),
-            "a+" | "as+" => o.read(true).append(true).create(true),
-            "ax+" | "xa+" => o.read(true).append(true).create_new(true),
-            _ => return Err(std::io::Error::from_raw_os_error(libc::ENOSYS)),
+        let mode = mode.parse::<u32>().unwrap_or(0o666);
+        let file = if let Some(bits) = flag.strip_prefix('#') {
+            open_numeric_flags(p, bits, mode)?
+        } else {
+            let mut o = std::fs::OpenOptions::new();
+            match flag {
+                "r" | "rs" => o.read(true),
+                "r+" | "rs+" => o.read(true).write(true),
+                "w" => o.write(true).create(true).truncate(true),
+                "wx" | "xw" => o.write(true).create_new(true),
+                "w+" => o.read(true).write(true).create(true).truncate(true),
+                "wx+" | "xw+" => o.read(true).write(true).create_new(true),
+                "a" | "as" => o.append(true).create(true),
+                "ax" | "xa" => o.append(true).create_new(true),
+                "a+" | "as+" => o.read(true).append(true).create(true),
+                "ax+" | "xa+" => o.read(true).append(true).create_new(true),
+                _ => return Err(std::io::Error::from_raw_os_error(libc::ENOSYS)),
+            };
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                o.mode(mode);
+            }
+            o.open(p)?
         };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            o.mode(mode.parse::<u32>().unwrap_or(0o666));
-        }
-        let file = o.open(p)?;
         let mut t = fds();
         let fd = t.0;
         t.0 += 1;
