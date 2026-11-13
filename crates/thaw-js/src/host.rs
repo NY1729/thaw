@@ -762,13 +762,9 @@ fn class_call(
         }
     };
     let package_handle = match &op {
-        ClassOp::Method { receiver, .. } => HANDLES
-            .with(|h| {
-                h.borrow()
-                    .get((*receiver as usize).wrapping_sub(1))
-                    .map(|(p, _)| *p)
-            })
-            .ok_or_else(|| HostError::Bundle("invalid class instance handle".into()))?,
+        ClassOp::Method { receiver, .. } => slot(*receiver as u64)
+            .map(|(p, _)| p)
+            .ok_or_else(|| HostError::Bundle(stale_handle(*receiver as u64)))?,
         _ => BY_NAME
             .with(|m| m.borrow().get(package).copied())
             .ok_or_else(|| HostError::Bundle(not_loaded(package)))?,
@@ -787,13 +783,7 @@ fn class_call(
             }
             ClassOp::Value { path } => p.exports_member(path)?,
             ClassOp::Method { receiver, name } => {
-                let this = HANDLES
-                    .with(|h| {
-                        h.borrow()
-                            .get((receiver as usize).wrapping_sub(1))
-                            .map(|(_, v)| v.clone())
-                    })
-                    .unwrap_or(Value::Undefined);
+                let this = slot(receiver as u64).map_or(Value::Undefined, |(_, v)| v);
                 let it = &mut p.interp;
                 let f = it.get(&this, name).map_err(|c| classify(it, c))?;
                 if !f.is_callable() {
@@ -964,11 +954,7 @@ fn native_symbol_pair(
     let Some(Native::Number(id)) = graph_field(fields, "hdl") else {
         return Err("invalid paired native Symbol graph token".into());
     };
-    let value = HANDLES.with(|h| {
-        h.borrow()
-            .get((*id as usize).wrapping_sub(1))
-            .map(|(_, v)| v.clone())
-    });
+    let value = slot(*id as u64).map(|(_, v)| v);
     let Some(value) = value.filter(crate::napi_symbols::is_symbol) else {
         return Err("invalid paired native Symbol graph token".into());
     };
@@ -1110,11 +1096,7 @@ fn graph_node(
             if let [Native::Array(kv)] = pairs.as_slice() {
                 if let [Native::Str(name), Native::Object(v), ..] = kv.as_slice() {
                     let found = match (name.as_str(), graph_field(v, "v")) {
-                        (HANDLE_KEY, Some(Native::Number(id))) => HANDLES.with(|h| {
-                            h.borrow()
-                                .get((*id as usize).wrapping_sub(1))
-                                .map(|(_, v)| v.clone())
-                        }),
+                        (HANDLE_KEY, Some(Native::Number(id))) => slot(*id as u64).map(|(_, v)| v),
                         (CALLBACK_KEY, Some(Native::Number(id))) => {
                             Some(callback_value(it, *id as usize))
                         }
@@ -1156,13 +1138,7 @@ fn graph_node(
             crate::napi_graph::lone_handle(it, k, native)?
         }
         [(k, Native::Number(id))] if k == "hdl" => {
-            let v = HANDLES
-                .with(|h| {
-                    h.borrow()
-                        .get((*id as usize).wrapping_sub(1))
-                        .map(|(_, v)| v.clone())
-                })
-                .unwrap_or(Value::Undefined);
+            let v = slot(*id as u64).map_or(Value::Undefined, |(_, v)| v);
             // The encoder retained this reference for the wire; the decoded value holds its own.
             if cx.release_in_node {
                 thaw_tjs_release_handle(*id as i64);
@@ -1337,9 +1313,7 @@ pub(crate) fn wire_owner(nodes: &[Native]) -> usize {
         .iter()
         .find_map(|n| match n {
             Native::Object(f) => match graph_field(f, "hdl") {
-                Some(Native::Number(id)) => {
-                    HANDLES.with(|h| h.borrow().get((*id as usize).wrapping_sub(1)).map(|e| e.0))
-                }
+                Some(Native::Number(id)) => slot(*id as u64).map(|(p, _)| p),
                 _ => None,
             },
             _ => None,
@@ -1380,18 +1354,45 @@ pub(crate) fn error_text(e: HostError) -> String {
     })
 }
 
+/// What handle `id` names: `(owner package, value)`. Id 0 is `undefined`, owned by the default realm, at
+/// every thaw-js boundary. A released id keeps its slot holding `undefined` (see `release`). None only
+/// for an id past the table, which was never allocated.
+pub(crate) fn slot(id: u64) -> Option<(usize, Value)> {
+    if id == 0 {
+        return Some((default_realm(), Value::Undefined));
+    }
+    HANDLES.with(|h| h.borrow().get((id as usize).wrapping_sub(1)).cloned())
+}
+
+/// The error for an id past the handle table.
+pub(crate) fn stale_handle(id: u64) -> String {
+    format!("invalid JavaScript handle {id}: released or never allocated")
+}
+
+/// The N-API seam's resolver (decision D1): Node-API's NULL `napi_value` is invalid there, so id 0 is an
+/// error, not `undefined`. Its text is the bare "invalid JavaScript handle" the N-API tests pin.
+pub(crate) fn slot_strict(id: u64) -> Result<(usize, Value), String> {
+    match slot(id) {
+        Some(entry) if id != 0 => Ok(entry),
+        _ => Err("invalid JavaScript handle".to_string()),
+    }
+}
+
 /// Run `f(interpreter, package, value)` on the value behind `handle`, in the package that owns it.
 pub(crate) fn on_handle<T>(
     handle: u64,
     f: impl FnOnce(&mut Package, usize, Value) -> Result<T, HostError>,
 ) -> Result<T, String> {
-    let (owner, value) = HANDLES
-        .with(|h| {
-            h.borrow()
-                .get((handle as usize).wrapping_sub(1))
-                .map(|(p, v)| (*p, v.clone()))
-        })
-        .ok_or("invalid JavaScript handle")?;
+    let (owner, value) = slot(handle).ok_or_else(|| stale_handle(handle))?;
+    with_package(owner, |p| f(p, owner, value)).map_err(error_text)
+}
+
+/// `on_handle` for the N-API seam: id 0 is an error (see `slot_strict`).
+pub(crate) fn on_handle_strict<T>(
+    handle: u64,
+    f: impl FnOnce(&mut Package, usize, Value) -> Result<T, HostError>,
+) -> Result<T, String> {
+    let (owner, value) = slot_strict(handle)?;
     with_package(owner, |p| f(p, owner, value)).map_err(error_text)
 }
 
@@ -1745,12 +1746,8 @@ pub extern "C" fn thaw_tjs_call_selected_method_graph_result(
         let args_json = cstr(args_json).ok_or("invalid arguments")?;
         let name = cstr(name).unwrap_or_default();
         let (_, args) = decode_wire(&args_json)?;
-        let method = HANDLES
-            .with(|h| {
-                h.borrow()
-                    .get((selected as usize).wrapping_sub(1))
-                    .map(|(_, v)| v.clone())
-            })
+        let method = slot(selected)
+            .map(|(_, v)| v)
             .ok_or("invalid JavaScript method")?;
         on_handle(receiver, |p, owner, this| {
             let it = &mut p.interp;
@@ -2442,13 +2439,8 @@ pub extern "C" fn thaw_tjs_intern_native_object(
         if pointer.is_null() {
             return Err("native object identity requires pointer and layout".to_string());
         }
-        let (owner, candidate) = HANDLES
-            .with(|h| {
-                h.borrow()
-                    .get((candidate_handle as usize).wrapping_sub(1))
-                    .cloned()
-            })
-            .ok_or("invalid JavaScript handle")?;
+        let (owner, candidate) =
+            slot(candidate_handle).ok_or_else(|| stale_handle(candidate_handle))?;
         Ok(NATIVE_OBJECTS.with(|m| {
             let mut m = m.borrow_mut();
             if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
@@ -2506,11 +2498,7 @@ pub extern "C" fn thaw_tjs_native_object_pointer(
 ) -> HandleResult {
     handle_result((|| {
         let expected = cstr(expected_layout).ok_or("native object pointer requires a layout")?;
-        let value = HANDLES.with(|h| {
-            h.borrow()
-                .get((handle as usize).wrapping_sub(1))
-                .map(|(_, v)| v.clone())
-        });
+        let value = slot(handle).map(|(_, v)| v);
         let trace = std::env::var_os("THAW_JS_TRACE_WIRE").is_some();
         if trace {
             eprintln!("[tjs] native_object_pointer handle={handle} expected_layout={expected:?}");
@@ -2554,12 +2542,8 @@ pub extern "C" fn thaw_tjs_call_selected_method_handle_graph_args_result(
         let args_json = cstr(args_json).ok_or("invalid arguments")?;
         let name = cstr(name).unwrap_or_default();
         let (_, args) = decode_wire(&args_json)?;
-        let method = HANDLES
-            .with(|h| {
-                h.borrow()
-                    .get((selected as usize).wrapping_sub(1))
-                    .map(|(_, v)| v.clone())
-            })
+        let method = slot(selected)
+            .map(|(_, v)| v)
             .ok_or("invalid JavaScript method")?;
         on_handle(receiver, |p, owner, this| {
             let it = &mut p.interp;
@@ -3904,11 +3888,7 @@ pub(crate) fn handle_value(id: u64) -> Option<Value> {
     if id == 0 {
         return None;
     }
-    HANDLES.with(|h| {
-        h.borrow()
-            .get((id as usize).wrapping_sub(1))
-            .map(|e| e.1.clone())
-    })
+    slot(id).map(|(_, v)| v)
 }
 
 /// A compiled throw of a live JS object rethrows that exact object: tag 7 with a non-zero `object`
@@ -4463,13 +4443,7 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
             let Some((_, Native::Number(id))) = fields.first() else {
                 return Value::Undefined;
             };
-            HANDLES
-                .with(|h| {
-                    h.borrow()
-                        .get((*id as usize).wrapping_sub(1))
-                        .map(|(_, v)| v.clone())
-                })
-                .unwrap_or(Value::Undefined)
+            slot(*id as u64).map_or(Value::Undefined, |(_, v)| v)
         }
         // `{"__thaw_tjs_timer__": id}`: a Timeout/Immediate returned earlier (still live, else its id).
         Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Number(_))] if k == TIMER_KEY) =>
@@ -5480,11 +5454,12 @@ thread_local! {
 /// queued jobs of its package have drained (see `pump_watches`).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settle: SettleFn) {
-    let entry = HANDLES.with(|h| {
-        h.borrow()
-            .get((handle as usize).wrapping_sub(1))
-            .map(|(p, v)| (*p, v.clone()))
-    });
+    // 0 is `undefined`, which is never a pending promise: it takes the failure path below.
+    let entry = if handle == 0 {
+        None
+    } else {
+        slot(handle as u64)
+    };
     match entry {
         Some((package, promise)) => WATCHES.with(|w| {
             w.borrow_mut().push(Watch {
@@ -5709,7 +5684,7 @@ mod native_owner_tests {
         if handle == 0 {
             return 0;
         }
-        match HANDLES.with(|h| h.borrow().get((handle as usize).wrapping_sub(1)).cloned()) {
+        match slot(handle) {
             Some((_, Value::Object(obj))) => Rc::as_ptr(&obj) as usize,
             _ => panic!("handle is not an object"),
         }

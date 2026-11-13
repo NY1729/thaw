@@ -1652,7 +1652,9 @@ impl<'a> FnLowerer<'a> {
             // elsewhere) since nothing static can know which case a
             // given call actually returns.
             if actual == HirType::JsValue && crate::lower::thaw_js_routed() {
-                // A thaw-js build's `JsValue` is a handle into the thaw-js heap, never null.
+                // A thaw-js build's `JsValue` is a handle into the thaw-js heap, so it is never null. It can
+                // be `undefined` though (handle 0, or an absent global): the host resolves that handle to
+                // `undefined` (thaw-js host.rs `slot`), so the marker reads back as `undefined`.
                 return Ok(HirExpr::JsValueAsJson(Box::new(value)));
             }
             if actual == HirType::JsValue {
