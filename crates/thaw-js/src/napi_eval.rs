@@ -10,8 +10,8 @@ use base64::Engine;
 
 use crate::host::{
     awaited, check_handle_callable, classify, cstr, default_realm, error_text, from_value,
-    handle_result, on_handle, store_handle, thaw_tjs_call_graph_result, to_value, with_package,
-    HandleResult, HostError, Native, ThawResult,
+    handle_result, on_handle_strict, store_handle, thaw_tjs_call_graph_result, to_value,
+    with_package, HandleResult, HostError, Native, ThawResult,
 };
 use crate::napi_graph::{decode_napi_wire, encode_napi_graph};
 use crate::napi_props::ThawCallWithExceptionResult;
@@ -247,7 +247,7 @@ pub extern "C" fn thaw_tjs_call_handle_with_this_graph_result(
 fn call_with_this(handle: u64, args_json: *const c_char) -> Result<Outcome, String> {
     let args_json = cstr(args_json).ok_or("invalid arguments")?;
     let (_, args) = decode_napi_wire(&args_json)?;
-    on_handle(handle, |p, owner, f| {
+    on_handle_strict(handle, |p, owner, f| {
         let it = &mut p.interp;
         check_handle_callable(it, &f)?;
         let mut args = it.array_items(&args);
@@ -279,7 +279,7 @@ pub extern "C" fn thaw_tjs_graph_native_pair_matches_result(
     native_handle: u64,
     kind: u8,
 ) -> HandleResult {
-    handle_result(on_handle(handle, |p, _, value| {
+    handle_result(on_handle_strict(handle, |p, _, value| {
         let it = &mut p.interp;
         let global = Value::Object(it.global_object.clone());
         let verify = it
