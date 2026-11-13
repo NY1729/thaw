@@ -14,7 +14,7 @@ const PLATFORM_GLOBALS: &str = concat!(
     include_str!("platform_globals/workers/abort_timers.js"),
     include_str!("platform_globals/text_encoding.js"),
     include_str!("platform_globals/buffer_crypto.js"),
-    include_str!("platform_globals/intl.js"),
+    include_str!("../../../thaw-js/src/web/intl.js"),
     // Node enumerates only these globals; every other installed one (console, internals) is hidden.
     "\n;(function () {
   var keep = { global: 1, clearImmediate: 1, setImmediate: 1, clearInterval: 1, clearTimeout: 1,

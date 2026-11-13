@@ -2011,42 +2011,42 @@ include!("quickjs/processes.rs");
 
 include!("quickjs/dns_client.rs");
 
-include!("quickjs/intl.rs");
+include!("../../thaw-intl/src/intl.rs");
 
-include!("quickjs/intl_time_zone_names.rs");
-
-#[cfg(feature = "intl")]
-include!("quickjs/intl_locale.rs");
+include!("../../thaw-intl/src/intl_time_zone_names.rs");
 
 #[cfg(feature = "intl")]
-include!("quickjs/intl_datetime_skeleton.rs");
+include!("../../thaw-intl/src/intl_locale.rs");
 
 #[cfg(feature = "intl")]
-include!("quickjs/intl_datetime.rs");
+include!("../../thaw-intl/src/intl_datetime_skeleton.rs");
 
 #[cfg(feature = "intl")]
-include!("quickjs/intl_number.rs");
+include!("../../thaw-intl/src/intl_datetime.rs");
 
 #[cfg(feature = "intl")]
-include!("quickjs/intl_number_style.rs");
+include!("../../thaw-intl/src/intl_number.rs");
 
 #[cfg(feature = "intl")]
-include!("quickjs/intl_list.rs");
+include!("../../thaw-intl/src/intl_number_style.rs");
 
 #[cfg(feature = "intl")]
-include!("quickjs/intl_plurals.rs");
+include!("../../thaw-intl/src/intl_list.rs");
 
 #[cfg(feature = "intl")]
-include!("quickjs/intl_collator.rs");
+include!("../../thaw-intl/src/intl_plurals.rs");
+
+#[cfg(feature = "intl")]
+include!("../../thaw-intl/src/intl_collator.rs");
 
 #[cfg(feature = "icu4c")]
-include!("quickjs/intl_icu4c.rs");
+include!("../../thaw-intl/src/intl_icu4c.rs");
 
 #[cfg(feature = "intl")]
-include!("quickjs/intl_segmenter.rs");
+include!("../../thaw-intl/src/intl_segmenter.rs");
 
 #[cfg(feature = "intl")]
-include!("quickjs/intl_relative_time.rs");
+include!("../../thaw-intl/src/intl_relative_time.rs");
 
 include!("quickjs/asymmetric_crypto.rs");
 
