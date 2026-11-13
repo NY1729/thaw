@@ -547,6 +547,20 @@
       case 6: return Array.from(Map.prototype.values.call(value));
       case 7: return [...value];
       case 8: return [Reflect.getPrototypeOf(value)];
+      // for-in keys: enumerable string keys along the prototype chain; a name is decided by the
+      // nearest object that has it, even when that property is non-enumerable.
+      case 9: {
+        const out = [], seen = new Set();
+        for (let o = value; o !== null; o = Reflect.getPrototypeOf(o)) {
+          const enumerable = new Set(Object.keys(o));
+          for (const k of Reflect.ownKeys(o)) {
+            if (typeof k !== 'string' || seen.has(k)) continue;
+            seen.add(k);
+            if (enumerable.has(k) && !symbolKeyWire(k)) out.push(k);
+          }
+        }
+        return out;
+      }
       case 10: return Array.from(Map.prototype.entries.call(value));
       case 11: return Array.from(Set.prototype.values.call(value));
       default: throw new TypeError('Invalid native host enumeration');
