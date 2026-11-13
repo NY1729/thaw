@@ -141,7 +141,8 @@ fn fast_get(v: &Value, i: usize) -> Option<f64> {
 }
 
 /// The write `set_index` makes as a plain store: an existing non-hole element of an extensible, unfrozen,
-/// length-writable Array, or an in-range element of an unfrozen typed array (`TypedArr::set` does the conversion).
+/// length-writable Array, or an in-range element of an unfrozen numeric typed array (`TypedArr::set` does the conversion). A BigInt
+/// element is never stored here: its stores take `set_index` (ToBigInt, which throws for a Number).
 /// Returns `false` for everything else, which takes `set_index` / `set`. `proxy_set` is a no-op for both kinds
 /// (only `Kind::Proxy` objects have a trap), so skipping it changes nothing.
 #[inline]
@@ -166,7 +167,7 @@ fn fast_set(v: &Value, i: usize, x: f64) -> bool {
                 _ => false,
             }
         }
-        Kind::Typed(t) if i < t.len => {
+        Kind::Typed(t) if i < t.len && !t.ty.is_big() => {
             t.set(i, x);
             true
         }

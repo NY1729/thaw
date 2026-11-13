@@ -322,9 +322,7 @@ impl Interp {
                         return Some(items.iter().map(|v| unhole(Some(v))).collect())
                     }
                     Kind::Set(set) => return Some(set.items.clone()),
-                    Kind::Typed(t) => {
-                        return Some(t.to_vec().into_iter().map(Value::Number).collect())
-                    }
+                    Kind::Typed(t) => return Some(t.to_values()),
                     Kind::Map(map) => map.entries.clone(),
                     _ => return None,
                 };
