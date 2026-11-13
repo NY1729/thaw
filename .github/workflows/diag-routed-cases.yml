@@ -1,0 +1,400 @@
+name: diag-routed-cases
+
+# Diagnostics only, never gating: builds named node-compat cases (or the ky/https bisect legs) with
+# thaw-js forced on and wire tracing enabled, then uploads each case's stdout, stderr and the build
+# report (`thaw inspect`, which lists the QuickJS reasons and thaw-js blockers the build recorded).
+# Runs on demand only (workflow_dispatch). Nothing here belongs in a required-checks list.
+#
+# Routing: THAW_JS_ROUTE_ALL=1 only flips the program-level routing flag. Package-level blockers
+# (thaw_js_package_eligible) still keep a case on QuickJS, and there is no env override for them.
+# So the `ref` input checks out a tree where the blockers are already gone. The default is
+# cfc01bd1 (PR #583's first commit, on fix/routing-stale-guards-allowlist): it removes the
+# perf_hooks blocker, allowlists node:test/reporters, and keeps the mock.timers and cluster.fork
+# blockers. It is origin/main minus #581 (cbb0f54d), so it is not current main. Dispatch with
+# ref=main to see what main itself does.
+#
+# Example:
+#   gh workflow run diag-routed-cases.yml -f cases="node test dot reporter terminates output|nd7 perf_hooks mark detail and PerformanceObserver export"
+#   gh workflow run diag-routed-cases.yml -f ky_bisect=true -f cases=""
+#   gh run download <run-id> -n diag-routed-cases ; gh run download <run-id> -n diag-ky-https-bisect
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: tree to build from (commit sha or branch with the routing guards already relaxed)
+        type: string
+        default: "cfc01bd1"
+      cases:
+        description: node-compat case names from tests/node-compat.json, separated by "|" (empty skips the job)
+        type: string
+        default: "node test dot reporter terminates output|nd7 perf_hooks mark detail and PerformanceObserver export"
+      ky_bisect:
+        description: run the ky/https/brotli bisect job
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  routed-cases:
+    if: inputs.cases != ''
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CASES: ${{ inputs.cases }}
+      D: ${{ runner.temp }}/diag-cases
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: diag-routed-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            diag-routed-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Build thaw CLI (release)
+        run: cargo build --release -p thaw-cli
+      - name: Extract the named cases from tests/node-compat.json
+        run: |
+          python3 -I - <<'PY'
+          import json, os, pathlib
+          d = pathlib.Path(os.environ["D"])
+          (d / "cases").mkdir(parents=True, exist_ok=True)
+          data = json.load(open(os.path.join(os.environ["GITHUB_WORKSPACE"], "tests", "node-compat.json"), encoding="utf-8"))
+          by_name = {}
+          for case in data["cases"]:
+              by_name.setdefault(case["name"], case)
+          names = [n for n in os.environ["CASES"].split("|") if n.strip()]
+          index = []
+          for i, name in enumerate(names, 1):
+              slug = f"case-{i:02d}"
+              (d / "cases" / f"{slug}.name").write_text(name + "\n", encoding="utf-8")
+              case = by_name.get(name)
+              if case is None:
+                  (d / "cases" / f"{slug}.missing").write_text("not found in tests/node-compat.json\n", encoding="utf-8")
+              else:
+                  (d / "cases" / f"{slug}.ts").write_text(case["source"], encoding="utf-8")
+              index.append(f"{slug}\t{'missing' if case is None else 'ok'}\t{name}")
+          (d / "cases" / "index.tsv").write_text("\n".join(index) + "\n", encoding="utf-8")
+          print("\n".join(index))
+          PY
+      - name: Build and run each case (THAW_JS_ROUTE_ALL=1, thaw-js, wire trace)
+        run: |
+          # Per-case failures are findings: record exit codes and keep going.
+          set +e
+          bin_dir="$D/bin"; out_dir="$D/out"
+          mkdir -p "$bin_dir" "$out_dir"
+          export THAW_JS_ROUTE_ALL=1 THAW_JS_ENGINE=thaw-js THAW_JS_TRACE_WIRE=1 THAW_JS_RUNTIME_DEBUG=1
+          while IFS=$'\t' read -r slug status name; do
+            case_out="$out_dir/$slug"
+            mkdir -p "$case_out"
+            cp "$D/cases/$slug.name" "$case_out/name.txt"
+            if [ "$status" != ok ]; then
+              cp "$D/cases/$slug.missing" "$case_out/build.log"
+              continue
+            fi
+            # Build report: the stderr of the routed build (THAW_JS_RUNTIME_DEBUG names each QuickJS-bound package).
+            timeout 900 target/release/thaw build "$D/cases/$slug.ts" -o "$bin_dir/$slug" < /dev/null > "$case_out/build.stdout" 2> "$case_out/build.log"
+            echo "$?" > "$case_out/build.exit"
+            if [ -x "$bin_dir/$slug" ]; then
+              target/release/thaw inspect "$bin_dir/$slug" > "$case_out/inspect.txt" 2>&1
+              # Run the binary: stdout and stderr are kept separately, exit status recorded.
+              timeout 120 "$bin_dir/$slug" < /dev/null > "$case_out/run.stdout" 2> "$case_out/run.stderr"
+              echo "$?" > "$case_out/run.exit"
+            else
+              echo "no binary" > "$case_out/run.exit"
+            fi
+          done < "$D/cases/index.tsv"
+          exit 0
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### diag-routed-cases (ref ${{ inputs.ref }})"
+            for c in "$D"/out/*/; do
+              slug=$(basename "$c")
+              echo "- $slug: $(cat "$c/name.txt" 2>/dev/null) | build exit $(cat "$c/build.exit" 2>/dev/null || echo n/a) | run exit $(cat "$c/run.exit" 2>/dev/null || echo n/a)"
+              grep -E '^(quickjs|quickjs-reason|thaw-js-blocker)' "$c/inspect.txt" 2>/dev/null | cut -c1-300 | sed 's/^/    /'
+            done
+          } >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Upload per-case logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-routed-cases
+          path: ${{ runner.temp }}/diag-cases/out
+          if-no-files-found: ignore
+
+  ky-https-bisect:
+    # Section 5 of plan-q9-newly-routed-failures.md: the registry_add ky test hangs on thaw-js. Three
+    # mini programs split its legs: A = ky over http (fetch polyfill), B = node:https get with `ca` to a
+    # loopback TLS server, C = brotli decompress of a canned body. Each runs under timeout 120 with
+    # THAW_JS_ROUTE_ALL=1 and wire tracing. Local servers are plain python3 stdlib (no network).
+    if: inputs.ky_bisect
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      D: ${{ runner.temp }}/diag-ky
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: diag-routed-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            diag-routed-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Build thaw CLI (release)
+        run: cargo build --release -p thaw-cli
+      - name: Write the three legs, certificate, and local servers
+        run: |
+          set -e
+          mkdir -p "$D/legs" "$D/out"
+          cd "$D"
+          # Self-signed certificate for 127.0.0.1; its PEM is the `ca` option of leg B.
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 2 \
+            -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" 2>/dev/null
+          cat > serve.py <<'PY'
+          import http.server, ssl, sys, threading
+          BROTLI = bytes.fromhex(open(sys.argv[1]).read().strip())
+          CERT, KEY = sys.argv[2], sys.argv[3]
+          class Plain(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  body = b'{"ok":true,"n":42}'
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.send_header("Connection", "close")
+                  self.end_headers()
+                  self.wfile.write(body)
+              def log_message(self, *args):
+                  pass
+          class Tls(Plain):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header("Content-Type", "text/html")
+                  self.send_header("Content-Encoding", "br")
+                  self.send_header("Content-Length", str(len(BROTLI)))
+                  self.send_header("Connection", "close")
+                  self.end_headers()
+                  self.wfile.write(BROTLI)
+          ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+          ctx.load_cert_chain(CERT, KEY)
+          plain = http.server.ThreadingHTTPServer(("127.0.0.1", 18080), Plain)
+          tls = http.server.ThreadingHTTPServer(("127.0.0.1", 18443), Tls)
+          tls.socket = ctx.wrap_socket(tls.socket, server_side=True)
+          threading.Thread(target=plain.serve_forever, daemon=True).start()
+          tls.serve_forever()
+          PY
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          d = pathlib.Path(os.environ["D"])
+          rust = pathlib.Path(os.environ["GITHUB_WORKSPACE"], "crates/thaw-cli/src/tests/native_addons/javascript_packages.rs").read_text(encoding="utf-8")
+          block = re.search(r"EXAMPLE_BROTLI_BODY: &\[u8\] = &\[(.*?)\];", rust, re.S)
+          assert block, "EXAMPLE_BROTLI_BODY not found in the ref's javascript_packages.rs"
+          body = bytes(int(h, 16) for h in re.findall(r"0x([0-9a-fA-F]{2})", block.group(1)))
+          (d / "brotli.hex").write_text(body.hex() + "\n", encoding="utf-8")
+          ca_lit = json.dumps((d / "cert.pem").read_text(encoding="utf-8"))
+          legs = {
+              "a-ky.ts": 'import ky from "ky";\n'
+                         'async function main(): Promise<void> {\n'
+                         '    const data: { ok: boolean; n: number } = await ky.get("http://127.0.0.1:18080/data.json").json();\n'
+                         '    console.log(data.ok);\n'
+                         '    console.log(data.n);\n'
+                         '}\n',
+              "b-https.ts": 'import * as https from "node:https";\n'
+                            'async function main(): Promise<void> {\n'
+                            '    let body: string = "";\n'
+                            '    let chunks: number = 0;\n'
+                            '    await new Promise<void>((resolve, reject): void => {\n'
+                            '        const request = https.get({ hostname: "127.0.0.1", port: 18443, path: "/", ca: __CA__ }, (response: any): void => {\n'
+                            '            console.log(response.statusCode);\n'
+                            '            response.on("data", (chunk: Buffer): void => { chunks = chunks + 1; body += chunk.toString("hex"); });\n'
+                            '            response.on("end", (): void => { console.log(chunks); console.log(body.length); resolve(); });\n'
+                            '        });\n'
+                            '        request.on("error", reject);\n'
+                            '    });\n'
+                            '    console.log("done");\n'
+                            '}\n',
+              "c-brotli.ts": 'import * as zlib from "node:zlib";\n'
+                             'function main(): void {\n'
+                             '    const compressed: Buffer = Buffer.from("__HEX__", "hex");\n'
+                             '    const text: string = zlib.brotliDecompressSync(compressed).toString();\n'
+                             '    console.log(text.length > 0);\n'
+                             '    console.log(text.includes("Example Domain"));\n'
+                             '}\n',
+          }
+          legs["b-https.ts"] = legs["b-https.ts"].replace("__CA__", ca_lit)
+          legs["c-brotli.ts"] = legs["c-brotli.ts"].replace("__HEX__", body.hex())
+          for name, text in legs.items():
+              (d / "legs" / name).write_text(text, encoding="utf-8")
+          print("wrote", sorted(legs), "brotli bytes", len(body))
+          PY
+      - name: Start local servers (127.0.0.1:18080 plain, 127.0.0.1:18443 TLS)
+        run: |
+          cd "$D"
+          nohup python3 -I serve.py brotli.hex cert.pem key.pem > serve.log 2>&1 &
+          echo $! > serve.pid
+          for i in $(seq 50); do
+            if (exec 3<>/dev/tcp/127.0.0.1/18080) 2>/dev/null && (exec 3<>/dev/tcp/127.0.0.1/18443) 2>/dev/null; then
+              echo "servers up"; exit 0
+            fi
+            sleep 0.2
+          done
+          echo "servers did not start"; cat serve.log; exit 1
+      - name: Register ky and build/run the three legs (timeout 120 each run)
+        run: |
+          set +e
+          cd "$GITHUB_WORKSPACE"
+          target/release/thaw registry add ky@2.1.0 --registry "$D/modules" > "$D/out/registry-add.log" 2>&1
+          echo "registry add exit $?" >> "$D/out/registry-add.log"
+          export THAW_JS_ROUTE_ALL=1 THAW_JS_ENGINE=thaw-js THAW_JS_TRACE_WIRE=1 THAW_JS_RUNTIME_DEBUG=1
+          for leg in a-ky b-https c-brotli; do
+            leg_out="$D/out/$leg"; mkdir -p "$leg_out"
+            use_args=()
+            if [ "$leg" = a-ky ]; then use_args=(--registry "$D/modules" --use ky); fi
+            timeout 900 target/release/thaw build "$D/legs/$leg.ts" -o "$D/bin-$leg" "${use_args[@]}" > "$leg_out/build.stdout" 2> "$leg_out/build.log"
+            echo "$?" > "$leg_out/build.exit"
+            if [ -x "$D/bin-$leg" ]; then
+              target/release/thaw inspect "$D/bin-$leg" > "$leg_out/inspect.txt" 2>&1
+              timeout 120 "$D/bin-$leg" > "$leg_out/run.stdout" 2> "$leg_out/run.stderr"
+              echo "$?" > "$leg_out/run.exit"
+            else
+              echo "no binary" > "$leg_out/run.exit"
+            fi
+          done
+          exit 0
+      - name: Stop local servers and summarize
+        if: always()
+        run: |
+          kill "$(cat "$D/serve.pid" 2>/dev/null)" 2>/dev/null || true
+          {
+            echo "### diag ky/https/brotli bisect (ref ${{ inputs.ref }}, timeout 120 per run)"
+            for leg in a-ky b-https c-brotli; do
+              l="$D/out/$leg"
+              echo "- $leg: build exit $(cat "$l/build.exit" 2>/dev/null || echo n/a), run exit $(cat "$l/run.exit" 2>/dev/null || echo n/a) (124 = timeout)"
+              grep -E '^(quickjs|quickjs-reason|thaw-js-blocker)' "$l/inspect.txt" 2>/dev/null | cut -c1-300 | sed 's/^/    /'
+            done
+          } >> "$GITHUB_STEP_SUMMARY" || true
+          cp "$D/serve.log" "$D/out/serve.log" 2>/dev/null || true
+      - name: Upload bisect logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-ky-https-bisect
+          path: ${{ runner.temp }}/diag-ky/out
+          if-no-files-found: ignore
