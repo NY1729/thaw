@@ -10,7 +10,12 @@ use thaw_wasm::{
 struct NoHost;
 
 impl HostCallbacks for NoHost {
-    fn call_import(&mut self, id: u32, _args: &[Val]) -> Result<Vec<Val>, u32> {
+    fn call_import(
+        &mut self,
+        _store: &mut thaw_wasm::Access<'_, '_>,
+        id: u32,
+        _args: &[Val],
+    ) -> Result<Vec<Val>, u32> {
         panic!("unexpected host call {id}")
     }
 }
@@ -22,7 +27,12 @@ struct Doubler {
 }
 
 impl HostCallbacks for Doubler {
-    fn call_import(&mut self, id: u32, args: &[Val]) -> Result<Vec<Val>, u32> {
+    fn call_import(
+        &mut self,
+        _store: &mut thaw_wasm::Access<'_, '_>,
+        id: u32,
+        args: &[Val],
+    ) -> Result<Vec<Val>, u32> {
         self.seen.push(id);
         match args {
             [Val::I32(x)] => Ok(vec![Val::I32(x * 2)]),
@@ -267,7 +277,12 @@ fn host_exception_is_passed_through() {
     // make Doubler reject by calling a 0-arg-shaped host: here we simply return Err from a custom host.
     struct Throws;
     impl HostCallbacks for Throws {
-        fn call_import(&mut self, _id: u32, _args: &[Val]) -> Result<Vec<Val>, u32> {
+        fn call_import(
+            &mut self,
+            _store: &mut thaw_wasm::Access<'_, '_>,
+            _id: u32,
+            _args: &[Val],
+        ) -> Result<Vec<Val>, u32> {
             Err(42)
         }
     }

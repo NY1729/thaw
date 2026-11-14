@@ -614,6 +614,9 @@ impl Interp {
         let Value::Object(o) = target else {
             return self.throw_error("TypeError", "Object.defineProperty called on non-object");
         };
+        if crate::typed::typed_own_key(o, key) == Some(false) {
+            return self.throw_error("TypeError", "Invalid typed array index");
+        }
         if self.try_define(o, key, desc)? {
             return Ok(());
         }
@@ -648,6 +651,23 @@ impl Interp {
             get: has(self, "get")?,
             set: has(self, "set")?,
         };
+        // a typed array's element takes only a plain data descriptor (no accessor, no false attribute)
+        if let Some(valid) = crate::typed::typed_own_key(o, key) {
+            let refused = |x: &Option<Value>| x.as_ref().is_some_and(|v| !v.truthy());
+            if !valid
+                || d.get.is_some()
+                || d.set.is_some()
+                || refused(&d.writable)
+                || refused(&d.enumerable)
+                || refused(&d.configurable)
+            {
+                return Ok(false);
+            }
+            if let Some(v) = d.value {
+                self.set(&Value::Object(o.clone()), key, v)?;
+            }
+            return Ok(true);
+        }
         let frozen = o.frozen.get();
         // array elements and `length` have no Prop: their attributes derive from the object flags
         let arr_current = match &*o.kind.borrow() {
@@ -2757,9 +2777,9 @@ impl Interp {
         let key = self.key_of(key);
         Ok(match target {
             Value::Object(o) => {
-                find_own(o, &key).is_some()
+                crate::typed::typed_own_key(o, &key).unwrap_or_else(|| find_own(o, &key).is_some()
                     || synth_fn_own(o, &key).is_some()
-                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))) || *key == *"length")
+                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))) || *key == *"length"))
             }
             Value::Str(s) => array_index(&key).is_some_and(|i| i < str_len(s)),
             _ => false,
@@ -2777,10 +2797,10 @@ impl Interp {
         }
         let key = self.key_of(key);
         Ok(match target {
-            Value::Object(o) => {
+            Value::Object(o) => crate::typed::typed_own_key(o, &key).unwrap_or_else(|| {
                 find_own(o, &key).is_some_and(|(_, e)| e)
                     || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))))
-            }
+            }),
             _ => false,
         })
     }

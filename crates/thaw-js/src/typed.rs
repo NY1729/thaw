@@ -89,13 +89,19 @@ const ALL: [Ty; 11] = [
 #[derive(Default)]
 pub(crate) struct Store {
     cell: RefCell<Vec<u8>>,
+    /// Storage owned by the wasm engine (a wasm memory's bytes, see `thaw-wasm`); `cell` is unused then.
+    /// The owner empties it when the memory is replaced, which is how a stale view sees length 0.
+    shared: Option<Rc<RefCell<Vec<u8>>>>,
     detached: Cell<bool>,
 }
 
 impl std::ops::Deref for Store {
     type Target = RefCell<Vec<u8>>;
     fn deref(&self) -> &RefCell<Vec<u8>> {
-        &self.cell
+        match &self.shared {
+            Some(shared) => shared,
+            None => &self.cell,
+        }
     }
 }
 
@@ -105,19 +111,39 @@ pub(crate) type Bytes = Rc<Store>;
 pub(crate) fn new_bytes(v: Vec<u8>) -> Bytes {
     Rc::new(Store {
         cell: RefCell::new(v),
+        shared: None,
+        detached: Cell::new(false),
+    })
+}
+
+#[cfg(feature = "wasm")]
+/// An attached storage over bytes the wasm engine owns (no copy; the same allocation as the engine's memory).
+pub(crate) fn shared_bytes(shared: Rc<RefCell<Vec<u8>>>) -> Bytes {
+    Rc::new(Store {
+        cell: RefCell::new(Vec::new()),
+        shared: Some(shared),
         detached: Cell::new(false),
     })
 }
 
 /// Detach a storage: its bytes are released (length 0) and it reports `detached`. Idempotent.
+/// A shared storage keeps its bytes (the engine owns them); only the flag changes.
 pub(crate) fn detach_bytes(b: &Bytes) {
-    *b.cell.borrow_mut() = Vec::new();
+    if b.shared.is_none() {
+        *b.cell.borrow_mut() = Vec::new();
+    }
     b.detached.set(true);
 }
 
-/// True once `detach_bytes` has run on this storage.
+#[cfg(feature = "wasm")]
+/// True when `b` is the storage over exactly this engine-owned allocation (see `shared_bytes`).
+pub(crate) fn same_shared(b: &Bytes, shared: &Rc<RefCell<Vec<u8>>>) -> bool {
+    b.shared.as_ref().is_some_and(|s| Rc::ptr_eq(s, shared))
+}
+
+/// True once `detach_bytes` has run on this storage, or a shared storage was emptied by its engine owner.
 pub(crate) fn is_detached(b: &Bytes) -> bool {
-    b.detached.get()
+    b.detached.get() || b.shared.as_ref().is_some_and(|s| s.borrow().is_empty())
 }
 
 #[derive(Clone)]
@@ -127,6 +153,27 @@ pub(crate) struct TypedArr {
     pub(crate) ty: Ty,
     pub(crate) off: usize,
     pub(crate) len: usize,
+}
+
+/// What an integer-indexed exotic object does with a property key (see `TypedArr::key`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum TypedKey {
+    Index(usize),
+    Invalid,
+    Ordinary,
+}
+
+/// The own-property answer for a numeric key of a typed array: `Some(true)` for a valid element, `Some(false)`
+/// for any other canonical numeric key, `None` for an ordinary key or any non-typed object.
+pub(crate) fn typed_own_key(o: &Obj, key: &str) -> Option<bool> {
+    match &*o.kind.borrow() {
+        Kind::Typed(t) => match t.key(key) {
+            TypedKey::Index(_) => Some(true),
+            TypedKey::Invalid => Some(false),
+            TypedKey::Ordinary => None,
+        },
+        _ => None,
+    }
 }
 
 impl TypedArr {
@@ -215,6 +262,18 @@ impl TypedArr {
             self.set(i, n);
         }
         Ok(())
+    }
+
+    /// How this array treats property key `k` (the integer-indexed exotic object rules): a valid index is an
+    /// element; any other CanonicalNumericIndexString (`-1`, `1.5`, `-0`, `NaN`, `Infinity`, `4294967296`) is
+    /// `Invalid` and never reaches the ordinary properties; every other key is `Ordinary`.
+    pub(crate) fn key(&self, k: &str) -> TypedKey {
+        match array_index(k) {
+            Some(i) if i < self.cur_len() => TypedKey::Index(i),
+            Some(_) => TypedKey::Invalid,
+            None if canonical_numeric_index(k).is_some() => TypedKey::Invalid,
+            None => TypedKey::Ordinary,
+        }
     }
 
     /// Wraps modulo 2^64 like the spec's BigInt64 / BigUint64 stores.

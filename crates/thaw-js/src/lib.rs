@@ -61,6 +61,7 @@ pub mod scan;
 mod sysio;
 mod tls;
 mod typed;
+pub(crate) use typed::TypedKey;
 mod url;
 mod vm;
 #[path = "web/abort.rs"]
@@ -93,6 +94,12 @@ mod web_streams;
 mod web_text_codec;
 #[path = "web/wasm.rs"]
 mod web_wasm;
+#[cfg(feature = "wasm")]
+#[path = "web/wasm_natives.rs"]
+mod web_wasm_natives;
+#[cfg(all(test, feature = "wasm"))]
+#[path = "web/wasm_tests.rs"]
+mod web_wasm_tests;
 #[path = "web/worker_stream.rs"]
 mod web_worker_stream;
 #[path = "web/worker_threads.rs"]
@@ -911,6 +918,11 @@ pub struct Interp {
     /// Process-unique id of this realm: tags the zlib jobs it starts so only it collects their results.
     pub(crate) realm_id: usize,
     depth: usize,
+    /// Addresses of the arrays/objects whose native walk is in progress (`join`, `inspect`): meeting one
+    /// again means the value contains itself. Shared guard for every native recursion over user objects.
+    walking: Vec<usize>,
+    /// Address of the object a `[Circular *1]` pointed back to (inspect prints `<ref *1>` on it).
+    circular_target: Option<usize>,
     /// Call-depth cap; replaced by the stack-address check once `configure_stack` was called.
     max_depth: usize,
     /// Lowest stack address JS calls may reach (0 = not configured).
@@ -948,6 +960,9 @@ pub struct Interp {
     /// One thaw-js Error per native Error id: `(name, message, error)`, so a native Error that crosses
     /// twice is the same object (`error_object`).
     pub(crate) native_errors: HashMap<u64, (String, String, Value)>,
+    /// Native exception packets a thrown carrier names (`\0pkt`, host.rs `packet_error`), by packet id. The
+    /// arena keeps packets weakly, so this keeps a carrier's packet resolvable until release_all.
+    pub(crate) native_packets: HashMap<u64, Rc<thaw_arena::exception::ExceptionPacket>>,
     /// The intrinsic `Symbol` constructor, its `Symbol.for` registry and the well-known symbols, captured at
     /// realm setup (collections.rs `install_collections`), so Rust never looks `Symbol` up in the global scope.
     pub(crate) symbol_ctor: Option<Obj>,
@@ -1051,6 +1066,8 @@ impl Interp {
             arg_pool: Vec::new(),
             realm_id: next_realm_id(),
             depth: 0,
+            walking: Vec::new(),
+            circular_target: None,
             max_depth: MAX_DEPTH,
             stack_limit: 0,
             out: Vec::new(),
@@ -1070,6 +1087,7 @@ impl Interp {
             yielded: false,
             callback_values: HashMap::new(),
             native_errors: HashMap::new(),
+            native_packets: HashMap::new(),
             symbol_ctor: None,
             symbol_registry: None,
             well_known: Vec::new(),
@@ -1126,6 +1144,8 @@ impl Interp {
             web_streams::install(&mut it);
             web_async_hooks::install(&mut it);
             web_wasm::install(&mut it);
+            #[cfg(feature = "wasm")]
+            web_wasm_natives::install(&mut it);
             web_crypto::install(&mut it);
             web_navigator::install(&mut it);
             web_console::install(&mut it);
@@ -1377,14 +1397,33 @@ impl Interp {
         }
     }
 
+    /// Starts a native walk of `o`. `false` when `o` is already being walked, i.e. the walk reached
+    /// a cycle: the caller stops there. Every `true` must be paired with `leave_walk`.
+    pub(crate) fn enter_walk(&mut self, o: &Obj) -> bool {
+        let addr = Rc::as_ptr(o) as usize;
+        if self.walking.contains(&addr) {
+            return false;
+        }
+        self.walking.push(addr);
+        true
+    }
+
+    pub(crate) fn leave_walk(&mut self) {
+        self.walking.pop();
+    }
+
     pub(crate) fn join(&mut self, this: &Value, sep: &str) -> JsStr {
-        let items = match this {
-            Value::Object(o) => match &*o.kind.borrow() {
-                Kind::Array(v) => v.clone(),
-                _ => Vec::new(),
-            },
-            _ => Vec::new(),
+        let Value::Object(o) = this else {
+            return "".into();
         };
+        let items = match &*o.kind.borrow() {
+            Kind::Array(v) => v.clone(),
+            _ => return "".into(),
+        };
+        // ES: an array that reaches itself joins that reference as the empty string
+        if !self.enter_walk(o) {
+            return "".into();
+        }
         let mut out = String::new();
         for (i, v) in items.iter().enumerate() {
             if i > 0 {
@@ -1394,6 +1433,7 @@ impl Interp {
                 builtins::push_joined(&mut out, &self.to_str(v));
             }
         }
+        self.leave_walk();
         out.into()
     }
 
@@ -1526,7 +1566,13 @@ impl Interp {
                         }
                     }
                 };
-                match kind {
+                // a cycle back into an array/object being printed is `[Circular *1]`
+                let walks = matches!(kind, K::Arr(_) | K::Plain);
+                if walks && !self.enter_walk(o) {
+                    self.circular_target = Some(Rc::as_ptr(o) as usize);
+                    return "[Circular *1]".into();
+                }
+                let text: String = match kind {
                     K::Arr(items) if items.is_empty() => "[]".into(),
                     K::Arr(items) => {
                         let mut parts: Vec<String> = Vec::new();
@@ -1603,7 +1649,15 @@ impl Interp {
                             format!("{head}{{ {} }}", parts.join(", "))
                         }
                     }
+                };
+                if walks {
+                    self.leave_walk();
                 }
+                if self.circular_target == Some(Rc::as_ptr(o) as usize) {
+                    self.circular_target = None;
+                    return format!("<ref *1> {text}");
+                }
+                text
             }
             Value::Number(n) if *n == 0.0 && n.is_sign_negative() => "-0".into(),
             Value::BigInt(b) => format!("{b}n"),
@@ -1748,9 +1802,13 @@ impl Interp {
                         }
                         "byteOffset" => Fast::Hit(Value::Number(t.cur_off() as f64)),
                         "buffer" => Fast::Hit(Value::Object(t.abuf.clone())),
-                        _ => array_index(key).map_or(Fast::Chain, |i| {
-                            Fast::Hit(t.get_value(i).unwrap_or(Value::Undefined))
-                        }),
+                        _ => match t.key(key) {
+                            TypedKey::Index(i) => {
+                                Fast::Hit(t.get_value(i).unwrap_or(Value::Undefined))
+                            }
+                            TypedKey::Invalid => Fast::Hit(Value::Undefined),
+                            TypedKey::Ordinary => Fast::Chain,
+                        },
                     },
                     Kind::ArrayBuffer(b) if key == "byteLength" => {
                         Fast::Hit(Value::Number(b.borrow().len() as f64))
@@ -1852,9 +1910,19 @@ impl Interp {
             Kind::Typed(t) => Some(t.clone()),
             _ => None,
         };
-        if let (Some(t), Some(i)) = (typed, array_index(key)) {
-            t.set_value(self, i, &value)?;
-            return Ok(());
+        if let Some(t) = typed {
+            match t.key(key) {
+                TypedKey::Index(i) => {
+                    t.set_value(self, i, &value)?;
+                    return Ok(());
+                }
+                // a non-element numeric key: the conversion still runs, the store is dropped (out of range)
+                TypedKey::Invalid => {
+                    t.set_value(self, usize::MAX, &value)?;
+                    return Ok(());
+                }
+                TypedKey::Ordinary => {}
+            }
         }
         match find_in_chain(o, key) {
             Some(Slot::Accessor { set, .. }) => {
@@ -4173,6 +4241,21 @@ pub(crate) fn array_index(k: &str) -> Option<usize> {
         .ok()
         .filter(|n| *n != u32::MAX)
         .map(|n| n as usize)
+}
+
+/// CanonicalNumericIndexString (spec 7.1.21): `-0`, or a key whose ToString(ToNumber(k)) is k itself
+/// (`"-1"`, `"1.5"`, `"NaN"`, `"Infinity"`). Typed arrays route these keys away from ordinary properties.
+pub(crate) fn canonical_numeric_index(k: &str) -> Option<f64> {
+    if k == "-0" {
+        return Some(-0.0);
+    }
+    // cheap reject: every canonical numeric string starts with a digit, '-', 'I' or 'N'
+    match k.as_bytes().first()? {
+        b'0'..=b'9' | b'-' | b'I' | b'N' => {}
+        _ => return None,
+    }
+    let n = string_to_number(k);
+    (number_to_string(n) == k).then_some(n)
 }
 
 /// Enumeration order of own keys: array indices ascending, then the rest in insertion order.

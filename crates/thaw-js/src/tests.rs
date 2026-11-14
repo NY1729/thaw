@@ -834,6 +834,36 @@ fn typed_arrays_wrap_values_and_share_their_buffer() {
 }
 
 #[test]
+fn typed_array_canonical_numeric_keys_are_integer_indexed_not_ordinary() {
+    assert_eq!(
+        one("var s = new Uint8Array(3); s[-1] = 5; s['1.5'] = 1; s['-0'] = 2; s.foo = 4;
+             console.log(s[-1], s['1.5'], s['-0'], Object.keys(s).join(), -1 in s, '1.5' in s, s.hasOwnProperty('-1'), s.hasOwnProperty(0), s.foo, s['01']);"),
+        "undefined undefined undefined 0,1,2,foo false false false true 4 undefined"
+    );
+}
+
+#[test]
+fn typed_array_invalid_numeric_key_define_throws_and_delete_follows_validity() {
+    assert_eq!(
+        one("var t = new Uint8Array(2);
+             try { Object.defineProperty(t, '-1', {value: 1}); } catch (e) { console.log(e.constructor.name, e.message); }
+             console.log(Reflect.defineProperty(t, '1.5', {value: 1}), Reflect.set(t, '-1', 3), Reflect.get(t, '-1'), delete t[-1], delete t[0]);"),
+        "TypeError Invalid typed array index|false true undefined true false"
+    );
+}
+
+#[test]
+fn bigint_and_buffer_canonical_numeric_keys_are_integer_indexed() {
+    assert_eq!(
+        one("var b = new BigInt64Array(2); b[-1] = 5n; b['1.5'] = 1n;
+             console.log(b[-1], b['1.5'], Object.keys(b).join(), -1 in b);
+             var f = Buffer.from([1, 2]); f[-1] = 9; f.x = 3;
+             console.log(f[-1], Object.keys(f).join(), JSON.stringify(f));"),
+        "undefined undefined 0,1 false|undefined 0,1,x {\"type\":\"Buffer\",\"data\":[1,2]}"
+    );
+}
+
+#[test]
 fn dataview_is_an_array_buffer_view() {
     assert_eq!(
         one("var b = new ArrayBuffer(4), d = new DataView(b, 1, 2);
@@ -1219,6 +1249,100 @@ fn native_error_token_round_trips_through_the_hidden_id() {
     assert_eq!(thaw_tjs_exception_native_token(0), 0);
     drop(packet);
     assert_eq!(thaw_tjs_exception_native_token(made.value), 0);
+}
+
+/// A packet built from a native Error identity (`native_error_identity`), as a native throw publishes it.
+fn identified_packet(
+    identity: usize,
+    tag: i64,
+    object: usize,
+) -> thaw_arena::exception::ExceptionPacket {
+    let mut packet = primitive_exception_packet(tag, 0.0, 0, false, object);
+    packet.native_error_identity = identity;
+    packet
+}
+
+/// Runs a native throw's callback result (`text`, carrying `packet`) through `take_callback_result` on the
+/// default realm, with every outside `Rc` of the packet dropped. Returns the thrown value and its hidden
+/// `\0pkt` property.
+fn thrown_through_callback(
+    packet: thaw_arena::exception::ExceptionPacket,
+    text: &[u8],
+) -> (Value, Value) {
+    let pointer = thaw_arena::owned_string(text);
+    let (_, packet) = thaw_arena::exception::register_packet(packet).unwrap();
+    assert!(thaw_arena::bind_owned_exception(pointer, packet));
+    crate::host::with_package(crate::host::default_realm(), |p| {
+        let thrown = match crate::host::take_callback_result(&mut p.interp, pointer) {
+            Err(Ctl::Throw(v)) => v,
+            _ => panic!("expected a throw"),
+        };
+        let pkt = p
+            .interp
+            .get(&thrown, "\u{0}pkt")
+            .unwrap_or(Value::Undefined);
+        Ok((thrown, pkt))
+    })
+    .unwrap_or_else(|_| panic!("the default realm is unavailable"))
+}
+
+/// A native Error thrown through a callback keeps its packet: the carrier names it with a hidden `\0pkt`,
+/// the native token resolves to it after the caller's `Rc` is gone, and one framed native Error crossing
+/// twice is one object.
+#[test]
+fn native_error_throw_carrier_keeps_its_packet() {
+    use crate::host::{store_handle, thaw_tjs_exception_native_token};
+    let identity = 0x7f00_0020_usize;
+    let (first, pkt) =
+        thrown_through_callback(identified_packet(identity, 4, 0), b"\x02\x01Error\x01boom");
+    let Value::Number(id) = pkt else {
+        panic!("the thrown carrier has no hidden \\0pkt");
+    };
+    let id = id as u64;
+    assert!(thaw_arena::exception::is_live(id));
+    let handle = store_handle(crate::host::default_realm(), first.clone()) as u64;
+    assert_eq!(thaw_tjs_exception_native_token(handle), id);
+    let (second, _) =
+        thrown_through_callback(identified_packet(identity, 4, 0), b"\x02\x01Error\x01boom");
+    assert!(
+        matches!((&first, &second), (Value::Object(a), Value::Object(b)) if Rc::ptr_eq(a, b)),
+        "the same native Error must be the same thrown object"
+    );
+}
+
+/// An untracked plain object thrown from a native callback keeps a live packet on its placeholder carrier,
+/// so the native side can restore the original value by token.
+#[test]
+fn native_thrown_object_carrier_names_its_packet() {
+    use crate::host::{store_handle, thaw_tjs_exception_native_token};
+    let (thrown, pkt) = thrown_through_callback(
+        primitive_exception_packet(7, 0.0, 0, false, 0x1234),
+        b"\x02[native exception value]",
+    );
+    assert!(matches!(thrown, Value::Object(_)));
+    let Value::Number(id) = pkt else {
+        panic!("the thrown carrier has no hidden \\0pkt");
+    };
+    let id = id as u64;
+    assert!(thaw_arena::exception::is_live(id));
+    let handle = store_handle(crate::host::default_realm(), thrown) as u64;
+    assert_eq!(thaw_tjs_exception_native_token(handle), id);
+}
+
+/// A packet retained by a thrown carrier is released by `thaw_tjs_release_all_handles`.
+#[test]
+fn release_all_drops_packets_retained_by_thrown_carriers() {
+    let (_, pkt) = thrown_through_callback(
+        identified_packet(0x7f00_0030, 4, 0),
+        b"\x02\x01Error\x01gone",
+    );
+    let Value::Number(id) = pkt else {
+        panic!("the thrown carrier has no hidden \\0pkt");
+    };
+    let id = id as u64;
+    assert!(thaw_arena::exception::is_live(id));
+    crate::host::thaw_tjs_release_all_handles();
+    assert!(!thaw_arena::exception::is_live(id));
 }
 
 /// Node 22.23.1: `Object.keys(e)` is `["extra"]`, `JSON.stringify(e)` is `{"extra":1}` and the cause
@@ -8543,6 +8667,48 @@ fn construct_non_constructors_name_the_callee() {
     );
 }
 
+// Cyclic arrays/objects in native walks (Array.prototype.join and its callers, inspect).
+// A reference back to an array still being joined is the empty string (ES Array.prototype.join);
+// inspect prints `[Circular *1]` and marks the target `<ref *1>`, as Node does.
+
+#[test]
+fn cyclic_array_join_is_empty_at_the_cycle() {
+    assert_eq!(
+        one(
+            r#"var a=[1,2]; a.push(a); console.log(JSON.stringify([String(a), a.join("-"), ""+a, `${a}`, String(Number(a))]))"#
+        ),
+        r#"["1,2,","1-2-","1,2,","1,2,","NaN"]"#
+    );
+}
+
+#[test]
+fn cyclic_array_nested_and_mutual_join() {
+    assert_eq!(
+        one(
+            r#"var p=[1],q=[p]; p.push(q); var x=[1,[2]]; x[1].push(x); console.log(JSON.stringify([String(p),String(q),String(x),[x].toString()]))"#
+        ),
+        r#"["1,","1,","1,2,","1,2,"]"#
+    );
+}
+
+#[test]
+fn cyclic_array_join_with_separators() {
+    assert_eq!(
+        one(
+            r#"var m=[1,2,3]; m.push(m); console.log(JSON.stringify(m.join(", ") + " ; " + m.join("")))"#
+        ),
+        r#""1, 2, 3,  ; 123""#
+    );
+}
+
+#[test]
+fn cyclic_array_json_and_flat_errors() {
+    assert_eq!(
+        one(r#"var a=[1]; a.push(a); try { JSON.stringify(a) } catch (e) { console.log(e.name, e.message.split("\n")[0]) } try { a.flat(Infinity) } catch (e) { console.log(e.name, e.message) }"#),
+        "TypeError Converting circular structure to JSON|RangeError Maximum call stack size exceeded"
+    );
+}
+
 #[test]
 fn host_own_predicate_consults_proxy_descriptor_trap() {
     let mut it = Interp::new();
@@ -8588,5 +8754,21 @@ fn host_own_predicate_consults_proxy_descriptor_trap() {
     assert_eq!(
         crate::host::property_predicate_value(&mut it, &zo, "b", 1).unwrap(),
         0
+    );
+}
+
+#[test]
+fn cyclic_array_structured_clone_keeps_the_cycle() {
+    assert_eq!(
+        one(r#"var a=[1,2]; a.push(a); var c=structuredClone(a); console.log(c.length, c[2]===c)"#),
+        "3 true"
+    );
+}
+
+#[test]
+fn cyclic_values_inspect_as_circular() {
+    assert_eq!(
+        one(r#"var a=[1,2]; a.push(a); console.log(a); var o={n:1}; o.self=o; console.log(o)"#),
+        "<ref *1> [ 1, 2, [Circular *1] ]|<ref *1> { n: 1, self: [Circular *1] }"
     );
 }
