@@ -589,7 +589,6 @@ pub extern "C" fn thaw_json_set_js_engine(id: u8) {
     JS_ENGINE.with(|engine| engine.set(id));
 }
 
-#[allow(dead_code)] // consumers (engine-specific gates) land in a follow-up PR
 pub(crate) fn engine_is_thaw_js() -> bool {
     JS_ENGINE.with(|engine| engine.get()) == 1
 }
@@ -1851,6 +1850,9 @@ fn error_prop_value(error: *const c_char, key: &[u8]) -> Value {
 
 /// A stored one-key handle marker (a thaw-js object kept alive by the error) becomes its live lease again.
 fn live_handle_prop(value: Value) -> Value {
+    if !engine_is_thaw_js() {
+        return value;
+    }
     match json_handle_ref(&value) {
         Some(handle) if matches!(value, Value::Object(_)) => {
             host_value_from_borrowed_handle(handle).unwrap_or(value)
@@ -1865,7 +1867,7 @@ fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
     };
     // A live host object is stored as its handle marker; the error takes one reference to it.
     let marker = match value {
-        Value::Host(lease) if lease.handle != 0 => {
+        Value::Host(lease) if engine_is_thaw_js() && lease.handle != 0 => {
             HOST_OPERATIONS.with(|slot| slot.get()).and_then(|ops| {
                 (without_typed_decode_scope(|| (ops.retain)(lease.handle)) != 0)
                     .then(|| format!(r#"{{"__thaw_tjs_handle__":{}}}"#, lease.handle))
@@ -11655,24 +11657,29 @@ mod tests {
         1
     }
 
+    fn install_counting_host_operations() {
+        HOST_OPERATIONS.with(|slot| {
+            slot.set(Some(HostOperations {
+                retain: counting_retain,
+                release: factory_test_release,
+                get: pr2_test_get,
+                query: pr2_test_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            }))
+        });
+    }
+
     #[test]
     fn a_host_cause_stored_on_an_error_reads_back_as_the_same_live_handle() {
         std::thread::spawn(|| {
             unsafe extern "C" {
                 fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char;
             }
-            HOST_OPERATIONS.with(|slot| {
-                slot.set(Some(HostOperations {
-                    retain: counting_retain,
-                    release: factory_test_release,
-                    get: pr2_test_get,
-                    query: pr2_test_query,
-                    date_set: unused_typed_scope_date,
-                    set: unused_typed_scope_set,
-                    predicate: unused_typed_scope_predicate,
-                    enumerate: unused_typed_scope_text,
-                }))
-            });
+            install_counting_host_operations();
+            thaw_json_set_js_engine(1);
             let error = unsafe { thaw_error_frame(c"Error".as_ptr(), c"outer".as_ptr()) };
             let cause = Value::Host(Rc::new(HostLease {
                 handle: 3,
@@ -11690,6 +11697,35 @@ mod tests {
                 matches!(error_prop_value(error, b"plain"), Value::String(text) if text == "x")
             );
             assert_eq!(RETAIN_CALLS.with(Cell::get), 2);
+            thaw_json_set_js_engine(0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    // Under QuickJS (engine 0) a Host value is not a thaw-js handle: it keeps the
+    // pre-existing text form, takes no reference, and reads back as before.
+    #[test]
+    fn a_host_cause_under_the_default_engine_stores_text_without_a_retain() {
+        std::thread::spawn(|| {
+            unsafe extern "C" {
+                fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char;
+            }
+            install_counting_host_operations();
+            thaw_json_set_js_engine(0);
+            let error = unsafe { thaw_error_frame(c"Error".as_ptr(), c"outer".as_ptr()) };
+            let cause = Value::Host(Rc::new(HostLease {
+                handle: 3,
+                release: factory_test_release,
+            }));
+            set_error_prop(error, b"cause", &cause);
+            assert_eq!(RETAIN_CALLS.with(Cell::get), 0);
+            let read = error_prop_value(error, b"cause");
+            assert!(!matches!(&read, Value::Host(_)));
+            // Pre-change read-back: the Host's text form is empty, so the prop reads as undefined.
+            assert_eq!(read.to_string(), napi_undefined_value().to_string());
+            assert_eq!(RETAIN_CALLS.with(Cell::get), 0);
+            thaw_json_set_js_engine(0);
         })
         .join()
         .unwrap();
