@@ -1690,6 +1690,16 @@ impl<'ctx> HirCompiler<'ctx> {
         if self.js_engine() == JsEngine::ThawJs {
             return self.compile_thaw_js_handle_marker(handle.into_int_value());
         }
+        self.compile_branded_dynamic_value_placeholder(handle)
+    }
+
+    /// The branded `__thaw_js_handle_id__` wrapper that `thaw_json_graph_encode` turns into a lease on every
+    /// engine. Callback results must use this on thaw-js: `compile_thaw_js_handle_marker` is the plain call-argument
+    /// marker, which the encoder never sees as a handle, so the result turned into `null`.
+    pub(super) fn compile_branded_dynamic_value_placeholder(
+        &mut self,
+        handle: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let handle = self
             .builder
             .build_unsigned_int_to_float(
