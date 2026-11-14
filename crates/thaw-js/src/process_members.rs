@@ -328,7 +328,6 @@ fn set_source_maps_enabled(_: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::Interp;
 
     /// Runs `src` in a fresh realm and returns what it logged, joined by `|`.
