@@ -2449,50 +2449,99 @@ isFinite	name	data	--c	string	-	isFinite	-	-	-
 isNaN	length	data	--c	number	1	-	-	-	-
 isNaN	name	data	--c	string	-	isNaN	-	-	-
 process	@@toStringTag	data	w--	string	-	-	-	-	process
+process	_getActiveHandles	data	wec	function	0	_getActiveHandles	0	-	-
+process	_getActiveRequests	data	wec	function	0	_getActiveRequests	0	-	-
+process	_kill	data	wec	function	0	_kill	0	-	-
+process	_linkedBinding	data	wec	function	1	_linkedBinding	1	174	-
+process	_rawDebug	data	wec	function	0	_rawDebug	1	175	-
+process	abort	data	wec	function	0	abort	0	-	-
 process	arch	data	-ec	string	-	-	-	-	-
 process	argv	data	wec	object	-	-	-	-	-
+process	argv0	data	-e-	string	-	-	-	-	-
+process	availableMemory	data	wec	function	0	availableMemory	0	-	-
 process	binding	data	wec	function	1	binding	1	177	-
 process	chdir	data	wec	function	1		1	178	-
 process	config	data	-ec	object	-	-	-	-	-
+process	constrainedMemory	data	wec	function	0	constrainedMemory	0	-	-
+process	cpuUsage	data	wec	function	1	cpuUsage	1	179	-
 process	cwd	data	wec	function	0	wrappedCwd	1	180	-
+process	debugPort	data	wec	number	-	-	-	-	-
 process	emitWarning	data	wec	function	4	emitWarning	1	181	-
 process	env	data	wec	object	-	-	-	-	-
 process	execArgv	data	wec	object	-	-	-	-	-
 process	execPath	data	wec	string	-	-	-	-	-
 process	exit	data	wec	function	1	exit	1	183	-
 process	exitCode	accessor	-e-	-	-	get|set	-	-	-
+process	features	data	-e-	object	-	-	-	-	-
+process	getActiveResourcesInfo	data	wec	function	0	getActiveResourcesInfo	0	-	-
 process	getegid	data	wec	function	0	getegid	0	-	-
 process	geteuid	data	wec	function	0	geteuid	0	-	-
 process	getgid	data	wec	function	0	getgid	0	-	-
+process	getgroups	data	wec	function	0	getgroups	0	-	-
 process	getuid	data	wec	function	0	getuid	0	-	-
 process	hrtime	data	wec	function	1	hrtime	1	186	-
+process	initgroups	data	wec	function	2	initgroups	1	187	-
 process	kill	data	wec	function	2	kill	1	188	-
 process	memoryUsage	data	wec	function	0	memoryUsage	1	190	-
 process	nextTick	data	wec	function	1	nextTick	1	191	-
 process	pid	data	-ec	number	-	-	-	-	-
 process	platform	data	-ec	string	-	-	-	-	-
+process	ppid	data	wec	number	-	-	-	-	-
+process	reallyExit	data	wec	function	0	reallyExit	0	-	-
 process	release	data	-ec	object	-	-	-	-	-
+process	report	accessor	-ec	-	-	get|-	-	-	-
+process	resourceUsage	data	wec	function	0	resourceUsage	1	194	-
+process	setSourceMapsEnabled	data	wec	function	1	setSourceMapsEnabled	1	195	-
+process	setegid	data	wec	function	1		1	197	-
+process	seteuid	data	wec	function	1		1	198	-
+process	setgid	data	wec	function	1		1	199	-
+process	setgroups	data	wec	function	1	setgroups	1	200	-
+process	setuid	data	wec	function	1		1	201	-
+process	sourceMapsEnabled	accessor	-ec	-	-	get|-	-	-	-
+process	threadCpuUsage	data	wec	function	1	threadCpuUsage	1	202	-
 process	title	data	wec	string	-	-	-	-	-
 process	umask	data	wec	function	1	wrappedUmask	1	203	-
 process	uptime	data	wec	function	0	uptime	0	-	-
 process	version	data	-ec	string	-	-	-	-	-
 process	versions	data	-ec	object	-	-	-	-	-
+process._getActiveHandles	length	data	--c	number	0	-	-	-	-
+process._getActiveHandles	name	data	--c	string	-	_getActiveHandles	-	-	-
+process._getActiveRequests	length	data	--c	number	0	-	-	-	-
+process._getActiveRequests	name	data	--c	string	-	_getActiveRequests	-	-	-
+process._kill	length	data	--c	number	0	-	-	-	-
+process._kill	name	data	--c	string	-	_kill	-	-	-
+process._linkedBinding	length	data	--c	number	1	-	-	-	-
+process._linkedBinding	name	data	--c	string	-	_linkedBinding	-	-	-
+process._rawDebug	length	data	--c	number	0	-	-	-	-
+process._rawDebug	name	data	--c	string	-	_rawDebug	-	-	-
+process.abort	length	data	--c	number	0	-	-	-	-
+process.abort	name	data	--c	string	-	abort	-	-	-
+process.availableMemory	length	data	--c	number	0	-	-	-	-
+process.availableMemory	name	data	--c	string	-	availableMemory	-	-	-
 process.binding	length	data	--c	number	1	-	-	-	-
 process.binding	name	data	--c	string	-	binding	-	-	-
 process.chdir	length	data	--c	number	1	-	-	-	-
 process.chdir	name	data	--c	string	-		-	-	-
+process.constrainedMemory	length	data	--c	number	0	-	-	-	-
+process.constrainedMemory	name	data	--c	string	-	constrainedMemory	-	-	-
+process.cpuUsage	length	data	--c	number	1	-	-	-	-
+process.cpuUsage	name	data	--c	string	-	cpuUsage	-	-	-
 process.cwd	length	data	--c	number	0	-	-	-	-
 process.cwd	name	data	--c	string	-	wrappedCwd	-	-	-
 process.emitWarning	length	data	--c	number	4	-	-	-	-
 process.emitWarning	name	data	--c	string	-	emitWarning	-	-	-
 process.exit	length	data	--c	number	1	-	-	-	-
 process.exit	name	data	--c	string	-	exit	-	-	-
+process.getActiveResourcesInfo	length	data	--c	number	0	-	-	-	-
+process.getActiveResourcesInfo	name	data	--c	string	-	getActiveResourcesInfo	-	-	-
 process.getegid	length	data	--c	number	0	-	-	-	-
 process.getegid	name	data	--c	string	-	getegid	-	-	-
 process.geteuid	length	data	--c	number	0	-	-	-	-
 process.geteuid	name	data	--c	string	-	geteuid	-	-	-
 process.getgid	length	data	--c	number	0	-	-	-	-
 process.getgid	name	data	--c	string	-	getgid	-	-	-
+process.getgroups	length	data	--c	number	0	-	-	-	-
+process.getgroups	name	data	--c	string	-	getgroups	-	-	-
 process.getuid	length	data	--c	number	0	-	-	-	-
 process.getuid	name	data	--c	string	-	getuid	-	-	-
 process.hrtime	bigint	data	wec	function	0	hrtimeBigInt	1	-	-
@@ -2500,6 +2549,8 @@ process.hrtime	length	data	--c	number	1	-	-	-	-
 process.hrtime	name	data	--c	string	-	hrtime	-	-	-
 process.hrtime.bigint	length	data	--c	number	0	-	-	-	-
 process.hrtime.bigint	name	data	--c	string	-	hrtimeBigInt	-	-	-
+process.initgroups	length	data	--c	number	2	-	-	-	-
+process.initgroups	name	data	--c	string	-	initgroups	-	-	-
 process.kill	length	data	--c	number	2	-	-	-	-
 process.kill	name	data	--c	string	-	kill	-	-	-
 process.memoryUsage	length	data	--c	number	0	-	-	-	-
@@ -2509,6 +2560,24 @@ process.memoryUsage.rss	length	data	--c	number	0	-	-	-	-
 process.memoryUsage.rss	name	data	--c	string	-	rss	-	-	-
 process.nextTick	length	data	--c	number	1	-	-	-	-
 process.nextTick	name	data	--c	string	-	nextTick	-	-	-
+process.reallyExit	length	data	--c	number	0	-	-	-	-
+process.reallyExit	name	data	--c	string	-	reallyExit	-	-	-
+process.resourceUsage	length	data	--c	number	0	-	-	-	-
+process.resourceUsage	name	data	--c	string	-	resourceUsage	-	-	-
+process.setSourceMapsEnabled	length	data	--c	number	1	-	-	-	-
+process.setSourceMapsEnabled	name	data	--c	string	-	setSourceMapsEnabled	-	-	-
+process.setegid	length	data	--c	number	1	-	-	-	-
+process.setegid	name	data	--c	string	-		-	-	-
+process.seteuid	length	data	--c	number	1	-	-	-	-
+process.seteuid	name	data	--c	string	-		-	-	-
+process.setgid	length	data	--c	number	1	-	-	-	-
+process.setgid	name	data	--c	string	-		-	-	-
+process.setgroups	length	data	--c	number	1	-	-	-	-
+process.setgroups	name	data	--c	string	-	setgroups	-	-	-
+process.setuid	length	data	--c	number	1	-	-	-	-
+process.setuid	name	data	--c	string	-		-	-	-
+process.threadCpuUsage	length	data	--c	number	1	-	-	-	-
+process.threadCpuUsage	name	data	--c	string	-	threadCpuUsage	-	-	-
 process.umask	length	data	--c	number	1	-	-	-	-
 process.umask	name	data	--c	string	-	wrappedUmask	-	-	-
 process.uptime	length	data	--c	number	0	-	-	-	-
