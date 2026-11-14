@@ -4440,6 +4440,96 @@ fn drain_native_continuations(_: &mut Interp) -> bool {
     ran || (http & 2) != 0
 }
 
+/// Process-wide barrier ids (unique across threads and realms; 0 is "no barrier").
+static JOB_BARRIER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+thread_local! {
+    /// Whether this thread handed the job barrier hooks to the compiled runtime (its registry is per thread).
+    static JOB_HOOKS_REGISTERED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Calls `f` on every realm of this thread: packages in their slots, and packages running now (taken out
+/// of their slot, reached through `RUNNING`). Only for work that runs no JavaScript (PACKAGES stays borrowed).
+fn for_each_interp(f: &mut dyn FnMut(&mut Interp)) {
+    PACKAGES.with(|ps| {
+        if let Ok(mut ps) = ps.try_borrow_mut() {
+            for package in ps.iter_mut().flatten() {
+                f(&mut package.interp);
+            }
+        }
+    });
+    let running: Vec<*mut Package> = RUNNING.with(|r| r.borrow().values().copied().collect());
+    for ptr in running {
+        // SAFETY: a running package's pointer is a live stack local of its enclosing `with_package`.
+        f(unsafe { &mut (*ptr).interp });
+    }
+}
+
+/// `thaw_runtime_set_js_job_hooks` queue hook: a barrier id behind every realm's pending jobs, 0 if none pending.
+pub(crate) extern "C" fn queue_js_job_barrier() -> u64 {
+    let mut pending = false;
+    for_each_interp(&mut |it| pending |= it.has_job_work());
+    if !pending {
+        return 0;
+    }
+    let id = JOB_BARRIER_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    for_each_interp(&mut |it| {
+        if it.has_job_work() {
+            it.push_job_barrier(id);
+        }
+    });
+    id
+}
+
+/// `thaw_runtime_set_js_job_hooks` drain hook: runs every realm's jobs queued before barrier `id`.
+/// ponytail: a fatal error from a drained job is dropped here (the hook returns nothing); the normal loop reports the rest.
+pub(crate) extern "C" fn drain_js_job_barrier(id: u64) {
+    if id == 0 {
+        return;
+    }
+    let count = PACKAGES.with(|ps| ps.borrow().len());
+    let last = LAST_PACKAGE.with(Cell::get);
+    for handle in 0..count {
+        let _ = with_package(handle, |p| {
+            p.interp
+                .drain_to_job_barrier(id)
+                .map_err(|c| classify(&mut p.interp, c))
+        });
+    }
+    LAST_PACKAGE.with(|l| l.set(last));
+}
+
+/// Hands the job barrier hooks to the compiled runtime once per thread (looked up by symbol; no runtime, no hooks).
+fn ensure_js_job_hooks() {
+    if JOB_HOOKS_REGISTERED.with(Cell::get) {
+        return;
+    }
+    JOB_HOOKS_REGISTERED.with(|r| r.set(true));
+    register_js_job_hooks();
+}
+
+#[cfg(unix)]
+fn register_js_job_hooks() {
+    // SAFETY: the symbol, when present, is the compiled runtime's `thaw_runtime_set_js_job_hooks`; a null
+    // hooks pointer leaves its own hook table alone.
+    unsafe {
+        let sym = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            c"thaw_runtime_set_js_job_hooks".as_ptr(),
+        );
+        if sym.is_null() {
+            return;
+        }
+        std::mem::transmute::<
+            *mut c_void,
+            extern "C" fn(extern "C" fn() -> u64, extern "C" fn(u64), *mut c_void),
+        >(sym)(queue_js_job_barrier, drain_js_job_barrier, ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+fn register_js_job_hooks() {}
+
 #[cfg(unix)]
 fn native_promise_state(promise: usize) -> u8 {
     // SAFETY: both symbols are the compiled runtime's, looked up like the QuickJS host does.
@@ -5021,6 +5111,7 @@ pub(crate) fn with_package<T>(
     handle: usize,
     f: impl FnOnce(&mut Package) -> Result<T, HostError>,
 ) -> Result<T, HostError> {
+    ensure_js_job_hooks();
     let taken = PACKAGES.with(|ps| ps.borrow_mut().get_mut(handle).map(Option::take));
     let mut package = match taken {
         Some(Some(package)) => package,
@@ -5088,6 +5179,8 @@ pub(crate) fn park_host_tls(key: usize) {
 
 /// Take over realm `key`'s parked host tables on this thread. A no-op when nothing is parked for it.
 pub(crate) fn adopt_host_tls(key: usize) {
+    // a coroutine thread queues native continuations too: it needs the hooks on its own thread
+    ensure_js_job_hooks();
     let parked = {
         let mut parked = PARKED.lock().unwrap();
         parked
