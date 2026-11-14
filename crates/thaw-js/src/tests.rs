@@ -1209,6 +1209,43 @@ var __thaw_bundle_entry_key = "ei/index.js";
     );
 }
 
+/// A `\u{2}cause` bag entry that is the handle marker of a live slot is that slot's value (`===`).
+#[test]
+fn native_error_cause_marker_of_a_live_slot_is_the_slot_value() {
+    use crate::host::{thaw_tjs_new_function, thaw_tjs_register};
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "eic/index.js": function(module, exports, require) {
+  exports.sameCause = function (e, f) { return String(e.cause === f) + "|" + String(e.cause && e.cause.message); };
+  exports.causeText = function (e) { return String(e.cause); };
+}, };
+var __thaw_bundle_require_maps = { "eic/index.js": {}, };
+var __thaw_bundle_entry_key = "eic/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("eic").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let body = CString::new(r#"["return 1"]"#).unwrap();
+    let live = thaw_tjs_new_function(body.as_ptr()).value;
+    let cause = format!(r#",\"\\u0002cause\":{{\"__thaw_tjs_handle__\":{live}}}"#);
+    let frame =
+        format!(r#""\u0001Error\u0001\u001eE1:4:-:boom\u0005{{\"\\u0000id\":4098{cause}}}""#);
+    assert_eq!(
+        typed_call(
+            "eic::sameCause",
+            &format!("[{frame},{{\"__thaw_tjs_handle__\":{live}}}]")
+        ),
+        Ok(r#""true|undefined""#.into())
+    );
+    // a marker whose slot is gone keeps its raw text
+    let dead = r#",\"\\u0002cause\":{\"__thaw_tjs_handle__\":999999}"#;
+    let frame =
+        format!(r#""\u0001Error\u0001\u001eE1:4:-:boom\u0005{{\"\\u0000id\":4099{dead}}}""#);
+    assert_eq!(
+        typed_call("eic::causeText", &format!("[{frame}]")),
+        Ok(r#""{\"__thaw_tjs_handle__\":999999}""#.into())
+    );
+}
+
 /// `thaw_tjs_exception_native_token` reads the hidden native id of a thrown Error back to the live
 /// native packet it was built from; 0 for anything else, and 0 once the packet is gone.
 #[test]
