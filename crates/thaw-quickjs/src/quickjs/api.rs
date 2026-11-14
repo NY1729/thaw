@@ -2651,6 +2651,12 @@ pub extern "C" fn thaw_js_lookup_native_object(
     }
 }
 
+/// Engine id for thaw-std's JS engine discriminator: 0 = QuickJS.
+#[no_mangle]
+pub extern "C" fn thaw_js_engine_id() -> u8 {
+    0
+}
+
 /// Creates a genuine JavaScript Error from one of the compiler's framed native error strings.
 /// The returned handle is owned by the caller; native text identity is interned separately by
 /// `thaw_js_intern_native_object` only when its pointer belongs to the arena.
@@ -9361,5 +9367,13 @@ fn read_only_property_error(key: Option<&str>) -> String {
     match key {
         Some(key) => format!("\u{1}TypeError\u{1}Cannot assign to read only property '{key}' of object '#<Object>'"),
         None => "\u{1}TypeError\u{1}Cannot assign to read only property".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod engine_id_tests {
+    #[test]
+    fn engine_id_is_quickjs() {
+        assert_eq!(super::thaw_js_engine_id(), 0);
     }
 }
