@@ -38,7 +38,6 @@
 %GeneratorFunction%.prototype.prototype	next
 %GeneratorFunction%.prototype.prototype	return
 %GeneratorFunction%.prototype.prototype	throw
-%TypedArray%	@@species
 %TypedArray%	from
 %TypedArray%	of
 %TypedArray%	prototype
@@ -168,7 +167,6 @@ AbortSignal.prototype.@@messaging_transfer_symbol	length
 AbortSignal.prototype.@@messaging_transfer_symbol	name
 AbortSignal.prototype.@@nodejs.util.inspect.custom	length
 AbortSignal.prototype.@@nodejs.util.inspect.custom	name
-Array	@@species
 Array	fromAsync
 Array.fromAsync	length
 Array.fromAsync	name
@@ -193,8 +191,6 @@ Array.prototype.@@unscopables	toSpliced
 Array.prototype.@@unscopables	values
 Array.prototype.toLocaleString	length
 Array.prototype.toLocaleString	name
-ArrayBuffer	@@species
-ArrayBuffer.prototype	@@toStringTag
 ArrayBuffer.prototype	maxByteLength
 ArrayBuffer.prototype	resize
 ArrayBuffer.prototype.resize	length
@@ -368,18 +364,15 @@ Buffer.prototype.writeUIntLE	length
 Buffer.prototype.writeUIntLE	name
 Buffer.prototype.writeUIntLE	prototype
 ByteLengthQueuingStrategy.prototype	@@nodejs.util.inspect.custom
-ByteLengthQueuingStrategy.prototype	@@toStringTag
 ByteLengthQueuingStrategy.prototype	size
 ByteLengthQueuingStrategy.prototype.@@nodejs.util.inspect.custom	length
 ByteLengthQueuingStrategy.prototype.@@nodejs.util.inspect.custom	name
 CompressionStream.prototype	@@nodejs.util.inspect.custom
-CompressionStream.prototype	@@toStringTag
 CompressionStream.prototype	readable
 CompressionStream.prototype	writable
 CompressionStream.prototype.@@nodejs.util.inspect.custom	length
 CompressionStream.prototype.@@nodejs.util.inspect.custom	name
 CountQueuingStrategy.prototype	@@nodejs.util.inspect.custom
-CountQueuingStrategy.prototype	@@toStringTag
 CountQueuingStrategy.prototype	size
 CountQueuingStrategy.prototype.@@nodejs.util.inspect.custom	length
 CountQueuingStrategy.prototype.@@nodejs.util.inspect.custom	name
@@ -409,7 +402,6 @@ CryptoKey.prototype	type
 CryptoKey.prototype	usages
 CryptoKey.prototype.@@nodejs.util.inspect.custom	length
 CryptoKey.prototype.@@nodejs.util.inspect.custom	name
-CustomEvent.prototype	@@toStringTag
 CustomEvent.prototype	detail
 DOMException.prototype	@@messaging_clone_symbol
 DOMException.prototype	@@messaging_deserialize_symbol
@@ -428,7 +420,6 @@ Date.prototype.@@toPrimitive	name
 Date.prototype.setYear	length
 Date.prototype.setYear	name
 DecompressionStream.prototype	@@nodejs.util.inspect.custom
-DecompressionStream.prototype	@@toStringTag
 DecompressionStream.prototype	readable
 DecompressionStream.prototype	writable
 DecompressionStream.prototype.@@nodejs.util.inspect.custom	length
@@ -471,7 +462,6 @@ EventTarget.prototype	@@kRemoveListener
 EventTarget.prototype	@@kRemoveWeakListenerHelper
 EventTarget.prototype	@@nodejs.internal.kHybridDispatch
 EventTarget.prototype	@@nodejs.util.inspect.custom
-EventTarget.prototype	@@toStringTag
 EventTarget.prototype.@@kCreateEvent	length
 EventTarget.prototype.@@kCreateEvent	name
 EventTarget.prototype.@@kNewListener	length
@@ -641,10 +631,8 @@ Intl.supportedValuesOf	length
 Intl.supportedValuesOf	name
 Iterator.prototype	@@toStringTag
 Iterator.prototype	constructor
-Map	@@species
 MessageChannel	arguments
 MessageChannel	caller
-MessageEvent.prototype	@@toStringTag
 MessageEvent.prototype	data
 MessageEvent.prototype	initMessageEvent
 MessageEvent.prototype	lastEventId
@@ -735,13 +723,10 @@ PerformanceResourceTiming.prototype	startTime
 PerformanceResourceTiming.prototype	toJSON
 PerformanceResourceTiming.prototype.toJSON	length
 PerformanceResourceTiming.prototype.toJSON	name
-Promise	@@species
-Promise.prototype	@@toStringTag
 ReadableByteStreamController.prototype	@@kCancel
 ReadableByteStreamController.prototype	@@kPull
 ReadableByteStreamController.prototype	@@kRelease
 ReadableByteStreamController.prototype	@@nodejs.util.inspect.custom
-ReadableByteStreamController.prototype	@@toStringTag
 ReadableByteStreamController.prototype.@@kCancel	length
 ReadableByteStreamController.prototype.@@kCancel	name
 ReadableByteStreamController.prototype.@@kPull	length
@@ -757,7 +742,6 @@ ReadableStream.prototype	@@nodejs.stream.disturbed
 ReadableStream.prototype	@@nodejs.stream.errored
 ReadableStream.prototype	@@nodejs.stream.readable
 ReadableStream.prototype	@@nodejs.util.inspect.custom
-ReadableStream.prototype	@@toStringTag
 ReadableStream.prototype.@@messaging_deserialize_symbol	length
 ReadableStream.prototype.@@messaging_deserialize_symbol	name
 ReadableStream.prototype.@@messaging_transfer_list_symbol	length
@@ -767,18 +751,15 @@ ReadableStream.prototype.@@messaging_transfer_symbol	name
 ReadableStream.prototype.@@nodejs.util.inspect.custom	length
 ReadableStream.prototype.@@nodejs.util.inspect.custom	name
 ReadableStreamBYOBReader.prototype	@@nodejs.util.inspect.custom
-ReadableStreamBYOBReader.prototype	@@toStringTag
 ReadableStreamBYOBReader.prototype.@@nodejs.util.inspect.custom	length
 ReadableStreamBYOBReader.prototype.@@nodejs.util.inspect.custom	name
 ReadableStreamBYOBRequest.prototype	@@nodejs.util.inspect.custom
-ReadableStreamBYOBRequest.prototype	@@toStringTag
 ReadableStreamBYOBRequest.prototype.@@nodejs.util.inspect.custom	length
 ReadableStreamBYOBRequest.prototype.@@nodejs.util.inspect.custom	name
 ReadableStreamDefaultController.prototype	@@kCancel
 ReadableStreamDefaultController.prototype	@@kPull
 ReadableStreamDefaultController.prototype	@@kRelease
 ReadableStreamDefaultController.prototype	@@nodejs.util.inspect.custom
-ReadableStreamDefaultController.prototype	@@toStringTag
 ReadableStreamDefaultController.prototype.@@kCancel	length
 ReadableStreamDefaultController.prototype.@@kCancel	name
 ReadableStreamDefaultController.prototype.@@kPull	length
@@ -788,7 +769,6 @@ ReadableStreamDefaultController.prototype.@@kRelease	name
 ReadableStreamDefaultController.prototype.@@nodejs.util.inspect.custom	length
 ReadableStreamDefaultController.prototype.@@nodejs.util.inspect.custom	name
 ReadableStreamDefaultReader.prototype	@@nodejs.util.inspect.custom
-ReadableStreamDefaultReader.prototype	@@toStringTag
 ReadableStreamDefaultReader.prototype.@@nodejs.util.inspect.custom	length
 ReadableStreamDefaultReader.prototype.@@nodejs.util.inspect.custom	name
 RegExp	$&
@@ -805,7 +785,6 @@ RegExp	$8
 RegExp	$9
 RegExp	$_
 RegExp	$`
-RegExp	@@species
 RegExp	input
 RegExp	lastMatch
 RegExp	lastParen
@@ -850,8 +829,6 @@ Response.prototype	@@nodejs.util.inspect.custom
 Response.prototype	@@toStringTag
 Response.prototype.@@nodejs.util.inspect.custom	length
 Response.prototype.@@nodejs.util.inspect.custom	name
-Set	@@species
-SharedArrayBuffer	@@species
 SharedArrayBuffer.prototype	grow
 SharedArrayBuffer.prototype.grow	length
 SharedArrayBuffer.prototype.grow	name
@@ -940,7 +917,6 @@ SubtleCrypto.prototype.verify	name
 SubtleCrypto.prototype.wrapKey	length
 SubtleCrypto.prototype.wrapKey	name
 Symbol.prototype	@@toPrimitive
-Symbol.prototype	@@toStringTag
 Symbol.prototype	constructor
 Symbol.prototype	description
 Symbol.prototype	valueOf
@@ -949,7 +925,6 @@ Symbol.prototype.@@toPrimitive	name
 Symbol.prototype.valueOf	length
 Symbol.prototype.valueOf	name
 TextDecoder.prototype	@@nodejs.util.inspect.custom
-TextDecoder.prototype	@@toStringTag
 TextDecoder.prototype	encoding
 TextDecoder.prototype	fatal
 TextDecoder.prototype	ignoreBOM
@@ -964,7 +939,6 @@ TextDecoderStream.prototype	writable
 TextDecoderStream.prototype.@@nodejs.util.inspect.custom	length
 TextDecoderStream.prototype.@@nodejs.util.inspect.custom	name
 TextEncoder.prototype	@@nodejs.util.inspect.custom
-TextEncoder.prototype	@@toStringTag
 TextEncoder.prototype.@@nodejs.util.inspect.custom	length
 TextEncoder.prototype.@@nodejs.util.inspect.custom	name
 TextEncoderStream.prototype	@@nodejs.util.inspect.custom
@@ -977,7 +951,6 @@ TransformStream.prototype	@@messaging_deserialize_symbol
 TransformStream.prototype	@@messaging_transfer_list_symbol
 TransformStream.prototype	@@messaging_transfer_symbol
 TransformStream.prototype	@@nodejs.util.inspect.custom
-TransformStream.prototype	@@toStringTag
 TransformStream.prototype	readable
 TransformStream.prototype	writable
 TransformStream.prototype.@@messaging_deserialize_symbol	length
@@ -989,7 +962,6 @@ TransformStream.prototype.@@messaging_transfer_symbol	name
 TransformStream.prototype.@@nodejs.util.inspect.custom	length
 TransformStream.prototype.@@nodejs.util.inspect.custom	name
 TransformStreamDefaultController.prototype	@@nodejs.util.inspect.custom
-TransformStreamDefaultController.prototype	@@toStringTag
 TransformStreamDefaultController.prototype.@@nodejs.util.inspect.custom	length
 TransformStreamDefaultController.prototype.@@nodejs.util.inspect.custom	name
 URL	createObjectURL
@@ -999,7 +971,6 @@ URL.createObjectURL	name
 URL.createObjectURL	prototype
 URL.createObjectURL.prototype	constructor
 URL.prototype	@@nodejs.util.inspect.custom
-URL.prototype	@@toStringTag
 URL.prototype.@@nodejs.util.inspect.custom	length
 URL.prototype.@@nodejs.util.inspect.custom	name
 URL.revokeObjectURL	length
@@ -1009,7 +980,6 @@ URL.revokeObjectURL.prototype	constructor
 URLSearchParams.prototype	@@nodejs.util.inspect.custom
 URLSearchParams.prototype.@@nodejs.util.inspect.custom	length
 URLSearchParams.prototype.@@nodejs.util.inspect.custom	name
-WebAssembly	@@toStringTag
 WebAssembly	Exception
 WebAssembly	JSTag
 WebAssembly	Tag
@@ -1027,17 +997,14 @@ WebAssembly.Exception.prototype	getArg
 WebAssembly.Exception.prototype	is
 WebAssembly.Global	arguments
 WebAssembly.Global	caller
-WebAssembly.Global.prototype	@@toStringTag
 WebAssembly.Global.prototype	value
 WebAssembly.Global.prototype	valueOf
 WebAssembly.Instance	arguments
 WebAssembly.Instance	caller
-WebAssembly.Instance.prototype	@@toStringTag
 WebAssembly.Instance.prototype	exports
 WebAssembly.LinkError.prototype	message
 WebAssembly.Memory	arguments
 WebAssembly.Memory	caller
-WebAssembly.Memory.prototype	@@toStringTag
 WebAssembly.Memory.prototype	buffer
 WebAssembly.Memory.prototype	grow
 WebAssembly.Module	arguments
@@ -1051,11 +1018,9 @@ WebAssembly.Module.exports	length
 WebAssembly.Module.exports	name
 WebAssembly.Module.imports	length
 WebAssembly.Module.imports	name
-WebAssembly.Module.prototype	@@toStringTag
 WebAssembly.RuntimeError.prototype	message
 WebAssembly.Table	arguments
 WebAssembly.Table	caller
-WebAssembly.Table.prototype	@@toStringTag
 WebAssembly.Table.prototype	get
 WebAssembly.Table.prototype	grow
 WebAssembly.Table.prototype	length
@@ -1106,7 +1071,6 @@ WritableStream.prototype	@@messaging_transfer_symbol
 WritableStream.prototype	@@nodejs.stream.errored
 WritableStream.prototype	@@nodejs.stream.writable
 WritableStream.prototype	@@nodejs.util.inspect.custom
-WritableStream.prototype	@@toStringTag
 WritableStream.prototype.@@messaging_deserialize_symbol	length
 WritableStream.prototype.@@messaging_deserialize_symbol	name
 WritableStream.prototype.@@messaging_transfer_list_symbol	length
@@ -1118,7 +1082,6 @@ WritableStream.prototype.@@nodejs.util.inspect.custom	name
 WritableStreamDefaultController.prototype	@@kAbort
 WritableStreamDefaultController.prototype	@@kError
 WritableStreamDefaultController.prototype	@@nodejs.util.inspect.custom
-WritableStreamDefaultController.prototype	@@toStringTag
 WritableStreamDefaultController.prototype	signal
 WritableStreamDefaultController.prototype.@@kAbort	length
 WritableStreamDefaultController.prototype.@@kAbort	name
@@ -1127,7 +1090,6 @@ WritableStreamDefaultController.prototype.@@kError	name
 WritableStreamDefaultController.prototype.@@nodejs.util.inspect.custom	length
 WritableStreamDefaultController.prototype.@@nodejs.util.inspect.custom	name
 WritableStreamDefaultWriter.prototype	@@nodejs.util.inspect.custom
-WritableStreamDefaultWriter.prototype	@@toStringTag
 WritableStreamDefaultWriter.prototype.@@nodejs.util.inspect.custom	length
 WritableStreamDefaultWriter.prototype.@@nodejs.util.inspect.custom	name
 clearImmediate	prototype
@@ -1148,7 +1110,6 @@ console	@@kGroupIndentWidth
 console	@@kGroupIndentationString
 console	@@kIsConsole
 console	@@kWriteToConsole
-console	@@toStringTag
 console	_ignoreErrors
 console	_stderr
 console	_stderrErrorHandler

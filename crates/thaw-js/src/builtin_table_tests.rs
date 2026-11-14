@@ -279,3 +279,43 @@ fn builtin_table_is_parsed_once_for_all_realms() {
         "later realms re-parsed the embedded table"
     );
 }
+
+/// The `@@toStringTag` and `@@species` rows that thaw-js lacks on an owner it has are defined as Node 22
+/// defines them: the tag string with the table's flags, and a species getter that returns `this`.
+#[test]
+fn builtin_table_defines_missing_tags_and_species_as_node() {
+    let mut it = Interp::new();
+    it.run(
+        "const out = [];\
+         const tag = (o) => Object.prototype.toString.call(o);\
+         out.push(tag(Promise.prototype), tag(Symbol.prototype), tag(URL.prototype), tag(ArrayBuffer.prototype), tag(Atomics));\
+         out.push(tag(new Map().entries()), tag(new Set().values()), tag(Math), tag(WeakRef.prototype));\
+         for (const C of [Array, ArrayBuffer, Map, Promise, RegExp, Set, SharedArrayBuffer]) {\
+           const d = Object.getOwnPropertyDescriptor(C, Symbol.species);\
+           out.push(!d ? C.name + ' none' : [C.name, typeof d.get, d.get.name, d.get.length, d.set, d.enumerable, d.configurable, C[Symbol.species] === C].join(' '));\
+         }\
+         out.push(JSON.stringify(Object.getOwnPropertyDescriptor(Symbol.prototype, Symbol.toStringTag)));\
+         out.push(JSON.stringify(Object.getOwnPropertyDescriptor(Promise.prototype, Symbol.toStringTag)));\
+         console.log(out.join('\\n'));",
+    )
+    .expect("probe runs");
+    let expected = r#"[object Promise]
+[object Symbol]
+[object URL]
+[object ArrayBuffer]
+[object Atomics]
+[object Map Iterator]
+[object Set Iterator]
+[object Math]
+[object WeakRef]
+Array function get [Symbol.species] 0  false true true
+ArrayBuffer function get [Symbol.species] 0  false true true
+Map function get [Symbol.species] 0  false true true
+Promise function get [Symbol.species] 0  false true true
+RegExp function get [Symbol.species] 0  false true true
+Set function get [Symbol.species] 0  false true true
+SharedArrayBuffer function get [Symbol.species] 0  false true true
+{"value":"Symbol","writable":false,"enumerable":false,"configurable":true}
+{"value":"Promise","writable":false,"enumerable":false,"configurable":true}"#;
+    assert_eq!(it.out.join("\n"), expected);
+}
