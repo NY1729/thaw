@@ -4958,7 +4958,7 @@ pub unsafe extern "C" fn thaw_json_callback_error_tuple(
             let bytes = unsafe { thaw_arena::NativeStr::from_ptr(native_text) }.to_bytes();
             let legacy_frame = bytes.first() == Some(&1) && bytes[1..].contains(&1);
             if thaw_arena::error_wire::parse_tagged(bytes).is_some() || legacy_frame {
-                native_text as usize
+                thaw_error_canonical_pointer(native_text.cast())
             } else {
                 0
             }
@@ -7764,13 +7764,35 @@ pub extern "C" fn thaw_json_as_string_value(value: *mut Value) -> *const c_char 
                     .and_then(|bytes| String::from_utf8(bytes).ok())
             {
                 // Own properties (`code`, ...) ride after the frame, as for a caught exception.
-                if let Some(properties) =
-                    host_query(lease, 28).filter(|text| text != "{}" && !text.is_empty())
-                {
+                let properties =
+                    host_query(lease, 28).filter(|text| text != "{}" && !text.is_empty());
+                // The id only has a consumer where the thaw-js Error factory is registered.
+                let owner = ERROR_FACTORY_OPERATIONS
+                    .with(|slot| slot.get().is_some())
+                    .then(|| host_query(lease, 21))
+                    .flatten()
+                    .and_then(|hex| usize::from_str_radix(&hex, 16).ok())
+                    .filter(|&pointer| pointer != 0);
+                let bag = match (properties, owner) {
+                    (properties, None) => properties,
+                    (None, Some(owner)) => Some(format!("{{\"\\u0000id\":{owner}}}")),
+                    (Some(properties), Some(owner)) => match properties.strip_suffix('}') {
+                        Some(open) => Some(format!("{open},\"\\u0000id\":{owner}}}")),
+                        None => Some(properties),
+                    },
+                };
+                if let Some(bag) = bag {
                     framed.push('\u{5}');
-                    framed.push_str(&properties);
+                    framed.push_str(&bag);
                 }
-                return thaw_arena::owned_string(framed);
+                let copy = thaw_arena::owned_string(framed);
+                if let Some(owner) = owner {
+                    thaw_arena::register_reset_hook(reset_native_error_text_identity);
+                    NATIVE_ERROR_TEXT_IDENTITY.with(|table| {
+                        table.borrow_mut().insert(copy as usize, owner);
+                    });
+                }
+                return copy;
             }
         }
     }
@@ -10083,8 +10105,30 @@ fn error_host_value_from_text(
         return None;
     };
     let layout = FRAMED_ERROR_NATIVE_LAYOUT.as_ptr().cast();
-    let native_pointer = value.cast::<c_void>();
-    let arena_owned = thaw_arena::contains_allocation(value as usize);
+    // Key and create through the Error's canonical identity, so every copy of one thrown Error
+    // resolves to one lease and the lease carries the Error's own properties.
+    let canonical = {
+        let canon = thaw_error_canonical_pointer(value.cast());
+        if canon != value as usize {
+            canon
+        } else {
+            thaw_arena::owned_exception(value)
+                .map(|packet| packet.native_error_identity)
+                .filter(|&identity| identity != 0)
+                .unwrap_or(canon)
+        }
+    };
+    let native_pointer = canonical as *const c_void;
+    let arena_owned = thaw_arena::contains_allocation(value as usize)
+        || thaw_arena::contains_allocation(canonical);
+    let text = if canonical != 0
+        && !thaw_arena::was_reclaimed(canonical)
+        && unsafe { *(canonical as *const u8) } == 1
+    {
+        unsafe { thaw_error_json_text(canonical as *const c_char) }
+    } else {
+        value
+    };
 
     let handle = if arena_owned {
         let result = without_typed_decode_scope(|| (operations.lookup)(native_pointer, layout));
@@ -10102,7 +10146,7 @@ fn error_host_value_from_text(
         Some(handle) => handle,
         None => {
             let candidate = host_error_from_result(
-                without_typed_decode_scope(|| (operations.create)(value)),
+                without_typed_decode_scope(|| (operations.create)(text)),
                 "Error factory",
             )?;
             if arena_owned {
@@ -11245,6 +11289,229 @@ mod tests {
             0
         );
         NATIVE_ERROR_TEXT_IDENTITY.with(|table| table.borrow_mut().clear());
+    }
+
+    thread_local! {
+        static FACTORY_CREATE_TEXTS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+        static FACTORY_LOOKUPS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+        static FACTORY_HANDLES: std::cell::RefCell<std::collections::HashMap<usize, u64>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+        static AS_STRING_OWNER_HEX: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+
+    extern "C" fn factory_test_create(text: *const c_char) -> HostHandleResult {
+        let text = unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned();
+        FACTORY_CREATE_TEXTS.with(|texts| texts.borrow_mut().push(text));
+        HostHandleResult {
+            value: 77,
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn factory_test_lookup(
+        pointer: *const c_void,
+        _: *const c_char,
+    ) -> HostHandleResult {
+        FACTORY_LOOKUPS.with(|seen| seen.borrow_mut().push(pointer as usize));
+        let value = FACTORY_HANDLES
+            .with(|handles| handles.borrow().get(&(pointer as usize)).copied())
+            .unwrap_or(0);
+        HostHandleResult {
+            value,
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn factory_test_intern(
+        pointer: *const c_void,
+        _: *const c_char,
+        handle: u64,
+    ) -> HostHandleResult {
+        FACTORY_HANDLES.with(|handles| handles.borrow_mut().insert(pointer as usize, handle));
+        HostHandleResult {
+            value: handle,
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn factory_test_retain(_: u64) -> u8 {
+        1
+    }
+
+    extern "C" fn factory_test_release(_: u64) -> u8 {
+        1
+    }
+
+    extern "C" fn factory_test_get(_: u64, _: *const c_char) -> HostHandleResult {
+        HostHandleResult {
+            value: 0,
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn factory_test_query(_: u64, operation: u8) -> HostTextResult {
+        let text = match operation {
+            22 => "1".to_string(),
+            28 => r#"{"a":1}"#.to_string(),
+            21 => AS_STRING_OWNER_HEX.with(|hex| hex.borrow().clone()),
+            _ => String::new(),
+        };
+        HostTextResult {
+            value: thaw_arena::owned_string(text),
+            error: std::ptr::null(),
+        }
+    }
+
+    fn install_factory_test_host_operations() {
+        HOST_OPERATIONS.with(|slot| {
+            slot.set(Some(HostOperations {
+                retain: factory_test_retain,
+                release: factory_test_release,
+                get: factory_test_get,
+                query: factory_test_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            }))
+        });
+    }
+
+    #[test]
+    fn callback_error_identity_is_the_canonical_pointer_of_a_copied_text() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let framed = thaw_arena::error_wire::encode_tagged(b"Error", b"boom", None)
+                .expect("valid error frame");
+            let original = thaw_arena::arena_string(&framed);
+            let copy = thaw_arena::arena_string(&framed);
+            NATIVE_ERROR_TEXT_IDENTITY
+                .with(|table| table.borrow_mut().insert(copy as usize, original as usize));
+            for (text, expected) in [(copy, original as usize), (original, original as usize)] {
+                let result = unsafe {
+                    thaw_json_callback_error_tuple(
+                        text,
+                        4,
+                        0.0,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        text,
+                        std::ptr::null(),
+                    )
+                };
+                let token = unsafe { thaw_exception_native_token(result) };
+                let packet = thaw_arena::exception::packet(token).unwrap();
+                assert_eq!(packet.native_error_identity, expected);
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn error_factory_is_called_with_the_canonical_pointer_and_its_props() {
+        std::thread::spawn(|| {
+            unsafe extern "C" {
+                fn thaw_error_set_prop(
+                    error: *const c_char,
+                    key: *const c_char,
+                    json: *const c_char,
+                ) -> bool;
+            }
+            thaw_arena::thaw_arena_enable_tracing();
+            install_factory_test_host_operations();
+            thaw_json_register_error_factory(
+                factory_test_create,
+                factory_test_lookup,
+                factory_test_intern,
+            );
+            let framed = thaw_arena::error_wire::encode_tagged(b"Error", b"boom", None)
+                .expect("valid error frame");
+            let canonical = thaw_arena::arena_string(&framed);
+            let (key, json) = (CString::new("a").unwrap(), CString::new("1").unwrap());
+            assert!(unsafe { thaw_error_set_prop(canonical, key.as_ptr(), json.as_ptr()) });
+            let (first, second) = (
+                thaw_arena::arena_string(&framed),
+                thaw_arena::arena_string(&framed),
+            );
+            NATIVE_ERROR_TEXT_IDENTITY.with(|table| {
+                let mut table = table.borrow_mut();
+                table.insert(first as usize, canonical as usize);
+                table.insert(second as usize, canonical as usize);
+            });
+
+            let value = thaw_json_receiver_string(first);
+            assert!(matches!(unsafe { value.as_ref() }, Some(Value::Host(_))));
+            let texts = FACTORY_CREATE_TEXTS.with(|texts| texts.borrow().clone());
+            assert_eq!(texts.len(), 1, "{texts:?}");
+            assert!(
+                texts[0].contains(&format!(r#""\u0000id":{}"#, canonical as usize)),
+                "{}",
+                texts[0]
+            );
+            assert!(texts[0].contains(r#""a":1"#), "{}", texts[0]);
+            assert!(FACTORY_LOOKUPS.with(|seen| {
+                seen.borrow()
+                    .iter()
+                    .all(|&pointer| pointer == canonical as usize)
+            }));
+
+            // A second copy of the same Error reuses the first handle: no second create.
+            let again = thaw_json_receiver_string(second);
+            assert!(matches!(unsafe { again.as_ref() }, Some(Value::Host(_))));
+            assert_eq!(FACTORY_CREATE_TEXTS.with(|texts| texts.borrow().len()), 1);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn caught_error_lease_widens_to_a_string_carrying_its_canonical_identity() {
+        std::thread::spawn(|| {
+            install_factory_test_host_operations();
+            let owner = 0x7f00_0040_usize;
+            AS_STRING_OWNER_HEX.with(|hex| *hex.borrow_mut() = format!("{owner:x}"));
+            let lease = leak(Value::Host(Rc::new(HostLease {
+                handle: 5,
+                release: factory_test_release,
+            })));
+            // Without the Error factory (QuickJS lane) the text stays as it was.
+            let unfactored = thaw_json_as_string_value(lease);
+            let unfactored = unsafe { CStr::from_ptr(unfactored) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert!(!unfactored.contains("\\u0000id"), "{unfactored}");
+            thaw_json_register_error_factory(
+                factory_test_create,
+                factory_test_lookup,
+                factory_test_intern,
+            );
+            let text = thaw_json_as_string_value(lease);
+            assert!(!text.is_null());
+            assert_eq!(thaw_error_canonical_pointer(text as *const u8), owner);
+            let framed = unsafe { CStr::from_ptr(text) }.to_str().unwrap().to_owned();
+            assert!(framed.contains(r#""a":1"#), "{framed}");
+            assert!(
+                framed.contains(&format!(r#""\u0000id":{owner}"#)),
+                "{framed}"
+            );
+
+            // No owner pointer from the host: the text carries no identity.
+            AS_STRING_OWNER_HEX.with(|hex| hex.borrow_mut().clear());
+            let plain = thaw_json_as_string_value(lease);
+            let plain = unsafe { CStr::from_ptr(plain) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert!(!plain.contains("\\u0000id"), "{plain}");
+        })
+        .join()
+        .unwrap();
     }
 
     use super::*;
