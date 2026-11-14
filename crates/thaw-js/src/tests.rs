@@ -1345,6 +1345,87 @@ fn release_all_drops_packets_retained_by_thrown_carriers() {
     assert!(!thaw_arena::exception::is_live(id));
 }
 
+/// The hidden `\0pkt` id of a thrown carrier.
+fn carrier_packet_id(pkt: Value) -> u64 {
+    let Value::Number(id) = pkt else {
+        panic!("the thrown carrier has no hidden \\0pkt");
+    };
+    id as u64
+}
+
+/// The id of the packet an owned error string is bound to, if any.
+fn bound_packet_id(error: *const std::ffi::c_char) -> Option<u64> {
+    thaw_arena::owned_exception(error).map(|packet| packet.id)
+}
+
+/// The failed-call result of `thrown`, classified and built the way a failed thaw-js call builds it.
+fn error_result_of(thrown: Value) -> crate::host::ThawResult {
+    crate::host::with_package(crate::host::default_realm(), |p| {
+        let error = crate::host::classify(&mut p.interp, Ctl::Throw(thrown)).to_string();
+        Ok(crate::host::graph_result(Err(error)))
+    })
+    .unwrap_or_else(|_| panic!("the default realm is unavailable"))
+}
+
+/// T1: the error string of a failed call keeps the packet of the carrier it was classified from.
+#[test]
+fn carrier_error_string_keeps_its_packet() {
+    let (thrown, pkt) = thrown_through_callback(
+        identified_packet(0x7f00_0040, 4, 0),
+        b"\x02\x01Error\x01boom",
+    );
+    let id = carrier_packet_id(pkt);
+    let result = error_result_of(thrown);
+    assert_eq!(bound_packet_id(result.error), Some(id));
+}
+
+/// T2: `thaw_tjs_frame_error` hands the packet over to the framed string it returns.
+#[test]
+fn carrier_error_keeps_its_packet_through_frame_error() {
+    let (thrown, pkt) = thrown_through_callback(
+        identified_packet(0x7f00_0041, 4, 0),
+        b"\x02\x01Error\x01boom",
+    );
+    let id = carrier_packet_id(pkt);
+    let result = error_result_of(thrown);
+    // SAFETY: `result.error` is an owned string from `graph_result`, used only here.
+    let framed = unsafe { crate::host::thaw_tjs_frame_error(result.error) };
+    assert_eq!(bound_packet_id(framed), Some(id));
+    let text = unsafe { std::ffi::CStr::from_ptr(framed) }.to_string_lossy();
+    assert!(text.starts_with("\u{1}Error\u{1}"), "not framed: {text:?}");
+}
+
+/// T3: a plain Error classified after a carrier, with no call in between, binds no stale packet.
+#[test]
+fn plain_error_after_carrier_has_no_packet() {
+    let (thrown, _) = thrown_through_callback(
+        identified_packet(0x7f00_0042, 4, 0),
+        b"\x02\x01Error\x01boom",
+    );
+    let result = crate::host::with_package(crate::host::default_realm(), |p| {
+        let _ = crate::host::classify(&mut p.interp, Ctl::Throw(thrown));
+        let Err(plain) = p.interp.throw_error::<()>("Error", "a") else {
+            panic!("throw_error did not throw");
+        };
+        let error = crate::host::classify(&mut p.interp, plain).to_string();
+        Ok(crate::host::graph_result(Err(error)))
+    })
+    .unwrap_or_else(|_| panic!("the default realm is unavailable"));
+    assert_eq!(bound_packet_id(result.error), None);
+}
+
+/// T4: an untracked plain object thrown through a callback (tag 7) keeps its packet on the error string.
+#[test]
+fn untracked_carrier_error_string_keeps_its_packet() {
+    let (thrown, pkt) = thrown_through_callback(
+        primitive_exception_packet(7, 0.0, 0, false, 0x1234),
+        b"\x02[native exception value]",
+    );
+    let id = carrier_packet_id(pkt);
+    let result = error_result_of(thrown);
+    assert_eq!(bound_packet_id(result.error), Some(id));
+}
+
 /// Node 22.23.1: `Object.keys(e)` is `["extra"]`, `JSON.stringify(e)` is `{"extra":1}` and the cause
 /// is a non-enumerable own data property (the source of the `keys`/`json`/`cause` checks above).
 #[test]
