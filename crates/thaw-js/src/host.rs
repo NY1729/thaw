@@ -4054,7 +4054,20 @@ fn error_object(it: &mut Interp, tagged: &str, id_hint: Option<u64>) -> Result<V
     for (k, v) in fields {
         if k != "name" && k != "message" && k != "stack" && !k.starts_with('\u{0}') {
             has_code |= k == "code";
-            let v = to_value(it, &v);
+            // a cause marker whose slot is gone keeps its raw text rather than becoming `undefined`
+            let dead = match &v {
+                Native::Object(f) => match f.as_slice() {
+                    [(h, Native::Number(id))] if h == HANDLE_KEY && slot(*id as u64).is_none() => {
+                        Some(*id)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            let v = match dead {
+                Some(id) if k == "\u{2}cause" => Value::str(&format!("{{\"{HANDLE_KEY}\":{id}}}")),
+                _ => to_value(it, &v),
+            };
             if k == "\u{2}cause" {
                 if let Value::Object(o) = &err {
                     crate::put_hidden(o, "cause", v);
