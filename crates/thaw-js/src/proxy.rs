@@ -108,6 +108,14 @@ impl Interp {
             return Ok(valid);
         }
         let is_index = matches!(&*o.kind.borrow(), Kind::Array(items) if key == "length" || array_index(key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))));
+        if matches!(&*o.kind.borrow(), Kind::Global) {
+            if crate::hidden_global_name(key) {
+                return Ok(false);
+            }
+            if self.global_prop(key).is_some() {
+                return Ok(true);
+            }
+        }
         Ok(is_index || find_in_chain(o, key).is_some())
     }
 

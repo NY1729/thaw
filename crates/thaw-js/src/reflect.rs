@@ -34,7 +34,12 @@ fn list_from(it: &mut Interp, v: &Value) -> R<Vec<Value>> {
 
 /// Own property `key` as (slot, writable). Array elements and `length` count as writable data; a
 /// frozen object has nothing writable.
-fn own_prop(o: &Obj, key: &str) -> Option<(Slot, bool)> {
+fn own_prop(it: &Interp, o: &Obj, key: &str) -> Option<(Slot, bool)> {
+    if matches!(&*o.kind.borrow(), Kind::Global) {
+        if let Some(p) = it.global_prop(key) {
+            return Some((Slot::Data(p.value), p.writable));
+        }
+    }
     let writable = !o.frozen.get();
     if let Kind::Typed(t) = &*o.kind.borrow() {
         // elements are writable data; any other numeric key has no own property
@@ -101,7 +106,7 @@ fn get(it: &mut Interp, o: &Obj, key: &str, recv: &Value) -> R<Value> {
         if is_proxy(&cur) {
             return Ok(it.proxy_get(&cur, key, recv)?.unwrap_or(Value::Undefined));
         }
-        match own_prop(&cur, key) {
+        match own_prop(it, &cur, key) {
             Some((Slot::Data(v), _)) => return Ok(v),
             Some((Slot::LazyProto { .. }, _)) => unreachable!("own_prop forces the key"),
             Some((Slot::Accessor { get, .. }, _)) => {
@@ -137,7 +142,7 @@ fn set(it: &mut Interp, o: &Obj, key: &str, v: Value, recv: &Value, intr: &Intri
         if is_proxy(&cur) {
             return set_via_proxy(it, &cur, key, v, recv, intr);
         }
-        match own_prop(&cur, key) {
+        match own_prop(it, &cur, key) {
             Some((Slot::Accessor { set, .. }, _)) => {
                 return match set {
                     Some(setter) => {
@@ -247,12 +252,16 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
         if let Some(deleted) = it.delete_global_binding(key) {
             return Ok(deleted);
         }
+        // a non-configurable builtin (`NaN`, `undefined`, `Infinity`) refuses the delete, as in Node
+        if it.global_prop(key).is_some_and(|p| !p.configurable) {
+            return Ok(false);
+        }
     }
     // a typed array's element is never deletable; any other numeric key is not an own property
     if let Some(valid) = crate::typed::typed_own_key(o, key) {
         return Ok(!valid);
     }
-    if own_prop(o, key).is_none() {
+    if own_prop(it, o, key).is_none() {
         return Ok(true);
     }
     // array elements have no Prop: they are configurable unless the object is frozen or sealed

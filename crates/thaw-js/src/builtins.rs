@@ -1180,6 +1180,14 @@ impl Interp {
                         return Ok(it.array(names));
                     }
                 }
+                if matches!(&t, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Global)) {
+                    let names = it
+                        .global_own_names(false)
+                        .into_iter()
+                        .map(|k| Value::Str(k.into()))
+                        .collect();
+                    return Ok(it.array(names));
+                }
                 // Insertion order over all own string keys, enumerable or not (V8 order). Array and
                 // typed-array indices come from `own_keys` and lead; raw props follow in insertion order.
                 let raw: Vec<Rc<str>> = match &t {
@@ -1264,6 +1272,16 @@ impl Interp {
                     };
                 }
                 o.force_key(&key);
+                if matches!(&*o.kind.borrow(), Kind::Global) {
+                    if let Some(g) = it.global_prop(&key) {
+                        let d = it.plain();
+                        put(&d, "value", g.value);
+                        put(&d, "writable", Value::Bool(g.writable));
+                        put(&d, "enumerable", Value::Bool(g.enumerable));
+                        put(&d, "configurable", Value::Bool(g.configurable));
+                        return Ok(Value::Object(d));
+                    }
+                }
                 let Some(p) = o
                     .raw_props
                     .borrow()
@@ -2775,6 +2793,11 @@ impl Interp {
             ));
         }
         let key = self.key_of(key);
+        if matches!(target, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Global))
+            && self.global_prop(&key).is_some()
+        {
+            return Ok(true);
+        }
         Ok(match target {
             Value::Object(o) => {
                 crate::typed::typed_own_key(o, &key).unwrap_or_else(|| find_own(o, &key).is_some()
