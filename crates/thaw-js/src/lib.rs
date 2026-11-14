@@ -1134,8 +1134,6 @@ impl Interp {
             web_streams::install(&mut it);
             web_async_hooks::install(&mut it);
             web_wasm::install(&mut it);
-            #[cfg(feature = "wasm")]
-            web_wasm_natives::install(&mut it);
             web_crypto::install(&mut it);
             web_navigator::install(&mut it);
             web_console::install(&mut it);

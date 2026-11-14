@@ -1,0 +1,9 @@
+9 9 10 0
+5n bigint
+TypeError set WebAssembly.Global.value: Can't set the value of an immutable global.
+TypeError Cannot convert 5 to a BigInt
+TypeError WebAssembly.Global(): Descriptor property 'value' must be a WebAssembly type
+TypeError WebAssembly.Global(): Argument 0 must be a global descriptor
+1.100000023841858 0
+1 [object WebAssembly.Global] [object WebAssembly.Global]
+true 42 42

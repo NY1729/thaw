@@ -1,0 +1,30 @@
+compile,validate,instantiate,Module,Instance,Table,Memory,Global,Tag,JSTag,Exception,CompileError,LinkError,RuntimeError,compileStreaming,instantiateStreaming
+compile,validate,instantiate,compileStreaming,instantiateStreaming
+object [object WebAssembly] WebAssembly
+Module function 1 Module constructor
+Module [object WebAssembly.Module] false
+Instance function 1 Instance constructor,exports
+Instance [object WebAssembly.Instance] false
+Memory function 1 Memory constructor,grow,buffer
+Memory [object WebAssembly.Memory] false
+Table function 1 Table constructor,length,grow,set,get
+Table [object WebAssembly.Table] false
+Global function 1 Global constructor,valueOf,value
+Global [object WebAssembly.Global] false
+Tag function 1 Tag constructor
+Tag [object WebAssembly.Tag] false
+Exception function 1 Exception constructor,getArg,is
+Exception [object WebAssembly.Exception] false
+CompileError 1 CompileError CompileError boom true true CompileError: boom true
+CompileError [object Error] true false
+LinkError 1 LinkError LinkError boom true true LinkError: boom true
+LinkError [object Error] true false
+RuntimeError 1 RuntimeError RuntimeError boom true true RuntimeError: boom true
+RuntimeError [object Error] true false
+1 exports 1 1 1
+false false
+true [object WebAssembly.Tag]
+TypeError WebAssembly.Module(): WebAssembly.Module must be invoked with 'new'
+CompileError WebAssembly.Module(): expected version 01 00 00 00, found 02 00 00 00 @+4
+CompileError WebAssembly.Module(): expected 4 bytes, fell off end @+0
+TypeError WebAssembly.Module(): Argument 0 must be a buffer source

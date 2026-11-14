@@ -171,7 +171,25 @@ fn builtin_table_descriptors_match_node_and_missing_list_is_exact() {
             failures.push(format!("absent row not listed: {absent:?}"));
         }
         for present in listed.difference(&missing) {
+            // The `wasm` feature installs the real WebAssembly namespace (web/webassembly.js): its
+            // listed rows are present, and the descriptor loop above has already compared each one
+            // with the table. The default build keeps the list exact.
+            if cfg!(feature = "wasm") && present.starts_with("WebAssembly") {
+                continue;
+            }
             failures.push(format!("listed row is present: {present:?}"));
+        }
+        if cfg!(feature = "wasm") {
+            // every WebAssembly row is served under the feature except the sloppy-function
+            // `arguments`/`caller` own props, which the shim (strict mode) does not model
+            for absent in missing.iter().filter(|r| r.starts_with("WebAssembly")) {
+                let key = absent.split('\t').nth(1).unwrap_or("");
+                if key != "arguments" && key != "caller" {
+                    failures.push(format!(
+                        "WebAssembly row absent under the wasm feature: {absent:?}"
+                    ));
+                }
+            }
         }
     }
     assert!(
