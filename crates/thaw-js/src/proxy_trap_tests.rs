@@ -141,3 +141,21 @@ fn json_stringify_revoked_proxy_over_array_throws() {
         "TypeError"
     );
 }
+
+#[test]
+fn proxy_get_trap_drives_symbol_to_primitive() {
+    // Node 22 (v22.23.1): `P:default P:string NaN P:string true false`
+    assert_eq!(
+        one("var p = new Proxy({}, { get(t, k) { return k === Symbol.toPrimitive ? (h => 'P:' + h) : undefined; } }); console.log(p + '', `${p}`, p * 1, String(p), p == 'P:default', p > 'a');"),
+        "P:default P:string NaN P:string true false"
+    );
+}
+
+#[test]
+fn proxy_get_trap_symbol_to_primitive_accessor() {
+    // Node 22: `G:default1`
+    assert_eq!(
+        one("var ge = new Proxy({}, { get(t, k) { return k === Symbol.toPrimitive ? function (h) { return 'G:' + h; } : undefined; } }); console.log(ge + 1);"),
+        "G:default1"
+    );
+}

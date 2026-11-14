@@ -232,3 +232,17 @@ fn object_literal_symbol_keys_and_methods_match_node() {
     );
     assert_eq!(out, vec!["0 2 43 42 42", "f [Symbol.toPrimitive]"]);
 }
+
+/// A class projection's symbol-keyed method arrives as wire text (`\u001f@@toPrimitive`); the
+/// projection maps it to `Symbol.toPrimitive`, so `in` and ToPrimitive (through the Proxy `get` trap) see it.
+#[test]
+fn dynamic_projection_maps_symbol_wire_keys() {
+    // callbacks: [method getter, method setter, extensible, sealed, frozen, setState, propertyFlags, setFlags, canFlags]
+    let src = r#"
+      var cb = [() => h => 'Q:' + h, () => undefined, () => true, () => false, () => false, () => true, () => 7, () => true, () => true];
+      var w = __thaw_object_with_native_getters(['\u001f@@toPrimitive'], [false], [false], [false], [true], '__thawmod0_Q', ...cb);
+      console.log(Symbol.toPrimitive in w, w + '', `${w}`, w * 1);
+    "#;
+    // One console.log line; Node 22 prints `true Q:default Q:string NaN`.
+    assert_eq!(run_realm(src), vec!["true Q:default Q:string NaN"]);
+}

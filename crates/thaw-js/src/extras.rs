@@ -278,7 +278,7 @@ pub(crate) enum Hint {
 impl crate::Interp {
     /// ToPrimitive: `Symbol.toPrimitive`, then `valueOf` / `toString` in hint order.
     pub(crate) fn primitive_of(&mut self, v: &crate::Value, hint: Hint) -> crate::R<crate::Value> {
-        use crate::{find_in_chain, Ctl, Slot, Value};
+        use crate::{find_in_chain, Ctl, Value};
         let Value::Object(o) = v else {
             return Ok(v.clone());
         };
@@ -294,19 +294,22 @@ impl crate::Interp {
                 k
             }
         };
-        if let Some(Slot::Data(f)) = find_in_chain(o, &key) {
-            if f.is_callable() {
-                let h = match hint {
-                    Hint::Default => "default",
-                    Hint::Number => "number",
-                    Hint::String => "string",
-                };
-                let r = self.call(&f, v, &[Value::str(h)])?;
-                if !matches!(r, Value::Object(_)) {
-                    return Ok(r);
-                }
-                return self.throw_error("TypeError", "Cannot convert object to primitive value");
+        // [[Get]] (not a chain lookup): Proxy `get` traps and accessors see the lookup.
+        let f = self.get(v, &key)?;
+        if f.is_callable() {
+            let h = match hint {
+                Hint::Default => "default",
+                Hint::Number => "number",
+                Hint::String => "string",
+            };
+            let r = self.call(&f, v, &[Value::str(h)])?;
+            if !matches!(r, Value::Object(_)) {
+                return Ok(r);
             }
+            return self.throw_error("TypeError", "Cannot convert object to primitive value");
+        }
+        if !matches!(f, Value::Undefined | Value::Null) {
+            return self.throw_error("TypeError", "Cannot convert object to primitive value");
         }
         // a Date prefers its string form unless a number is asked for explicitly
         let is_date = find_in_chain(o, "__time").is_some();
