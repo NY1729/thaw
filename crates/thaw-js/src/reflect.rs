@@ -36,6 +36,14 @@ fn list_from(it: &mut Interp, v: &Value) -> R<Vec<Value>> {
 /// frozen object has nothing writable.
 fn own_prop(o: &Obj, key: &str) -> Option<(Slot, bool)> {
     let writable = !o.frozen.get();
+    if let Kind::Typed(t) = &*o.kind.borrow() {
+        // elements are writable data; any other numeric key has no own property
+        match t.key(key) {
+            TypedKey::Index(i) => return t.get_value(i).map(|v| (Slot::Data(v), writable)),
+            TypedKey::Invalid => return None,
+            TypedKey::Ordinary => {}
+        }
+    }
     if let Kind::Array(items) = &*o.kind.borrow() {
         if key == "length" {
             return Some((
@@ -113,6 +121,16 @@ fn get(it: &mut Interp, o: &Obj, key: &str, recv: &Value) -> R<Value> {
 }
 
 fn set(it: &mut Interp, o: &Obj, key: &str, v: Value, recv: &Value, intr: &Intrinsics) -> R<bool> {
+    // integer-indexed [[Set]]: a numeric key of a typed array never reaches the prototype or a define
+    if let Some(valid) = crate::typed::typed_own_key(o, key) {
+        if matches!(recv, Value::Object(r) if std::rc::Rc::ptr_eq(r, o)) {
+            it.set(&Value::Object(o.clone()), key, v)?;
+            return Ok(true);
+        }
+        if !valid {
+            return Ok(true);
+        }
+    }
     // OrdinarySet: the first holder of `key` along the chain decides, then the receiver takes the value
     let mut cur = o.clone();
     let holder_writable = loop {
@@ -229,6 +247,10 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
         if let Some(deleted) = it.delete_global_binding(key) {
             return Ok(deleted);
         }
+    }
+    // a typed array's element is never deletable; any other numeric key is not an own property
+    if let Some(valid) = crate::typed::typed_own_key(o, key) {
+        return Ok(!valid);
     }
     if own_prop(o, key).is_none() {
         return Ok(true);

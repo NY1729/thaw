@@ -695,10 +695,11 @@ pub extern "C" fn thaw_tjs_release_handle(handle: i64) -> u8 {
 /// or create handles, so the scan repeats until none is live. Returns the number released.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_release_all_handles() -> u64 {
-    // one thaw-js Error per native id is a live reference too
+    // one thaw-js Error per native id, and each thrown carrier's packet, are live references too
     PACKAGES.with(|ps| {
         for package in ps.borrow_mut().iter_mut().flatten() {
             package.interp.native_errors.clear();
+            package.interp.native_packets.clear();
         }
     });
     let mut released = 0;
@@ -1582,6 +1583,12 @@ pub extern "C" fn thaw_tjs_get_property_exact_result(
 #[no_mangle]
 pub extern "C" fn thaw_tjs_exception_native_token(handle: u64) -> u64 {
     on_handle(handle, |p, _owner, v| {
+        // the carrier's own packet first: it stays live through `native_packets`, unlike an identity lookup
+        if let Ok(Value::Number(n)) = p.interp.get(&v, PACKET_KEY) {
+            if n >= 1.0 && thaw_arena::exception::is_live(n as u64) {
+                return Ok(n as u64);
+            }
+        }
         let id = match p.interp.get(&v, NATIVE_ID_KEY) {
             Ok(Value::Number(n)) if n >= 1.0 => n as usize,
             _ => 0,
@@ -1924,6 +1931,48 @@ fn is_buffer_value(v: &Value) -> bool {
         && crate::find_in_chain(o, "__isBuffer").is_some())
 }
 
+/// Operation 27: a host typed array other than a Buffer, as `{"n":name,"v":[text,..]}` (the probe
+/// thaw-std's `typed_probe_node` reads for console inspection); `""` for anything else. A BigInt item
+/// carries an `n` suffix and `-0` keeps its sign, as in QuickJS.
+fn typed_probe_text(it: &mut Interp, v: &Value) -> String {
+    let Value::Object(o) = v else {
+        return String::new();
+    };
+    if is_buffer_value(v) {
+        return String::new();
+    }
+    let (name, len) = match &*o.kind.borrow() {
+        Kind::Typed(t) => (t.ty.name(), t.cur_len()),
+        _ => return String::new(),
+    };
+    let mut items = Vec::with_capacity(len);
+    for i in 0..len {
+        let item = match &*o.kind.borrow() {
+            Kind::Typed(t) => t.get_value(i).unwrap_or(Value::Undefined),
+            _ => Value::Undefined,
+        };
+        items.push(match item {
+            Value::Number(n) if n == 0.0 && n.is_sign_negative() => "\"-0\"".to_string(),
+            Value::Number(n) => format!("\"{}\"", crate::number_to_string(n)),
+            other => format!("\"{}n\"", it.to_str(&other)),
+        });
+    }
+    format!(r#"{{"n":"{name}","v":[{}]}}"#, items.join(","))
+}
+
+/// Operation 28: an Error's own extra properties as JSON (`message`, `name` and `stack` excluded), via the
+/// realm's `__thaw_error_properties_json`; `"{}"` when there are none.
+fn error_properties_json(it: &mut Interp, v: &Value) -> String {
+    let g = Value::Object(it.global_object.clone());
+    let Ok(helper) = it.get(&g, "__thaw_error_properties_json") else {
+        return "{}".to_string();
+    };
+    match it.call(&helper, &g, std::slice::from_ref(v)) {
+        Ok(Value::Str(json)) if !json.is_empty() => json.to_string(),
+        _ => "{}".to_string(),
+    }
+}
+
 /// Introspection of the value behind `handle` for the Json host bridge (the numbering is the QuickJS
 /// `__thaw_json_host_query`'s). Kinds thaw-js has no value for (Date, Buffer, Map, Set, native
 /// wrappers) answer "no" to the copy queries; operation 29 says whether the value must stay a live handle,
@@ -1999,14 +2048,14 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             13 => crate::number_to_string(it.date_time(&v).map_err(|c| classify(it, c))?),
             17..=20 | 22..=24 => prelude_call(it, "__thaw_json_host_query", &v, operation)?,
             21 => native_owner_pointer_hex(&v),
-            27 => String::new(),
-            28 => "{}".to_string(),
+            27 => typed_probe_text(it, &v),
+            28 => error_properties_json(it, &v),
             // a value that must cross a thaw-js call argument as a live handle: a typed array other
             // than Uint8Array, an ArrayBuffer, a Map, a Set or a Proxy (the native array, collection and
             // class views) would otherwise be flattened to a plain object. A plain Uint8Array is live
             // too (so `util.inspect` keeps it), but a Buffer (`__isBuffer` in its chain) still answers 0
             29 => flag(matches!(&v, Value::Object(o) if matches!(&*o.kind.borrow(),
-                Kind::ArrayBuffer(_) | Kind::Map(_) | Kind::Set(_) | Kind::Proxy(_))
+                Kind::ArrayBuffer(_) | Kind::Map(_) | Kind::Set(_) | Kind::Proxy(_) | Kind::RegExp(_))
                 || matches!(&*o.kind.borrow(), Kind::Typed(t) if !matches!(t.ty, crate::typed::Ty::U8))
                 || (matches!(&*o.kind.borrow(), Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8))
                     && !is_buffer_value(&v)))),
@@ -3878,19 +3927,46 @@ fn callback_value(it: &mut Interp, id: usize) -> Value {
 
 /// Rebuild a thrown error from the compiled side's `\u{1}Name\u{1}message` framing.
 pub(crate) fn tagged_error(it: &mut Interp, tagged: &str) -> Ctl {
-    match error_object(it, tagged) {
+    match error_object(it, tagged, None) {
         Ok(err) => Ctl::Throw(err),
+        Err(c) => c,
+    }
+}
+
+/// The thrown value of a callback's error result. With a native packet it is a carrier: the Error takes the
+/// packet's native identity as its id hint, names the packet in a hidden `\0pkt`, and the interpreter retains
+/// the packet until `thaw_tjs_release_all_handles`, so the native side still resolves it by token.
+fn packet_error(
+    it: &mut Interp,
+    packet: Option<Rc<thaw_arena::exception::ExceptionPacket>>,
+    tagged: &str,
+) -> Ctl {
+    let hint = packet
+        .as_deref()
+        .map(|p| p.native_error_identity as u64)
+        .filter(|&id| id != 0);
+    match error_object(it, tagged, hint) {
+        Ok(err) => {
+            if let (Some(packet), Value::Object(o)) = (packet, &err) {
+                crate::put_hidden(o, PACKET_KEY, Value::Number(packet.id as f64));
+                it.native_packets.insert(packet.id, packet);
+            }
+            Ctl::Throw(err)
+        }
         Err(c) => c,
     }
 }
 
 /// Reserved bag key of a native Error's identity (`thaw_error_json_text`); kept as a hidden property.
 const NATIVE_ID_KEY: &str = "\u{0}id";
+/// Hidden property of a thrown carrier: the id of the native exception packet it was built from.
+const PACKET_KEY: &str = "\u{0}pkt";
 
 /// The error object for a framed error string (`\u{1}Name\u{1}message`, or the tagged `\u{1}Name\u{1}\u{1e}E1:..`
 /// form), with its `\u{3}code`, `\u{5}<json>` own properties and `\u{2}` cause; `Err` is what the construction
 /// raised. One object per native id: a repeat crossing of the same native Error returns the cached object.
-fn error_object(it: &mut Interp, tagged: &str) -> Result<Value, Ctl> {
+/// `id_hint` is the native id of a packet's Error when the text carries no `\0id` bag entry.
+fn error_object(it: &mut Interp, tagged: &str, id_hint: Option<u64>) -> Result<Value, Ctl> {
     let tagged = tagged.strip_prefix('\u{2}').unwrap_or(tagged);
     // a native error token (`\u{1}Name\u{1}\u{1e}E1:<units>:-:<message>`): the name, the message and the suffix it frames
     let framed = thaw_arena::error_wire::parse_tagged(tagged.as_bytes()).and_then(|f| {
@@ -3916,10 +3992,13 @@ fn error_object(it: &mut Interp, tagged: &str) -> Result<Value, Ctl> {
         Some(Ok(Native::Object(fields))) => fields,
         _ => Vec::new(),
     };
-    let native_id = fields.iter().find_map(|(k, v)| match v {
-        Native::Number(n) if k == NATIVE_ID_KEY && *n >= 1.0 => Some(*n as u64),
-        _ => None,
-    });
+    let native_id = fields
+        .iter()
+        .find_map(|(k, v)| match v {
+            Native::Number(n) if k == NATIVE_ID_KEY && *n >= 1.0 => Some(*n as u64),
+            _ => None,
+        })
+        .or(id_hint);
     // a cached error keeps its identity only while its name and message still match (a reused arena id
     // of another Error is not this one)
     let cached = native_id.and_then(|id| {
@@ -3997,7 +4076,7 @@ fn framed_error(it: &mut Interp, s: &str) -> Option<Value> {
     if bytes.first() != Some(&1) || !bytes[1..].contains(&1) {
         return None;
     }
-    error_object(it, s).ok()
+    error_object(it, s, None).ok()
 }
 
 fn throw_type_error<T>(it: &mut Interp, message: &str) -> R<T> {
@@ -4118,7 +4197,7 @@ pub(crate) fn take_callback_result(
         return Err(Ctl::Throw(reason));
     }
     if packet.is_some() || out.starts_with('\u{2}') {
-        return Err(tagged_error(it, &out));
+        return Err(packet_error(it, packet, &out));
     }
     Ok((!out.is_empty()).then_some(out))
 }
@@ -4549,7 +4628,7 @@ fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<
         return Err(Ctl::Throw(original));
     }
     if packet.is_some() || out.starts_with('\u{2}') {
-        return Err(tagged_error(it, &out));
+        return Err(packet_error(it, packet, &out));
     }
     if out.is_empty() {
         return Ok(Value::Undefined);
@@ -6434,6 +6513,89 @@ mod host_query_live_tests {
             r#"{"0":0,"1":0}"#
         );
         assert_eq!(query(construct("Map", "[]"), 8), "{}");
+    }
+
+    #[test]
+    fn host_query_typed_probe_lists_typed_array_items_like_node() {
+        // node 22: new Uint8Array([3,4]) and new Float64Array([1.5]); Symbol.toStringTag gives the name
+        assert_eq!(
+            query(construct_array("Uint8Array", &[3, 4]), 27),
+            r#"{"n":"Uint8Array","v":["3","4"]}"#
+        );
+        assert_eq!(
+            query(construct_array("Float64Array", &[1]), 27),
+            r#"{"n":"Float64Array","v":["1"]}"#
+        );
+    }
+
+    #[test]
+    fn host_query_typed_probe_is_empty_for_non_typed_values() {
+        // node 22: a Buffer and a DataView are not probed; a plain object, a Map and a RegExp are not typed arrays
+        assert_eq!(query(construct("Buffer", "[{\"v\":3}]"), 27), "");
+        assert_eq!(query(construct("Object", "[]"), 27), "");
+        assert_eq!(query(construct("Map", "[]"), 27), "");
+        assert_eq!(query(construct("RegExp", "[{\"v\":\"y\"}]"), 27), "");
+    }
+
+    #[test]
+    fn host_query_keep_live_keeps_regexp_whole_for_structured_clone() {
+        // node 22: structuredClone(/y/m).flags === "m"; a RegExp lease must stay whole, not an empty object
+        assert_eq!(
+            query(construct("RegExp", "[{\"v\":\"y\"},{\"v\":\"m\"}]"), 29),
+            "1"
+        );
+    }
+
+    #[test]
+    fn host_query_error_properties_are_own_extra_properties_json() {
+        // node 22: JSON.stringify(Object.assign(new Error("x"), {code: "C"})) is {"code":"C"}; message/name/stack excluded
+        let error = construct("Error", "[{\"v\":\"x\"}]");
+        let wire = CString::new(r#"{"root":{"v":"C"},"nodes":[]}"#).unwrap();
+        let key = CString::new("\"code\"").unwrap();
+        let result = thaw_tjs_set_property_graph_result(error, key.as_ptr(), wire.as_ptr());
+        assert!(result.error.is_null());
+        assert_eq!(query(error, 28), r#"{"code":"C"}"#);
+        assert_eq!(query(construct("Error", "[{\"v\":\"x\"}]"), 28), "{}");
+    }
+
+    /// `new <global>([items])` as a handle: node 1 is the item array, node 0 the argument list holding it.
+    fn construct_array(global: &str, items: &[i64]) -> u64 {
+        let ctor = thaw_tjs_get_global(CString::new(global).unwrap().as_ptr());
+        assert_ne!(ctor, 0, "{global} is not defined");
+        let values = items
+            .iter()
+            .map(|n| format!(r#"{{"v":{n}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let wire = CString::new(format!(
+            r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"a":[{values}]}}]}}"#
+        ))
+        .unwrap();
+        let result = thaw_tjs_construct_handle_graph_args_result(ctor as u64, wire.as_ptr());
+        assert!(result.error.is_null());
+        result.value
+    }
+
+    #[test]
+    fn host_query_typed_probe_marks_bigint_items_like_node() {
+        // node 22: new BigInt64Array([1n, -1n]) probes as BigInt items with the `n` suffix
+        let mut it = Interp::new();
+        let v = it.run("new BigInt64Array([1n, -1n])").unwrap();
+        assert_eq!(
+            typed_probe_text(&mut it, &v),
+            r#"{"n":"BigInt64Array","v":["1n","-1n"]}"#
+        );
+    }
+
+    #[test]
+    fn host_query_lease_kinds_for_date_map_set_and_error_match_node_clone() {
+        // node 22: structuredClone(new Date(0)) is a Date, Map and Set clone as collections, Error as an Error
+        assert_eq!(query(construct("Date", "[{\"v\":0}]"), 12), "1");
+        assert_eq!(query(construct("Map", "[]"), 24), "map");
+        assert_eq!(query(construct("Set", "[]"), 24), "set");
+        assert_eq!(query(construct("Error", "[{\"v\":\"x\"}]"), 22), "1");
+        // a Date lease is non-plain, so structuredClone keeps it live (op 12 = "1")
+        assert_eq!(query(construct("Date", "[{\"v\":0}]"), 29), "0");
     }
 
     fn thaw_tjs_new_function_handle() -> u64 {
