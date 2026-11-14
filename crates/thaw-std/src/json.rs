@@ -1748,6 +1748,18 @@ fn string_value(value: *const c_char) -> Value {
     if value.is_null() {
         Value::Null
     } else {
+        // With the thaw-js Error factory a framed Error widens to its one interned lease, so every
+        // copy shares the Error's props and identity (the QuickJS lane keeps the text below).
+        if unsafe { *value } == 1 {
+            let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
+            if is_error_frame_text(bytes) {
+                if let Some(operations) = ERROR_FACTORY_OPERATIONS.with(|slot| slot.get()) {
+                    if let Some(lease) = error_host_value_from_text(value, operations) {
+                        return lease;
+                    }
+                }
+            }
+        }
         // Keep the raw WTF-8 bytes so a lone surrogate survives to the
         // serializer; a valid-UTF-8 string stays the common `Value::String`.
         // A framed Error carries its side-table props with it (the copy has no pointer identity).
@@ -4870,7 +4882,26 @@ pub extern "C" fn thaw_json_stringify_public(value: *mut Value) -> *const c_char
     if is_json_undefined(value) {
         return top_level_undefined_string();
     }
+    if let Some(props) = error_lease_own_props(value) {
+        return CString::new(props).unwrap_or_default().into_raw();
+    }
     stringify_value(&ordered_json_omitting_undefined(value), &[])
+}
+
+/// `JSON.stringify(err)` for a root thaw-js Error lease: its own enumerable props (host query 28),
+/// not the handle marker a live object otherwise writes. Only with the Error factory, and not on
+/// the store path (`thaw_json_encode_public`), which keeps the marker.
+fn error_lease_own_props(value: &Value) -> Option<String> {
+    let Value::Host(lease) = value else {
+        return None;
+    };
+    if ERROR_REFS_AS_TEXT.with(Cell::get)
+        || ERROR_FACTORY_OPERATIONS.with(|slot| slot.get().is_none())
+        || host_query(lease, 22).as_deref() != Some("1")
+    {
+        return None;
+    }
+    host_query(lease, 28)
 }
 
 #[no_mangle]
@@ -8057,10 +8088,31 @@ unsafe extern "C" fn thaw_json_capture_stack_trace_at(
 /// `value instanceof <ErrorClass>` for a Json copy of an Error (0 for every other value).
 #[no_mangle]
 pub extern "C" fn thaw_json_is_error_instance(value: *const Value, class: *const c_char) -> u8 {
+    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        return u8::from(host_error_instance(lease, class));
+    }
     let Some(error) = unsafe { value.as_ref() }.and_then(error_ref) else {
         return 0;
     };
     u8::from(unsafe { thaw_error_is_instance(error, class) })
+}
+
+/// `instanceof` for a live thaw-js Error lease, gated on the Error factory (the QuickJS lane has
+/// no such lease). The host only reports the Error family (query 22), so the class is the Error
+/// itself or the lease's own `name` (a native subclass's name); deeper user subclasses are not
+/// matched.
+// ponytail: name-equality class check, not a prototype-chain walk; upgrade if a user subclass with an inherited name needs it.
+fn host_error_instance(lease: &HostLease, class: *const c_char) -> bool {
+    if ERROR_FACTORY_OPERATIONS.with(|slot| slot.get().is_none())
+        || host_query(lease, 22).as_deref() != Some("1")
+    {
+        return false;
+    }
+    let class = to_str(class);
+    if class == "Error" {
+        return true;
+    }
+    matches!(host_get_property(lease, b"name"), Value::String(name) if name.as_str() == class)
 }
 
 #[no_mangle]
@@ -11509,6 +11561,167 @@ mod tests {
                 .unwrap()
                 .to_owned();
             assert!(!plain.contains("\\u0000id"), "{plain}");
+        })
+        .join()
+        .unwrap();
+    }
+
+    // Lease 5 is a plain Error, 6 a TypeError, 7 an Error with own props, 9 not an Error.
+    // Their `name` strings are handles 33 (\"Error\") and 34 (\"TypeError\").
+    extern "C" fn pr2_test_get(handle: u64, key: *const c_char) -> HostHandleResult {
+        let key = unsafe { CStr::from_ptr(key) }.to_str().unwrap().to_owned();
+        let value = match (handle, key.as_str()) {
+            (5 | 7, "\"name\"") => 33,
+            (6, "\"name\"") => 34,
+            _ => 0,
+        };
+        HostHandleResult {
+            value,
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn pr2_test_query(handle: u64, operation: u8) -> HostTextResult {
+        let text = match (handle, operation) {
+            (33 | 34, 0) => "string",
+            (33, 3) => "\"Error\"",
+            (34, 3) => "\"TypeError\"",
+            (5 | 6 | 7, 22) => "1",
+            (9, 22) => "0",
+            (7, 28) => r#"{"code":"E1"}"#,
+            (7, 8) => r#"{"__thaw_tjs_handle__":7}"#,
+            _ => "",
+        };
+        HostTextResult {
+            value: thaw_arena::owned_string(text.to_string()),
+            error: std::ptr::null(),
+        }
+    }
+
+    fn install_pr2_host_operations() {
+        HOST_OPERATIONS.with(|slot| {
+            slot.set(Some(HostOperations {
+                retain: factory_test_retain,
+                release: factory_test_release,
+                get: pr2_test_get,
+                query: pr2_test_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            }))
+        });
+    }
+
+    #[test]
+    fn string_value_widening_returns_the_interned_lease_when_the_error_factory_is_registered() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            install_pr2_host_operations();
+            let framed = thaw_arena::error_wire::encode_tagged(b"Error", b"boom", None)
+                .expect("valid error frame");
+            let canonical = thaw_arena::arena_string(&framed);
+            let (first, second) = (
+                thaw_arena::arena_string(&framed),
+                thaw_arena::arena_string(&framed),
+            );
+            NATIVE_ERROR_TEXT_IDENTITY.with(|table| {
+                let mut table = table.borrow_mut();
+                table.insert(first as usize, canonical as usize);
+                table.insert(second as usize, canonical as usize);
+            });
+            // Without the Error factory (QuickJS lane) the widened text stays a String.
+            assert!(matches!(string_value(first), Value::String(_)));
+
+            thaw_json_register_error_factory(
+                factory_test_create,
+                factory_test_lookup,
+                factory_test_intern,
+            );
+            let (a, b) = (string_value(first), string_value(second));
+            let (Value::Host(a), Value::Host(b)) = (&a, &b) else {
+                panic!("widened Error copies must be leases");
+            };
+            assert_eq!(a.handle, b.handle);
+
+            // A plain string frame-less text is never an Error lease.
+            let plain = CString::new("\u{1}abc").unwrap();
+            assert!(matches!(string_value(plain.as_ptr()), Value::String(_)));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn host_error_lease_instanceof_follows_its_class_only_with_the_error_factory() {
+        std::thread::spawn(|| {
+            install_pr2_host_operations();
+            let lease = |handle: u64| {
+                leak(Value::Host(Rc::new(HostLease {
+                    handle,
+                    release: factory_test_release,
+                })))
+            };
+            let (error, type_error, plain) = (lease(5), lease(6), lease(9));
+            let class = |name: &str| CString::new(name).unwrap();
+            // Without the factory the lease is not authenticated as an Error.
+            assert_eq!(
+                thaw_json_is_error_instance(error, class("Error").as_ptr()),
+                0
+            );
+
+            thaw_json_register_error_factory(
+                factory_test_create,
+                factory_test_lookup,
+                factory_test_intern,
+            );
+            assert_eq!(
+                thaw_json_is_error_instance(error, class("Error").as_ptr()),
+                1
+            );
+            assert_eq!(
+                thaw_json_is_error_instance(error, class("TypeError").as_ptr()),
+                0
+            );
+            assert_eq!(
+                thaw_json_is_error_instance(type_error, class("TypeError").as_ptr()),
+                1
+            );
+            assert_eq!(
+                thaw_json_is_error_instance(type_error, class("Error").as_ptr()),
+                1
+            );
+            assert_eq!(
+                thaw_json_is_error_instance(plain, class("Error").as_ptr()),
+                0
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn stringify_of_a_root_host_error_lease_uses_its_own_properties_with_the_error_factory() {
+        std::thread::spawn(|| {
+            install_pr2_host_operations();
+            let root = leak(Value::Host(Rc::new(HostLease {
+                handle: 7,
+                release: factory_test_release,
+            })));
+            let text =
+                |ptr: *const c_char| unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+            // Without the factory the host's handle marker is kept (QuickJS lane).
+            assert!(text(thaw_json_stringify_public(root)).contains("__thaw_tjs_handle__"));
+
+            thaw_json_register_error_factory(
+                factory_test_create,
+                factory_test_lookup,
+                factory_test_intern,
+            );
+            let out = text(thaw_json_stringify_public(root));
+            assert_eq!(out, r#"{"code":"E1"}"#);
+            // Storing a lease (the encode path) still writes the handle marker.
+            assert!(text(thaw_json_encode_public(root)).contains("__thaw_tjs_handle__"));
         })
         .join()
         .unwrap();
