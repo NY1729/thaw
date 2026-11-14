@@ -1,4 +1,5 @@
 owner	key	kind	flags	vtype	length	name	hasPrototype	alias	tag
+%TypedArray%	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
 %TypedArray%	length	data	--c	number	0	-	-	-	-
 %TypedArray%	name	data	--c	string	-	TypedArray	-	-	-
 AbortController	length	data	--c	number	0	-	-	-	-
@@ -36,6 +37,7 @@ AggregateError	prototype	data	---	object	-	-	-	-	-
 AggregateError.prototype	constructor	data	w-c	function	2	AggregateError	1	13	-
 AggregateError.prototype	message	data	w-c	string	-	-	-	-	-
 AggregateError.prototype	name	data	w-c	string	-	AggregateError	-	-	-
+Array	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
 Array	from	data	w-c	function	1	from	0	-	-
 Array	isArray	data	w-c	function	1	isArray	0	-	-
 Array	length	data	--c	number	1	-	-	-	-
@@ -161,12 +163,14 @@ Array.prototype.unshift	length	data	--c	number	1	-	-	-	-
 Array.prototype.unshift	name	data	--c	string	-	unshift	-	-	-
 Array.prototype.with	length	data	--c	number	2	-	-	-	-
 Array.prototype.with	name	data	--c	string	-	with	-	-	-
+ArrayBuffer	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
 ArrayBuffer	isView	data	w-c	function	1	isView	0	-	-
 ArrayBuffer	length	data	--c	number	1	-	-	-	-
 ArrayBuffer	name	data	--c	string	-	ArrayBuffer	-	-	-
 ArrayBuffer	prototype	data	---	object	-	-	-	-	-
 ArrayBuffer.isView	length	data	--c	number	1	-	-	-	-
 ArrayBuffer.isView	name	data	--c	string	-	isView	-	-	-
+ArrayBuffer.prototype	@@toStringTag	data	--c	string	-	-	-	-	ArrayBuffer
 ArrayBuffer.prototype	byteLength	accessor	--c	-	-	get byteLength|-	-	-	-
 ArrayBuffer.prototype	constructor	data	w-c	function	1	ArrayBuffer	1	16	-
 ArrayBuffer.prototype	detached	accessor	--c	-	-	get detached|-	-	-	-
@@ -517,20 +521,24 @@ Buffer.prototype.writeUInt8	prototype	data	w--	object	-	-	-	-	-
 ByteLengthQueuingStrategy	length	data	--c	number	1	-	-	-	-
 ByteLengthQueuingStrategy	name	data	--c	string	-	ByteLengthQueuingStrategy	-	-	-
 ByteLengthQueuingStrategy	prototype	data	---	object	-	-	-	-	-
+ByteLengthQueuingStrategy.prototype	@@toStringTag	data	--c	string	-	-	-	-	ByteLengthQueuingStrategy
 ByteLengthQueuingStrategy.prototype	constructor	data	w-c	function	1	ByteLengthQueuingStrategy	1	54	-
 ByteLengthQueuingStrategy.prototype	highWaterMark	accessor	-ec	-	-	get highWaterMark|-	-	-	-
 CompressionStream	length	data	--c	number	1	-	-	-	-
 CompressionStream	name	data	--c	string	-	CompressionStream	-	-	-
 CompressionStream	prototype	data	---	object	-	-	-	-	-
+CompressionStream.prototype	@@toStringTag	data	--c	string	-	-	-	-	CompressionStream
 CompressionStream.prototype	constructor	data	w-c	function	1	CompressionStream	1	55	-
 CountQueuingStrategy	length	data	--c	number	1	-	-	-	-
 CountQueuingStrategy	name	data	--c	string	-	CountQueuingStrategy	-	-	-
 CountQueuingStrategy	prototype	data	---	object	-	-	-	-	-
+CountQueuingStrategy.prototype	@@toStringTag	data	--c	string	-	-	-	-	CountQueuingStrategy
 CountQueuingStrategy.prototype	constructor	data	w-c	function	1	CountQueuingStrategy	1	56	-
 CountQueuingStrategy.prototype	highWaterMark	accessor	-ec	-	-	get highWaterMark|-	-	-	-
 CustomEvent	length	data	--c	number	1	-	-	-	-
 CustomEvent	name	data	--c	string	-	CustomEvent	-	-	-
 CustomEvent	prototype	data	---	object	-	-	-	-	-
+CustomEvent.prototype	@@toStringTag	data	--c	string	-	-	-	-	CustomEvent
 CustomEvent.prototype	constructor	data	w-c	function	1	CustomEvent	1	59	-
 DOMException	ABORT_ERR	data	-e-	number	-	-	-	-	-
 DOMException	DATA_CLONE_ERR	data	-e-	number	-	-	-	-	-
@@ -803,6 +811,7 @@ Date.prototype.valueOf	name	data	--c	string	-	valueOf	-	-	-
 DecompressionStream	length	data	--c	number	1	-	-	-	-
 DecompressionStream	name	data	--c	string	-	DecompressionStream	-	-	-
 DecompressionStream	prototype	data	---	object	-	-	-	-	-
+DecompressionStream.prototype	@@toStringTag	data	--c	string	-	-	-	-	DecompressionStream
 DecompressionStream.prototype	constructor	data	w-c	function	1	DecompressionStream	1	64	-
 Error	captureStackTrace	data	w-c	function	2	captureStackTrace	0	-	-
 Error	length	data	--c	number	1	-	-	-	-
@@ -840,6 +849,7 @@ Event.prototype.stopPropagation	name	data	--c	string	-	stopPropagation	-	-	-
 EventTarget	length	data	--c	number	0	-	-	-	-
 EventTarget	name	data	--c	string	-	EventTarget	-	-	-
 EventTarget	prototype	data	---	object	-	-	-	-	-
+EventTarget.prototype	@@toStringTag	data	--c	string	-	-	-	-	EventTarget
 EventTarget.prototype	addEventListener	data	wec	function	2	addEventListener	0	-	-
 EventTarget.prototype	constructor	data	w-c	function	0	EventTarget	1	69	-
 EventTarget.prototype	dispatchEvent	data	wec	function	1	dispatchEvent	0	-	-
@@ -1041,6 +1051,7 @@ JSON.rawJSON	length	data	--c	number	1	-	-	-	-
 JSON.rawJSON	name	data	--c	string	-	rawJSON	-	-	-
 JSON.stringify	length	data	--c	number	3	-	-	-	-
 JSON.stringify	name	data	--c	string	-	stringify	-	-	-
+Map	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
 Map	groupBy	data	w-c	function	2	groupBy	0	-	-
 Map	length	data	--c	number	0	-	-	-	-
 Map	name	data	--c	string	-	Map	-	-	-
@@ -1199,6 +1210,7 @@ MessageChannel.prototype	constructor	data	w-c	function	0	MessageChannel	1	94	-
 MessageEvent	length	data	--c	number	1	-	-	-	-
 MessageEvent	name	data	--c	string	-	MessageEvent	-	-	-
 MessageEvent	prototype	data	---	object	-	-	-	-	-
+MessageEvent.prototype	@@toStringTag	data	--c	string	-	-	-	-	MessageEvent
 MessageEvent.prototype	constructor	data	w-c	function	1	MessageEvent	1	95	-
 MessagePort	length	data	--c	number	0	-	-	-	-
 MessagePort	name	data	--c	string	-	MessagePort	-	-	-
@@ -1494,6 +1506,7 @@ PerformanceResourceTiming.prototype	responseStatus	accessor	-ec	-	-	get response
 PerformanceResourceTiming.prototype	secureConnectionStart	accessor	-ec	-	-	get secureConnectionStart|-	-	-	-
 PerformanceResourceTiming.prototype	transferSize	accessor	-ec	-	-	get transferSize|-	-	-	-
 PerformanceResourceTiming.prototype	workerStart	accessor	-ec	-	-	get workerStart|-	-	-	-
+Promise	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
 Promise	all	data	w-c	function	1	all	0	-	-
 Promise	allSettled	data	w-c	function	1	allSettled	0	-	-
 Promise	any	data	w-c	function	1	any	0	-	-
@@ -1510,6 +1523,7 @@ Promise.allSettled	length	data	--c	number	1	-	-	-	-
 Promise.allSettled	name	data	--c	string	-	allSettled	-	-	-
 Promise.any	length	data	--c	number	1	-	-	-	-
 Promise.any	name	data	--c	string	-	any	-	-	-
+Promise.prototype	@@toStringTag	data	--c	string	-	-	-	-	Promise
 Promise.prototype	catch	data	w-c	function	1	catch	0	-	-
 Promise.prototype	constructor	data	w-c	function	1	Promise	1	109	-
 Promise.prototype	finally	data	w-c	function	1	finally	0	-	-
@@ -1542,6 +1556,7 @@ RangeError.prototype	name	data	w-c	string	-	RangeError	-	-	-
 ReadableByteStreamController	length	data	--c	number	0	-	-	-	-
 ReadableByteStreamController	name	data	--c	string	-	ReadableByteStreamController	-	-	-
 ReadableByteStreamController	prototype	data	---	object	-	-	-	-	-
+ReadableByteStreamController.prototype	@@toStringTag	data	--c	string	-	-	-	-	ReadableByteStreamController
 ReadableByteStreamController.prototype	byobRequest	accessor	-ec	-	-	get byobRequest|-	-	-	-
 ReadableByteStreamController.prototype	close	data	wec	function	0	close	0	-	-
 ReadableByteStreamController.prototype	constructor	data	w-c	function	0	ReadableByteStreamController	1	111	-
@@ -1561,6 +1576,7 @@ ReadableStream	prototype	data	---	object	-	-	-	-	-
 ReadableStream.from	length	data	--c	number	1	-	-	-	-
 ReadableStream.from	name	data	--c	string	-	from	-	-	-
 ReadableStream.prototype	@@asyncIterator	data	w-c	function	0	values	0	112	-
+ReadableStream.prototype	@@toStringTag	data	--c	string	-	-	-	-	ReadableStream
 ReadableStream.prototype	cancel	data	wec	function	0	cancel	0	-	-
 ReadableStream.prototype	constructor	data	w-c	function	0	ReadableStream	1	113	-
 ReadableStream.prototype	getReader	data	wec	function	0	getReader	0	-	-
@@ -1584,6 +1600,7 @@ ReadableStream.prototype.tee	name	data	--c	string	-	tee	-	-	-
 ReadableStreamBYOBReader	length	data	--c	number	1	-	-	-	-
 ReadableStreamBYOBReader	name	data	--c	string	-	ReadableStreamBYOBReader	-	-	-
 ReadableStreamBYOBReader	prototype	data	---	object	-	-	-	-	-
+ReadableStreamBYOBReader.prototype	@@toStringTag	data	--c	string	-	-	-	-	ReadableStreamBYOBReader
 ReadableStreamBYOBReader.prototype	cancel	data	wec	function	0	cancel	0	-	-
 ReadableStreamBYOBReader.prototype	closed	accessor	-ec	-	-	get closed|-	-	-	-
 ReadableStreamBYOBReader.prototype	constructor	data	w-c	function	1	ReadableStreamBYOBReader	1	114	-
@@ -1598,6 +1615,7 @@ ReadableStreamBYOBReader.prototype.releaseLock	name	data	--c	string	-	releaseLoc
 ReadableStreamBYOBRequest	length	data	--c	number	0	-	-	-	-
 ReadableStreamBYOBRequest	name	data	--c	string	-	ReadableStreamBYOBRequest	-	-	-
 ReadableStreamBYOBRequest	prototype	data	---	object	-	-	-	-	-
+ReadableStreamBYOBRequest.prototype	@@toStringTag	data	--c	string	-	-	-	-	ReadableStreamBYOBRequest
 ReadableStreamBYOBRequest.prototype	constructor	data	w-c	function	0	ReadableStreamBYOBRequest	1	115	-
 ReadableStreamBYOBRequest.prototype	respond	data	wec	function	1	respond	0	-	-
 ReadableStreamBYOBRequest.prototype	respondWithNewView	data	wec	function	1	respondWithNewView	0	-	-
@@ -1609,6 +1627,7 @@ ReadableStreamBYOBRequest.prototype.respondWithNewView	name	data	--c	string	-	re
 ReadableStreamDefaultController	length	data	--c	number	0	-	-	-	-
 ReadableStreamDefaultController	name	data	--c	string	-	ReadableStreamDefaultController	-	-	-
 ReadableStreamDefaultController	prototype	data	---	object	-	-	-	-	-
+ReadableStreamDefaultController.prototype	@@toStringTag	data	--c	string	-	-	-	-	ReadableStreamDefaultController
 ReadableStreamDefaultController.prototype	close	data	wec	function	0	close	0	-	-
 ReadableStreamDefaultController.prototype	constructor	data	w-c	function	0	ReadableStreamDefaultController	1	116	-
 ReadableStreamDefaultController.prototype	desiredSize	accessor	-ec	-	-	get desiredSize|-	-	-	-
@@ -1623,6 +1642,7 @@ ReadableStreamDefaultController.prototype.error	name	data	--c	string	-	error	-	-
 ReadableStreamDefaultReader	length	data	--c	number	1	-	-	-	-
 ReadableStreamDefaultReader	name	data	--c	string	-	ReadableStreamDefaultReader	-	-	-
 ReadableStreamDefaultReader	prototype	data	---	object	-	-	-	-	-
+ReadableStreamDefaultReader.prototype	@@toStringTag	data	--c	string	-	-	-	-	ReadableStreamDefaultReader
 ReadableStreamDefaultReader.prototype	cancel	data	wec	function	0	cancel	0	-	-
 ReadableStreamDefaultReader.prototype	closed	accessor	-ec	-	-	get closed|-	-	-	-
 ReadableStreamDefaultReader.prototype	constructor	data	w-c	function	1	ReadableStreamDefaultReader	1	117	-
@@ -1680,6 +1700,7 @@ Reflect.set	length	data	--c	number	3	-	-	-	-
 Reflect.set	name	data	--c	string	-	set	-	-	-
 Reflect.setPrototypeOf	length	data	--c	number	2	-	-	-	-
 Reflect.setPrototypeOf	name	data	--c	string	-	setPrototypeOf	-	-	-
+RegExp	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
 RegExp	length	data	--c	number	2	-	-	-	-
 RegExp	name	data	--c	string	-	RegExp	-	-	-
 RegExp	prototype	data	---	object	-	-	-	-	-
@@ -1777,6 +1798,7 @@ Response.prototype.text	length	data	--c	number	0	-	-	-	-
 Response.prototype.text	name	data	--c	string	-	text	-	-	-
 Response.redirect	length	data	--c	number	1	-	-	-	-
 Response.redirect	name	data	--c	string	-	redirect	-	-	-
+Set	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
 Set	length	data	--c	number	0	-	-	-	-
 Set	name	data	--c	string	-	Set	-	-	-
 Set	prototype	data	---	object	-	-	-	-	-
@@ -1827,6 +1849,7 @@ Set.prototype.symmetricDifference	length	data	--c	number	1	-	-	-	-
 Set.prototype.symmetricDifference	name	data	--c	string	-	symmetricDifference	-	-	-
 Set.prototype.union	length	data	--c	number	1	-	-	-	-
 Set.prototype.union	name	data	--c	string	-	union	-	-	-
+SharedArrayBuffer	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
 SharedArrayBuffer	length	data	--c	number	1	-	-	-	-
 SharedArrayBuffer	name	data	--c	string	-	SharedArrayBuffer	-	-	-
 SharedArrayBuffer	prototype	data	---	object	-	-	-	-	-
@@ -1982,6 +2005,7 @@ Symbol.for	length	data	--c	number	1	-	-	-	-
 Symbol.for	name	data	--c	string	-	for	-	-	-
 Symbol.keyFor	length	data	--c	number	1	-	-	-	-
 Symbol.keyFor	name	data	--c	string	-	keyFor	-	-	-
+Symbol.prototype	@@toStringTag	data	--c	string	-	-	-	-	Symbol
 Symbol.prototype	toString	data	w-c	function	0	toString	0	-	-
 Symbol.prototype.toString	length	data	--c	number	0	-	-	-	-
 Symbol.prototype.toString	name	data	--c	string	-	toString	-	-	-
@@ -1994,6 +2018,7 @@ SyntaxError.prototype	name	data	w-c	string	-	SyntaxError	-	-	-
 TextDecoder	length	data	--c	number	0	-	-	-	-
 TextDecoder	name	data	--c	string	-	TextDecoder	-	-	-
 TextDecoder	prototype	data	---	object	-	-	-	-	-
+TextDecoder.prototype	@@toStringTag	data	--c	string	-	-	-	-	TextDecoder
 TextDecoder.prototype	constructor	data	w-c	function	0	TextDecoder	1	131	-
 TextDecoder.prototype	decode	data	wec	function	0	decode	0	-	-
 TextDecoder.prototype.decode	length	data	--c	number	0	-	-	-	-
@@ -2005,6 +2030,7 @@ TextDecoderStream.prototype	constructor	data	w-c	function	0	TextDecoderStream	1	
 TextEncoder	length	data	--c	number	0	-	-	-	-
 TextEncoder	name	data	--c	string	-	TextEncoder	-	-	-
 TextEncoder	prototype	data	---	object	-	-	-	-	-
+TextEncoder.prototype	@@toStringTag	data	--c	string	-	-	-	-	TextEncoder
 TextEncoder.prototype	constructor	data	w-c	function	0	TextEncoder	1	133	-
 TextEncoder.prototype	encode	data	wec	function	0	encode	0	-	-
 TextEncoder.prototype	encodeInto	data	wec	function	2	encodeInto	0	-	-
@@ -2020,10 +2046,12 @@ TextEncoderStream.prototype	constructor	data	w-c	function	0	TextEncoderStream	1	
 TransformStream	length	data	--c	number	0	-	-	-	-
 TransformStream	name	data	--c	string	-	TransformStream	-	-	-
 TransformStream	prototype	data	---	object	-	-	-	-	-
+TransformStream.prototype	@@toStringTag	data	--c	string	-	-	-	-	TransformStream
 TransformStream.prototype	constructor	data	w-c	function	0	TransformStream	1	135	-
 TransformStreamDefaultController	length	data	--c	number	0	-	-	-	-
 TransformStreamDefaultController	name	data	--c	string	-	TransformStreamDefaultController	-	-	-
 TransformStreamDefaultController	prototype	data	---	object	-	-	-	-	-
+TransformStreamDefaultController.prototype	@@toStringTag	data	--c	string	-	-	-	-	TransformStreamDefaultController
 TransformStreamDefaultController.prototype	constructor	data	w-c	function	0	TransformStreamDefaultController	1	136	-
 TransformStreamDefaultController.prototype	desiredSize	accessor	-ec	-	-	get desiredSize|-	-	-	-
 TransformStreamDefaultController.prototype	enqueue	data	wec	function	0	enqueue	0	-	-
@@ -2056,6 +2084,7 @@ URL.canParse	length	data	--c	number	1	-	-	-	-
 URL.canParse	name	data	--c	string	-	canParse	-	-	-
 URL.parse	length	data	--c	number	1	-	-	-	-
 URL.parse	name	data	--c	string	-	parse	-	-	-
+URL.prototype	@@toStringTag	data	--c	string	-	-	-	-	URL
 URL.prototype	constructor	data	w-c	function	1	URL	1	141	-
 URL.prototype	hash	accessor	-ec	-	-	get hash|set hash	-	-	-
 URL.prototype	host	accessor	-ec	-	-	get host|set host	-	-	-
@@ -2181,6 +2210,7 @@ WeakSet.prototype.delete	length	data	--c	number	1	-	-	-	-
 WeakSet.prototype.delete	name	data	--c	string	-	delete	-	-	-
 WeakSet.prototype.has	length	data	--c	number	1	-	-	-	-
 WeakSet.prototype.has	name	data	--c	string	-	has	-	-	-
+WebAssembly	@@toStringTag	data	--c	string	-	-	-	-	WebAssembly
 WebAssembly	CompileError	data	w-c	function	1	CompileError	1	151	-
 WebAssembly	Global	data	w-c	function	1	Global	1	153	-
 WebAssembly	Instance	data	w-c	function	1	Instance	1	154	-
@@ -2200,10 +2230,12 @@ WebAssembly.CompileError.prototype	name	data	w-c	string	-	CompileError	-	-	-
 WebAssembly.Global	length	data	--c	number	1	-	-	-	-
 WebAssembly.Global	name	data	--c	string	-	Global	-	-	-
 WebAssembly.Global	prototype	data	---	object	-	-	-	-	-
+WebAssembly.Global.prototype	@@toStringTag	data	--c	string	-	-	-	-	WebAssembly.Global
 WebAssembly.Global.prototype	constructor	data	w-c	function	1	Global	1	153	-
 WebAssembly.Instance	length	data	--c	number	1	-	-	-	-
 WebAssembly.Instance	name	data	--c	string	-	Instance	-	-	-
 WebAssembly.Instance	prototype	data	---	object	-	-	-	-	-
+WebAssembly.Instance.prototype	@@toStringTag	data	--c	string	-	-	-	-	WebAssembly.Instance
 WebAssembly.Instance.prototype	constructor	data	w-c	function	1	Instance	1	154	-
 WebAssembly.LinkError	length	data	--c	number	1	-	-	-	-
 WebAssembly.LinkError	name	data	--c	string	-	LinkError	-	-	-
@@ -2213,10 +2245,12 @@ WebAssembly.LinkError.prototype	name	data	w-c	string	-	LinkError	-	-	-
 WebAssembly.Memory	length	data	--c	number	1	-	-	-	-
 WebAssembly.Memory	name	data	--c	string	-	Memory	-	-	-
 WebAssembly.Memory	prototype	data	---	object	-	-	-	-	-
+WebAssembly.Memory.prototype	@@toStringTag	data	--c	string	-	-	-	-	WebAssembly.Memory
 WebAssembly.Memory.prototype	constructor	data	w-c	function	1	Memory	1	156	-
 WebAssembly.Module	length	data	--c	number	1	-	-	-	-
 WebAssembly.Module	name	data	--c	string	-	Module	-	-	-
 WebAssembly.Module	prototype	data	---	object	-	-	-	-	-
+WebAssembly.Module.prototype	@@toStringTag	data	--c	string	-	-	-	-	WebAssembly.Module
 WebAssembly.Module.prototype	constructor	data	w-c	function	1	Module	1	157	-
 WebAssembly.RuntimeError	length	data	--c	number	1	-	-	-	-
 WebAssembly.RuntimeError	name	data	--c	string	-	RuntimeError	-	-	-
@@ -2226,6 +2260,7 @@ WebAssembly.RuntimeError.prototype	name	data	w-c	string	-	RuntimeError	-	-	-
 WebAssembly.Table	length	data	--c	number	1	-	-	-	-
 WebAssembly.Table	name	data	--c	string	-	Table	-	-	-
 WebAssembly.Table	prototype	data	---	object	-	-	-	-	-
+WebAssembly.Table.prototype	@@toStringTag	data	--c	string	-	-	-	-	WebAssembly.Table
 WebAssembly.Table.prototype	constructor	data	w-c	function	1	Table	1	159	-
 WebAssembly.compile	length	data	--c	number	1	-	-	-	-
 WebAssembly.compile	name	data	--c	string	-	compile	-	-	-
@@ -2236,6 +2271,7 @@ WebAssembly.validate	name	data	--c	string	-	validate	-	-	-
 WritableStream	length	data	--c	number	0	-	-	-	-
 WritableStream	name	data	--c	string	-	WritableStream	-	-	-
 WritableStream	prototype	data	---	object	-	-	-	-	-
+WritableStream.prototype	@@toStringTag	data	--c	string	-	-	-	-	WritableStream
 WritableStream.prototype	abort	data	wec	function	0	abort	0	-	-
 WritableStream.prototype	close	data	wec	function	0	close	0	-	-
 WritableStream.prototype	constructor	data	w-c	function	0	WritableStream	1	162	-
@@ -2250,6 +2286,7 @@ WritableStream.prototype.getWriter	name	data	--c	string	-	getWriter	-	-	-
 WritableStreamDefaultController	length	data	--c	number	0	-	-	-	-
 WritableStreamDefaultController	name	data	--c	string	-	WritableStreamDefaultController	-	-	-
 WritableStreamDefaultController	prototype	data	---	object	-	-	-	-	-
+WritableStreamDefaultController.prototype	@@toStringTag	data	--c	string	-	-	-	-	WritableStreamDefaultController
 WritableStreamDefaultController.prototype	constructor	data	w-c	function	0	WritableStreamDefaultController	1	163	-
 WritableStreamDefaultController.prototype	error	data	wec	function	0	error	0	-	-
 WritableStreamDefaultController.prototype.error	length	data	--c	number	0	-	-	-	-
@@ -2257,6 +2294,7 @@ WritableStreamDefaultController.prototype.error	name	data	--c	string	-	error	-	-
 WritableStreamDefaultWriter	length	data	--c	number	1	-	-	-	-
 WritableStreamDefaultWriter	name	data	--c	string	-	WritableStreamDefaultWriter	-	-	-
 WritableStreamDefaultWriter	prototype	data	---	object	-	-	-	-	-
+WritableStreamDefaultWriter.prototype	@@toStringTag	data	--c	string	-	-	-	-	WritableStreamDefaultWriter
 WritableStreamDefaultWriter.prototype	abort	data	wec	function	0	abort	0	-	-
 WritableStreamDefaultWriter.prototype	close	data	wec	function	0	close	0	-	-
 WritableStreamDefaultWriter.prototype	closed	accessor	-ec	-	-	get closed|-	-	-	-
@@ -2287,6 +2325,7 @@ clearInterval	length	data	--c	number	1	-	-	-	-
 clearInterval	name	data	--c	string	-	clearInterval	-	-	-
 clearTimeout	length	data	--c	number	1	-	-	-	-
 clearTimeout	name	data	--c	string	-	clearTimeout	-	-	-
+console	@@toStringTag	data	--c	string	-	-	-	-	console
 console	Console	data	wec	function	1	Console	1	170	-
 console	debug	data	wec	function	0	debug	0	-	-
 console	error	data	wec	function	0	error	0	-	-
