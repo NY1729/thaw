@@ -375,12 +375,184 @@ struct Binding {
 /// How a global-scope binding relates to the `globalThis` object, for `delete`.
 #[derive(Clone, Copy, PartialEq)]
 enum Origin {
-    /// let/const/class, parameters, builtins: never removed by `delete`.
+    /// builtins and host bindings: never removed by `delete`.
     Decl,
     /// top-level `var` or function of a script: non-configurable, `delete` returns false.
     Var,
     /// implicit global (assigned without a declaration): configurable, `delete` removes it.
     Prop,
+    /// top-level let/const/class: a scope binding only, not an own property of `globalThis`.
+    Lexical,
+}
+
+/// Node 22's `globalThis` own properties, as `(name, e/w/c flags)` from the recorded surface (`-` where
+/// the attribute is off; an accessor in Node is `e-c`/`--c`, shown here as its flags on a data property).
+/// A binding named here takes these flags whatever its origin: a prelude's assignment is an implicit
+/// global to thaw-js, but a non-enumerable builtin in Node.
+const NODE_GLOBAL_FLAGS: &[(&str, &str)] = &[
+    ("Object", "-wc"),
+    ("Function", "-wc"),
+    ("Array", "-wc"),
+    ("Number", "-wc"),
+    ("parseFloat", "-wc"),
+    ("parseInt", "-wc"),
+    ("Infinity", "---"),
+    ("NaN", "---"),
+    ("undefined", "---"),
+    ("Boolean", "-wc"),
+    ("String", "-wc"),
+    ("Symbol", "-wc"),
+    ("Date", "-wc"),
+    ("Promise", "-wc"),
+    ("RegExp", "-wc"),
+    ("Error", "-wc"),
+    ("AggregateError", "-wc"),
+    ("EvalError", "-wc"),
+    ("RangeError", "-wc"),
+    ("ReferenceError", "-wc"),
+    ("SyntaxError", "-wc"),
+    ("TypeError", "-wc"),
+    ("URIError", "-wc"),
+    ("globalThis", "-wc"),
+    ("JSON", "-wc"),
+    ("Math", "-wc"),
+    ("Intl", "-wc"),
+    ("ArrayBuffer", "-wc"),
+    ("Atomics", "-wc"),
+    ("Uint8Array", "-wc"),
+    ("Int8Array", "-wc"),
+    ("Uint16Array", "-wc"),
+    ("Int16Array", "-wc"),
+    ("Uint32Array", "-wc"),
+    ("Int32Array", "-wc"),
+    ("Float32Array", "-wc"),
+    ("Float64Array", "-wc"),
+    ("Uint8ClampedArray", "-wc"),
+    ("BigUint64Array", "-wc"),
+    ("BigInt64Array", "-wc"),
+    ("DataView", "-wc"),
+    ("Map", "-wc"),
+    ("BigInt", "-wc"),
+    ("Set", "-wc"),
+    ("WeakMap", "-wc"),
+    ("WeakSet", "-wc"),
+    ("Proxy", "-wc"),
+    ("Reflect", "-wc"),
+    ("FinalizationRegistry", "-wc"),
+    ("WeakRef", "-wc"),
+    ("decodeURI", "-wc"),
+    ("decodeURIComponent", "-wc"),
+    ("encodeURI", "-wc"),
+    ("encodeURIComponent", "-wc"),
+    ("escape", "-wc"),
+    ("unescape", "-wc"),
+    ("eval", "-wc"),
+    ("isFinite", "-wc"),
+    ("isNaN", "-wc"),
+    ("console", "-wc"),
+    ("process", "--c"),
+    ("global", "ewc"),
+    ("Buffer", "--c"),
+    ("clearImmediate", "ewc"),
+    ("setImmediate", "ewc"),
+    ("URL", "-wc"),
+    ("URLSearchParams", "-wc"),
+    ("DOMException", "-wc"),
+    ("AbortController", "-wc"),
+    ("AbortSignal", "-wc"),
+    ("Event", "-wc"),
+    ("EventTarget", "-wc"),
+    ("TextEncoder", "-wc"),
+    ("TextDecoder", "-wc"),
+    ("TransformStream", "-wc"),
+    ("TransformStreamDefaultController", "-wc"),
+    ("WritableStream", "-wc"),
+    ("WritableStreamDefaultController", "-wc"),
+    ("WritableStreamDefaultWriter", "-wc"),
+    ("ReadableStream", "-wc"),
+    ("ReadableStreamDefaultReader", "-wc"),
+    ("ReadableStreamBYOBReader", "-wc"),
+    ("ReadableStreamBYOBRequest", "-wc"),
+    ("ReadableByteStreamController", "-wc"),
+    ("ReadableStreamDefaultController", "-wc"),
+    ("ByteLengthQueuingStrategy", "-wc"),
+    ("CountQueuingStrategy", "-wc"),
+    ("TextEncoderStream", "-wc"),
+    ("TextDecoderStream", "-wc"),
+    ("CompressionStream", "-wc"),
+    ("DecompressionStream", "-wc"),
+    ("clearInterval", "ewc"),
+    ("clearTimeout", "ewc"),
+    ("setInterval", "ewc"),
+    ("setTimeout", "ewc"),
+    ("queueMicrotask", "ewc"),
+    ("structuredClone", "ewc"),
+    ("atob", "ewc"),
+    ("btoa", "ewc"),
+    ("BroadcastChannel", "-wc"),
+    ("MessageChannel", "-wc"),
+    ("MessagePort", "-wc"),
+    ("Blob", "-wc"),
+    ("File", "-wc"),
+    ("Performance", "-wc"),
+    ("PerformanceEntry", "-wc"),
+    ("PerformanceMark", "-wc"),
+    ("PerformanceMeasure", "-wc"),
+    ("PerformanceObserver", "-wc"),
+    ("PerformanceObserverEntryList", "-wc"),
+    ("PerformanceResourceTiming", "-wc"),
+    ("performance", "e-c"),
+    ("fetch", "ewc"),
+    ("FormData", "-wc"),
+    ("Headers", "-wc"),
+    ("Request", "-wc"),
+    ("Response", "-wc"),
+    ("MessageEvent", "-wc"),
+    ("WebSocket", "-wc"),
+    ("Iterator", "-wc"),
+    ("SharedArrayBuffer", "-wc"),
+    ("WebAssembly", "-wc"),
+    ("Navigator", "-wc"),
+    ("navigator", "e-c"),
+    ("crypto", "e-c"),
+    ("Crypto", "-wc"),
+    ("CryptoKey", "-wc"),
+    ("SubtleCrypto", "-wc"),
+    ("CustomEvent", "-wc"),
+];
+
+/// A global binding as an own property of `globalThis`, with Node's attributes.
+pub(crate) struct GlobalProp {
+    pub value: Value,
+    pub enumerable: bool,
+    pub writable: bool,
+    pub configurable: bool,
+}
+
+/// `(enumerable, writable, configurable)` of global binding `name` as `globalThis` shows it, or None
+/// when it is not an own property: lexical bindings, and `__thaw_*` internals, which scope lookup and
+/// property reads still resolve. A name in `NODE_GLOBAL_FLAGS` takes Node's flags; the rest follow the
+/// binding's origin.
+fn global_view_flags(name: &str, b: &Binding) -> Option<(bool, bool, bool)> {
+    if hidden_global_name(name) || b.origin == Origin::Lexical {
+        return None;
+    }
+    if let Some((_, f)) = NODE_GLOBAL_FLAGS.iter().find(|(n, _)| *n == name) {
+        let f = f.as_bytes();
+        return Some((f[0] == b'e', f[1] == b'w', f[2] == b'c'));
+    }
+    match b.origin {
+        Origin::Lexical => None,
+        Origin::Decl => Some((false, b.mutable, true)),
+        Origin::Var => Some((true, b.mutable, false)),
+        Origin::Prop => Some((true, b.mutable, true)),
+    }
+}
+
+/// `__thaw_*` names are thaw-js internals: scope lookup and property reads still resolve them, but the
+/// `globalThis` object view (`in`, keys, own names, descriptors) never shows them.
+pub(crate) fn hidden_global_name(name: &str) -> bool {
+    name.starts_with("__thaw_")
 }
 
 /// A resolved assignment / update / read-modify-write target.
@@ -651,20 +823,25 @@ impl Scope {
             this_val: RefCell::new(None),
         })
     }
+    /// A builtin or host binding: an own property of `globalThis` when it is global.
     fn declare(&self, name: &str, value: Value, mutable: bool) {
-        self.declare_rc(name.into(), value, mutable);
+        self.declare_with(name.into(), value, mutable, Origin::Decl);
     }
     fn set_this(&self, value: Value) {
         *self.this_val.borrow_mut() = Some(value);
     }
+    /// A lexical binding (let/const/class and the block-level function forms).
     fn declare_rc(&self, name: Rc<str>, value: Value, mutable: bool) {
+        self.declare_with(name, value, mutable, Origin::Lexical);
+    }
+    fn declare_with(&self, name: Rc<str>, value: Value, mutable: bool, origin: Origin) {
         let bit = name_bit(&name);
         let maybe_present = self.mask.get() & bit != 0;
         self.mask.set(self.mask.get() | bit);
         let binding = Binding {
             value,
             mutable,
-            origin: Origin::Decl,
+            origin,
         };
         let mut vars = self.vars.borrow_mut();
         if maybe_present {
@@ -1248,6 +1425,49 @@ impl Interp {
         new_obj(Some(self.object_proto.clone()), Kind::Plain)
     }
 
+    /// Global binding `name` as an own property of `globalThis`, or None when it is not one.
+    pub(crate) fn global_prop(&self, name: &str) -> Option<GlobalProp> {
+        let vars = self.global.vars.borrow();
+        let b = vars.get(name)?;
+        let (enumerable, writable, configurable) = global_view_flags(name, b)?;
+        Some(GlobalProp {
+            value: b.value.clone(),
+            enumerable,
+            writable,
+            configurable,
+        })
+    }
+
+    /// The names `globalThis` shows as own properties, in binding order; `enumerable_only` keeps the
+    /// ones `Object.keys` lists.
+    pub(crate) fn global_view_names(&self, enumerable_only: bool) -> Vec<Rc<str>> {
+        self.global
+            .vars
+            .borrow()
+            .list
+            .iter()
+            .filter(|(k, b)| global_view_flags(k, b).is_some_and(|(e, _, _)| e || !enumerable_only))
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// The own string keys of the global object: its bindings, then its raw properties (not shadowed by a
+    /// binding, not hidden). `enumerable_only` keeps the ones `Object.keys` lists.
+    pub(crate) fn global_own_names(&self, enumerable_only: bool) -> Vec<Rc<str>> {
+        let mut names = self.global_view_names(enumerable_only);
+        let vars = self.global.vars.borrow();
+        for p in self.global_object.raw_props.borrow().iter() {
+            if p.key.starts_with("@@") || hidden_global_name(&p.key) || vars.contains_key(&p.key) {
+                continue;
+            }
+            if enumerable_only && !p.enumerable {
+                continue;
+            }
+            names.push(p.key.clone());
+        }
+        names
+    }
+
     // ----- introspection for the feature scan -----
 
     pub fn global_names(&self) -> Vec<String> {
@@ -1670,6 +1890,9 @@ impl Interp {
     pub(crate) fn own_keys(&mut self, v: &Value) -> Vec<Rc<str>> {
         match v {
             Value::Object(o) => {
+                if matches!(&*o.kind.borrow(), Kind::Global) {
+                    return self.global_own_names(true);
+                }
                 if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
                     return match self.proxy_own_keys(o, true) {
                         Ok(Some(keys)) => keys
@@ -2415,7 +2638,7 @@ impl Interp {
         let g = self.global.clone();
         let origin = g.vars.borrow().get(name)?.origin;
         match origin {
-            Origin::Decl => None,
+            Origin::Decl | Origin::Lexical => None,
             Origin::Var => Some(false),
             Origin::Prop => {
                 g.vars.borrow_mut().remove(name);
@@ -4526,6 +4749,8 @@ mod builtin_table_tests;
 mod dynamic_helper_contract_tests;
 #[cfg(all(test, unix))]
 mod fs_tests;
+#[cfg(test)]
+mod global_object_view_tests;
 #[cfg(test)]
 mod handle_json_argument_tests;
 #[cfg(test)]
