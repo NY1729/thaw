@@ -4,7 +4,7 @@
 //! object: its attributes, and for a function its real `length` and `name`. An alias row (one object at
 //! two paths) makes both slots hold one object again. Rows whose owner or key thaw-js lacks are skipped.
 
-use crate::{find_own, Interp, Kind, Obj, Prop, Slot, Value};
+use crate::{define_accessor, find_own, put_hidden, Interp, Kind, Obj, Prop, Slot, Value};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -176,7 +176,9 @@ impl Interp {
                         set_fn_head(&owner, name, length);
                     }
                 }
-                if !self.table_row_present(&owner, &key, row) {
+                if !self.table_row_present(&owner, &key, row)
+                    && !self.define_missing_wellknown(&owner, &key, row)
+                {
                     continue;
                 }
                 owner.force_key(&key);
@@ -292,6 +294,31 @@ impl Interp {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// The define-missing pass: a `@@toStringTag` or `@@species` row whose owner thaw-js has, but whose
+    /// property it lacks, is defined here. The caller then sets the row's flags. Only the spec's species
+    /// getter (`get [Symbol.species]`, returns `this`) is defined: `Buffer`'s getter returns another class,
+    /// so its row stays listed. Returns true when it defined the property.
+    fn define_missing_wellknown(&self, owner: &Obj, key: &str, row: &Row<'_>) -> bool {
+        if find_own(owner, key).is_some() {
+            return false;
+        }
+        match row.key {
+            "@@toStringTag" if !row.accessor && row.vtype == "string" => match row.tag {
+                Some(tag) => {
+                    put_hidden(owner, key, Value::str(tag));
+                    true
+                }
+                None => false,
+            },
+            "@@species" if row.accessor && row.name == "get [Symbol.species]|-" => {
+                let get = self.native(|_, this, _| Ok(this.clone()));
+                define_accessor(owner, key, Some(get), None, false);
+                true
+            }
+            _ => false,
         }
     }
 
