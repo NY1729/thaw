@@ -2188,19 +2188,24 @@ pub(crate) fn property_predicate_value(
 ) -> Result<i64, HostError> {
     let result = match operation {
         0 => it.has_property(target, key).map_err(|c| classify(it, c))?,
-        1 => matches!(target, Value::Object(o) if crate::find_own(o, key).is_some()),
+        1 => it
+            .has_own_property(target, &Value::str(key))
+            .map_err(|c| classify(it, c))?,
         2 => match target {
             Value::Object(o) => {
                 crate::reflect::delete_own(it, o, key).map_err(|c| classify(it, c))?
             }
             _ => true,
         },
-        3 => {
-            matches!(target, Value::Object(o) if crate::find_own(o, key).is_some_and(|(_, enumerable)| enumerable))
-        }
+        3 => it
+            .own_enumerable(target, &Value::str(key))
+            .map_err(|c| classify(it, c))?,
         4 => match target {
             Value::Object(o) => {
-                if crate::find_own(o, key).is_none() {
+                if !it
+                    .has_own_property(target, &Value::str(key))
+                    .map_err(|c| classify(it, c))?
+                {
                     return Ok(0);
                 }
                 let desc = it.plain();
@@ -3910,6 +3915,10 @@ fn callback_value(it: &mut Interp, id: usize) -> Value {
         return v.clone();
     }
     let function = it.native(move |it, this, args| call_compiled(it, id, this, args));
+    if let Value::Object(o) = &function {
+        // marks a compiled function so `construct_with` runs it as an ordinary function, not a builtin
+        crate::put_hidden(o, "@@hostcb", Value::Bool(true));
+    }
     // the declared arity (a rest parameter does not count), as a JS function's `length`
     let arity = CALLBACKS.lock().unwrap().get(id).map(|c| {
         if c.has_rest {
