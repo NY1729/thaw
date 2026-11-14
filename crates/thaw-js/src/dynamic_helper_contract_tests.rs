@@ -246,3 +246,38 @@ fn dynamic_projection_maps_symbol_wire_keys() {
     // One console.log line; Node 22 prints `true Q:default Q:string NaN`.
     assert_eq!(run_realm(src), vec!["true Q:default Q:string NaN"]);
 }
+
+/// A two-level class projection (`Derived extends Base`, the accessor declared by `Base`): the accessor
+/// lives on the `Base` stand-in prototype, the chain is `Derived -> Base -> Object`, and every wrapper of
+/// the class shares its prototypes. Values recorded with Node 22 for the equivalent class hierarchy.
+#[test]
+fn dynamic_projection_builds_per_class_prototype_chain() {
+    // keys: ['value'], declared by Base (methods[0] is the declaring class name, accessors[0] true).
+    let src = r#"
+      var cb = [() => 42, () => undefined, () => true, () => false, () => false, () => true, () => 7, () => true, () => true];
+      var a = __thaw_object_with_native_getters(['value'], [true], [false], [true], ['Base'], 'Derived\u001fBase', ...cb);
+      var b = __thaw_object_with_native_getters(['value'], [true], [false], [true], ['Base'], 'Derived\u001fBase', ...cb);
+      var base = Object.getPrototypeOf(Object.getPrototypeOf(a));
+      var d = Object.getOwnPropertyDescriptor(base, 'value');
+      console.log([typeof d.get, String(d.set), d.enumerable, d.configurable].join(' '));
+      console.log(Object.getPrototypeOf(a) === Object.getPrototypeOf(b), a.value, Object.getPrototypeOf(a).constructor.name, base.constructor.name);
+    "#;
+    // Node 22: `function undefined false true` / `true 42 Derived Base`.
+    assert_eq!(
+        run_realm(src),
+        vec!["function undefined false true", "true 42 Derived Base"]
+    );
+}
+
+/// Stand-in prototypes are cached per ancestry, so a second class projection with the same ancestry
+/// reuses the same chain; the Symbol-keyed method mapping still applies on the cached chain.
+#[test]
+fn dynamic_projection_prototype_chain_keeps_symbol_method_mapping() {
+    let src = r#"
+      var cb = [() => 1, () => undefined, () => true, () => false, () => false, () => true, () => 7, () => true, () => true];
+      var w = __thaw_object_with_native_getters(['\u001f@@toPrimitive'], [false], [false], [false], [true], 'Q\u001fBase', ...cb);
+      console.log(Symbol.toPrimitive in w, Object.getPrototypeOf(Object.getPrototypeOf(w)) === Object.prototype);
+    "#;
+    // Node 22: `true false` (the method is served by the Proxy, the Base stand-in is not Object.prototype).
+    assert_eq!(run_realm(src), vec!["true false"]);
+}

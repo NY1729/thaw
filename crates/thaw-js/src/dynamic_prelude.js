@@ -13,6 +13,7 @@
   const thawGraphObjectIsFrozen = Object.isFrozen;
   const thawGraphObjectIsSealed = Object.isSealed;
   const thawGraphArraySlice = Array.prototype.slice;
+  const thawGraphArrayJoin = Array.prototype.join;
   const thawGraphArrayMap = Array.prototype.map;
   const thawGraphArrayPush = Array.prototype.push;
   const thawStringSplit = String.prototype.split;
@@ -135,6 +136,8 @@
   });
   globalThis.__thaw_storage_value = (values) => values;
   globalThis.__thaw_json_host_instanceof = (value, constructor) => value instanceof constructor;
+  // Stand-in class prototypes by suffix ancestry (`Derived\u001fBase`), shared by all wrappers.
+  const thawProjectionChains = new thawGraphMapConstructor();
   thawGraphDefineProperty(globalThis, '__thaw_object_with_native_getters', {
     value: (wireKeys, readable, writable, accessors, methods, ...rest) => {
       // Symbol-keyed members arrive as wire text (`\u001f@@name`, registered/unique
@@ -147,8 +150,12 @@
       const isClass = ancestry !== undefined;
       const target = {};
       let displayName = ancestry;
+      // `chain[k]` is the prototype of `names[k]`; `real` is the first level with a real JS class.
+      let names;
+      let chain;
+      let real;
       if (isClass) {
-        const names = thawGraphApply(thawStringSplit, ancestry, ['\u001f']);
+        names = thawGraphApply(thawStringSplit, ancestry, ['\u001f']);
         const display = name => {
           // Module-scoped classes are mangled `__thawmod<N>_Name`.
           if (thawGraphApply(thawStringStartsWith, name, ['__thawmod'])) {
@@ -158,25 +165,34 @@
           return name;
         };
         displayName = display(names[0]);
-        // A class that is also used as a value has a real JS counterpart: its
-        // prototype keeps `instanceof` and `constructor` exact. A class without
-        // one gets a named stand-in that inherits from the nearest real ancestor.
-        let inherited = Object.prototype;
-        let proto;
-        for (let i = 0; i < names.length; i++) {
-          const realClass = globalThis['__thaw_class_value_' + names[i]];
-          if (typeof realClass === 'function' && realClass.prototype) {
-            if (i === 0) proto = realClass.prototype; else inherited = realClass.prototype;
-            break;
+        // A real class keeps `instanceof` and `constructor` exact and its own chain covers the
+        // ancestors above it. Levels below it get named stand-ins, cached per suffix ancestry so
+        // every wrapper of the class shares one chain.
+        real = names.length;
+        for (let k = 0; k < names.length; k++) {
+          const realClass = globalThis['__thaw_class_value_' + names[k]];
+          if (typeof realClass === 'function' && realClass.prototype) { real = k; break; }
+        }
+        chain = [];
+        let parent = Object.prototype;
+        if (real < names.length) {
+          parent = globalThis['__thaw_class_value_' + names[real]].prototype;
+          chain[real] = parent;
+        }
+        for (let k = real - 1; k >= 0; k--) {
+          const key = thawGraphApply(thawGraphArrayJoin, thawGraphApply(thawGraphArraySlice, names, [k]), ['\u001f']);
+          let proto = thawGraphApply(thawGraphMapGet, thawProjectionChains, [key]);
+          if (proto === undefined) {
+            proto = thawGraphObjectCreate(parent);
+            const constructor = thawGraphDefineProperty(function () {}, 'name', { value: display(names[k]), configurable: true });
+            thawGraphDefineProperty(proto, 'constructor', { value: constructor, writable: true, configurable: true });
+            thawGraphDefineProperty(constructor, 'prototype', { value: proto });
+            thawGraphApply(thawGraphMapSet, thawProjectionChains, [key, proto]);
           }
+          chain[k] = proto;
+          parent = proto;
         }
-        if (proto === undefined) {
-          proto = thawGraphObjectCreate(inherited);
-          const constructor = thawGraphDefineProperty(function () {}, 'name', { value: displayName, configurable: true });
-          thawGraphDefineProperty(proto, 'constructor', { value: constructor, writable: true, configurable: true });
-          thawGraphDefineProperty(constructor, 'prototype', { value: proto });
-        }
-        thawGraphObjectSetPrototypeOf(target, proto);
+        thawGraphObjectSetPrototypeOf(target, chain[0]);
       }
       const positions = new thawGraphMapConstructor();
       for (let i = 0; i < keys.length; i++) {
@@ -185,11 +201,13 @@
         // below but is not an own property of the instance.
         if (isClass && methods[i]) {
           if (accessors[i]) {
-            const proto = thawGraphGetPrototypeOf(target);
-            const owner = globalThis['__thaw_class_value_' + methods[i]];
-            const existing = typeof owner === 'function' && owner.prototype
-              && thawGraphReflectGetOwnPropertyDescriptor(owner.prototype, keys[i]);
-            if (existing) continue;
+            // `methods[i]` names the declaring class: its accessor lives on that level's prototype.
+            let level = 0;
+            for (let k = 0; k < names.length; k++) if (names[k] === methods[i]) { level = k; break; }
+            const top = Math.min(level, chain.length - 1);
+            const proto = chain[top];
+            if (top === real && real < names.length
+              && thawGraphReflectGetOwnPropertyDescriptor(proto, keys[i])) continue;
             thawGraphDefineProperty(proto, keys[i], {
               get: readable[i] ? callbacks[i * 2] : undefined,
               set: writable[i] ? callbacks[i * 2 + 1] : undefined,
