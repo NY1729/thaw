@@ -4,7 +4,9 @@
 // Known gaps: `console.table` on Map/Set, `dir` options, `inspectOptions`, the stderr warnings Node
 // emits for bad countReset/timeEnd labels (they go to process, not the stream), and calling without `new`.
 // ponytail: table cells use the default inspect depth; Node shrinks objects with more than 2 keys.
-const kStateOf = new WeakMap();
+// ponytail: a native Map, not WeakMap: the JS WeakMap shim (EXTRAS) gets compiled when hot and would
+// shift compile counts. Consoles are never freed, so user-created ones leak; use WeakMap once it is native.
+const kStateOf = new Map();
 const fmt = (...args) => __thaw_console_format(...args);
 const TABLE = {
   left: '│ ', middle: ' │ ', right: ' │', tl: '┌', tm: '┬', tr: '┐',

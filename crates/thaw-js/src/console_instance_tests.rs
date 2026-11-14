@@ -158,3 +158,19 @@ fn table_on_global_console_writes_the_node_table_to_stdout() {
     );
     assert_eq!(err, "");
 }
+
+// Console prelude functions are never analysed or compiled (the hot `console.log` path stays on the AST), while a
+// user function in the same realm still compiles. `compiled()` counts only compiled functions.
+#[test]
+fn console_methods_are_never_compiled_but_user_functions_are() {
+    let mut it = Interp::with_compile_mode(crate::compile::CompileMode::On);
+    it.compile_after = 1;
+    let src = "function user(n) { let s = 0; for (let i = 0; i < 3; i++) s += n; return s; }\n\
+               let t = 0;\n\
+               for (let k = 0; k < 200; k++) { console.log('x', k); t = user(t); }\n\
+               console.log(t);";
+    assert!(it.run_sloppy(src).is_ok());
+    assert_eq!(it.out.len(), 201);
+    assert_eq!(it.out.last().map(String::as_str), Some("0"));
+    assert_eq!(it.cstats.compiled(), 1, "only `user` may compile");
+}
