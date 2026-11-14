@@ -1748,18 +1748,6 @@ fn string_value(value: *const c_char) -> Value {
     if value.is_null() {
         Value::Null
     } else {
-        // With the thaw-js Error factory a framed Error widens to its one interned lease, so every
-        // copy shares the Error's props and identity (the QuickJS lane keeps the text below).
-        if unsafe { *value } == 1 {
-            let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
-            if is_error_frame_text(bytes) {
-                if let Some(operations) = ERROR_FACTORY_OPERATIONS.with(|slot| slot.get()) {
-                    if let Some(lease) = error_host_value_from_text(value, operations) {
-                        return lease;
-                    }
-                }
-            }
-        }
         // Keep the raw WTF-8 bytes so a lone surrogate survives to the
         // serializer; a valid-UTF-8 string stays the common `Value::String`.
         // A framed Error carries its side-table props with it (the copy has no pointer identity).
@@ -11586,14 +11574,14 @@ mod tests {
             (33 | 34, 0) => "string",
             (33, 3) => "\"Error\"",
             (34, 3) => "\"TypeError\"",
-            (5 | 6 | 7, 22) => "1",
+            (5..=7, 22) => "1",
             (9, 22) => "0",
             (7, 28) => r#"{"code":"E1"}"#,
             (7, 8) => r#"{"__thaw_tjs_handle__":7}"#,
             _ => "",
         };
         HostTextResult {
-            value: thaw_arena::owned_string(text.to_string()),
+            value: thaw_arena::owned_string(text),
             error: std::ptr::null(),
         }
     }
@@ -11614,39 +11602,27 @@ mod tests {
     }
 
     #[test]
-    fn string_value_widening_returns_the_interned_lease_when_the_error_factory_is_registered() {
+    fn string_value_keeps_a_framed_error_a_string_when_the_error_factory_is_registered() {
         std::thread::spawn(|| {
             thaw_arena::thaw_arena_enable_tracing();
             install_pr2_host_operations();
-            let framed = thaw_arena::error_wire::encode_tagged(b"Error", b"boom", None)
-                .expect("valid error frame");
-            let canonical = thaw_arena::arena_string(&framed);
-            let (first, second) = (
-                thaw_arena::arena_string(&framed),
-                thaw_arena::arena_string(&framed),
-            );
-            NATIVE_ERROR_TEXT_IDENTITY.with(|table| {
-                let mut table = table.borrow_mut();
-                table.insert(first as usize, canonical as usize);
-                table.insert(second as usize, canonical as usize);
-            });
-            // Without the Error factory (QuickJS lane) the widened text stays a String.
-            assert!(matches!(string_value(first), Value::String(_)));
-
             thaw_json_register_error_factory(
                 factory_test_create,
                 factory_test_lookup,
                 factory_test_intern,
             );
-            let (a, b) = (string_value(first), string_value(second));
-            let (Value::Host(a), Value::Host(b)) = (&a, &b) else {
-                panic!("widened Error copies must be leases");
-            };
-            assert_eq!(a.handle, b.handle);
-
-            // A plain string frame-less text is never an Error lease.
-            let plain = CString::new("\u{1}abc").unwrap();
-            assert!(matches!(string_value(plain.as_ptr()), Value::String(_)));
+            let framed = thaw_arena::error_wire::encode_tagged(b"Error", b"boom", None)
+                .expect("valid error frame");
+            let canonical = thaw_arena::arena_string(&framed);
+            let first = thaw_arena::arena_string(&framed);
+            NATIVE_ERROR_TEXT_IDENTITY.with(|table| {
+                table
+                    .borrow_mut()
+                    .insert(first as usize, canonical as usize);
+            });
+            let value = string_value(first);
+            assert!(matches!(value, Value::String(_)));
+            assert!(error_ref(&value).is_some());
         })
         .join()
         .unwrap();
