@@ -54,6 +54,7 @@ mod net;
 mod node_crypto;
 mod numfmt;
 mod process_env;
+mod process_members;
 mod procstate;
 mod proxy;
 mod reflect;

@@ -278,7 +278,7 @@ const PROCESS_SIGNALS: [(&str, i32); 15] = [
 ];
 
 /// A Node-style error of `kind` with a `code` property, ready to throw.
-fn node_error(it: &mut Interp, kind: &str, code: &str, msg: &str) -> Ctl {
+pub(crate) fn node_error(it: &mut Interp, kind: &str, code: &str, msg: &str) -> Ctl {
     match it.make_error(kind, msg) {
         Ok(e) => {
             if let Value::Object(o) = &e {
@@ -1853,6 +1853,7 @@ impl Interp {
         let exec_argv = self.array(node_exec_argv.iter().map(|a| Value::str(a)).collect());
         put(&p, "execArgv", exec_argv);
         put(&p, "env", self.make_process_env());
+        self.install_process_members(&p);
         self.set_native(&p, "cwd", |_, _, _| {
             Ok(Value::str(
                 &std::env::current_dir()
