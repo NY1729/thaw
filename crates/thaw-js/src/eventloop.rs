@@ -648,7 +648,8 @@ impl Interp {
     }
 
     /// Run this realm's jobs in FIFO order up to the marker `id`, so every job queued before it runs and
-    /// none after it. A realm without that marker (it had no work when the barrier was queued) does nothing.
+    /// none after it. Pending `nextTick` callbacks stay queued until the micro queue empties, as in Node.
+    /// A realm without that marker (it had no work when the barrier was queued) does nothing.
     pub(crate) fn drain_to_job_barrier(&mut self, id: u64) -> R<()> {
         if self.rt.barriers_seen.remove(&id) {
             return Ok(());
@@ -662,7 +663,6 @@ impl Interp {
             return Ok(());
         }
         loop {
-            self.drain_ticks()?;
             let Some((fr, job)) = self.rt.micro.pop_front() else {
                 return Ok(());
             };

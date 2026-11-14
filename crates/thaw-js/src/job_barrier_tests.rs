@@ -69,3 +69,20 @@ fn host_barrier_is_zero_when_idle_and_orders_pending_jobs() {
     .unwrap();
     assert_eq!(seen, "then,micro");
 }
+
+#[test]
+fn job_barrier_leaves_next_ticks_queued() {
+    let mut it = Interp::new();
+    it.run(
+        "var log = []; \
+         process.nextTick(() => log.push('tick')); \
+         Promise.resolve().then(() => log.push('promise'));",
+    )
+    .unwrap();
+    it.push_job_barrier(3);
+    it.drain_to_job_barrier(3).unwrap();
+    // Node runs ticks only once the microtask queue is empty, so the tick waits behind the barrier
+    assert_eq!(log_of(&mut it), "promise");
+    it.run_jobs().unwrap();
+    assert_eq!(log_of(&mut it), "promise,tick");
+}
