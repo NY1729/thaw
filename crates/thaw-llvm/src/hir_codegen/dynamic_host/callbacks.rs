@@ -528,6 +528,16 @@ impl<'ctx> HirCompiler<'ctx> {
             &operations,
             "register_js_error_factory",
         ).map_err(|error| error.to_string())?;
+        let engine_id = self.builder.build_call(
+            self.module.get_function("thaw_js_engine_id").unwrap(),
+            &[],
+            "js_engine_id",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_set_js_engine").unwrap(),
+            &[engine_id.try_as_basic_value().basic().unwrap().into()],
+            "set_js_engine",
+        ).map_err(|error| error.to_string())?;
         Ok(())
     }
 

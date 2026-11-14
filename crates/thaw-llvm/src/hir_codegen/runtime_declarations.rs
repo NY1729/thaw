@@ -583,6 +583,13 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_set_js_engine",
+            self.context
+                .void_type()
+                .fn_type(&[self.context.i8_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_register_error_factory",
             self.context
                 .void_type()
@@ -3382,6 +3389,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_js_error_from_tagged_handle",
             handle_result_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_engine_id",
+            self.context.i8_type().fn_type(&[], false),
             Some(Linkage::External),
         );
         self.module.add_function(

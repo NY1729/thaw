@@ -2431,6 +2431,12 @@ pub extern "C" fn thaw_tjs_emit_rejection_handled_result() -> HandleResult {
     })
 }
 
+/// Engine id for thaw-std's JS engine discriminator: 1 = thaw-js.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_engine_id() -> u8 {
+    1
+}
+
 /// A genuine `Error` object from the compiler's framed error text, as a new handle.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_error_from_tagged_handle(value: *const c_char) -> HandleResult {
@@ -6782,5 +6788,13 @@ mod graph_bytes_node_tests {
         let (_, v) = decode_wire(r#"{"root":{"r":0},"nodes":[{"b":[104,105]}]}"#).unwrap();
         assert_eq!(Interp::view_bytes(&v), Some(vec![104, 105]));
         assert!(Interp::typed_of(&v).is_some());
+    }
+}
+
+#[cfg(test)]
+mod engine_id_tests {
+    #[test]
+    fn engine_id_is_thaw_js() {
+        assert_eq!(super::thaw_tjs_engine_id(), 1);
     }
 }

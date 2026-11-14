@@ -152,6 +152,8 @@ type GraphOriginSerials = (u64, HashMap<usize, (u64, GraphOriginRef)>);
 thread_local! {
     static HOST_OPERATIONS: Cell<Option<HostOperations>> = const { Cell::new(None) };
     static ERROR_FACTORY_OPERATIONS: Cell<Option<ErrorFactoryOperations>> = const { Cell::new(None) };
+    // Which JS engine backs this program's JS handles: 0 = QuickJS (default), 1 = thaw-js.
+    static JS_ENGINE: Cell<u8> = const { Cell::new(0) };
     static HOST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     // `None` is a boundary while a trusted Host/NAPI callback executes.
     // User reentry without its own decode scope must not join the caller's ledger.
@@ -579,6 +581,17 @@ pub extern "C" fn thaw_json_register_error_factory(
             intern,
         }))
     });
+}
+
+/// Records the engine id reported by the linked JS engine (`thaw_js_engine_id` / `thaw_tjs_engine_id`).
+#[no_mangle]
+pub extern "C" fn thaw_json_set_js_engine(id: u8) {
+    JS_ENGINE.with(|engine| engine.set(id));
+}
+
+#[allow(dead_code)] // consumers (engine-specific gates) land in a follow-up PR
+pub(crate) fn engine_is_thaw_js() -> bool {
+    JS_ENGINE.with(|engine| engine.get()) == 1
 }
 
 #[no_mangle]
@@ -11264,6 +11277,15 @@ pub unsafe extern "C" fn thaw_json_object_assign(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn engine_defaults_to_quickjs_and_set_one_selects_thaw_js() {
+        assert!(!super::engine_is_thaw_js());
+        super::thaw_json_set_js_engine(1);
+        assert!(super::engine_is_thaw_js());
+        super::thaw_json_set_js_engine(0);
+        assert!(!super::engine_is_thaw_js());
+    }
+
     #[test]
     fn error_inspect_prints_props_and_a_stack_override_like_node() {
         unsafe extern "C" {

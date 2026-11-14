@@ -1194,6 +1194,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_js_error_from_tagged_handle",
                     "thaw_tjs_error_from_tagged_handle",
                 ),
+                ("thaw_js_engine_id", "thaw_tjs_engine_id"),
                 (
                     "thaw_js_lookup_native_object",
                     "thaw_tjs_lookup_native_object",
