@@ -4130,6 +4130,9 @@ fn tracked_handle_id(object: usize) -> u64 {
             c"thaw_json_borrowed_tracked_handle_id".as_ptr(),
         );
         if sym.is_null() {
+            if trace_wire() {
+                eprintln!("thaw-js tracked_handle_id: thaw_json_borrowed_tracked_handle_id symbol missing");
+            }
             return 0;
         }
         std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*const c_void) -> u64>(sym)(
@@ -4213,6 +4216,8 @@ pub(crate) fn native_error_write(id: u64, key: &str, json: Option<&str>) {
                         *mut c_void,
                         unsafe extern "C" fn(*const c_char, *const c_char, *const c_char) -> bool,
                     >(sym)(error, key.as_ptr(), json.as_ptr());
+                } else if trace_wire() {
+                    eprintln!("thaw-js native_error_write: thaw_error_set_prop symbol missing");
                 }
             }
             None => {
@@ -4222,6 +4227,8 @@ pub(crate) fn native_error_write(id: u64, key: &str, json: Option<&str>) {
                         *mut c_void,
                         unsafe extern "C" fn(*const c_char, *const c_char) -> bool,
                     >(sym)(error, key.as_ptr());
+                } else if trace_wire() {
+                    eprintln!("thaw-js native_error_write: thaw_error_delete_prop symbol missing");
                 }
             }
         }

@@ -1600,11 +1600,15 @@ fn quickjs_callback_export_args() -> [&'static str; 4] {
 
 /// The thaw-js loop's native-continuation drain (`drain_native_continuations`, host.rs) looks this symbol up via
 /// RTLD_DEFAULT; it is not in `quickjs_callback_export_args` and must be exported from a thaw-js routed build.
-fn thaw_js_extra_export_args() -> [&'static str; 2] {
+fn thaw_js_extra_export_args() -> [&'static str; 5] {
     [
         "-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle",
         // the thaw-js loop polls a compiled http server through RTLD_DEFAULT (host.rs poll_native_servers)
         "-Wl,--export-dynamic-symbol=thaw_http_poll_servers",
+        // native Error write-through and tracked handle ids, looked up via RTLD_DEFAULT (host.rs native_error_write, tracked_handle_id)
+        "-Wl,--export-dynamic-symbol=thaw_error_set_prop",
+        "-Wl,--export-dynamic-symbol=thaw_error_delete_prop",
+        "-Wl,--export-dynamic-symbol=thaw_json_borrowed_tracked_handle_id",
     ]
 }
 
@@ -1698,10 +1702,13 @@ fn native_poll_exports_needed_for_quickjs_or_thaw_js() {
 #[test]
 fn thaw_js_builds_export_the_native_continuation_drain() {
     assert_eq!(
-        thaw_js_extra_export_args(),
-        [
+        thaw_js_extra_export_args().to_vec(),
+        vec![
             "-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle",
             "-Wl,--export-dynamic-symbol=thaw_http_poll_servers",
+            "-Wl,--export-dynamic-symbol=thaw_error_set_prop",
+            "-Wl,--export-dynamic-symbol=thaw_error_delete_prop",
+            "-Wl,--export-dynamic-symbol=thaw_json_borrowed_tracked_handle_id",
         ]
     );
     assert!(thaw_js_drain_export_needed(true));
@@ -1717,6 +1724,35 @@ fn thaw_js_builds_export_the_ready_continuation_hand_off() {
             "-Wl,--export-dynamic-symbol=thaw_runtime_adopt_ready",
         ]
     );
+}
+
+/// Every `c"thaw_*"` dlsym literal in thaw-js host.rs must be a dynamic export of a thaw-js routed binary,
+/// i.e. listed in one of the `--export-dynamic-symbol` lists here. A missing one is a silent runtime no-op.
+/// exports.txt is deliberately not a fallback: it only feeds libthaw_rt.so, not the linked binary.
+#[test]
+fn every_thaw_js_dlsym_target_is_a_dynamic_export() {
+    const HOST: &str = include_str!("../../thaw-js/src/host.rs");
+    let exported: Vec<&str> = thaw_js_extra_export_args()
+        .into_iter()
+        .chain(thaw_js_ready_export_args())
+        .chain(quickjs_callback_export_args())
+        .filter_map(|arg| arg.strip_prefix("-Wl,--export-dynamic-symbol="))
+        .collect();
+    let mut looked_up = Vec::new();
+    for (at, _) in HOST.match_indices("c\"thaw_") {
+        let rest = &HOST[at + 2..];
+        looked_up.push(&rest[..rest.find('"').unwrap()]);
+    }
+    assert!(
+        looked_up.len() >= 9,
+        "dlsym literal scan found {looked_up:?}"
+    );
+    for name in looked_up {
+        assert!(
+            exported.contains(&name),
+            "thaw-js dlsyms `{name}` but no --export-dynamic-symbol list in build.rs exports it"
+        );
+    }
 }
 
 #[test]
