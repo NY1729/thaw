@@ -901,6 +901,11 @@ pub struct Interp {
     /// Process-unique id of this realm: tags the zlib jobs it starts so only it collects their results.
     pub(crate) realm_id: usize,
     depth: usize,
+    /// Addresses of the arrays/objects whose native walk is in progress (`join`, `inspect`): meeting one
+    /// again means the value contains itself. Shared guard for every native recursion over user objects.
+    walking: Vec<usize>,
+    /// Address of the object a `[Circular *1]` pointed back to (inspect prints `<ref *1>` on it).
+    circular_target: Option<usize>,
     /// Call-depth cap; replaced by the stack-address check once `configure_stack` was called.
     max_depth: usize,
     /// Lowest stack address JS calls may reach (0 = not configured).
@@ -1041,6 +1046,8 @@ impl Interp {
             arg_pool: Vec::new(),
             realm_id: next_realm_id(),
             depth: 0,
+            walking: Vec::new(),
+            circular_target: None,
             max_depth: MAX_DEPTH,
             stack_limit: 0,
             out: Vec::new(),
@@ -1367,14 +1374,33 @@ impl Interp {
         }
     }
 
+    /// Starts a native walk of `o`. `false` when `o` is already being walked, i.e. the walk reached
+    /// a cycle: the caller stops there. Every `true` must be paired with `leave_walk`.
+    pub(crate) fn enter_walk(&mut self, o: &Obj) -> bool {
+        let addr = Rc::as_ptr(o) as usize;
+        if self.walking.contains(&addr) {
+            return false;
+        }
+        self.walking.push(addr);
+        true
+    }
+
+    pub(crate) fn leave_walk(&mut self) {
+        self.walking.pop();
+    }
+
     pub(crate) fn join(&mut self, this: &Value, sep: &str) -> JsStr {
-        let items = match this {
-            Value::Object(o) => match &*o.kind.borrow() {
-                Kind::Array(v) => v.clone(),
-                _ => Vec::new(),
-            },
-            _ => Vec::new(),
+        let Value::Object(o) = this else {
+            return "".into();
         };
+        let items = match &*o.kind.borrow() {
+            Kind::Array(v) => v.clone(),
+            _ => return "".into(),
+        };
+        // ES: an array that reaches itself joins that reference as the empty string
+        if !self.enter_walk(o) {
+            return "".into();
+        }
         let mut out = String::new();
         for (i, v) in items.iter().enumerate() {
             if i > 0 {
@@ -1384,6 +1410,7 @@ impl Interp {
                 builtins::push_joined(&mut out, &self.to_str(v));
             }
         }
+        self.leave_walk();
         out.into()
     }
 
@@ -1516,7 +1543,13 @@ impl Interp {
                         }
                     }
                 };
-                match kind {
+                // a cycle back into an array/object being printed is `[Circular *1]`
+                let walks = matches!(kind, K::Arr(_) | K::Plain);
+                if walks && !self.enter_walk(o) {
+                    self.circular_target = Some(Rc::as_ptr(o) as usize);
+                    return "[Circular *1]".into();
+                }
+                let text: String = match kind {
                     K::Arr(items) if items.is_empty() => "[]".into(),
                     K::Arr(items) => {
                         let mut parts: Vec<String> = Vec::new();
@@ -1593,7 +1626,15 @@ impl Interp {
                             format!("{head}{{ {} }}", parts.join(", "))
                         }
                     }
+                };
+                if walks {
+                    self.leave_walk();
                 }
+                if self.circular_target == Some(Rc::as_ptr(o) as usize) {
+                    self.circular_target = None;
+                    return format!("<ref *1> {text}");
+                }
+                text
             }
             Value::Number(n) if *n == 0.0 && n.is_sign_negative() => "-0".into(),
             Value::BigInt(b) => format!("{b}n"),
