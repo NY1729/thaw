@@ -13,6 +13,7 @@
   const thawGraphObjectIsFrozen = Object.isFrozen;
   const thawGraphObjectIsSealed = Object.isSealed;
   const thawGraphArraySlice = Array.prototype.slice;
+  const thawGraphArrayMap = Array.prototype.map;
   const thawGraphArrayPush = Array.prototype.push;
   const thawStringSplit = String.prototype.split;
   const thawStringStartsWith = String.prototype.startsWith;
@@ -135,7 +136,10 @@
   globalThis.__thaw_storage_value = (values) => values;
   globalThis.__thaw_json_host_instanceof = (value, constructor) => value instanceof constructor;
   thawGraphDefineProperty(globalThis, '__thaw_object_with_native_getters', {
-    value: (keys, readable, writable, accessors, methods, ...rest) => {
+    value: (wireKeys, readable, writable, accessors, methods, ...rest) => {
+      // Symbol-keyed members arrive as wire text (`\u001f@@name`, registered/unique
+      // symbol text): the JS-visible keys are the mapped Symbols, native callbacks keep wire text.
+      const keys = thawGraphApply(thawGraphArrayMap, wireKeys, [thawPropertyKey]);
       // A class instance passes its class name before the callbacks: its method
       // keys become non-enumerable members of a prototype that names the class.
       const ancestry = typeof rest[0] === 'string' ? rest[0] : undefined;
@@ -244,7 +248,7 @@
           if (isClass && methods[i]) continue;
           const key = keys[i];
           const current = thawGraphReflectGetOwnPropertyDescriptor(target, key);
-          const bits = flags(key);
+          const bits = flags(wireKeys[i]);
           const configurable = !!(bits & 4) && !nativeSealed;
           const enumerable = !!(bits & 2);
           if (accessors[i]) {
@@ -284,7 +288,7 @@
           if (index === undefined) return thawGraphReflectSet(target, key, value);
           if (accessors[index]) return thawGraphReflectSet(target, key, value, receiver);
           if (isClass && methods[index]) return thawGraphReflectSet(target, key, value);
-          if (!(flags(key) & 1)) return false;
+          if (!(flags(wireKeys[index]) & 1)) return false;
           write(index, value);
           return true;
         },
@@ -336,7 +340,7 @@
           const requested = ((updated.writable ?? before.writable) ? 1 : 0)
             | ((updated.enumerable ?? before.enumerable) ? 2 : 0)
             | ((updated.configurable ?? before.configurable) ? 4 : 0);
-          if (!thawGraphApply(canFlags, stateReceiver, [key, requested])) return false;
+          if (!thawGraphApply(canFlags, stateReceiver, [wireKeys[index], requested])) return false;
           // Check the JS target transition without changing it. The native
           // value write may still throw; committing target attributes first
           // would leave the alias with a descriptor the owner never accepted.
@@ -344,7 +348,7 @@
           if (!thawGraphReflectDefineProperty(probe, key, before)
               || !thawGraphReflectDefineProperty(probe, key, updated)) return false;
           if (!accessors[index] && 'value' in descriptor) {
-            const current = flags(key);
+            const current = flags(wireKeys[index]);
             // A frozen, non-writable field accepts the same value without a
             // write. Configurable non-writable fields accept a new value via
             // DefineOwnProperty, unlike ordinary assignment.
@@ -358,7 +362,7 @@
           // becomes non-configurable and non-writable, Proxy invariants need
           // its actual stored value, including for an attributes-only update.
           if (!accessors[index]) updated.value = value(index);
-          if (!thawGraphApply(setFlags, stateReceiver, [key, requested])) return false;
+          if (!thawGraphApply(setFlags, stateReceiver, [wireKeys[index], requested])) return false;
           if (!thawGraphReflectDefineProperty(target, key, updated)) return false;
           if (thawGraphObjectIsFrozen(target)) thawGraphApply(setState, stateReceiver, [3]);
           else if (thawGraphObjectIsSealed(target)) thawGraphApply(setState, stateReceiver, [2]);

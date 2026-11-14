@@ -8667,6 +8667,23 @@ fn construct_non_constructors_name_the_callee() {
     );
 }
 
+/// `[Symbol.toPrimitive]` hints and the non-callable rejection, values recorded with Node 22.23.1.
+#[test]
+fn symbol_to_primitive_hints_match_node() {
+    assert_eq!(
+        one("class Q { [Symbol.toPrimitive](h) { return 'Q:' + h; } } var q = new Q(); console.log(q + '', `${q}`, q * 1, String(q), q == 'Q:default', q < 'R');"),
+        "Q:default Q:string NaN Q:string true true"
+    );
+    assert_eq!(
+        one("class Qn { [Symbol.toPrimitive](h) { return h === 'number' ? 7 : 'S'; } } var qn = new Qn(); console.log(qn * 2, qn + '', qn == 7, +qn, `${qn}`, qn > 6);"),
+        "14 S false 7 S true"
+    );
+    assert_eq!(
+        one("var bad = { [Symbol.toPrimitive]: 5 }; try { bad + 1 } catch (e) { console.log(e.constructor.name) }"),
+        "TypeError"
+    );
+}
+
 // Cyclic arrays/objects in native walks (Array.prototype.join and its callers, inspect).
 // A reference back to an array still being joined is the empty string (ES Array.prototype.join);
 // inspect prints `[Circular *1]` and marks the target `<ref *1>`, as Node does.
