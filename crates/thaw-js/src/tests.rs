@@ -834,6 +834,36 @@ fn typed_arrays_wrap_values_and_share_their_buffer() {
 }
 
 #[test]
+fn typed_array_canonical_numeric_keys_are_integer_indexed_not_ordinary() {
+    assert_eq!(
+        one("var s = new Uint8Array(3); s[-1] = 5; s['1.5'] = 1; s['-0'] = 2; s.foo = 4;
+             console.log(s[-1], s['1.5'], s['-0'], Object.keys(s).join(), -1 in s, '1.5' in s, s.hasOwnProperty('-1'), s.hasOwnProperty(0), s.foo, s['01']);"),
+        "undefined undefined undefined 0,1,2,foo false false false true 4 undefined"
+    );
+}
+
+#[test]
+fn typed_array_invalid_numeric_key_define_throws_and_delete_follows_validity() {
+    assert_eq!(
+        one("var t = new Uint8Array(2);
+             try { Object.defineProperty(t, '-1', {value: 1}); } catch (e) { console.log(e.constructor.name, e.message); }
+             console.log(Reflect.defineProperty(t, '1.5', {value: 1}), Reflect.set(t, '-1', 3), Reflect.get(t, '-1'), delete t[-1], delete t[0]);"),
+        "TypeError Invalid typed array index|false true undefined true false"
+    );
+}
+
+#[test]
+fn bigint_and_buffer_canonical_numeric_keys_are_integer_indexed() {
+    assert_eq!(
+        one("var b = new BigInt64Array(2); b[-1] = 5n; b['1.5'] = 1n;
+             console.log(b[-1], b['1.5'], Object.keys(b).join(), -1 in b);
+             var f = Buffer.from([1, 2]); f[-1] = 9; f.x = 3;
+             console.log(f[-1], Object.keys(f).join(), JSON.stringify(f));"),
+        "undefined undefined 0,1 false|undefined 0,1,x {\"type\":\"Buffer\",\"data\":[1,2]}"
+    );
+}
+
+#[test]
 fn dataview_is_an_array_buffer_view() {
     assert_eq!(
         one("var b = new ArrayBuffer(4), d = new DataView(b, 1, 2);

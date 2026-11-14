@@ -129,6 +129,27 @@ pub(crate) struct TypedArr {
     pub(crate) len: usize,
 }
 
+/// What an integer-indexed exotic object does with a property key (see `TypedArr::key`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum TypedKey {
+    Index(usize),
+    Invalid,
+    Ordinary,
+}
+
+/// The own-property answer for a numeric key of a typed array: `Some(true)` for a valid element, `Some(false)`
+/// for any other canonical numeric key, `None` for an ordinary key or any non-typed object.
+pub(crate) fn typed_own_key(o: &Obj, key: &str) -> Option<bool> {
+    match &*o.kind.borrow() {
+        Kind::Typed(t) => match t.key(key) {
+            TypedKey::Index(_) => Some(true),
+            TypedKey::Invalid => Some(false),
+            TypedKey::Ordinary => None,
+        },
+        _ => None,
+    }
+}
+
 impl TypedArr {
     /// The view's window still lies inside its buffer (false once the buffer is detached).
     #[inline]
@@ -215,6 +236,18 @@ impl TypedArr {
             self.set(i, n);
         }
         Ok(())
+    }
+
+    /// How this array treats property key `k` (the integer-indexed exotic object rules): a valid index is an
+    /// element; any other CanonicalNumericIndexString (`-1`, `1.5`, `-0`, `NaN`, `Infinity`, `4294967296`) is
+    /// `Invalid` and never reaches the ordinary properties; every other key is `Ordinary`.
+    pub(crate) fn key(&self, k: &str) -> TypedKey {
+        match array_index(k) {
+            Some(i) if i < self.cur_len() => TypedKey::Index(i),
+            Some(_) => TypedKey::Invalid,
+            None if canonical_numeric_index(k).is_some() => TypedKey::Invalid,
+            None => TypedKey::Ordinary,
+        }
     }
 
     /// Wraps modulo 2^64 like the spec's BigInt64 / BigUint64 stores.

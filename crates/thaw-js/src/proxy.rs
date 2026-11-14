@@ -103,6 +103,10 @@ impl Interp {
         if let Some(r) = self.proxy_has(o, key)? {
             return Ok(r);
         }
+        // a typed array's numeric key answers for the element alone, never the prototype chain
+        if let Some(valid) = crate::typed::typed_own_key(o, key) {
+            return Ok(valid);
+        }
         let is_index = matches!(&*o.kind.borrow(), Kind::Array(items) if key == "length" || array_index(key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))));
         Ok(is_index || find_in_chain(o, key).is_some())
     }

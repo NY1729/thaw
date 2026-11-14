@@ -670,6 +670,20 @@ pub(crate) fn define_slot(
         }
         return define_slot(it, &inner, key, slot, enumerable, writable, configurable);
     }
+    // a typed array's numeric keys never become ordinary properties: a valid element takes a data value
+    match crate::typed::typed_own_key(o, key) {
+        Some(false) => return it.throw_error("TypeError", "Invalid typed array index"),
+        Some(true) => {
+            let Slot::Data(v) = slot else {
+                return it.throw_error(
+                    "TypeError",
+                    "Accessor on a typed array element is not supported",
+                );
+            };
+            return it.set(target, key, v);
+        }
+        None => {}
+    }
     let frozen = o.frozen.get();
     // array elements and length live in the element storage, written through `set`
     let element = match &*o.kind.borrow() {
