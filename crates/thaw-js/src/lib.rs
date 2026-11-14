@@ -1326,7 +1326,6 @@ impl Interp {
             web_wasm::install(&mut it);
             web_crypto::install(&mut it);
             web_navigator::install(&mut it);
-            web_console::install(&mut it);
             node_crypto::install(&mut it);
             it.install_url();
             #[cfg(feature = "intl")]
@@ -1334,6 +1333,7 @@ impl Interp {
         }
         it.run(extras::EXTRAS_LATE)
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
+        web_console::install(&mut it);
         it.apply_builtin_table();
         it
     }
@@ -4745,6 +4745,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 mod arraybuffer_detach_tests;
 #[cfg(test)]
 mod builtin_table_tests;
+#[cfg(test)]
+mod console_instance_tests;
 #[cfg(test)]
 mod dynamic_helper_contract_tests;
 #[cfg(all(test, unix))]
