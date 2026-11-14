@@ -1246,6 +1246,66 @@ var __thaw_bundle_entry_key = "eic/index.js";
     );
 }
 
+/// `err.k = v` and `delete err.k` on a cached native Error reach the native side table as JSON writes, in
+/// order; a function value does not. A bag entry applied on a crossing (`code`) is not written back, and an
+/// object without the hidden `\0id` writes nothing.
+#[test]
+fn native_error_property_writes_reach_the_native_side_table() {
+    use crate::host::{thaw_tjs_register, NATIVE_ERROR_WRITES};
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "nwt/index.js": function(module, exports, require) {
+  exports.write = function (e) { e.extra = {a:1}; e.tag = "s"; delete e.extra; e.cb = function () {}; e.n = 2; return "ok"; };
+  exports.code = function (e) { return String(e.code); };
+  exports.plain = function (o) { o.x = 1; return "ok"; };
+}, };
+var __thaw_bundle_require_maps = { "nwt/index.js": {}, };
+var __thaw_bundle_entry_key = "nwt/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("nwt").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let take_writes = || {
+        NATIVE_ERROR_WRITES
+            .with(|log| log.borrow_mut().take())
+            .unwrap_or_default()
+    };
+    let start_recording = || NATIVE_ERROR_WRITES.with(|log| *log.borrow_mut() = Some(Vec::new()));
+
+    start_recording();
+    let frame = r#""\u0001Error\u0001boom\u0005{\"\\u0000id\":4098}""#;
+    assert_eq!(
+        typed_call("nwt::write", &format!("[{frame}]")),
+        Ok(r#""ok""#.into())
+    );
+    assert_eq!(
+        take_writes(),
+        [
+            r#"set 4098 extra {"a":1}"#,
+            r#"set 4098 tag "s""#,
+            "delete 4098 extra",
+            "set 4098 n 2",
+        ]
+    );
+
+    // the bag `code` is applied on each crossing (cached object, same id) and is not echoed back
+    start_recording();
+    let coded = r#""\u0001Error\u0001boom\u0005{\"\\u0000id\":4099,\"code\":\"C\"}""#;
+    assert_eq!(
+        typed_call("nwt::code", &format!("[{coded}]")),
+        Ok(r#""C""#.into())
+    );
+    assert_eq!(
+        typed_call("nwt::code", &format!("[{coded}]")),
+        Ok(r#""C""#.into())
+    );
+    assert_eq!(take_writes(), Vec::<String>::new());
+
+    // a plain object has no `\0id`: its writes are not native
+    start_recording();
+    assert_eq!(typed_call("nwt::plain", "[{}]"), Ok(r#""ok""#.into()));
+    assert_eq!(take_writes(), Vec::<String>::new());
+}
+
 /// `thaw_tjs_exception_native_token` reads the hidden native id of a thrown Error back to the live
 /// native packet it was built from; 0 for anything else, and 0 once the packet is gone.
 #[test]

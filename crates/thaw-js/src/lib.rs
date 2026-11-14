@@ -960,6 +960,8 @@ pub struct Interp {
     /// One thaw-js Error per native Error id: `(name, message, error)`, so a native Error that crosses
     /// twice is the same object (`error_object`).
     pub(crate) native_errors: HashMap<u64, (String, String, Value)>,
+    /// Set while a crossing applies its bag to a cached native Error: those writes are not echoed back.
+    pub(crate) native_sync_off: bool,
     /// Native exception packets a thrown carrier names (`\0pkt`, host.rs `packet_error`), by packet id. The
     /// arena keeps packets weakly, so this keeps a carrier's packet resolvable until release_all.
     pub(crate) native_packets: HashMap<u64, Rc<thaw_arena::exception::ExceptionPacket>>,
@@ -1087,6 +1089,7 @@ impl Interp {
             yielded: false,
             callback_values: HashMap::new(),
             native_errors: HashMap::new(),
+            native_sync_off: false,
             native_packets: HashMap::new(),
             symbol_ctor: None,
             symbol_registry: None,
@@ -1947,6 +1950,11 @@ impl Interp {
         }
         if o.ext.get() != 0 && find_own(o, key).is_none() {
             return Ok(()); // sloppy mode: silently ignored
+        }
+        if let Some(id) = crate::host::native_error_target(self, o, key) {
+            if let Some(json) = crate::host::plain_json(self, &value) {
+                crate::host::native_error_write(id, key, Some(&json));
+            }
         }
         put(o, key, value);
         Ok(())

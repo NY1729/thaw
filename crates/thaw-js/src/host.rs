@@ -4056,6 +4056,8 @@ fn error_object(it: &mut Interp, tagged: &str, id_hint: Option<u64>) -> Result<V
             err
         }
     };
+    // the bag is this crossing's own state: its writes are not echoed to the native side table
+    let sync_off = std::mem::replace(&mut it.native_sync_off, true);
     let mut has_code = false;
     for (k, v) in fields {
         if k != "name" && k != "message" && k != "stack" && !k.starts_with('\u{0}') {
@@ -4089,6 +4091,7 @@ fn error_object(it: &mut Interp, tagged: &str, id_hint: Option<u64>) -> Result<V
             let _ = it.set(&err, "code", Value::str(code));
         }
     }
+    it.native_sync_off = sync_off;
     Ok(err)
 }
 
@@ -4138,6 +4141,93 @@ fn tracked_handle_id(object: usize) -> u64 {
 #[cfg(not(unix))]
 fn tracked_handle_id(_object: usize) -> u64 {
     0
+}
+
+// Test seam for `native_error_write`: when `Some`, writes are recorded here instead of reaching the runtime.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static NATIVE_ERROR_WRITES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// The native id of `o` when a property write on it must reach the native side table: `o` holds the hidden
+/// `\0id` of a cached native Error that is still live, and no crossing bag is being applied.
+pub(crate) fn native_error_target(it: &Interp, o: &Obj, key: &str) -> Option<u64> {
+    if it.native_sync_off || it.native_errors.is_empty() || key.starts_with('\u{0}') {
+        return None;
+    }
+    let Some((Slot::Data(Value::Number(n)), _)) = crate::find_own(o, NATIVE_ID_KEY) else {
+        return None;
+    };
+    let id = n as u64;
+    (n >= 1.0 && it.native_errors.contains_key(&id) && !thaw_arena::was_reclaimed(id as usize))
+        .then_some(id)
+}
+
+/// The JSON text of a value written onto a native Error. Only plain objects, arrays and primitives have one
+/// here: functions, class instances of other kinds and Errors stay thaw-js-only.
+pub(crate) fn plain_json(it: &mut Interp, value: &Value) -> Option<String> {
+    if let Value::Object(o) = value {
+        if !matches!(&*o.kind.borrow(), Kind::Plain | Kind::Array(_)) {
+            return None;
+        }
+    }
+    crate::napi_eval::json_stringify(it, value).ok().flatten()
+}
+
+/// Write-through of one property set (`Some(json)`) or delete (`None`) on the native Error `id` to the
+/// runtime side table (`thaw_error_set_prop` / `thaw_error_delete_prop`). Looked up by symbol like
+/// `tracked_handle_id`: a missing symbol (no compiled runtime, tests) makes this a no-op.
+pub(crate) fn native_error_write(id: u64, key: &str, json: Option<&str>) {
+    #[cfg(test)]
+    {
+        let line = match json {
+            Some(json) => format!("set {id} {key} {json}"),
+            None => format!("delete {id} {key}"),
+        };
+        let recorded = NATIVE_ERROR_WRITES.with(|log| match log.borrow_mut().as_mut() {
+            Some(log) => {
+                log.push(line);
+                true
+            }
+            None => false,
+        });
+        if recorded {
+            return;
+        }
+    }
+    #[cfg(unix)]
+    // SAFETY: the caller checked that `id` names a live native Error (`native_error_target`); the symbols,
+    // when present, are thaw-runtime's `extern "C"` functions with these signatures.
+    unsafe {
+        let (Ok(key), error) = (CString::new(key), id as *const c_char) else {
+            return;
+        };
+        match json {
+            Some(json) => {
+                let sym = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_error_set_prop".as_ptr());
+                let Ok(json) = CString::new(json) else {
+                    return;
+                };
+                if !sym.is_null() {
+                    std::mem::transmute::<
+                        *mut c_void,
+                        unsafe extern "C" fn(*const c_char, *const c_char, *const c_char) -> bool,
+                    >(sym)(error, key.as_ptr(), json.as_ptr());
+                }
+            }
+            None => {
+                let sym = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_error_delete_prop".as_ptr());
+                if !sym.is_null() {
+                    std::mem::transmute::<
+                        *mut c_void,
+                        unsafe extern "C" fn(*const c_char, *const c_char) -> bool,
+                    >(sym)(error, key.as_ptr());
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (id, key, json);
 }
 
 /// The live value behind a handle id (index + 1 into `HANDLES`); 0 or a released id gives None.
