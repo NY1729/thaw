@@ -1834,7 +1834,7 @@ fn error_prop_value(error: *const c_char, key: &[u8]) -> Value {
     let json = unsafe { thaw_error_get_prop_json(error, key.as_ptr()) };
     if !json.is_null() {
         if let Some(value) = JsonParser::new(unsafe { CStr::from_ptr(json) }.to_bytes()).parse() {
-            return value;
+            return live_handle_prop(value);
         }
     }
     let text = |pointer: *const c_char| {
@@ -1849,8 +1849,31 @@ fn error_prop_value(error: *const c_char, key: &[u8]) -> Value {
     .unwrap_or_else(napi_undefined_value)
 }
 
+/// A stored one-key handle marker (a thaw-js object kept alive by the error) becomes its live lease again.
+fn live_handle_prop(value: Value) -> Value {
+    match json_handle_ref(&value) {
+        Some(handle) if matches!(value, Value::Object(_)) => {
+            host_value_from_borrowed_handle(handle).unwrap_or(value)
+        }
+        _ => value,
+    }
+}
+
 fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
-    let (Ok(key), Ok(json)) = (CString::new(key), CString::new(value.to_string())) else {
+    let Ok(key) = CString::new(key) else {
+        return;
+    };
+    // A live host object is stored as its handle marker; the error takes one reference to it.
+    let marker = match value {
+        Value::Host(lease) if lease.handle != 0 => {
+            HOST_OPERATIONS.with(|slot| slot.get()).and_then(|ops| {
+                (without_typed_decode_scope(|| (ops.retain)(lease.handle)) != 0)
+                    .then(|| format!(r#"{{"__thaw_tjs_handle__":{}}}"#, lease.handle))
+            })
+        }
+        _ => None,
+    };
+    let Ok(json) = CString::new(marker.unwrap_or_else(|| value.to_string())) else {
         return;
     };
     unsafe { thaw_error_set_prop(error, key.as_ptr(), json.as_ptr()) };
@@ -11621,6 +11644,55 @@ mod tests {
                 enumerate: unused_typed_scope_text,
             }))
         });
+    }
+
+    thread_local! {
+        static RETAIN_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    extern "C" fn counting_retain(_: u64) -> u8 {
+        RETAIN_CALLS.with(|calls| calls.set(calls.get() + 1));
+        1
+    }
+
+    #[test]
+    fn a_host_cause_stored_on_an_error_reads_back_as_the_same_live_handle() {
+        std::thread::spawn(|| {
+            unsafe extern "C" {
+                fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char;
+            }
+            HOST_OPERATIONS.with(|slot| {
+                slot.set(Some(HostOperations {
+                    retain: counting_retain,
+                    release: factory_test_release,
+                    get: pr2_test_get,
+                    query: pr2_test_query,
+                    date_set: unused_typed_scope_date,
+                    set: unused_typed_scope_set,
+                    predicate: unused_typed_scope_predicate,
+                    enumerate: unused_typed_scope_text,
+                }))
+            });
+            let error = unsafe { thaw_error_frame(c"Error".as_ptr(), c"outer".as_ptr()) };
+            let cause = Value::Host(Rc::new(HostLease {
+                handle: 3,
+                release: factory_test_release,
+            }));
+            set_error_prop(error, b"cause", &cause);
+            assert_eq!(RETAIN_CALLS.with(Cell::get), 1);
+            let read = error_prop_value(error, b"cause");
+            assert!(matches!(&read, Value::Host(lease) if lease.handle == 3));
+            assert_eq!(RETAIN_CALLS.with(Cell::get), 2);
+
+            // A plain (non-host) prop keeps its value and takes no reference.
+            set_error_prop(error, b"plain", &Value::String("x".into()));
+            assert!(
+                matches!(error_prop_value(error, b"plain"), Value::String(text) if text == "x")
+            );
+            assert_eq!(RETAIN_CALLS.with(Cell::get), 2);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
