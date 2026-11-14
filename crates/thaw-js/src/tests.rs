@@ -8488,3 +8488,61 @@ fn symbol_to_primitive_hints_match_node() {
         "TypeError"
     );
 }
+
+// Cyclic arrays/objects in native walks (Array.prototype.join and its callers, inspect).
+// A reference back to an array still being joined is the empty string (ES Array.prototype.join);
+// inspect prints `[Circular *1]` and marks the target `<ref *1>`, as Node does.
+
+#[test]
+fn cyclic_array_join_is_empty_at_the_cycle() {
+    assert_eq!(
+        one(
+            r#"var a=[1,2]; a.push(a); console.log(JSON.stringify([String(a), a.join("-"), ""+a, `${a}`, String(Number(a))]))"#
+        ),
+        r#"["1,2,","1-2-","1,2,","1,2,","NaN"]"#
+    );
+}
+
+#[test]
+fn cyclic_array_nested_and_mutual_join() {
+    assert_eq!(
+        one(
+            r#"var p=[1],q=[p]; p.push(q); var x=[1,[2]]; x[1].push(x); console.log(JSON.stringify([String(p),String(q),String(x),[x].toString()]))"#
+        ),
+        r#"["1,","1,","1,2,","1,2,"]"#
+    );
+}
+
+#[test]
+fn cyclic_array_join_with_separators() {
+    assert_eq!(
+        one(
+            r#"var m=[1,2,3]; m.push(m); console.log(JSON.stringify(m.join(", ") + " ; " + m.join("")))"#
+        ),
+        r#""1, 2, 3,  ; 123""#
+    );
+}
+
+#[test]
+fn cyclic_array_json_and_flat_errors() {
+    assert_eq!(
+        one(r#"var a=[1]; a.push(a); try { JSON.stringify(a) } catch (e) { console.log(e.name, e.message.split("\n")[0]) } try { a.flat(Infinity) } catch (e) { console.log(e.name, e.message) }"#),
+        "TypeError Converting circular structure to JSON|RangeError Maximum call stack size exceeded"
+    );
+}
+
+#[test]
+fn cyclic_array_structured_clone_keeps_the_cycle() {
+    assert_eq!(
+        one(r#"var a=[1,2]; a.push(a); var c=structuredClone(a); console.log(c.length, c[2]===c)"#),
+        "3 true"
+    );
+}
+
+#[test]
+fn cyclic_values_inspect_as_circular() {
+    assert_eq!(
+        one(r#"var a=[1,2]; a.push(a); console.log(a); var o={n:1}; o.self=o; console.log(o)"#),
+        "<ref *1> [ 1, 2, [Circular *1] ]|<ref *1> { n: 1, self: [Circular *1] }"
+    );
+}
