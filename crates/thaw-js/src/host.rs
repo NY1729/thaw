@@ -4461,7 +4461,7 @@ fn for_each_interp(f: &mut dyn FnMut(&mut Interp)) {
     let running: Vec<*mut Package> = RUNNING.with(|r| r.borrow().values().copied().collect());
     for ptr in running {
         // SAFETY: a running package's pointer is a live stack local of its enclosing `with_package`.
-        f(unsafe { &mut *(*ptr).interp });
+        f(unsafe { &mut (*ptr).interp });
     }
 }
 
