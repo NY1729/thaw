@@ -1251,6 +1251,28 @@ fn native_error_token_round_trips_through_the_hidden_id() {
     assert_eq!(thaw_tjs_exception_native_token(made.value), 0);
 }
 
+/// Two crossings of one native Error id (`\0id` in the bag) yield the same JS Error object.
+#[test]
+fn tagged_error_text_with_one_native_id_is_one_error_object() {
+    use crate::host::{handle_value, thaw_tjs_error_from_tagged_handle};
+    use std::ffi::CString;
+    let identity = 0x7f00_0020_usize;
+    let text = CString::new(format!(
+        "\u{1}Error\u{1}\u{1e}E1:4:-:boom\u{5}{{\"\\u0000id\":{identity}}}"
+    ))
+    .unwrap();
+    let first = thaw_tjs_error_from_tagged_handle(text.as_ptr());
+    let second = thaw_tjs_error_from_tagged_handle(text.as_ptr());
+    assert!(first.error.is_null() && second.error.is_null());
+    let (Some(Value::Object(a)), Some(Value::Object(b))) = (
+        handle_value(first.value as u64),
+        handle_value(second.value as u64),
+    ) else {
+        panic!("both crossings should be Error objects");
+    };
+    assert!(Rc::ptr_eq(&a, &b));
+}
+
 /// A packet built from a native Error identity (`native_error_identity`), as a native throw publishes it.
 fn identified_packet(
     identity: usize,
