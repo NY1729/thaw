@@ -8596,6 +8596,77 @@ fn platform_globals_exist_in_thaw_js_realm_or_are_ledgered() {
     );
 }
 
+// ----- `new` on host callbacks, named non-constructor errors, host own-property predicates (PR-C) -----
+
+/// A host-callback native as `callback_value` builds it: marked `@@hostcb`, returns `ret`.
+fn hostcb_native(it: &mut Interp, ret: Option<Obj>) -> Value {
+    let f = it.native(move |_, _, _| Ok(ret.clone().map_or(Value::Undefined, Value::Object)));
+    if let Value::Object(o) = &f {
+        put_hidden(o, "@@hostcb", Value::Bool(true));
+    }
+    f
+}
+
+#[test]
+fn construct_host_callback_returning_undefined_yields_fresh_object() {
+    let mut it = Interp::new();
+    let f = hostcb_native(&mut it, None);
+    let r = it.construct(&f, &[]).unwrap();
+    let Value::Object(ro) = &r else {
+        panic!("expected object")
+    };
+    assert!(matches!(&*ro.kind.borrow(), Kind::Plain));
+    let proto_is_object_proto = ro
+        .proto
+        .borrow()
+        .as_ref()
+        .is_some_and(|p| Rc::ptr_eq(p, &it.object_proto));
+    assert!(proto_is_object_proto);
+}
+
+#[test]
+fn construct_host_callback_returning_object_yields_that_object() {
+    let mut it = Interp::new();
+    let target = it.plain();
+    let f = hostcb_native(&mut it, Some(target.clone()));
+    let r = it.construct(&f, &[]).unwrap();
+    assert!(matches!(&r, Value::Object(o) if Rc::ptr_eq(o, &target)));
+}
+
+#[test]
+fn construct_host_callback_takes_prototype_from_new_target() {
+    let mut it = Interp::new();
+    let f = hostcb_native(&mut it, None);
+    let proto = it.plain();
+    let nt = it.plain();
+    put(&nt, "prototype", Value::Object(proto.clone()));
+    let r = it.construct_with(&f, &[], &Value::Object(nt)).unwrap();
+    let Value::Object(ro) = &r else {
+        panic!("expected object")
+    };
+    assert!(ro
+        .proto
+        .borrow()
+        .as_ref()
+        .is_some_and(|p| Rc::ptr_eq(p, &proto)));
+}
+
+#[test]
+fn construct_non_constructors_name_the_callee() {
+    assert_eq!(
+        one("const f = () => 1; try { new f(); } catch (e) { console.log(e.message); }\n\
+             const o = { m() {}, async am() {} }; try { new o.m(); } catch (e) { console.log(e.message); }\n\
+             async function af() {} try { new af(); } catch (e) { console.log(e.message); }\n\
+             const ae = async function () {}; try { new ae(); } catch (e) { console.log(e.message); }\n\
+             try { new (() => 1)(); } catch (e) { console.log(e.message); }\n\
+             try { new (function* g() {})(); } catch (e) { console.log(e.message); }\n\
+             class C { k() {} } try { new C.prototype.k(); } catch (e) { console.log(e.message); }\n\
+             function plain() { return 1; } console.log(typeof new plain());\n\
+             function* gg() {} try { new gg(); } catch (e) { console.log(e.message); }"),
+        "f is not a constructor|o.m is not a constructor|af is not a constructor|ae is not a constructor|(intermediate value) is not a constructor|(intermediate value) is not a constructor|C.prototype.k is not a constructor|object|gg is not a constructor"
+    );
+}
+
 /// `[Symbol.toPrimitive]` hints and the non-callable rejection, values recorded with Node 22.23.1.
 #[test]
 fn symbol_to_primitive_hints_match_node() {
@@ -8652,6 +8723,54 @@ fn cyclic_array_json_and_flat_errors() {
     assert_eq!(
         one(r#"var a=[1]; a.push(a); try { JSON.stringify(a) } catch (e) { console.log(e.name, e.message.split("\n")[0]) } try { a.flat(Infinity) } catch (e) { console.log(e.name, e.message) }"#),
         "TypeError Converting circular structure to JSON|RangeError Maximum call stack size exceeded"
+    );
+}
+
+#[test]
+fn host_own_predicate_consults_proxy_descriptor_trap() {
+    let mut it = Interp::new();
+    it.run(
+        "var zp = new Proxy({}, { getOwnPropertyDescriptor(t, k) { \
+         return k === 'v' ? { value: 1, enumerable: true, configurable: true } : undefined; } });\n\
+         var za = [1, 2]; var zo = { a: 1 };",
+    )
+    .unwrap();
+    let get = |it: &mut Interp, n: &str| it.lookup(&it.global.clone(), n).unwrap();
+    let zp = get(&mut it, "zp");
+    let za = get(&mut it, "za");
+    let zo = get(&mut it, "zo");
+    // own (1) and own-enumerable (3) answers, as Node: the trap's `v` is own and enumerable
+    assert_eq!(
+        crate::host::property_predicate_value(&mut it, &zp, "v", 1).unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::host::property_predicate_value(&mut it, &zp, "v", 3).unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::host::property_predicate_value(&mut it, &zp, "w", 1).unwrap(),
+        0
+    );
+    assert_eq!(
+        crate::host::property_predicate_value(&mut it, &za, "1", 1).unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::host::property_predicate_value(&mut it, &za, "5", 1).unwrap(),
+        0
+    );
+    assert_eq!(
+        crate::host::property_predicate_value(&mut it, &zo, "a", 1).unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::host::property_predicate_value(&mut it, &zo, "a", 3).unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::host::property_predicate_value(&mut it, &zo, "b", 1).unwrap(),
+        0
     );
 }
 
