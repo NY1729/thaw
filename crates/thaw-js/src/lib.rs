@@ -333,6 +333,8 @@ struct FuncDef {
     class: Option<ClassInfo>,
     /// Lazy compilation state (`compile/mod.rs`); `Cold` until the function has been called enough.
     cstate: std::cell::RefCell<compile::CState>,
+    /// Created while `Interp::no_compile_define` was set (a prelude that opted out): never analysed or compiled.
+    no_compile: bool,
 }
 
 enum Body {
@@ -1088,6 +1090,9 @@ pub struct Interp {
     compile_mode: compile::CompileMode,
     compile_after: u32,
     compile_stats: bool,
+    /// Set by a prelude install that opts out of compilation (`web/console.rs`): the closures it creates get
+    /// `FuncDef::no_compile`.
+    no_compile_define: bool,
     cstats: compile::Stats,
     /// Recycled slot buffers of compiled calls (`compile/run.rs`); at most `FRAME_POOL_CAP` entries, all empty.
     frame_pool: Vec<Vec<Value>>,
@@ -1239,6 +1244,7 @@ impl Interp {
             compile_stats: compile::stats_enabled(
                 std::env::var("THAW_JS_COMPILE_STATS").ok().as_deref(),
             ),
+            no_compile_define: false,
             cstats: compile::Stats::with_level(compile::stats_level(
                 std::env::var("THAW_JS_COMPILE_STATS").ok().as_deref(),
             )),
@@ -1327,7 +1333,6 @@ impl Interp {
             web_wasm::install(&mut it);
             web_crypto::install(&mut it);
             web_navigator::install(&mut it);
-            web_console::install(&mut it);
             node_crypto::install(&mut it);
             it.install_url();
             #[cfg(feature = "intl")]
@@ -1335,6 +1340,7 @@ impl Interp {
         }
         it.run(extras::EXTRAS_LATE)
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
+        web_console::install(&mut it);
         it.apply_builtin_table();
         it
     }
@@ -2503,7 +2509,7 @@ impl Interp {
                 };
                 let param_names = simple_param_names(&params);
                 let param_mask = param_mask(&param_names);
-                Rc::new(FuncDef { name, params, body, arrow, is_async, is_gen, bind_self, no_prototype: !is_gen && (method || is_async), uses_arguments: finder.found && !arrow, uses_new_target: finder.new_target && !arrow, uses_this: finder.uses_this, src: (self_run_id, lo, hi), hoisted, param_names, param_mask, strict, class: None, cstate: Default::default() })
+                Rc::new(FuncDef { name, params, body, arrow, is_async, is_gen, bind_self, no_prototype: !is_gen && (method || is_async), uses_arguments: finder.found && !arrow, uses_new_target: finder.new_target && !arrow, uses_this: finder.uses_this, src: (self_run_id, lo, hi), hoisted, param_names, param_mask, strict, class: None, cstate: Default::default(), no_compile: self.no_compile_define })
             })
             .clone();
         self.closure_from_def(def, scope)
@@ -4746,6 +4752,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 mod arraybuffer_detach_tests;
 #[cfg(test)]
 mod builtin_table_tests;
+#[cfg(test)]
+mod console_instance_tests;
 #[cfg(test)]
 mod dynamic_helper_contract_tests;
 #[cfg(all(test, unix))]

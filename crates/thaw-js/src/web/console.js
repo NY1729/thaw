@@ -4,7 +4,9 @@
 // Known gaps: `console.table` on Map/Set, `dir` options, `inspectOptions`, the stderr warnings Node
 // emits for bad countReset/timeEnd labels (they go to process, not the stream), and calling without `new`.
 // ponytail: table cells use the default inspect depth; Node shrinks objects with more than 2 keys.
-const kStateOf = new WeakMap();
+// ponytail: a native Map, not WeakMap: the JS WeakMap shim (EXTRAS) gets compiled when hot and would
+// shift compile counts. Consoles are never freed, so user-created ones leak; use WeakMap once it is native.
+const kStateOf = new Map();
 const fmt = (...args) => __thaw_console_format(...args);
 const TABLE = {
   left: '│ ', middle: ' │ ', right: ' │', tl: '┌', tm: '┬', tr: '┐',
@@ -56,6 +58,18 @@ function emit(self, stream, text) {
   }
 }
 
+// A function with its own `name` and `length` (Node's shape for these members).
+function fn(name, length, impl) {
+  Object.defineProperties(impl, { name: { value: name }, length: { value: length } });
+  return impl;
+}
+// Node's `_stdoutErrorHandler`: an anonymous arrow (name '', no prototype), kept on each instance.
+function errorHandler(self) {
+  return fn('', 1, (err) => {
+    if (err && !kStateOf.get(self).ignoreErrors) throw err;
+  });
+}
+
 function Console(options) {
   let stdout = options;
   let stderr = arguments[1];
@@ -71,11 +85,33 @@ function Console(options) {
   if (!stdout || typeof stdout.write !== 'function') throw writableError('stdout');
   if (stderr === undefined || stderr === null) stderr = stdout;
   else if (typeof stderr.write !== 'function') throw writableError('stderr');
-  kStateOf.set(this, {
+  const state = {
     stdout, stderr, groupIndentation, ignoreErrors: ignoreErrors !== false,
     indent: '', counts: new Map(), timers: new Map(),
+  };
+  kStateOf.set(this, state);
+  const self = this;
+  for (const name of METHODS) {
+    const bound = this[name].bind(this);
+    Object.defineProperty(bound, 'name', { value: name });
+    this[name] = bound;
+  }
+  Object.defineProperties(this, {
+    _stdout: {
+      get: fn('get', 0, () => kStateOf.get(self).stdout),
+      set: fn('set', 1, (v) => { kStateOf.get(self).stdout = v; }),
+      configurable: true,
+    },
+    _stderr: {
+      get: fn('get', 0, () => kStateOf.get(self).stderr),
+      set: fn('set', 1, (v) => { kStateOf.get(self).stderr = v; }),
+      configurable: true,
+    },
+    _ignoreErrors: { value: state.ignoreErrors, writable: true, configurable: true },
+    _times: { value: state.timers, writable: true, configurable: true },
+    _stdoutErrorHandler: { value: errorHandler(this), writable: true, configurable: true },
+    _stderrErrorHandler: { value: errorHandler(this), writable: true, configurable: true },
   });
-  for (const name of METHODS) this[name] = this[name].bind(this);
 }
 const METHODS = ['log', 'info', 'debug', 'warn', 'error', 'dir', 'time', 'timeEnd', 'timeLog', 'trace',
   'assert', 'clear', 'count', 'countReset', 'group', 'groupEnd', 'table', 'dirxml', 'groupCollapsed'];
@@ -170,5 +206,16 @@ Object.assign(Console.prototype, {
 Console.prototype.dirxml = Console.prototype.log;
 Console.prototype.groupCollapsed = Console.prototype.group;
 
+// The global `console` is one `Console` instance on the process streams (Node: `console instanceof
+// console.Console`). Node's global methods report length 0 (context: 1); the extras below exist only on it.
+const globalConsole = new Console(process.stdout, process.stderr);
+for (const name of METHODS) Object.defineProperty(globalConsole[name], 'length', { value: 0 });
 Object.defineProperty(globalThis, 'Console', { value: Console, writable: true, enumerable: false, configurable: true });
-Object.defineProperty(console, 'Console', { value: Console, writable: true, enumerable: true, configurable: true });
+Object.defineProperty(globalConsole, 'Console', { value: Console, writable: true, enumerable: true, configurable: true });
+Object.assign(globalConsole, {
+  profile: fn('profile', 0, () => {}),
+  profileEnd: fn('profileEnd', 0, () => {}),
+  timeStamp: fn('timeStamp', 0, () => {}),
+  context: fn('context', 1, () => Object.assign({}, globalConsole)),
+  createTask: fn('createTask', 0, () => ({ run: (f) => f() })),
+});

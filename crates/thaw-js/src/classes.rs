@@ -105,6 +105,7 @@ impl Interp {
             uses_arguments: false,
             uses_new_target: ctor_uses_new_target || parent.is_some(),
             uses_this: true,
+            no_compile: self.no_compile_define,
             src: (self.run_id, class.span.lo.0, class.span.hi.0),
             hoisted,
             param_names,

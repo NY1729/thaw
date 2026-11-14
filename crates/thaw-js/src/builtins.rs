@@ -945,24 +945,6 @@ impl Interp {
         let op = self.object_proto.clone();
         let fp = self.function_proto.clone();
 
-        // ----- console -----
-        let console = self.plain();
-        for name in ["log", "info", "debug"] {
-            self.set_native(&console, name, |it, _, args| {
-                let line = it.format_log(args);
-                it.emit_out(&line, true);
-                Ok(Value::Undefined)
-            });
-        }
-        for name in ["error", "warn", "trace"] {
-            self.set_native(&console, name, |it, _, args| {
-                let line = it.format_log(args);
-                it.emit_err(&line);
-                Ok(Value::Undefined)
-            });
-        }
-        g.declare("console", Value::Object(console), true);
-
         // ----- Math -----
         let math = self.plain();
         macro_rules! math1 {
