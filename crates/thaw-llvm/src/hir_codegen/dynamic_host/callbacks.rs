@@ -1599,7 +1599,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 // "absent" case to a plain JSON `null` every time,
                 // indistinguishable from an explicit `null` return.
                 if *ret == HirType::JsValue {
-                    let result = self.compile_dynamic_value_placeholder_unchecked(result)?;
+                    let result = if graph_wire {
+                        self.compile_branded_dynamic_value_placeholder(result)?
+                    } else {
+                        self.compile_dynamic_value_placeholder_unchecked(result)?
+                    };
                     self.compile_json_array_push_owned(result_json, result)?;
                 } else if graph_wire && matches!(ret,
                     HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _)
@@ -1705,17 +1709,6 @@ impl<'ctx> HirCompiler<'ctx> {
         // `(x) => ({ wrapped: x })` -- `serde_json::Value::clone` is a
         // real recursive clone, so the nested copy is independent too).
         {
-            for (index, param) in params.iter().enumerate() {
-                if *param == HirType::JsValue {
-                    self.builder
-                        .build_call(
-                            self.module.get_function("thaw_js_release_handle").unwrap(),
-                            &[callback_args[index + 1 + holder_offset]],
-                            "release_native_callback_argument",
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
-            }
             for (position, value) in argument_json.into_iter().enumerate() {
                 let param = position.checked_sub(holder_offset).and_then(|index| params.get(index));
                 self.compile_release_callback_json_argument(value, param, "native_callback_json")?;
@@ -1739,6 +1732,19 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        // Release the JsValue parameter handles only after the graph encoder has retained whatever the result
+        // refers to (a callback returning its own parameter); releasing first left the result with a dead lease.
+        for (index, param) in params.iter().enumerate() {
+            if *param == HirType::JsValue {
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_js_release_handle").unwrap(),
+                        &[callback_args[index + 1 + holder_offset]],
+                        "release_native_callback_argument",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         if let Some(method) = projected_method_handle {
             // The graph encoder retained its own output lease before this
             // registration reference is dropped. The JS method wrapper

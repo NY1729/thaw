@@ -868,3 +868,4 @@ include!("tests/thaw_js_live_args_contracts.rs");
 include!("tests/thaw_js_live_owner_args_contracts.rs");
 include!("tests/thaw_js_stream_ctor_contracts.rs");
 include!("tests/thaw_js_jsvalue_callback_contracts.rs");
+include!("tests/thaw_js_callback_own_param_contracts.rs");
