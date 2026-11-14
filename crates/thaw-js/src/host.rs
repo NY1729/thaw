@@ -445,6 +445,11 @@ impl Package {
 }
 
 pub(crate) fn classify(it: &mut Interp, c: Ctl) -> HostError {
+    let packet = match &c {
+        Ctl::Throw(v) => carrier_packet(it, v),
+        _ => None,
+    };
+    LAST_PACKET.with(|p| *p.borrow_mut() = packet);
     match c {
         Ctl::Unsupported(f) => HostError::Unsupported(f),
         Ctl::Throw(v) => {
@@ -1424,7 +1429,7 @@ pub(crate) fn handle_result(result: Result<i64, String>) -> HandleResult {
         },
         Err(e) => HandleResult {
             value: 0,
-            error: thaw_arena::owned_string(e),
+            error: error_string(e),
         },
     }
 }
@@ -1572,7 +1577,7 @@ pub extern "C" fn thaw_tjs_get_property_exact_result(
             ..none
         },
         Err(e) => ExactResult {
-            error: thaw_arena::owned_string(e),
+            error: error_string(e),
             ..none
         },
     }
@@ -1783,7 +1788,7 @@ pub(crate) fn graph_result(r: Result<String, String>) -> ThawResult {
         Ok(wire) => graph_ok(wire),
         Err(e) => ThawResult {
             value: ptr::null_mut(),
-            error: thaw_arena::owned_string(e),
+            error: error_string(e),
         },
     }
 }
@@ -2352,7 +2357,7 @@ fn native_process_report(
         },
         Ok(Err(e)) | Err(e) => HandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error_text(e)),
+            error: error_string(error_text(e)),
         },
     }
 }
@@ -3092,7 +3097,7 @@ unsafe fn exact_call(
             ..none
         },
         Err(e) => ExactResult {
-            error: thaw_arena::owned_string(e),
+            error: error_string(e),
             ..none
         },
     }
@@ -3309,7 +3314,7 @@ fn to_iterator_exact(source: u64, asynchronous: bool) -> ExactResult {
             ..none
         },
         Err(e) => ExactResult {
-            error: thaw_arena::owned_string(e),
+            error: error_string(e),
             ..none
         },
     }
@@ -3419,7 +3424,7 @@ pub extern "C" fn thaw_tjs_iterator_step_exact_result(
             ..none
         },
         Err(e) => ExactResult {
-            error: thaw_arena::owned_string(e),
+            error: error_string(e),
             ..none
         },
     }
@@ -4659,6 +4664,29 @@ thread_local! {
     /// `(display, framed)` of the last `Error` object a package call threw: compiled code asks for the
     /// framed form of an error string (`thaw_tjs_frame_error`) when it raises it as a TypeScript error.
     static LAST_FRAME: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+    /// The native packet of the last carrier `classify` saw; `error_string` binds it to the error text.
+    static LAST_PACKET: RefCell<Option<Rc<thaw_arena::exception::ExceptionPacket>>> = const { RefCell::new(None) };
+}
+
+/// The live native packet a thrown carrier names in its hidden `\0pkt`, if any.
+fn carrier_packet(
+    it: &mut Interp,
+    v: &Value,
+) -> Option<Rc<thaw_arena::exception::ExceptionPacket>> {
+    match it.get(v, PACKET_KEY) {
+        Ok(Value::Number(n)) if n >= 1.0 => thaw_arena::exception::packet(n as u64),
+        _ => None,
+    }
+}
+
+/// An owned error string for a failed call. A carrier classified just before it keeps its packet bound to
+/// the string, as a callback result does, so the native side resolves the same exception by token.
+pub(crate) fn error_string(e: String) -> *mut c_char {
+    let pointer = thaw_arena::owned_string(e);
+    if let Some(packet) = LAST_PACKET.with(|p| p.borrow_mut().take()) {
+        thaw_arena::bind_owned_exception(pointer, packet);
+    }
+    pointer
 }
 
 /// The wire framing (`\u{1}Name\u{1}message...`, name / message / `code` / own properties) of the
@@ -4672,13 +4700,19 @@ pub unsafe extern "C" fn thaw_tjs_frame_error(error: *mut c_char) -> *mut c_char
     let Some(text) = cstr(error) else {
         return error;
     };
+    // the packet moves with the text: the framed string is a new allocation
+    let packet = thaw_arena::take_owned_exception(error);
     // SAFETY: `error` came from `thaw_arena::owned_string` in a thaw-js call result.
     unsafe { thaw_arena::destroy_string(error) };
     let framed = LAST_FRAME.with(|f| match f.borrow_mut().take() {
         Some((display, framed)) if display == text => framed,
         _ => text,
     });
-    thaw_arena::owned_string(framed)
+    let pointer = thaw_arena::owned_string(framed);
+    if let Some(packet) = packet {
+        thaw_arena::bind_owned_exception(pointer, packet);
+    }
+    pointer
 }
 
 /// The wire framing of a thrown `Error`-like object (`message` is a string): `\u{1}name\u{1}message`,
@@ -5680,7 +5714,7 @@ fn text_result(r: Result<String, String>) -> ThawResult {
         },
         Err(e) => ThawResult {
             value: ptr::null_mut(),
-            error: thaw_arena::owned_string(e),
+            error: error_string(e),
         },
     }
 }
