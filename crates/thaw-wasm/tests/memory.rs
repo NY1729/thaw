@@ -11,7 +11,12 @@ use thaw_wasm::{
 struct NoHost;
 
 impl HostCallbacks for NoHost {
-    fn call_import(&mut self, id: u32, _args: &[Val]) -> Result<Vec<Val>, u32> {
+    fn call_import(
+        &mut self,
+        _store: &mut thaw_wasm::Access<'_, '_>,
+        id: u32,
+        _args: &[Val],
+    ) -> Result<Vec<Val>, u32> {
         panic!("unexpected host call {id}")
     }
 }
@@ -20,7 +25,12 @@ impl HostCallbacks for NoHost {
 struct Poke(Bytes);
 
 impl HostCallbacks for Poke {
-    fn call_import(&mut self, _id: u32, args: &[Val]) -> Result<Vec<Val>, u32> {
+    fn call_import(
+        &mut self,
+        _store: &mut thaw_wasm::Access<'_, '_>,
+        _id: u32,
+        args: &[Val],
+    ) -> Result<Vec<Val>, u32> {
         let (Val::I32(addr), Val::I32(value)) = (&args[0], &args[1]) else {
             return Err(1);
         };

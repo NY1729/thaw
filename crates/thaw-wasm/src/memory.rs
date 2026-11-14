@@ -73,6 +73,14 @@ impl External {
         if self.cur.borrow().borrow().len() == want {
             return false;
         }
+        self.renew(want);
+        true
+    }
+
+    /// Moves the bytes into fresh shared storage of `want` bytes, even when the length is
+    /// unchanged. The previous storage is left empty, so it reads as detached (as after a
+    /// JS-level `Memory.grow`).
+    pub fn renew(&self, want: usize) {
         let mut vec = std::mem::take(&mut *self.cur.borrow().borrow_mut());
         assert!(
             want <= vec.capacity(),
@@ -83,7 +91,6 @@ impl External {
         // `set_len` touches it, so the bytes wasmi points at are still these bytes.
         unsafe { vec.set_len(want) };
         *self.cur.borrow_mut() = Rc::new(RefCell::new(vec));
-        true
     }
 }
 

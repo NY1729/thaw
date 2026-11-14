@@ -28,6 +28,10 @@ macro_rules! id_type {
             pub fn index(self) -> u32 {
                 self.0
             }
+            /// The id with this index (an embedder handle that came from `index`).
+            pub fn from_index(index: u32) -> Self {
+                Self(index)
+            }
         }
     )*};
 }
@@ -374,10 +378,20 @@ pub enum Import {
 }
 
 /// Embedder side of host imports. `Err(id)` makes the call throw embedder
-/// value `id` unchanged.
+/// value `id` unchanged. `store` is the store running the import: calls made through it
+/// (exports, memories, tables, globals, instantiate) reach the same store with no second borrow.
+/// It is valid only during this call.
 pub trait HostCallbacks {
-    fn call_import(&mut self, id: u32, args: &[Val]) -> Result<Vec<Val>, u32>;
+    fn call_import(
+        &mut self,
+        store: &mut Access<'_, '_>,
+        id: u32,
+        args: &[Val],
+    ) -> Result<Vec<Val>, u32>;
 }
+
+/// Default limit on host imports nested in host imports (see [`Store::set_reentry_limit`]).
+pub const DEFAULT_REENTRY_DEPTH: u32 = 100;
 
 /// Export of an instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -418,6 +432,9 @@ pub(crate) struct HostState {
     instances: Vec<Vec<(String, Extern)>>,
     /// Valid only while `Store::call_*`/`instantiate` run (see `with_host`).
     host: Option<NonNull<dyn HostCallbacks>>,
+    /// Host imports currently running (each may call back into wasm), and the limit on them.
+    depth: u32,
+    max_depth: u32,
     #[cfg(feature = "wasi")]
     pub(crate) wasi: wasmi_wasi::WasiCtx,
 }
@@ -434,71 +451,113 @@ impl std::fmt::Display for HostException {
 
 impl wasmi::errors::HostError for HostException {}
 
-pub struct Store {
-    inner: wasmi::Store<HostState>,
+/// Where an [`Access`] operation reaches the store: the owner (`Store`), a read-only borrow of
+/// it, or the `Caller` of the call that is running it (inside a host import).
+enum Ctx<'a, 'b> {
+    Shared(&'a wasmi::Store<HostState>),
+    Owned(&'a mut wasmi::Store<HostState>),
+    Caller(&'a mut wasmi::Caller<'b, HostState>),
 }
 
-impl Store {
-    pub fn new(engine: &Engine) -> Self {
-        let state = HostState {
-            funcs: Vec::new(),
-            memories: Vec::new(),
-            tables: Vec::new(),
-            globals: Vec::new(),
-            instances: Vec::new(),
-            host: None,
-            #[cfg(feature = "wasi")]
-            wasi: wasmi_wasi::sync::WasiCtxBuilder::new().build(),
-        };
-        Self {
-            inner: wasmi::Store::new(&engine.inner, state),
+impl AsContext for Ctx<'_, '_> {
+    type Data = HostState;
+
+    fn as_context(&self) -> wasmi::StoreContext<'_, HostState> {
+        match self {
+            Ctx::Shared(s) => s.as_context(),
+            Ctx::Owned(s) => s.as_context(),
+            Ctx::Caller(c) => c.as_context(),
+        }
+    }
+}
+
+impl AsContextMut for Ctx<'_, '_> {
+    fn as_context_mut(&mut self) -> wasmi::StoreContextMut<'_, HostState> {
+        match self {
+            // Only read paths are built over `Shared`; a write through it is a bug here.
+            Ctx::Shared(_) => unreachable!("write through a read-only store view"),
+            Ctx::Owned(s) => s.as_context_mut(),
+            Ctx::Caller(c) => c.as_context_mut(),
+        }
+    }
+}
+
+impl Ctx<'_, '_> {
+    fn data(&self) -> &HostState {
+        match self {
+            Ctx::Shared(s) => s.data(),
+            Ctx::Owned(s) => s.data(),
+            Ctx::Caller(c) => c.data(),
         }
     }
 
+    fn data_mut(&mut self) -> &mut HostState {
+        match self {
+            Ctx::Shared(_) => unreachable!("write through a read-only store view"),
+            Ctx::Owned(s) => s.data_mut(),
+            Ctx::Caller(c) => c.data_mut(),
+        }
+    }
+}
+
+/// Every store operation, over whichever store it reaches. `Store` methods use it on the owned
+/// store; `HostCallbacks::call_import` gets one over the store running the import, so a host
+/// function can call exports, grow memories, use tables and globals, and instantiate without
+/// a second borrow of the store (wasmi lends it through the `Caller`).
+pub struct Access<'a, 'b> {
+    ctx: Ctx<'a, 'b>,
+}
+
+impl Access<'_, '_> {
     // ---- memory -------------------------------------------------------
 
     /// Creates an embedder-owned memory whose bytes are shared through `memory_buffer`.
     pub fn new_memory(&mut self, min: u32, max: Option<u32>) -> Result<MemoryId, String> {
         let vec = reserve_pages(min, max, &mut alloc_zeroed_vec)
             .ok_or_else(|| "could not allocate memory".to_string())?;
-        let (mem, external) = memory::create_external(&mut self.inner, vec, min, max)?;
+        let (mem, external) = memory::create_external(&mut self.ctx, vec, min, max)?;
         Ok(self.intern_memory(mem, Some(external)))
     }
 
     /// Shared storage of an embedder-owned memory; `None` for memories wasmi owns
     /// (memories defined inside a module). Identity changes when a grow replaces it.
     pub fn memory_buffer(&self, id: MemoryId) -> Option<Bytes> {
-        self.state().memories[id.0 as usize]
+        self.ctx.data().memories[id.0 as usize]
             .external
             .as_ref()
             .map(|ext| ext.buffer())
     }
 
     pub fn memory_pages(&self, id: MemoryId) -> u64 {
-        self.state().memories[id.0 as usize].pages.get()
+        self.ctx.data().memories[id.0 as usize].pages.get()
     }
 
     pub fn memory_generation(&self, id: MemoryId) -> u64 {
-        self.state().memories[id.0 as usize].generation.get()
+        self.ctx.data().memories[id.0 as usize].generation.get()
     }
 
-    /// Runs `f` over the current bytes of the memory. Do not retain the slice.
+    /// Runs `f` over the current bytes of the memory. Do not retain the slice, and do not run
+    /// wasm or JS inside `f`.
     pub fn with_memory_bytes<R>(&mut self, id: MemoryId, f: impl FnOnce(&mut [u8]) -> R) -> R {
         if let Some(buffer) = self.memory_buffer(id) {
             let mut bytes = buffer.borrow_mut();
             return f(&mut bytes[..]);
         }
         let mem = self.mem(id);
-        f(mem.data_mut(&mut self.inner))
+        f(mem.data_mut(&mut self.ctx))
     }
 
-    /// Grows by `delta` pages; returns the old page count.
+    /// Grows by `delta` pages; returns the old page count. The buffer is replaced even when
+    /// `delta` is 0 (the JS API refreshes the buffer on every `Memory.grow`), so the old
+    /// shared storage reads as detached afterwards.
     pub fn memory_grow(&mut self, id: MemoryId, delta: u64) -> Result<u64, String> {
         let mem = self.mem(id);
-        let old = mem
-            .grow(&mut self.inner, delta)
-            .map_err(|e| e.to_string())?;
-        sync_memories(self.state(), &self.inner);
+        let old = mem.grow(&mut self.ctx, delta).map_err(|e| e.to_string())?;
+        let size = mem.data_size(&self.ctx);
+        if let Some(external) = &self.ctx.data().memories[id.0 as usize].external {
+            external.renew(size);
+        }
+        sync_memories(self.ctx.data(), &self.ctx);
         Ok(old)
     }
 
@@ -511,33 +570,33 @@ impl Store {
         max: Option<u32>,
         init: &Val,
     ) -> Result<TableId, String> {
-        let init = to_wasmi(&mut self.inner, init);
+        let init = to_wasmi(&mut self.ctx, init);
         let ty = wasmi::TableType::new(wasmi_val_type(element), min, max);
-        let table = wasmi::Table::new(&mut self.inner, ty, init).map_err(|e| e.to_string())?;
-        Ok(TableId(intern_slot(&mut self.state_mut().tables, table)))
+        let table = wasmi::Table::new(&mut self.ctx, ty, init).map_err(|e| e.to_string())?;
+        Ok(TableId(intern_slot(&mut self.ctx.data_mut().tables, table)))
     }
 
     pub fn table_size(&self, id: TableId) -> u64 {
-        self.table(id).size(&self.inner)
+        self.table(id).size(&self.ctx)
     }
 
     pub fn table_get(&mut self, id: TableId, index: u64) -> Option<Val> {
-        let value = self.table(id).get(&self.inner, index)?;
-        Some(from_wasmi(&mut self.inner, &value))
+        let value = self.table(id).get(&self.ctx, index)?;
+        Some(from_wasmi(&mut self.ctx, &value))
     }
 
     pub fn table_set(&mut self, id: TableId, index: u64, value: &Val) -> Result<(), String> {
-        let value = to_wasmi(&mut self.inner, value);
+        let value = to_wasmi(&mut self.ctx, value);
         self.table(id)
-            .set(&mut self.inner, index, value)
+            .set(&mut self.ctx, index, value)
             .map_err(|e| e.to_string())
     }
 
     /// Grows by `delta` slots filled with `init`; returns the old length.
     pub fn table_grow(&mut self, id: TableId, delta: u64, init: &Val) -> Result<u64, String> {
-        let init = to_wasmi(&mut self.inner, init);
+        let init = to_wasmi(&mut self.ctx, init);
         self.table(id)
-            .grow(&mut self.inner, delta, init)
+            .grow(&mut self.ctx, delta, init)
             .map_err(|e| e.to_string())
     }
 
@@ -549,39 +608,38 @@ impl Store {
         } else {
             wasmi::Mutability::Const
         };
-        let init = to_wasmi(&mut self.inner, init);
-        let global = wasmi::Global::new(&mut self.inner, init, mutability);
-        GlobalId(intern_slot(&mut self.state_mut().globals, global))
+        let init = to_wasmi(&mut self.ctx, init);
+        let global = wasmi::Global::new(&mut self.ctx, init, mutability);
+        GlobalId(intern_slot(&mut self.ctx.data_mut().globals, global))
     }
 
     pub fn global_get(&mut self, id: GlobalId) -> Val {
-        let value = self.global(id).get(&self.inner);
-        from_wasmi(&mut self.inner, &value)
+        let value = self.global(id).get(&self.ctx);
+        from_wasmi(&mut self.ctx, &value)
     }
 
     pub fn global_set(&mut self, id: GlobalId, value: &Val) -> Result<(), String> {
         let global = self.global(id);
-        if !matches!(global.ty(&self.inner).mutability(), wasmi::Mutability::Var) {
+        if !matches!(global.ty(&self.ctx).mutability(), wasmi::Mutability::Var) {
             return Err("Can't set the value of an immutable global.".to_string());
         }
-        let value = to_wasmi(&mut self.inner, value);
-        global
-            .set(&mut self.inner, value)
-            .map_err(|e| e.to_string())
+        let value = to_wasmi(&mut self.ctx, value);
+        global.set(&mut self.ctx, value).map_err(|e| e.to_string())
     }
 
     // ---- functions and instances ---------------------------------------
 
     /// Parameter and result types of a function.
     pub fn func_type(&self, id: FuncId) -> (Vec<ValType>, Vec<ValType>) {
-        let ty = self.func(id).ty(&self.inner);
+        let ty = self.func(id).ty(&self.ctx);
         (
             ty.params().iter().map(|t| val_type(*t)).collect(),
             ty.results().iter().map(|t| val_type(*t)).collect(),
         )
     }
 
-    /// Calls a function. Host imports invoked on the way use `host`.
+    /// Calls a function. Host imports invoked on the way use `host`. Memories are synced to the
+    /// embedder when the call returns, so a nested call's grow is visible to its caller.
     pub fn call_func(
         &mut self,
         id: FuncId,
@@ -589,7 +647,7 @@ impl Store {
         host: &mut dyn HostCallbacks,
     ) -> Result<Vec<Val>, CallError> {
         let func = self.func(id);
-        let ty = func.ty(&self.inner);
+        let ty = func.ty(&self.ctx);
         if args.len() != ty.params().len() {
             return Err(CallError::Argument(format!(
                 "expected {} arguments, got {}",
@@ -597,16 +655,16 @@ impl Store {
                 args.len()
             )));
         }
-        let inputs: Vec<wasmi::Val> = args.iter().map(|a| to_wasmi(&mut self.inner, a)).collect();
+        let inputs: Vec<wasmi::Val> = args.iter().map(|a| to_wasmi(&mut self.ctx, a)).collect();
         let mut outputs = vec![wasmi::Val::I32(0); ty.results().len()];
         let previous = self.set_host(host);
-        let result = func.call(&mut self.inner, &inputs, &mut outputs);
-        self.state_mut().host = previous;
-        sync_memories(self.state(), &self.inner);
+        let result = func.call(&mut self.ctx, &inputs, &mut outputs);
+        self.ctx.data_mut().host = previous;
+        sync_memories(self.ctx.data(), &self.ctx);
         result.map_err(map_error)?;
         Ok(outputs
             .iter()
-            .map(|v| from_wasmi(&mut self.inner, v))
+            .map(|v| from_wasmi(&mut self.ctx, v))
             .collect())
     }
 
@@ -627,12 +685,8 @@ impl Store {
         }
     }
 
-    pub fn exports(&self, instance: InstanceId) -> &[(String, Extern)] {
-        &self.state().instances[instance.0 as usize]
-    }
-
     pub fn export(&self, instance: InstanceId, name: &str) -> Option<Extern> {
-        self.exports(instance)
+        self.ctx.data().instances[instance.0 as usize]
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, e)| *e)
@@ -675,7 +729,8 @@ impl Store {
             ),
             None => None,
         };
-        let mut linker = wasmi::Linker::<HostState>::new(&self.inner.engine().clone());
+        let engine = self.ctx.as_context().engine().clone();
+        let mut linker = wasmi::Linker::<HostState>::new(&engine);
         #[cfg(feature = "wasi")]
         if wasi {
             wasi::add_to_linker(&mut linker).map_err(|e| link_error(false, e.to_string()))?;
@@ -699,7 +754,7 @@ impl Store {
             if is_wasi && matches!(import, Import::Missing { .. }) {
                 continue;
             }
-            if linker.get(&self.inner, &desc.module, &desc.name).is_some() {
+            if linker.get(&self.ctx, &desc.module, &desc.name).is_some() {
                 continue;
             }
             let external = self.resolve_import(index, desc, import)?;
@@ -717,46 +772,38 @@ impl Store {
         }
 
         let previous = self.set_host(host);
-        let result = linker.instantiate_and_start(&mut self.inner, &module.inner);
-        self.state_mut().host = previous;
+        let result = linker.instantiate_and_start(&mut self.ctx, &module.inner);
+        self.ctx.data_mut().host = previous;
         let instance = match result {
             Ok(instance) => instance,
             Err(error) => {
-                sync_memories(self.state(), &self.inner);
+                sync_memories(self.ctx.data(), &self.ctx);
                 return Err(InstantiateError::Call(map_error(error)));
             }
         };
-        sync_memories(self.state(), &self.inner);
+        sync_memories(self.ctx.data(), &self.ctx);
 
         let mut exports = Vec::with_capacity(module.exports.len());
         for export in &module.exports {
-            if let Some(ext) = instance.get_export(&self.inner, &export.name) {
+            if let Some(ext) = instance.get_export(&self.ctx, &export.name) {
                 let value = self.intern_extern(ext);
                 exports.push((export.name.clone(), value));
             }
         }
-        self.state_mut().instances.push(exports);
-        Ok(InstanceId((self.state().instances.len() - 1) as u32))
+        self.ctx.data_mut().instances.push(exports);
+        Ok(InstanceId((self.ctx.data().instances.len() - 1) as u32))
     }
 
     // ---- internals ------------------------------------------------------
 
-    fn state(&self) -> &HostState {
-        self.inner.data()
-    }
-
-    fn state_mut(&mut self) -> &mut HostState {
-        self.inner.data_mut()
-    }
-
     /// Installs `host` for the duration of one entry into wasm. Returns the
     /// previous pointer, which the caller restores afterwards.
     fn set_host(&mut self, host: &mut dyn HostCallbacks) -> Option<NonNull<dyn HostCallbacks>> {
-        // SAFETY: the pointer is only dereferenced by host closures, which run
-        // only while the `&mut` borrow passed here is still alive (the caller
-        // restores the previous pointer before returning).
+        // SAFETY: the pointer is only dereferenced by host closures, which run only while the
+        // `&mut` borrow passed here is still alive (the caller restores the previous pointer
+        // before returning).
         let erased: &'static mut dyn HostCallbacks = unsafe { std::mem::transmute(host) };
-        self.state_mut().host.replace(NonNull::from(erased))
+        self.ctx.data_mut().host.replace(NonNull::from(erased))
     }
 
     fn resolve_import(
@@ -809,31 +856,46 @@ impl Store {
             (Import::Table(id), ExternKind::Table { .. }) => Ok(wasmi::Extern::Table(self.table(*id))),
             (Import::Global(id), ExternKind::Global { .. }) => Ok(wasmi::Extern::Global(self.global(*id))),
             (Import::GlobalValue(value), ExternKind::Global { mutable, .. }) => {
-                let value = to_wasmi(&mut self.inner, value);
+                let value = to_wasmi(&mut self.ctx, value);
                 let mutability = if *mutable { wasmi::Mutability::Var } else { wasmi::Mutability::Const };
-                Ok(wasmi::Extern::Global(wasmi::Global::new(&mut self.inner, value, mutability)))
+                Ok(wasmi::Extern::Global(wasmi::Global::new(&mut self.ctx, value, mutability)))
             }
             _ => Err(link(format!("{named}: import kind does not match the module"))),
         }
     }
 
-    /// A wasmi host function that forwards to the embedder's `HostCallbacks`.
+    /// A wasmi host function that forwards to the embedder's `HostCallbacks`, with the store
+    /// it runs in exposed as an [`Access`] for the duration of the call.
     fn host_func(&mut self, id: u32, ty: wasmi::FuncType) -> wasmi::Func {
         wasmi::Func::new(
-            &mut self.inner,
+            &mut self.ctx,
             ty,
             move |mut caller: wasmi::Caller<'_, HostState>,
                   params: &[wasmi::Val],
                   results: &mut [wasmi::Val]| {
                 sync_memories(caller.data(), caller.as_context());
                 let args: Vec<Val> = params.iter().map(|p| from_wasmi(&mut caller, p)).collect();
-                let host = caller
-                    .data()
-                    .host
-                    .ok_or_else(|| wasmi::Error::new("no host callbacks installed"))?;
-                // SAFETY: installed by `set_host` for this entry into wasm; the
-                // embedder's `&mut` is alive until that entry returns.
-                let outcome = unsafe { (*host.as_ptr()).call_import(id, &args) };
+                let (host, depth, limit) = {
+                    let state = caller.data();
+                    (state.host, state.depth, state.max_depth)
+                };
+                let host = host.ok_or_else(|| wasmi::Error::new("no host callbacks installed"))?;
+                // Past the guard this is a wasm stack overflow (RangeError), not a Rust one.
+                if depth >= limit {
+                    return Err(wasmi::TrapCode::StackOverflow.into());
+                }
+                caller.data_mut().depth += 1;
+                let outcome = {
+                    let mut access = Access {
+                        ctx: Ctx::Caller(&mut caller),
+                    };
+                    // SAFETY: installed by `set_host` for the entry into wasm that is running this
+                    // closure. That entry's `&mut dyn HostCallbacks` is alive until it returns,
+                    // and nothing else holds a reference into the callbacks while this call runs.
+                    unsafe { (*host.as_ptr()).call_import(&mut access, id, &args) }
+                };
+                caller.data_mut().depth -= 1;
+                sync_memories(caller.data(), caller.as_context());
                 match outcome {
                     Ok(values) => {
                         if values.len() != results.len() {
@@ -860,8 +922,8 @@ impl Store {
         external: Option<memory::External>,
     ) -> MemoryId {
         let key = format!("{mem:?}");
-        let pages = mem.size(&self.inner);
-        let memories = &mut self.state_mut().memories;
+        let pages = mem.size(&self.ctx);
+        let memories = &mut self.ctx.data_mut().memories;
         let index = match memories.iter().position(|e| e.key == key) {
             Some(index) => index,
             None => {
@@ -881,32 +943,183 @@ impl Store {
     fn intern_extern(&mut self, ext: wasmi::Extern) -> Extern {
         match ext {
             wasmi::Extern::Func(f) => {
-                Extern::Func(FuncId(intern_slot(&mut self.state_mut().funcs, f)))
+                Extern::Func(FuncId(intern_slot(&mut self.ctx.data_mut().funcs, f)))
             }
             wasmi::Extern::Memory(m) => Extern::Memory(self.intern_memory(m, None)),
             wasmi::Extern::Table(t) => {
-                Extern::Table(TableId(intern_slot(&mut self.state_mut().tables, t)))
+                Extern::Table(TableId(intern_slot(&mut self.ctx.data_mut().tables, t)))
             }
             wasmi::Extern::Global(g) => {
-                Extern::Global(GlobalId(intern_slot(&mut self.state_mut().globals, g)))
+                Extern::Global(GlobalId(intern_slot(&mut self.ctx.data_mut().globals, g)))
             }
         }
     }
 
     fn func(&self, id: FuncId) -> wasmi::Func {
-        self.state().funcs[id.0 as usize].item
+        self.ctx.data().funcs[id.0 as usize].item
     }
 
     fn mem(&self, id: MemoryId) -> wasmi::Memory {
-        self.state().memories[id.0 as usize].mem
+        self.ctx.data().memories[id.0 as usize].mem
     }
 
     fn table(&self, id: TableId) -> wasmi::Table {
-        self.state().tables[id.0 as usize].item
+        self.ctx.data().tables[id.0 as usize].item
     }
 
     fn global(&self, id: GlobalId) -> wasmi::Global {
-        self.state().globals[id.0 as usize].item
+        self.ctx.data().globals[id.0 as usize].item
+    }
+}
+
+pub struct Store {
+    inner: wasmi::Store<HostState>,
+}
+
+impl Store {
+    pub fn new(engine: &Engine) -> Self {
+        let state = HostState {
+            funcs: Vec::new(),
+            memories: Vec::new(),
+            tables: Vec::new(),
+            globals: Vec::new(),
+            instances: Vec::new(),
+            host: None,
+            depth: 0,
+            max_depth: DEFAULT_REENTRY_DEPTH,
+            #[cfg(feature = "wasi")]
+            wasi: wasmi_wasi::sync::WasiCtxBuilder::new().build(),
+        };
+        Self {
+            inner: wasmi::Store::new(&engine.inner, state),
+        }
+    }
+
+    /// A mutable view of the owned store. Use it only while no wasm call on this store is running
+    /// (inside a host import, use the `Access` that `call_import` receives).
+    pub fn access(&mut self) -> Access<'_, 'static> {
+        Access {
+            ctx: Ctx::Owned(&mut self.inner),
+        }
+    }
+
+    /// A read-only view of the owned store.
+    fn view(&self) -> Access<'_, 'static> {
+        Access {
+            ctx: Ctx::Shared(&self.inner),
+        }
+    }
+
+    /// Creates an embedder-owned memory whose bytes are shared through `memory_buffer`.
+    pub fn new_memory(&mut self, min: u32, max: Option<u32>) -> Result<MemoryId, String> {
+        self.access().new_memory(min, max)
+    }
+
+    /// See [`Access::memory_buffer`].
+    pub fn memory_buffer(&self, id: MemoryId) -> Option<Bytes> {
+        self.view().memory_buffer(id)
+    }
+
+    pub fn memory_pages(&self, id: MemoryId) -> u64 {
+        self.view().memory_pages(id)
+    }
+
+    pub fn memory_generation(&self, id: MemoryId) -> u64 {
+        self.view().memory_generation(id)
+    }
+
+    pub fn with_memory_bytes<R>(&mut self, id: MemoryId, f: impl FnOnce(&mut [u8]) -> R) -> R {
+        self.access().with_memory_bytes(id, f)
+    }
+
+    /// Grows by `delta` pages; returns the old page count.
+    pub fn memory_grow(&mut self, id: MemoryId, delta: u64) -> Result<u64, String> {
+        self.access().memory_grow(id, delta)
+    }
+
+    pub fn new_table(
+        &mut self,
+        element: ValType,
+        min: u32,
+        max: Option<u32>,
+        init: &Val,
+    ) -> Result<TableId, String> {
+        self.access().new_table(element, min, max, init)
+    }
+
+    pub fn table_size(&self, id: TableId) -> u64 {
+        self.view().table_size(id)
+    }
+
+    pub fn table_get(&mut self, id: TableId, index: u64) -> Option<Val> {
+        self.access().table_get(id, index)
+    }
+
+    pub fn table_set(&mut self, id: TableId, index: u64, value: &Val) -> Result<(), String> {
+        self.access().table_set(id, index, value)
+    }
+
+    /// Grows by `delta` slots filled with `init`; returns the old length.
+    pub fn table_grow(&mut self, id: TableId, delta: u64, init: &Val) -> Result<u64, String> {
+        self.access().table_grow(id, delta, init)
+    }
+
+    pub fn new_global(&mut self, mutable: bool, init: &Val) -> GlobalId {
+        self.access().new_global(mutable, init)
+    }
+
+    pub fn global_get(&mut self, id: GlobalId) -> Val {
+        self.access().global_get(id)
+    }
+
+    pub fn global_set(&mut self, id: GlobalId, value: &Val) -> Result<(), String> {
+        self.access().global_set(id, value)
+    }
+
+    pub fn func_type(&self, id: FuncId) -> (Vec<ValType>, Vec<ValType>) {
+        self.view().func_type(id)
+    }
+
+    pub fn call_func(
+        &mut self,
+        id: FuncId,
+        args: &[Val],
+        host: &mut dyn HostCallbacks,
+    ) -> Result<Vec<Val>, CallError> {
+        self.access().call_func(id, args, host)
+    }
+
+    pub fn call_export(
+        &mut self,
+        instance: InstanceId,
+        name: &str,
+        args: &[Val],
+        host: &mut dyn HostCallbacks,
+    ) -> Result<Vec<Val>, CallError> {
+        self.access().call_export(instance, name, args, host)
+    }
+
+    pub fn exports(&self, instance: InstanceId) -> &[(String, Extern)] {
+        &self.inner.data().instances[instance.0 as usize]
+    }
+
+    pub fn export(&self, instance: InstanceId, name: &str) -> Option<Extern> {
+        self.view().export(instance, name)
+    }
+
+    pub fn instantiate(
+        &mut self,
+        module: &Module,
+        imports: &[Import],
+        host: &mut dyn HostCallbacks,
+    ) -> Result<InstanceId, InstantiateError> {
+        self.access().instantiate(module, imports, host)
+    }
+
+    /// Maximum nesting of host imports that call back into wasm (see [`Access`]). A deeper
+    /// call traps with [`Trap::StackOverflow`]. Default [`DEFAULT_REENTRY_DEPTH`].
+    pub fn set_reentry_limit(&mut self, limit: u32) {
+        self.inner.data_mut().max_depth = limit;
     }
 }
 

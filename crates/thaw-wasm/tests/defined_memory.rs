@@ -14,7 +14,12 @@ use thaw_wasm::{
 struct NoHost;
 
 impl HostCallbacks for NoHost {
-    fn call_import(&mut self, id: u32, _args: &[Val]) -> Result<Vec<Val>, u32> {
+    fn call_import(
+        &mut self,
+        _store: &mut thaw_wasm::Access<'_, '_>,
+        id: u32,
+        _args: &[Val],
+    ) -> Result<Vec<Val>, u32> {
         panic!("unexpected host call {id}")
     }
 }
@@ -293,7 +298,12 @@ fn module_that_imports_a_reserved_name_is_not_rewritten() {
     let mut store = Store::new(&engine);
     struct Ok0;
     impl HostCallbacks for Ok0 {
-        fn call_import(&mut self, _: u32, _: &[Val]) -> Result<Vec<Val>, u32> {
+        fn call_import(
+            &mut self,
+            _store: &mut thaw_wasm::Access<'_, '_>,
+            _: u32,
+            _: &[Val],
+        ) -> Result<Vec<Val>, u32> {
             Ok(vec![])
         }
     }
