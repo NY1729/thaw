@@ -89,13 +89,19 @@ const ALL: [Ty; 11] = [
 #[derive(Default)]
 pub(crate) struct Store {
     cell: RefCell<Vec<u8>>,
+    /// Storage owned by the wasm engine (a wasm memory's bytes, see `thaw-wasm`); `cell` is unused then.
+    /// The owner empties it when the memory is replaced, which is how a stale view sees length 0.
+    shared: Option<Rc<RefCell<Vec<u8>>>>,
     detached: Cell<bool>,
 }
 
 impl std::ops::Deref for Store {
     type Target = RefCell<Vec<u8>>;
     fn deref(&self) -> &RefCell<Vec<u8>> {
-        &self.cell
+        match &self.shared {
+            Some(shared) => shared,
+            None => &self.cell,
+        }
     }
 }
 
@@ -105,19 +111,39 @@ pub(crate) type Bytes = Rc<Store>;
 pub(crate) fn new_bytes(v: Vec<u8>) -> Bytes {
     Rc::new(Store {
         cell: RefCell::new(v),
+        shared: None,
+        detached: Cell::new(false),
+    })
+}
+
+#[cfg(feature = "wasm")]
+/// An attached storage over bytes the wasm engine owns (no copy; the same allocation as the engine's memory).
+pub(crate) fn shared_bytes(shared: Rc<RefCell<Vec<u8>>>) -> Bytes {
+    Rc::new(Store {
+        cell: RefCell::new(Vec::new()),
+        shared: Some(shared),
         detached: Cell::new(false),
     })
 }
 
 /// Detach a storage: its bytes are released (length 0) and it reports `detached`. Idempotent.
+/// A shared storage keeps its bytes (the engine owns them); only the flag changes.
 pub(crate) fn detach_bytes(b: &Bytes) {
-    *b.cell.borrow_mut() = Vec::new();
+    if b.shared.is_none() {
+        *b.cell.borrow_mut() = Vec::new();
+    }
     b.detached.set(true);
 }
 
-/// True once `detach_bytes` has run on this storage.
+#[cfg(feature = "wasm")]
+/// True when `b` is the storage over exactly this engine-owned allocation (see `shared_bytes`).
+pub(crate) fn same_shared(b: &Bytes, shared: &Rc<RefCell<Vec<u8>>>) -> bool {
+    b.shared.as_ref().is_some_and(|s| Rc::ptr_eq(s, shared))
+}
+
+/// True once `detach_bytes` has run on this storage, or a shared storage was emptied by its engine owner.
 pub(crate) fn is_detached(b: &Bytes) -> bool {
-    b.detached.get()
+    b.detached.get() || b.shared.as_ref().is_some_and(|s| s.borrow().is_empty())
 }
 
 #[derive(Clone)]
