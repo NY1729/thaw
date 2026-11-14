@@ -1798,7 +1798,11 @@ fn error_id(bytes: &[u8]) -> Option<usize> {
 /// The live framed Error a Json string value refers to: its own props, `===` identity and
 /// edits all go through the Error side table keyed by this pointer.
 fn error_ref_bytes(bytes: &[u8]) -> Option<*const c_char> {
-    let id = error_id(bytes)?;
+    error_ptr_from_id(error_id(bytes)?)
+}
+
+/// The live framed Error at identity `id`, or `None` when it was reclaimed or is not a framed Error.
+fn error_ptr_from_id(id: usize) -> Option<*const c_char> {
     if thaw_arena::was_reclaimed(id) {
         return None;
     }
@@ -1859,6 +1863,32 @@ fn live_handle_prop(value: Value) -> Value {
         }
         _ => value,
     }
+}
+
+/// The native Error a thaw-js Error lease stands for: its hidden `\0id` is the Error's identity.
+fn native_error_for_lease(lease: &HostLease) -> Option<*const c_char> {
+    if !engine_is_thaw_js() {
+        return None;
+    }
+    let id = host_get_property(lease, b"\0id").as_f64()?;
+    (id >= 1.0 && id.fract() == 0.0)
+        .then(|| error_ptr_from_id(id as usize))
+        .flatten()
+}
+
+/// `native_error_for_lease` for a stored cause or prop: a live lease or a one-key handle marker.
+fn native_error_for_marker(value: &Value) -> Option<*const c_char> {
+    if !engine_is_thaw_js() {
+        return None;
+    }
+    if let Value::Host(lease) = value {
+        return native_error_for_lease(lease);
+    }
+    let handle = json_handle_ref(value)?;
+    let Value::Host(lease) = host_value_from_borrowed_handle(handle)? else {
+        return None;
+    };
+    native_error_for_lease(&lease)
 }
 
 fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
@@ -5665,6 +5695,10 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
     if kind != "object" {
         return host_inspect_text(lease, kind == "string");
     }
+    // A thaw-js Error lease prints like the native Error it stands for (props and frames included).
+    if let Some(error) = native_error_for_lease(lease) {
+        return native_error_node(error, stack);
+    }
     if host_query(lease, 12).as_deref() == Some("1") {
         let text = host_query(lease, 13)
             .and_then(|time| time.parse::<f64>().ok())
@@ -6127,6 +6161,29 @@ fn frame_bag_has(suffix: &[u8], key: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// A native Error nested in an inspected value prints with its props and frames, like `console.log` of it.
+fn native_error_node(error: *const c_char, stack: &mut Vec<usize>) -> crate::inspect::Node {
+    use crate::inspect::Node;
+    let id = error as usize;
+    if stack.contains(&id) {
+        return Node::Circular(id);
+    }
+    stack.push(id);
+    let bytes = unsafe { CStr::from_ptr(thaw_error_with_props(error)) }.to_bytes();
+    let node = tagged_error_node(bytes, stack, Some(error))
+        .unwrap_or_else(|| Node::Raw(to_str(unsafe { thaw_error_to_string(error) })));
+    stack.pop();
+    node
+}
+
+/// An Error prop value (a cause or an own prop): a native Error marker prints as that Error.
+fn inspect_error_field(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
+    match native_error_for_marker(value) {
+        Some(error) => native_error_node(error, stack),
+        None => inspect_node(&live_handle_prop(value.clone()), stack),
+    }
+}
+
 /// A thrown `Error` carried as a tagged string (`\u{1}Name\u{1}..` frame) nested inside a value.
 /// Props baked into the text (`thaw_error_with_props`'s `\u{5}` bag, a cause) print like Node:
 /// `[Name: message] { code: 'E_X' }`, or `<stack> {\n  code: 'E_X'\n}` when `stack` was overridden
@@ -6207,13 +6264,13 @@ fn tagged_error_node(
             } else {
                 wtf8_decode_utf16(key)
             };
-            (label, inspect_node(value, stack))
+            (label, inspect_error_field(value, stack))
         })
         .collect();
     if let Some(cause) = hidden_cause {
         entries.push((
             "\u{1}[cause]".encode_utf16().collect(),
-            inspect_node(&cause, stack),
+            inspect_error_field(&cause, stack),
         ));
     }
     Some(if entries.is_empty() {
@@ -11339,6 +11396,201 @@ mod tests {
             // A copy of the text carries the props with it (a Json string value).
             let copy = unsafe { thaw_error_with_props(error) };
             assert_eq!(inspect(copy), inspect(error));
+        })
+        .join()
+        .unwrap();
+    }
+
+    // A thaw-js Error cause is a one-key marker naming a host lease (handle 3). That lease's
+    // `\0id` is the native Error's identity: the inner Error pointer (set per test). Handle 4 is
+    // dead (retain fails), handle 5 has no `\0id`.
+    thread_local! {
+        static CAUSE_TEST_ID: Cell<usize> = const { Cell::new(0) };
+    }
+
+    extern "C" fn cause_test_retain(handle: u64) -> u8 {
+        u8::from(handle != 4)
+    }
+
+    extern "C" fn cause_test_get(handle: u64, key: *const c_char) -> HostHandleResult {
+        let key = unsafe { CStr::from_ptr(key) }.to_str().unwrap();
+        let value = match (handle, key) {
+            (3, "\"\\u0000id\"") => 900,
+            _ => 0,
+        };
+        HostHandleResult {
+            value,
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn cause_test_query(handle: u64, operation: u8) -> HostTextResult {
+        let text = match (handle, operation) {
+            (900, 0) => "number".to_string(),
+            (900, 10) => CAUSE_TEST_ID.with(Cell::get).to_string(),
+            (3, 0) => "object".to_string(),
+            _ => String::new(),
+        };
+        HostTextResult {
+            value: thaw_arena::owned_string(text),
+            error: std::ptr::null(),
+        }
+    }
+
+    fn install_cause_test_host_operations() {
+        HOST_OPERATIONS.with(|slot| {
+            slot.set(Some(HostOperations {
+                retain: cause_test_retain,
+                release: factory_test_release,
+                get: cause_test_get,
+                query: cause_test_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            }))
+        });
+    }
+
+    /// A framed Error whose stack is overridden to `stack` (a `\u{5}` bag entry).
+    fn cause_test_error(message: &str, stack: &str) -> *const c_char {
+        unsafe extern "C" {
+            fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char;
+        }
+        let message = CString::new(message).unwrap();
+        let error = unsafe { thaw_error_frame(c"Error".as_ptr(), message.as_ptr()) };
+        cause_test_set_prop(
+            error,
+            "stack",
+            &format!("\"{}\"", stack.replace('\n', "\\n")),
+        );
+        error
+    }
+
+    fn cause_test_set_prop(error: *const c_char, key: &str, json: &str) {
+        unsafe extern "C" {
+            fn thaw_error_set_prop(
+                error: *const c_char,
+                key: *const c_char,
+                json: *const c_char,
+            ) -> bool;
+        }
+        let key = CString::new(key).unwrap();
+        let json = CString::new(json).unwrap();
+        assert!(unsafe { thaw_error_set_prop(error, key.as_ptr(), json.as_ptr()) });
+    }
+
+    fn cause_test_console_inspect(error: *const c_char) -> String {
+        unsafe extern "C" {
+            fn thaw_error_console_inspect(value: *const c_char) -> *const c_char;
+        }
+        to_str(unsafe { thaw_error_console_inspect(error) })
+    }
+
+    const CAUSE_TEST_OUTER: &str = "Error: outer\n    at c (x:3:1)\n    at b (x:2:1)";
+    const CAUSE_TEST_INNER: &str = "Error: inner\n    at a (x:1:1)\n    at b (x:2:1)";
+
+    // Node 22: `console.log(outer)` with `cause: inner` (recorded).
+    #[test]
+    fn a_marker_cause_prints_the_native_error_it_stands_for() {
+        std::thread::spawn(|| {
+            install_cause_test_host_operations();
+            thaw_json_set_js_engine(1);
+            let inner = cause_test_error("inner", CAUSE_TEST_INNER);
+            CAUSE_TEST_ID.with(|id| id.set(inner as usize));
+            let outer = cause_test_error("outer", CAUSE_TEST_OUTER);
+            cause_test_set_prop(outer, "\u{2}cause", r#"{"__thaw_tjs_handle__":3}"#);
+            assert_eq!(
+                cause_test_console_inspect(outer),
+                "Error: outer\n    at c (x:3:1)\n    at b (x:2:1) {\n  [cause]: Error: inner\n      at a (x:1:1)\n      at b (x:2:1)\n}"
+            );
+            thaw_json_set_js_engine(0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    // The same marker as an enumerable own prop prints like the cause does (Node 22, recorded).
+    #[test]
+    fn a_marker_enumerable_prop_prints_the_native_error_it_stands_for() {
+        std::thread::spawn(|| {
+            install_cause_test_host_operations();
+            thaw_json_set_js_engine(1);
+            let inner = cause_test_error("inner", CAUSE_TEST_INNER);
+            CAUSE_TEST_ID.with(|id| id.set(inner as usize));
+            let outer = cause_test_error("outer", CAUSE_TEST_OUTER);
+            cause_test_set_prop(outer, "wrapped", r#"{"__thaw_tjs_handle__":3}"#);
+            assert_eq!(
+                cause_test_console_inspect(outer),
+                "Error: outer\n    at c (x:3:1)\n    at b (x:2:1) {\n  wrapped: Error: inner\n      at a (x:1:1)\n      at b (x:2:1)\n}"
+            );
+            thaw_json_set_js_engine(0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    // Gate pin: under the default (QuickJS) engine the marker is never resolved, so the text is unchanged.
+    #[test]
+    fn a_marker_cause_under_the_default_engine_prints_the_marker_text() {
+        std::thread::spawn(|| {
+            install_cause_test_host_operations();
+            thaw_json_set_js_engine(0);
+            let inner = cause_test_error("inner", CAUSE_TEST_INNER);
+            CAUSE_TEST_ID.with(|id| id.set(inner as usize));
+            let outer = cause_test_error("outer", CAUSE_TEST_OUTER);
+            cause_test_set_prop(outer, "\u{2}cause", r#"{"__thaw_tjs_handle__":3}"#);
+            assert_eq!(
+                cause_test_console_inspect(outer),
+                "Error: outer\n    at c (x:3:1)\n    at b (x:2:1) {\n  [cause]: { __thaw_tjs_handle__: 3 }\n}"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    // A dead handle (retain fails) and a lease without `\0id` fall back to the old text: no panic.
+    #[test]
+    fn a_dead_or_idless_marker_cause_falls_back_without_panicking() {
+        std::thread::spawn(|| {
+            install_cause_test_host_operations();
+            thaw_json_set_js_engine(1);
+            let outer = cause_test_error("outer", CAUSE_TEST_OUTER);
+            for handle in [4, 5] {
+                cause_test_set_prop(
+                    outer,
+                    "\u{2}cause",
+                    &format!(r#"{{"__thaw_tjs_handle__":{handle}}}"#),
+                );
+                let text = cause_test_console_inspect(outer);
+                assert!(text.starts_with(CAUSE_TEST_OUTER), "{text}");
+                assert!(text.contains("[cause]: "), "{text}");
+            }
+            thaw_json_set_js_engine(0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    // A thaw-js Error lease (handle 3) nested in a value prints like the native Error (Node 22: `[Error: boom] { code: 'C' }`).
+    #[test]
+    fn a_thaw_js_error_lease_prints_like_the_native_error_it_stands_for() {
+        std::thread::spawn(|| {
+            install_cause_test_host_operations();
+            thaw_json_set_js_engine(1);
+            let inner = cause_test_error("boom", "Error: boom");
+            cause_test_set_prop(inner, "code", "\"C\"");
+            CAUSE_TEST_ID.with(|id| id.set(inner as usize));
+            let lease = Value::Host(Rc::new(HostLease {
+                handle: 3,
+                release: factory_test_release,
+            }));
+            let text = crate::inspect::inspect(
+                &inspect_node(&lease, &mut Vec::new()),
+                &crate::inspect::InspectOptions::default(),
+            );
+            assert_eq!(text, "[Error: boom] { code: 'C' }");
+            thaw_json_set_js_engine(0);
         })
         .join()
         .unwrap();
