@@ -3977,6 +3977,20 @@ fn packet_error(
     }
 }
 
+/// A restored original object (tag 7) thrown from a packet keeps that packet, the same invariant as
+/// `packet_error`: the object names it in a hidden `\0pkt` and the interpreter retains the packet, so the
+/// next hop's error string still binds it. Shared by both callback result paths.
+pub(crate) fn retain_restored_packet(
+    it: &mut Interp,
+    packet: Option<Rc<thaw_arena::exception::ExceptionPacket>>,
+    original: &Value,
+) {
+    if let (Some(packet), Value::Object(o)) = (packet, original) {
+        crate::put_hidden(o, PACKET_KEY, Value::Number(packet.id as f64));
+        it.native_packets.insert(packet.id, packet);
+    }
+}
+
 /// Reserved bag key of a native Error's identity (`thaw_error_json_text`); kept as a hidden property.
 const NATIVE_ID_KEY: &str = "\u{0}id";
 /// Hidden property of a thrown carrier: the id of the native exception packet it was built from.
@@ -4321,6 +4335,7 @@ pub(crate) fn take_callback_result(
         eprintln!("thaw-js callback result: {out:?}");
     }
     if let Some(original) = packet.as_deref().and_then(original_js_exception) {
+        retain_restored_packet(it, packet.clone(), &original);
         return Err(Ctl::Throw(original));
     }
     if let Some(reason) = packet.as_deref().and_then(primitive_reason) {
@@ -4755,6 +4770,7 @@ fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<
         eprintln!("thaw-js callback({id}) result: {out:?} args={}", args.len());
     }
     if let Some(original) = packet.as_deref().and_then(original_js_exception) {
+        retain_restored_packet(it, packet.clone(), &original);
         return Err(Ctl::Throw(original));
     }
     if packet.is_some() || out.starts_with('\u{2}') {

@@ -1533,6 +1533,82 @@ fn plain_error_after_carrier_has_no_packet() {
     assert_eq!(bound_packet_id(result.error), None);
 }
 
+/// A tracked original object restored from a tag-7 packet keeps that packet: the thrown object names it in a
+/// hidden `\0pkt`, the native token resolves to the object, and a second hop's error string binds the packet.
+#[test]
+fn restored_original_object_keeps_its_packet() {
+    use crate::host::{store_handle, thaw_tjs_exception_native_token};
+    let mut it = Interp::new();
+    let Ok(Value::Object(original)) = it.run("({ code: 'ERR_BAD_REQUEST' })") else {
+        panic!("object literal did not evaluate to an object");
+    };
+    let handle = store_handle(
+        crate::host::default_realm(),
+        Value::Object(original.clone()),
+    ) as u64;
+    let (thrown, pkt) = thrown_through_callback(
+        primitive_exception_packet(7, 0.0, handle as i64, false, 0x1234),
+        b"\x02[native exception value]",
+    );
+    assert!(matches!(&thrown, Value::Object(o) if Rc::ptr_eq(o, &original)));
+    let id = carrier_packet_id(pkt);
+    assert!(thaw_arena::exception::is_live(id));
+    assert_eq!(thaw_tjs_exception_native_token(handle), id);
+    let result = error_result_of(thrown);
+    assert_eq!(bound_packet_id(result.error), Some(id));
+}
+
+/// The packet hidden on a restored original object is not visible to `Object.keys` or `JSON.stringify`.
+#[test]
+fn restored_original_packet_is_invisible() {
+    use crate::host::store_handle;
+    let mut it = Interp::new();
+    let Ok(Value::Object(original)) = it.run("({ code: 'ERR_BAD_REQUEST' })") else {
+        panic!("object literal did not evaluate to an object");
+    };
+    let handle = store_handle(crate::host::default_realm(), Value::Object(original)) as u64;
+    let (thrown, _) = thrown_through_callback(
+        primitive_exception_packet(7, 0.0, handle as i64, false, 0x1234),
+        b"\x02[native exception value]",
+    );
+    let keys = crate::host::with_package(crate::host::default_realm(), |p| {
+        Ok(p.interp.own_keys(&thrown))
+    })
+    .unwrap_or_else(|_| panic!("the default realm is unavailable"));
+    assert_eq!(
+        keys.iter().map(|k| &**k).collect::<Vec<&str>>(),
+        vec!["code"]
+    );
+    let Ok(stringify) = it.run("(o) => JSON.stringify(o)") else {
+        panic!("stringify did not evaluate");
+    };
+    let Ok(Value::Str(text)) = it.call(&stringify, &Value::Undefined, &[thrown]) else {
+        panic!("JSON.stringify did not return a string");
+    };
+    assert_eq!(&*text, "{\"code\":\"ERR_BAD_REQUEST\"}");
+}
+
+/// The helper both callback result paths call: a restored original names its packet in `\0pkt` and keeps it
+/// alive, and a non-object original is left alone.
+#[test]
+fn retain_restored_packet_binds_and_keeps_the_packet() {
+    let mut it = Interp::new();
+    let Ok(original) = it.run("({ code: 'ERR_BAD_REQUEST' })") else {
+        panic!("object literal did not evaluate to an object");
+    };
+    let (_, packet) = thaw_arena::exception::register_packet(primitive_exception_packet(
+        7, 0.0, 0, false, 0x1234,
+    ))
+    .unwrap();
+    let id = packet.id;
+    crate::host::retain_restored_packet(&mut it, Some(packet), &original);
+    let pkt = it.get(&original, "\u{0}pkt").unwrap_or(Value::Undefined);
+    assert_eq!(carrier_packet_id(pkt), id);
+    assert!(thaw_arena::exception::is_live(id));
+    crate::host::retain_restored_packet(&mut it, None, &Value::Number(1.0));
+    assert_eq!(it.own_keys(&original), vec![Rc::from("code")]);
+}
+
 /// T4: an untracked plain object thrown through a callback (tag 7) keeps its packet on the error string.
 #[test]
 fn untracked_carrier_error_string_keeps_its_packet() {
