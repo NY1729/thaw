@@ -1,0 +1,10 @@
+TypeError WebAssembly.Instance(): Imports argument must be present and must be an object
+TypeError WebAssembly.Instance(): Import #0 module="env": module is not an object or function
+TypeError WebAssembly.Instance(): Import #0 module="env": module is not an object or function
+LinkError WebAssembly.Instance(): Import #0 module="env" function="g": function import requires a callable
+no error
+TypeError WebAssembly.Instance(): Argument 1 must be an object
+TypeError WebAssembly.Instance(): Argument 0 must be a WebAssembly.Module
+TypeError WebAssembly.Instance(): WebAssembly.Instance must be invoked with 'new'
+no error
+9

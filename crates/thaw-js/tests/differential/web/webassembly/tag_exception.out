@@ -1,0 +1,5 @@
+1 2.5 true false
+false [object WebAssembly.Tag] [object WebAssembly.Exception] true
+RangeError WebAssembly.Exception.getArg(): Index out of range
+TypeError WebAssembly.Tag(): Argument 0 must be a tag type with 'parameters'
+true function 1

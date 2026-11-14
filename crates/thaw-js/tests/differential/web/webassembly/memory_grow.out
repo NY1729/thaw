@@ -1,0 +1,10 @@
+65536 true true
+1 0 true 131072 false
+9
+RangeError WebAssembly.Memory.grow(): Maximum memory size exceeded
+TypeError WebAssembly.Memory(): Property 'initial' is required
+RangeError WebAssembly.Memory(): Property 'maximum': value 1 is below the lower bound 2
+TypeError WebAssembly.Memory(): WebAssembly.Memory must be invoked with 'new'
+TypeError WebAssembly.Memory.grow(): Receiver is not a WebAssembly.Memory
+0 0 [object WebAssembly.Memory]
+true 65536 1 196608

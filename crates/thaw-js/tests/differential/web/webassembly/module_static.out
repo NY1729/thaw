@@ -1,0 +1,11 @@
+add:function
+env.g.function
+0 0
+TypeError WebAssembly.Module.imports(): Argument 0 must be a WebAssembly.Module
+TypeError WebAssembly.Module.customSections(): Argument 1 is required
+name,kind
+CompileError WebAssembly.Module(): expected magic word 00 61 73 6d, found 00 00 00 00 @+0
+TypeError WebAssembly.Module(): Argument 0 must be a buffer source
+1 2
+true true
+TypeError WebAssembly.validate(): Argument 0 must be a buffer source
