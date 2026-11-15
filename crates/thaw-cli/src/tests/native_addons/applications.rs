@@ -343,6 +343,27 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Drains a child pipe on a background thread so a chatty child cannot block on a full pipe.
+fn drain_in_background<R: std::io::Read + Send + 'static>(
+    mut pipe: R,
+) -> (
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    std::thread::JoinHandle<()>,
+) {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = buf.clone();
+    let handle = std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        while let Ok(n) = pipe.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            sink.lock().unwrap().extend_from_slice(&chunk[..n]);
+        }
+    });
+    (buf, handle)
+}
+
 #[test]
 fn registry_add_runs_a_real_fastify_route_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -369,11 +390,11 @@ async function main(): Promise<void> {
     }, { prefix: "/api" });
     await app.ready();
     const injected = await app.inject({ method: "GET", url: "/api/users/42" });
-    if (Number(injected.statusCode) !== 200) throw "Fastify injection failed";
+    if (Number(injected.statusCode) !== 200) throw "Fastify injection failed: " + injected.statusCode + " " + injected.body;
     const posted = await app.inject({ method: "POST", url: "/api/echo", payload: { name: "Thaw" } });
-    if (Number(posted.statusCode) !== 200 || !String(posted.body).includes("Thaw")) throw "Fastify POST injection failed";
+    if (Number(posted.statusCode) !== 200 || !String(posted.body).includes("Thaw")) throw "Fastify POST injection failed: " + posted.statusCode + " body=" + JSON.stringify(posted.body) + " raw=" + (posted.rawPayload ? posted.rawPayload.length : "none") + " headers=" + JSON.stringify(posted.headers);
     const failed = await app.inject({ method: "GET", url: "/api/fail" });
-    if (Number(failed.statusCode) !== 418 || !String(failed.body).includes("expected failure")) throw "Fastify error handler failed";
+    if (Number(failed.statusCode) !== 418 || !String(failed.body).includes("expected failure")) throw "Fastify error handler failed: " + failed.statusCode + " " + failed.body;
     await app.listen({ host: "127.0.0.1", port: Number(process.env.PORT) });
 }"#,
     )
@@ -395,19 +416,37 @@ async function main(): Promise<void> {
     drop(probe);
     let mut child = Command::new(&output)
         .env("PORT", port.to_string())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut stream = (0..500)
-        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => Some(stream),
-            Err(_) => {
-                std::thread::sleep(Duration::from_millis(10));
-                None
-            }
-        })
-        .expect("compiled Fastify server did not start");
+    let (stdout_buf, stdout_reader) = drain_in_background(child.stdout.take().unwrap());
+    let (stderr_buf, stderr_reader) = drain_in_background(child.stderr.take().unwrap());
+    let connected = (0..500).find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+        Ok(stream) => Some(stream),
+        Err(_) => {
+            std::thread::sleep(Duration::from_millis(10));
+            None
+        }
+    });
+    let mut stream = match connected {
+        Some(stream) => stream,
+        None => {
+            let exited = child.try_wait().unwrap();
+            let _ = child.kill();
+            let status = match exited {
+                Some(status) => status,
+                None => child.wait().unwrap(),
+            };
+            stdout_reader.join().unwrap();
+            stderr_reader.join().unwrap();
+            panic!(
+                "compiled Fastify server did not start\nstatus: {status:?}\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&stdout_buf.lock().unwrap()),
+                String::from_utf8_lossy(&stderr_buf.lock().unwrap()),
+            );
+        }
+    };
     stream
         .write_all(b"GET /api/users/42 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();

@@ -843,6 +843,10 @@ impl Interp {
         args: &[Value],
         new_target: &Option<Value>,
     ) -> Option<R<Value>> {
+        // A prelude's closure (`Interp::no_compile_define`) is never analysed, so it is not counted either.
+        if def.no_compile {
+            return None;
+        }
         let mut st = def.cstate.borrow_mut();
         self.cstats.calls += 1;
         // A function with a loop is analysed on its first call, so a loop that runs once (main, a driver)
