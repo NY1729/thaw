@@ -54,6 +54,7 @@ mod net;
 mod node_crypto;
 mod numfmt;
 mod process_env;
+mod process_events;
 mod process_members;
 mod procstate;
 mod proxy;
@@ -4796,6 +4797,8 @@ mod napi_symbols_tests;
 mod net_tests;
 #[cfg(test)]
 mod process_env_tests;
+#[cfg(test)]
+mod process_events_tests;
 #[cfg(test)]
 mod prop_array_length_tests;
 #[cfg(test)]

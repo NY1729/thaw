@@ -2449,10 +2449,13 @@ isFinite	name	data	--c	string	-	isFinite	-	-	-
 isNaN	length	data	--c	number	1	-	-	-	-
 isNaN	name	data	--c	string	-	isNaN	-	-	-
 process	@@toStringTag	data	w--	string	-	-	-	-	process
+process	_events	data	wec	object	-	-	-	-	-
+process	_eventsCount	data	wec	number	-	-	-	-	-
 process	_getActiveHandles	data	wec	function	0	_getActiveHandles	0	-	-
 process	_getActiveRequests	data	wec	function	0	_getActiveRequests	0	-	-
 process	_kill	data	wec	function	0	_kill	0	-	-
 process	_linkedBinding	data	wec	function	1	_linkedBinding	1	174	-
+process	_maxListeners	data	wec	undefined	-	-	-	-	-
 process	_rawDebug	data	wec	function	0	_rawDebug	1	175	-
 process	abort	data	wec	function	0	abort	0	-	-
 process	arch	data	-ec	string	-	-	-	-	-
