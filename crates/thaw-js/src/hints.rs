@@ -32,12 +32,12 @@ type HintedLookup = (Value, Option<(u32, u32, Rc<str>)>);
 #[derive(Default)]
 pub(crate) struct HintSlot {
     packed: Cell<u32>,
-    bit: u64,
+    pub(crate) bit: u64,
     name: RefCell<Option<Rc<str>>>,
 }
 
 impl HintSlot {
-    fn new(bit: u64) -> Self {
+    pub(crate) fn new(bit: u64) -> Self {
         HintSlot {
             packed: Cell::new(0),
             bit,
