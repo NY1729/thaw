@@ -1700,10 +1700,29 @@ Reflect.set	length	data	--c	number	3	-	-	-	-
 Reflect.set	name	data	--c	string	-	set	-	-	-
 Reflect.setPrototypeOf	length	data	--c	number	2	-	-	-	-
 Reflect.setPrototypeOf	name	data	--c	string	-	setPrototypeOf	-	-	-
+RegExp	$&	accessor	--c	-	-	get $&|set $&	-	-	-
+RegExp	$'	accessor	--c	-	-	get $'|set $'	-	-	-
+RegExp	$+	accessor	--c	-	-	get $+|set $+	-	-	-
+RegExp	$1	accessor	--c	-	-	get $1|set $1	-	-	-
+RegExp	$2	accessor	--c	-	-	get $2|set $2	-	-	-
+RegExp	$3	accessor	--c	-	-	get $3|set $3	-	-	-
+RegExp	$4	accessor	--c	-	-	get $4|set $4	-	-	-
+RegExp	$5	accessor	--c	-	-	get $5|set $5	-	-	-
+RegExp	$6	accessor	--c	-	-	get $6|set $6	-	-	-
+RegExp	$7	accessor	--c	-	-	get $7|set $7	-	-	-
+RegExp	$8	accessor	--c	-	-	get $8|set $8	-	-	-
+RegExp	$9	accessor	--c	-	-	get $9|set $9	-	-	-
+RegExp	$_	accessor	--c	-	-	get $_|set $_	-	-	-
+RegExp	$`	accessor	--c	-	-	get $`|set $`	-	-	-
 RegExp	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
+RegExp	input	accessor	--c	-	-	get input|set input	-	-	-
+RegExp	lastMatch	accessor	--c	-	-	get lastMatch|set lastMatch	-	-	-
+RegExp	lastParen	accessor	--c	-	-	get lastParen|set lastParen	-	-	-
+RegExp	leftContext	accessor	--c	-	-	get leftContext|set leftContext	-	-	-
 RegExp	length	data	--c	number	2	-	-	-	-
 RegExp	name	data	--c	string	-	RegExp	-	-	-
 RegExp	prototype	data	---	object	-	-	-	-	-
+RegExp	rightContext	accessor	--c	-	-	get rightContext|set rightContext	-	-	-
 RegExp.prototype	constructor	data	w-c	function	2	RegExp	1	119	-
 RegExp.prototype	exec	data	w-c	function	1	exec	0	-	-
 RegExp.prototype	test	data	w-c	function	1	test	0	-	-
