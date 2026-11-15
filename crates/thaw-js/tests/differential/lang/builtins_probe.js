@@ -5,6 +5,7 @@ T('s2', () => 'abcdef'.substring(4, 1) + 'abcdef'.substr(-3, 2) + 'abcdef'.slice
 T('s3', () => ['ab'.localeCompare('ac'), 'a'.localeCompare('B'), 'İ'.toLowerCase().length, 'ß'.toUpperCase(), 'abc'.normalize('NFD')]);
 T('s4', () => ['abc'.search(/c/), 'aXbX'.replace(/x/gi, (m, o) => o), 'abc'.match(/(?<l>b)/).groups.l, [...'a1b2'.matchAll(/\d/g)].map(m => m.index), 'x'.concat(1, 2), 'abc'.startsWith('b', 1), 'abc'.endsWith('b', 2), 'abc'.includes('c')]);
 T('s5', () => [escape('a b'), unescape('%41'), encodeURIComponent('a b&é'), decodeURIComponent('%C3%A9'), encodeURI('http://x/a b'), 'abc'.isWellFormed?.()]);
+T('s5b', () => ['a'.anchor('x"y'), 'a'.fontsize(3), 'a\ud800'.isWellFormed(), 'a\ud800'.toWellFormed() === 'a\ufffd', 'a'.bold.length, String.prototype.length]);
 T('s6', () => [String(Symbol('q')), String(null), String([1, [2, 3]]), String({}), `${[]}`, 'a\tb'.split(/\s/), 'aBc'.toLocaleUpperCase()]);
 // Array
 T('a1', () => [[1, 2, 3].at(-1), [1, [2, [3, [4]]]].flat(Infinity), [1, 2].flatMap(x => [x, x * 2]), [3, 1, 2].toSorted(), [1, 2, 3].toReversed(), [1, 2, 3].with(1, 9), [1, 2, 3, 4].toSpliced(1, 2), [1, 2, 3].findLast(x => x < 3), [1, 2, 3].findLastIndex(x => x < 3)]);

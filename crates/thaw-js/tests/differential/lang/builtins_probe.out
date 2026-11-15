@@ -3,6 +3,7 @@ s2 bcddeefa982
 s3 [-1,-1,2,"SS","abc"]
 s4 [2,"a1b3","b",[1,3],"x12",true,true,true]
 s5 ["a%20b","A","a%20b%26%C3%A9","é","http://x/a%20b",true]
+s5b ["<a name=\"x&quot;y\">a</a>","<font size=\"3\">a</font>",false,true,0,0]
 s6 ["Symbol(q)","null","1,2,3","[object Object]","",["a","b"],"ABC"]
 a1 [3,[1,2,3,4],[1,2,2,4],[1,2,3],[3,2,1],[1,9,3],[1,4],2,1]
 a2 [[0,2,4],[7,8],[0,0,0],[4,5,3,4,5],false,true,-1,2,"3-2-1"]
