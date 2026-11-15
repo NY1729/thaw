@@ -776,17 +776,6 @@ RegExp.prototype	@@matchAll
 RegExp.prototype	@@replace
 RegExp.prototype	@@search
 RegExp.prototype	@@split
-RegExp.prototype	compile
-RegExp.prototype	dotAll
-RegExp.prototype	flags
-RegExp.prototype	global
-RegExp.prototype	hasIndices
-RegExp.prototype	ignoreCase
-RegExp.prototype	multiline
-RegExp.prototype	source
-RegExp.prototype	sticky
-RegExp.prototype	unicode
-RegExp.prototype	unicodeSets
 RegExp.prototype.@@match	length
 RegExp.prototype.@@match	name
 RegExp.prototype.@@matchAll	length
@@ -797,8 +786,6 @@ RegExp.prototype.@@search	length
 RegExp.prototype.@@search	name
 RegExp.prototype.@@split	length
 RegExp.prototype.@@split	name
-RegExp.prototype.compile	length
-RegExp.prototype.compile	name
 Request.prototype	@@nodejs.util.inspect.custom
 Request.prototype	@@toStringTag
 Request.prototype	attribute

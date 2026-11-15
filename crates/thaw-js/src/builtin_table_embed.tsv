@@ -1723,10 +1723,23 @@ RegExp	length	data	--c	number	2	-	-	-	-
 RegExp	name	data	--c	string	-	RegExp	-	-	-
 RegExp	prototype	data	---	object	-	-	-	-	-
 RegExp	rightContext	accessor	--c	-	-	get rightContext|set rightContext	-	-	-
+RegExp.prototype	compile	data	w-c	function	2	compile	0	-	-
 RegExp.prototype	constructor	data	w-c	function	2	RegExp	1	119	-
+RegExp.prototype	dotAll	accessor	--c	-	-	get dotAll|-	-	-	-
 RegExp.prototype	exec	data	w-c	function	1	exec	0	-	-
+RegExp.prototype	flags	accessor	--c	-	-	get flags|-	-	-	-
+RegExp.prototype	global	accessor	--c	-	-	get global|-	-	-	-
+RegExp.prototype	hasIndices	accessor	--c	-	-	get hasIndices|-	-	-	-
+RegExp.prototype	ignoreCase	accessor	--c	-	-	get ignoreCase|-	-	-	-
+RegExp.prototype	multiline	accessor	--c	-	-	get multiline|-	-	-	-
+RegExp.prototype	source	accessor	--c	-	-	get source|-	-	-	-
+RegExp.prototype	sticky	accessor	--c	-	-	get sticky|-	-	-	-
 RegExp.prototype	test	data	w-c	function	1	test	0	-	-
 RegExp.prototype	toString	data	w-c	function	0	toString	0	-	-
+RegExp.prototype	unicode	accessor	--c	-	-	get unicode|-	-	-	-
+RegExp.prototype	unicodeSets	accessor	--c	-	-	get unicodeSets|-	-	-	-
+RegExp.prototype.compile	length	data	--c	number	2	-	-	-	-
+RegExp.prototype.compile	name	data	--c	string	-	compile	-	-	-
 RegExp.prototype.exec	length	data	--c	number	1	-	-	-	-
 RegExp.prototype.exec	name	data	--c	string	-	exec	-	-	-
 RegExp.prototype.test	length	data	--c	number	1	-	-	-	-

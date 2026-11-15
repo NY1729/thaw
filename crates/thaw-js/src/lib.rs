@@ -4812,6 +4812,8 @@ mod prop_get_tests;
 #[cfg(test)]
 mod proxy_trap_tests;
 #[cfg(test)]
+mod regexp_proto_tests;
+#[cfg(test)]
 mod regexp_statics_tests;
 #[cfg(test)]
 mod str_cursor_tests;

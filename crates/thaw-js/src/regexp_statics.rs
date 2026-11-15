@@ -2,8 +2,22 @@
 //! by `record_match` on every successful match (exec core, search, split); the statics are accessors
 //! on the `RegExp` constructor, and their reads slice the recorded subject lazily.
 
-use crate::{arg, define_accessor, Interp, JsStr, Obj, Value};
+use crate::builtins::regexp_flags;
+use crate::{arg, define_accessor, find_own, Interp, JsStr, Kind, Obj, Slot, Value};
 use std::ops::Range;
+use std::rc::Rc;
+
+/// The eight flag getters on `RegExp.prototype`, in the order `flags` reads them (the canonical order).
+const FLAG_GETTERS: [(&str, char); 8] = [
+    ("hasIndices", 'd'),
+    ("global", 'g'),
+    ("ignoreCase", 'i'),
+    ("multiline", 'm'),
+    ("dotAll", 's'),
+    ("unicode", 'u'),
+    ("unicodeSets", 'v'),
+    ("sticky", 'y'),
+];
 
 /// The last successful match of a realm. `caps[0]` is the whole match; ranges are byte offsets into
 /// `subject`. `input` is separate because `RegExp.input` is writable and must not move the subject.
@@ -95,5 +109,56 @@ impl Interp {
             });
             define_accessor(regexp, &key, Some(get), Some(set), false);
         }
+    }
+
+    /// `RegExp.prototype`'s flag, `source` and `flags` getters (no setters). A RegExp receiver reads its
+    /// own slots; the prototype itself gives `undefined` / `(?:)` / ""; anything else is a TypeError.
+    pub(crate) fn install_regexp_proto_accessors(&mut self, rp: &Obj) {
+        for (key, flag) in FLAG_GETTERS {
+            let proto = rp.clone();
+            let get = self.native(move |it, this, _| match this {
+                Value::Object(o) if matches!(&*o.kind.borrow(), Kind::RegExp(_)) => {
+                    Ok(Value::Bool(regexp_flags(o).contains(flag)))
+                }
+                Value::Object(o) if Rc::ptr_eq(o, &proto) => Ok(Value::Undefined),
+                _ => it.throw_error(
+                    "TypeError",
+                    &format!("RegExp.prototype.{key} getter called on non-RegExp object"),
+                ),
+            });
+            define_accessor(rp, key, Some(get), None, false);
+        }
+        let proto = rp.clone();
+        let source = self.native(move |it, this, _| match this {
+            Value::Object(o) if matches!(&*o.kind.borrow(), Kind::RegExp(_)) => {
+                Ok(match find_own(o, "source") {
+                    Some((Slot::Data(v), _)) => v,
+                    _ => Value::str("(?:)"),
+                })
+            }
+            Value::Object(o) if Rc::ptr_eq(o, &proto) => Ok(Value::str("(?:)")),
+            _ => it.throw_error(
+                "TypeError",
+                "RegExp.prototype.source getter called on non-RegExp object",
+            ),
+        });
+        define_accessor(rp, "source", Some(source), None, false);
+        let flags = self.native(|it, this, _| {
+            if !matches!(this, Value::Object(_)) {
+                let shown = it.to_str(this);
+                return it.throw_error(
+                    "TypeError",
+                    &format!("RegExp.prototype.flags getter called on non-object {shown}"),
+                );
+            }
+            let mut out = String::new();
+            for (key, flag) in FLAG_GETTERS {
+                if it.get(this, key)?.truthy() {
+                    out.push(flag);
+                }
+            }
+            Ok(Value::str(&out))
+        });
+        define_accessor(rp, "flags", Some(flags), None, false);
     }
 }
