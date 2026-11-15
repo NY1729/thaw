@@ -237,7 +237,6 @@ pub(crate) struct Rt {
     /// True until the first loop turn starts: timers armed before it (by the main script) get a 2 ms
     /// head start, so that delays of 2 ms or less are due on the first turn, ahead of `setImmediate`.
     first_turn: bool,
-    listeners: HashMap<String, Vec<(Value, bool)>>,
     promise_proto: Option<Obj>,
     timeout_proto: Option<Obj>,
     immediate_proto: Option<Obj>,
@@ -437,7 +436,7 @@ impl Interp {
         Err(Ctl::Throw(e))
     }
 
-    fn make_error(&mut self, class: &str, msg: &str) -> R<Value> {
+    pub(crate) fn make_error(&mut self, class: &str, msg: &str) -> R<Value> {
         match self.throw_error::<()>(class, msg) {
             Err(Ctl::Throw(v)) => Ok(v),
             Err(e) => Err(e),
@@ -682,23 +681,13 @@ impl Interp {
         match e {
             Ctl::Throw(v) => {
                 // Node: every `uncaughtExceptionMonitor` listener runs first, then the `uncaughtException` handler
-                if self
-                    .rt
-                    .listeners
-                    .get("uncaughtExceptionMonitor")
-                    .is_some_and(|l| !l.is_empty())
-                {
+                if self.listener_count("uncaughtExceptionMonitor") > 0 {
                     self.emit(
                         "uncaughtExceptionMonitor",
                         &[v.clone(), Value::str("uncaughtException")],
                     )?;
                 }
-                if self
-                    .rt
-                    .listeners
-                    .get("uncaughtException")
-                    .is_some_and(|l| !l.is_empty())
-                {
+                if self.listener_count("uncaughtException") > 0 {
                     self.emit("uncaughtException", &[v, Value::str("uncaughtException")])?;
                     Ok(())
                 } else {
@@ -739,12 +728,7 @@ impl Interp {
                         _ => continue,
                     }
                 };
-                if self
-                    .rt
-                    .listeners
-                    .get("unhandledRejection")
-                    .is_some_and(|l| !l.is_empty())
-                {
+                if self.listener_count("unhandledRejection") > 0 {
                     self.emit("unhandledRejection", &[reason, Value::Object(p)])?;
                 } else if matches!(&reason, Value::Object(o) if !matches!(&*o.kind.borrow(), Kind::Closure{..}|Kind::Native(_)) && self.get(&reason, "message").is_ok_and(|m| !matches!(m, Value::Undefined)))
                 {
@@ -796,7 +780,7 @@ impl Interp {
     pub(crate) fn exit_listeners(&self) -> bool {
         ["beforeExit", "exit"]
             .iter()
-            .any(|name| self.rt.listeners.get(*name).is_some_and(|l| !l.is_empty()))
+            .any(|name| self.listener_count(name) > 0)
     }
 
     /// One native-continuation checkpoint (`turn_hook`), if the host installed one. The compiled runtime
@@ -1561,27 +1545,36 @@ impl Interp {
 
     // ----- process events -----
 
-    /// Whether `process.on(name)` has a listener in this realm.
-    pub(crate) fn has_process_listeners(&self, name: &str) -> bool {
-        self.rt.listeners.get(name).is_some_and(|l| !l.is_empty())
+    /// Listeners `name` has on `process` in this realm: a function is one, an array is its length.
+    pub(crate) fn listener_count(&self, name: &str) -> usize {
+        let Some(p) = &self.rt.process else {
+            return 0;
+        };
+        let Some(events) = crate::process_events::own_events(p) else {
+            return 0;
+        };
+        match crate::process_events::own_value(&events, name) {
+            Some(v) if v.is_callable() => 1,
+            Some(v) => self.array_items(&v).len(),
+            None => 0,
+        }
     }
 
+    /// Whether `process.on(name)` has a listener in this realm.
+    pub(crate) fn has_process_listeners(&self, name: &str) -> bool {
+        self.listener_count(name) > 0
+    }
+
+    /// `process.emit(name, ...args)`, looked up through the property chain as Node's internals do.
     pub(crate) fn emit(&mut self, name: &str, args: &[Value]) -> R<bool> {
-        let list = self.rt.listeners.get(name).cloned().unwrap_or_default();
-        let this = self
-            .rt
-            .process
-            .clone()
-            .map_or(Value::Undefined, Value::Object);
-        for (f, once) in &list {
-            if *once {
-                if let Some(l) = self.rt.listeners.get_mut(name) {
-                    l.retain(|(g, _)| !strict_equals(g, f));
-                }
-            }
-            self.call(f, &this, args)?;
-        }
-        Ok(!list.is_empty())
+        let Some(p) = self.rt.process.clone() else {
+            return Ok(false);
+        };
+        let this = Value::Object(p);
+        let emit = self.get(&this, "emit")?;
+        let mut argv = vec![Value::str(name)];
+        argv.extend_from_slice(args);
+        Ok(matches!(self.call(&emit, &this, &argv)?, Value::Bool(true)))
     }
 
     // ----- installation -----
@@ -2121,46 +2114,7 @@ impl Interp {
             it.rt.ticks.push_back((it.rt.actx.clone(), cb, vec![]));
             Ok(Value::Undefined)
         });
-        for (name, once) in [("on", false), ("addListener", false), ("once", true)] {
-            self.set_native(&p, name, move |it, this, a| {
-                let ev = it.to_str(&arg(a, 0)).to_string();
-                it.rt
-                    .listeners
-                    .entry(ev)
-                    .or_default()
-                    .push((arg(a, 1), once));
-                Ok(this.clone())
-            });
-        }
-        for name in ["off", "removeListener"] {
-            self.set_native(&p, name, |it, this, a| {
-                let ev = it.to_str(&arg(a, 0)).to_string();
-                if let Some(l) = it.rt.listeners.get_mut(&ev) {
-                    l.retain(|(f, _)| !strict_equals(f, &arg(a, 1)));
-                }
-                Ok(this.clone())
-            });
-        }
-        self.set_native(&p, "removeAllListeners", |it, this, a| {
-            match arg(a, 0) {
-                Value::Undefined => it.rt.listeners.clear(),
-                v => {
-                    let ev = it.to_str(&v).to_string();
-                    it.rt.listeners.remove(&ev);
-                }
-            }
-            Ok(this.clone())
-        });
-        self.set_native(&p, "emit", |it, _, a| {
-            let ev = it.to_str(&arg(a, 0)).to_string();
-            Ok(Value::Bool(it.emit(&ev, a.get(1..).unwrap_or(&[]))?))
-        });
-        self.set_native(&p, "listenerCount", |it, _, a| {
-            let ev = it.to_str(&arg(a, 0)).to_string();
-            Ok(Value::Number(
-                it.rt.listeners.get(&ev).map_or(0, Vec::len) as f64
-            ))
-        });
+        self.install_process_events(&p);
         for (name, is_err) in [("stdout", false), ("stderr", true)] {
             let s = self.plain();
             self.set_native(&s, "write", move |it, _, a| {
