@@ -1772,6 +1772,7 @@ impl Interp {
                         Value::Number(n) => format!("[Number: {}]", number_to_string(*n)),
                         Value::Str(s) => format!("[String: '{s}']"),
                         Value::Bool(b) => format!("[Boolean: {b}]"),
+                        Value::BigInt(b) => format!("[BigInt: {b}n]"),
                         _ => "[Object]".into(),
                     }),
                     Kind::ArrayBuffer(b) if typed::is_detached(b) => {
@@ -4907,6 +4908,8 @@ mod regexp_statics_tests;
 mod str_cursor_tests;
 #[cfg(test)]
 mod str_unit_tests;
+#[cfg(test)]
+mod structured_clone_tests;
 #[cfg(test)]
 mod sysio_stdin_tests;
 #[cfg(test)]
