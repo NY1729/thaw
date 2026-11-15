@@ -93,3 +93,33 @@ console.log([RegExp.prototype.compile.length, RegExp.prototype.compile.name].joi
         r##"true;b;g;0;true;false|0;;b|i|TypeError|TypeError|2;compile"##
     );
 }
+
+// RegExp.prototype[Symbol.match/matchAll/replace/search/split]: thin delegations to the String natives.
+// Expected values recorded with Node v22.23.1.
+
+#[test]
+fn regexp_symbol_methods_names_lengths_and_behaviour() {
+    assert_eq!(
+        run_loop(
+            r##"const P = RegExp.prototype;
+const syms = [Symbol.match, Symbol.matchAll, Symbol.replace, Symbol.search, Symbol.split];
+console.log(syms.map(s => { const d = Object.getOwnPropertyDescriptor(P, s); return [d.writable, d.enumerable, d.configurable, d.value.name, d.value.length].join(';'); }).join('|'));
+console.log([P[Symbol.replace].call(/a/, "cat", "X"), P[Symbol.match].call(/a/g, "banana").join(','), P[Symbol.search].call(/n/, "banana"), P[Symbol.split].call(/a/, "banana", 2).join('|'), [...P[Symbol.matchAll].call(/a(n)?/g, "banana")].map(m => m[0] + ':' + m[1]).join(','), "qr".split(/(r)/).join('|')].join(';'));"##
+        ),
+        r##"true;false;true;[Symbol.match];1|true;false;true;[Symbol.matchAll];1|true;false;true;[Symbol.replace];2|true;false;true;[Symbol.search];1|true;false;true;[Symbol.split];2|cXt;a,a,a;2;b|n;an:n,an:n,a:undefined;q|r|"##
+    );
+}
+
+#[test]
+fn regexp_symbol_methods_last_index_like_node() {
+    assert_eq!(
+        run_loop(
+            r##"const g = /a/g; g.lastIndex = 3; const r1 = g[Symbol.replace]("banana", "[$&]");
+const m = /a/g; m.lastIndex = 2; const r2 = m[Symbol.match]("banana");
+const ma = /a/g; ma.lastIndex = 3; const idx = [...ma[Symbol.matchAll]("banana")].map(x => x.index).join(',');
+const y = /a/y; y.lastIndex = 1; const r3 = y[Symbol.replace]("banana", "X");
+console.log([r1, g.lastIndex, r2.join(','), m.lastIndex, idx, ma.lastIndex, r3, y.lastIndex].join(';'));"##
+        ),
+        r##"b[a]n[a]n[a];0;a,a,a;0;3,5;3;bXnana;2"##
+    );
+}
