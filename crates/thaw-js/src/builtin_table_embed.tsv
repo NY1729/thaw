@@ -1723,6 +1723,11 @@ RegExp	length	data	--c	number	2	-	-	-	-
 RegExp	name	data	--c	string	-	RegExp	-	-	-
 RegExp	prototype	data	---	object	-	-	-	-	-
 RegExp	rightContext	accessor	--c	-	-	get rightContext|set rightContext	-	-	-
+RegExp.prototype	@@match	data	w-c	function	1	[Symbol.match]	0	-	-
+RegExp.prototype	@@matchAll	data	w-c	function	1	[Symbol.matchAll]	0	-	-
+RegExp.prototype	@@replace	data	w-c	function	2	[Symbol.replace]	0	-	-
+RegExp.prototype	@@search	data	w-c	function	1	[Symbol.search]	0	-	-
+RegExp.prototype	@@split	data	w-c	function	2	[Symbol.split]	0	-	-
 RegExp.prototype	compile	data	w-c	function	2	compile	0	-	-
 RegExp.prototype	constructor	data	w-c	function	2	RegExp	1	119	-
 RegExp.prototype	dotAll	accessor	--c	-	-	get dotAll|-	-	-	-
@@ -1738,6 +1743,16 @@ RegExp.prototype	test	data	w-c	function	1	test	0	-	-
 RegExp.prototype	toString	data	w-c	function	0	toString	0	-	-
 RegExp.prototype	unicode	accessor	--c	-	-	get unicode|-	-	-	-
 RegExp.prototype	unicodeSets	accessor	--c	-	-	get unicodeSets|-	-	-	-
+RegExp.prototype.@@match	length	data	--c	number	1	-	-	-	-
+RegExp.prototype.@@match	name	data	--c	string	-	[Symbol.match]	-	-	-
+RegExp.prototype.@@matchAll	length	data	--c	number	1	-	-	-	-
+RegExp.prototype.@@matchAll	name	data	--c	string	-	[Symbol.matchAll]	-	-	-
+RegExp.prototype.@@replace	length	data	--c	number	2	-	-	-	-
+RegExp.prototype.@@replace	name	data	--c	string	-	[Symbol.replace]	-	-	-
+RegExp.prototype.@@search	length	data	--c	number	1	-	-	-	-
+RegExp.prototype.@@search	name	data	--c	string	-	[Symbol.search]	-	-	-
+RegExp.prototype.@@split	length	data	--c	number	2	-	-	-	-
+RegExp.prototype.@@split	name	data	--c	string	-	[Symbol.split]	-	-	-
 RegExp.prototype.compile	length	data	--c	number	2	-	-	-	-
 RegExp.prototype.compile	name	data	--c	string	-	compile	-	-	-
 RegExp.prototype.exec	length	data	--c	number	1	-	-	-	-
