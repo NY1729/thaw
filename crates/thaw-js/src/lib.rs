@@ -30,6 +30,7 @@ mod builtins;
 mod child;
 mod classes;
 mod jsstr;
+mod regexp_statics;
 pub use jsstr::JsStr;
 mod collections;
 mod compile;
@@ -1069,6 +1070,8 @@ pub struct Interp {
     global_object: Obj,
     next_symbol: u64,
     regex_cache: HashMap<(String, String), Rc<regress::Regex>>,
+    /// The realm's last successful match (legacy `RegExp.$1`-style statics).
+    last_match: regexp_statics::LastMatch,
     fn_cache: FxMap<(u32, u32), Rc<FuncDef>>,
     tpl_cache: FxMap<(u32, u32), Value>,
     /// Script text by `run_id` (function source for `toString`).
@@ -1225,6 +1228,7 @@ impl Interp {
             global_object: new_obj(Some(object_proto.clone()), Kind::Global),
             next_symbol: 0,
             regex_cache: HashMap::new(),
+            last_match: Default::default(),
             number_proto,
             bool_proto,
             fn_cache: FxMap::default(),
@@ -4807,6 +4811,8 @@ mod prop_configurable_tests;
 mod prop_get_tests;
 #[cfg(test)]
 mod proxy_trap_tests;
+#[cfg(test)]
+mod regexp_statics_tests;
 #[cfg(test)]
 mod str_cursor_tests;
 #[cfg(test)]
