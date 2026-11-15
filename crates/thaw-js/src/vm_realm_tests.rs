@@ -138,3 +138,74 @@ fn vm_realm_hides_performance_globals() {
         ]
     );
 }
+
+fn prelude_parses() -> usize {
+    crate::PRELUDE_PARSES.with(|n| n.get())
+}
+
+#[test]
+fn shared_prelude_parse_count_is_one_for_n_vm_realms() {
+    // on a fresh thread: the shared cache is thread-local and the counter is per thread
+    std::thread::spawn(|| {
+        let _first = Interp::new_vm_realm();
+        let after_first = prelude_parses();
+        assert!(after_first > 0, "the first vm realm parsed no prelude");
+        for _ in 0..20 {
+            drop(Interp::new_vm_realm());
+        }
+        assert_eq!(
+            prelude_parses(),
+            after_first,
+            "later vm realms re-parsed a prelude"
+        );
+    })
+    .join()
+    .expect("worker thread");
+}
+
+#[test]
+fn host_realm_does_not_populate_shared_cache() {
+    std::thread::spawn(|| {
+        let _host = Interp::new();
+        assert_eq!(
+            crate::shared_prelude_entries(),
+            0,
+            "host realm filled the shared cache"
+        );
+        assert_eq!(
+            prelude_parses(),
+            0,
+            "host realm used the shared prelude path"
+        );
+    })
+    .join()
+    .expect("worker thread");
+}
+
+#[test]
+fn vm_realm_calls_prelude_closure_from_another_realm() {
+    // `Object.groupBy` is a JS prelude closure; realm A's copy runs with realm B's values and hints
+    let mut a = Interp::new_vm_realm();
+    let group = a.run("Object.groupBy").unwrap();
+    let mut b = Interp::new_vm_realm();
+    let items = b.run("[1, 2, 3, 4]").unwrap();
+    let key = b.run("(x) => (x % 2 ? 'odd' : 'even')").unwrap();
+    let grouped = b.call(&group, &Value::Undefined, &[items, key]).unwrap();
+    let show = b.run("(v) => console.log(JSON.stringify(v))").unwrap();
+    b.call(&show, &Value::Undefined, &[grouped]).unwrap();
+    assert_eq!(b.out, vec![r#"{"odd":[1,3],"even":[2,4]}"#.to_string()]);
+}
+
+#[test]
+fn vm_realms_share_prelude_source_text() {
+    let mut a = Interp::new_vm_realm();
+    let mut b = Interp::new_vm_realm();
+    let fa = a.run("Object.groupBy.toString()").unwrap();
+    let fb = b.run("Object.groupBy.toString()").unwrap();
+    let text = a.to_str(&fa).to_string();
+    assert!(
+        text.contains("groupBy") || text.contains("items"),
+        "no source text: {text}"
+    );
+    assert_eq!(text, b.to_str(&fb).to_string());
+}
