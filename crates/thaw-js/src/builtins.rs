@@ -305,12 +305,74 @@ fn this_str(it: &mut Interp, this: &Value) -> JsStr {
     it.to_str(this)
 }
 
+/// The own `flags` slot of a RegExp instance, in canonical order ("" if absent). Readers test single
+/// flags on it, so the flag getters on `RegExp.prototype` and the exec core agree.
+pub(crate) fn regexp_flags(o: &Obj) -> JsStr {
+    match find_own(o, "flags") {
+        Some((Slot::Data(Value::Str(f)), _)) => f,
+        _ => "".into(),
+    }
+}
+
+/// `RegExp.prototype.source` form (V8's EscapeRegExpSource): `/` outside a class and line terminators escaped.
+fn escape_regexp_source(source: &str) -> String {
+    if source.is_empty() {
+        return "(?:)".into();
+    }
+    let mut out = String::with_capacity(source.len());
+    let mut in_class = false;
+    let mut chars = source.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('\n') => out.push_str("\\n"),
+                Some('\r') => out.push_str("\\r"),
+                Some('\u{2028}') => out.push_str("\\u2028"),
+                Some('\u{2029}') => out.push_str("\\u2029"),
+                Some(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                None => out.push('\\'),
+            },
+            '[' => {
+                in_class = true;
+                out.push(c);
+            }
+            ']' => {
+                in_class = false;
+                out.push(c);
+            }
+            '/' if !in_class => out.push_str("\\/"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The `flags` string in Node's canonical order (`dgimsuvy`); unknown letters are dropped.
+fn canonical_flags(flags: &str) -> String {
+    "dgimsuvy".chars().filter(|c| flags.contains(*c)).collect()
+}
+
+/// Store the per-instance slots that host marshalling reads (`source`, `flags`, `lastIndex`).
+fn put_regexp_slots(o: &Obj, source: &str, flags: &str) {
+    put_hidden(o, "source", Value::str(&escape_regexp_source(source)));
+    put_hidden(o, "flags", Value::str(&canonical_flags(flags)));
+    put_hidden(o, "lastIndex", Value::Number(0.0));
+}
+
 impl Interp {
-    pub(crate) fn new_regexp(&mut self, source: &str, flags: &str) -> R<Value> {
+    /// Compile through the realm's cache; the caller stores the result in a RegExp object.
+    pub(crate) fn compile_regex(&mut self, source: &str, flags: &str) -> R<Rc<regress::Regex>> {
         let engine_flags: String = flags.chars().filter(|c| "imsuv".contains(*c)).collect();
         let key = (source.to_string(), engine_flags.clone());
-        let re = match self.regex_cache.get(&key) {
-            Some(re) => re.clone(),
+        match self.regex_cache.get(&key) {
+            Some(re) => Ok(re.clone()),
             None => {
                 let compiled = match regress::Regex::with_flags(source, engine_flags.as_str()) {
                     Ok(r) => Rc::new(r),
@@ -329,16 +391,15 @@ impl Interp {
                     }
                 };
                 self.regex_cache.insert(key, compiled.clone());
-                compiled
+                Ok(compiled)
             }
-        };
+        }
+    }
+
+    pub(crate) fn new_regexp(&mut self, source: &str, flags: &str) -> R<Value> {
+        let re = self.compile_regex(source, flags)?;
         let o = new_obj(Some(self.regexp_proto.clone()), Kind::RegExp(re));
-        put_hidden(&o, "source", Value::str(source));
-        put_hidden(&o, "flags", Value::str(flags));
-        put_hidden(&o, "global", Value::Bool(flags.contains('g')));
-        put_hidden(&o, "ignoreCase", Value::Bool(flags.contains('i')));
-        put_hidden(&o, "multiline", Value::Bool(flags.contains('m')));
-        put_hidden(&o, "lastIndex", Value::Number(0.0));
+        put_regexp_slots(&o, source, flags);
         Ok(Value::Object(o))
     }
 
@@ -367,10 +428,7 @@ impl Interp {
 
     /// One `exec`: returns the match array (with `index`/`input`) and updates `lastIndex`.
     fn regexp_exec(&mut self, re_obj: &Obj, re: &regress::Regex, s: &JsStr) -> R<Value> {
-        let flags = match find_own(re_obj, "flags") {
-            Some((Slot::Data(Value::Str(f)), _)) => f,
-            _ => "".into(),
-        };
+        let flags = regexp_flags(re_obj);
         let (global, sticky) = (flags.contains('g'), flags.contains('y'));
         let last = if global || sticky {
             let v = self.get(&Value::Object(re_obj.clone()), "lastIndex")?;
@@ -535,10 +593,7 @@ impl Interp {
         // (char index, match-array-like values) of the matches to replace
         let mut matches: Vec<(usize, Vec<Value>, Value)> = Vec::new();
         if let Some((ro, re)) = self.regexp_of(&pattern) {
-            let global = matches!(
-                find_own(&ro, "global"),
-                Some((Slot::Data(Value::Bool(true)), _))
-            );
+            let global = regexp_flags(&ro).contains('g');
             let found = if global {
                 self.regexp_all(&ro, &re, &s)?
             } else {
@@ -2035,10 +2090,7 @@ impl Interp {
                     it.regexp_of(&r).unwrap()
                 }
             };
-            if matches!(
-                find_own(&ro, "global"),
-                Some((Slot::Data(Value::Bool(true)), _))
-            ) {
+            if regexp_flags(&ro).contains('g') {
                 let all = it.regexp_all(&ro, &re, &s)?;
                 if all.is_empty() {
                     return Ok(Value::Null);
@@ -2172,6 +2224,43 @@ impl Interp {
             Ok(Value::Str(
                 format!("/{}/{}", it.to_str(&s), it.to_str(&f)).into(),
             ))
+        });
+        self.install_regexp_proto_accessors(&rp);
+        self.set_native(&rp, "compile", |it, this, args| {
+            let Some((ro, _)) = it.regexp_of(this) else {
+                return it.throw_error(
+                    "TypeError",
+                    "Method RegExp.prototype.compile called on incompatible receiver",
+                );
+            };
+            let pattern = arg(args, 0);
+            let (src, flags) = match it.regexp_of(&pattern) {
+                Some((po, _)) => {
+                    if !matches!(arg(args, 1), Value::Undefined) {
+                        return it.throw_error(
+                            "TypeError",
+                            "Cannot supply flags when constructing one RegExp from another",
+                        );
+                    }
+                    let src = it.get(&pattern, "source")?;
+                    (it.to_str(&src).to_string(), regexp_flags(&po).to_string())
+                }
+                None => {
+                    let src = match pattern {
+                        Value::Undefined => "(?:)".to_string(),
+                        v => it.to_str(&v).to_string(),
+                    };
+                    let flags = match arg(args, 1) {
+                        Value::Undefined => "".to_string(),
+                        v => it.to_str(&v).to_string(),
+                    };
+                    (src, flags)
+                }
+            };
+            let re = it.compile_regex(&src, &flags)?;
+            *ro.kind.borrow_mut() = Kind::RegExp(re);
+            put_regexp_slots(&ro, &src, &flags);
+            Ok(this.clone())
         });
 
         // ----- Number / Boolean / globals -----
