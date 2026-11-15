@@ -390,11 +390,11 @@ async function main(): Promise<void> {
     }, { prefix: "/api" });
     await app.ready();
     const injected = await app.inject({ method: "GET", url: "/api/users/42" });
-    if (Number(injected.statusCode) !== 200) throw "Fastify injection failed";
+    if (Number(injected.statusCode) !== 200) throw "Fastify injection failed: " + injected.statusCode + " " + injected.body;
     const posted = await app.inject({ method: "POST", url: "/api/echo", payload: { name: "Thaw" } });
-    if (Number(posted.statusCode) !== 200 || !String(posted.body).includes("Thaw")) throw "Fastify POST injection failed";
+    if (Number(posted.statusCode) !== 200 || !String(posted.body).includes("Thaw")) throw "Fastify POST injection failed: " + posted.statusCode + " " + posted.body;
     const failed = await app.inject({ method: "GET", url: "/api/fail" });
-    if (Number(failed.statusCode) !== 418 || !String(failed.body).includes("expected failure")) throw "Fastify error handler failed";
+    if (Number(failed.statusCode) !== 418 || !String(failed.body).includes("expected failure")) throw "Fastify error handler failed: " + failed.statusCode + " " + failed.body;
     await app.listen({ host: "127.0.0.1", port: Number(process.env.PORT) });
 }"#,
     )
