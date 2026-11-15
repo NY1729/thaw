@@ -174,3 +174,10 @@ fn console_methods_are_never_compiled_but_user_functions_are() {
     assert_eq!(it.out.last().map(String::as_str), Some("0"));
     assert_eq!(it.cstats.compiled(), 1, "only `user` may compile");
 }
+
+#[test]
+fn console_methods_work_inside_a_promise_executor() {
+    let (out, err) = run("new Promise((res) => { console.log('p'); res(); }); console.log('end');");
+    assert_eq!(out, "p|end");
+    assert_eq!(err, "");
+}

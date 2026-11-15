@@ -2323,6 +2323,9 @@ impl Interp {
         args: &[Value],
     ) -> R<Value> {
         let new_target = self.rt.pending_nt.take();
+        // user code starts here: a native constructor's `constructing` mark (set in `construct_with`) must not
+        // reach the calls it makes, or a bound function called from a `new Promise` executor takes it as `new`
+        self.rt.constructing = false;
         if self.compile_mode != compile::CompileMode::Off {
             if let Some(r) = self.try_compiled(f, def, scope, this, args, &new_target) {
                 return r;

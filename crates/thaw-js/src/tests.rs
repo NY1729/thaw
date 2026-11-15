@@ -9065,3 +9065,12 @@ fn cyclic_values_inspect_as_circular() {
         "<ref *1> [ 1, 2, [Circular *1] ]|<ref *1> { n: 1, self: [Circular *1] }"
     );
 }
+
+#[test]
+fn bound_function_called_inside_a_promise_executor_is_called_not_constructed() {
+    // `new Promise` marks the native constructor call; a bound function run by its executor must not read that mark as `new bound()`
+    assert_eq!(
+        one("let r = 0; const o = { m() { r = 1; } }; new Promise(() => { const b = o.m.bind(o); b(); }); console.log(r);"),
+        "1"
+    );
+}
