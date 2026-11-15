@@ -1634,6 +1634,69 @@ fn server_response_calls_write_head_once_if_not_already_called() {
     let _ = fs::remove_dir_all(empty_node_modules);
 }
 
+/// `ServerResponse._hasBody` must follow Node: an own, writable property set
+/// in the constructor (false for HEAD requests only), cleared by `writeHead`
+/// for 204, 304 and 1xx (not 205), and set false by `_implicitHeader()` after
+/// a `statusCode` change. Light-my-request 6.8.1 (fastify inject) gates body
+/// writes on this flag, so a missing value drops every payload chunk.
+#[test]
+fn server_response_has_body_follows_node() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_server_response_has_body");
+    fs::write(
+        dir.join("index.js"),
+        "var http = require('node:http'); var EventEmitter = require('node:events'); function req(m) { var r = new EventEmitter(); r.method = m; r.httpVersion = '1.1'; r.headers = {}; r.socket = { write: function() {}, end: function() {} }; return r; } module.exports = function() { var out = []; var a = new http.ServerResponse(req('GET')); out.push(a._hasBody, Object.keys(a).indexOf('_hasBody') >= 0); out.push(new http.ServerResponse(req('HEAD'))._hasBody); [204, 304, 100, 101, 200, 205].forEach(function(code) { var r = new http.ServerResponse(req('GET')); r.writeHead(code); out.push(r._hasBody); }); var s = new http.ServerResponse(req('GET')); s.statusCode = 204; out.push(s._hasBody); s._implicitHeader(); out.push(s._hasBody); return out; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http_server_response_has_body_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHasBody = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHasBody").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        "[true,true,false,false,false,false,false,true,true,true,false]"
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+/// A subclass of `ServerResponse` that overrides `write` the way
+/// light-my-request 6.8.1 does (calls the prototype write, then returns early
+/// unless `this._hasBody`) must still see its payload recorded for GET and
+/// drop it for HEAD and 204. Node yields `["abcdef",0,0]` for this shape.
+#[test]
+fn server_response_subclass_write_override_respects_has_body() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_server_response_subclass_write");
+    fs::write(
+        dir.join("index.js"),
+        "var http = require('node:http'); var util = require('node:util'); var EventEmitter = require('node:events'); function req(m) { var r = new EventEmitter(); r.method = m; r.httpVersion = '1.1'; r.headers = {}; r.socket = { write: function() {}, end: function() {} }; return r; } function Resp(r) { http.ServerResponse.call(this, r); this.chunks = []; this.assignSocket({ write: function(b, e, cb) { if (typeof cb === 'function') cb(); return true; }, end: function(b, e, cb) { if (typeof cb === 'function') cb(); }, on: function() {}, once: function() {}, removeListener: function() {}, cork: function() {}, uncork: function() {} }); } util.inherits(Resp, http.ServerResponse); Resp.prototype.write = function(d, e, cb) { http.ServerResponse.prototype.write.call(this, d, e, cb); if (!this._hasBody) return true; this.chunks.push(Buffer.from(d, e)); return true; }; module.exports = function() { var g = new Resp(req('GET')); g.write('abc'); g.write('def'); var h = new Resp(req('HEAD')); h.write('abc'); var n = new Resp(req('GET')); n.writeHead(204); n.write('x'); return [Buffer.concat(g.chunks).toString(), h.chunks.length, n.chunks.length]; };",
+    )
+    .unwrap();
+    let empty_node_modules =
+        temp_registry("builtin_http_server_response_subclass_write_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseSubclassWrite = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseSubclassWrite").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[\"abcdef\",0,0]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
 #[test]
 fn http_server_supports_standard_timeout_configuration() {
     use std::ffi::{CStr, CString};
