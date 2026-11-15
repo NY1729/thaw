@@ -1121,8 +1121,8 @@ fn graph_put(it: &mut Interp, target: &Obj, name: &str, v: Value, flags: u8) -> 
     .map_err(|c| classify(it, c).to_string())
 }
 
-/// An `a` node: its elements, then (N-API wire) the own properties `p` as `[key, token, flags]`. Under the
-/// N-API wire the array is memoized before its elements decode, so a cycle back to it resolves.
+/// An `a` node: its elements, then (N-API wire) the own properties `p` as `[key, token, flags]`. The array
+/// is memoized before its elements decode, so a cycle back to it resolves.
 fn graph_array(
     it: &mut Interp,
     index: usize,
@@ -1135,9 +1135,8 @@ fn graph_array(
     let Value::Object(obj) = arr.clone() else {
         return Err("malformed graph array".into());
     };
-    if cx.napi {
-        cx.memo[index] = Some(arr.clone());
-    }
+    // Memoized before the elements decode, so a cycle back to the array resolves to it.
+    cx.memo[index] = Some(arr.clone());
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         out.push(match item {
@@ -1176,7 +1175,8 @@ fn graph_node(
         return Ok(v.clone());
     }
     let node = nodes.get(index).ok_or("graph node out of range")?;
-    // ponytail: cyclic graphs are rejected (containers are built whole); fill-after-create if a package needs them.
+    // `a` and `o` memoize before their children decode, so only nodes built whole (Map/Set/Date/...) reject a cycle.
+    // ponytail: a cycle through a Map/Set/Date/RegExp/BigInt/Buffer node is rejected; fill-after-create if needed.
     if std::mem::replace(&mut cx.busy[index], true) {
         return Err("cyclic graph is not supported".into());
     }
@@ -1211,9 +1211,8 @@ fn graph_node(
                 }
             }
             let o = it.plain();
-            if cx.napi {
-                cx.memo[index] = Some(Value::Object(o.clone()));
-            }
+            // Memoized before the properties decode, so a cycle back to the object resolves to it.
+            cx.memo[index] = Some(Value::Object(o.clone()));
             for pair in pairs {
                 let Native::Array(kv) = pair else {
                     return Err("malformed graph property".into());

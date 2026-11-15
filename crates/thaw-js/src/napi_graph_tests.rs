@@ -18,8 +18,21 @@ fn load(source: &str) {
 /// Decode `wire` with the N-API rules and pass the value to `probe` (a JS function declaration named
 /// `__probe`); the probe's result as text.
 fn probe(wire: &str, source: &str) -> String {
+    probe_with(decode_napi_wire, wire, source)
+}
+
+/// `probe` through the plain (non-N-API) wire decoder.
+fn probe_plain(wire: &str, source: &str) -> String {
+    probe_with(decode_wire, wire, source)
+}
+
+fn probe_with(
+    decode: fn(&str) -> Result<(usize, Value), String>,
+    wire: &str,
+    source: &str,
+) -> String {
     load(source);
-    let (owner, value) = decode_napi_wire(wire).unwrap();
+    let (owner, value) = decode(wire).unwrap();
     with_package(owner, |p| {
         let it = &mut p.interp;
         let global = it.global.clone();
@@ -58,6 +71,18 @@ fn napi_graph_object_attributes_and_cycle() {
 }
 
 #[test]
+fn plain_wire_object_cycle_resolves() {
+    let wire = r#"{"root":{"r":0},"nodes":[{"o":[["self",{"r":0}],["v",{"v":1}]]}]}"#;
+    assert_eq!(
+        probe_plain(
+            wire,
+            "function __probe(o) { return [o.self === o, o.v, Object.keys(o).join(',')].join('|'); }"
+        ),
+        "true|1|self,v"
+    );
+}
+
+#[test]
 fn napi_graph_lone_surrogate_token_and_plain_wire_rejects_it() {
     let wire = r#"{"root":{"su":[97,55296]},"nodes":[],"leases":[],"napiLeases":[]}"#;
     assert_eq!(
@@ -72,7 +97,7 @@ fn napi_graph_lone_surrogate_token_and_plain_wire_rejects_it() {
 }
 
 #[test]
-fn napi_graph_array_cycle_resolves_and_plain_wire_still_rejects_it() {
+fn napi_graph_array_cycle_resolves_on_both_wires() {
     let wire = r#"{"root":{"r":0},"nodes":[{"a":[{"r":0},{"v":1}]}],"leases":[],"napiLeases":[]}"#;
     assert_eq!(
         probe(
@@ -81,8 +106,23 @@ fn napi_graph_array_cycle_resolves_and_plain_wire_still_rejects_it() {
         ),
         "true|1"
     );
+    // The plain wire resolves the same cycle (was: rejected with "cyclic graph is not supported").
+    assert_eq!(
+        probe_plain(
+            wire,
+            "function __probe(a) { return [a[0] === a, a[1]].join('|'); }"
+        ),
+        "true|1"
+    );
+}
+
+#[test]
+fn plain_wire_rejects_cycle_through_built_whole_node() {
+    // A Map is built from its items, so a cycle back to it cannot resolve and is still rejected.
+    let wire =
+        r#"{"root":{"r":0},"nodes":[{"m":{"r":1}},{"a":[{"r":0}]}],"leases":[],"napiLeases":[]}"#;
     let Err(error) = decode_wire(wire) else {
-        panic!("cycle accepted by the plain wire")
+        panic!("cycle through a Map accepted")
     };
     assert!(error.contains("cyclic graph is not supported"), "{error}");
 }
