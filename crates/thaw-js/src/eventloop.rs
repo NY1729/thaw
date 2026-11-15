@@ -1772,7 +1772,7 @@ impl Interp {
 
     /// Promise combinators in JS; needs `Error`, so it runs after the main prelude.
     pub(crate) fn run_promise_prelude(&mut self) {
-        self.run(PROMISE_PRELUDE)
+        self.run_prelude(PROMISE_PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js promise prelude must evaluate"));
     }
 

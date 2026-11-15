@@ -909,11 +909,47 @@ impl Scope {
     }
 }
 
+/// One parsed `'static` prelude: its run id, statements and text, shared by every vm realm on the thread.
+struct SharedRun {
+    run_id: u32,
+    stmts: Rc<Vec<a::Stmt>>,
+    source: Rc<str>,
+    /// `bit` of each hint slot annotation pushed, in order (the slots themselves are per realm).
+    hint_bits: Vec<u64>,
+}
+
+// Preludes already parsed and annotated on this thread (`run_shared`), keyed by text and hint base.
+thread_local! {
+    static SHARED_PRELUDES: RefCell<FxMap<(usize, usize, usize), Rc<SharedRun>>> = RefCell::new(FxMap::default());
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PRELUDE_PARSES: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn shared_prelude_entries() -> usize {
+    SHARED_PRELUDES.with(|c| c.borrow().len())
+}
+
 /// Process-wide run counter: every realm draws from it, so `(run_id, span)` cache keys never collide.
 static RUN_IDS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 pub(crate) fn next_run_id() -> u32 {
     RUN_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// The statements of a script; an ES module declaration is unsupported.
+fn module_stmts(module: a::Module) -> R<Vec<a::Stmt>> {
+    let mut stmts = Vec::new();
+    for item in module.body {
+        match item {
+            a::ModuleItem::Stmt(s) => stmts.push(s),
+            a::ModuleItem::ModuleDecl(_) => return unsupported("esm-syntax"),
+        }
+    }
+    Ok(stmts)
 }
 
 /// Realm ids are process-wide (worker threads share the platform tables), starting at 1.
@@ -1088,6 +1124,8 @@ pub struct Interp {
     ident_hints: Vec<hints::HintSlot>,
     /// Hint counters (`THAW_JS_HINT_STATS=1`).
     hint_stats: hints::HintStats,
+    /// vm realms (`build(false)`) take their preludes from `run_shared`; host realms parse them each time.
+    share_preludes: bool,
     /// Oracle mode: every hinted read also runs the by-name lookup and asserts they agree.
     check_hints: bool,
     /// `THAW_JS_COMPILE` mode, `THAW_JS_COMPILE_AFTER` call threshold, `THAW_JS_COMPILE_STATS` report flag.
@@ -1238,6 +1276,7 @@ impl Interp {
             names: Default::default(),
             run_id: 0,
             ident_hints: vec![hints::HintSlot::default()],
+            share_preludes: !host,
             hint_stats: hints::HintStats::from_env(),
             check_hints: cfg!(test) || std::env::var_os("THAW_JS_CHECK_HINTS").is_some(),
             compile_mode: compile::CompileMode::parse(
@@ -1292,13 +1331,13 @@ impl Interp {
         it.install_numfmt();
         it.install_proxy();
         it.install_reflect();
-        it.run(builtins::PRELUDE)
+        it.run_prelude(builtins::PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js prelude must evaluate"));
         it.run_promise_prelude();
         if host {
             it.install_main_file_loader();
         }
-        it.run(extras::EXTRAS).unwrap_or_else(|e| {
+        it.run_prelude(extras::EXTRAS).unwrap_or_else(|e| {
             let why = match &e {
                 Ctl::Throw(v) => {
                     let m = it.get(v, "message").unwrap_or(Value::Undefined);
@@ -1343,7 +1382,7 @@ impl Interp {
             #[cfg(feature = "intl")]
             it.install_intl();
         }
-        it.run(extras::EXTRAS_LATE)
+        it.run_prelude(extras::EXTRAS_LATE)
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
         web_console::install(&mut it);
         it.apply_builtin_table();
@@ -2861,25 +2900,74 @@ impl Interp {
         hints::annotate(&mut module, &mut self.ident_hints);
         self.run_id = next_run_id();
         self.sources.insert(self.run_id, Rc::from(source));
-        let mut stmts = Vec::new();
-        for item in module.body {
-            match item {
-                a::ModuleItem::Stmt(s) => stmts.push(s),
-                a::ModuleItem::ModuleDecl(_) => return unsupported("esm-syntax"),
-            }
-        }
+        let stmts = module_stmts(module)?;
+        self.run_global(&stmts, script)
+    }
+
+    /// Declares and hoists the top-level `stmts` in the global scope, then runs them.
+    fn run_global(&mut self, stmts: &[a::Stmt], script: bool) -> R<Value> {
         let global = self.global.clone();
         let origin = if script { Origin::Var } else { Origin::Prop };
-        for name in &hoisted_names(&stmts) {
+        for name in &hoisted_names(stmts) {
             global.declare_global_var(name, origin);
         }
-        self.hoist_functions(&stmts, &global)?;
-        for s in &stmts {
+        self.hoist_functions(stmts, &global)?;
+        for s in stmts {
             if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
                 global.set_origin(&f.ident.sym, origin);
             }
         }
-        self.run_hoisted(&stmts, &global)
+        self.run_hoisted(stmts, &global)
+    }
+
+    /// A `'static` prelude: `run`, except that a vm realm reuses the parse and annotation of the same
+    /// text (`run_shared`).
+    pub(crate) fn run_prelude(&mut self, src: &'static str) -> R<Value> {
+        if self.share_preludes {
+            self.run_shared(src)
+        } else {
+            self.run(src)
+        }
+    }
+
+    /// `run` for a prelude, parsed and annotated once per thread. The cache key is the text (pointer
+    /// and length; `'static` text is never freed or reused) and the hint base, because annotation
+    /// bakes hint indices into the AST. Each realm still gets its own hint slots, `run_id` entry in
+    /// `sources`, and function caches.
+    // ponytail: the cache lives as long as the thread (~60 KB of prelude AST per thread, no eviction).
+    fn run_shared(&mut self, src: &'static str) -> R<Value> {
+        let base = self.ident_hints.len();
+        let key = (src.as_ptr() as usize, src.len(), base);
+        let hit = SHARED_PRELUDES.with(|c| c.borrow().get(&key).cloned());
+        let shared = match hit {
+            Some(shared) => {
+                self.ident_hints.extend(
+                    shared
+                        .hint_bits
+                        .iter()
+                        .map(|&bit| hints::HintSlot::new(bit)),
+                );
+                shared
+            }
+            None => {
+                #[cfg(test)]
+                PRELUDE_PARSES.with(|n| n.set(n.get() + 1));
+                let mut module =
+                    thaw_parser::parse_javascript(src).map_err(|e| Ctl::Throw(Value::str(&e)))?;
+                hints::annotate(&mut module, &mut self.ident_hints);
+                let shared = Rc::new(SharedRun {
+                    run_id: next_run_id(),
+                    stmts: Rc::new(module_stmts(module)?),
+                    source: Rc::from(src),
+                    hint_bits: self.ident_hints[base..].iter().map(|s| s.bit).collect(),
+                });
+                SHARED_PRELUDES.with(|c| c.borrow_mut().insert(key, shared.clone()));
+                shared
+            }
+        };
+        self.run_id = shared.run_id;
+        self.sources.insert(shared.run_id, shared.source.clone());
+        self.run_global(&shared.stmts, true)
     }
 
     /// Hoists the functions of `stmts` into `scope`, then runs them; the value is that of the last
