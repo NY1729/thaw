@@ -2232,6 +2232,13 @@ impl Interp {
     }
 
     pub fn call(&mut self, f: &Value, this: &Value, args: &[Value]) -> R<Value> {
+        self.call_as(f, this, args, false)
+    }
+
+    /// Every call sets `rt.constructing` for its own callee: `constructing` is true only for the native
+    /// constructor `construct_with` enters, so a native that calls back into JS never leaks the mark into it.
+    fn call_as(&mut self, f: &Value, this: &Value, args: &[Value], constructing: bool) -> R<Value> {
+        self.rt.constructing = constructing;
         let Value::Object(fo) = f else {
             let msg = self.not_callable_message(f);
             return self.throw_error("TypeError", &msg);
@@ -2323,9 +2330,6 @@ impl Interp {
         args: &[Value],
     ) -> R<Value> {
         let new_target = self.rt.pending_nt.take();
-        // user code starts here: a native constructor's `constructing` mark (set in `construct_with`) must not
-        // reach the calls it makes, or a bound function called from a `new Promise` executor takes it as `new`
-        self.rt.constructing = false;
         if self.compile_mode != compile::CompileMode::Off {
             if let Some(r) = self.try_compiled(f, def, scope, this, args, &new_target) {
                 return r;
@@ -2444,8 +2448,7 @@ impl Interp {
         };
         if is_native {
             // natives that act as constructors (Array, RegExp, Object, ...) return their own object
-            self.rt.constructing = true;
-            let r = self.call(f, &Value::Undefined, args);
+            let r = self.call_as(f, &Value::Undefined, args, true);
             self.rt.constructing = false;
             let r = r?;
             if !matches!(r, Value::Object(_)) && find_own(fo, "@@wrap").is_some() {

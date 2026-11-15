@@ -9074,3 +9074,45 @@ fn bound_function_called_inside_a_promise_executor_is_called_not_constructed() {
         "1"
     );
 }
+
+// A native constructor's `constructing` mark must reach only that constructor's own entry, never the natives it calls back into.
+fn run_loop_checked(src: &str) -> Vec<String> {
+    let mut it = Interp::new();
+    it.run(src).expect("script runs");
+    it.run_event_loop().expect("event loop runs");
+    it.out
+}
+
+#[test]
+fn bound_native_as_promise_executor_is_called_not_constructed() {
+    assert_eq!(
+        run_loop_checked("new Promise(console.log.bind(console, 'x')); console.log('after');"),
+        vec!["x [Function (anonymous)] [Function (anonymous)]", "after"]
+    );
+}
+
+#[test]
+fn unbound_native_as_promise_executor_is_called_not_constructed() {
+    assert_eq!(
+        run_loop_checked("new Promise(console.log); console.log('after');"),
+        vec!["[Function (anonymous)] [Function (anonymous)]", "after"]
+    );
+}
+
+#[test]
+fn bound_native_as_another_natives_promise_executor_is_called() {
+    assert_eq!(
+        run_loop_checked("new Promise(Math.max.bind(null, 1)); console.log('after');"),
+        vec!["after"]
+    );
+}
+
+#[test]
+fn bound_native_callback_run_by_a_native_inside_a_promise_executor_is_called() {
+    assert_eq!(
+        run_loop_checked(
+            "new Promise(Array.prototype.forEach.bind([1], console.log.bind(console, 'y'))); console.log('after');"
+        ),
+        vec!["y 1 0 [ 1 ]", "after"]
+    );
+}
