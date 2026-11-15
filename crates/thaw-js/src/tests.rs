@@ -9116,3 +9116,47 @@ fn bound_native_callback_run_by_a_native_inside_a_promise_executor_is_called() {
         vec!["y 1 0 [ 1 ]", "after"]
     );
 }
+
+#[test]
+fn string_html_methods_escape_and_wrap_like_node() {
+    assert_eq!(
+        one(
+            r#"console.log('a'.anchor('x"y'), 'a'.fontsize(3), 'a'.link('u'), 'a'.big(), 'a'.bold(), 'a'.fixed(), 'a'.italics(), 'a'.small(), 'a'.strike(), 'a'.sub(), 'a'.sup(), 'a'.blink(), 'a'.fontcolor('red'));"#
+        ),
+        r#"<a name="x&quot;y">a</a> <font size="3">a</font> <a href="u">a</a> <big>a</big> <b>a</b> <tt>a</tt> <i>a</i> <small>a</small> <strike>a</strike> <sub>a</sub> <sup>a</sup> <blink>a</blink> <font color="red">a</font>"#
+    );
+    assert_eq!(
+        one("console.log(String.prototype.anchor.length, String.prototype.anchor.name, String.prototype.fontsize.length, String.prototype.bold.length, String.prototype.toWellFormed.length, String.prototype.toWellFormed.name);"),
+        "1 anchor 1 0 0 toWellFormed"
+    );
+    assert_eq!(
+        one("try { String.prototype.bold.call(null); } catch (e) { console.log(e instanceof TypeError); }"),
+        "true"
+    );
+}
+
+#[test]
+fn string_is_and_to_well_formed_handle_lone_surrogates() {
+    assert_eq!(
+        one(
+            r#"console.log('a\ud800'.isWellFormed(), '😀'.isWellFormed(), '\ude00a'.isWellFormed(), 'a'.isWellFormed());"#
+        ),
+        "false true false true"
+    );
+    assert_eq!(
+        one(
+            r#"console.log('a\ud800'.toWellFormed() === 'a\ufffd', '\ude00a'.toWellFormed() === '\ufffda', '\ud83d\ude00'.toWellFormed() === '\u{1F600}', 'a\ud800b'.toWellFormed().length);"#
+        ),
+        "true true true 3"
+    );
+}
+
+#[test]
+fn string_prototype_length_is_zero_and_boxed_length_wins() {
+    assert_eq!(
+        one(
+            r#"var d = Object.getOwnPropertyDescriptor(String.prototype, 'length'); console.log(String.prototype.length, new String('ab').length, 'abc'.length, d.writable, d.enumerable, d.configurable);"#
+        ),
+        "0 2 3 false false false"
+    );
+}
