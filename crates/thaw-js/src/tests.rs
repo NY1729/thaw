@@ -9160,3 +9160,81 @@ fn string_prototype_length_is_zero_and_boxed_length_wins() {
         "0 2 3 false false false"
     );
 }
+
+#[test]
+fn array_from_async_matches_node_for_each_source_shape() {
+    let (out, _) = main_run(
+        r#"(async () => {
+  console.log(JSON.stringify(await Array.fromAsync([1, Promise.resolve(2)])));
+  async function* g() { yield 'x'; yield await Promise.resolve('y'); }
+  console.log(JSON.stringify(await Array.fromAsync(g())));
+  console.log(JSON.stringify(await Array.fromAsync({ length: 2, 0: 'a', 1: 'b' })));
+  console.log(JSON.stringify(await Array.fromAsync([1, 2, 3], async (v, i) => v * 10 + i)));
+  console.log(JSON.stringify(await Array.fromAsync([Promise.resolve(1), 2], (v) => Promise.resolve(v + 1))));
+  console.log(JSON.stringify(await Array.fromAsync(5)));
+  console.log(JSON.stringify(await Array.fromAsync(new Set([7, 8]))));
+  console.log(JSON.stringify(await Array.fromAsync([1, 2], function (v) { return this.k + v; }, { k: 5 })));
+  try { await Array.fromAsync([Promise.reject(new Error('boom'))]); } catch (e) { console.log('rej', e.message); }
+  try { await Array.fromAsync([1], 5); } catch (e) { console.log(e.name); }
+  const order = []; const p = Array.fromAsync([1]); order.push('sync'); Promise.resolve().then(() => order.push('micro')); await p; console.log(order.join(','));
+  console.log(Array.fromAsync.length, Array.fromAsync.name, 'prototype' in Array.fromAsync);
+})();"#,
+    );
+    assert_eq!(
+        out.join("|"),
+        "[1,2]|[\"x\",\"y\"]|[\"a\",\"b\"]|[10,21,32]|[2,3]|[]|[7,8]|[6,7]|rej boom|TypeError|sync,micro|1 fromAsync false"
+    );
+}
+
+#[test]
+fn buffer_of_copy_bytes_from_and_species_match_node() {
+    let (out, _) = main_run(
+        r#"console.log(Buffer.of(1, 2).toString('hex'), Buffer.of.length, Buffer.of.name, Buffer.of(256, -1, 3.7, '5').toString('hex'), Buffer.of().length);
+const e = (f) => { try { f(); return 'no'; } catch (x) { return x.name + ' ' + x.code; } };
+console.log(Buffer.copyBytesFrom(new Uint16Array([1, 2, 3]), 1, 1).toString('hex'), Buffer.copyBytesFrom(new Uint16Array([1, 2, 3])).length, Buffer.copyBytesFrom(new Uint8Array([9, 8, 7]), 1, 5).toString('hex'), Buffer.copyBytesFrom(new Uint8Array([9, 8, 7]), 5).length, Buffer.copyBytesFrom(new Float32Array([1.5]), 0, 1).toString('hex'));
+const u = new Uint8Array([1, 2, 3]); const c = Buffer.copyBytesFrom(u); c[0] = 99; console.log(u[0], c.constructor === Buffer, Buffer.copyBytesFrom(new Uint8Array([1, 2, 3]), 0, 2) instanceof Buffer);
+console.log(e(() => Buffer.copyBytesFrom([1, 2])), '|', e(() => Buffer.copyBytesFrom(new DataView(new ArrayBuffer(4)))), '|', e(() => Buffer.copyBytesFrom(new Uint8Array(2), -1)), '|', e(() => Buffer.copyBytesFrom(new Uint8Array(2), 0, -1)));
+console.log(Buffer.copyBytesFrom.length, Buffer.copyBytesFrom.name, typeof Buffer.copyBytesFrom.prototype);
+const d = Object.getOwnPropertyDescriptor(Buffer, Symbol.species);
+console.log(typeof Buffer[Symbol.species], Buffer[Symbol.species] === Buffer, Buffer[Symbol.species].name, Buffer.from([1, 2]).slice(0, 1) instanceof Buffer, Buffer.from([1, 2]).subarray(1).constructor === Buffer);
+console.log(d.get.name, d.get.length, d.set, d.enumerable, d.configurable, 'prototype' in d.get);"#,
+    );
+    assert_eq!(
+        out.join("|"),
+        "0102 0 of 00ff0305 0|0200 6 0807 0 0000c03f|1 true true|TypeError ERR_INVALID_ARG_TYPE | TypeError ERR_INVALID_ARG_TYPE | RangeError ERR_OUT_OF_RANGE | RangeError ERR_OUT_OF_RANGE|3 copyBytesFrom object|function false FastBuffer true true|get 0 undefined false true false"
+    );
+}
+
+#[test]
+fn url_create_and_revoke_object_url_match_node() {
+    assert_eq!(
+        one(
+            r#"const b = new Blob(['hi']); const u = URL.createObjectURL(b);
+const e = (f) => { try { f(); return 'no'; } catch (x) { return x.name + ' ' + x.code; } };
+console.log(typeof u, u.startsWith('blob:nodedata:'), u.length, URL.revokeObjectURL(u), URL.createObjectURL(b) !== u);
+console.log(e(() => URL.createObjectURL({})), e(() => URL.createObjectURL('x')), e(() => URL.revokeObjectURL()), URL.revokeObjectURL('blob:nodedata:nope'));
+console.log(URL.createObjectURL.length, URL.createObjectURL.name, URL.revokeObjectURL.length, URL.revokeObjectURL.name, typeof URL.createObjectURL.prototype, URL.createObjectURL.prototype.constructor === URL.createObjectURL);"#
+        ),
+        "string true 50 undefined true|TypeError ERR_INVALID_ARG_TYPE TypeError ERR_INVALID_ARG_TYPE TypeError ERR_MISSING_ARGS undefined|1 createObjectURL 1 revokeObjectURL object true"
+    );
+}
+
+#[test]
+fn event_phase_constants_are_on_the_constructor_only() {
+    assert_eq!(
+        one(
+            r#"console.log(Event.NONE, Event.CAPTURING_PHASE, Event.AT_TARGET, Event.BUBBLING_PHASE, Event.prototype.NONE, JSON.stringify(Object.getOwnPropertyDescriptor(Event, 'AT_TARGET')));"#
+        ),
+        "0 1 2 3 undefined {\"value\":2,\"writable\":false,\"enumerable\":true,\"configurable\":false}"
+    );
+}
+
+#[test]
+fn global_object_has_global_to_string_tag_only_in_the_host_realm() {
+    assert_eq!(
+        one(
+            r#"console.log(Object.prototype.toString.call(globalThis), JSON.stringify(Object.getOwnPropertyDescriptor(globalThis, Symbol.toStringTag)));"#
+        ),
+        "[object global] {\"value\":\"global\",\"writable\":false,\"enumerable\":false,\"configurable\":true}"
+    );
+}
