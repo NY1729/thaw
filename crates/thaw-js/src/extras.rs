@@ -448,8 +448,24 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   def(ArrayBuffer, 'isView', function isView(v) { return nativeIsView(v) || v instanceof DataView; });
 
   // ----- structuredClone (plain data, Map, Set, Date, RegExp, typed arrays, Error; cycles preserved) -----
-  globalThis.structuredClone = function structuredClone(value) {
+  globalThis.structuredClone = function structuredClone(value, options) {
     var seen = new Map();
+    function dataCloneError(msg) {
+      if (typeof DOMException === 'function') return new DOMException(msg, 'DataCloneError');
+      var e = new Error(msg); e.name = 'DataCloneError'; return e;
+    }
+    // transfer: each buffer's copy is what the clone gets; the sources are detached only after the
+    // whole clone succeeds, so a throwing value leaves them intact.
+    var moves = [];
+    if (options != null && options.transfer !== undefined) {
+      Array.from(options.transfer).forEach(function (b) {
+        if (!(b instanceof ArrayBuffer)) throw dataCloneError('Found invalid value in transferList.');
+        if (moves.indexOf(b) >= 0) throw dataCloneError('Transfer list contains duplicate ArrayBuffer');
+        if (detGet.call(b)) throw dataCloneError('Cannot transfer object of unsupported type.');
+        moves.push(b);
+      });
+      moves.forEach(function (b) { seen.set(b, b.slice(0)); });
+    }
     function clone(v) {
       if (typeof v === 'function' || typeof v === 'symbol') {
         var msg = (typeof v === 'function' ? String(v) : String(v.toString())) + ' could not be cloned.';
@@ -461,6 +477,10 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       if (typeof v !== 'object' || v === null) return v;
       if (seen.has(v)) return seen.get(v);
       var out;
+      if (__thaw_is_proxy(v)) throw dataCloneError((Array.isArray(v) ? '[object Array]' : '#<Object>') + ' could not be cloned.');
+      if (v instanceof WeakMap || v instanceof WeakSet || v instanceof WeakRef || v instanceof Promise) throw dataCloneError('#<' + v.constructor.name + '> could not be cloned.');
+      var boxed = v instanceof Number ? Number.prototype.valueOf : v instanceof String ? String.prototype.valueOf : v instanceof Boolean ? Boolean.prototype.valueOf : v instanceof BigInt ? BigInt.prototype.valueOf : null;
+      if (boxed) { out = Object(boxed.call(v)); seen.set(v, out); return out; }
       if (Array.isArray(v)) { out = []; seen.set(v, out); for (var i = 0; i < v.length; i++) out[i] = clone(v[i]); return out; }
       if (v instanceof Date) { out = new Date(v.getTime()); seen.set(v, out); return out; }
       if (v instanceof RegExp) { out = new RegExp(v.source, v.flags); seen.set(v, out); return out; }
@@ -483,7 +503,9 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       Object.keys(v).forEach(function (k) { out[k] = clone(v[k]); });
       return out;
     }
-    return clone(value);
+    var result = clone(value);
+    moves.forEach(function (b) { b.transfer(); });
+    return result;
   };
 
   // ----- util.types (the registry's node:util polyfill reads globalThis.__thaw_util_types) -----
@@ -524,7 +546,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     isGeneratorFunction: function (v) { return tag(v) === '[object GeneratorFunction]'; },
     isGeneratorObject: function (v) { return tag(v) === '[object Generator]'; },
     isExternal: function () { return false; },
-    isProxy: function () { return false; },
+    isProxy: function (v) { return __thaw_is_proxy(v); },
     isModuleNamespaceObject: function () { return false; },
     isKeyObject: function () { return false; },
     isCryptoKey: function () { return false; }
