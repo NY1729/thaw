@@ -394,6 +394,7 @@ impl Interp {
             }
             return Ok(Value::Null);
         };
+        self.record_match(s, &m);
         if global || sticky {
             put_hidden(
                 re_obj,
@@ -2061,9 +2062,12 @@ impl Interp {
                     it.regexp_of(&r).unwrap()
                 }
             };
+            let m = re.find(&s);
+            if let Some(m) = &m {
+                it.record_match(&s, m);
+            }
             Ok(Value::Number(
-                re.find(&s)
-                    .map_or(-1.0, |m| byte_to_unit(&s, m.start()) as f64),
+                m.map_or(-1.0, |m| byte_to_unit(&s, m.start()) as f64),
             ))
         });
         self.set_native(&sp, "split", |it, this, args| {
@@ -2093,6 +2097,7 @@ impl Interp {
                             q = st.max(q) + s[st.max(q)..].chars().next().map_or(1, char::len_utf8);
                             continue;
                         }
+                        it.record_match(&s, &m);
                         parts.push(Value::str(&s[p..st]));
                         for gr in m.groups().skip(1) {
                             parts.push(gr.map_or(Value::Undefined, |r| Value::str(&s[r])));
@@ -2142,6 +2147,7 @@ impl Interp {
         if let Value::Object(o) = &regexp {
             put_hidden(o, "prototype", Value::Object(rp.clone()));
             put_hidden(&rp, "constructor", regexp.clone());
+            self.install_legacy_statics(o);
         }
         g.declare("RegExp", regexp, true);
         self.set_native(&rp, "exec", |it, this, args| {
