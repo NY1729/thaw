@@ -46,7 +46,34 @@ pub(crate) const EXTRAS: &str = r#"
   def(SP, 'trimRight', SP.trimEnd);
   def(SP, 'toLocaleLowerCase', function () { return this.toLowerCase(); });
   def(SP, 'toLocaleUpperCase', function () { return this.toUpperCase(); });
-  def(SP, 'isWellFormed', function () { return true; });
+  function strThis(self, name) {
+    if (self == null) throw new TypeError('String.prototype.' + name + ' called on null or undefined');
+    return String(self);
+  }
+  def(SP, 'toWellFormed', function () {
+    'use strict';
+    var s = strThis(this, 'toWellFormed'), out = '';
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i), lead = c >= 0xD800 && c <= 0xDBFF, trail = c >= 0xDC00 && c <= 0xDFFF;
+      if (lead && i + 1 < s.length && s.charCodeAt(i + 1) >= 0xDC00 && s.charCodeAt(i + 1) <= 0xDFFF) out += s[i] + s[++i];
+      else out += lead || trail ? '�' : s[i];
+    }
+    return out;
+  });
+  def(SP, 'isWellFormed', function () { 'use strict'; var s = strThis(this, 'isWellFormed'); return s === SP.toWellFormed.call(s); });
+  Object.defineProperty(SP, 'length', { value: 0, writable: false, enumerable: false, configurable: false });
+  var HTML = [['anchor', 'a', 'name'], ['big', 'big'], ['blink', 'blink'], ['bold', 'b'], ['fixed', 'tt'], ['fontcolor', 'font', 'color'],
+    ['fontsize', 'font', 'size'], ['italics', 'i'], ['link', 'a', 'href'], ['small', 'small'], ['strike', 'strike'], ['sub', 'sub'], ['sup', 'sup']];
+  for (var hi = 0; hi < HTML.length; hi++) {
+    (function (name, tag, attr) {
+      def(SP, name, function (v) {
+        'use strict';
+        var open = '<' + tag;
+        if (attr) open += ' ' + attr + '="' + String(v).replace(/"/g, '&quot;') + '"';
+        return open + '>' + strThis(this, name) + '</' + tag + '>';
+      });
+    })(HTML[hi][0], HTML[hi][1], HTML[hi][2]);
+  }
   def(Object, 'hasOwn', function (o, k) { return Object.prototype.hasOwnProperty.call(o, k); });
   def(Object, 'groupBy', function (items, f) {
     var out = Object.create(null), i = 0;
