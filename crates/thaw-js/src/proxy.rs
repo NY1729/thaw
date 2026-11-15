@@ -339,6 +339,13 @@ impl Interp {
             Ok(Value::Object(out))
         });
         self.global.declare("Proxy", ctor, true);
+        // Brand check for structuredClone and util.types.isProxy (no JS-visible way to tell a proxy apart).
+        let is_proxy = self.native(|_, _, args| {
+            Ok(Value::Bool(
+                matches!(arg(args, 0), Value::Object(o) if Interp::proxy_data(&o).is_some()),
+            ))
+        });
+        self.global.declare("__thaw_is_proxy", is_proxy, true);
     }
 
     fn make_proxy(&mut self, target: &Value, handler: &Value) -> R<Value> {

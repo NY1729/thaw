@@ -1102,10 +1102,15 @@ impl Interp {
         let object = self.native(|it, _, args| {
             Ok(match arg(args, 0) {
                 v @ Value::Object(_) => v,
-                v @ (Value::Number(_) | Value::Str(_) | Value::Bool(_)) => {
+                v @ (Value::Number(_) | Value::Str(_) | Value::Bool(_) | Value::BigInt(_)) => {
                     let proto = match v {
                         Value::Number(_) => it.number_proto.clone(),
                         Value::Str(_) => it.string_proto.clone(),
+                        Value::BigInt(_) => it
+                            .rt
+                            .bigint_proto
+                            .clone()
+                            .unwrap_or_else(|| it.object_proto.clone()),
                         _ => it.bool_proto.clone(),
                     };
                     Value::Object(new_obj(Some(proto), Kind::Wrapper(v)))
@@ -1471,6 +1476,7 @@ impl Interp {
                     Kind::Typed(t) => t.ty.tag(),
                     Kind::Wrapper(Value::Number(_)) => "[object Number]",
                     Kind::Wrapper(Value::Str(_)) => "[object String]",
+                    Kind::Wrapper(Value::BigInt(_)) => "[object BigInt]",
                     Kind::Wrapper(_) => "[object Boolean]",
                     Kind::Plain if find_in_chain(o, "__time").is_some() => "[object Date]",
                     Kind::Plain if is_error_instance(it, o) => "[object Error]",
