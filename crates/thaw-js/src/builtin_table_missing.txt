@@ -1147,11 +1147,8 @@ process	@@kCapture
 process	@@shapeMode
 process	_debugEnd
 process	_debugProcess
-process	_events
-process	_eventsCount
 process	_exiting
 process	_fatalException
-process	_maxListeners
 process	_preload_modules
 process	_startProfilerIdleNotifier
 process	_stopProfilerIdleNotifier
