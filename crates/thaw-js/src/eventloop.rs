@@ -257,6 +257,12 @@ pub(crate) struct Rt {
     pub(crate) exit_emitted: bool,
     /// This realm started `process.stdin`, so its loop polls the stdin reader.
     pub(crate) stdin_started: bool,
+    /// `process._exiting`: set once the `exit` event starts.
+    pub(crate) exiting: bool,
+    /// The `setUncaughtExceptionCaptureCallback` function; while set, it takes uncaught exceptions.
+    pub(crate) capture_fn: Option<Value>,
+    /// `process.finalization` callbacks not yet run (see process_members.rs `run_finalizers`).
+    pub(crate) finalizers: Vec<crate::process_members::Finalizer>,
 }
 
 impl Rt {
@@ -703,7 +709,11 @@ impl Interp {
                         &[v.clone(), Value::str("uncaughtException")],
                     )?;
                 }
-                if self.listener_count("uncaughtException") > 0 {
+                // a capture callback takes the exception instead of the `uncaughtException` listeners
+                if let Some(capture) = self.rt.capture_fn.clone() {
+                    self.call(&capture, &Value::Undefined, &[v])?;
+                    Ok(())
+                } else if self.listener_count("uncaughtException") > 0 {
                     self.emit("uncaughtException", &[v, Value::str("uncaughtException")])?;
                     Ok(())
                 } else {
@@ -1425,7 +1435,9 @@ impl Interp {
                 Err(e) => return self.fatal(e),
             }
             let before = self.exit_code();
-            match self.emit("beforeExit", &[Value::Number(before as f64)]) {
+            let before_exit = crate::process_members::run_finalizers(self, "beforeExit")
+                .and_then(|()| self.emit("beforeExit", &[Value::Number(before as f64)]));
+            match before_exit {
                 Ok(_) => {}
                 Err(Ctl::Exit(c)) => {
                     code = Some(c);
@@ -1462,7 +1474,10 @@ impl Interp {
         if std::mem::replace(&mut self.rt.exit_emitted, true) {
             return Ok(());
         }
-        match self.emit("exit", &[Value::Number(code as f64)]) {
+        self.rt.exiting = true;
+        let exit = crate::process_members::run_finalizers(self, "exit")
+            .and_then(|()| self.emit("exit", &[Value::Number(code as f64)]));
+        match exit {
             Ok(_) | Err(Ctl::Exit(_)) => Ok(()),
             Err(e) => Err(e),
         }

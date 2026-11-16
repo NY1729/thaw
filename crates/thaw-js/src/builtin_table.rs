@@ -106,7 +106,7 @@ type Owners<'a> = HashMap<&'a str, Option<Obj>>;
 
 /// Set a function's own `length` and `name` as the first two properties, as V8 orders them, both
 /// non-writable, non-enumerable, configurable. Removes any previous ones.
-fn set_fn_head(f: &Obj, name: &str, length: f64) {
+pub(crate) fn set_fn_head(f: &Obj, name: &str, length: f64) {
     f.remove_prop("length");
     f.remove_prop("name");
     let mut props = f.raw_props.borrow_mut();
