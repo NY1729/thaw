@@ -75,10 +75,12 @@ pub(crate) const PRELUDE: &str = r#"
   def(AP, 'fill', function (v, s, e) {
     var n = this.length; s = s === undefined ? 0 : (s < 0 ? Math.max(n + s, 0) : Math.min(s, n));
     e = e === undefined ? n : (e < 0 ? Math.max(n + e, 0) : Math.min(e, n));
+    if (s < e && Array.isArray(this) && Object.isFrozen(this)) throw new TypeError("Cannot assign to read only property '" + s + "' of object '[object Array]'");
     for (var i = s; i < e; i++) this[i] = v; return this;
   });
   def(AP, 'sort', function (cmp) {
     var a = this, defined = [], undef = 0, holes = 0;
+    if (a.length > 1 && Array.isArray(a) && Object.isFrozen(a)) throw new TypeError("Cannot assign to read only property '0' of object '[object Array]'");
     for (var i = 0; i < a.length; i++) { if (!(i in a)) holes++; else if (a[i] === undefined) undef++; else defined.push(a[i]); }
     var f = cmp === undefined ? function (x, y) { x = String(x); y = String(y); return x < y ? -1 : x > y ? 1 : 0; } : cmp;
     var n = defined.length, src = defined, dst = new Array(n);
@@ -1307,10 +1309,21 @@ impl Interp {
                 if let Value::Object(o) = arg(args, 0) {
                     let proto = arg(args, 1);
                     if it.proxy_set_prototype_of(&o, &proto)?.is_none() {
-                        *o.proto.borrow_mut() = match proto {
+                        let next = match proto {
                             Value::Object(p) => Some(p),
                             _ => None,
                         };
+                        let same = match (&*o.proto.borrow(), &next) {
+                            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                            (None, None) => true,
+                            _ => false,
+                        };
+                        if !same && restricted(&o) {
+                            let label = v8_label(it, &o)?;
+                            return it
+                                .throw_error("TypeError", &format!("{label} is not extensible"));
+                        }
+                        *o.proto.borrow_mut() = next;
                     }
                 }
                 Ok(arg(args, 0))
@@ -1483,8 +1496,14 @@ impl Interp {
                 );
                 Ok(Value::Object(d))
             });
-            self.set_native(o, "freeze", |_, _, args| {
+            self.set_native(o, "freeze", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
+                    if matches!(&*o.kind.borrow(), Kind::Typed(t) if t.len > 0) {
+                        return it.throw_error(
+                            "TypeError",
+                            "Cannot freeze array buffer views with elements",
+                        );
+                    }
                     freeze_obj(&o);
                 }
                 Ok(arg(args, 0))
@@ -1770,14 +1789,22 @@ impl Interp {
             if o.len_ro.get() {
                 return it.throw_error("TypeError", RO_LENGTH);
             }
+            let n = match &*o.kind.borrow() {
+                Kind::Array(items) => Some(items.len()),
+                _ => None,
+            };
+            let Some(n) = n else {
+                return it.throw_error("TypeError", "push on non-array");
+            };
+            if restricted(o) {
+                splice_restricted(it, o, n, 0, args)?;
+                return Ok(Value::Number((n + args.len()) as f64));
+            }
             let mut kind = o.kind.borrow_mut();
             let Kind::Array(items) = &mut *kind else {
                 drop(kind);
                 return it.throw_error("TypeError", "push on non-array");
             };
-            if o.frozen.get() {
-                return Ok(Value::Number(items.len() as f64));
-            }
             items.extend(args.iter().cloned());
             Ok(Value::Number(items.len() as f64))
         });
@@ -1800,6 +1827,15 @@ impl Interp {
                     it.set(this, "length", Value::Number((n - 1) as f64))?;
                     return Ok(v);
                 }
+                let n = match &*o.kind.borrow() {
+                    Kind::Array(items) => Some(items.len()),
+                    _ => None,
+                };
+                if let Some(n) = n.filter(|_| restricted(o)) {
+                    let removed =
+                        splice_restricted(it, o, n.saturating_sub(1), usize::from(n > 0), &[])?;
+                    return Ok(removed.into_iter().next().unwrap_or(Value::Undefined));
+                }
                 if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
                     return Ok(items.pop().unwrap_or(Value::Undefined));
                 }
@@ -1811,6 +1847,14 @@ impl Interp {
                 // ponytail: throws before mutating; Node shifts the element first, then its length Set throws
                 if o.len_ro.get() {
                     return it.throw_error("TypeError", RO_LENGTH);
+                }
+                let n = match &*o.kind.borrow() {
+                    Kind::Array(items) => Some(items.len()),
+                    _ => None,
+                };
+                if let Some(n) = n.filter(|_| restricted(o)) {
+                    let removed = splice_restricted(it, o, 0, usize::from(n > 0), &[])?;
+                    return Ok(removed.into_iter().next().unwrap_or(Value::Undefined));
                 }
                 if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
                     return Ok(if items.is_empty() {
@@ -1827,6 +1871,10 @@ impl Interp {
                 if o.len_ro.get() {
                     return it.throw_error("TypeError", RO_LENGTH);
                 }
+                if restricted(o) && matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                    splice_restricted(it, o, 0, 0, args)?;
+                    return Ok(Value::Number(it.array_items(this).len() as f64));
+                }
                 if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
                     items.splice(0..0, args.iter().cloned());
                     return Ok(Value::Number(items.len() as f64));
@@ -1834,8 +1882,14 @@ impl Interp {
             }
             Ok(Value::Undefined)
         });
-        self.set_native(&ap, "reverse", |_, this, _| {
+        self.set_native(&ap, "reverse", |it, this, _| {
             if let Value::Object(o) = this {
+                // a frozen array refuses the first write (index 0) when there are two or more elements
+                if o.frozen.get()
+                    && matches!(&*o.kind.borrow(), Kind::Array(items) if items.len() >= 2)
+                {
+                    return arr_fail(it, ArrFail::Set(0));
+                }
                 if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
                     items.reverse();
                 }
@@ -1867,6 +1921,10 @@ impl Interp {
             } else {
                 (it.num(&args[1]).max(0.0) as usize).min(len - start)
             };
+            if restricted(o) {
+                let removed = splice_restricted(it, o, start, del, args.get(2..).unwrap_or(&[]))?;
+                return Ok(it.array(removed));
+            }
             let removed: Vec<Value> = match &mut *o.kind.borrow_mut() {
                 Kind::Array(items) => items
                     .splice(start..start + del, args.iter().skip(2).cloned())
@@ -3125,6 +3183,124 @@ fn same_value(a: &Value, b: &Value) -> bool {
 /// An array's `length`, or an element that is present (not a hole), is own.
 /// The TypeError an array mutator raises when it must set a read-only `length`.
 const RO_LENGTH: &str = "Cannot assign to read only property 'length' of object '[object Array]'";
+
+/// An array write V8 refuses on an integrity-restricted array (Node 22 texts; see the probe in
+/// `builtin_integrity_tests.rs`).
+enum ArrFail {
+    Add(usize),
+    Set(usize),
+    Del(usize),
+    Len,
+}
+
+fn arr_fail<T>(it: &mut Interp, f: ArrFail) -> R<T> {
+    let msg = match f {
+        ArrFail::Add(i) => format!("Cannot add property {i}, object is not extensible"),
+        ArrFail::Set(i) => {
+            format!("Cannot assign to read only property '{i}' of object '[object Array]'")
+        }
+        ArrFail::Del(i) => format!("Cannot delete property '{i}' of [object Array]"),
+        ArrFail::Len => RO_LENGTH.to_string(),
+    };
+    it.throw_error("TypeError", &msg)
+}
+
+/// Frozen, or non-extensible (sealed implies non-extensible): writes and deletes can be refused, so
+/// the mutators follow the spec's step order and can fail partway.
+fn restricted(o: &Obj) -> bool {
+    o.frozen.get() || o.ext.get() != 0
+}
+
+/// V8's receiver label in `X is not extensible`: arrays `[object Array]`, a function its source
+/// text, other objects `#<Ctor>` from the first `constructor` on the chain, else `[object Object]`.
+fn v8_label(it: &mut Interp, o: &Obj) -> R<String> {
+    if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+        return Ok("[object Array]".into());
+    }
+    if matches!(&*o.kind.borrow(), Kind::Closure { .. } | Kind::Native(_)) {
+        return Ok(it.to_str(&Value::Object(o.clone())).to_string());
+    }
+    if let Value::Object(f) = it.get(&Value::Object(o.clone()), "constructor")? {
+        if let Value::Str(n) = it.get(&Value::Object(f), "name")? {
+            if !n.is_empty() {
+                return Ok(format!("#<{n}>"));
+            }
+        }
+    }
+    Ok("[object Object]".into())
+}
+
+/// The spec steps of `Array.prototype.splice` over `w` (push, pop, shift and unshift are the same
+/// steps with other arguments). The first refused write stops the walk, so `w` keeps the partial
+/// state V8 leaves. On success returns the final length, and the caller truncates `w` to it.
+fn splice_steps(
+    w: &mut Vec<Value>,
+    frozen: bool,
+    sealed: bool,
+    s: usize,
+    d: usize,
+    ins: &[Value],
+) -> Result<usize, ArrFail> {
+    let set = |w: &mut Vec<Value>, i: usize, v: Value| -> Result<(), ArrFail> {
+        if i >= w.len() {
+            return Err(ArrFail::Add(i));
+        }
+        if frozen {
+            return Err(ArrFail::Set(i));
+        }
+        w[i] = v;
+        Ok(())
+    };
+    let n = w.len();
+    let c = ins.len();
+    if c < d {
+        for k in s..n - d {
+            let v = w[k + d].clone();
+            set(w, k + c, v)?;
+        }
+        if sealed {
+            return Err(ArrFail::Del(n - 1));
+        }
+    } else if c > d {
+        let mut k = n - d;
+        while k > s {
+            let v = w[k + d - 1].clone();
+            set(w, k + c - 1, v)?;
+            k -= 1;
+        }
+    }
+    for (i, v) in ins.iter().enumerate() {
+        set(w, s + i, v.clone())?;
+    }
+    if frozen {
+        return Err(ArrFail::Len);
+    }
+    Ok(n - d + c)
+}
+
+/// `Array.prototype.splice` on a restricted array (see `restricted`): removes `d` elements at
+/// `s`, inserts `ins`, and returns the removed elements. On a refused write the array keeps the
+/// partial state and the V8 TypeError is thrown.
+fn splice_restricted(it: &mut Interp, o: &Obj, s: usize, d: usize, ins: &[Value]) -> R<Vec<Value>> {
+    let frozen = o.frozen.get();
+    let sealed = frozen || o.ext.get() == 2;
+    let mut w = match &*o.kind.borrow() {
+        Kind::Array(items) => items.clone(),
+        _ => return Ok(Vec::new()),
+    };
+    let removed = w[s..s + d].to_vec();
+    let outcome = splice_steps(&mut w, frozen, sealed, s, d, ins);
+    if let Ok(newlen) = outcome {
+        w.truncate(newlen);
+    }
+    if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
+        *items = w;
+    }
+    match outcome {
+        Ok(_) => Ok(removed),
+        Err(f) => arr_fail(it, f),
+    }
+}
 
 fn own_array_elem(o: &Obj, key: &str) -> bool {
     match &*o.kind.borrow() {
