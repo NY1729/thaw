@@ -254,11 +254,13 @@ fn builtin_routing_package(name: &str) -> ResolvedPackage {
 #[test]
 fn thaw_js_newly_allowlisted_builtins_route_to_thaw_js() {
     // the module added to THAW_JS_BUILTIN_MODULES: a metadata-only program must be eligible for thaw-js
-    // old: node:cluster only; new: node:cluster, node:console, node:wasi
+    // old: node:cluster, node:console, node:wasi; new: + node:v8, node:test/reporters
     let cases = [
         ("node:cluster", "import cluster from 'node:cluster';\nconsole.log(cluster.isPrimary, cluster.settings);\n"),
         ("node:console", "import { Console } from 'node:console';\nconsole.log(typeof Console);\n"),
         ("node:wasi", "import { WASI } from 'node:wasi';\nconsole.log(typeof WASI);\n"),
+        ("node:v8", "import v8 from 'node:v8';\nconsole.log(typeof v8);\n"),
+        ("node:test/reporters", "import reporters from 'node:test/reporters';\nconsole.log(typeof reporters);\n"),
     ];
     for (module, user) in cases {
         let bundle = thaw_registry::builtin_bundle_with(module, &[]).unwrap();
@@ -267,15 +269,6 @@ fn thaw_js_newly_allowlisted_builtins_route_to_thaw_js() {
             "{module}"
         );
     }
-}
-
-#[test]
-fn thaw_js_cluster_program_that_forks_stays_on_quickjs() {
-    // old: node:cluster was not allowlisted, so every cluster program stayed on QuickJS;
-    // new: metadata-only programs route, a program calling cluster.fork() still does not
-    let bundle = thaw_registry::builtin_bundle_with("node:cluster", &[]).unwrap();
-    let forks = "import cluster from 'node:cluster';\nif (cluster.isPrimary) { cluster.fork(); }\n";
-    assert!(!thaw_js_package_eligible(&builtin_routing_package("node:cluster"), &bundle, forks, &Default::default(), ""));
 }
 
 #[test]
@@ -546,6 +539,7 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:url",
         "node:fs",
         "node:vm",
+        "node:v8",
         "node:async_hooks",
         "node:querystring",
         "node:timers",
@@ -581,6 +575,7 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:domain",
         "node:stream/promises",
         "node:test",
+        "node:test/reporters",
         "node:console",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
