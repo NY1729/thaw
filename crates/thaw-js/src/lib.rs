@@ -1356,6 +1356,7 @@ impl Interp {
         if host {
             it.install_sysio();
             it.install_process_stdin();
+            it.install_process_members_js();
             napi_bridge::install(&mut it);
             net::install(&mut it);
             worker::install(&mut it);
