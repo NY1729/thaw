@@ -378,6 +378,61 @@ fn events_builtin_supports_symbols_async_iteration_and_abort() {
 }
 
 #[test]
+fn events_builtin_reads_event_target_listeners_once_on_and_abort_listeners() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_events_event_target");
+    fs::write(dir.join("index.js"), r#"var events = require('node:events');
+module.exports = async function () {
+  var target = new EventTarget(), first = function () {}, second = function () {};
+  target.addEventListener('x', first);
+  target.addEventListener('x', second);
+  var listeners = events.getEventListeners(target, 'x');
+  var missing = events.getEventListeners(target, 'nope').length;
+  var pending = events.once(target, 'go');
+  target.dispatchEvent(new Event('go'));
+  var fired = await pending;
+  var iterator = events.on(target, 'tick');
+  target.dispatchEvent(new Event('tick'));
+  target.dispatchEvent(new Event('tick'));
+  var a = await iterator.next(), b = await iterator.next(), done = await iterator.return();
+  var controller = new AbortController(), abortError;
+  var aborting = events.once(target, 'never', { signal: controller.signal }).catch(function (error) { abortError = [error.name, error.code, error.cause]; });
+  controller.abort('reason');
+  await aborting;
+  var defaultMax = events.getMaxListeners(target);
+  events.setMaxListeners(5, target);
+  var live = new AbortController(), calls = 0;
+  var disposable = events.addAbortListener(live.signal, function () { calls++; });
+  disposable[Symbol.dispose || Symbol.for("nodejs.dispose")]();
+  live.abort();
+  var pre = new AbortController(), preCalls = 0;
+  pre.abort();
+  events.addAbortListener(pre.signal, function () { preCalls++; });
+  await null;
+  return [listeners.length, listeners[0] === first, listeners[1] === second, missing, fired.length, fired[0].type, fired[0] instanceof Event, a.value[0].type, b.value[0].type, done.done, defaultMax, events.getMaxListeners(target), abortError, calls, preCalls];
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_events_event_target_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseEventTarget = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseEventTarget").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"[2,true,true,0,1,"go",true,"tick","tick",true,10,5,["AbortError","ABORT_ERR","reason"],0,1]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn assert_builtin_reports_structured_failures_through_commonjs_require() {
     use std::ffi::{CStr, CString};
 
