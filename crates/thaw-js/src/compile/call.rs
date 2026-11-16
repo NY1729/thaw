@@ -144,14 +144,14 @@ impl Interp {
             {
                 match &*def.cstate.borrow() {
                     CState::Compiled(c) if !applies(self.compile_mode, c) => {
-                        Some((def.src.0, c.clone(), scope.clone()))
+                        Some((def.src.0, c.clone(), scope.clone(), def.clone()))
                     }
                     _ => None,
                 }
             }
             _ => None,
         };
-        let Some((src_run, c, scope)) = hit else {
+        let Some((src_run, c, scope, def)) = hit else {
             return self.call(f, this, args);
         };
         if self.too_deep() {
@@ -166,7 +166,10 @@ impl Interp {
         self.cstats.compiled_calls += 1;
         self.cstats.note_direct_call();
         let caller_run = std::mem::replace(&mut self.run_id, src_run);
+        let mark = self.call_frames.len();
+        self.call_frames.push((def, false));
         let r = c.run(self, f, scope, this, args);
+        self.call_frames.truncate(mark);
         self.run_id = caller_run;
         self.depth -= 1;
         r

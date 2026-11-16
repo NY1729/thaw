@@ -28,6 +28,7 @@ mod bigint;
 mod buffer;
 mod builtin_table;
 mod builtins;
+mod call_frames;
 mod child;
 mod classes;
 mod jsstr;
@@ -1146,6 +1147,8 @@ pub struct Interp {
     /// Process-unique id of this realm: tags the zlib jobs it starts so only it collects their results.
     pub(crate) realm_id: usize,
     depth: usize,
+    /// Closures being run, innermost last, with whether the call constructs (`call_frames.rs`).
+    pub(crate) call_frames: Vec<(Rc<FuncDef>, bool)>,
     /// Addresses of the arrays/objects whose native walk is in progress (`join`, `inspect`): meeting one
     /// again means the value contains itself. Shared guard for every native recursion over user objects.
     walking: Vec<usize>,
@@ -1301,6 +1304,7 @@ impl Interp {
             arg_pool: Vec::new(),
             realm_id: next_realm_id(),
             depth: 0,
+            call_frames: Vec::new(),
             walking: Vec::new(),
             circular_target: None,
             max_depth: MAX_DEPTH,
@@ -1330,6 +1334,7 @@ impl Interp {
             well_known: Vec::new(),
         };
         it.install_builtins();
+        it.install_call_frames();
         it.install_collections();
         it.install_eventloop();
         it.install_generators();
@@ -2010,10 +2015,14 @@ impl Interp {
         let ctor = self
             .lookup(&self.global.clone(), class)
             .unwrap_or(Value::Undefined);
-        // the error constructor must be callable even at the depth limit
+        // the error constructor must be callable even at the depth limit, and on a stack that is out of room:
+        // building it goes through `call_as`, whose stack guard would throw again and recurse until the real end.
+        // `construct` returns (never `?`), so both values are restored on every path; nested calls save and restore too.
         let depth = std::mem::replace(&mut self.depth, 0);
+        let stack_limit = std::mem::replace(&mut self.stack_limit, 0);
         let built = self.construct(&ctor, &[Value::str(message)]);
         self.depth = depth;
+        self.stack_limit = stack_limit;
         match built {
             Ok(err) => Err(Ctl::Throw(err)),
             Err(e) => Err(e),
@@ -2342,7 +2351,13 @@ impl Interp {
                 };
                 n(self, prim.as_ref().unwrap_or(this), args)
             }
-            Callee::Closure(def, scope) => self.call_closure(f, &def, &scope, this, args),
+            Callee::Closure(def, scope) => {
+                let mark = self.call_frames.len();
+                self.call_frames.push((def.clone(), constructing));
+                let r = self.call_closure(f, &def, &scope, this, args);
+                self.call_frames.truncate(mark);
+                r
+            }
             Callee::Class(n) => self.throw_error(
                 "TypeError",
                 &format!("Class constructor {n} cannot be invoked without 'new'"),
@@ -4883,6 +4898,8 @@ mod builtin_members_tests;
 #[cfg(test)]
 mod builtin_table_tests;
 #[cfg(test)]
+mod callsite_tests;
+#[cfg(test)]
 mod console_instance_tests;
 #[cfg(test)]
 mod dynamic_helper_contract_tests;
@@ -4946,6 +4963,8 @@ mod regexp_proto_tests;
 mod regexp_statics_tests;
 #[cfg(test)]
 mod sab_tests;
+#[cfg(test)]
+mod stack_overflow_tests;
 #[cfg(test)]
 mod str_cursor_tests;
 #[cfg(test)]

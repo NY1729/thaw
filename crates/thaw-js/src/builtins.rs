@@ -10,12 +10,71 @@ pub(crate) const PRELUDE: &str = r#"
   function def(o, name, f) {
     Object.defineProperty(o, name, { value: f, writable: true, enumerable: false, configurable: true });
   }
+  // V8 formats `stack` through Error.prepareStackTrace(error, callsites) when it is a function. This engine
+  // formats it when the error is made (V8 at first read). The hook is not re-entered from inside itself: an
+  // error made while it runs gets the default stack. Frames come from `__thaw_call_frames`, called by the
+  // Error function itself so that its own frame is the one skipped.
+  var formatting = false;
+  // The built-in default (ErrorPrepareStackTrace) is never run: without a user hook the stack is the header
+  // and one frame line, as before.
+  function usableHook() {
+    var hook = formatting || !E ? undefined : E.prepareStackTrace;
+    return hook === ErrorPrepareStackTrace ? undefined : hook;
+  }
+  var siteProto = {};
+  // WeakMap is defined by the later extras prelude, so the store is made on first use
+  var siteData = null;
+  function siteStore() { return siteData || (siteData = new WeakMap()); }
+  function formatStack(err, hook, frames) {
+    formatting = true;
+    try {
+      return hook(err, frames.map(function (fr) {
+        var c = Object.create(siteProto);
+        siteStore().set(c, fr);
+        return c;
+      }));
+    } finally {
+      formatting = false;
+    }
+  }
+  function siteFrame(c) {
+    var fr = siteStore().get(c);
+    return fr === undefined ? [null, false] : fr;
+  }
+  var siteMethods = {
+    getThis: function () { return undefined; },
+    getTypeName: function () { return null; },
+    getFunction: function () { return undefined; },
+    getFunctionName: function () { return siteFrame(this)[0]; },
+    getMethodName: function () { return null; },
+    getFileName: function () { return undefined; },
+    getLineNumber: function () { return null; },
+    getColumnNumber: function () { return null; },
+    getEnclosingLineNumber: function () { return null; },
+    getEnclosingColumnNumber: function () { return null; },
+    getPosition: function () { return 0; },
+    getPromiseIndex: function () { return null; },
+    getScriptNameOrSourceURL: function () { return undefined; },
+    getScriptHash: function () { return ''; },
+    getEvalOrigin: function () { return undefined; },
+    isToplevel: function () { return !siteFrame(this)[1]; },
+    isEval: function () { return false; },
+    isNative: function () { return false; },
+    isConstructor: function () { return siteFrame(this)[1]; },
+    isAsync: function () { return false; },
+    isPromiseAll: function () { return false; },
+    toString: function () { var n = siteFrame(this)[0]; return n === null ? '<anonymous>' : n; }
+  };
+  for (var k in siteMethods) def(siteProto, k, siteMethods[k]);
   function mkError(name, Parent) {
     var C = function (message, options) {
       if (!(this instanceof C)) return new C(message, options);
       if (message !== undefined) def(this, 'message', String(message));
       if (options !== null && typeof options === 'object' && 'cause' in options) def(this, 'cause', options.cause);
-      def(this, 'stack', name + (message !== undefined ? ': ' + String(message) : ''));
+      var hook = usableHook();
+      def(this, 'stack', typeof hook === 'function'
+        ? formatStack(this, hook, __thaw_call_frames(C, E.stackTraceLimit, undefined))
+        : name + (message !== undefined ? ': ' + String(message) : ''));
     };
     def(C, 'name', name);
     C.prototype = Parent ? Object.create(Parent.prototype) : {};
@@ -30,13 +89,17 @@ pub(crate) const PRELUDE: &str = r#"
     var m = String(this.message);
     return m ? this.name + ': ' + m : String(this.name);
   });
-  // string stack only (header + one frame line, no call frames yet); ctorOpt is accepted and ignored
+  // default stack is the header and one frame line; with Error.prepareStackTrace set, the frames above ctorOpt are cut
   function captureStackTrace(target, ctorOpt) {
     if (target === null || (typeof target !== 'object' && typeof target !== 'function')) throw new TypeError('invalid_argument');
     var name = target.name === undefined ? 'Error' : String(target.name);
     var msg = target.message === undefined ? '' : String(target.message);
     var header = name && msg ? name + ': ' + msg : (name || msg);
-    Object.defineProperty(target, 'stack', { value: header + '\n    at <anonymous>', writable: true, enumerable: false, configurable: true });
+    var hook = usableHook();
+    var value = typeof hook === 'function'
+      ? formatStack(target, hook, __thaw_call_frames(captureStackTrace, E.stackTraceLimit, ctorOpt))
+      : header + '\n    at <anonymous>';
+    Object.defineProperty(target, 'stack', { value: value, writable: true, enumerable: false, configurable: true });
   }
   def(E, 'captureStackTrace', captureStackTrace);
   // V8 hook (plain node 22 default: a named function); assignable by addon loaders (`bindings` saves and restores it);
