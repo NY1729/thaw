@@ -74,8 +74,12 @@ fn record_acceptance_metrics(name: &str, build_time: Duration, build_cpu_ms: u64
     // and hono+react+prisma+postgres, whose bundled Prisma client dominates)
     // legitimately take minutes on a slow, shared CI runner and can drift by
     // a few seconds run to run. Still catches a gross regression (a build
-    // that suddenly takes many minutes).
-    assert!(build_time < Duration::from_secs(420), "{metrics}");
+    // that suddenly takes many minutes). On a loaded runner the wall time of the
+    // identical build reached 455-482 s (usual 234-346 s, same executable size),
+    // so the wall ceiling is 900 s; `cpu_ms` (CPU time of the build, not counting
+    // time the runner spent waiting) is recorded alongside to take over as the
+    // regression gate once typical values are known.
+    assert!(build_time < Duration::from_secs(900), "{metrics}");
     assert!(executable_bytes < 100 * 1024 * 1024, "{metrics}");
 }
 
