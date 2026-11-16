@@ -44,6 +44,7 @@ mod hints;
 pub mod host;
 #[cfg(feature = "intl")]
 mod intl;
+mod ipc;
 mod json;
 mod napi_bridge;
 mod napi_eval;
@@ -1360,6 +1361,7 @@ impl Interp {
             it.install_sysio();
             it.install_process_stdin();
             it.install_process_members_js();
+            it.install_ipc_if_marked(std::env::var_os(ipc::MARKER).as_deref());
             napi_bridge::install(&mut it);
             net::install(&mut it);
             worker::install(&mut it);
@@ -4863,6 +4865,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 #[cfg(test)]
 mod arraybuffer_detach_tests;
 #[cfg(test)]
+mod buffer_members_tests;
+#[cfg(test)]
 mod builtin_members_tests;
 #[cfg(test)]
 mod builtin_table_tests;
@@ -4927,6 +4931,8 @@ mod regexp_proto_tests;
 #[cfg(test)]
 mod regexp_statics_tests;
 #[cfg(test)]
+mod sab_tests;
+#[cfg(test)]
 mod str_cursor_tests;
 #[cfg(test)]
 mod str_unit_tests;
@@ -4941,6 +4947,8 @@ mod timers_shape_tests;
 
 #[cfg(test)]
 mod coroutine_teardown_tests;
+#[cfg(test)]
+mod ipc_tests;
 #[cfg(test)]
 mod vm_realm_tests;
 #[cfg(test)]
@@ -5095,6 +5103,7 @@ impl Interp {
 
 impl Drop for Interp {
     fn drop(&mut self) {
+        ipc::forget_realm(self.realm_id);
         self.teardown();
     }
 }

@@ -229,3 +229,17 @@ fn file_worker_runs_a_commonjs_file_with_relative_require() {
     assert_eq!(run_main(&src), "from-helper");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn worker_data_shares_a_shared_array_buffer() {
+    // node-compat case "worker data shares a SharedArrayBuffer": the worker's store is seen by the parent's view
+    let src = "const wt = __thaw_worker_threads_exports;
+      const shared = new SharedArrayBuffer(8); const view = new Int32Array(shared);
+      (async () => {
+        const worker = new wt.Worker(`const { parentPort, workerData } = require('node:worker_threads'); const view = new Int32Array(workerData); Atomics.store(view, 0, 42); parentPort.postMessage(workerData instanceof SharedArrayBuffer);`, { eval: true, workerData: shared });
+        const kind = await new Promise((resolve) => { worker.once('message', (value) => resolve(value)); });
+        await worker.terminate();
+        console.log(kind, view[0]);
+      })().catch((e) => console.log('failed ' + e));";
+    assert_eq!(run_main(src), "true 42");
+}

@@ -577,22 +577,44 @@ pub(crate) fn start_stdin_fd(fd: i32) {
 }
 
 /// The stdin events since the last poll, as a JSON array: `[{"type":"data","value":"<hex>"}, {"type":"end"}]`.
-/// The reader is joined and forgotten once it reports the end.
 pub(crate) fn poll_stdin() -> String {
+    let items: Vec<String> = take_stdin_events()
+        .into_iter()
+        .map(|event| match event {
+            StdinEvent::Data(value) => format!(r#"{{"type":"data","value":"{}"}}"#, hex(&value)),
+            StdinEvent::End => r#"{"type":"end"}"#.to_string(),
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// The bytes read since the last call, and whether the stream has ended. The IPC channel (ipc.rs) reads through this.
+pub(crate) fn drain_stdin() -> (Vec<u8>, bool) {
+    let mut bytes = Vec::new();
+    let mut ended = false;
+    for event in take_stdin_events() {
+        match event {
+            StdinEvent::Data(value) => bytes.extend_from_slice(&value),
+            StdinEvent::End => ended = true,
+        }
+    }
+    (bytes, ended)
+}
+
+/// Drains the reader's queue. The reader is joined and forgotten once it reports the end (the last event is `End`).
+fn take_stdin_events() -> Vec<StdinEvent> {
     HOST_STDIN.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(stdin) = slot.as_mut() else {
-            return "[]".into();
+            return Vec::new();
         };
-        let mut items = Vec::new();
+        let mut events = Vec::new();
         let mut finished = false;
         loop {
             match stdin.events.try_recv() {
-                Ok(StdinEvent::Data(value)) => {
-                    items.push(format!(r#"{{"type":"data","value":"{}"}}"#, hex(&value)));
-                }
+                Ok(data @ StdinEvent::Data(_)) => events.push(data),
                 Ok(StdinEvent::End) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    items.push(r#"{"type":"end"}"#.to_string());
+                    events.push(StdinEvent::End);
                     finished = true;
                     break;
                 }
@@ -605,7 +627,7 @@ pub(crate) fn poll_stdin() -> String {
             }
             *slot = None;
         }
-        format!("[{}]", items.join(","))
+        events
     })
 }
 

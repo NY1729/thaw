@@ -1,7 +1,8 @@
 // Worker message wire (ported from thaw-quickjs `platform_globals/workers/structured_clone.js`). A value becomes a
 // JSON string `{root, nodes}` that crosses worker threads as plain text; `__thaw_worker_decode` rebuilds it.
-// Differences from the QuickJS wire: no uncloneable marks, no blob snapshots, no SharedArrayBuffer (DataCloneError),
-// and an `Error` node so error events keep name, message, stack and cause.
+// Differences from the QuickJS wire: no uncloneable marks, no blob snapshots, and an `Error` node so error events
+// keep name, message, stack and cause. A SharedArrayBuffer is an `SAB` node holding an id into the shared-block table
+// (worker.rs): the decoding Interp gets the same memory, so writes are seen by every thread holding it.
 const cloneError = message => new DOMException(message, 'DataCloneError');
 globalThis.__thaw_worker_encode = value => {
   const seen = new Map(), nodes = [];
@@ -13,7 +14,6 @@ globalThis.__thaw_worker_encode = value => {
     if (input === null || typeof input !== 'object') return { v: input };
     if (seen.has(input)) return { r: seen.get(input) };
     if (input instanceof WeakMap || input instanceof WeakSet || input instanceof Promise) throw cloneError('value cannot be cloned');
-    if (typeof SharedArrayBuffer === 'function' && input instanceof SharedArrayBuffer) throw cloneError('SharedArrayBuffer is not supported');
     if (typeof MessagePort === 'function' && input instanceof MessagePort) throw cloneError('MessagePort requires a transfer list');
     const id = nodes.length; seen.set(input, id); nodes.push(null);
     let node;
@@ -28,6 +28,7 @@ globalThis.__thaw_worker_encode = value => {
     else if (input instanceof RegExp) node = { t: 'RegExp', s: input.source, f: input.flags };
     else if (input instanceof Map) node = { t: 'Map', v: Array.from(input, ([key, item]) => [encode(key), encode(item)]) };
     else if (input instanceof Set) node = { t: 'Set', v: Array.from(input, item => encode(item)) };
+    else if (input instanceof SharedArrayBuffer) node = { t: 'SAB', id: __thaw_sab_export(input) };
     else if (input instanceof ArrayBuffer) node = { t: 'ArrayBuffer', v: Array.from(new Uint8Array(input), byte => byte.toString(16).padStart(2, '0')).join('') };
     else if (ArrayBuffer.isView(input)) node = { t: input instanceof DataView ? 'DataView' : 'TypedArray', c: input.constructor.name, b: encode(input.buffer), o: input.byteOffset, l: input instanceof DataView ? input.byteLength : input.length };
     else if (input instanceof Error) {
@@ -60,6 +61,7 @@ globalThis.__thaw_worker_decode = source => {
     else if (node.t === 'Map') values[id] = new Map();
     else if (node.t === 'Set') values[id] = new Set();
     else if (node.t === 'Object') values[id] = {};
+    else if (node.t === 'SAB') values[id] = __thaw_sab_import(node.id);
     else if (node.t === 'ArrayBuffer') {
       const bytes = new Uint8Array(node.v.length / 2);
       for (let index = 0; index < bytes.length; index++) bytes[index] = parseInt(node.v.slice(index * 2, index * 2 + 2), 16);

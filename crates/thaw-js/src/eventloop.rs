@@ -1392,6 +1392,7 @@ impl Interp {
             || crate::zlib::active_for(self.realm_id)
             || crate::worker::active(self)
             || self.stdin_live()
+            || self.ipc_live()
             || crate::napi_bridge::pending()
     }
 
@@ -1451,6 +1452,7 @@ impl Interp {
                 }
             }
         }
+        self.poll_ipc()?;
         Ok(())
     }
 
@@ -1501,6 +1503,7 @@ impl Interp {
                     || crate::zlib::active_for(self.realm_id)
                     || crate::worker::active(self)
                     || self.stdin_live()
+                    || self.ipc_live()
                     || self.interrupt.is_some()
                     || crate::host::native_servers_live()
                 {
@@ -1516,6 +1519,7 @@ impl Interp {
                 || crate::zlib::active_for(self.realm_id)
                 || crate::worker::active(self)
                 || self.stdin_live()
+                || self.ipc_live()
                 || self.interrupt.is_some()
                 || crate::host::native_servers_live()
             {
