@@ -296,6 +296,7 @@ pub(crate) const EXTRAS: &str = r#"
     var from = start === undefined ? 0 : start < 0 ? Math.max(len + start, 0) : Math.min(start, len);
     var fin = end === undefined ? len : end < 0 ? Math.max(len + end, 0) : Math.min(end, len);
     var count = Math.min(fin - from, len - to), copy = this.slice(from, from + count);
+    if (count > 0 && Array.isArray(this) && Object.isFrozen(this)) throw new TypeError("Cannot assign to read only property '" + (from < to && to < from + count ? to + count - 1 : to) + "' of object '[object Array]'");
     for (var i = 0; i < count; i++) this[to + i] = copy[i];
     return this;
   });
