@@ -670,6 +670,27 @@ fn a_callback_with_a_class_instance_param_registers_on_the_graph_route() {
     assert!(!ir.contains("call i64 @thaw_tjs_register_callback("), "{ir}");
 }
 
+/// The shape the bridge now emits for a same-module class callback param
+/// (`JsValue`, not the old `Json` fallback): same graph route, live handles.
+#[test]
+fn a_callback_with_a_jsvalue_class_param_registers_on_the_graph_route() {
+    let sym = thaw_js_class_symbol_hex("$new$PerformanceObserver$arity1");
+    let source = format!(
+        "declare function __thaw_typed_tjs_{sym}(callback: (list: JsValue, observer: JsValue) => void): JsValue;
+         function main(): void {{ const o = __thaw_typed_tjs_{sym}((list, observer) => {{ console.log(\"obs\"); }}); }}"
+    );
+    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_class_source(&source).unwrap();
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(
+        ir.contains("call { i64, ptr } @thaw_tjs_register_native_callback_graph("),
+        "{ir}"
+    );
+    assert!(
+        !ir.contains("call i64 @thaw_tjs_register_callback("),
+        "{ir}"
+    );
+}
+
 /// Plain callback params (Json, number) keep the JSON-text route: only class instances move to the graph.
 #[test]
 fn plain_callback_params_keep_the_text_route_for_class_calls() {
