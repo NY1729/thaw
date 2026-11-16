@@ -17,6 +17,13 @@ name: diag-routed-cases
 #   gh workflow run diag-routed-cases.yml -f cases="node test dot reporter terminates output|nd7 perf_hooks mark detail and PerformanceObserver export"
 #   gh workflow run diag-routed-cases.yml -f ky_bisect=true -f cases=""
 #   gh run download <run-id> -n diag-routed-cases ; gh run download <run-id> -n diag-ky-https-bisect
+#
+# Step 0 of plan-q9-thawjs-fetch.md (5 fetch cases with the native-server fetch blocker lifted in this
+# checkout only; per case: build/run exit, manifest.txt, quickjs-symbols.txt, run.stdout/stderr):
+#   gh workflow run diag-routed-cases.yml -f ref=main -f lift_fetch_blocker=true -f ky_bisect=false \
+#     -f cases="fetch Response from a local http server|unannotated await fetch is a Response|r2c for await over http request body|r2c http chunked response framing headers|r2c Response static members spread of Headers and res.end without arguments"
+#   Read: the job summary ("quickjs symbols" per case) and the artifact diag-routed-cases, out/<slug>/run.stdout.
+#   Hang = run exit 124. Compare run.stdout with tests/node-compat.json expectations.
 
 on:
   workflow_dispatch:
@@ -29,6 +36,10 @@ on:
         description: node-compat case names from tests/node-compat.json, separated by "|" (empty skips the job)
         type: string
         default: "node test dot reporter terminates output|nd7 perf_hooks mark detail and PerformanceObserver export"
+      lift_fetch_blocker:
+        description: "Step 0 of plan-q9-thawjs-fetch.md (routed-cases job only): delete the native createServer + fetch routing blocker in the checked-out tree before building. Diagnostic only, never committed."
+        type: boolean
+        default: false
       ky_bisect:
         description: run the ky/https/brotli bisect job
         type: boolean
@@ -111,6 +122,19 @@ jobs:
           echo "$prefix/bin" >> "$GITHUB_PATH"
           echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Lift the native-server fetch routing blocker (diagnostic, this checkout only)
+        if: inputs.lift_fetch_blocker
+        run: |
+          python3 -I - <<'PY'
+          import os, pathlib
+          p = pathlib.Path(os.environ["GITHUB_WORKSPACE"], "crates/thaw-cli/src/registry_integration/thaw_js_routing.rs")
+          s = p.read_text(encoding="utf-8")
+          call = "if let Some(why) = thaw_js_native_server_with_http_client_blocker(&pkg.name, user_source) {"
+          assert s.count(call) == 1, f"blocker call found {s.count(call)} times"
+          s = s.replace(call, "if let Some(why) = thaw_js_native_server_with_http_client_blocker(&pkg.name, user_source).filter(|_| false) {")
+          p.write_text(s, encoding="utf-8")
+          print("blocker call disabled in this checkout")
+          PY
       - name: Build thaw CLI (release)
         run: cargo build --release -p thaw-cli
       - name: Extract the named cases from tests/node-compat.json
@@ -157,6 +181,9 @@ jobs:
             echo "$?" > "$case_out/build.exit"
             if [ -x "$bin_dir/$slug" ]; then
               target/release/thaw inspect "$bin_dir/$slug" > "$case_out/inspect.txt" 2>&1
+              # Step 0 evidence: manifest line and QuickJS symbol count of the linked binary.
+              strings "$bin_dir/$slug" | grep THAW_ARTIFACT_V1 | head -3 > "$case_out/manifest.txt"
+              nm "$bin_dir/$slug" 2>/dev/null | grep -c thaw_quickjs > "$case_out/quickjs-symbols.txt" || true
               # Run the binary: stdout and stderr are kept separately, exit status recorded.
               timeout 120 "$bin_dir/$slug" < /dev/null > "$case_out/run.stdout" 2> "$case_out/run.stderr"
               echo "$?" > "$case_out/run.exit"
@@ -173,6 +200,7 @@ jobs:
             for c in "$D"/out/*/; do
               slug=$(basename "$c")
               echo "- $slug: $(cat "$c/name.txt" 2>/dev/null) | build exit $(cat "$c/build.exit" 2>/dev/null || echo n/a) | run exit $(cat "$c/run.exit" 2>/dev/null || echo n/a)"
+              echo "    quickjs symbols: $(cat "$c/quickjs-symbols.txt" 2>/dev/null || echo n/a)"
               grep -E '^(quickjs|quickjs-reason|thaw-js-blocker)' "$c/inspect.txt" 2>/dev/null | cut -c1-300 | sed 's/^/    /'
             done
           } >> "$GITHUB_STEP_SUMMARY" || true

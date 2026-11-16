@@ -1356,6 +1356,7 @@ impl Interp {
         if host {
             it.install_sysio();
             it.install_process_stdin();
+            it.install_process_members_js();
             napi_bridge::install(&mut it);
             net::install(&mut it);
             worker::install(&mut it);
@@ -4864,6 +4865,8 @@ mod builtin_table_tests;
 mod console_instance_tests;
 #[cfg(test)]
 mod dynamic_helper_contract_tests;
+#[cfg(test)]
+mod fetch_tests;
 #[cfg(all(test, unix))]
 mod fs_tests;
 #[cfg(test)]
@@ -4874,6 +4877,8 @@ mod handle_json_argument_tests;
 mod handle_zero_tests;
 #[cfg(test)]
 mod job_barrier_tests;
+#[cfg(test)]
+mod leak_audit_tests;
 #[cfg(test)]
 mod names_tests;
 #[cfg(test)]
