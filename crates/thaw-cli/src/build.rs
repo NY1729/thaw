@@ -1157,13 +1157,19 @@ fn build_with_native_mode_routed(
     // references `Intl`; its `thaw_intl_*` exports then also serve the native locale calls, so the
     // standalone thaw-intl archive would define them twice.
     let thaw_js_intl = compiler.uses_thaw_js() && runtime_features.contains("intl");
+    // `wasm` programs (WebAssembly, node:wasi) get thaw-js's `wasi` feature, which implies `wasm`.
+    let thaw_js_wasm = compiler.uses_thaw_js() && runtime_features.contains("wasm");
+    let thaw_js_features: Vec<&str> = [(thaw_js_intl, "intl"), (thaw_js_wasm, "wasi")]
+        .into_iter()
+        .filter_map(|(on, feature)| on.then_some(feature))
+        .collect();
     let thaw_js_lib = compiler
         .uses_thaw_js()
         .then(|| {
-            if thaw_js_intl {
-                build_staticlib_with_features("thaw-js", &["intl"])
-            } else {
+            if thaw_js_features.is_empty() {
                 build_staticlib("thaw-js")
+            } else {
+                build_staticlib_with_features("thaw-js", &thaw_js_features)
             }
         })
         .transpose()?;
