@@ -4922,3 +4922,5 @@ mod tests;
 mod coroutine_teardown_tests;
 #[cfg(test)]
 mod vm_realm_tests;
+#[cfg(test)]
+mod web_class_tag_tests;
