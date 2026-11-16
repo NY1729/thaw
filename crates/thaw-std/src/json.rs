@@ -1897,50 +1897,16 @@ fn native_error_for_marker(value: &Value) -> Option<*const c_char> {
     native_error_for_lease(&lease)
 }
 
-thread_local! {
-    /// One reference per handle marker a stored Error prop holds, keyed by the Error it belongs to.
-    static ERROR_MARKER_RETAINS: RefCell<Vec<(usize, u64)>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Releases the marker references of Errors the arena reclaimed (every one when not tracing).
-fn reset_error_marker_retains(tracing: bool) {
-    let dead = ERROR_MARKER_RETAINS.with(|retains| {
-        let mut retains = retains.borrow_mut();
-        let (dead, live): (Vec<_>, Vec<_>) = std::mem::take(&mut *retains)
-            .into_iter()
-            .partition(|(error, _)| !tracing || thaw_arena::was_reclaimed(*error));
-        *retains = live;
-        dead
-    });
-    if dead.is_empty() {
-        return;
-    }
-    // Release callbacks may report a cleanup-only Host error; keep the error that preceded reset.
-    let prior = HOST_ERROR.with(|slot| slot.borrow_mut().take());
-    if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
-        for (_, handle) in dead {
-            without_typed_decode_scope(|| (ops.release)(handle));
-        }
-    }
-    HOST_ERROR.with(|slot| *slot.borrow_mut() = prior);
-}
-
 fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
     let Ok(key) = CString::new(key) else {
         return;
     };
-    // A live host object (a lease, or a handle marker from the Json coercion of a native object)
-    // is stored as its handle marker; the error takes one reference to it until it is reclaimed.
-    let marker = match json_handle_ref(value) {
-        Some(handle) if engine_is_thaw_js() => {
-            let retained = HOST_OPERATIONS
-                .with(|slot| slot.get())
-                .is_some_and(|ops| without_typed_decode_scope(|| (ops.retain)(handle)) != 0);
-            retained.then(|| {
-                thaw_arena::register_reset_hook(reset_error_marker_retains);
-                ERROR_MARKER_RETAINS
-                    .with(|retains| retains.borrow_mut().push((error as usize, handle)));
-                format!(r#"{{"__thaw_tjs_handle__":{handle}}}"#)
+    // A live host object is stored as its handle marker; the error takes one reference to it.
+    let marker = match value {
+        Value::Host(lease) if engine_is_thaw_js() && lease.handle != 0 => {
+            HOST_OPERATIONS.with(|slot| slot.get()).and_then(|ops| {
+                (without_typed_decode_scope(|| (ops.retain)(lease.handle)) != 0)
+                    .then(|| format!(r#"{{"__thaw_tjs_handle__":{}}}"#, lease.handle))
             })
         }
         _ => None,
@@ -12116,90 +12082,6 @@ mod tests {
                 host_get_property(&record, b"plain"),
                 Value::String(text) if text.as_str() == "x"
             ));
-            thaw_json_set_js_engine(0);
-        })
-        .join()
-        .unwrap();
-    }
-
-    thread_local! {
-        static LIVE_REFS: RefCell<HashMap<u64, u32>> = RefCell::new(HashMap::new());
-        static RELEASE_CALLS: Cell<u64> = const { Cell::new(0) };
-    }
-
-    // A live thaw-js object has a count of its owners; retain fails once every owner is gone.
-    extern "C" fn refcount_retain(handle: u64) -> u8 {
-        LIVE_REFS.with(|refs| match refs.borrow_mut().get_mut(&handle) {
-            Some(count) if *count > 0 => {
-                *count += 1;
-                1
-            }
-            _ => 0,
-        })
-    }
-
-    extern "C" fn refcount_release(handle: u64) -> u8 {
-        RELEASE_CALLS.with(|calls| calls.set(calls.get() + 1));
-        LIVE_REFS.with(|refs| {
-            if let Some(count) = refs.borrow_mut().get_mut(&handle) {
-                *count = count.saturating_sub(1);
-            }
-        });
-        1
-    }
-
-    extern "C" fn refcount_query(handle: u64, operation: u8) -> HostTextResult {
-        let text = match (handle, operation) {
-            (34, 0) => "object",
-            _ => "",
-        };
-        HostTextResult {
-            value: thaw_arena::owned_string(text),
-            error: std::ptr::null(),
-        }
-    }
-
-    // `Error("m", { cause: { k: 1 } })`: the cause is an unbranded handle marker whose only owner is
-    // the literal. The error keeps the object alive, so the stored marker still reads back live.
-    #[test]
-    fn a_handle_marker_cause_keeps_its_object_alive_until_the_error_is_reclaimed() {
-        std::thread::spawn(|| {
-            unsafe extern "C" {
-                fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char;
-            }
-            HOST_OPERATIONS.with(|slot| {
-                slot.set(Some(HostOperations {
-                    retain: refcount_retain,
-                    release: refcount_release,
-                    get: pr2_test_get,
-                    query: refcount_query,
-                    date_set: unused_typed_scope_date,
-                    set: unused_typed_scope_set,
-                    predicate: unused_typed_scope_predicate,
-                    enumerate: unused_typed_scope_text,
-                }))
-            });
-            thaw_json_set_js_engine(1);
-            LIVE_REFS.with(|refs| refs.borrow_mut().insert(34, 1));
-            let error = unsafe { thaw_error_frame(c"Error".as_ptr(), c"outer".as_ptr()) };
-            let mut fields = indexmap::IndexMap::new();
-            fields.insert(b"__thaw_tjs_handle__".to_vec(), number_value(34.0));
-            let marker = Value::shared_object(fields);
-
-            set_error_prop(error, b"cause", &marker);
-            // The literal's own owner ends with the expression.
-            refcount_release(34);
-            let read = error_prop_value(error, b"cause");
-            assert!(
-                matches!(&read, Value::Host(lease) if lease.handle == 34),
-                "marker read back raw"
-            );
-            drop(read);
-
-            let released = RELEASE_CALLS.with(Cell::get);
-            reset_error_marker_retains(false);
-            assert_eq!(RELEASE_CALLS.with(Cell::get), released + 1);
-            assert_eq!(LIVE_REFS.with(|refs| refs.borrow()[&34]), 0);
             thaw_json_set_js_engine(0);
         })
         .join()
