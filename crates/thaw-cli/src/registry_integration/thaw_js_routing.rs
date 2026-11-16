@@ -157,6 +157,19 @@ fn source_may_call_realm_fetch(sources: &[&str]) -> bool {
 /// The realm `fetch` transport's bundles, linked by `force_realm_fetch_bundles`.
 const REALM_FETCH_TRANSPORT_BUNDLES: [&str; 2] = ["node:http", "node:https"];
 
+/// The realm `fetch` transport bundles the shim must load, imported or not (empty when the program may not call
+/// `fetch`). Unlike `force_realm_fetch_bundles`, an imported package stays in this set without losing its declarations.
+fn realm_fetch_transport_bundles(sources: &[&str]) -> std::collections::HashSet<String> {
+    if source_may_call_realm_fetch(sources) {
+        REALM_FETCH_TRANSPORT_BUNDLES
+            .iter()
+            .map(|name| name.to_string())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    }
+}
+
 /// Adds the realm `fetch` transport bundles to the package lists as if imported, at runtime only. A package
 /// the program already imports keeps its typed declarations; one added here goes into `forced`, so the
 /// declaration passes emit no names for it (its bundle still loads lazily on the first fetch).
@@ -948,6 +961,31 @@ fn realm_fetch_bundles_are_forced_runtime_only_unless_the_program_imports_them()
     force_realm_fetch_bundles(&mut runtime, &mut resolved, &mut forced);
     assert_eq!(forced, set(&["node:https"]));
     assert_eq!(resolved.iter().filter(|p| *p == "node:http").count(), 1);
+}
+
+#[cfg(test)]
+#[test]
+fn realm_fetch_transport_bundles_load_even_when_the_program_imports_node_http() {
+    // a program that calls the realm fetch loads both transport bundles, imported or not
+    let fetch = realm_fetch_transport_bundles(&["fetch('http://127.0.0.1/');"]);
+    assert_eq!(
+        fetch,
+        ["node:http", "node:https"]
+            .map(String::from)
+            .into_iter()
+            .collect()
+    );
+    assert!(realm_fetch_transport_bundles(&["const x = 1;"]).is_empty());
+    // an imported node:http keeps its declarations (not forced) yet still loads through the fetch set
+    let mut runtime = ["node:fs", "node:http"]
+        .map(String::from)
+        .into_iter()
+        .collect();
+    let mut resolved = vec!["node:fs".to_string(), "node:http".to_string()];
+    let mut forced = std::collections::HashSet::new();
+    force_realm_fetch_bundles(&mut runtime, &mut resolved, &mut forced);
+    assert!(!forced.contains("node:http"));
+    assert!(fetch.contains("node:http"));
 }
 
 #[cfg(test)]

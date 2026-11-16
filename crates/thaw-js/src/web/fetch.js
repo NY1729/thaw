@@ -1,4 +1,5 @@
 const encodeUtf8 = s => new TextEncoder().encode(s);
+const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Object.defineProperty({}, 'constructor', { value: fn, writable: true, configurable: true }), writable: true });
   const thawImmutableResponseHeaders = new WeakSet();
   if (typeof globalThis.Headers !== 'function') {
     const headerLists = new WeakMap();
@@ -83,6 +84,7 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
     for (const name of ['append', 'delete', 'get', 'has', 'set', 'getSetCookie', 'keys', 'values', 'entries', 'forEach']) {
       const descriptor = Object.getOwnPropertyDescriptor(Headers.prototype, name); descriptor.enumerable = true; Object.defineProperty(Headers.prototype, name, descriptor);
     }
+    for (const name of ['entries', 'keys', 'values', 'forEach']) withPrototype(Headers.prototype[name]);
     globalThis.Headers = Headers;
   }
   if (typeof globalThis.ReadableStream !== 'function') {
@@ -819,9 +821,10 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
     globalThis.ReadableStreamBYOBReader = ReadableStreamBYOBReader;
     globalThis.ReadableStreamBYOBRequest = ReadableStreamBYOBRequest;
     class WritableStreamDefaultController {
-      constructor(stream) { this._stream = stream; this._abortController = new AbortController(); this.signal = this._abortController.signal; }
+      constructor(stream) { this._stream = stream; this._abortController = new AbortController(); }
       error(error) { if (this._stream) this._stream._errorStream(error); }
     }
+    Object.defineProperties(WritableStreamDefaultController.prototype, Object.getOwnPropertyDescriptors({ get signal() { return this._abortController.signal; } }));
     class WritableStreamDefaultWriter {
       constructor(stream) {
         if (stream.locked) throw webInvalidState('WritableStream is locked');
@@ -957,6 +960,7 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
       error(reason) { this._readableController.error(reason); if (this._writable) this._writable._errorStream(reason); }
       terminate() { const error = webInvalidState('TransformStream has been terminated'); this._readableController._stream._rejectCapacity(error); this._readableController.close(); if (this._writable) this._writable._errorStream(error); }
     }
+    const streamSides = Object.getOwnPropertyDescriptors({ get readable() { return this._readable; }, get writable() { return this._writable; } });
     globalThis.TransformStream = class TransformStream {
       constructor(transformer = {}, writableStrategy = {}, readableStrategy = {}) {
         const writableQueueStrategy = webStrategy(writableStrategy);
@@ -971,9 +975,9 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
         let readableController, writable;
         if (readableQueueStrategy.highWaterMark === undefined) readableQueueStrategy.highWaterMark = 0;
         const callCancel = reason => cancel === undefined ? undefined : webApply(cancel, transformer, [reason]);
-        this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(reason) { let outcome; try { outcome = callCancel(reason); } catch (error) { outcome = Promise.reject(error); } return Promise.resolve(outcome).then(() => { if (writable) writable._errorStream(reason); }, error => { if (writable) writable._errorStream(error); throw error; }); } }, readableQueueStrategy);
+        this._readable = new ReadableStream({ start(value) { readableController = value; }, cancel(reason) { let outcome; try { outcome = callCancel(reason); } catch (error) { outcome = Promise.reject(error); } return Promise.resolve(outcome).then(() => { if (writable) writable._errorStream(reason); }, error => { if (writable) writable._errorStream(error); throw error; }); } }, readableQueueStrategy);
         const controller = new TransformStreamDefaultController(readableController), fail = error => { controller.error(error); throw error; };
-        writable = this.writable = new WritableStream({
+        writable = this._writable = new WritableStream({
           start(writableController) { controller._writable = writable = writableController._stream; const result = start === undefined ? undefined : webApply(start, transformer, [controller]); return result !== null && (typeof result === 'object' || typeof result === 'function') && typeof result.then === 'function' ? Promise.resolve(result).catch(error => { controller.error(error); throw error; }) : result; },
           write(chunk) { return readableController._stream._waitForCapacity().then(() => transform === undefined ? controller.enqueue(chunk) : webApply(transform, transformer, [chunk, controller])).catch(fail); },
           close() { return Promise.resolve().then(() => flush === undefined ? undefined : webApply(flush, transformer, [controller])).then(() => readableController.close()).catch(fail); },
@@ -982,6 +986,7 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
         controller._writable = writable;
       }
     };
+    Object.defineProperties(TransformStream.prototype, streamSides);
     globalThis.TransformStreamDefaultController = TransformStreamDefaultController;
     const streamBytes = (value, allowShared = false) => {
       const shared = buffer => typeof SharedArrayBuffer === 'function' && buffer instanceof SharedArrayBuffer;
@@ -1013,8 +1018,10 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
         cancel: release
       });
     };
-    globalThis.CompressionStream = class CompressionStream { constructor(format) { const stream = compressionTransform('compress', format); this.readable = stream.readable; this.writable = stream.writable; } };
-    globalThis.DecompressionStream = class DecompressionStream { constructor(format) { const stream = compressionTransform('decompress', format); this.readable = stream.readable; this.writable = stream.writable; } };
+    globalThis.CompressionStream = class CompressionStream { constructor(format) { const stream = compressionTransform('compress', format); this._readable = stream.readable; this._writable = stream.writable; } };
+    globalThis.DecompressionStream = class DecompressionStream { constructor(format) { const stream = compressionTransform('decompress', format); this._readable = stream.readable; this._writable = stream.writable; } };
+    Object.defineProperties(globalThis.CompressionStream.prototype, streamSides);
+    Object.defineProperties(globalThis.DecompressionStream.prototype, streamSides);
     const queuingStrategyMarks = new WeakMap();
     const queuingStrategyInit = options => {
       if (options === null || (typeof options !== 'object' && typeof options !== 'function')) { const error = new TypeError('init must be an object'); error.code = 'ERR_INVALID_ARG_TYPE'; throw error; }
@@ -1023,19 +1030,25 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
     };
     const strategyHighWaterMark = function() { if (!queuingStrategyMarks.has(this)) throw new TypeError('invalid queuing strategy receiver'); return queuingStrategyMarks.get(this); };
     class ByteLengthQueuingStrategy { constructor(options) { queuingStrategyMarks.set(this, queuingStrategyInit(options)); } }
+    const byteLengthSize = { size(chunk) { return chunk.byteLength; } }.size;
     Object.defineProperties(ByteLengthQueuingStrategy.prototype, {
-      highWaterMark: { get: strategyHighWaterMark, enumerable: true, configurable: true },
-      size: { value(chunk) { return chunk.byteLength; }, writable: true, enumerable: true, configurable: true }
+      highWaterMark: { get: strategyHighWaterMark, enumerable: true, configurable: true }
     });
+    Object.defineProperties(ByteLengthQueuingStrategy.prototype, Object.getOwnPropertyDescriptors({ get size() { return byteLengthSize; } }));
     class CountQueuingStrategy { constructor(options) { queuingStrategyMarks.set(this, queuingStrategyInit(options)); } }
+    const countSize = { size() { return 1; } }.size;
     Object.defineProperties(CountQueuingStrategy.prototype, {
-      highWaterMark: { get: strategyHighWaterMark, enumerable: true, configurable: true },
-      size: { value() { return 1; }, writable: true, enumerable: true, configurable: true }
+      highWaterMark: { get: strategyHighWaterMark, enumerable: true, configurable: true }
     });
+    Object.defineProperties(CountQueuingStrategy.prototype, Object.getOwnPropertyDescriptors({ get size() { return countSize; } }));
     globalThis.ByteLengthQueuingStrategy = ByteLengthQueuingStrategy;
     globalThis.CountQueuingStrategy = CountQueuingStrategy;
-    globalThis.TextEncoderStream = class TextEncoderStream { constructor() { const encoder = new TextEncoder(); let pendingHigh = ''; const transform = new TransformStream({ transform(chunk, controller) { let text = pendingHigh + `${chunk}`; pendingHigh = ''; const last = text.charCodeAt(text.length - 1); if (last >= 0xd800 && last <= 0xdbff) { pendingHigh = text.slice(-1); text = text.slice(0, -1); } if (text) controller.enqueue(encoder.encode(text)); }, flush(controller) { if (pendingHigh) controller.enqueue(encoder.encode(pendingHigh)); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = 'utf-8'; } };
-    globalThis.TextDecoderStream = class TextDecoderStream { constructor(label = 'utf-8', options = {}) { const decoder = new TextDecoder(label, options); const transform = new TransformStream({ transform(chunk, controller) { const bytes = streamBytes(chunk, true); if (!bytes) throw new TypeError('chunk must be an ArrayBuffer or view'); const text = decoder.decode(bytes, { stream: true }); if (text) controller.enqueue(text); }, flush(controller) { const text = decoder.decode(); if (text) controller.enqueue(text); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = decoder.encoding || String(label).toLowerCase(); this.fatal = decoder.fatal; this.ignoreBOM = decoder.ignoreBOM; } };
+    globalThis.TextEncoderStream = class TextEncoderStream { constructor() { const encoder = new TextEncoder(); let pendingHigh = ''; const transform = new TransformStream({ transform(chunk, controller) { let text = pendingHigh + `${chunk}`; pendingHigh = ''; const last = text.charCodeAt(text.length - 1); if (last >= 0xd800 && last <= 0xdbff) { pendingHigh = text.slice(-1); text = text.slice(0, -1); } if (text) controller.enqueue(encoder.encode(text)); }, flush(controller) { if (pendingHigh) controller.enqueue(encoder.encode(pendingHigh)); } }); this._readable = transform.readable; this._writable = transform.writable; } };
+    Object.defineProperties(globalThis.TextEncoderStream.prototype, streamSides);
+    Object.defineProperties(globalThis.TextEncoderStream.prototype, Object.getOwnPropertyDescriptors({ get encoding() { return 'utf-8'; } }));
+    globalThis.TextDecoderStream = class TextDecoderStream { constructor(label = 'utf-8', options = {}) { const decoder = new TextDecoder(label, options); const transform = new TransformStream({ transform(chunk, controller) { const bytes = streamBytes(chunk, true); if (!bytes) throw new TypeError('chunk must be an ArrayBuffer or view'); const text = decoder.decode(bytes, { stream: true }); if (text) controller.enqueue(text); }, flush(controller) { const text = decoder.decode(); if (text) controller.enqueue(text); } }); this._readable = transform.readable; this._writable = transform.writable; this._decoder = decoder; } };
+    Object.defineProperties(globalThis.TextDecoderStream.prototype, streamSides);
+    Object.defineProperties(globalThis.TextDecoderStream.prototype, Object.getOwnPropertyDescriptors({ get encoding() { return this._decoder.encoding; }, get fatal() { return this._decoder.fatal; }, get ignoreBOM() { return this._decoder.ignoreBOM; } }));
   }
   if (typeof globalThis.FormData !== 'function') {
     const formDataEntries = new WeakMap();
@@ -1091,11 +1104,12 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
           entries = formDataList(this);
         }
       }
-      get [Symbol.toStringTag]() { return 'FormData'; }
     }
     globalThis.FormData = FormData;
     // Node: FormData.prototype[Symbol.iterator] is the entries function itself
     Object.defineProperty(FormData.prototype, Symbol.iterator, { value: FormData.prototype.entries, writable: true, configurable: true });
+    for (const name of ['entries', 'keys', 'values', 'forEach']) withPrototype(FormData.prototype[name]);
+    Object.defineProperty(FormData.prototype, Symbol.toStringTag, { value: 'FormData', configurable: true });
     Object.defineProperty(globalThis, '__thaw_form_data_entries', {
       configurable: true,
       value(value) { return formDataList(value).slice(); }
@@ -1328,6 +1342,8 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
     Object.defineProperty(Request.prototype, Symbol.toStringTag, { value: 'Request', configurable: true });
     globalThis.Response = Response;
     globalThis.Request = Request;
+    Object.defineProperties(Request.prototype, Object.getOwnPropertyDescriptors({ get isHistoryNavigation() { return false; }, get isReloadNavigation() { return false; } }));
+    Object.defineProperty(Request.prototype, 'attribute', { value: undefined, enumerable: true });
   }
   // Global fetch (Q9 plan-q9-thawjs-fetch.md). Defined in every thaw-js realm, beside Request/Response. The HTTP
   // client is the node:http / node:https bundle modules: the host installs `__thaw_fetch_transport(name)` for a

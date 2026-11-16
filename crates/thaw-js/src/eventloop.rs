@@ -1334,7 +1334,9 @@ impl Interp {
             if let Some(state) = self.promise_state(v) {
                 return Ok(Some(state));
             }
-            if !self.loop_alive() {
+            // a compiled native server in this process answers through the same poll and drain as the terminal loop
+            let served = crate::host::drain_native_continuations(self);
+            if !self.loop_alive() && !crate::host::native_servers_live() {
                 return Ok(None);
             }
             self.rt.first_turn = false;
@@ -1347,7 +1349,7 @@ impl Interp {
                 continue;
             }
             // a timer or event just settled the promise: do not sleep toward the next unrelated timer
-            if self.promise_state(v).is_some() {
+            if served || self.promise_state(v).is_some() {
                 continue;
             }
             if let Some(next) = self
@@ -1358,8 +1360,8 @@ impl Interp {
                 .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             {
                 let mut wait = next - clock_ms();
-                // a pending napi completion is polled every 2 ms, not only at the next timer
-                if crate::napi_bridge::pending() {
+                // a pending napi completion or a live native server is polled every 2 ms, not only at the next timer
+                if crate::napi_bridge::pending() || crate::host::native_servers_live() {
                     wait = wait.min(2.0);
                 }
                 if wait > 0.0 {
@@ -1370,6 +1372,7 @@ impl Interp {
                 || crate::worker::active(self)
                 || self.stdin_live()
                 || crate::napi_bridge::pending()
+                || crate::host::native_servers_live()
             {
                 // nothing timed to wait for, but a platform event will arrive: poll again shortly
                 loop_idle_sleep(Duration::from_millis(2));
