@@ -4,6 +4,8 @@
 use crate::{arg, Interp, Value};
 
 const POLYFILL: &str = include_str!("web/intl.js");
+// Locale-sensitive built-ins that delegate to the polyfill above (thaw-js only: thaw-quickjs keeps its own).
+const TO_LOCALE: &str = include_str!("web/intl_tolocale.js");
 
 impl Interp {
     pub(crate) fn install_intl(&mut self) {
@@ -31,5 +33,7 @@ impl Interp {
         // `undefined`). The shared polyfill keeps it for thaw-quickjs and the HIR lowering.
         self.run_builtin("delete globalThis.Intl.DurationFormat")
             .unwrap_or_else(|_| panic!("thaw-js must drop Intl.DurationFormat"));
+        self.run(TO_LOCALE)
+            .unwrap_or_else(|_| panic!("thaw-js toLocale* delegation must evaluate"));
     }
 }

@@ -1294,12 +1294,9 @@ impl Interp {
             share_preludes: !host,
             hint_stats: hints::HintStats::from_env(),
             check_hints: cfg!(test) || std::env::var_os("THAW_JS_CHECK_HINTS").is_some(),
-            compile_mode: compile::CompileMode::parse(
-                std::env::var("THAW_JS_COMPILE").ok().as_deref(),
-            ),
-            compile_after: compile::parse_after(
-                std::env::var("THAW_JS_COMPILE_AFTER").ok().as_deref(),
-            ),
+            // the env is applied at the end of `build`, after the preludes: they are never analysed or counted
+            compile_mode: compile::CompileMode::Off,
+            compile_after: compile::DEFAULT_AFTER,
             strict_mode: strict::StrictMode::parse(std::env::var("THAW_JS_STRICT").ok().as_deref()),
             builtin_runs: Default::default(),
             builtin_pending: false,
@@ -1414,6 +1411,11 @@ impl Interp {
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
         web_console::install(&mut it);
         it.apply_builtin_table();
+        // user code only: the env turns the compiler on after the preludes ran (`Interp::with_compile_mode` overrides)
+        it.compile_mode =
+            compile::CompileMode::parse(std::env::var("THAW_JS_COMPILE").ok().as_deref());
+        it.compile_after =
+            compile::parse_after(std::env::var("THAW_JS_COMPILE_AFTER").ok().as_deref());
         it
     }
 

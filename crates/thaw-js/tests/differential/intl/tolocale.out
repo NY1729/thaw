@@ -1,0 +1,85 @@
+num en-US                    "1,234,567.891"
+num de-DE                    "1.234,5"
+num ja-JP                    "1,234.5"
+num fr-FR                    "12 345,678"
+num percent                  "50%"
+num currency USD             "$1,234.50"
+num currency EUR de          "1.234,50 €"
+num currency JPY ja          "￥1,235"
+num compact en               "1.5K"
+num compact ja               "150万"
+num unit long                "12 kilometers per hour"
+num minFrac                  "1,234.50"
+num maxSig                   "1,200"
+num negzero                  "-0"
+num NaN de                   "NaN"
+num Infinity                 "∞"
+num nogroup                  "1234.5"
+bigint de-DE                 "12.345"
+bigint currency              "$12,345.00"
+array de-DE                  "1.234,5,1.234"
+array en-US default          "1,234.5,x,"
+date de-DE date              "1.1.1970"
+date ja-JP time              "0:00:00"
+date en-US default           "1/1/1970, 12:00:00 AM"
+date en-US full              "Thursday, January 1, 1970"
+date en-GB weekday           "Thursday, 1 January 1970"
+date NY tzname               "12/31/1969, 7:00:00 PM EST"
+time h23                     "00:00:00"
+time short                   "12:00 AM"
+date ja Tokyo                "1970/1/1"
+date month only              "January"
+date invalid                 "Invalid Date"
+date de-DE toLocaleString    "1.1.1970, 00:00:00"
+time de-DE fields            "00:00"
+date dateStyle+timeStyle     "Jan 1, 1970, 12:00 AM"
+date fr-FR toLocaleString    "01/01/1971 00:00:00"
+cmp sv                       -1
+cmp de umlaut                -1
+cmp sv umlaut                1
+cmp base                     0
+cmp numeric                  1
+cmp caseFirst upper          1
+cmp default                  -1
+cmp default case             -1
+cmp bad locale               THREW RangeError
+lower tr dotted I            "i"
+upper tr i                   "İ"
+lower tr I                   "ı"
+lower az I                   "ı"
+upper en-US i                "I"
+upper de sharp s             "SS"
+lower lt I-grave             "i̇̀"
+lower lt I-plain             "i"
+lower default dotted         "i̇"
+lower bad locale             THREW RangeError
+lower tr I+dot               "i"
+lower tr I+acute             "ı́"
+lower az dotted              "i"
+upper lt i+dot               "I"
+upper lt i+dot+grave         "Ì"
+upper tr i+dot               "İ̇"
+upper az i+dot               "İ̇"
+lower lt I+acute             "i̇́"
+lower lt J+grave             "j̇̀"
+lower lt I+dot               "i̇̇"
+lower lt I+tilde             "i̇̃"
+lower lt Í                   "i̇́"
+lower lt Į+acute             "į̇́"
+lower lt I+cedilla           "i̧"
+lower lt Istanbul            "istanbul"
+upper tr Istanbul            "İSTANBUL"
+lower tr ISTANBUL            "ıstanbul"
+lower el final sigma         "οδος"
+lower null locale            THREW TypeError
+lower empty array            "i"
+lower array tr               "ı"
+lower tr-TR region           "ı"
+bigint bad                   THREW RangeError
+date timeStyle on date       THREW TypeError
+time dateStyle on time       THREW TypeError
+date dayPeriod               "1/1/1970, 12 AM"
+num this wrong               THREW TypeError
+date this wrong              THREW TypeError
+lc wrong this                THREW TypeError
+array null elems             ",,1"
