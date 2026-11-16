@@ -80,6 +80,8 @@ struct Timer {
     obj: Obj,
     refd: bool,
     frame: Option<Value>,
+    /// The async_hooks id, when a hook was enabled at scheduling (see `hook_init`).
+    async_id: Option<f64>,
 }
 
 struct Imm {
@@ -89,6 +91,7 @@ struct Imm {
     obj: Obj,
     refd: bool,
     frame: Option<Value>,
+    async_id: Option<f64>,
 }
 
 // ----- coroutines -----
@@ -220,6 +223,8 @@ pub(crate) struct Rt {
     timers: Vec<Timer>,
     immediates: Vec<Imm>,
     cleared: Vec<u64>,
+    /// An async_hooks hook is enabled in this realm: timer operations then report to `__thaw_async_hook_bus`.
+    async_hooks_on: bool,
     pub(crate) arraybuffer_proto: Option<Obj>,
     /// SharedArrayBuffer.prototype; separate from ArrayBuffer.prototype (not an ArrayBuffer).
     pub(crate) sharedarraybuffer_proto: Option<Obj>,
@@ -989,6 +994,11 @@ impl Interp {
     }
 
     fn add_timer(&mut self, args: &[Value], repeat: bool) -> R<Value> {
+        self.schedule_timer(args, repeat, true)
+    }
+
+    /// `instrumented` false is an internal timer (the async_hooks destroy flush) that no hook sees.
+    fn schedule_timer(&mut self, args: &[Value], repeat: bool, instrumented: bool) -> R<Value> {
         let cb = arg(args, 0);
         self.need_callback(&cb)?;
         let mut delay = match arg(args, 1) {
@@ -1025,6 +1035,11 @@ impl Interp {
             },
         );
         put(&obj, "_destroyed", Value::Bool(false));
+        let async_id = if instrumented {
+            self.hook_init("Timeout", &Value::Object(obj.clone()))?
+        } else {
+            None
+        };
         self.rt.timers.push(Timer {
             id,
             // the head start is for timers armed before the first loop turn only
@@ -1037,8 +1052,57 @@ impl Interp {
             obj: obj.clone(),
             refd: true,
             frame: self.rt.actx.clone(),
+            async_id,
         });
         Ok(Value::Object(obj))
+    }
+
+    /// The realm's `__thaw_async_hook_bus` while a hook is enabled here: the one test a timer operation makes when no hook is on.
+    fn timer_bus(&mut self) -> Option<Obj> {
+        if !self.rt.async_hooks_on {
+            return None;
+        }
+        match self.get(
+            &Value::Object(self.global_object.clone()),
+            "__thaw_async_hook_bus",
+        ) {
+            Ok(Value::Object(bus)) => Some(bus),
+            _ => None,
+        }
+    }
+
+    /// `bus.init(type, handle)` for a timer that is scheduled while a hook is enabled; returns its async id.
+    fn hook_init(&mut self, kind: &str, handle: &Value) -> R<Option<f64>> {
+        let Some(bus) = self.timer_bus() else {
+            return Ok(None);
+        };
+        let init = self.get(&Value::Object(bus.clone()), "init")?;
+        match self.call(
+            &init,
+            &Value::Object(bus),
+            &[Value::str(kind), handle.clone()],
+        )? {
+            Value::Number(n) => Ok(Some(n)),
+            _ => Ok(None),
+        }
+    }
+
+    /// `bus.before` / `bus.after` for a timer that has an async id; a no-op otherwise.
+    fn hook_emit(&mut self, method: &str, id: Option<f64>) -> R<()> {
+        let Some(id) = id else {
+            return Ok(());
+        };
+        let Some(bus) = self.timer_bus() else {
+            return Ok(());
+        };
+        let f = self.get(&Value::Object(bus.clone()), method)?;
+        self.call(&f, &Value::Object(bus), &[Value::Number(id)])?;
+        Ok(())
+    }
+
+    /// `bus.destroy`. It only queues the id (the bus runs no user code), so its errors are not reported.
+    fn hook_destroy(&mut self, id: Option<f64>) {
+        let _ = self.hook_emit("destroy", id);
     }
 
     /// The id of a Timeout/Immediate object (what crosses the host boundary in its place).
@@ -1079,22 +1143,32 @@ impl Interp {
 
     /// Remove timer/immediate `id` here, else in the realm that owns it. Ids are unique across realms.
     pub(crate) fn clear_timer_anywhere(&mut self, id: u64, immediate: bool) {
-        let n = self.rt.timers.len() + self.rt.immediates.len();
-        self.rt.timers.retain(|t| t.id != id);
-        self.rt.immediates.retain(|t| t.id != id);
+        let found = self.remove_timer_local(id);
         if immediate {
             self.rt.cleared.push(id);
         }
-        if self.rt.timers.len() + self.rt.immediates.len() != n {
+        if found {
             return;
         }
         crate::host::for_other_realms(self, |other| {
-            other.rt.timers.retain(|t| t.id != id);
-            other.rt.immediates.retain(|t| t.id != id);
+            other.remove_timer_local(id);
             if immediate {
                 other.rt.cleared.push(id);
             }
         });
+    }
+
+    /// Remove timer/immediate `id` from this realm's tables and destroy its async resource; false if absent.
+    fn remove_timer_local(&mut self, id: u64) -> bool {
+        let dead = match self.rt.timers.iter().position(|t| t.id == id) {
+            Some(i) => self.rt.timers.remove(i).async_id,
+            None => match self.rt.immediates.iter().position(|t| t.id == id) {
+                Some(i) => self.rt.immediates.remove(i).async_id,
+                None => return false,
+            },
+        };
+        self.hook_destroy(dead);
+        true
     }
 
     /// ref/unref/hasRef on a Timeout/Immediate. `Some(r)` sets, `None` reads. Here first, else in the realm that owns it,
@@ -1180,7 +1254,7 @@ impl Interp {
                 })
                 .map(|(i, _)| i);
             let Some(i) = next else { return Ok(()) };
-            let (id, cb, args, obj, repeat, delay, frame) = {
+            let (id, cb, args, obj, repeat, delay, frame, async_id) = {
                 let t = &mut self.rt.timers[i];
                 let r = (
                     t.id,
@@ -1190,6 +1264,7 @@ impl Interp {
                     t.repeat,
                     t.delay,
                     t.frame.clone(),
+                    t.async_id,
                 );
                 if t.repeat {
                     t.expiry = f64::INFINITY; // parked while its callback runs
@@ -1200,7 +1275,13 @@ impl Interp {
             };
             // a repeat restarts from the clock read before its callback runs (as Node does)
             let start = if repeat { clock_ms() } else { 0.0 };
-            if let Err(e) = self.in_frame(frame, |it| it.call(&cb, &Value::Object(obj), &args)) {
+            self.hook_emit("before", async_id)?;
+            let r = self.in_frame(frame, |it| it.call(&cb, &Value::Object(obj), &args));
+            self.hook_emit("after", async_id)?;
+            if !repeat {
+                self.hook_destroy(async_id);
+            }
+            if let Err(e) = r {
                 self.uncaught(e)?;
             }
             if repeat {
@@ -1219,13 +1300,18 @@ impl Interp {
     fn run_immediates(&mut self) -> R<()> {
         let batch = std::mem::take(&mut self.rt.immediates);
         for im in batch {
-            // a clearImmediate from an earlier callback of this batch removes later ones
+            // a clearImmediate from an earlier callback of this batch removes later ones (their destroy is emitted here)
             if self.rt.cleared.contains(&im.id) {
+                self.hook_destroy(im.async_id);
                 continue;
             }
-            if let Err(e) = self.in_frame(im.frame.clone(), |it| {
+            self.hook_emit("before", im.async_id)?;
+            let r = self.in_frame(im.frame.clone(), |it| {
                 it.call(&im.cb, &Value::Object(im.obj.clone()), &im.args)
-            }) {
+            });
+            self.hook_emit("after", im.async_id)?;
+            self.hook_destroy(im.async_id);
+            if let Err(e) = r {
                 self.uncaught(e)?;
             }
             self.run_jobs()?;
@@ -1780,6 +1866,7 @@ impl Interp {
             put(&obj, "_onImmediate", cb.clone());
             put(&obj, "_argv", argv);
             put(&obj, "_destroyed", Value::Bool(false));
+            let async_id = it.hook_init("Immediate", &Value::Object(obj.clone()))?;
             it.rt.immediates.push(Imm {
                 id,
                 cb,
@@ -1787,10 +1874,20 @@ impl Interp {
                 obj: obj.clone(),
                 refd: true,
                 frame: it.rt.actx.clone(),
+                async_id,
             });
             Ok(Value::Object(obj))
         });
         g.declare("setImmediate", f, true);
+        // Internal timer for async_hooks' deferred destroy: never reported to a hook.
+        let f = self.native(|it, _, a| it.schedule_timer(a, false, false));
+        g.declare("__thaw_set_timeout_internal", f, true);
+        // Set by async_hooks when a hook is enabled or the last one is disabled in this realm.
+        let f = self.native(|it, _, a| {
+            it.rt.async_hooks_on = matches!(arg(a, 0), Value::Bool(true));
+            Ok(Value::Undefined)
+        });
+        g.declare("__thaw_async_hook_timers", f, true);
         let f = self.native(|it, _, a| {
             if let Some(id) = it.timer_id(&arg(a, 0)) {
                 it.clear_timer_anywhere(id, true);
