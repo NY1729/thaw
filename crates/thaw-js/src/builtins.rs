@@ -87,6 +87,99 @@ pub(crate) const PRELUDE: &str = r#"
     return a;
   });
   def(Object, 'fromEntries', function (entries) { var o = {}; for (var e of entries) o[e[0]] = e[1]; return o; });
+  // Missing members: Annex B `Object.prototype` accessors, unscopables, Symbol/Date/DataView members.
+  function toObj(v) { if (v === null || v === undefined) throw new TypeError('Cannot convert undefined or null to object'); return Object(v); }
+  function toKey(p) { return typeof p === 'symbol' ? p : String(p); }
+  function legacyLookup(self, p, half) {
+    var o = toObj(self), k = toKey(p);
+    while (o !== null) {
+      var d = Object.getOwnPropertyDescriptor(o, k);
+      if (d) return d[half];
+      o = Object.getPrototypeOf(o);
+    }
+    return undefined;
+  }
+  def(Object.prototype, '__defineGetter__', function __defineGetter__(p, f) {
+    'use strict';
+    var o = toObj(this);
+    if (typeof f !== 'function') throw new TypeError('Object.prototype.__defineGetter__: Expecting function');
+    Object.defineProperty(o, toKey(p), { get: f, enumerable: true, configurable: true });
+  });
+  def(Object.prototype, '__defineSetter__', function __defineSetter__(p, f) {
+    'use strict';
+    var o = toObj(this);
+    if (typeof f !== 'function') throw new TypeError('Object.prototype.__defineSetter__: Expecting function');
+    Object.defineProperty(o, toKey(p), { set: f, enumerable: true, configurable: true });
+  });
+  def(Object.prototype, '__lookupGetter__', function __lookupGetter__(p) { 'use strict'; return legacyLookup(this, p, 'get'); });
+  def(Object.prototype, '__lookupSetter__', function __lookupSetter__(p) { 'use strict'; return legacyLookup(this, p, 'set'); });
+  def(Object.prototype, 'toLocaleString', function toLocaleString() {
+    'use strict';
+    if (this === null || this === undefined) throw new TypeError('Object.prototype.toLocaleString called on null or undefined');
+    return this.toString();
+  });
+
+  // OrdinaryHasInstance. `instanceof` keeps its native path for this exact function (Interp::is_default_has_instance).
+  Object.defineProperty(Function.prototype, Symbol.hasInstance, { value: function (v) {
+    'use strict';
+    if (typeof this !== 'function') return false;
+    if (v === null || (typeof v !== 'object' && typeof v !== 'function')) return false;
+    var p = this.prototype;
+    if (p === null || (typeof p !== 'object' && typeof p !== 'function')) throw new TypeError("Function has non-object prototype '" + String(p) + "' in instanceof check");
+    for (var c = Object.getPrototypeOf(v); c !== null; c = Object.getPrototypeOf(c)) if (c === p) return true;
+    return false;
+  }, writable: false, enumerable: false, configurable: false });
+
+  // Array.prototype.toLocaleString: an element that is already being converted (a cycle) contributes ''.
+  var localeStack = [];
+  def(AP, 'toLocaleString', function toLocaleString() {
+    'use strict';
+    if (this === null || this === undefined) throw new TypeError('Array.prototype.toLocaleString called on null or undefined');
+    var o = Object(this);
+    if (localeStack.indexOf(o) !== -1) return '';
+    localeStack.push(o);
+    try {
+      var s = '', n = o.length >>> 0;
+      for (var i = 0; i < n; i++) {
+        if (i > 0) s += ',';
+        var e = o[i];
+        if (e !== undefined && e !== null) s += e.toLocaleString();
+      }
+      return s;
+    } finally {
+      localeStack.pop();
+    }
+  });
+
+  // Symbol.prototype.valueOf (native: it reads the symbol) gives @@toPrimitive its value.
+  def(Symbol.prototype, 'constructor', Symbol);
+  Object.defineProperty(Symbol.prototype, Symbol.toStringTag, { value: 'Symbol', writable: false, enumerable: false, configurable: true });
+  var symbolValueOf = Symbol.prototype.valueOf;
+  Object.defineProperty(Symbol.prototype, Symbol.toPrimitive, { value: function (hint) { return symbolValueOf.call(this); }, writable: false, enumerable: false, configurable: true });
+
+  // Date.prototype.setYear (Annex B) and @@toPrimitive (the same order as OrdinaryToPrimitive).
+  var dateGetTime = Date.prototype.getTime, dateSetTime = Date.prototype.setTime, dateSetFullYear = Date.prototype.setFullYear;
+  def(Date.prototype, 'setYear', function setYear(y) {
+    dateGetTime.call(this);
+    var n = Number(y);
+    if (n !== n) { dateSetTime.call(this, NaN); return NaN; }
+    var yi = Math.trunc(n);
+    return dateSetFullYear.call(this, yi >= 0 && yi <= 99 ? 1900 + yi : yi);
+  });
+  Object.defineProperty(Date.prototype, Symbol.toPrimitive, { value: function (hint) {
+    'use strict';
+    if (this === null || (typeof this !== 'object' && typeof this !== 'function')) throw new TypeError('Method Date.prototype [ @@toPrimitive ] called on incompatible receiver ' + String(this));
+    if (hint !== 'string' && hint !== 'default' && hint !== 'number') throw new TypeError('Invalid hint: ' + String(hint));
+    var names = hint === 'number' ? ['valueOf', 'toString'] : ['toString', 'valueOf'];
+    for (var i = 0; i < 2; i++) {
+      var m = this[names[i]];
+      if (typeof m === 'function') {
+        var r = m.call(this);
+        if (r === null || (typeof r !== 'object' && typeof r !== 'function')) return r;
+      }
+    }
+    throw new TypeError('Cannot convert object to primitive value');
+  }, writable: false, enumerable: false, configurable: true });
 })();
 "#;
 
@@ -2374,6 +2467,24 @@ impl Interp {
         self.set_native(&self.bool_proto.clone(), "toString", |it, this, _| {
             Ok(Value::Str(it.to_str(this)))
         });
+        // thisBooleanValue: a boolean, or a Boolean wrapper; anything else is a TypeError
+        self.set_native(&self.bool_proto.clone(), "valueOf", |it, this, _| {
+            let b = match this {
+                Value::Bool(b) => Some(*b),
+                Value::Object(o) => match &*o.kind.borrow() {
+                    Kind::Wrapper(Value::Bool(b)) => Some(*b),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match b {
+                Some(b) => Ok(Value::Bool(b)),
+                None => it.throw_error(
+                    "TypeError",
+                    "Boolean.prototype.valueOf requires that 'this' be a Boolean",
+                ),
+            }
+        });
         let boolean = self.native(|_, _, args| Ok(Value::Bool(arg(args, 0).truthy())));
         if let Value::Object(o) = &boolean {
             put_hidden(o, "prototype", Value::Object(self.bool_proto.clone()));
@@ -3024,4 +3135,76 @@ fn format_number_text(n: f64) -> String {
     } else {
         number_to_string(n)
     }
+}
+
+impl Interp {
+    /// `Function.prototype`, read through the `Function` global.
+    fn function_prototype(&mut self) -> Option<Obj> {
+        let Value::Object(function) = self
+            .lookup(&self.global.clone(), "Function")
+            .unwrap_or(Value::Undefined)
+        else {
+            return None;
+        };
+        match self.get(&Value::Object(function), "prototype") {
+            Ok(Value::Object(proto)) => Some(proto),
+            _ => None,
+        }
+    }
+
+    /// Remember the intrinsic `Function.prototype[Symbol.hasInstance]` that the prelude defined.
+    pub(crate) fn capture_default_has_instance(&mut self) {
+        let key = self.well_known_key("hasInstance");
+        let Some(proto) = self.function_prototype() else {
+            return;
+        };
+        if let Some((Slot::Data(Value::Object(f)), _)) = find_own(&proto, &key) {
+            self.rt.default_has_instance = Some(f);
+        }
+    }
+
+    /// `Function.prototype.arguments` and `caller`. V8 gives a sloppy ordinary function its own legacy props,
+    /// which read null (and are not writable, so an assignment is ignored in sloppy code). Every other
+    /// receiver reaches V8's %ThrowTypeError%: strict and arrow functions, classes, methods, generators,
+    /// async functions, bound and built-in functions, and non-functions.
+    pub(crate) fn install_legacy_function_props(&mut self) {
+        let Some(proto) = self.function_prototype() else {
+            return;
+        };
+        // one getter and one setter for both properties, as V8 shares %ThrowTypeError%
+        let get = self.native(|it, this, _| {
+            if sloppy_ordinary_fn(this) {
+                Ok(Value::Null)
+            } else {
+                it.throw_error("TypeError", LEGACY_CALLER_MSG)
+            }
+        });
+        let set = self.native(|it, this, _| {
+            if sloppy_ordinary_fn(this) {
+                Ok(Value::Undefined)
+            } else {
+                it.throw_error("TypeError", LEGACY_CALLER_MSG)
+            }
+        });
+        for name in ["arguments", "caller"] {
+            define_accessor(&proto, name, Some(get.clone()), Some(set.clone()), false);
+        }
+    }
+
+    /// True when `f` is the intrinsic `Function.prototype[Symbol.hasInstance]` (the native `instanceof` path
+    /// computes the same answer, so it is not called).
+    pub(crate) fn is_default_has_instance(&self, f: &Value) -> bool {
+        matches!((f, &self.rt.default_has_instance), (Value::Object(a), Some(b)) if Rc::ptr_eq(a, b))
+    }
+}
+
+const LEGACY_CALLER_MSG: &str = "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them";
+
+/// True for a sloppy ordinary function: not strict, not an arrow, class, method, generator or async function.
+fn sloppy_ordinary_fn(v: &Value) -> bool {
+    matches!(v, Value::Object(o) if matches!(
+        &*o.kind.borrow(),
+        Kind::Closure { def, scope }
+            if !def.strict && !scope.strict.get() && !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype && def.class.is_none()
+    ))
 }
