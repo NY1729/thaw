@@ -100,7 +100,7 @@ const STRICT_ONLY: &[(&str, &str)] = &[
 #[test]
 fn strict_probes_throw_the_node_message_in_every_engine() {
     for (body, want) in STRICT_ONLY {
-        assert_eq!(strict_on(body), format!("{want}"), "{body}");
+        assert_eq!(strict_on(body), want.to_string(), "{body}");
     }
 }
 
