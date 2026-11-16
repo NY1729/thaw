@@ -160,13 +160,10 @@ pub(crate) const PRELUDE: &str = r#"
       localeStack.pop();
     }
   });
-  var unscopables = Object.create(null);
-  var unscopableNames = ['at', 'copyWithin', 'entries', 'fill', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'includes', 'keys', 'toReversed', 'toSorted', 'toSpliced', 'values'];
-  for (var u = 0; u < unscopableNames.length; u++) unscopables[unscopableNames[u]] = true;
-  Object.defineProperty(AP, Symbol.unscopables, { value: unscopables, writable: false, enumerable: false, configurable: true });
 
   // Symbol.prototype.valueOf (native: it reads the symbol) gives @@toPrimitive its value.
   def(Symbol.prototype, 'constructor', Symbol);
+  Object.defineProperty(Symbol.prototype, Symbol.toStringTag, { value: 'Symbol', writable: false, enumerable: false, configurable: true });
   var symbolValueOf = Symbol.prototype.valueOf;
   Object.defineProperty(Symbol.prototype, Symbol.toPrimitive, { value: function (hint) { return symbolValueOf.call(this); }, writable: false, enumerable: false, configurable: true });
 

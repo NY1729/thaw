@@ -1,7 +1,4 @@
 owner	key	kind	flags	vtype	length	name	hasPrototype	alias	tag
-%TypedArray%	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
-%TypedArray%	length	data	--c	number	0	-	-	-	-
-%TypedArray%	name	data	--c	string	-	TypedArray	-	-	-
 AbortController	length	data	--c	number	0	-	-	-	-
 AbortController	name	data	--c	string	-	AbortController	-	-	-
 AbortController	prototype	data	---	object	-	-	-	-	-
