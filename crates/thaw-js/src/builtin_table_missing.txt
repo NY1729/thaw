@@ -1039,13 +1039,10 @@ process	_stopProfilerIdleNotifier
 process	_tickCallback
 process	allowedNodeEnvironmentFlags
 process	assert
-process	dlopen
 process	domain
-process	execve
 process	finalization
 process	getBuiltinModule
 process	hasUncaughtExceptionCaptureCallback
-process	loadEnvFile
 process	mainModule
 process	moduleLoadList
 process	openStdin
@@ -1091,12 +1088,8 @@ process.cpuUsage	prototype
 process.cpuUsage.prototype	constructor
 process.cwd	prototype
 process.cwd.prototype	constructor
-process.dlopen	length
-process.dlopen	name
 process.emitWarning	prototype
 process.emitWarning.prototype	constructor
-process.execve	length
-process.execve	name
 process.execve	prototype
 process.execve.prototype	constructor
 process.exit	prototype
@@ -1116,8 +1109,6 @@ process.initgroups	prototype
 process.initgroups.prototype	constructor
 process.kill	prototype
 process.kill.prototype	constructor
-process.loadEnvFile	length
-process.loadEnvFile	name
 process.loadEnvFile	prototype
 process.loadEnvFile.prototype	constructor
 process.memoryUsage	prototype
