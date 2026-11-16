@@ -145,6 +145,48 @@ fn thaw_js_mentions(user_source: &str, name: &str) -> bool {
     })
 }
 
+/// Whether a program of these module-graph sources may call the realm `fetch`: the rewrite that reads it
+/// needs the identifier in source, so a scan of every source is a safe over-approximation (a shadowed local
+/// or the word in a comment only costs the extra `node:http` / `node:https` bundles).
+fn source_may_call_realm_fetch(sources: &[&str]) -> bool {
+    sources
+        .iter()
+        .any(|source| thaw_js_mentions(source, "fetch"))
+}
+
+/// The realm `fetch` transport's bundles, linked by `force_realm_fetch_bundles`.
+const REALM_FETCH_TRANSPORT_BUNDLES: [&str; 2] = ["node:http", "node:https"];
+
+/// The realm `fetch` transport bundles the shim must load, imported or not (empty when the program may not call
+/// `fetch`). Unlike `force_realm_fetch_bundles`, an imported package stays in this set without losing its declarations.
+fn realm_fetch_transport_bundles(sources: &[&str]) -> std::collections::HashSet<String> {
+    if source_may_call_realm_fetch(sources) {
+        REALM_FETCH_TRANSPORT_BUNDLES
+            .iter()
+            .map(|name| name.to_string())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    }
+}
+
+/// Adds the realm `fetch` transport bundles to the package lists as if imported, at runtime only. A package
+/// the program already imports keeps its typed declarations; one added here goes into `forced`, so the
+/// declaration passes emit no names for it (its bundle still loads lazily on the first fetch).
+fn force_realm_fetch_bundles(
+    runtime_packages: &mut std::collections::HashSet<String>,
+    resolved_packages: &mut Vec<String>,
+    forced: &mut std::collections::HashSet<String>,
+) {
+    for builtin in REALM_FETCH_TRANSPORT_BUNDLES {
+        runtime_packages.insert(builtin.to_string());
+        if !resolved_packages.iter().any(|package| package == builtin) {
+            resolved_packages.push(builtin.to_string());
+            forced.insert(builtin.to_string());
+        }
+    }
+}
+
 /// Whether the program uses the package's value export `name` as a value: any value but a class and
 /// anything but a namespace object whose only uses are calls of the package's own functions
 /// (`validator.isEmail(..)`, which the shim resolves to the typed functions) and its import. Such a
@@ -886,6 +928,76 @@ fn thaw_js_mentions_matches_whole_identifiers_only() {
     assert!(thaw_js_mentions("bcrypt.hash(a)", "hash"));
     assert!(thaw_js_mentions("import { $x } from 'p'", "$x"));
     assert!(thaw_js_mentions("ns.sub.hash(1)", "a.b.hash"));
+}
+
+#[cfg(test)]
+#[test]
+fn source_may_call_realm_fetch_is_a_whole_word_scan_of_every_source() {
+    assert!(source_may_call_realm_fetch(&["fetch('http://x/')"]));
+    assert!(source_may_call_realm_fetch(&["const r = await globalThis.fetch(u);"]));
+    assert!(source_may_call_realm_fetch(&["window.fetch(u)"]));
+    assert!(!source_may_call_realm_fetch(&["const fetchy = 1; refetch(x);"]));
+    assert!(!source_may_call_realm_fetch(&["const x = 1;"]));
+    assert!(!source_may_call_realm_fetch(&[]));
+    // any module of the graph counts, not only the entry
+    assert!(source_may_call_realm_fetch(&["export const x = 1;", "fetch(u);"]));
+    // a shadowed local or a word in a comment over-approximates: an extra bundle, never a missing one
+    assert!(source_may_call_realm_fetch(&["// fetch later"]));
+}
+
+#[cfg(test)]
+#[test]
+fn realm_fetch_bundles_are_forced_runtime_only_unless_the_program_imports_them() {
+    let set = |names: &[&str]| {
+        names
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<std::collections::HashSet<_>>()
+    };
+    // no import: both transport bundles are linked, and neither may contribute declarations
+    let mut runtime = set(&["node:fs"]);
+    let mut resolved = vec!["node:fs".to_string()];
+    let mut forced = std::collections::HashSet::new();
+    force_realm_fetch_bundles(&mut runtime, &mut resolved, &mut forced);
+    assert_eq!(forced, set(&["node:http", "node:https"]));
+    assert!(runtime.contains("node:http") && runtime.contains("node:https"));
+    assert!(
+        resolved.contains(&"node:http".to_string()) && resolved.contains(&"node:https".to_string())
+    );
+    let declared: Vec<&String> = resolved.iter().filter(|p| !forced.contains(*p)).collect();
+    assert_eq!(declared, vec![&"node:fs".to_string()]);
+    // an imported node:http keeps its declarations: only the bundle not already listed is forced
+    let mut runtime = set(&["node:fs", "node:http"]);
+    let mut resolved = vec!["node:fs".to_string(), "node:http".to_string()];
+    let mut forced = std::collections::HashSet::new();
+    force_realm_fetch_bundles(&mut runtime, &mut resolved, &mut forced);
+    assert_eq!(forced, set(&["node:https"]));
+    assert_eq!(resolved.iter().filter(|p| *p == "node:http").count(), 1);
+}
+
+#[cfg(test)]
+#[test]
+fn realm_fetch_transport_bundles_load_even_when_the_program_imports_node_http() {
+    // a program that calls the realm fetch loads both transport bundles, imported or not
+    let fetch = realm_fetch_transport_bundles(&["fetch('http://127.0.0.1/');"]);
+    assert_eq!(
+        fetch,
+        ["node:http", "node:https"]
+            .map(String::from)
+            .into_iter()
+            .collect()
+    );
+    assert!(realm_fetch_transport_bundles(&["const x = 1;"]).is_empty());
+    // an imported node:http keeps its declarations (not forced) yet still loads through the fetch set
+    let mut runtime = ["node:fs", "node:http"]
+        .map(String::from)
+        .into_iter()
+        .collect();
+    let mut resolved = vec!["node:fs".to_string(), "node:http".to_string()];
+    let mut forced = std::collections::HashSet::new();
+    force_realm_fetch_bundles(&mut runtime, &mut resolved, &mut forced);
+    assert!(!forced.contains("node:http"));
+    assert!(fetch.contains("node:http"));
 }
 
 #[cfg(test)]

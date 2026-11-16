@@ -8448,6 +8448,28 @@ extern "C" fn fake_server_poll_40() -> u8 {
 }
 
 #[test]
+fn fetch_await_services_a_live_native_server_in_the_same_process() {
+    use crate::host::TEST_SERVER_POLL;
+    let _guard = SERVER_POLL_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    *TEST_SERVER_POLL.lock().unwrap() = Some(fake_server_poll_40);
+    SERVER_POLLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    guarded(|| {
+        let mut it = Interp::new();
+        // nothing else in this realm can settle it: the awaited answer comes from the server in this process
+        let Ok(v) = it.run("new Promise(function () {})") else {
+            panic!("promise")
+        };
+        let Ok(settled) = it.await_settled(&v) else {
+            panic!("loop runs")
+        };
+        assert!(settled.is_none());
+    });
+    *TEST_SERVER_POLL.lock().unwrap() = None;
+    // before the fix the await returns at once (no poll); now it polls until the server goes idle
+    assert!(SERVER_POLLS.load(std::sync::atomic::Ordering::SeqCst) >= 40);
+}
+
+#[test]
 fn q9_process_config_and_error_prepare_stack_trace_exist() {
     let (out, code) = main_run(
         "console.log(typeof process.config, typeof process.config.variables, typeof process.config.target_defaults);\n\
@@ -8953,12 +8975,7 @@ fn host_for_in_keys_walk_prototype_chain_with_shadowing() {
 /// Standard globals that thaw-hir lowers by name (`platform_globals`) must
 /// exist in the thaw-js realm, or be listed here. Shrink-only: an entry is
 /// removed in the PR that implements it, and a stale entry fails this test.
-const ABSENT_IN_THAW_JS: &[&str] = &[
-    "fetch",
-    "WebSocket",
-    "DisposableStack",
-    "AsyncDisposableStack",
-];
+const ABSENT_IN_THAW_JS: &[&str] = &["WebSocket", "DisposableStack", "AsyncDisposableStack"];
 
 #[test]
 fn platform_globals_exist_in_thaw_js_realm_or_are_ledgered() {

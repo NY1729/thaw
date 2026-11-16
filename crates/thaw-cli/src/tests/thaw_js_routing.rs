@@ -780,7 +780,7 @@ fn random_fill_sync_declaration_keeps_bytes_only_when_thaw_js_routes_node_crypto
             &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
             &thaw_parser::common::FileName::Custom("random fill.ts".into()),
             false, &dir.join("app"), Some(&dir.join("staging")),
-            &std::collections::HashSet::new(), true, routed,
+            &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, routed,
         ).unwrap();
         shims.0.lines()
             .find(|line| thaw_js_declared_function(line, "node:crypto").as_deref() == Some("randomFillSync"))
@@ -806,7 +806,7 @@ fn imported_buffer_stays_native_when_thaw_js_routes_node_buffer() {
             &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
             &thaw_parser::common::FileName::Custom("imported buffer.ts".into()),
             false, &dir.join("app"), Some(&dir.join("staging")),
-            &std::collections::HashSet::new(), true, routed,
+            &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, routed,
         ).unwrap();
         shims.0
     };
@@ -846,7 +846,7 @@ fn thaw_js_routes_node_http_when_the_program_calls_native_create_server() {
         &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
         &thaw_parser::common::FileName::Custom("http eligible.ts".into()),
         false, &dir.join("app"), Some(&dir.join("staging")),
-        &std::collections::HashSet::new(), true, &ThawJsPackages::new(),
+        &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &ThawJsPackages::new(),
     ).unwrap();
     assert!(eligible.contains("node:http"), "{eligible:?}");
     let _ = std::fs::remove_dir_all(dir);
@@ -863,7 +863,7 @@ fn routed_node_http_keeps_the_native_create_server_declaration() {
         &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
         &thaw_parser::common::FileName::Custom("http decl.ts".into()),
         false, &dir.join("app"), Some(&dir.join("staging")),
-        &std::collections::HashSet::new(), true, &packages.iter().cloned().collect(),
+        &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &packages.iter().cloned().collect(),
     ).unwrap();
     let shim = shims.0;
     assert!(shim.contains("declare function createServer("), "{shim}");
@@ -931,6 +931,63 @@ fn thaw_js_routed_node_http_fetch_from_listen_callback_refused() {
     assert_eq!(manifest["quickjs"], true, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "err\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_routed_fetch_without_node_http_import_runs_on_thaw_js() {
+    // Q9 PR 2b: a program that mentions `fetch` but never imports node:http still routes through thaw-js
+    // (the forced node:http / node:https bundles give the realm fetch its transport). No server: fetch to a
+    // closed port (59123: closed and not on undici's bad-port list) rejects, as under `node`. The shape of
+    // the caught error is not asserted: the compiled catch sees the transport's error text, not Node's
+    // TypeError('fetch failed'); a real round trip is covered by the createServer + own fetch test.
+    let (dir, registry, entry) = thaw_js_fixture(
+        "fetch-without-node-http",
+        "async function main(): Promise<void> {\n\
+           try {\n\
+             await fetch('http://127.0.0.1:59123/');\n\
+             console.log('unexpected');\n\
+           } catch (e: any) {\n\
+             console.log('rejected');\n\
+           }\n\
+         }\n",
+    );
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run_guarded(&output), "rejected\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_routed_native_server_with_own_fetch_builds_and_matches_node() {
+    // Q9 PR 2b: the forced realm-fetch bundles must not add typed declarations, so the program's own
+    // `createServer` does not clash with node:https. The native server + fetch blocker still keeps node:http
+    // on QuickJS, which is what this build should report. Expected stdout is from a real `node` run.
+    let (dir, registry, entry) = thaw_js_fixture(
+        "native-server-with-own-fetch",
+        "import * as http from 'node:http';\n\
+         function main(): void {\n\
+           const srv = http.createServer((req, res) => { res.end('ok'); });\n\
+           srv.listen(0, '127.0.0.1', async () => {\n\
+             const addr: any = srv.address();\n\
+             const r: Response = await fetch('http://127.0.0.1:' + addr.port + '/');\n\
+             console.log(r.status, await r.text());\n\
+             srv.close();\n\
+           });\n\
+         }\n",
+    );
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    let blockers = manifest["thaw_js_blockers"].to_string();
+    assert!(
+        blockers.contains("native createServer together with global fetch"),
+        "{manifest}"
+    );
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run_guarded(&output), "200 ok\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

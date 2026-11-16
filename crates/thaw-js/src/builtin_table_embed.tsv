@@ -3024,6 +3024,10 @@ escape	length	data	--c	number	1	-	-	-	-
 escape	name	data	--c	string	-	escape	-	-	-
 eval	length	data	--c	number	1	-	-	-	-
 eval	name	data	--c	string	-	eval	-	-	-
+fetch	length	data	--c	number	1	-	-	-	-
+fetch	name	data	--c	string	-	fetch	-	-	-
+fetch	prototype	data	w--	object	-	-	-	-	-
+fetch.prototype	constructor	data	w-c	function	1	fetch	1	173	-
 isFinite	length	data	--c	number	1	-	-	-	-
 isFinite	name	data	--c	string	-	isFinite	-	-	-
 isNaN	length	data	--c	number	1	-	-	-	-

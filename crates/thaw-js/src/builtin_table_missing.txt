@@ -554,10 +554,6 @@ console.Console.prototype	@@kFormatForStderr
 console.Console.prototype	@@kFormatForStdout
 console.Console.prototype	@@kGetInspectOptions
 console.Console.prototype	@@kWriteToConsole
-fetch	length
-fetch	name
-fetch	prototype
-fetch.prototype	constructor
 performance	@@events.maxEventTargetListeners
 performance	@@events.maxEventTargetListenersWarned
 performance	@@kEvents
