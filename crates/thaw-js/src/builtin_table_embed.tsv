@@ -591,6 +591,7 @@ CustomEvent	name	data	--c	string	-	CustomEvent	-	-	-
 CustomEvent	prototype	data	---	object	-	-	-	-	-
 CustomEvent.prototype	@@toStringTag	data	--c	string	-	-	-	-	CustomEvent
 CustomEvent.prototype	constructor	data	w-c	function	1	CustomEvent	1	59	-
+CustomEvent.prototype	detail	accessor	-ec	-	-	get detail|-	-	-	-
 DOMException	ABORT_ERR	data	-e-	number	-	-	-	-	-
 DOMException	DATA_CLONE_ERR	data	-e-	number	-	-	-	-	-
 DOMException	DOMSTRING_SIZE_ERR	data	-e-	number	-	-	-	-	-
@@ -645,7 +646,10 @@ DOMException.prototype	TYPE_MISMATCH_ERR	data	-e-	number	-	-	-	-	-
 DOMException.prototype	URL_MISMATCH_ERR	data	-e-	number	-	-	-	-	-
 DOMException.prototype	VALIDATION_ERR	data	-e-	number	-	-	-	-	-
 DOMException.prototype	WRONG_DOCUMENT_ERR	data	-e-	number	-	-	-	-	-
+DOMException.prototype	code	accessor	-ec	-	-	get code|-	-	-	-
 DOMException.prototype	constructor	data	w-c	function	0	DOMException	1	60	-
+DOMException.prototype	message	accessor	-ec	-	-	get message|-	-	-	-
+DOMException.prototype	name	accessor	-ec	-	-	get name|-	-	-	-
 DataView	length	data	--c	number	1	-	-	-	-
 DataView	name	data	--c	string	-	DataView	-	-	-
 DataView	prototype	data	---	object	-	-	-	-	-
@@ -898,10 +902,29 @@ Event	length	data	--c	number	1	-	-	-	-
 Event	name	data	--c	string	-	Event	-	-	-
 Event	prototype	data	---	object	-	-	-	-	-
 Event.prototype	@@toStringTag	data	--c	string	-	-	-	-	Event
+Event.prototype	bubbles	accessor	-ec	-	-	get bubbles|-	-	-	-
+Event.prototype	cancelBubble	accessor	-ec	-	-	get cancelBubble|set cancelBubble	-	-	-
+Event.prototype	cancelable	accessor	-ec	-	-	get cancelable|-	-	-	-
+Event.prototype	composed	accessor	-ec	-	-	get composed|-	-	-	-
+Event.prototype	composedPath	data	wec	function	0	composedPath	0	-	-
 Event.prototype	constructor	data	w-c	function	1	Event	1	68	-
+Event.prototype	currentTarget	accessor	-ec	-	-	get currentTarget|-	-	-	-
+Event.prototype	defaultPrevented	accessor	-ec	-	-	get defaultPrevented|-	-	-	-
+Event.prototype	eventPhase	accessor	-ec	-	-	get eventPhase|-	-	-	-
+Event.prototype	initEvent	data	wec	function	1	initEvent	0	-	-
+Event.prototype	isTrusted	accessor	-e-	-	-	get isTrusted|-	-	-	-
 Event.prototype	preventDefault	data	wec	function	0	preventDefault	0	-	-
+Event.prototype	returnValue	accessor	-ec	-	-	get returnValue|set returnValue	-	-	-
+Event.prototype	srcElement	accessor	-ec	-	-	get srcElement|-	-	-	-
 Event.prototype	stopImmediatePropagation	data	wec	function	0	stopImmediatePropagation	0	-	-
 Event.prototype	stopPropagation	data	wec	function	0	stopPropagation	0	-	-
+Event.prototype	target	accessor	-ec	-	-	get target|-	-	-	-
+Event.prototype	timeStamp	accessor	-ec	-	-	get timeStamp|-	-	-	-
+Event.prototype	type	accessor	-ec	-	-	get type|-	-	-	-
+Event.prototype.composedPath	length	data	--c	number	0	-	-	-	-
+Event.prototype.composedPath	name	data	--c	string	-	composedPath	-	-	-
+Event.prototype.initEvent	length	data	--c	number	1	-	-	-	-
+Event.prototype.initEvent	name	data	--c	string	-	initEvent	-	-	-
 Event.prototype.preventDefault	length	data	--c	number	0	-	-	-	-
 Event.prototype.preventDefault	name	data	--c	string	-	preventDefault	-	-	-
 Event.prototype.stopImmediatePropagation	length	data	--c	number	0	-	-	-	-
@@ -1280,6 +1303,14 @@ MessageEvent	name	data	--c	string	-	MessageEvent	-	-	-
 MessageEvent	prototype	data	---	object	-	-	-	-	-
 MessageEvent.prototype	@@toStringTag	data	--c	string	-	-	-	-	MessageEvent
 MessageEvent.prototype	constructor	data	w-c	function	1	MessageEvent	1	95	-
+MessageEvent.prototype	data	accessor	-ec	-	-	get data|-	-	-	-
+MessageEvent.prototype	initMessageEvent	data	wec	function	1	initMessageEvent	0	-	-
+MessageEvent.prototype	lastEventId	accessor	-ec	-	-	get lastEventId|-	-	-	-
+MessageEvent.prototype	origin	accessor	-ec	-	-	get origin|-	-	-	-
+MessageEvent.prototype	ports	accessor	-ec	-	-	get ports|-	-	-	-
+MessageEvent.prototype	source	accessor	-ec	-	-	get source|-	-	-	-
+MessageEvent.prototype.initMessageEvent	length	data	--c	number	1	-	-	-	-
+MessageEvent.prototype.initMessageEvent	name	data	--c	string	-	initMessageEvent	-	-	-
 MessagePort	length	data	--c	number	0	-	-	-	-
 MessagePort	name	data	--c	string	-	MessagePort	-	-	-
 MessagePort	prototype	data	w--	object	-	-	-	-	-
