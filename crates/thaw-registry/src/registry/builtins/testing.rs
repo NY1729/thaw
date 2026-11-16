@@ -47,7 +47,8 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              function escapeXml(value) { return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
              async function* junit(source) { yield '<testsuite>'; for await (var event of records(source)) if (event.type === 'test') yield '<testcase name="' + escapeXml(event.fullName) + '">' + (event.status === 'failed' ? '<failure>' + escapeXml(event.message || '') + '</failure>' : '') + '</testcase>'; yield '</testsuite>'; }
              async function* lcov(source) { for await (var event of records(source)) if (event.coverage) yield String(event.coverage); }
-             module.exports = { dot: dot, spec: spec, tap: tap, junit: junit, lcov: lcov }; module.exports.default = module.exports; module.exports.__esModule = true;
+             function Reporter() {}
+             module.exports = { dot: dot, spec: spec, tap: tap, junit: junit, lcov: lcov, Reporter: Reporter }; module.exports.default = module.exports; module.exports.__esModule = true;
 "#,
         ),
         "wasi" => Some(
