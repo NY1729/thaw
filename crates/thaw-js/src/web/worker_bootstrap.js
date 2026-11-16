@@ -19,7 +19,7 @@
   __thaw_worker_capture(opts.stdout === true, opts.stderr === true);
   const stdin = new __thaw_worker_stream.Readable();
   if (opts.stdin !== true) stdin.__thawEnd();
-  process.stdin = stdin;
+  Object.defineProperty(process, 'stdin', { get: () => stdin, enumerable: true, configurable: true });
 
   const parentPort = new MessagePort();
   // Messages to the parent are wire strings; transferring ports between threads is not supported yet.

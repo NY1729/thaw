@@ -2650,15 +2650,22 @@ isFinite	name	data	--c	string	-	isFinite	-	-	-
 isNaN	length	data	--c	number	1	-	-	-	-
 isNaN	name	data	--c	string	-	isNaN	-	-	-
 process	@@toStringTag	data	w--	string	-	-	-	-	process
+process	_debugEnd	data	wec	function	0	_debugEnd	0	-	-
+process	_debugProcess	data	wec	function	0	_debugProcess	0	-	-
 process	_events	data	wec	object	-	-	-	-	-
 process	_eventsCount	data	wec	number	-	-	-	-	-
 process	_exiting	accessor	-ec	-	-	get|set	-	-	-
+process	_fatalException	data	wec	function	2		0	-	-
 process	_getActiveHandles	data	wec	function	0	_getActiveHandles	0	-	-
 process	_getActiveRequests	data	wec	function	0	_getActiveRequests	0	-	-
 process	_kill	data	wec	function	0	_kill	0	-	-
 process	_linkedBinding	data	wec	function	1	_linkedBinding	1	174	-
 process	_maxListeners	data	wec	undefined	-	-	-	-	-
+process	_preload_modules	data	-ec	object	-	-	-	-	-
 process	_rawDebug	data	wec	function	0	_rawDebug	1	175	-
+process	_startProfilerIdleNotifier	data	wec	function	0		0	-	-
+process	_stopProfilerIdleNotifier	data	wec	function	0		0	-	-
+process	_tickCallback	data	wec	function	0	runNextTicks	1	176	-
 process	abort	data	wec	function	0	abort	0	-	-
 process	allowedNodeEnvironmentFlags	accessor	-ec	-	-	get|set	-	-	-
 process	arch	data	-ec	string	-	-	-	-	-
@@ -2717,6 +2724,9 @@ process	setgid	data	wec	function	1		1	199	-
 process	setgroups	data	wec	function	1	setgroups	1	200	-
 process	setuid	data	wec	function	1		1	201	-
 process	sourceMapsEnabled	accessor	-ec	-	-	get|-	-	-	-
+process	stderr	accessor	-ec	-	-	getStderr|-	-	-	-
+process	stdin	accessor	-ec	-	-	getStdin|-	-	-	-
+process	stdout	accessor	-ec	-	-	getStdout|-	-	-	-
 process	threadCpuUsage	data	wec	function	1	threadCpuUsage	1	202	-
 process	title	data	wec	string	-	-	-	-	-
 process	umask	data	wec	function	1	wrappedUmask	1	203	-
@@ -2724,6 +2734,12 @@ process	unref	data	wec	function	1	unref	1	204	-
 process	uptime	data	wec	function	0	uptime	0	-	-
 process	version	data	-ec	string	-	-	-	-	-
 process	versions	data	-ec	object	-	-	-	-	-
+process._debugEnd	length	data	--c	number	0	-	-	-	-
+process._debugEnd	name	data	--c	string	-	_debugEnd	-	-	-
+process._debugProcess	length	data	--c	number	0	-	-	-	-
+process._debugProcess	name	data	--c	string	-	_debugProcess	-	-	-
+process._fatalException	length	data	--c	number	2	-	-	-	-
+process._fatalException	name	data	--c	string	-		-	-	-
 process._getActiveHandles	length	data	--c	number	0	-	-	-	-
 process._getActiveHandles	name	data	--c	string	-	_getActiveHandles	-	-	-
 process._getActiveRequests	length	data	--c	number	0	-	-	-	-
@@ -2734,6 +2750,12 @@ process._linkedBinding	length	data	--c	number	1	-	-	-	-
 process._linkedBinding	name	data	--c	string	-	_linkedBinding	-	-	-
 process._rawDebug	length	data	--c	number	0	-	-	-	-
 process._rawDebug	name	data	--c	string	-	_rawDebug	-	-	-
+process._startProfilerIdleNotifier	length	data	--c	number	0	-	-	-	-
+process._startProfilerIdleNotifier	name	data	--c	string	-		-	-	-
+process._stopProfilerIdleNotifier	length	data	--c	number	0	-	-	-	-
+process._stopProfilerIdleNotifier	name	data	--c	string	-		-	-	-
+process._tickCallback	length	data	--c	number	0	-	-	-	-
+process._tickCallback	name	data	--c	string	-	runNextTicks	-	-	-
 process.abort	length	data	--c	number	0	-	-	-	-
 process.abort	name	data	--c	string	-	abort	-	-	-
 process.assert	length	data	--c	number	2	-	-	-	-
