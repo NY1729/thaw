@@ -2588,8 +2588,14 @@ impl Interp {
     fn closure_from_def(&mut self, def: Rc<FuncDef>, scope: &Rc<Scope>) -> Value {
         let (arrow, is_async, is_gen, no_prototype) =
             (def.arrow, def.is_async, def.is_gen, def.no_prototype);
+        let kind_proto = match (is_gen, is_async) {
+            (true, true) => self.rt.async_generator_function_proto.clone(),
+            (true, false) => self.rt.generator_function_proto.clone(),
+            (false, true) => self.rt.async_function_proto.clone(),
+            (false, false) => None,
+        };
         let f = new_obj(
-            Some(self.function_proto.clone()),
+            Some(kind_proto.unwrap_or_else(|| self.function_proto.clone())),
             Kind::Closure {
                 def,
                 scope: scope.clone(),
@@ -4886,6 +4892,8 @@ mod errors_stack_tests;
 mod fetch_tests;
 #[cfg(all(test, unix))]
 mod fs_tests;
+#[cfg(test)]
+mod generator_function_tests;
 #[cfg(test)]
 mod global_object_view_tests;
 #[cfg(test)]

@@ -8102,7 +8102,7 @@ fn lazy_prototype_json_assign_spread_and_inspect_skip_it() {
 fn lazy_prototype_generators_arrows_methods_and_bound_functions() {
     assert_eq!(
         one("function* gen(){}; var d = Object.getOwnPropertyDescriptor(gen,'prototype'); console.log(JSON.stringify(Object.getOwnPropertyNames(gen)), d.writable, d.enumerable, d.configurable, Object.getPrototypeOf(gen.prototype) === Object.getPrototypeOf(function*(){}).prototype, typeof gen.prototype);"),
-        r#"["length","name","prototype"] true false false false object"#
+        r#"["length","name","prototype"] true false false true object"#
     );
     assert_eq!(
         one("function* gen(){ yield 1; yield 2; }; console.log([...gen()].join(','), Object.getPrototypeOf(gen()) === gen.prototype);"),
