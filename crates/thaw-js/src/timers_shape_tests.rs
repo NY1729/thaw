@@ -4,7 +4,7 @@ use super::*;
 fn run(src: &str) -> Vec<String> {
     let mut it = Interp::new();
     match it.run(src) {
-        Ok(_) => it.out,
+        Ok(_) => std::mem::take(&mut it.out),
         Err(Ctl::Throw(v)) => {
             let mut out = it.out.clone();
             out.push(format!("Uncaught {}", it.to_str(&v)));
