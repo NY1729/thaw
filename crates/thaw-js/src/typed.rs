@@ -127,7 +127,10 @@ pub(crate) fn new_sab_block(len: usize) -> Arc<SabBlock> {
 
 /// A zeroed SharedArrayBuffer storage of `len` bytes.
 pub(crate) fn new_sab_bytes(len: usize) -> Bytes {
-    sab_store(new_sab_block(len))
+    // counted once, on the creating thread: an importing store (`sab_store` alone) charges nothing
+    let bytes = sab_store(new_sab_block(len));
+    bytes.charged.set(heap_limit::charge(len));
+    bytes
 }
 
 /// An attached storage over `block`: the same bytes as every other store of the block.
@@ -140,6 +143,7 @@ pub(crate) fn sab_store(block: Arc<SabBlock>) -> Bytes {
         shared: None,
         detached: Cell::new(false),
         sab: Some(block),
+        charged: Cell::new(0),
     })
 }
 
@@ -154,10 +158,13 @@ pub(crate) struct Store {
     detached: Cell<bool>,
     /// The block of a SharedArrayBuffer; `cell` then aliases it (see `SabBlock`).
     sab: Option<Arc<SabBlock>>,
+    /// Bytes this storage charged to the heap limit (`heap_limit`); 0 once detached.
+    charged: Cell<usize>,
 }
 
 impl Drop for Store {
     fn drop(&mut self) {
+        heap_limit::credit(self.charged.get());
         if self.sab.is_some() {
             // invariant 1: the alias must not free the block; `sab` then drops its Arc
             std::mem::forget(std::mem::take(self.cell.get_mut()));
@@ -179,11 +186,13 @@ pub(crate) type Bytes = Rc<Store>;
 
 /// A fresh, attached storage owning `v`.
 pub(crate) fn new_bytes(v: Vec<u8>) -> Bytes {
+    let charged = heap_limit::charge(v.len());
     Rc::new(Store {
         cell: RefCell::new(v),
         shared: None,
         detached: Cell::new(false),
         sab: None,
+        charged: Cell::new(charged),
     })
 }
 
@@ -195,6 +204,7 @@ pub(crate) fn shared_bytes(shared: Rc<RefCell<Vec<u8>>>) -> Bytes {
         shared: Some(shared),
         detached: Cell::new(false),
         sab: None,
+        charged: Cell::new(0),
     })
 }
 
@@ -209,6 +219,7 @@ pub(crate) fn detach_bytes(b: &Bytes) {
     if b.shared.is_none() {
         *b.cell.borrow_mut() = Vec::new();
     }
+    heap_limit::credit(b.charged.replace(0));
     b.detached.set(true);
 }
 
@@ -528,6 +539,8 @@ impl Interp {
         } else {
             self.new_array_buffer(new_bytes(vec![0; n as usize]))
         };
+        // the bytes are charged above: stop here if that tripped the worker's heap limit
+        self.check_interrupt()?;
         Ok(Value::Object(obj))
     }
 
