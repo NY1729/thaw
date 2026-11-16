@@ -725,7 +725,9 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
         }
         for m in &w.called {
             // `util.styleText` calls `stream.hasColors()` only after `typeof stream.hasColors === 'function'`
-            if !known_methods.contains(m)
+            // `process.dlopen` is exported now (it throws ERR_DLOPEN_FAILED), but no addon loads at runtime, so
+            // a bundle that calls it stays a blocker, as it was when the member was missing.
+            if (!known_methods.contains(m) || m == "dlopen")
                 && !defined.contains(m)
                 && !w.probed_methods.contains(m)
                 && m != "hasColors"

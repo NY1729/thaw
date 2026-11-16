@@ -2585,10 +2585,12 @@ process	constrainedMemory	data	wec	function	0	constrainedMemory	0	-	-
 process	cpuUsage	data	wec	function	1	cpuUsage	1	179	-
 process	cwd	data	wec	function	0	wrappedCwd	1	180	-
 process	debugPort	data	wec	number	-	-	-	-	-
+process	dlopen	data	wec	function	0	dlopen	0	-	-
 process	emitWarning	data	wec	function	4	emitWarning	1	181	-
 process	env	data	wec	object	-	-	-	-	-
 process	execArgv	data	wec	object	-	-	-	-	-
 process	execPath	data	wec	string	-	-	-	-	-
+process	execve	data	wec	function	1	execve	1	182	-
 process	exit	data	wec	function	1	exit	1	183	-
 process	exitCode	accessor	-e-	-	-	get|set	-	-	-
 process	features	data	-e-	object	-	-	-	-	-
@@ -2601,6 +2603,7 @@ process	getuid	data	wec	function	0	getuid	0	-	-
 process	hrtime	data	wec	function	1	hrtime	1	186	-
 process	initgroups	data	wec	function	2	initgroups	1	187	-
 process	kill	data	wec	function	2	kill	1	188	-
+process	loadEnvFile	data	wec	function	0	loadEnvFile	1	189	-
 process	memoryUsage	data	wec	function	0	memoryUsage	1	190	-
 process	nextTick	data	wec	function	1	nextTick	1	191	-
 process	pid	data	-ec	number	-	-	-	-	-
@@ -2647,8 +2650,12 @@ process.cpuUsage	length	data	--c	number	1	-	-	-	-
 process.cpuUsage	name	data	--c	string	-	cpuUsage	-	-	-
 process.cwd	length	data	--c	number	0	-	-	-	-
 process.cwd	name	data	--c	string	-	wrappedCwd	-	-	-
+process.dlopen	length	data	--c	number	0	-	-	-	-
+process.dlopen	name	data	--c	string	-	dlopen	-	-	-
 process.emitWarning	length	data	--c	number	4	-	-	-	-
 process.emitWarning	name	data	--c	string	-	emitWarning	-	-	-
+process.execve	length	data	--c	number	1	-	-	-	-
+process.execve	name	data	--c	string	-	execve	-	-	-
 process.exit	length	data	--c	number	1	-	-	-	-
 process.exit	name	data	--c	string	-	exit	-	-	-
 process.getActiveResourcesInfo	length	data	--c	number	0	-	-	-	-
@@ -2672,6 +2679,8 @@ process.initgroups	length	data	--c	number	2	-	-	-	-
 process.initgroups	name	data	--c	string	-	initgroups	-	-	-
 process.kill	length	data	--c	number	2	-	-	-	-
 process.kill	name	data	--c	string	-	kill	-	-	-
+process.loadEnvFile	length	data	--c	number	0	-	-	-	-
+process.loadEnvFile	name	data	--c	string	-	loadEnvFile	-	-	-
 process.memoryUsage	length	data	--c	number	0	-	-	-	-
 process.memoryUsage	name	data	--c	string	-	memoryUsage	-	-	-
 process.memoryUsage	rss	data	wec	function	0	rss	0	-	-
