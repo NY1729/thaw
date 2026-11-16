@@ -1394,6 +1394,7 @@ impl Interp {
             || self.stdin_live()
             || self.ipc_live()
             || crate::napi_bridge::pending()
+            || crate::atomics::delivery_pending(self.realm_id)
     }
 
     /// This realm reads `process.stdin` and the reader is still open and referenced.
@@ -1439,6 +1440,15 @@ impl Interp {
             let f = self.get(&g, "__thaw_worker_dispatch")?;
             if matches!(f, Value::Object(_)) {
                 self.call(&f, &g, &[Value::str(&events)])?;
+                self.run_jobs()?;
+            }
+        }
+        // Atomics.waitAsync waiters that a notify took since the last poll settle here, a loop turn after the notify
+        let done = crate::atomics::poll_async(self);
+        if done != "[]" {
+            let f = self.get(&g, "__thaw_waitasync_dispatch")?;
+            if matches!(f, Value::Object(_)) {
+                self.call(&f, &g, &[Value::str(&done)])?;
                 self.run_jobs()?;
             }
         }
@@ -1506,6 +1516,7 @@ impl Interp {
                     || self.ipc_live()
                     || self.interrupt.is_some()
                     || crate::host::native_servers_live()
+                    || crate::atomics::async_pending()
                 {
                     wait = wait.min(2.0);
                 }
@@ -1522,6 +1533,7 @@ impl Interp {
                 || self.ipc_live()
                 || self.interrupt.is_some()
                 || crate::host::native_servers_live()
+                || crate::atomics::async_pending()
             {
                 loop_idle_sleep(Duration::from_millis(2));
             }
@@ -2000,12 +2012,53 @@ impl Interp {
             Some(exit_code_set),
             true,
         );
+        // Node 22.23.1's `process.versions` keys in Node's order; `v8` is thaw's own value.
         let versions = self.plain();
-        put(&versions, "node", Value::str("22.23.1"));
-        put(&versions, "v8", Value::str("12.4.254.21-node.33"));
+        for (k, v) in [
+            ("node", "22.23.1"),
+            ("acorn", "8.16.0"),
+            ("ada", "2.9.2"),
+            ("amaro", "1.1.8"),
+            ("ares", "1.34.6"),
+            ("brotli", "1.2.0"),
+            ("cjs_module_lexer", "2.2.0"),
+            ("cldr", "48.0"),
+            ("icu", "78.2"),
+            ("llhttp", "9.4.2"),
+            ("modules", "127"),
+            ("napi", "10"),
+            ("nbytes", "0.1.3"),
+            ("ncrypto", "0.0.1"),
+            ("nghttp2", "1.69.0"),
+            ("openssl", "3.5.9"),
+            ("simdjson", "4.5.0"),
+            ("simdutf", "6.4.2"),
+            ("sqlite", "3.51.2"),
+            ("tz", "2025c"),
+            ("undici", "6.27.0"),
+            ("unicode", "17.0"),
+            ("uv", "1.52.1"),
+            ("uvwasi", "0.0.23"),
+            ("v8", "12.4.254.21-node.33"),
+            ("zlib", "1.3.1.zlib-ng"),
+            ("zstd", "1.5.7"),
+        ] {
+            put(&versions, k, Value::str(v));
+        }
         put(&p, "versions", Value::Object(versions));
         let release = self.plain();
         put(&release, "name", Value::str("node"));
+        put(&release, "lts", Value::str("Jod"));
+        put(
+            &release,
+            "sourceUrl",
+            Value::str("https://nodejs.org/download/release/v22.23.1/node-v22.23.1.tar.gz"),
+        );
+        put(
+            &release,
+            "headersUrl",
+            Value::str("https://nodejs.org/download/release/v22.23.1/node-v22.23.1-headers.tar.gz"),
+        );
         put(&p, "release", Value::Object(release));
         // Mirrors thaw-quickjs context.rs: argv[0] is the host binary, then the forwarded arguments.
         let (node_argv, node_exec_argv) = node_argv_split(&arguments);

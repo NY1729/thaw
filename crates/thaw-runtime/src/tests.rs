@@ -402,10 +402,32 @@ fn dependency_compile_root_locale_case() {
 
 static TLS_TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static UNHANDLED_REJECTIONS: AtomicU64 = AtomicU64::new(0);
+// The counter is process-wide while each test runs on its own thread, so every
+// test that registers `record_unhandled_rejection` holds this lock for its body.
+static UNHANDLED_REPORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 extern "C" fn record_unhandled_rejection(_: *const u8) -> u8 {
     UNHANDLED_REJECTIONS.fetch_add(1, Ordering::Relaxed);
     1
+}
+
+struct UnhandledReportGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for UnhandledReportGuard {
+    fn drop(&mut self) {
+        thaw_promise_set_unhandled_reporter(None);
+        thaw_promise_set_rejection_handled_reporter(None);
+    }
+}
+
+fn guard_unhandled_reports() -> UnhandledReportGuard {
+    let lock = UNHANDLED_REPORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    UNHANDLED_REJECTIONS.store(0, Ordering::Relaxed);
+    UnhandledReportGuard { _lock: lock }
 }
 
 extern "C" fn ignore_promise_result(_: *mut u8, _: *const u8) {}
@@ -657,7 +679,7 @@ fn timed_value(milliseconds: u64, value: f64) -> *mut ThawPromise {
 
 #[test]
 fn reports_only_unsubscribed_rejected_promises() {
-    UNHANDLED_REJECTIONS.store(0, Ordering::Relaxed);
+    let _guard = guard_unhandled_reports();
     thaw_promise_set_unhandled_reporter(Some(record_unhandled_rejection));
     let unhandled = thaw_promise_new();
     thaw_promise_reject(unhandled, c"boom".as_ptr().cast());
@@ -692,7 +714,6 @@ fn reports_only_unsubscribed_rejected_promises() {
     unsafe { thaw_promise_destroy(unhandled) };
     unsafe { thaw_promise_destroy(handled) };
     unsafe { thaw_promise_destroy(polled) };
-    thaw_promise_set_unhandled_reporter(None);
 }
 
 #[test]
@@ -702,6 +723,7 @@ fn reports_a_rejection_handled_after_the_unhandled_checkpoint() {
         HANDLED.fetch_add(1, Ordering::Relaxed);
     }
 
+    let _guard = guard_unhandled_reports();
     HANDLED.store(0, Ordering::Relaxed);
     thaw_promise_set_unhandled_reporter(Some(record_unhandled_rejection));
     thaw_promise_set_rejection_handled_reporter(Some(record_handled));
@@ -716,8 +738,6 @@ fn reports_a_rejection_handled_after_the_unhandled_checkpoint() {
     assert_eq!(thaw_runtime_poll_one(), 0);
     assert_eq!(HANDLED.load(Ordering::Relaxed), 1);
     unsafe { thaw_promise_destroy(promise) };
-    thaw_promise_set_unhandled_reporter(None);
-    thaw_promise_set_rejection_handled_reporter(None);
 }
 
 fn local_tls_configs() -> (Arc<ClientConfig>, Arc<ServerConfig>) {
@@ -3769,6 +3789,7 @@ fn dependency_compile_finally_adopt_deferred_frame() {
 
 #[test]
 fn terminal_reporting_activity_is_distinct_from_work_and_failure() {
+    let _guard = guard_unhandled_reports();
     thaw_promise_take_report_activity();
     thaw_promise_take_unhandled_failure();
     thaw_promise_set_unhandled_reporter(Some(record_unhandled_rejection));
@@ -3780,7 +3801,6 @@ fn terminal_reporting_activity_is_distinct_from_work_and_failure() {
     assert_eq!(thaw_promise_take_report_activity(), 0);
     assert_eq!(thaw_promise_take_unhandled_failure(), 0);
     unsafe { thaw_promise_destroy(promise) };
-    thaw_promise_set_unhandled_reporter(None);
 }
 
 #[test]

@@ -17,7 +17,12 @@ Gaps:
 
 Gate: exits 1 only when a gap id is NOT in --baseline (gaps may only shrink).
 --write-baseline records the current gap ids into --baseline and exits 0.
-Exit 2 = harness error (missing node output, duplicate probe name).
+Exit 2 = harness error (missing node output, duplicate probe name, bad --waivers file).
+
+--waivers FILE: classifies each gap as waived (with the first matching waiver id) or real.
+Waivers never change the gate; waived gaps are still baseline entries. Each gap gets
+`waived` and `waiver` fields in gaps.json. A gap matching two rules is counted under the first
+and listed in the report. Without --waivers every gap is real.
 """
 import argparse, glob, json, os, re, sys
 
@@ -99,6 +104,31 @@ def load_skips(path):
                 pats.append(re.compile(line))
     return pats
 
+def load_waivers(path):
+    """[{id, reason, res}] from a waivers.json; exit 2 on a malformed file."""
+    if not path:
+        return []
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+        rules, seen = [], set()
+        for w in data['waivers']:
+            wid, reason, match = w['id'], w['reason'], w['match']
+            if not re.fullmatch(r'W\d+', wid) or wid in seen:
+                raise ValueError(f'bad or duplicate waiver id {wid!r}')
+            if not reason.strip() or not match:
+                raise ValueError(f'waiver {wid} needs a reason and at least one match')
+            seen.add(wid)
+            rules.append({'id': wid, 'reason': reason, 'res': [re.compile(m) for m in match]})
+        return rules
+    except (OSError, ValueError, KeyError, TypeError, re.error) as e:
+        sys.stderr.write(f'harness error: bad waivers file {path}: {e}\n')
+        sys.exit(2)
+
+def waiver_hits(gap_id, rules):
+    """Ids of every waiver rule with a regex that fullmatches the gap id, in file order."""
+    return [w['id'] for w in rules if any(rx.fullmatch(gap_id) for rx in w['res'])]
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--node-dir', required=True)
@@ -109,11 +139,15 @@ def main():
     ap.add_argument('--skip', help='file of regexes; matching probe names are dropped from both sides')
     ap.add_argument('--blocks', action='store_true',
                     help='probes are `@@ <name>` delimited blocks that may span lines (see module doc)')
+    ap.add_argument('--waivers', help='waivers.json: classify gaps as waived or real (see module doc)')
     args = ap.parse_args()
     read = load_blocks if args.blocks else load
     norm = block_normalise if args.blocks else normalise
 
     skips = load_skips(args.skip)
+    rules = load_waivers(args.waivers)
+    waiver_counts = {w['id']: 0 for w in rules}
+    multi = []
     node_files = sorted(glob.glob(os.path.join(args.node_dir, '*.txt')))
     if not node_files:
         sys.stderr.write(f'harness error: no node outputs in {args.node_dir}\n')
@@ -125,7 +159,7 @@ def main():
         node = read(npath)
         tpath = os.path.join(args.thaw_dir, corpus + '.txt')
         thaw = read(tpath) if os.path.exists(tpath) else {}
-        c = {'probes': 0, 'MISSING': 0, 'DIFFERENT': 0, 'EXTRA': 0}
+        c = {'probes': 0, 'MISSING': 0, 'DIFFERENT': 0, 'EXTRA': 0, 'real': 0, 'waived': 0}
         for name in node:
             if any(p.search(name) for p in skips):
                 skipped += 1
@@ -138,8 +172,16 @@ def main():
             else:
                 continue
             c[kind] += 1
-            gaps.append({'id': f'{corpus}::{name}', 'corpus': corpus, 'probe': name, 'kind': kind,
-                         'node': node[name], 'thaw': t})
+            gid = f'{corpus}::{name}'
+            hits = waiver_hits(gid, rules)
+            if len(hits) > 1:
+                multi.append((gid, hits))
+            if hits:
+                waiver_counts[hits[0]] += 1
+            c['waived' if hits else 'real'] += 1
+            gaps.append({'id': gid, 'corpus': corpus, 'probe': name, 'kind': kind,
+                         'node': node[name], 'thaw': t,
+                         'waived': bool(hits), 'waiver': hits[0] if hits else None})
         for name in thaw:
             if name not in node and not any(p.search(name) for p in skips):
                 c['EXTRA'] += 1
@@ -153,20 +195,31 @@ def main():
     new = sorted(set(current) - baseline_ids)
     fixed = sorted(baseline_ids - set(current))
 
-    print(f'{"corpus":<18}{"probes":>8}{"MISSING":>9}{"DIFFERENT":>11}{"EXTRA":>7}')
+    print(f'{"corpus":<18}{"probes":>8}{"MISSING":>9}{"DIFFERENT":>11}{"EXTRA":>7}{"real":>7}{"waived":>8}')
     for corpus, c in counts.items():
-        print(f'{corpus:<18}{c["probes"]:>8}{c["MISSING"]:>9}{c["DIFFERENT"]:>11}{c["EXTRA"]:>7}')
+        print(f'{corpus:<18}{c["probes"]:>8}{c["MISSING"]:>9}{c["DIFFERENT"]:>11}{c["EXTRA"]:>7}'
+              f'{c["real"]:>7}{c["waived"]:>8}')
     print(f'skipped by {os.path.basename(args.skip) if args.skip else "-"}: {skipped}')
+    if rules:
+        print()
+        print(f'{"waiver":<8}{"gaps":>6}  reason')
+        for w in rules:
+            print(f'{w["id"]:<8}{waiver_counts[w["id"]]:>6}  {w["reason"][:80]}')
+        for gid, hits in multi:
+            print(f'matched {len(hits)} waivers ({", ".join(hits)}), counted as {hits[0]}: {gid}')
     print()
-    print(f'{"status":<8}{"kind":<11}{"probe":<60}{"node":<40}thaw')
+    print(f'{"status":<8}{"waiver":<8}{"kind":<11}{"probe":<60}{"node":<40}thaw')
     for g in gaps:
         status = 'known' if g['id'] in baseline_ids else 'NEW'
         if args.write_baseline:
             status = '-'
         flat = lambda v: v.replace('\n', '\\n')   # block values may span lines; keep one table row
-        print(f'{status:<8}{g["kind"]:<11}{g["id"][:58]:<60}{flat(g["node"])[:38]:<40}{flat(g["thaw"])[:60]}')
+        print(f'{status:<8}{g["waiver"] or "real":<8}{g["kind"]:<11}{g["id"][:58]:<60}'
+              f'{flat(g["node"])[:38]:<40}{flat(g["thaw"])[:60]}')
     print()
-    print(f'gaps: {len(gaps)}  baseline: {len(baseline_ids)}  new: {len(new)}  fixed since baseline: {len(fixed)}')
+    n_waived = sum(waiver_counts.values())
+    print(f'gaps: {len(gaps)}  real: {len(gaps) - n_waived}  waived: {n_waived}  '
+          f'baseline: {len(baseline_ids)}  new: {len(new)}  fixed since baseline: {len(fixed)}')
     if fixed:
         print('fixed (rerun with --write-baseline to ratchet): ' + ', '.join(fixed[:20]) + (' ...' if len(fixed) > 20 else ''))
 

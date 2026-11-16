@@ -327,6 +327,7 @@ Atomics	or	data	w-c	function	3	or	0	-	-
 Atomics	store	data	w-c	function	3	store	0	-	-
 Atomics	sub	data	w-c	function	3	sub	0	-	-
 Atomics	wait	data	w-c	function	4	wait	0	-	-
+Atomics	waitAsync	data	w-c	function	4	waitAsync	0	-	-
 Atomics	xor	data	w-c	function	3	xor	0	-	-
 Atomics.add	length	data	--c	number	3	-	-	-	-
 Atomics.add	name	data	--c	string	-	add	-	-	-
@@ -350,6 +351,8 @@ Atomics.sub	length	data	--c	number	3	-	-	-	-
 Atomics.sub	name	data	--c	string	-	sub	-	-	-
 Atomics.wait	length	data	--c	number	4	-	-	-	-
 Atomics.wait	name	data	--c	string	-	wait	-	-	-
+Atomics.waitAsync	length	data	--c	number	4	-	-	-	-
+Atomics.waitAsync	name	data	--c	string	-	waitAsync	-	-	-
 Atomics.xor	length	data	--c	number	3	-	-	-	-
 Atomics.xor	name	data	--c	string	-	xor	-	-	-
 BigInt	asIntN	data	w-c	function	2	asIntN	0	-	-

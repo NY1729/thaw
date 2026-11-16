@@ -2,6 +2,9 @@
 
 Run: python3 -m unittest discover -s tools/aotdiff -p 'test_*.py'
 """
+import contextlib
+import io
+import json
 import sys
 import tempfile
 import unittest
@@ -68,10 +71,135 @@ class OutputTest(unittest.TestCase):
 
 class VerdictTest(unittest.TestCase):
     def test_outcomes(self):
-        self.assertEqual(run.verdict("a => 1", "a => 1", 0), (run.MATCH, ""))
+        self.assertEqual(run.verdict("a => 1", "a => 1", 0), (run.MATCH, "", ""))
         self.assertEqual(run.verdict("a => 1", "a => 2", 0)[0], run.MISMATCH)
         self.assertEqual(run.verdict("a => 1", None, 0)[1], "no output line")
         self.assertEqual(run.verdict("a => 1", "a => 1", 139)[1], "exit code 139 (node 0)")
+
+    def test_kind_splits_type_from_message_wording(self):
+        self.assertEqual(run.verdict("e THROW TypeError x", "e THROW RangeError x", 0)[2], run.TYPE)
+        self.assertEqual(run.verdict("e THROW TypeError x", "e THROW TypeError y", 0)[2], run.MSG)
+        self.assertEqual(run.verdict("a => 1", "a => 2", 0)[2], run.OUTPUT)
+        self.assertEqual(run.verdict("e THROW TypeError x", "e => 1", 0)[2], run.TYPE)
+        self.assertEqual(run.verdict("a => 1", "a => 1", 139)[2], run.EXIT)
+        self.assertEqual(run.verdict("a => 1", None, 0)[2], run.NO_OUTPUT)
+
+
+class NormaliseTest(unittest.TestCase):
+    def test_absolute_paths_become_placeholder_but_regex_literals_survive(self):
+        self.assertEqual(run.normalise("at /home/fedora/work/x.ts"), "at <path>")
+        self.assertEqual(run.normalise("/ab/g"), "/ab/g")
+
+    def test_null_prototype_prefix_dropped(self):
+        self.assertEqual(run.normalise("[Object: null prototype] { a: 1 }"), "{ a: 1 }")
+        self.assertEqual(run.normalise("{ a: 1 }"), "{ a: 1 }")
+
+    def test_timing_and_address(self):
+        self.assertEqual(run.normalise("t => 12.5ms"), "t => <ms>")
+        self.assertEqual(run.normalise("o => [Object 0x7f3a2b1c4d]"), "o => [Object <addr>]")
+
+    def test_handle_id_is_not_normalised(self):
+        s = "__thaw_js_handle_id__: 42"
+        self.assertEqual(run.normalise(s), s)
+
+    def test_stack_frames_after_first_line_collapse(self):
+        t = "e THROW Error boom\n    at f (/a/b/c.ts:1:2)\n    at g (/a/b/c.ts:3:4)\n    at main"
+        self.assertEqual(run.normalise(t), "e THROW Error boom\n    at <frame>")
+
+    def test_header_and_non_frame_lines_untouched(self):
+        self.assertEqual(run.normalise("at => 1"), "at => 1")
+        self.assertEqual(run.normalise("x => {\n  at: 3\n}"), "x => {\n  at: 3\n}")
+
+
+FIXTURE_MIS = {"class": "MISMATCH", "kind": "OUTPUT", "reason": "output differs"}
+FIXTURE_REJ = {"class": "REJECT", "reason": "error: unsupported"}
+FIXTURE_WAIVER = {"id": "W1", "reason": "by design: no eval"}
+FIXTURE = {"numeric/a": FIXTURE_MIS, "numeric/b": FIXTURE_REJ}
+
+
+class BaselineTest(unittest.TestCase):
+    def test_validate_rejects_bad_entries(self):
+        bad = [
+            {"numeric/x": {"class": "FAIL", "reason": "r"}},
+            {"numeric/x": {"class": "MISMATCH", "kind": "BOGUS", "reason": "r"}},
+            {"numeric/x": {"class": "REJECT", "reason": ""}},
+            {"numeric/x": {"class": "REJECT", "reason": "r", "waiver": {"id": "X1", "reason": "r"}}},
+            {"numeric/x": {"class": "REJECT", "reason": "r", "waiver": {"id": "W1", "reason": ""}}},
+        ]
+        for gaps in bad:
+            with self.subTest(gaps=gaps), self.assertRaises(run.HarnessError):
+                run.validate_gaps(gaps)
+        run.validate_gaps(FIXTURE)
+
+    def test_round_trip_and_schema(self):
+        path = Path(tempfile.mkdtemp()) / "known-gaps.json"
+        run.write_baseline(path, FIXTURE, "thaw-test", "node-test")
+        self.assertEqual(run.load_baseline(path), FIXTURE)
+        self.assertEqual(json.loads(path.read_text())["schema"], 1)
+
+    def test_merge_keeps_other_families_and_waiver(self):
+        old = {"numeric/a": dict(FIXTURE_MIS, waiver=FIXTURE_WAIVER), "json/z": FIXTURE_MIS}
+        cur = {"numeric/a": dict(FIXTURE_MIS, kind="MSG"), "numeric/c": FIXTURE_REJ}
+        m = run.merge_baseline(old, cur, {"numeric"})
+        self.assertEqual(set(m), {"numeric/a", "numeric/c", "json/z"})
+        self.assertEqual(m["numeric/a"]["waiver"], FIXTURE_WAIVER)
+        self.assertEqual(m["numeric/a"]["kind"], "MSG")
+        self.assertNotIn("waiver", m["numeric/c"])
+
+    def test_waiver_dropped_when_class_changes(self):
+        old = {"numeric/a": dict(FIXTURE_REJ, waiver=FIXTURE_WAIVER)}
+        m = run.merge_baseline(old, {"numeric/a": FIXTURE_MIS}, {"numeric"})
+        self.assertNotIn("waiver", m["numeric/a"])
+
+
+def cur_of(*pairs):
+    return dict(pairs)
+
+
+class GateTest(unittest.TestCase):
+    def test_new_mismatch_fails(self):
+        g = run.gate({}, {"numeric/a": FIXTURE_MIS}, {"numeric"})
+        self.assertFalse(g["pass"])
+        self.assertEqual(g["new_mismatch"], ["numeric/a"])
+
+    def test_new_reject_does_not_gate(self):
+        g = run.gate({}, {"numeric/b": FIXTURE_REJ}, {"numeric"})
+        self.assertTrue(g["pass"])
+        self.assertEqual(g["new_reject"], ["numeric/b"])
+
+    def test_fixed_gap_passes_and_is_listed(self):
+        g = run.gate(FIXTURE, {}, {"numeric"})
+        self.assertTrue(g["pass"])
+        self.assertEqual([i for i, _, _ in g["fixed"]], ["numeric/a", "numeric/b"])
+
+    def test_waived_baseline_mismatch_does_not_count_open(self):
+        base = {"numeric/a": dict(FIXTURE_MIS, waiver=FIXTURE_WAIVER)}
+        g = run.gate(base, {"numeric/a": FIXTURE_MIS}, {"numeric"})
+        self.assertTrue(g["pass"])
+        self.assertEqual((g["open_mismatch"], g["waived"]), (0, 1))
+
+    def test_known_mismatch_still_passes_and_counts_open(self):
+        g = run.gate({"numeric/a": FIXTURE_MIS}, {"numeric/a": FIXTURE_MIS}, {"numeric"})
+        self.assertTrue(g["pass"])
+        self.assertEqual(g["open_mismatch"], 1)
+
+    def test_reject_turning_into_mismatch_is_new(self):
+        g = run.gate({"numeric/a": FIXTURE_REJ}, {"numeric/a": FIXTURE_MIS}, {"numeric"})
+        self.assertFalse(g["pass"])
+        self.assertEqual(g["new_mismatch"], ["numeric/a"])
+
+    def test_unrun_family_is_ignored(self):
+        g = run.gate({"json/z": FIXTURE_MIS}, {}, {"numeric"})
+        self.assertTrue(g["pass"])
+        self.assertEqual(g["fixed"], [])
+
+
+class CliTest(unittest.TestCase):
+    def test_check_and_update_are_exclusive(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            run.main(["--check", "--update-baseline"])
+
+
 
 
 class ParseTest(unittest.TestCase):
