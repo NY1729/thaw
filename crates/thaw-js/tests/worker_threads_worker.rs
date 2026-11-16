@@ -243,3 +243,15 @@ fn worker_data_shares_a_shared_array_buffer() {
       })().catch((e) => console.log('failed ' + e));";
     assert_eq!(run_main(src), "true 42");
 }
+
+#[test]
+fn worker_stack_overflow_is_a_catchable_range_error() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const worker = new wt.Worker(`const { parentPort } = require('node:worker_threads'); function f() { return f(); } try { f(); } catch (e) { parentPort.postMessage(e.name + ' ' + e.message); }`, { eval: true });
+        const text = await new Promise((resolve) => { worker.once('message', (v) => resolve(v)); });
+        console.log(text);
+        await worker.terminate();
+      })().catch((e) => console.log('failed ' + e));";
+    assert_eq!(run_main(src), "RangeError Maximum call stack size exceeded");
+}
