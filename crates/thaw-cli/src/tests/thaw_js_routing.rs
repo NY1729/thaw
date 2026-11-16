@@ -1422,3 +1422,58 @@ fn routed_shared_array_buffer_and_atomics_match_node() {
         assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
     }
 }
+
+/// A routed `node:path` package whose `join` is declared (the typed function the shim resolves `path.join(..)` to).
+fn path_routing_package_with_join() -> ResolvedPackage {
+    let mut pkg = builtin_routing_package("node:path");
+    pkg.functions = thaw_bridge::parse_dts("export declare function join(...paths: string[]): string;").unwrap();
+    pkg
+}
+
+#[test]
+fn thaw_js_default_import_value_keeps_its_handle_export() {
+    let pkg = path_routing_package_with_join();
+    let needs = |user: &str| thaw_js_value_export_needs_handle(&pkg, user, "default");
+    // the path-contracts case: the default binding is compared, so it is a value
+    assert!(needs("import path, { posix, win32 } from 'node:path'; const ok = [path === posix];"));
+    // a bare alias of the default binding is a value use too
+    assert!(needs("import p from 'node:path'; const q = p;"));
+    // a value passed as an argument
+    assert!(needs("import p from 'node:path'; use(p);"));
+    // `import { default as p }` binds the same default export
+    assert!(needs("import { default as p } from 'node:path'; const q = p;"));
+    // `import p = require('node:path')` binds it as well
+    assert!(needs("import p = require('node:path'); const q = p;"));
+    // the bare `node:`-less specifier names the same builtin
+    assert!(needs("import p from 'path'; const q = p;"));
+}
+
+#[test]
+fn thaw_js_default_import_used_only_as_namespace_calls_stays_typed() {
+    let pkg = path_routing_package_with_join();
+    let needs = |user: &str| thaw_js_value_export_needs_handle(&pkg, user, "default");
+    assert!(!needs("import path from 'node:path'; const s = path.join('a', 'b');"));
+    // an unused default import must not force the export
+    assert!(!needs("import path from 'node:path'; const s = 1;"));
+    // a namespace import binds the module object, not the default export
+    assert!(!needs("import * as path from 'node:path'; const s = path.join('a');"));
+    assert!(!needs("import * as path from 'node:path'; const s = [path];"));
+}
+
+#[test]
+fn thaw_js_default_import_of_another_module_does_not_match() {
+    let pkg = path_routing_package_with_join();
+    let needs = |user: &str| thaw_js_value_export_needs_handle(&pkg, user, "default");
+    assert!(!needs("import p from 'node:url'; const q = [p];"));
+    assert!(!needs("import p from 'node:url'; import { join } from 'node:path'; const q = [p, join];"));
+    // a default import of another module with the same local name as an unused binding is not a use
+    assert!(!needs("import path from 'other-pkg'; const q = [path];"));
+}
+
+#[test]
+fn thaw_js_named_value_export_is_unchanged_by_default_import_bindings() {
+    let pkg = path_routing_package_with_join();
+    // `posix` is a named value export: its own members differ from the module's, so `posix.join(..)` needs it
+    assert!(thaw_js_value_export_needs_handle(&pkg, "import { posix } from 'node:path'; posix.join('a');", "posix"));
+    assert!(thaw_js_value_export_needs_handle(&pkg, "import path, { posix } from 'node:path'; path.join('a'); posix.join('a');", "posix"));
+}
