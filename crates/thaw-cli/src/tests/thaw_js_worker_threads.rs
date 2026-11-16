@@ -8,8 +8,9 @@ fn thaw_js_worker_threads_blocker_keeps_unsupported_worker_use_on_quickjs() {
     // stdin is served on thaw-js (W5): a Worker program that uses stdin routes to thaw-js too
     let stdin = "import { Worker } from \"node:worker_threads\";\nconst w = new Worker(src, { eval: true, stdin: true });";
     assert!(thaw_js_worker_threads_blocker("node:worker_threads", stdin).is_none());
+    // resourceLimits is enforced on thaw-js (maxOldGenerationSizeMb, heap_limit): a Worker that sets it routes too
     let limits = "import { Worker } from \"node:worker_threads\";\nnew Worker(src, { eval: true, resourceLimits: {} });";
-    assert!(thaw_js_worker_threads_blocker("node:worker_threads", limits).is_some());
+    assert!(thaw_js_worker_threads_blocker("node:worker_threads", limits).is_none());
     assert!(thaw_js_worker_threads_blocker(
         "node:worker_threads",
         "import { postMessageToThread } from \"node:worker_threads\";"
