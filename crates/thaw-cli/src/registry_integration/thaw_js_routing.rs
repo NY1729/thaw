@@ -803,6 +803,62 @@ fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'st
     .then_some("createHook with promise resources is not supported on thaw-js yet")
 }
 
+/// The six specifiers of the `node:path` family. Each is its own thaw-js package with its own interpreter
+/// (`pkg.name` is the user's specifier), so one value taken through two of them is two objects of two realms.
+const PATH_FAMILY_SPECIFIERS: [&str; 6] = [
+    "path",
+    "node:path",
+    "path/posix",
+    "node:path/posix",
+    "path/win32",
+    "node:path/win32",
+];
+
+/// Whether the program takes a value export (`default`, `posix`, `win32`: a default, namespace or named import
+/// of one of them) from two or more path-family specifiers. `===` between those values is false on thaw-js
+/// (different interpreters), so such a program keeps every path-family package on QuickJS, whose one realm
+/// shares the `node:path` bundle.
+/// ponytail: interim guard. Sharing one interpreter for the family's value exports would keep these on thaw-js;
+/// add that if a program needs it. Only the entry source is scanned, so a split across modules is not seen.
+fn path_family_value_realms_split(user_source: &str) -> bool {
+    use thaw_parser::ast::{ImportSpecifier, ModuleDecl, ModuleExportName, ModuleItem, TsModuleRef};
+    let Ok((module, _)) = thaw_parser::parse_typescript_with_source_map_named(
+        user_source,
+        thaw_parser::common::FileName::Custom("thaw-js routing".into()),
+    ) else {
+        return false;
+    };
+    let is_value_export = |name: &str| matches!(name, "default" | "posix" | "win32");
+    let mut value_specifiers = std::collections::HashSet::<String>::new();
+    for item in &module.body {
+        let (src, takes_value) = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
+                let takes_value = import.specifiers.iter().any(|specifier| match specifier {
+                    ImportSpecifier::Default(_) | ImportSpecifier::Namespace(_) => true,
+                    ImportSpecifier::Named(named) => match &named.imported {
+                        Some(ModuleExportName::Ident(name)) => is_value_export(&name.sym),
+                        Some(_) => false,
+                        None => is_value_export(&named.local.sym),
+                    },
+                });
+                (import.src.value.as_str(), takes_value)
+            }
+            // `import p = require('path')` binds the whole module, like a default import
+            ModuleItem::ModuleDecl(ModuleDecl::TsImportEquals(decl)) => match &decl.module_ref {
+                TsModuleRef::TsExternalModuleRef(external) => (external.expr.value.as_str(), true),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if takes_value {
+            if let Some(src) = src.filter(|src| PATH_FAMILY_SPECIFIERS.contains(src)) {
+                value_specifiers.insert(src.to_string());
+            }
+        }
+    }
+    value_specifiers.len() > 1
+}
+
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
 /// feature scan, the program touches no class of it (those are live JavaScript objects), and
 /// every function the program mentions is a typed call whose declaration only carries plain data, or
@@ -846,6 +902,9 @@ fn thaw_js_package_eligible(
     }
     if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
         return reject(why.into());
+    }
+    if PATH_FAMILY_SPECIFIERS.contains(&pkg.name.as_str()) && path_family_value_realms_split(user_source) {
+        return reject("path-family value exports from two specifiers do not share one realm on thaw-js".into());
     }
     // A class the program names is served through thaw-js handles (`new`, instance and static
     // methods); every operation the shim declares for it must be plain data or an instance handle.

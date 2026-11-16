@@ -1477,3 +1477,35 @@ fn thaw_js_named_value_export_is_unchanged_by_default_import_bindings() {
     assert!(thaw_js_value_export_needs_handle(&pkg, "import { posix } from 'node:path'; posix.join('a');", "posix"));
     assert!(thaw_js_value_export_needs_handle(&pkg, "import path, { posix } from 'node:path'; path.join('a'); posix.join('a');", "posix"));
 }
+
+#[test]
+fn path_family_value_realms_split_needs_two_value_specifiers() {
+    // the default of `path` and a value of `path/posix` are objects of two interpreters on thaw-js
+    assert!(path_family_value_realms_split("import path from 'path'; import { posix } from 'node:path/posix'; const s = [path === posix];"));
+    // a namespace import binds the module object, which is a value too
+    assert!(path_family_value_realms_split("import * as p from 'node:path'; import win32 from 'path/win32'; const s = [p, win32];"));
+    // `import p = require()` binds the whole module
+    assert!(path_family_value_realms_split("import p = require('node:path'); import q from 'path/posix';"));
+    // the imported name decides, not the local alias
+    assert!(path_family_value_realms_split("import { posix as a } from 'path'; import { win32 as b } from 'node:path/win32';"));
+    assert!(path_family_value_realms_split("import { default as p } from 'node:path/posix'; import path from 'path';"));
+    // one specifier, however many values: one interpreter, so identity holds
+    assert!(!path_family_value_realms_split("import path, { posix, win32 } from 'node:path';"));
+    assert!(!path_family_value_realms_split("import path from 'path'; import { posix } from 'path';"));
+    // a function-only import of the second specifier takes no value export
+    assert!(!path_family_value_realms_split("import path from 'path'; import { join } from 'path/posix'; const s = path.join('a');"));
+    // other modules do not count
+    assert!(!path_family_value_realms_split("import path from 'node:path'; import posix from 'node:url';"));
+    assert!(!path_family_value_realms_split("import path from 'node:path'; const x = 1;"));
+}
+
+#[test]
+fn path_family_packages_stay_on_quickjs_when_their_values_split() {
+    let bundle = "module.exports = (function(require){ var __thaw_bundle_factories = { \"node:path\": function(module, exports, require) { exports.sep = '/'; } }; var __thaw_bundle_require_maps = { \"node:path\": {} }; var __thaw_bundle_entry_key = \"node:path\"; })(globalThis.require);";
+    let split = "import path from 'path'; import { posix } from 'path/posix'; const s = [path === posix];";
+    let one_specifier = "import path, { posix } from 'node:path'; const s = [path === posix];";
+    assert!(!thaw_js_package_eligible(&builtin_routing_package("path"), bundle, split, &Default::default(), ""));
+    assert!(thaw_js_package_eligible(&builtin_routing_package("node:path"), bundle, one_specifier, &Default::default(), ""));
+    // the guard is for the family only: another package with the same split source is unaffected
+    assert!(thaw_js_package_eligible(&builtin_routing_package("node:url"), bundle, split, &Default::default(), ""));
+}
