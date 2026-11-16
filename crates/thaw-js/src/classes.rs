@@ -155,10 +155,11 @@ impl Interp {
                         proto_scope.clone()
                     };
                     let key = self.prop_name(&cm.key, &mscope)?;
+                    let fname = self.fn_name_of_key(&key);
                     let shown: Rc<str> = match cm.kind {
-                        a::MethodKind::Getter => format!("get {key}").into(),
-                        a::MethodKind::Setter => format!("set {key}").into(),
-                        a::MethodKind::Method => key.clone(),
+                        a::MethodKind::Getter => format!("get {fname}").into(),
+                        a::MethodKind::Setter => format!("set {fname}").into(),
+                        a::MethodKind::Method => fname,
                     };
                     let f = self.method_value(Some(shown), &cm.function, &mscope)?;
                     match cm.kind {
@@ -174,7 +175,13 @@ impl Interp {
                 a::ClassMember::ClassProp(p) if p.is_static => {
                     let key = self.prop_name(&p.key, &static_scope)?;
                     let v = match &p.value {
-                        Some(e) => self.eval(e, &static_scope)?,
+                        Some(e) => {
+                            let v = self.eval(e, &static_scope)?;
+                            if crate::is_anonymous_fn_def(e) {
+                                crate::name_anonymous_fn(&v, &self.fn_name_of_key(&key));
+                            }
+                            v
+                        }
                         None => Value::Undefined,
                     };
                     put(&ctor_obj, &key, v);
@@ -206,7 +213,14 @@ impl Interp {
                 a::ClassMember::PrivateProp(p) if p.is_static => {
                     let key: Rc<str> = format!("@@priv:{}", &*p.key.name).into();
                     let v = match &p.value {
-                        Some(e) => self.eval(e, &static_scope)?,
+                        Some(e) => {
+                            let v = self.eval(e, &static_scope)?;
+                            if crate::is_anonymous_fn_def(e) {
+                                let name = format!("#{}", &*p.key.name);
+                                crate::name_anonymous_fn(&v, &name);
+                            }
+                            v
+                        }
                         None => Value::Undefined,
                     };
                     put_hidden(&ctor_obj, &key, v);
@@ -245,7 +259,17 @@ impl Interp {
         frame.set_this(this.clone());
         for (key, init) in fields {
             let v = match init {
-                Some(e) => self.eval(&e, &frame)?,
+                Some(e) => {
+                    let v = self.eval(&e, &frame)?;
+                    if crate::is_anonymous_fn_def(&e) {
+                        let name = match key.strip_prefix("@@priv:") {
+                            Some(n) => format!("#{n}").into(),
+                            None => self.fn_name_of_key(&key),
+                        };
+                        crate::name_anonymous_fn(&v, &name);
+                    }
+                    v
+                }
                 None => Value::Undefined,
             };
             let Value::Object(target) = this else {
