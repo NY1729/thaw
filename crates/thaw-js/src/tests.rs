@@ -1176,6 +1176,28 @@ var __thaw_bundle_entry_key = "cdef/index.js";
 }
 
 #[test]
+fn node_crypto_bundle_exposes_module_level_subtle_as_webcrypto_subtle() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    // the node:crypto bundle shape: an __esModule bundle over the crypto stand-in object
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "crypto_esm/index.js": function(module, exports, require) {
+  module.exports = globalThis.__thaw_crypto_module; module.exports.default = module.exports; module.exports.__esModule = true;
+}, };
+var __thaw_bundle_require_maps = { "crypto_esm/index.js": {}, };
+var __thaw_bundle_entry_key = "crypto_esm/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (
+        CString::new("crypto_esm").unwrap(),
+        CString::new(bundle).unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    // Node 22: `crypto.subtle` is the module-level `crypto.webcrypto.subtle`, an object, never undefined
+    let subtle = class_call("$value$crypto_esm::subtle$arity0", "[]", 0, false).unwrap();
+    assert_ne!(subtle, "null", "module-level subtle is missing");
+}
+
+#[test]
 fn error_wire_framed_strings_revive_as_error_objects() {
     use crate::host::thaw_tjs_register;
     use std::ffi::CString;
