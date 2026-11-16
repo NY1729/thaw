@@ -5129,6 +5129,21 @@ thread_local! {
     static DATE_IDS: RefCell<Option<HashMap<u64, Value>>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// The Dates of the typed result being encoded by `from_value`, keyed by object address: the id each got.
+    /// The `Obj` is held so an address cannot be reused by another Date while the scope is open.
+    static RESULT_DATE_IDS: RefCell<Option<HashMap<usize, (u64, Obj)>>> = const { RefCell::new(None) };
+}
+
+/// `from_value` for a typed call result. Every Date object gets a `__thaw_tjs_id__` (its first-write
+/// order), so the compiled side revives one Date object to one object. Nested scopes restore the outer one.
+fn from_result_value(it: &mut Interp, v: &Value) -> Result<Native, HostError> {
+    let outer = RESULT_DATE_IDS.with(|ids| ids.borrow_mut().replace(HashMap::new()));
+    let result = from_value(it, v, 0);
+    RESULT_DATE_IDS.with(|ids| *ids.borrow_mut() = outer);
+    result
+}
+
 fn is_date_node(fields: &[(String, Native)]) -> bool {
     match fields {
         [(k, _)] => k == DATE_KEY,
@@ -5370,7 +5385,22 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
                 } else {
                     Native::Str("NaN".into())
                 };
-                return Ok(Native::Object(vec![(DATE_KEY.to_string(), ms)]));
+                // in a typed result, a Date object keeps its id so every occurrence revives to one object
+                let id = RESULT_DATE_IDS.with(|ids| {
+                    let mut ids = ids.borrow_mut();
+                    let ids = ids.as_mut()?;
+                    let next = ids.len() as u64 + 1;
+                    Some(
+                        ids.entry(Rc::as_ptr(o) as usize)
+                            .or_insert_with(|| (next, o.clone()))
+                            .0,
+                    )
+                });
+                let mut marker = vec![(DATE_KEY.to_string(), ms)];
+                if let Some(id) = id {
+                    marker.push((DATE_ID_KEY.to_string(), Native::Number(id as f64)));
+                }
+                return Ok(Native::Object(marker));
             }
             // a Buffer or Uint8Array crosses as `{"type":"Buffer","data":[...]}`, the shape the compiled
             // side decodes as `Bytes` (both flavours share it: the compiled side has one byte type)
@@ -6371,7 +6401,7 @@ pub extern "C" fn thaw_tjs_call_typed_result(
                     return Ok(handle_marker_json(id as i64));
                 }
             }
-            from_value(&mut p.interp, &r, 0).map(|n| n.to_result_json())
+            from_result_value(&mut p.interp, &r).map(|n| n.to_result_json())
         })
         .map_err(|e| e.to_string());
         pump_watches();
@@ -7580,5 +7610,79 @@ var __thaw_bundle_entry_key = "a/index.js";
         assert_eq!(global_str(transport, "result"), "200 ok");
         thaw_tjs_unload(transport as i64);
         thaw_tjs_unload(server as i64);
+    }
+}
+
+#[cfg(test)]
+mod result_date_id_tests {
+    use super::*;
+    use std::ffi::{CStr, CString};
+
+    fn object(it: &mut Interp, src: &str) -> Value {
+        let Ok(v) = it.run(src) else {
+            panic!("script failed")
+        };
+        v
+    }
+
+    #[test]
+    fn result_scope_gives_one_id_per_date_object() {
+        let mut it = Interp::new();
+        let v = object(
+            &mut it,
+            "(()=>{const d=new Date(1234),e=new Date(1234);return [d,d,e]})()",
+        );
+        let json = from_result_value(&mut it, &v).unwrap().to_result_json();
+        assert_eq!(
+            json,
+            r#"[{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":1},{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":1},{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":2}]"#
+        );
+    }
+
+    #[test]
+    fn result_scope_gives_an_invalid_date_twice_one_id() {
+        let mut it = Interp::new();
+        let v = object(
+            &mut it,
+            "(()=>{const x=new Date(NaN);return {valid:new Date(0),invalid:x,again:x}})()",
+        );
+        let json = from_result_value(&mut it, &v).unwrap().to_result_json();
+        assert_eq!(
+            json,
+            r#"{"valid":{"__thaw_tjs_date__":0,"__thaw_tjs_id__":1},"invalid":{"__thaw_tjs_date__":"NaN","__thaw_tjs_id__":2},"again":{"__thaw_tjs_date__":"NaN","__thaw_tjs_id__":2}}"#
+        );
+    }
+
+    #[test]
+    fn from_value_without_a_result_scope_emits_no_id_key() {
+        let mut it = Interp::new();
+        let v = object(&mut it, "(()=>{const d=new Date(1234);return [d,d]})()");
+        let json = from_value(&mut it, &v, 0).unwrap().to_result_json();
+        assert_eq!(
+            json,
+            r#"[{"__thaw_tjs_date__":1234},{"__thaw_tjs_date__":1234}]"#
+        );
+    }
+
+    #[test]
+    fn typed_call_result_carries_date_ids_for_a_shared_date() {
+        let name = CString::new("dtid").unwrap();
+        let source = CString::new(
+            r#"module.exports = (function(require){ var __thaw_bundle_factories = {"a/index.js": function(module, exports, require) { exports.f = function () { const d = new Date(1234), e = new Date(1234); return [d, d, e]; }; }}; var __thaw_bundle_require_maps = {"a/index.js": {}}; var __thaw_bundle_entry_key = "a/index.js"; })(globalThis.require);"#,
+        )
+        .unwrap();
+        assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+        let symbol = CString::new("dtid::f").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result = thaw_tjs_call_typed_result(symbol.as_ptr(), args.as_ptr());
+        assert!(result.error.is_null());
+        let text = unsafe { CStr::from_ptr(result.value) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            text,
+            r#"[{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":1},{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":1},{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":2}]"#
+        );
     }
 }

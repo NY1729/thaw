@@ -10382,26 +10382,66 @@ fn add_error_suffix_properties(
     }
 }
 
-/// `{"__thaw_tjs_date__": ms}` (`"NaN"` for an Invalid Date) is how thaw-js writes a Date nested in a plain result.
-/// Same construction as the graph `d` node (~4365): a branded `{timestamp}` object.
-fn revive_tjs_date_marker(value: &Value) -> Option<Value> {
-    let timestamp = {
-        let fields = value.as_object()?;
-        if fields.len() != 1 {
-            return None;
-        }
-        match fields.get(b"__thaw_tjs_date__".as_slice())? {
-            number if number.as_f64().is_some() => number.clone(),
-            Value::String(text) if text == "NaN" => napi_non_finite_value(f64::NAN),
-            _ => return None,
-        }
-    };
-    Some(brand_internal_value(Value::shared_object(
-        indexmap::IndexMap::from([(b"timestamp".to_vec(), timestamp)]),
-    )))
+thread_local! {
+    /// The Dates of the typed result being revived, keyed by `__thaw_tjs_id__`: one id, one object.
+    static REVIVED_DATES: RefCell<Option<HashMap<u64, Value>>> = const { RefCell::new(None) };
 }
 
+/// `{"__thaw_tjs_date__": ms}` (`"NaN"` for an Invalid Date) is how thaw-js writes a Date nested in a plain result.
+/// With a `__thaw_tjs_id__` too, every marker of one id revives to the same object.
+/// Same construction as the graph `d` node (~4365): a branded `{timestamp}` object.
+fn revive_tjs_date_marker(value: &Value) -> Option<Value> {
+    let fields = value.as_object()?;
+    let id = match fields.len() {
+        1 => None,
+        2 => Some(
+            fields
+                .get(b"__thaw_tjs_id__".as_slice())?
+                .as_f64()
+                .filter(|id| id.fract() == 0.0 && *id >= 0.0)? as u64,
+        ),
+        _ => return None,
+    };
+    if let Some(id) = id {
+        let memo = REVIVED_DATES.with(|dates| {
+            dates
+                .borrow()
+                .as_ref()
+                .and_then(|dates| dates.get(&id).cloned())
+        });
+        if memo.is_some() {
+            return memo;
+        }
+    }
+    let timestamp = match fields.get(b"__thaw_tjs_date__".as_slice())? {
+        number if number.as_f64().is_some() => number.clone(),
+        Value::String(text) if text == "NaN" => napi_non_finite_value(f64::NAN),
+        _ => return None,
+    };
+    let date = brand_internal_value(Value::shared_object(indexmap::IndexMap::from([(
+        b"timestamp".to_vec(),
+        timestamp,
+    )])));
+    if let Some(id) = id {
+        REVIVED_DATES.with(|dates| {
+            if let Some(dates) = dates.borrow_mut().as_mut() {
+                dates.insert(id, date.clone());
+            }
+        });
+    }
+    Some(date)
+}
+
+/// Revives a whole result: framed errors become Errors and Date markers become Dates, with one
+/// object per `__thaw_tjs_id__` (the scope is this call's; the recursion below shares it).
 fn revive_framed_errors(value: Value) -> Value {
+    let outer = REVIVED_DATES.with(|dates| dates.borrow_mut().replace(HashMap::new()));
+    let revived = revive_framed_errors_in(value);
+    REVIVED_DATES.with(|dates| *dates.borrow_mut() = outer);
+    revived
+}
+
+fn revive_framed_errors_in(value: Value) -> Value {
     match &value {
         Value::String(text) if is_error_frame_text(text.as_bytes()) => {
             match CString::new(text.as_bytes()) {
@@ -10414,7 +10454,7 @@ fn revive_framed_errors(value: Value) -> Value {
         Value::Array(_) => {
             if let Some(mut items) = value.as_array_mut() {
                 for item in items.iter_mut() {
-                    *item = revive_framed_errors(std::mem::replace(item, Value::Null));
+                    *item = revive_framed_errors_in(std::mem::replace(item, Value::Null));
                 }
             }
             value
@@ -10425,7 +10465,7 @@ fn revive_framed_errors(value: Value) -> Value {
             }
             if let Some(mut fields) = value.as_object_mut() {
                 for item in fields.values_mut() {
-                    *item = revive_framed_errors(std::mem::replace(item, Value::Null));
+                    *item = revive_framed_errors_in(std::mem::replace(item, Value::Null));
                 }
             }
             value
@@ -12458,6 +12498,51 @@ mod tests {
         assert!(revived
             .as_object()
             .is_some_and(|fields| fields.contains_key(b"__thaw_tjs_date__".as_slice())));
+    }
+
+    #[test]
+    fn revive_framed_errors_shares_one_date_between_markers_with_the_same_id() {
+        let marker = |ms: f64, id: f64| {
+            Value::shared_object(indexmap::IndexMap::from([
+                (b"__thaw_tjs_date__".to_vec(), number_value(ms)),
+                (b"__thaw_tjs_id__".to_vec(), number_value(id)),
+            ]))
+        };
+        let revived = revive_framed_errors(Value::shared_array(vec![
+            marker(1234.0, 1.0),
+            marker(1234.0, 1.0),
+            marker(1234.0, 2.0),
+        ]));
+        let items = revived.as_array().expect("root stays an array");
+        assert_eq!(thaw_json_is_date_shape(&items[0] as *const Value), 1);
+        assert_eq!(thaw_json_date_timestamp(&items[2] as *const Value), 1234.0);
+        assert_eq!(
+            object_identity_key(&items[0]),
+            object_identity_key(&items[1])
+        );
+        assert_ne!(
+            object_identity_key(&items[1]),
+            object_identity_key(&items[2])
+        );
+        // ids are per top-level revive: the same id in another result is another Date
+        let again = revive_framed_errors(marker(1234.0, 1.0));
+        assert_ne!(object_identity_key(&again), object_identity_key(&items[0]));
+    }
+
+    #[test]
+    fn revive_framed_errors_keeps_one_key_date_markers_distinct() {
+        let marker = || {
+            Value::shared_object(indexmap::IndexMap::from([(
+                b"__thaw_tjs_date__".to_vec(),
+                number_value(1234.0),
+            )]))
+        };
+        let revived = revive_framed_errors(Value::shared_array(vec![marker(), marker()]));
+        let items = revived.as_array().expect("root stays an array");
+        assert_ne!(
+            object_identity_key(&items[0]),
+            object_identity_key(&items[1])
+        );
     }
 
     #[test]
