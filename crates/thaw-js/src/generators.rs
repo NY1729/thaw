@@ -5,6 +5,7 @@
 //! are driven from the event loop (an `await` inside the body suspends the driver, not the caller).
 //! ponytail: one OS thread per started generator that is not run to completion (parked until exit).
 
+use crate::builtin_table::set_fn_head;
 use crate::eventloop::{
     adopt_native_ready, park_disconnected, park_native_ready, Co, Resume, SendBox, Yield,
 };
@@ -73,6 +74,7 @@ impl Interp {
         let agp = self.plain();
         self.rt.generator_proto = Some(gp.clone());
         self.rt.async_generator_proto = Some(agp.clone());
+        self.install_function_kinds(&gp, &agp);
         // %AsyncIteratorPrototype%, the prototype of %AsyncGeneratorPrototype%: `[Symbol.asyncIterator]() { return this }`
         let aip = self.plain();
         *agp.proto.borrow_mut() = Some(aip.clone());
@@ -84,7 +86,7 @@ impl Interp {
                 ("throw", Req::Throw),
                 ("return", Req::Return),
             ] {
-                self.set_native(proto, name, move |it, this, args| {
+                let f = self.native(move |it, this, args| {
                     let Some(g) = gen_data(this) else {
                         return it.throw_error(
                             "TypeError",
@@ -101,13 +103,80 @@ impl Interp {
                         it.gen_resume(&g, req, v)
                     }
                 });
+                if let Value::Object(o) = &f {
+                    set_fn_head(o, name, 1.0);
+                }
+                put_hidden(proto, name, f);
             }
             let key = self.well_known_key(if asyn { "asyncIterator" } else { "iterator" });
             let me = self.native(|_, this, _| Ok(this.clone()));
             put_hidden(proto, &key, me);
             let tag = self.well_known_key("toStringTag");
             let name = if asyn { "AsyncGenerator" } else { "Generator" };
-            put_hidden(proto, &tag, Value::str(name));
+            put_with(proto, &tag, Value::str(name), false, false, true);
+        }
+    }
+
+    /// %GeneratorFunction.prototype%, %AsyncFunction.prototype% and %AsyncGeneratorFunction.prototype%
+    /// (the [[Prototype]] of generator, async and async generator functions), each with its
+    /// `GeneratorFunction` / `AsyncFunction` / `AsyncGeneratorFunction` constructor (not a global). The
+    /// generator ones link to %GeneratorPrototype% / %AsyncGeneratorPrototype% both ways.
+    fn install_function_kinds(&mut self, gp: &Obj, agp: &Obj) {
+        let fp = self.function_proto.clone();
+        let function_ctor = self.lookup(&self.global.clone(), "Function");
+        let kinds = [
+            ("GeneratorFunction", "function*", Some(gp)),
+            ("AsyncFunction", "async function", None),
+            ("AsyncGeneratorFunction", "async function*", Some(agp)),
+        ];
+        let tag = self.well_known_key("toStringTag");
+        for (name, keyword, instances) in kinds {
+            let proto = new_obj(Some(fp.clone()), Kind::Plain);
+            let ctor = self.native(move |it, _, args| {
+                let src = crate::builtins::dynamic_function_source(it, args);
+                it.eval_function(&format!("{keyword} {src}"))
+            });
+            let Value::Object(c) = &ctor else {
+                unreachable!("a native is an object")
+            };
+            *c.proto.borrow_mut() = match &function_ctor {
+                Some(Value::Object(f)) => Some(f.clone()),
+                _ => Some(fp.clone()),
+            };
+            set_fn_head(c, name, 1.0);
+            put_with(
+                c,
+                "prototype",
+                Value::Object(proto.clone()),
+                false,
+                false,
+                false,
+            );
+            put_with(&proto, "constructor", ctor.clone(), false, false, true);
+            put_with(&proto, &tag, Value::str(name), false, false, true);
+            if let Some(instances) = instances {
+                put_with(
+                    &proto,
+                    "prototype",
+                    Value::Object(instances.clone()),
+                    false,
+                    false,
+                    true,
+                );
+                put_with(
+                    instances,
+                    "constructor",
+                    Value::Object(proto.clone()),
+                    false,
+                    false,
+                    true,
+                );
+            }
+            match name {
+                "GeneratorFunction" => self.rt.generator_function_proto = Some(proto),
+                "AsyncFunction" => self.rt.async_function_proto = Some(proto),
+                _ => self.rt.async_generator_function_proto = Some(proto),
+            }
         }
     }
 

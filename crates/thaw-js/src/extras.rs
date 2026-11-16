@@ -243,6 +243,13 @@ pub(crate) const EXTRAS: &str = r#"
     def(p, 'next', function next() {
       var s = this !== null && this !== undefined ? this['@@it'] : undefined;
       if (!s) throw new TypeError('Method ' + tag + '.prototype.next called on incompatible receiver ' + String(this));
+      if (s.live !== undefined) {
+        // an array iterator: reads the live array on each step; `live` becomes null once it is done
+        var o = s.live;
+        if (o === null || s.i >= o.length) { s.live = null; return { value: undefined, done: true }; }
+        var i = s.i++;
+        return { value: s.kind === 'keys' ? i : s.kind === 'values' ? o[i] : [i, o[i]], done: false };
+      }
       return s.i < s.items.length ? { value: s.items[s.i++], done: false } : { value: undefined, done: true };
     });
     Object.defineProperty(p, Symbol.toStringTag, { value: tag, configurable: true });
@@ -255,9 +262,18 @@ pub(crate) const EXTRAS: &str = r#"
     Object.defineProperty(it, '@@it', { value: { items: items, i: 0 } });
     return it;
   }
-  def(AP, 'entries', function () { var r = []; for (var i = 0; i < this.length; i++) r.push([i, this[i]]); return makeIter(r, 'Array Iterator'); });
-  def(AP, 'keys', function () { var r = []; for (var i = 0; i < this.length; i++) r.push(i); return makeIter(r, 'Array Iterator'); });
-  def(AP, 'values', function () { var r = []; for (var i = 0; i < this.length; i++) r.push(this[i]); return makeIter(r, 'Array Iterator'); });
+  function arrayIter(o, kind) {
+    var it = Object.create(iterProto('Array Iterator'));
+    Object.defineProperty(it, '@@it', { value: { live: o, kind: kind, i: 0 } });
+    return it;
+  }
+  function liveArray(self, name) {
+    if (self === null || self === undefined) throw new TypeError('Array.prototype.' + name + ' called on null or undefined');
+    return Object(self);
+  }
+  def(AP, 'entries', function entries() { return arrayIter(liveArray(this, 'entries'), 'entries'); });
+  def(AP, 'keys', function keys() { return arrayIter(liveArray(this, 'keys'), 'keys'); });
+  def(AP, 'values', function values() { return arrayIter(liveArray(this, 'values'), 'values'); });
   def(AP, Symbol.iterator, AP.values);
   // (in this file, after @@iterator: own symbol keys list in V8's order)
   var unscopables = Object.create(null);

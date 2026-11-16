@@ -469,6 +469,22 @@ fn put_regexp_slots(o: &Obj, source: &str, flags: &str) {
     put_hidden(o, "lastIndex", Value::Number(0.0));
 }
 
+/// `anonymous(params) {body}` for the `Function` constructor family: the last argument is the body,
+/// the others join with `,` into the parameter list (Function / GeneratorFunction / AsyncFunction).
+pub(crate) fn dynamic_function_source(it: &mut Interp, args: &[Value]) -> String {
+    let (body, params) = match args.split_last() {
+        Some((b, p)) => (
+            it.to_str(b),
+            p.iter()
+                .map(|v| it.to_str(v).to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        None => ("".into(), String::new()),
+    };
+    format!("anonymous({params}\n) {{\n{body}\n}}")
+}
+
 impl Interp {
     /// Compile through the realm's cache; the caller stores the result in a RegExp object.
     pub(crate) fn compile_regex(&mut self, source: &str, flags: &str) -> R<Rc<regress::Regex>> {
@@ -1669,17 +1685,8 @@ impl Interp {
             )))
         });
         let function = self.native(|it, _, args| {
-            let (body, params) = match args.split_last() {
-                Some((b, p)) => (
-                    it.to_str(b),
-                    p.iter()
-                        .map(|v| it.to_str(v).to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                ),
-                None => ("".into(), String::new()),
-            };
-            it.eval_function(&format!("function anonymous({params}\n) {{\n{body}\n}}"))
+            let src = dynamic_function_source(it, args);
+            it.eval_function(&format!("function {src}"))
         });
         g.declare(
             "globalThis",

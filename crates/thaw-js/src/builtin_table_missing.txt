@@ -4,33 +4,6 @@
 # must be listed. A row thaw-js gains must be removed from this file in the same change, and this list only shrinks.
 # Regenerate it with BUILTIN_TABLE_WRITE_MISSING=1 on the builtin_table_tests test, then run
 # node tools/parity/filter_builtin_table.js (the embed is this table minus these rows). Never edit by hand.
-%AsyncFunction%	length
-%AsyncFunction%	name
-%AsyncFunction%	prototype
-%AsyncFunction%.prototype	@@toStringTag
-%AsyncFunction%.prototype	constructor
-%AsyncGeneratorFunction%	length
-%AsyncGeneratorFunction%	name
-%AsyncGeneratorFunction%	prototype
-%AsyncGeneratorFunction%.prototype	@@toStringTag
-%AsyncGeneratorFunction%.prototype	constructor
-%AsyncGeneratorFunction%.prototype	prototype
-%AsyncGeneratorFunction%.prototype.prototype	@@toStringTag
-%AsyncGeneratorFunction%.prototype.prototype	constructor
-%AsyncGeneratorFunction%.prototype.prototype	next
-%AsyncGeneratorFunction%.prototype.prototype	return
-%AsyncGeneratorFunction%.prototype.prototype	throw
-%GeneratorFunction%	length
-%GeneratorFunction%	name
-%GeneratorFunction%	prototype
-%GeneratorFunction%.prototype	@@toStringTag
-%GeneratorFunction%.prototype	constructor
-%GeneratorFunction%.prototype	prototype
-%GeneratorFunction%.prototype.prototype	@@toStringTag
-%GeneratorFunction%.prototype.prototype	constructor
-%GeneratorFunction%.prototype.prototype	next
-%GeneratorFunction%.prototype.prototype	return
-%GeneratorFunction%.prototype.prototype	throw
 %TypedArray%	@@species
 %TypedArray%.prototype	with
 %TypedArray%.prototype.with	length

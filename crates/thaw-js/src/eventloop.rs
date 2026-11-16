@@ -252,6 +252,11 @@ pub(crate) struct Rt {
     pub(crate) bigint_proto: Option<Obj>,
     pub(crate) generator_proto: Option<Obj>,
     pub(crate) async_generator_proto: Option<Obj>,
+    /// %GeneratorFunction.prototype%, %AsyncFunction.prototype%, %AsyncGeneratorFunction.prototype%: the
+    /// [[Prototype]] of the function objects of each kind (generators.rs `install_function_kinds`).
+    pub(crate) generator_function_proto: Option<Obj>,
+    pub(crate) async_function_proto: Option<Obj>,
+    pub(crate) async_generator_function_proto: Option<Obj>,
     process: Option<Obj>,
     /// Print console output as it happens instead of buffering it in `Interp::out`.
     pub(crate) stream: bool,
@@ -279,6 +284,9 @@ impl Rt {
         out.extend(self.bigint_proto.take());
         out.extend(self.generator_proto.take());
         out.extend(self.async_generator_proto.take());
+        out.extend(self.generator_function_proto.take());
+        out.extend(self.async_function_proto.take());
+        out.extend(self.async_generator_function_proto.take());
         out.extend(self.process.take());
         out.append(&mut self.unhandled);
     }
