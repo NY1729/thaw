@@ -1745,16 +1745,13 @@ impl WireOut {
             let id = store_handle(self.owner, v.clone()) as u64;
             return Ok(self.lease_symbol(id, native));
         }
-        // A Buffer/Uint8Array/ArrayBuffer result crosses as the branded `{"b":[bytes]}` node, which thaw-std rebuilds
-        // as a Buffer-shaped wrapper (json.rs:4378) instead of a graph-plain {type,data} copy it will not read as bytes.
+        // A Buffer/Uint8Array result crosses as the branded `{"b":[bytes]}` node, which thaw-std rebuilds
+        // as a Buffer-shaped wrapper (json.rs:4378). An ArrayBuffer stays a live lease (byteLength, Buffer.from).
         if self.plain {
             let bytes = match &v {
                 Value::Object(o) => match &*o.kind.borrow() {
                     Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8) => {
                         Some(t.window().iter().map(u8::to_string).collect::<Vec<_>>())
-                    }
-                    Kind::ArrayBuffer(b) if !crate::typed::is_detached(b) => {
-                        Some(b.borrow().iter().map(u8::to_string).collect::<Vec<_>>())
                     }
                     _ => None,
                 },
@@ -3880,43 +3877,12 @@ pub extern "C" fn thaw_tjs_handle_is_plain_data(handle: u64) -> u8 {
     .unwrap_or(0)
 }
 
-/// `console.log` of a typed array: `{"n":name,"v":[text, ..],"e":[]}` for the std inspector
+/// `console.log` of a typed array: `{"n":name,"v":[text, ..]}` (plus `"e"` for extra keys) for the std inspector
 /// (`thaw_console_typed_or`), or null for any other value (and for a `Buffer`, which prints itself).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_handle_typed_array_probe(handle: u64) -> *const c_char {
-    let probe = on_handle(handle, |_, _, v| {
-        let Value::Object(o) = &v else {
-            return Ok(None);
-        };
-        let Kind::Typed(t) = &*o.kind.borrow() else {
-            return Ok(None);
-        };
-        if crate::find_in_chain(o, "__isBuffer").is_some() {
-            return Ok(None);
-        }
-        // BigInt elements print with the `n` suffix, as Node's inspect does
-        let items: Vec<String> = t
-            .to_values()
-            .iter()
-            .map(|v| {
-                let text = match v {
-                    Value::BigInt(b) => format!("{b}n"),
-                    Value::Number(x) if *x == 0.0 && x.is_sign_negative() => "-0".to_string(),
-                    Value::Number(x) => crate::number_to_string(*x),
-                    _ => String::new(),
-                };
-                format!("\"{text}\"")
-            })
-            .collect();
-        // ponytail: no extra own-property list ("e"); add if a package prints a typed array with extra keys
-        Ok(Some(format!(
-            "{{\"n\":\"{}\",\"v\":[{}],\"e\":[]}}",
-            t.ty.name(),
-            items.join(",")
-        )))
-    });
-    match probe {
-        Ok(Some(text)) => thaw_arena::owned_string(text),
+    match on_handle(handle, |p, _, v| Ok(typed_probe_text(&mut p.interp, &v))) {
+        Ok(text) if !text.is_empty() => thaw_arena::owned_string(text),
         _ => ptr::null(),
     }
 }
@@ -5404,8 +5370,10 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
             }
             // a Buffer or Uint8Array crosses as `{"type":"Buffer","data":[...]}`, the shape the compiled
             // side decodes as `Bytes` (both flavours share it: the compiled side has one byte type)
+            // an ArrayBuffer (Buffer.from(lease) on a digest) copies its bytes, as a Uint8Array does
             let bytes = match &*o.kind.borrow() {
                 Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8) => Some(t.window()),
+                Kind::ArrayBuffer(b) if !crate::typed::is_detached(b) => Some(b.borrow().to_vec()),
                 _ => None,
             };
             if let Some(bytes) = bytes {
@@ -6726,13 +6694,25 @@ mod live_result_lease_tests {
     }
 
     #[test]
-    fn plain_wire_emits_an_arraybuffer_as_b_node() {
-        // node 22: Buffer.from(await crypto.subtle.digest(...)) reads the digest bytes
+    fn plain_wire_keeps_an_arraybuffer_a_live_lease() {
+        // node 22: await crypto.subtle.digest(...) is a live ArrayBuffer (byteLength, Buffer.from(lease))
         let mut it = Interp::new();
         let buf = object(&mut it, "new Uint8Array([1, 2]).buffer");
         let (token, out) = token_of(&mut it, &buf);
         assert_eq!(token, "{\"r\":0}");
-        assert_eq!(out.nodes, vec!["{\"b\":[1,2]}".to_string()]);
+        assert_eq!(out.leases.len(), 1, "{:?}", out.nodes);
+        thaw_tjs_release_handle(out.leases[0] as i64);
+    }
+
+    #[test]
+    fn from_value_copies_an_arraybuffer_as_the_buffer_bytes() {
+        // Buffer.from(lease) coerces through from_value: an ArrayBuffer copies its bytes like a Uint8Array
+        let mut it = Interp::new();
+        let ab = object(&mut it, "new Uint8Array([1, 2]).buffer");
+        let u8 = object(&mut it, "new Uint8Array([1, 2])");
+        let bytes = from_value(&mut it, &ab, 0).unwrap().to_json();
+        assert_eq!(bytes, from_value(&mut it, &u8, 0).unwrap().to_json());
+        assert!(bytes.contains("\"Buffer\""), "{bytes}");
     }
 
     #[test]
@@ -7275,6 +7255,23 @@ mod host_query_live_tests {
         let v = it.run("Object.assign(new Uint8Array(4), {x: 3})").unwrap();
         assert_eq!(
             typed_probe_text(&mut it, &v),
+            r#"{"n":"Uint8Array","v":["0","0","0","0"],"e":[["x","n","3"]]}"#
+        );
+    }
+
+    #[test]
+    fn typed_array_handle_probe_lists_non_index_own_properties() {
+        // node 22: console.log of Object.assign(new Uint8Array(4), {x: 3}) prints Uint8Array(4) [ 0, 0, 0, 0, x: 3 ]
+        let u8 = construct_array("Uint8Array", &[0, 0, 0, 0]);
+        let wire = CString::new(r#"{"root":{"v":3},"nodes":[]}"#).unwrap();
+        let key = CString::new("\"x\"").unwrap();
+        let result = thaw_tjs_set_property_graph_result(u8, key.as_ptr(), wire.as_ptr());
+        assert!(result.error.is_null());
+        let text = thaw_tjs_handle_typed_array_probe(u8);
+        let owned = unsafe { CStr::from_ptr(text) }.to_str().unwrap().to_owned();
+        unsafe { thaw_arena::destroy_string(text) };
+        assert_eq!(
+            owned,
             r#"{"n":"Uint8Array","v":["0","0","0","0"],"e":[["x","n","3"]]}"#
         );
     }
