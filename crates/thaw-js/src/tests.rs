@@ -8343,7 +8343,7 @@ fn q9_process_config_and_error_prepare_stack_trace_exist() {
          console.log(typeof Error.prepareStackTrace);",
     );
     assert_eq!(code, 0);
-    assert_eq!(out.join("|"), "object object object|true|function");
+    assert_eq!(out.join("|"), "object object object|false|function");
 }
 
 #[test]

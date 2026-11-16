@@ -320,6 +320,88 @@ SharedArrayBuffer function get [Symbol.species] 0  false true true
     assert_eq!(it.out.join("\n"), expected);
 }
 
+/// Iterator, async-iterator, console.Console and timer shapes that Node 22 defines (`node probe.js` output is
+/// the expected text; the probe is the same JS run under thaw-js).
+#[test]
+fn misc_shapes_match_node() {
+    let mut it = Interp::new();
+    if let Err(why) = it.run(r##"const out = [];
+const f = (x) => typeof x === 'function' ? x.name + '/' + x.length : typeof x === 'string' ? JSON.stringify(x) : String(x);
+const d = (o, k) => {
+  const p = Object.getOwnPropertyDescriptor(o, k);
+  if (!p) return 'NONE';
+  const parts = [];
+  if (p.get) parts.push('get:' + f(p.get));
+  if (p.set) parts.push('set:' + f(p.set));
+  if ('value' in p) parts.push('v:' + f(p.value));
+  parts.push('w' + (p.writable ? 1 : 0) + 'e' + (p.enumerable ? 1 : 0) + 'c' + (p.configurable ? 1 : 0));
+  return parts.join(' ');
+};
+const t = (fn) => { try { return String(fn()); } catch (e) { return 'THREW ' + e.name; } };
+const AIP = Object.getPrototypeOf([][Symbol.iterator]());
+const AsyncIP = Object.getPrototypeOf(Object.getPrototypeOf(Object.getPrototypeOf((async function* () {})())));
+out.push('AIP tag ' + d(AIP, Symbol.toStringTag));
+out.push('AIP next ' + d(AIP, 'next'));
+out.push('AIP.next own prototype ' + d(AIP.next, 'prototype'));
+out.push('AIP.next call on non-iterator ' + t(() => AIP.next.call({})));
+out.push('AIP proto is Iterator.prototype ' + (Object.getPrototypeOf(AIP) === Iterator.prototype));
+out.push('array iter next ' + JSON.stringify([...[7, 8].values()]) + ' ' + JSON.stringify(Object.getOwnPropertyDescriptor([].values(), 'next')));
+out.push('string iter tag ' + Object.prototype.toString.call(''[Symbol.iterator]()));
+out.push('AsyncIP @@asyncIterator ' + d(AsyncIP, Symbol.asyncIterator));
+out.push('AsyncIP fn name/len ' + f(AsyncIP[Symbol.asyncIterator]));
+out.push('AsyncIP fn returns this ' + (AsyncIP[Symbol.asyncIterator].call(7) === 7));
+out.push('Iterator tag ' + d(Iterator.prototype, Symbol.toStringTag));
+out.push('Iterator ctor ' + d(Iterator.prototype, 'constructor'));
+out.push('Iterator tag value ' + Iterator.prototype[Symbol.toStringTag] + ' ' + Object.prototype.toString.call(Iterator.prototype));
+out.push('Iterator ctor value ' + (Iterator.prototype.constructor === Iterator));
+out.push('Iterator home tag set ' + t(() => { Iterator.prototype[Symbol.toStringTag] = 'x'; return 'ok'; }));
+out.push('Iterator home ctor set ' + t(() => { Iterator.prototype.constructor = 1; return 'ok'; }));
+out.push('Iterator derived ctor set ' + t(() => { const o = Object.create(Iterator.prototype); o.constructor = 5; return d(o, 'constructor'); }));
+out.push('Iterator derived tag set ' + t(() => { const o = Object.create(Iterator.prototype); o[Symbol.toStringTag] = 'Z'; return Object.prototype.toString.call(o) + ' ' + d(o, Symbol.toStringTag); }));
+out.push('Console hasInstance ' + d(console.Console, Symbol.hasInstance));
+out.push('Console instanceof ' + [console instanceof console.Console, Object.create(console) instanceof console.Console, ({}) instanceof console.Console, new console.Console({ stdout: { write() {} } }) instanceof console.Console].join(' '));
+for (const n of ['setTimeout', 'setInterval', 'setImmediate', 'clearTimeout', 'clearInterval', 'clearImmediate', 'queueMicrotask']) {
+  const g = globalThis[n];
+  out.push(n + ' prototype ' + d(g, 'prototype') + ' ctor ' + d(g.prototype, 'constructor') + ' same ' + (g.prototype.constructor === g));
+}
+console.log(out.join('\n'));"##) {
+        let why = match why {
+            crate::Ctl::Throw(v) => it.to_str(&v).to_string(),
+            _ => "non-throw completion".into(),
+        };
+        panic!("probe threw: {why}");
+    }
+    let expected = r##"AIP tag v:"Array Iterator" w0e0c1
+AIP next v:next/0 w1e0c1
+AIP.next own prototype NONE
+AIP.next call on non-iterator THREW TypeError
+AIP proto is Iterator.prototype true
+array iter next [7,8] undefined
+string iter tag [object String Iterator]
+AsyncIP @@asyncIterator v:[Symbol.asyncIterator]/0 w1e0c1
+AsyncIP fn name/len [Symbol.asyncIterator]/0
+AsyncIP fn returns this true
+Iterator tag get:get [Symbol.toStringTag]/0 set:set [Symbol.toStringTag]/1 w0e0c1
+Iterator ctor get:get constructor/0 set:set constructor/1 w0e0c1
+Iterator tag value Iterator [object Iterator]
+Iterator ctor value true
+Iterator home tag set THREW TypeError
+Iterator home ctor set THREW TypeError
+Iterator derived ctor set v:5 w1e1c1
+Iterator derived tag set [object Z] v:"Z" w1e1c1
+Console hasInstance v:value/1 w0e0c0
+Console instanceof true true false true
+setTimeout prototype v:[object Object] w1e0c0 ctor v:setTimeout/2 w1e0c1 same true
+setInterval prototype v:[object Object] w1e0c0 ctor v:setInterval/2 w1e0c1 same true
+setImmediate prototype v:[object Object] w1e0c0 ctor v:setImmediate/1 w1e0c1 same true
+clearTimeout prototype v:[object Object] w1e0c0 ctor v:clearTimeout/1 w1e0c1 same true
+clearInterval prototype v:[object Object] w1e0c0 ctor v:clearInterval/1 w1e0c1 same true
+clearImmediate prototype v:[object Object] w1e0c0 ctor v:clearImmediate/1 w1e0c1 same true
+queueMicrotask prototype v:[object Object] w1e0c0 ctor v:queueMicrotask/1 w1e0c1 same true"##
+        .trim_end_matches('\n');
+    assert_eq!(it.out.join("\n"), expected);
+}
+
 /// Stream, text, Blob, Request and FormData/Headers shape rows: the accessors are prototype getters with
 /// Node's flags, `Blob.prototype.stream` reads the blob, and the FormData/Headers methods carry `prototype`.
 /// The expected text was recorded with `node` 22 from the same script.

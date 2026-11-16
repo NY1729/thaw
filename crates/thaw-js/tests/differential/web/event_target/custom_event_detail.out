@@ -1,0 +1,8 @@
+function undefined true true get detail 0
+null null
+1 0
+0 0 true c
+no throw
+x
+brand true ERR_INVALID_THIS
+listener sees [ 1, 2 ]

@@ -1,4 +1,11 @@
 owner	key	kind	flags	vtype	length	name	hasPrototype	alias	tag
+%ArrayIteratorPrototype%	@@toStringTag	data	--c	string	-	-	-	-	Array Iterator
+%ArrayIteratorPrototype%	next	data	w-c	function	0	next	0	-	-
+%ArrayIteratorPrototype%.next	length	data	--c	number	0	-	-	-	-
+%ArrayIteratorPrototype%.next	name	data	--c	string	-	next	-	-	-
+%AsyncIteratorPrototype%	@@asyncIterator	data	w-c	function	0	[Symbol.asyncIterator]	0	-	-
+%AsyncIteratorPrototype%.@@asyncIterator	length	data	--c	number	0	-	-	-	-
+%AsyncIteratorPrototype%.@@asyncIterator	name	data	--c	string	-	[Symbol.asyncIterator]	-	-	-
 AbortController	length	data	--c	number	0	-	-	-	-
 AbortController	name	data	--c	string	-	AbortController	-	-	-
 AbortController	prototype	data	---	object	-	-	-	-	-
@@ -598,6 +605,7 @@ CustomEvent	name	data	--c	string	-	CustomEvent	-	-	-
 CustomEvent	prototype	data	---	object	-	-	-	-	-
 CustomEvent.prototype	@@toStringTag	data	--c	string	-	-	-	-	CustomEvent
 CustomEvent.prototype	constructor	data	w-c	function	1	CustomEvent	1	59	-
+CustomEvent.prototype	detail	accessor	-ec	-	-	get detail|-	-	-	-
 DOMException	ABORT_ERR	data	-e-	number	-	-	-	-	-
 DOMException	DATA_CLONE_ERR	data	-e-	number	-	-	-	-	-
 DOMException	DOMSTRING_SIZE_ERR	data	-e-	number	-	-	-	-	-
@@ -652,7 +660,10 @@ DOMException.prototype	TYPE_MISMATCH_ERR	data	-e-	number	-	-	-	-	-
 DOMException.prototype	URL_MISMATCH_ERR	data	-e-	number	-	-	-	-	-
 DOMException.prototype	VALIDATION_ERR	data	-e-	number	-	-	-	-	-
 DOMException.prototype	WRONG_DOCUMENT_ERR	data	-e-	number	-	-	-	-	-
+DOMException.prototype	code	accessor	-ec	-	-	get code|-	-	-	-
 DOMException.prototype	constructor	data	w-c	function	0	DOMException	1	60	-
+DOMException.prototype	message	accessor	-ec	-	-	get message|-	-	-	-
+DOMException.prototype	name	accessor	-ec	-	-	get name|-	-	-	-
 DataView	length	data	--c	number	1	-	-	-	-
 DataView	name	data	--c	string	-	DataView	-	-	-
 DataView	prototype	data	---	object	-	-	-	-	-
@@ -883,10 +894,15 @@ DecompressionStream.prototype	writable	accessor	-ec	-	-	get writable|-	-	-	-
 Error	captureStackTrace	data	w-c	function	2	captureStackTrace	0	-	-
 Error	length	data	--c	number	1	-	-	-	-
 Error	name	data	--c	string	-	Error	-	-	-
+Error	prepareStackTrace	data	w-c	function	2	ErrorPrepareStackTrace	1	65	-
 Error	prototype	data	---	object	-	-	-	-	-
 Error	stackTraceLimit	data	wec	number	-	-	-	-	-
 Error.captureStackTrace	length	data	--c	number	2	-	-	-	-
 Error.captureStackTrace	name	data	--c	string	-	captureStackTrace	-	-	-
+Error.prepareStackTrace	length	data	--c	number	2	-	-	-	-
+Error.prepareStackTrace	name	data	--c	string	-	ErrorPrepareStackTrace	-	-	-
+Error.prepareStackTrace	prototype	data	w--	object	-	-	-	-	-
+Error.prepareStackTrace.prototype	constructor	data	w-c	function	2	ErrorPrepareStackTrace	1	65	-
 Error.prototype	constructor	data	w-c	function	1	Error	1	66	-
 Error.prototype	message	data	w-c	string	-	-	-	-	-
 Error.prototype	name	data	w-c	string	-	Error	-	-	-
@@ -907,10 +923,29 @@ Event	length	data	--c	number	1	-	-	-	-
 Event	name	data	--c	string	-	Event	-	-	-
 Event	prototype	data	---	object	-	-	-	-	-
 Event.prototype	@@toStringTag	data	--c	string	-	-	-	-	Event
+Event.prototype	bubbles	accessor	-ec	-	-	get bubbles|-	-	-	-
+Event.prototype	cancelBubble	accessor	-ec	-	-	get cancelBubble|set cancelBubble	-	-	-
+Event.prototype	cancelable	accessor	-ec	-	-	get cancelable|-	-	-	-
+Event.prototype	composed	accessor	-ec	-	-	get composed|-	-	-	-
+Event.prototype	composedPath	data	wec	function	0	composedPath	0	-	-
 Event.prototype	constructor	data	w-c	function	1	Event	1	68	-
+Event.prototype	currentTarget	accessor	-ec	-	-	get currentTarget|-	-	-	-
+Event.prototype	defaultPrevented	accessor	-ec	-	-	get defaultPrevented|-	-	-	-
+Event.prototype	eventPhase	accessor	-ec	-	-	get eventPhase|-	-	-	-
+Event.prototype	initEvent	data	wec	function	1	initEvent	0	-	-
+Event.prototype	isTrusted	accessor	-e-	-	-	get isTrusted|-	-	-	-
 Event.prototype	preventDefault	data	wec	function	0	preventDefault	0	-	-
+Event.prototype	returnValue	accessor	-ec	-	-	get returnValue|set returnValue	-	-	-
+Event.prototype	srcElement	accessor	-ec	-	-	get srcElement|-	-	-	-
 Event.prototype	stopImmediatePropagation	data	wec	function	0	stopImmediatePropagation	0	-	-
 Event.prototype	stopPropagation	data	wec	function	0	stopPropagation	0	-	-
+Event.prototype	target	accessor	-ec	-	-	get target|-	-	-	-
+Event.prototype	timeStamp	accessor	-ec	-	-	get timeStamp|-	-	-	-
+Event.prototype	type	accessor	-ec	-	-	get type|-	-	-	-
+Event.prototype.composedPath	length	data	--c	number	0	-	-	-	-
+Event.prototype.composedPath	name	data	--c	string	-	composedPath	-	-	-
+Event.prototype.initEvent	length	data	--c	number	1	-	-	-	-
+Event.prototype.initEvent	name	data	--c	string	-	initEvent	-	-	-
 Event.prototype.preventDefault	length	data	--c	number	0	-	-	-	-
 Event.prototype.preventDefault	name	data	--c	string	-	preventDefault	-	-	-
 Event.prototype.stopImmediatePropagation	length	data	--c	number	0	-	-	-	-
@@ -1089,6 +1124,8 @@ Iterator	prototype	data	---	object	-	-	-	91	-
 Iterator.from	length	data	--c	number	1	-	-	-	-
 Iterator.from	name	data	--c	string	-	from	-	-	-
 Iterator.prototype	@@iterator	data	w-c	function	0	[Symbol.iterator]	0	-	-
+Iterator.prototype	@@toStringTag	accessor	--c	-	-	get [Symbol.toStringTag]|set [Symbol.toStringTag]	-	-	-
+Iterator.prototype	constructor	accessor	--c	-	-	get constructor|set constructor	-	-	-
 Iterator.prototype	drop	data	w-c	function	1	drop	0	-	-
 Iterator.prototype	every	data	w-c	function	1	every	0	-	-
 Iterator.prototype	filter	data	w-c	function	1	filter	0	-	-
@@ -1298,6 +1335,14 @@ MessageEvent	name	data	--c	string	-	MessageEvent	-	-	-
 MessageEvent	prototype	data	---	object	-	-	-	-	-
 MessageEvent.prototype	@@toStringTag	data	--c	string	-	-	-	-	MessageEvent
 MessageEvent.prototype	constructor	data	w-c	function	1	MessageEvent	1	95	-
+MessageEvent.prototype	data	accessor	-ec	-	-	get data|-	-	-	-
+MessageEvent.prototype	initMessageEvent	data	wec	function	1	initMessageEvent	0	-	-
+MessageEvent.prototype	lastEventId	accessor	-ec	-	-	get lastEventId|-	-	-	-
+MessageEvent.prototype	origin	accessor	-ec	-	-	get origin|-	-	-	-
+MessageEvent.prototype	ports	accessor	-ec	-	-	get ports|-	-	-	-
+MessageEvent.prototype	source	accessor	-ec	-	-	get source|-	-	-	-
+MessageEvent.prototype.initMessageEvent	length	data	--c	number	1	-	-	-	-
+MessageEvent.prototype.initMessageEvent	name	data	--c	string	-	initMessageEvent	-	-	-
 MessagePort	length	data	--c	number	0	-	-	-	-
 MessagePort	name	data	--c	string	-	MessagePort	-	-	-
 MessagePort	prototype	data	w--	object	-	-	-	-	-
@@ -2461,42 +2506,63 @@ WebAssembly.CompileError	length	data	--c	number	1	-	-	-	-
 WebAssembly.CompileError	name	data	--c	string	-	CompileError	-	-	-
 WebAssembly.CompileError	prototype	data	---	object	-	-	-	-	-
 WebAssembly.CompileError.prototype	constructor	data	w-c	function	1	CompileError	1	151	-
+WebAssembly.CompileError.prototype	message	data	w-c	string	-	-	-	-	-
 WebAssembly.CompileError.prototype	name	data	w-c	string	-	CompileError	-	-	-
 WebAssembly.Global	length	data	--c	number	1	-	-	-	-
 WebAssembly.Global	name	data	--c	string	-	Global	-	-	-
 WebAssembly.Global	prototype	data	---	object	-	-	-	-	-
 WebAssembly.Global.prototype	@@toStringTag	data	--c	string	-	-	-	-	WebAssembly.Global
 WebAssembly.Global.prototype	constructor	data	w-c	function	1	Global	1	153	-
+WebAssembly.Global.prototype	value	accessor	-ec	-	-	get value|set value	-	-	-
+WebAssembly.Global.prototype	valueOf	data	wec	function	0	valueOf	0	-	-
 WebAssembly.Instance	length	data	--c	number	1	-	-	-	-
 WebAssembly.Instance	name	data	--c	string	-	Instance	-	-	-
 WebAssembly.Instance	prototype	data	---	object	-	-	-	-	-
 WebAssembly.Instance.prototype	@@toStringTag	data	--c	string	-	-	-	-	WebAssembly.Instance
 WebAssembly.Instance.prototype	constructor	data	w-c	function	1	Instance	1	154	-
+WebAssembly.Instance.prototype	exports	accessor	-ec	-	-	get exports|-	-	-	-
 WebAssembly.LinkError	length	data	--c	number	1	-	-	-	-
 WebAssembly.LinkError	name	data	--c	string	-	LinkError	-	-	-
 WebAssembly.LinkError	prototype	data	---	object	-	-	-	-	-
 WebAssembly.LinkError.prototype	constructor	data	w-c	function	1	LinkError	1	155	-
+WebAssembly.LinkError.prototype	message	data	w-c	string	-	-	-	-	-
 WebAssembly.LinkError.prototype	name	data	w-c	string	-	LinkError	-	-	-
 WebAssembly.Memory	length	data	--c	number	1	-	-	-	-
 WebAssembly.Memory	name	data	--c	string	-	Memory	-	-	-
 WebAssembly.Memory	prototype	data	---	object	-	-	-	-	-
 WebAssembly.Memory.prototype	@@toStringTag	data	--c	string	-	-	-	-	WebAssembly.Memory
+WebAssembly.Memory.prototype	buffer	accessor	-ec	-	-	get buffer|-	-	-	-
 WebAssembly.Memory.prototype	constructor	data	w-c	function	1	Memory	1	156	-
+WebAssembly.Memory.prototype	grow	data	wec	function	1	grow	0	-	-
+WebAssembly.Module	customSections	data	wec	function	2	customSections	0	-	-
+WebAssembly.Module	exports	data	wec	function	1	exports	0	-	-
+WebAssembly.Module	imports	data	wec	function	1	imports	0	-	-
 WebAssembly.Module	length	data	--c	number	1	-	-	-	-
 WebAssembly.Module	name	data	--c	string	-	Module	-	-	-
 WebAssembly.Module	prototype	data	---	object	-	-	-	-	-
+WebAssembly.Module.customSections	length	data	--c	number	2	-	-	-	-
+WebAssembly.Module.customSections	name	data	--c	string	-	customSections	-	-	-
+WebAssembly.Module.exports	length	data	--c	number	1	-	-	-	-
+WebAssembly.Module.exports	name	data	--c	string	-	exports	-	-	-
+WebAssembly.Module.imports	length	data	--c	number	1	-	-	-	-
+WebAssembly.Module.imports	name	data	--c	string	-	imports	-	-	-
 WebAssembly.Module.prototype	@@toStringTag	data	--c	string	-	-	-	-	WebAssembly.Module
 WebAssembly.Module.prototype	constructor	data	w-c	function	1	Module	1	157	-
 WebAssembly.RuntimeError	length	data	--c	number	1	-	-	-	-
 WebAssembly.RuntimeError	name	data	--c	string	-	RuntimeError	-	-	-
 WebAssembly.RuntimeError	prototype	data	---	object	-	-	-	-	-
 WebAssembly.RuntimeError.prototype	constructor	data	w-c	function	1	RuntimeError	1	158	-
+WebAssembly.RuntimeError.prototype	message	data	w-c	string	-	-	-	-	-
 WebAssembly.RuntimeError.prototype	name	data	w-c	string	-	RuntimeError	-	-	-
 WebAssembly.Table	length	data	--c	number	1	-	-	-	-
 WebAssembly.Table	name	data	--c	string	-	Table	-	-	-
 WebAssembly.Table	prototype	data	---	object	-	-	-	-	-
 WebAssembly.Table.prototype	@@toStringTag	data	--c	string	-	-	-	-	WebAssembly.Table
 WebAssembly.Table.prototype	constructor	data	w-c	function	1	Table	1	159	-
+WebAssembly.Table.prototype	get	data	wec	function	1	get	0	-	-
+WebAssembly.Table.prototype	grow	data	wec	function	1	grow	0	-	-
+WebAssembly.Table.prototype	length	accessor	-ec	-	-	get length|-	-	-	-
+WebAssembly.Table.prototype	set	data	wec	function	1	set	0	-	-
 WebAssembly.compile	length	data	--c	number	1	-	-	-	-
 WebAssembly.compile	name	data	--c	string	-	compile	-	-	-
 WebAssembly.instantiate	length	data	--c	number	1	-	-	-	-
@@ -2557,10 +2623,16 @@ btoa	prototype	data	w--	object	-	-	-	-	-
 btoa.prototype	constructor	data	w-c	function	1	btoa	1	166	-
 clearImmediate	length	data	--c	number	1	-	-	-	-
 clearImmediate	name	data	--c	string	-	clearImmediate	-	-	-
+clearImmediate	prototype	data	w--	object	-	-	-	-	-
+clearImmediate.prototype	constructor	data	w-c	function	1	clearImmediate	1	167	-
 clearInterval	length	data	--c	number	1	-	-	-	-
 clearInterval	name	data	--c	string	-	clearInterval	-	-	-
+clearInterval	prototype	data	w--	object	-	-	-	-	-
+clearInterval.prototype	constructor	data	w-c	function	1	clearInterval	1	168	-
 clearTimeout	length	data	--c	number	1	-	-	-	-
 clearTimeout	name	data	--c	string	-	clearTimeout	-	-	-
+clearTimeout	prototype	data	w--	object	-	-	-	-	-
+clearTimeout.prototype	constructor	data	w-c	function	1	clearTimeout	1	169	-
 console	@@toStringTag	data	--c	string	-	-	-	-	console
 console	Console	data	wec	function	1	Console	1	170	-
 console	_ignoreErrors	data	w-c	boolean	-	-	-	-	-
@@ -2593,9 +2665,12 @@ console	timeLog	data	wec	function	0	timeLog	0	-	-
 console	timeStamp	data	wec	function	0	timeStamp	0	-	-
 console	trace	data	wec	function	0	trace	0	-	-
 console	warn	data	wec	function	0	warn	0	-	-
+console.Console	@@hasInstance	data	---	function	1	value	0	-	-
 console.Console	length	data	--c	number	1	-	-	-	-
 console.Console	name	data	--c	string	-	Console	-	-	-
 console.Console	prototype	data	w--	object	-	-	-	-	-
+console.Console.@@hasInstance	length	data	--c	number	1	-	-	-	-
+console.Console.@@hasInstance	name	data	--c	string	-	value	-	-	-
 console.Console.prototype	assert	data	wec	function	1	assert	0	-	-
 console.Console.prototype	clear	data	wec	function	0	clear	0	-	-
 console.Console.prototype	constructor	data	w-c	function	1	Console	1	170	-
@@ -2891,12 +2966,20 @@ process.uptime	length	data	--c	number	0	-	-	-	-
 process.uptime	name	data	--c	string	-	uptime	-	-	-
 queueMicrotask	length	data	--c	number	1	-	-	-	-
 queueMicrotask	name	data	--c	string	-	queueMicrotask	-	-	-
+queueMicrotask	prototype	data	w--	object	-	-	-	-	-
+queueMicrotask.prototype	constructor	data	w-c	function	1	queueMicrotask	1	205	-
 setImmediate	length	data	--c	number	1	-	-	-	-
 setImmediate	name	data	--c	string	-	setImmediate	-	-	-
+setImmediate	prototype	data	w--	object	-	-	-	-	-
+setImmediate.prototype	constructor	data	w-c	function	1	setImmediate	1	206	-
 setInterval	length	data	--c	number	2	-	-	-	-
 setInterval	name	data	--c	string	-	setInterval	-	-	-
+setInterval	prototype	data	w--	object	-	-	-	-	-
+setInterval.prototype	constructor	data	w-c	function	2	setInterval	1	207	-
 setTimeout	length	data	--c	number	2	-	-	-	-
 setTimeout	name	data	--c	string	-	setTimeout	-	-	-
+setTimeout	prototype	data	w--	object	-	-	-	-	-
+setTimeout.prototype	constructor	data	w-c	function	2	setTimeout	1	208	-
 structuredClone	length	data	--c	number	2	-	-	-	-
 structuredClone	name	data	--c	string	-	structuredClone	-	-	-
 structuredClone	prototype	data	w--	object	-	-	-	-	-
