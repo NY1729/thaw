@@ -196,3 +196,34 @@ try { process.setUncaughtExceptionCaptureCallback(1); } catch (e) { console.log(
         "false|ERR_INVALID_ARG_TYPE|handler:boom2"
     );
 }
+
+// `process.versions` / `process.release` shape as Node 22.23.1 reports it. Values are Node's own
+// (`process.versions` minus `v8`, which keeps thaw's existing value); native addons and
+// `node-gyp-build`-style loaders pick prebuilt binaries from `modules`/`napi`.
+#[test]
+fn process_versions_and_release_structure_like_node() {
+    assert_eq!(
+        run_loop(
+            "const v = process.versions;
+const rest = {};
+for (const k of Object.keys(v)) if (k !== 'v8') rest[k] = v[k];
+console.log(Object.keys(v).join(','));
+console.log(JSON.stringify(rest));
+console.log(typeof v.v8 === 'string' && v.v8.startsWith('12.4.254.21-node.') ? 'v8 ok' : 'v8 bad');
+console.log(Object.values(v).every((x) => typeof x === 'string') ? 'strings' : 'nonstring');
+const d = Object.getOwnPropertyDescriptor(process, 'versions');
+console.log([d.enumerable, d.writable, d.configurable].join(','));
+console.log(Object.keys(process.release).join(','));
+console.log(JSON.stringify(process.release));
+const rd = Object.getOwnPropertyDescriptor(process, 'release');
+console.log([rd.enumerable, rd.writable].join(','));
+console.log(process.version === 'v' + v.node);"
+        ),
+        "node,acorn,ada,amaro,ares,brotli,cjs_module_lexer,cldr,icu,llhttp,modules,napi,nbytes,ncrypto,nghttp2,openssl,simdjson,simdutf,sqlite,tz,undici,unicode,uv,uvwasi,v8,zlib,zstd\
+|{\"node\":\"22.23.1\",\"acorn\":\"8.16.0\",\"ada\":\"2.9.2\",\"amaro\":\"1.1.8\",\"ares\":\"1.34.6\",\"brotli\":\"1.2.0\",\"cjs_module_lexer\":\"2.2.0\",\"cldr\":\"48.0\",\"icu\":\"78.2\",\"llhttp\":\"9.4.2\",\"modules\":\"127\",\"napi\":\"10\",\"nbytes\":\"0.1.3\",\"ncrypto\":\"0.0.1\",\"nghttp2\":\"1.69.0\",\"openssl\":\"3.5.9\",\"simdjson\":\"4.5.0\",\"simdutf\":\"6.4.2\",\"sqlite\":\"3.51.2\",\"tz\":\"2025c\",\"undici\":\"6.27.0\",\"unicode\":\"17.0\",\"uv\":\"1.52.1\",\"uvwasi\":\"0.0.23\",\"zlib\":\"1.3.1.zlib-ng\",\"zstd\":\"1.5.7\"}\
+|v8 ok|strings|true,false,true\
+|name,lts,sourceUrl,headersUrl\
+|{\"name\":\"node\",\"lts\":\"Jod\",\"sourceUrl\":\"https://nodejs.org/download/release/v22.23.1/node-v22.23.1.tar.gz\",\"headersUrl\":\"https://nodejs.org/download/release/v22.23.1/node-v22.23.1-headers.tar.gz\"}\
+|true,false|true"
+    );
+}
