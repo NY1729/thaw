@@ -822,11 +822,10 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   // the native lowering of `Iterator.from` calls this platform global (thaw-hir static_builtins.rs)
   globalThis.__thaw_iterator_from = function (source) { return Iterator.from(source); };
 
-  // ----- Atomics. One agent: every read-modify-write is atomic by construction, and each op returns the
-  // old value (store returns the stored integer). ponytail: no other agent can touch a SharedArrayBuffer
-  // (worker.rs runs a separate Interp, so Atomics.wait can only time out and notify wakes nobody); add
-  // cross-worker waiters when worker SAB sharing lands. ponytail: ledgered, not implemented: Atomics on
-  // BigInt64Array / BigUint64Array (intTA refuses them with a TypeError; Node accepts BigInt operands). -----
+  // ----- Atomics. A SharedArrayBuffer goes to the natives (`__thaw_atomic`, `__thaw_atomics_wait/notify`, atomics.rs):
+  // real atomic ops on the shared block, with waiters parked across threads. Any other buffer is one agent, so the
+  // plain read-modify-write below is already atomic. ponytail: ledgered, not implemented: Atomics on BigInt64Array /
+  // BigUint64Array (intTA refuses them with a TypeError; Node accepts BigInt operands), and Atomics.waitAsync. -----
   var Atomics = {};
   function intTA(ta, op) {
     if (!(ta instanceof Int8Array || ta instanceof Uint8Array || ta instanceof Int16Array ||
@@ -835,6 +834,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     }
     return ta;
   }
+  function isShared(ta) { return ta.buffer instanceof SharedArrayBuffer; }
   function atomicIndex(ta, i) {
     var n = Math.trunc(Number(i)) || 0;
     if (n < 0 || n >= ta.length) throw new RangeError('Invalid atomic access index');
@@ -846,7 +846,9 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   function rmw(name, combine) {
     def(Atomics, name, function (ta, i, v) {
       intTA(ta, name);
-      var k = atomicIndex(ta, i), old = ta[k];
+      var k = atomicIndex(ta, i);
+      if (isShared(ta)) return __thaw_atomic(name, ta, k, toInt(v), 0);
+      var old = ta[k];
       ta[k] = combine(old, toInt(v));
       return old;
     });
@@ -859,38 +861,41 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   rmw('exchange', function (a, b) { return b; });
   def(Atomics, 'load', function (ta, i) {
     intTA(ta, 'load');
-    return ta[atomicIndex(ta, i)];
+    var k = atomicIndex(ta, i);
+    if (isShared(ta)) return __thaw_atomic('load', ta, k, 0, 0);
+    return ta[k];
   });
   def(Atomics, 'store', function (ta, i, v) {
     intTA(ta, 'store');
     var k = atomicIndex(ta, i), n = toInt(v);
-    ta[k] = n;
+    if (isShared(ta)) __thaw_atomic('store', ta, k, n, 0);
+    else ta[k] = n;
     return n;
   });
   def(Atomics, 'compareExchange', function (ta, i, expected, replacement) {
     intTA(ta, 'compareExchange');
-    var k = atomicIndex(ta, i), old = ta[k];
+    var k = atomicIndex(ta, i);
+    if (isShared(ta)) return __thaw_atomic('compareExchange', ta, k, toInt(expected), toInt(replacement));
+    var old = ta[k];
     if (old === elementOf(ta, toInt(expected))) ta[k] = toInt(replacement);
     return old;
   });
   def(Atomics, 'isLockFree', function (n) { n = toInt(n); return n === 1 || n === 2 || n === 4 || n === 8; });
   def(Atomics, 'wait', function (ta, i, v, timeout) {
-    if (!(ta instanceof Int32Array) || !(ta.buffer instanceof SharedArrayBuffer)) {
+    if (!(ta instanceof Int32Array) || !isShared(ta)) {
       throw new TypeError('Atomics.wait requires a shared Int32Array');
     }
     var k = atomicIndex(ta, i);
-    if (ta[k] !== (Number(v) | 0)) return 'not-equal';
     var ms = timeout === undefined ? Infinity : Number(timeout);
     if (ms !== ms) ms = Infinity;
-    // ponytail: no other agent can notify, so an infinite wait would hang forever; refuse it instead
-    if (ms === Infinity) throw new RangeError('Atomics.wait with no timeout would block forever');
-    __thaw_sleep_ms(Math.max(ms, 0));
-    return 'timed-out';
+    return __thaw_atomics_wait(ta, k, toInt(v), ms);
   });
-  def(Atomics, 'notify', function (ta, i) {
-    intTA(ta, 'notify');
-    atomicIndex(ta, i);
-    return 0;
+  def(Atomics, 'notify', function (ta, i, count) {
+    if (!(ta instanceof Int32Array)) throw new TypeError('Atomics.notify requires an Int32Array');
+    var k = atomicIndex(ta, i);
+    var c = count === undefined ? Infinity : toInt(count);
+    if (!isShared(ta)) return 0;
+    return __thaw_atomics_notify(ta, k, c);
   });
   Object.defineProperty(Atomics, Symbol.toStringTag, { value: 'Atomics', configurable: true });
   def(globalThis, 'Atomics', Atomics);
