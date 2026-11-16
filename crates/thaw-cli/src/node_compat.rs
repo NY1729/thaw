@@ -290,11 +290,13 @@ fn run_node_compat_case(
     let exit_code_matches = expected_exit_code.is_none_or(|expected| {
         node.status.code().map(i64::from) == Some(expected) && thaw_exit_code == Some(expected)
     });
-    let classification = if actual == expected && detail_matches && exit_code_matches {
-        actual
-    } else {
-        "bug"
-    };
+    let link_matches = quickjs_link_expectation_met(case, links_quickjs);
+    let classification =
+        if actual == expected && detail_matches && exit_code_matches && link_matches {
+            actual
+        } else {
+            "bug"
+        };
     let mut result = serde_json::json!({
         "name": name,
         "expected": expected,
@@ -327,6 +329,14 @@ fn record_quickjs_link(result: &mut serde_json::Value, links_quickjs: Option<boo
     if let Some(links) = links_quickjs {
         result["linksQuickjs"] = links.into();
     }
+}
+
+/// `expectQuickjsLink` (optional bool on a case) pins whether the Thaw binary must link QuickJS. A case
+/// without the key is not checked; a build whose link state is unknown (no inspect) fails a pinned case.
+fn quickjs_link_expectation_met(case: &serde_json::Value, links_quickjs: Option<bool>) -> bool {
+    case.get("expectQuickjsLink")
+        .and_then(serde_json::Value::as_bool)
+        .is_none_or(|expected| links_quickjs == Some(expected))
 }
 
 /// Adds `quickjsReasons` (the reason and blocker lines `thaw inspect` prints, capped at 10 entries of 300 chars).
@@ -617,6 +627,18 @@ mod quickjs_link_tests {
         let mut result = serde_json::json!({"name": "case"});
         record_quickjs_link(&mut result, Some(false));
         assert_eq!(result["linksQuickjs"], false);
+    }
+
+    #[test]
+    fn pinned_link_expectation_is_checked_only_when_present() {
+        use super::quickjs_link_expectation_met;
+        let unpinned = serde_json::json!({"name": "case"});
+        assert!(quickjs_link_expectation_met(&unpinned, Some(true)));
+        assert!(quickjs_link_expectation_met(&unpinned, None));
+        let pinned = serde_json::json!({"name": "case", "expectQuickjsLink": false});
+        assert!(quickjs_link_expectation_met(&pinned, Some(false)));
+        assert!(!quickjs_link_expectation_met(&pinned, Some(true)));
+        assert!(!quickjs_link_expectation_met(&pinned, None));
     }
 
     #[test]

@@ -4890,6 +4890,8 @@ mod napi_symbol_protocol_tests;
 #[cfg(test)]
 mod napi_symbols_tests;
 #[cfg(test)]
+mod fetch_tests;
+#[cfg(test)]
 mod net_tests;
 #[cfg(test)]
 mod process_env_tests;
