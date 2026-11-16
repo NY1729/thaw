@@ -1,0 +1,19 @@
+data w e c fn:customSections/2 data w e c fn:exports/1 data w e c fn:imports/1
+accessor - e c get:get buffer/0 data w e c fn:grow/1
+data w e c fn:get/1 data w e c fn:grow/1 data w e c fn:set/1 accessor - e c get:get length/0
+accessor - e c get:get value/0 set:set value/1 data w e c fn:valueOf/0
+accessor - e c get:get exports/0
+CompileError data w - c "" ""
+LinkError data w - c "" ""
+RuntimeError data w - c "" ""
+1 3 0
+f:function,memory:memory,tbl:table,g:global
+42 0 0 65536
+1 0 131072 false
+RangeError WebAssembly.Memory.grow(): Maximum memory size exceeded
+2 null 2 3 null
+true 42 null
+RangeError WebAssembly.Table.get(): invalid index 9 into funcref table of size 3
+5 5
+9 9
+[object Object] f,memory,tbl,g

@@ -234,16 +234,36 @@ pub(crate) const EXTRAS: &str = r#"
   // ----- iterators over arrays / strings, matchAll, normalize, misc numeric helpers -----
   var IterProto = {};
   def(IterProto, Symbol.iterator, function () { return this; });
+  // One prototype per iterator kind (%ArrayIteratorPrototype% and friends): a shared `next` reads the
+  // state kept on each iterator under the internal '@@it' key.
+  var iterProtos = {};
+  function iterProto(tag) {
+    if (iterProtos[tag]) return iterProtos[tag];
+    var p = Object.create(IterProto);
+    def(p, 'next', function next() {
+      var s = this !== null && this !== undefined ? this['@@it'] : undefined;
+      if (!s) throw new TypeError('Method ' + tag + '.prototype.next called on incompatible receiver ' + String(this));
+      return s.i < s.items.length ? { value: s.items[s.i++], done: false } : { value: undefined, done: true };
+    });
+    Object.defineProperty(p, Symbol.toStringTag, { value: tag, configurable: true });
+    iterProtos[tag] = p;
+    return p;
+  }
+  def(globalThis, '__thaw_array_iterator_proto', iterProto('Array Iterator'));
   function makeIter(items, tag) {
-    var i = 0, it = Object.create(IterProto);
-    def(it, 'next', function next() { return i < items.length ? { value: items[i++], done: false } : { value: undefined, done: true }; });
-    def(it, Symbol.toStringTag, tag);
+    var it = Object.create(iterProto(tag));
+    Object.defineProperty(it, '@@it', { value: { items: items, i: 0 } });
     return it;
   }
   def(AP, 'entries', function () { var r = []; for (var i = 0; i < this.length; i++) r.push([i, this[i]]); return makeIter(r, 'Array Iterator'); });
   def(AP, 'keys', function () { var r = []; for (var i = 0; i < this.length; i++) r.push(i); return makeIter(r, 'Array Iterator'); });
   def(AP, 'values', function () { var r = []; for (var i = 0; i < this.length; i++) r.push(this[i]); return makeIter(r, 'Array Iterator'); });
   def(AP, Symbol.iterator, AP.values);
+  // (in this file, after @@iterator: own symbol keys list in V8's order)
+  var unscopables = Object.create(null);
+  var unscopableNames = ['at', 'copyWithin', 'entries', 'fill', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'includes', 'keys', 'toReversed', 'toSorted', 'toSpliced', 'values'];
+  for (var u = 0; u < unscopableNames.length; u++) unscopables[unscopableNames[u]] = true;
+  Object.defineProperty(AP, Symbol.unscopables, { value: unscopables, writable: false, enumerable: false, configurable: true });
   def(SP, Symbol.iterator, function () { return makeIter(Array.from(String(this)), 'String Iterator'); });
   Object.defineProperty(Object.prototype, '__proto__', {
     get: function () { return Object.getPrototypeOf(this); },
@@ -351,8 +371,15 @@ impl crate::Interp {
                 k
             }
         };
+        // A symbol is a primitive here (a Symbol object, not a wrapper), so `Symbol.prototype[@@toPrimitive]`
+        // never applies to it: String(sym) and friends take `toString`, as before that method existed.
+        let is_symbol = matches!(&*o.kind.borrow(), crate::Kind::Symbol { .. });
         // [[Get]] (not a chain lookup): Proxy `get` traps and accessors see the lookup.
-        let f = self.get(v, &key)?;
+        let f = if is_symbol {
+            crate::Value::Undefined
+        } else {
+            self.get(v, &key)?
+        };
         if f.is_callable() {
             let h = match hint {
                 Hint::Default => "default",
@@ -406,15 +433,16 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     var len = byteLength === undefined ? total - off : (Math.trunc(byteLength) || 0);
     if (len < 0 || off + len > total) throw new RangeError('Invalid DataView length ' + len);
     if (buffer instanceof ArrayBuffer && detGet.call(buffer)) throw new TypeError('Cannot perform DataView constructor on a detached ArrayBuffer');
-    def(this, 'buffer', buffer);
+    def(this, '__buf', buffer);
     def(this, '__off', off);
     def(this, '__len', len);
     def(this, '__bytes', new Uint8Array(buffer, off, len));
   }
   // byteOffset / byteLength are accessors (a detached buffer makes them throw, as in V8).
   function dvLive(dv, what) {
-    if (dv.buffer instanceof ArrayBuffer && detGet.call(dv.buffer)) throw new TypeError('Cannot perform ' + what + ' on a detached ArrayBuffer');
+    if (dv.__buf instanceof ArrayBuffer && detGet.call(dv.__buf)) throw new TypeError('Cannot perform ' + what + ' on a detached ArrayBuffer');
   }
+  Object.defineProperty(DataView.prototype, 'buffer', { enumerable: false, configurable: true, get: function () { if (!Object.prototype.hasOwnProperty.call(this, '__buf')) throw new TypeError('Method get DataView.prototype.buffer called on incompatible receiver'); return this.__buf; } });
   Object.defineProperty(DataView.prototype, 'byteLength', { enumerable: false, configurable: true, get: function () { dvLive(this, 'get DataView.prototype.byteLength'); return this.__len; } });
   Object.defineProperty(DataView.prototype, 'byteOffset', { enumerable: false, configurable: true, get: function () { dvLive(this, 'get DataView.prototype.byteOffset'); return this.__off; } });
   var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
@@ -576,14 +604,30 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   // ----- Iterator global and iterator helpers. Iterator.prototype is the IterProto base of the
   // array/String/RegExp iterators (EXTRAS above), the prototype of generator objects and of the
   // native Map/Set iterators (collections.rs). -----
-  var ITP = Object.getPrototypeOf([].values());
+  var ITP = Object.getPrototypeOf(Object.getPrototypeOf([].values()));
   var GENP = Object.getPrototypeOf(Object.getPrototypeOf((function* () {})()));
   function isObj(v) { return v !== null && (typeof v === 'object' || typeof v === 'function'); }
   function Iterator() {
     if (new.target === undefined || new.target === Iterator) throw new TypeError('Abstract class Iterator not directly constructable');
   }
   Iterator.prototype = ITP;
-  def(ITP, 'constructor', Iterator);
+  // Node 22: Iterator.prototype's @@toStringTag and constructor are accessors whose setter ignores the
+  // prototype (SetterThatIgnoresPrototypeProperties): assigning on a derived object makes an own property.
+  function ignoringProtoAccessor(home, key, value) {
+    var pair = {
+      get [key]() { return value; },
+      set [key](v) {
+        if (!isObj(this)) throw new TypeError('Iterator.prototype setter called on non-object');
+        if (this === home) throw new TypeError("Cannot assign to read only property '" + String(key) + "' of object '[object Iterator]'");
+        if (Object.getOwnPropertyDescriptor(this, key) === undefined) Object.defineProperty(this, key, { value: v, writable: true, enumerable: true, configurable: true });
+        else this[key] = v;
+      },
+    };
+    var d = Object.getOwnPropertyDescriptor(pair, key);
+    Object.defineProperty(home, key, { get: d.get, set: d.set, enumerable: false, configurable: true });
+  }
+  ignoringProtoAccessor(ITP, 'constructor', Iterator);
+  ignoringProtoAccessor(ITP, Symbol.toStringTag, 'Iterator');
   Object.setPrototypeOf(GENP, ITP);
   var MapIterP = Object.getPrototypeOf(new Map().keys()), SetIterP = Object.getPrototypeOf(new Set().values());
   def(MapIterP, Symbol.toStringTag, 'Map Iterator');

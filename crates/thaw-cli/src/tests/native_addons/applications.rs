@@ -1049,6 +1049,7 @@ function main(): void {
     )
     .unwrap();
     let build_started = Instant::now();
+    let build_cpu = CpuTimer::start();
     build(
         &source,
         &output,
@@ -1063,7 +1064,12 @@ function main(): void {
         ],
     )
     .unwrap();
-    record_acceptance_metrics("hono-sharp", build_started.elapsed(), &output);
+    record_acceptance_metrics(
+        "hono-sharp",
+        build_started.elapsed(),
+        build_cpu.cpu_ms(),
+        &output,
+    );
     std::fs::remove_dir_all(&registry).unwrap();
 
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1149,6 +1155,7 @@ fn builds_and_serves_hono_react_prisma_postgres_when_enabled() {
     let assets = build_vite_project(&project).unwrap();
     let output = dir.join("app");
     let build_started = Instant::now();
+    let build_cpu = CpuTimer::start();
     build_with_native_mode(
         &project.join("server.ts"),
         &output,
@@ -1171,6 +1178,7 @@ fn builds_and_serves_hono_react_prisma_postgres_when_enabled() {
     record_acceptance_metrics(
         "hono-react-prisma-postgres",
         build_started.elapsed(),
+        build_cpu.cpu_ms(),
         &output,
     );
     std::fs::remove_dir_all(&registry).unwrap();

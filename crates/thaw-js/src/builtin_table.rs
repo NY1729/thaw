@@ -269,7 +269,39 @@ impl Interp {
             let Some(Value::Object(u)) = self.lookup(&self.global, "Uint8Array") else {
                 return None;
             };
-            return u.proto.borrow().clone();
+            let proto = u.proto.borrow().clone()?;
+            // thaw-js has no %TypedArray% constructor of its own: Uint8Array's prototype is then Function.prototype.
+            // Treat the owner as absent, so its rows are not applied to Function.prototype.
+            let function_proto = match self.lookup(&self.global, "Function") {
+                Some(Value::Object(f)) => match find_own(&f, "prototype") {
+                    Some((Slot::Data(Value::Object(p)), _)) => Some(p),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if function_proto.is_some_and(|f| Rc::ptr_eq(&f, &proto)) {
+                return None;
+            }
+            return Some(proto);
+        }
+        // the intrinsics that have no global binding: the prototypes made by the preludes and generators.rs
+        match name {
+            "%ArrayIteratorPrototype%" => {
+                return match self.lookup(&self.global, "__thaw_array_iterator_proto") {
+                    Some(Value::Object(o)) => Some(o),
+                    _ => None,
+                };
+            }
+            "%AsyncIteratorPrototype%" => {
+                return self
+                    .rt
+                    .async_generator_proto
+                    .as_ref()?
+                    .proto
+                    .borrow()
+                    .clone();
+            }
+            _ => {}
         }
         if name.starts_with('%') {
             return None;
@@ -300,12 +332,20 @@ impl Interp {
     /// The define-missing pass: a `@@toStringTag` or `@@species` row whose owner thaw-js has, but whose
     /// property it lacks, is defined here. The caller then sets the row's flags. Only the spec's species
     /// getter (`get [Symbol.species]`, returns `this`) is defined: `Buffer`'s getter returns another class,
-    /// so its row stays listed. Returns true when it defined the property.
+    /// so its row stays listed. A function owner's missing `prototype` object is made as a plain
+    /// function's is (a fresh object whose `constructor` is the owner), so the `X.prototype constructor`
+    /// row then finds it. Returns true when it defined the property.
     fn define_missing_wellknown(&self, owner: &Obj, key: &str, row: &Row<'_>) -> bool {
         if find_own(owner, key).is_some() {
             return false;
         }
         match row.key {
+            "prototype" if row.vtype == "object" && is_function(owner) => {
+                let proto = self.plain();
+                put_hidden(&proto, "constructor", Value::Object(owner.clone()));
+                put_hidden(owner, key, Value::Object(proto));
+                true
+            }
             "@@toStringTag" if !row.accessor && row.vtype == "string" => match row.tag {
                 Some(tag) => {
                     put_hidden(owner, key, Value::str(tag));

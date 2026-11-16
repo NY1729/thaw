@@ -1,15 +1,35 @@
 // MessageEvent (ported from thaw-quickjs `platform_globals/workers/blob_events.js`); messaging.js below needs it.
 if (typeof globalThis.MessageEvent !== 'function') {
+  const messageFields = new WeakMap();
+  const messageOf = self => {
+    const record = messageFields.get(self);
+    if (!record) throw new TypeError('Illegal invocation');
+    return record;
+  };
   globalThis.MessageEvent = class MessageEvent extends Event {
     constructor(type, options = {}) {
       super(type, options);
-      this.data = options.data === undefined ? null : options.data;
-      this.origin = options.origin === undefined ? '' : String(options.origin);
-      this.lastEventId = options.lastEventId === undefined ? '' : String(options.lastEventId);
-      this.source = options.source === undefined ? null : options.source;
-      this.ports = options.ports === undefined ? [] : Array.from(options.ports);
+      messageFields.set(this, {
+        data: options.data === undefined ? null : options.data,
+        origin: options.origin === undefined ? '' : String(options.origin),
+        lastEventId: options.lastEventId === undefined ? '' : String(options.lastEventId),
+        source: options.source === undefined ? null : options.source,
+        ports: options.ports === undefined ? [] : Array.from(options.ports),
+      });
+    }
+    // Node (legacy): returns a new MessageEvent built from the arguments; this one is unchanged.
+    initMessageEvent(type, bubbles = false, cancelable = false, data = null, origin = '', lastEventId = '', source = null, ports = []) {
+      messageOf(this);
+      if (arguments.length === 0) throw new TypeError('MessageEvent.initMessageEvent: 1 argument required, but 0 found.');
+      return new MessageEvent(type, { bubbles, cancelable, data, origin, lastEventId, source, ports });
     }
   };
+  for (const key of ['data', 'origin', 'lastEventId', 'source', 'ports']) {
+    Object.defineProperty(globalThis.MessageEvent.prototype, key, {
+      get() { return messageOf(this)[key]; },
+      enumerable: true, configurable: true,
+    });
+  }
 }
 // MessagePort / MessageChannel / BroadcastChannel (verbatim from thaw-quickjs `platform_globals/workers/messaging.js`).
   // `on<type>` event-handler attributes are one listener, registered when the
