@@ -1573,9 +1573,16 @@ impl Interp {
                         put(&d, "configurable", Value::Bool(true));
                         return Ok(Value::Object(d));
                     }
-                    let v = it.get(&arg(args, 0), &key)?;
-                    if matches!(&*o.kind.borrow(), Kind::Array(_)) && !matches!(v, Value::Undefined)
-                    {
+                    // only array index / length are virtual own props (served from the items); any other
+                    // key is absent, and a [[Get]] here would run inherited accessors with the wrong receiver
+                    let array_virtual = matches!(&*o.kind.borrow(), Kind::Array(_))
+                        && (array_index(&key).is_some() || key.as_ref() == "length");
+                    let v = if array_virtual {
+                        it.get(&arg(args, 0), &key)?
+                    } else {
+                        Value::Undefined
+                    };
+                    if array_virtual && !matches!(v, Value::Undefined) {
                         let d = it.plain();
                         // elements are derived from the object-wide flags; `length` is never configurable
                         let frozen = o.frozen.get();
