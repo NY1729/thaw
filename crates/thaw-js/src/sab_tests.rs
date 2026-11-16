@@ -386,3 +386,223 @@ fn atomics_wait_on_a_terminated_interp_returns_with_exit_code_one() {
         (true, Vec::<String>::new())
     );
 }
+
+/// Runs `src` as a main program (its event loop included) on a fresh Interp over `block`; returns its console lines.
+fn main_lines_on_block(block: &Arc<SabBlock>, src: &str) -> Vec<String> {
+    let mut it = Interp::new();
+    let obj = it.new_shared_buffer(sab_store(block.clone()));
+    it.global.declare("__sab", Value::Object(obj), true);
+    match it.run_main(src) {
+        Ok(0) => {}
+        Ok(code) => panic!("exit code {code}"),
+        Err(Ctl::Throw(v)) => panic!("uncaught {}", it.to_str(&v)),
+        Err(_) => panic!("stray completion"),
+    }
+    std::mem::take(&mut it.out)
+}
+
+/// `main_lines_on_block` for a program that makes its own SharedArrayBuffer.
+fn main_lines(src: &str) -> Vec<String> {
+    main_lines_on_block(&new_sab_block(4), src)
+}
+
+#[test]
+fn atomics_wait_async_sync_results_shapes_and_argument_errors() {
+    let src = "const ia = new Int32Array(new SharedArrayBuffer(8));
+      const r1 = Atomics.waitAsync(ia, 0, 1);
+      console.log(r1.async, r1.value, Object.keys(r1).join(','));
+      const r2 = Atomics.waitAsync(ia, 0, 0, 0);
+      console.log(r2.async, r2.value);
+      const r3 = Atomics.waitAsync(ia, 0, 0, -5);
+      console.log(r3.async, r3.value);
+      console.log(Atomics.waitAsync.length, Atomics.waitAsync.name);
+      try { Atomics.waitAsync(new Int32Array(4), 0, 0, 0); } catch (e) { console.log('nonshared', e.constructor.name); }
+      try { Atomics.waitAsync(new Int16Array(new SharedArrayBuffer(8)), 0, 0, 0); } catch (e) { console.log('int16', e.constructor.name); }
+      try { Atomics.waitAsync(new Float64Array(new SharedArrayBuffer(16)), 0, 0, 0); } catch (e) { console.log('f64', e.constructor.name); }
+      try { Atomics.waitAsync(ia, 2, 0, 0); } catch (e) { console.log('range', e.constructor.name); }
+      const p = Atomics.waitAsync(ia, 0, 0, 10);
+      console.log(p.async, typeof p.value.then);";
+    assert_eq!(
+        lines(src, None),
+        [
+            "false not-equal async,value",
+            "false timed-out",
+            "false timed-out",
+            "4 waitAsync",
+            "nonshared TypeError",
+            "int16 TypeError",
+            "f64 TypeError",
+            "range RangeError",
+            "true function",
+        ]
+    );
+}
+
+#[test]
+fn atomics_wait_async_fixture_n66_timeout_then_notify_resolves_ok() {
+    // QuickJS contract n66, run as a program: the setInterval keeps the loop alive while the promises settle
+    let src = "(async () => {
+      const keep = setInterval(() => {}, 50);
+      const ia = new Int32Array(new SharedArrayBuffer(16)); const out = [];
+      const r = Atomics.waitAsync(ia, 0, 0, 5);
+      out.push(await r.value);
+      out.push(Atomics.notify(ia, 0));
+      const r2 = Atomics.waitAsync(ia, 0, 0, 1000);
+      out.push(Atomics.notify(ia, 0, 1), await r2.value);
+      clearInterval(keep);
+      console.log(JSON.stringify(out));
+    })();";
+    assert_eq!(main_lines(src), ["[\"timed-out\",0,1,\"ok\"]"]);
+}
+
+#[test]
+fn atomics_wait_async_fixture_n67_index_coercion_and_range() {
+    let src = "(async () => {
+      const ia = new Int32Array(new SharedArrayBuffer(16)); const out = [];
+      for (const idx of [1.5, '1', -0.5, undefined, NaN, null, true, -1, 4, 2**53, Infinity, {valueOf(){return 2}}]) {
+        try { const r = Atomics.waitAsync(ia, idx, 1, 0); out.push(r.value); } catch (e) { out.push(e.constructor.name); }
+      }
+      console.log(JSON.stringify(out));
+    })();";
+    assert_eq!(
+        main_lines(src),
+        ["[\"not-equal\",\"not-equal\",\"not-equal\",\"not-equal\",\"not-equal\",\"not-equal\",\"not-equal\",\"RangeError\",\"RangeError\",\"RangeError\",\"RangeError\",\"not-equal\"]"]
+    );
+}
+
+#[test]
+fn atomics_wait_async_fixture_n68_coerces_value_then_timeout_then_count() {
+    let src = "(async () => {
+      const ia = new Int32Array(new SharedArrayBuffer(16)); const log = [];
+      const t = { valueOf() { log.push('timeout'); return 0; } }, v = { valueOf() { log.push('value'); return 5; } };
+      const r = Atomics.waitAsync(ia, 0, v, t);
+      const c = { valueOf() { log.push('count'); return 1; } };
+      Atomics.notify(ia, 0, c);
+      const r2 = Atomics.waitAsync(ia, 0, '0', 0);
+      console.log(JSON.stringify([log, r.value, r2.value]));
+    })();";
+    assert_eq!(
+        main_lines(src),
+        ["[[\"value\",\"timeout\",\"count\"],\"not-equal\",\"timed-out\"]"]
+    );
+}
+
+#[test]
+fn atomics_wait_async_fixture_n70_int32_value_coercion() {
+    // QuickJS contract n70 without its BigInt64Array rows (BigInt64 is not supported yet; see atomics_wait_async note)
+    let src = "(async () => {
+      const ia = new Int32Array(new SharedArrayBuffer(16)); const out = [];
+      out.push(Atomics.waitAsync(ia, 0, '0', 0).value, Atomics.waitAsync(ia, 0, 2**32, 0).value, Atomics.waitAsync(ia, 0, 1.9, 0).value);
+      console.log(JSON.stringify(out));
+    })();";
+    assert_eq!(
+        main_lines(src),
+        ["[\"timed-out\",\"timed-out\",\"not-equal\"]"]
+    );
+}
+
+#[test]
+fn atomics_wait_async_shares_one_fifo_with_sync_waiters() {
+    // thread A parks in a sync wait first; the main program then queues an async waiter behind it. The first
+    // notify must wake A (so the promise is still pending in the next timer turn); the second wakes the async waiter.
+    let block = new_sab_block(8);
+    let sync_block = block.clone();
+    let sync = std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            lines_on_block(
+                &sync_block,
+                "const i = new Int32Array(__sab); Atomics.store(i, 1, 1); console.log('sync', Atomics.wait(i, 0, 0, 2000));",
+            )
+        })
+        .expect("thread spawns");
+    let program = main_lines_on_block(
+        &block,
+        "const i = new Int32Array(__sab);
+         while (Atomics.load(i, 1) !== 1) {}
+         __thaw_sleep_ms(30);
+         let got = null;
+         Atomics.waitAsync(i, 0, 0, 2000).value.then((v) => { got = v; console.log('async', v); });
+         console.log('notify1', Atomics.notify(i, 0, 1));
+         setTimeout(() => {
+           console.log('mid', got);
+           console.log('notify2', Atomics.notify(i, 0, 1));
+         }, 20);",
+    );
+    assert_eq!(program, ["notify1 1", "mid null", "notify2 1", "async ok"]);
+    assert_eq!(sync.join().expect("thread joins"), ["sync ok"]);
+}
+
+#[test]
+fn atomics_wait_async_is_woken_by_notify_from_another_interp() {
+    // the waiter queues before it announces itself (word 1), so the notifier never races the queueing
+    let block = new_sab_block(8);
+    let waiter_block = block.clone();
+    let waiter = std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            main_lines_on_block(
+                &waiter_block,
+                "const i = new Int32Array(__sab);
+                 const keep = setInterval(() => {}, 50);
+                 Atomics.waitAsync(i, 0, 0, 5000).value.then((v) => { console.log('woke', v); clearInterval(keep); });
+                 Atomics.store(i, 1, 1);",
+            )
+        })
+        .expect("thread spawns");
+    let notifier = lines_on_block(
+        &block,
+        "const i = new Int32Array(__sab);
+         for (let n = 0; n < 2e6 && Atomics.load(i, 1) !== 1; n++) {}
+         Atomics.store(i, 0, 1);
+         console.log(Atomics.notify(i, 0, 1));",
+    );
+    assert_eq!(notifier, ["1"]);
+    assert_eq!(waiter.join().expect("thread joins"), ["woke ok"]);
+}
+
+#[test]
+fn atomics_wait_async_timeout_settles_timed_out_while_the_loop_is_kept_alive() {
+    // the 10 ms timeout fires before the 60 ms referenced timer that keeps the program alive
+    let src = "const ia = new Int32Array(new SharedArrayBuffer(8));
+      Atomics.waitAsync(ia, 0, 0, 10).value.then((v) => console.log('t', v));
+      setTimeout(() => console.log('keep'), 60);";
+    assert_eq!(main_lines(src), ["t timed-out", "keep"]);
+}
+
+#[test]
+fn atomics_wait_async_does_not_keep_the_process_alive() {
+    // Node 22: a pending waitAsync (finite or infinite timeout) alone lets the program exit; nothing settles
+    let src = "const ia = new Int32Array(new SharedArrayBuffer(8));
+      Atomics.waitAsync(ia, 0, 0, 200).value.then(() => console.log('fired'));
+      Atomics.waitAsync(ia, 0, 0).value.then(() => console.log('fired inf'));
+      console.log('end');";
+    assert_eq!(main_lines(src), ["end"]);
+}
+
+#[test]
+fn atomics_wait_async_dropped_realm_leaves_no_waiter_for_notify() {
+    // a realm that drops with a pending waitAsync must not count as a waiter (notify returns 0)
+    let block = new_sab_block(8);
+    let dropped_block = block.clone();
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            let mut it = Interp::new();
+            let obj = it.new_shared_buffer(sab_store(dropped_block));
+            it.global.declare("__sab", Value::Object(obj), true);
+            assert!(it
+                .run("const i = new Int32Array(__sab); Atomics.waitAsync(i, 0, 0);")
+                .is_ok());
+        })
+        .expect("thread spawns")
+        .join()
+        .expect("thread joins");
+    assert_eq!(
+        lines_on_block(
+            &block,
+            "const i = new Int32Array(__sab); console.log(Atomics.notify(i, 0, 1));"
+        ),
+        ["0"]
+    );
+}
