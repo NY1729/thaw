@@ -1,0 +1,12 @@
+data get data/0 undefined true true
+origin get origin/0 undefined true true
+lastEventId get lastEventId/0 undefined true true
+source get source/0 undefined true true
+ports get ports/0 undefined true true
+initMessageEvent initMessageEvent/1 true true true
+0 1 https://o id null 0 message false
+message 1 false | mm d o2 l2 true true true
+nn false false null "" null 0
+no args true
+brand true
+port event hi  0
