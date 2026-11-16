@@ -4,8 +4,11 @@
 //! (the table rows of `process`), so this installer only has to create each member.
 
 use crate::eventloop::node_error;
-use crate::{arg, define_accessor, put, Ctl, Interp, Obj, Value, R};
+use crate::process_env::apply_dotenv;
+use crate::{arg, define_accessor, put, Ctl, Interp, Kind, Obj, Value, R};
 use std::cell::{Cell, RefCell};
+use std::ffi::CString;
+use std::io::Write;
 use std::rc::Rc;
 
 const JS_MEMBERS: &str = include_str!("web/process_members.js");
@@ -52,6 +55,9 @@ const FUNCTIONS: &[(&str, f64, MemberFn)] = &[
         1.0,
         set_capture_callback,
     ),
+    ("loadEnvFile", 0.0, load_env_file),
+    ("dlopen", 0.0, dlopen),
+    ("execve", 1.0, execve),
 ];
 
 /// Node's `process.resourceUsage()` keys, in Node's order.
@@ -404,8 +410,9 @@ fn getgroups(it: &mut Interp, _: &Value, _: &[Value]) -> R<Value> {
 fn errno_throw(it: &mut Interp, syscall: &str) -> R<Value> {
     let err = std::io::Error::last_os_error();
     let code = match err.raw_os_error() {
-        Some(libc::EPERM) => "EPERM",
         Some(libc::EINVAL) => "EINVAL",
+        Some(libc::ENOENT) => "ENOENT",
+        Some(libc::EACCES) => "EACCES",
         _ => "EPERM",
     };
     let msg = format!("{code}: {}, {syscall}", err.to_string().to_lowercase());
@@ -475,6 +482,200 @@ fn set_source_maps_enabled(_: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
     let on = arg(a, 0).truthy();
     SOURCE_MAPS.with(|c| c.set(on));
     Ok(Value::Undefined)
+}
+
+/// The `Received ...` tail of an ERR_INVALID_ARG_VALUE message: objects render as `{}`.
+fn received_arg(it: &mut Interp, v: &Value) -> String {
+    match v {
+        Value::Object(_) => "{}".into(),
+        _ => received(it, v),
+    }
+}
+
+/// The `Received ...` tail of Node's ERR_INVALID_ARG_TYPE messages, for the values the members validate.
+fn received(it: &mut Interp, v: &Value) -> String {
+    match v {
+        Value::Undefined => "undefined".into(),
+        Value::Null => "null".into(),
+        Value::Str(_) => format!("type string ('{}')", it.to_str(v)),
+        Value::Number(_) => format!("type number ({})", it.to_str(v)),
+        Value::Bool(_) => format!("type boolean ({})", it.to_str(v)),
+        _ => "an instance of Object".into(),
+    }
+}
+
+fn invalid_type(it: &mut Interp, name: &str, expected: &str, v: &Value) -> Ctl {
+    let msg = format!(
+        "The \"{name}\" argument {expected}. Received {}",
+        received(it, v)
+    );
+    node_error(it, "TypeError", "ERR_INVALID_ARG_TYPE", &msg)
+}
+
+/// `process.loadEnvFile(path = '.env')`: dotenv lines into the environment, unset names only. A missing file throws
+/// the fs error shape (`ENOENT: no such file or directory, open '<path>'`, errno, syscall, path).
+fn load_env_file(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
+    let v = arg(a, 0);
+    let path = match v {
+        Value::Undefined | Value::Null => ".env".to_string(),
+        Value::Str(_) => it.to_str(&v).to_string(),
+        _ => {
+            return Err(invalid_type(
+                it,
+                "path",
+                "must be of type string or an instance of Buffer or URL",
+                &v,
+            ))
+        }
+    };
+    let text = match std::fs::read(&path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) => {
+            let code = match e.kind() {
+                std::io::ErrorKind::NotFound => "ENOENT",
+                std::io::ErrorKind::PermissionDenied => "EACCES",
+                std::io::ErrorKind::IsADirectory => "EISDIR",
+                _ => "EIO",
+            };
+            let errno = -e.raw_os_error().unwrap_or(libc::EIO);
+            let reason = e
+                .to_string()
+                .split(" (os error")
+                .next()
+                .unwrap_or("")
+                .to_lowercase();
+            let err = it.make_error("Error", &format!("{code}: {reason}, open '{path}'"))?;
+            if let Value::Object(o) = &err {
+                put(o, "errno", Value::Number(errno as f64));
+                put(o, "code", Value::str(code));
+                put(o, "syscall", Value::str("open"));
+                put(o, "path", Value::str(&path));
+            }
+            return Err(Ctl::Throw(err));
+        }
+    };
+    apply_dotenv(&text);
+    Ok(Value::Undefined)
+}
+
+/// `process.dlopen(module, filename)`: argument validation as Node, then ERR_DLOPEN_FAILED. Addons are loaded by the
+/// N-API host linked into the compiled program (thaw-napi), not at runtime, so a valid addon path is refused here too.
+/// ponytail: no runtime addon load; wire to thaw-napi's loader if a program needs process.dlopen.
+fn dlopen(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
+    if a.len() < 2 {
+        return Err(node_error(
+            it,
+            "TypeError",
+            "ERR_MISSING_ARGS",
+            "process.dlopen needs at least 2 arguments",
+        ));
+    }
+    if matches!(arg(a, 0), Value::Undefined | Value::Null) {
+        let err = it.make_error("TypeError", "Cannot convert undefined or null to object")?;
+        return Err(Ctl::Throw(err));
+    }
+    let file = it.to_str(&arg(a, 1)).to_string();
+    let reason = match std::fs::metadata(&file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            "No such file or directory".to_string()
+        }
+        _ => "native addons cannot be loaded at runtime on thaw-js".to_string(),
+    };
+    let msg = format!("{file}: cannot open shared object file: {reason}");
+    Err(node_error(it, "Error", "ERR_DLOPEN_FAILED", &msg))
+}
+
+/// `process.execve(execPath, args = [execPath], env = process.env)`: validates like Node, flushes stdio, then replaces
+/// the process. Returns only on failure, which throws the errno error.
+fn execve(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
+    let path_v = arg(a, 0);
+    if !matches!(path_v, Value::Str(_)) {
+        return Err(invalid_type(
+            it,
+            "execPath",
+            "must be of type string",
+            &path_v,
+        ));
+    }
+    let path = it.to_str(&path_v).to_string();
+    let args_v = arg(a, 1);
+    let items: Vec<Value> = match &args_v {
+        Value::Undefined => vec![path_v.clone()],
+        Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => it.array_items(&args_v),
+        _ => {
+            return Err(invalid_type(
+                it,
+                "args",
+                "must be an instance of Array",
+                &args_v,
+            ))
+        }
+    };
+    let mut argv = Vec::with_capacity(items.len());
+    for (i, v) in items.iter().enumerate() {
+        // ponytail: non-string elements are shown as `{}` in the message, not inspected
+        let c = match v {
+            Value::Str(_) => CString::new(it.to_str(v).to_string()).ok(),
+            _ => None,
+        };
+        match c {
+            Some(c) => argv.push(c),
+            None => {
+                let msg = format!(
+                    "The argument 'args[{i}]' must be a string without null bytes. Received {}",
+                    received_arg(it, v)
+                );
+                return Err(node_error(it, "TypeError", "ERR_INVALID_ARG_VALUE", &msg));
+            }
+        }
+    }
+    let env_pairs: Vec<String> = match arg(a, 2) {
+        Value::Undefined => std::env::vars_os()
+            .map(|(k, v)| format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
+            .collect(),
+        Value::Object(_) => {
+            let env = arg(a, 2);
+            it.own_keys(&env)
+                .into_iter()
+                .map(|k| {
+                    let v = it
+                        .get(&env, &k)
+                        .map(|v| it.to_str(&v).to_string())
+                        .unwrap_or_default();
+                    format!("{k}={v}")
+                })
+                .collect()
+        }
+        other => return Err(invalid_type(it, "env", "must be of type object", &other)),
+    };
+    let envp = env_pairs
+        .into_iter()
+        .map(CString::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            node_error(
+                it,
+                "TypeError",
+                "ERR_INVALID_ARG_VALUE",
+                "The environment must not contain null bytes",
+            )
+        })?;
+    let cpath = CString::new(path).map_err(|_| {
+        node_error(
+            it,
+            "TypeError",
+            "ERR_INVALID_ARG_VALUE",
+            "The execPath must not contain null bytes",
+        )
+    })?;
+    let mut argv_p: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
+    argv_p.push(std::ptr::null());
+    let mut envp_p: Vec<*const libc::c_char> = envp.iter().map(|c| c.as_ptr()).collect();
+    envp_p.push(std::ptr::null());
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    unsafe { libc::execve(cpath.as_ptr(), argv_p.as_ptr(), envp_p.as_ptr()) };
+    errno_throw(it, "execve")
 }
 
 #[cfg(test)]
@@ -592,6 +793,99 @@ mod tests {
         assert_eq!(
             output("const a = process.sourceMapsEnabled; process.setSourceMapsEnabled(true); const b = process.sourceMapsEnabled; process.setSourceMapsEnabled(false); console.log(a, b, process.sourceMapsEnabled);"),
             "false true false"
+        );
+    }
+
+    /// Writes `content` to a fresh file under the temp dir (TMPDIR-aware) and returns its path.
+    fn temp_env_file(tag: &str, content: &str) -> String {
+        let path = std::env::temp_dir().join(format!("thaw-lef-{}-{tag}.env", std::process::id()));
+        std::fs::write(&path, content).expect("write temp env file");
+        path.display().to_string()
+    }
+
+    #[test]
+    fn load_env_file_parses_dotenv_and_keeps_preset_values() {
+        let path = temp_env_file(
+            "parse",
+            "TJS_LEF_A=1\nexport TJS_LEF_B=two\nTJS_LEF_C = spaced  \nTJS_LEF_D=\"dq\\nx\"\nTJS_LEF_E='sq\\nraw'\n\
+             TJS_LEF_F=val # comment\n# full comment\nTJS_LEF_G=\nTJS_LEF_H=\"multi\nline\"\nTJS_LEF_PRE=from-file\nno-equals-line\n",
+        );
+        std::env::set_var("TJS_LEF_PRE", "preset");
+        let got = output(&format!(
+            "const r = process.loadEnvFile('{path}'); \
+             console.log(r, ['A','B','C','D','E','F','G','H','PRE'].map(k => JSON.stringify(process.env['TJS_LEF_' + k])).join(' '));"
+        ));
+        assert_eq!(got, "undefined \"1\" \"two\" \"spaced\" \"dq\\nx\" \"sq\\\\nraw\" \"val\" \"\" \"multi\\nline\" \"preset\"");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_env_file_errors_have_node_shape() {
+        assert_eq!(
+            output("try { process.loadEnvFile('/nonexistent-tjs/.env'); } catch (e) { console.log(e.message, e.code, e.errno, e.syscall, e.path); }"),
+            "ENOENT: no such file or directory, open '/nonexistent-tjs/.env' ENOENT -2 open /nonexistent-tjs/.env"
+        );
+        assert_eq!(
+            output("try { process.loadEnvFile(5); } catch (e) { console.log(e.name, e.code, e.message); }"),
+            "TypeError ERR_INVALID_ARG_TYPE The \"path\" argument must be of type string or an instance of Buffer or URL. Received type number (5)"
+        );
+    }
+
+    #[test]
+    fn dlopen_validates_and_fails_with_node_shapes() {
+        assert_eq!(
+            output(
+                "try { process.dlopen(); } catch (e) { console.log(e.name, e.code, e.message); }"
+            ),
+            "TypeError ERR_MISSING_ARGS process.dlopen needs at least 2 arguments"
+        );
+        assert_eq!(
+            output("try { process.dlopen(undefined, 'x'); } catch (e) { console.log(e.name, e.code, e.message); }"),
+            "TypeError undefined Cannot convert undefined or null to object"
+        );
+        assert_eq!(
+            output("try { process.dlopen({exports: {}}, '/nonexistent-tjs/x.node'); } catch (e) { console.log(e.name, e.code, e.message); }"),
+            "Error ERR_DLOPEN_FAILED /nonexistent-tjs/x.node: cannot open shared object file: No such file or directory"
+        );
+        assert_eq!(
+            output("try { process.dlopen({exports: {}}, 5); } catch (e) { console.log(e.name, e.code, e.message); }"),
+            "Error ERR_DLOPEN_FAILED 5: cannot open shared object file: No such file or directory"
+        );
+    }
+
+    #[test]
+    fn execve_validates_arguments_before_exec() {
+        assert_eq!(
+            output("try { process.execve(); } catch (e) { console.log(e.name, e.code, e.message); }"),
+            "TypeError ERR_INVALID_ARG_TYPE The \"execPath\" argument must be of type string. Received undefined"
+        );
+        assert_eq!(
+            output("try { process.execve(5, []); } catch (e) { console.log(e.name, e.code, e.message); }"),
+            "TypeError ERR_INVALID_ARG_TYPE The \"execPath\" argument must be of type string. Received type number (5)"
+        );
+        assert_eq!(
+            output("try { process.execve('/bin/true', 'x'); } catch (e) { console.log(e.name, e.code, e.message); }"),
+            "TypeError ERR_INVALID_ARG_TYPE The \"args\" argument must be an instance of Array. Received type string ('x')"
+        );
+        assert_eq!(
+            output("try { process.execve('/bin/true', ['a'], 'x'); } catch (e) { console.log(e.name, e.code, e.message); }"),
+            "TypeError ERR_INVALID_ARG_TYPE The \"env\" argument must be of type object. Received type string ('x')"
+        );
+        assert_eq!(
+            output("try { process.execve('/bin/true', ['a'], null); } catch (e) { console.log(e.name, e.code, e.message); }"),
+            "TypeError ERR_INVALID_ARG_TYPE The \"env\" argument must be of type object. Received null"
+        );
+        assert_eq!(
+            output("try { process.execve('/bin/true', [{}], {}); } catch (e) { console.log(e.name, e.code, e.message); }"),
+            "TypeError ERR_INVALID_ARG_VALUE The argument 'args[0]' must be a string without null bytes. Received {}"
+        );
+    }
+
+    #[test]
+    fn env_and_addon_members_have_node_lengths() {
+        assert_eq!(
+            output("console.log(process.loadEnvFile.length, process.dlopen.length, process.execve.length, typeof process.loadEnvFile, typeof process.dlopen, typeof process.execve);"),
+            "0 0 1 function function function"
         );
     }
 
