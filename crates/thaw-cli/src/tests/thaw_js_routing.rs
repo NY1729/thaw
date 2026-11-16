@@ -737,7 +737,7 @@ fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
 
 #[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
-    // A `node:worker_threads` program that names `Atomics` (thaw-js does not serve it yet) keeps that module on
+    // A `node:worker_threads` program that names `resourceLimits` (thaw-js does not serve it yet) keeps that module on
     // QuickJS; the build falls back and the artifact reports the blocker.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "blockers-fallback",
@@ -745,7 +745,7 @@ fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
          import { isMainThread } from 'node:worker_threads';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
-           console.log(c.add(2), isMainThread, Atomics.isLockFree(4));\n\
+           console.log(c.add(2), isMainThread, Object.keys({ resourceLimits: 1 }).length);\n\
          }\n",
     );
     let output = dir.join("app");

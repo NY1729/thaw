@@ -648,7 +648,6 @@ const THAW_JS_WORKER_THREADS_UNSUPPORTED: &[&str] = &[
     "markAsUncloneable",
     "isMarkedAsUntransferable",
     "resourceLimits",
-    "Atomics",
     "transferList",
 ];
 
@@ -663,7 +662,7 @@ fn thaw_js_worker_threads_blocker(pkg_name: &str, user_source: &str) -> Option<&
             || THAW_JS_WORKER_THREADS_UNSUPPORTED
                 .iter()
                 .any(|name| thaw_js_mentions(user_source, name))))
-    .then_some("worker threads options (resourceLimits, Atomics, ...) and main-thread process.stdin are not supported on thaw-js yet")
+    .then_some("worker threads options (resourceLimits, ...) and main-thread process.stdin are not supported on thaw-js yet")
 }
 
 /// `node:path/posix` / `node:path/win32` as a registry bundle: the `node:path` bundle plus one factory
