@@ -4859,6 +4859,8 @@ mod builtin_table_tests;
 mod console_instance_tests;
 #[cfg(test)]
 mod dynamic_helper_contract_tests;
+#[cfg(test)]
+mod fetch_tests;
 #[cfg(all(test, unix))]
 mod fs_tests;
 #[cfg(test)]
@@ -4889,8 +4891,6 @@ mod napi_proxy_tests;
 mod napi_symbol_protocol_tests;
 #[cfg(test)]
 mod napi_symbols_tests;
-#[cfg(test)]
-mod fetch_tests;
 #[cfg(test)]
 mod net_tests;
 #[cfg(test)]
