@@ -339,6 +339,32 @@ const URL_PRELUDE: &str = r#"
   Object.defineProperty(P, 'size', { get: function () { return this['@@list'].length; }, configurable: true });
   P[Symbol.iterator] = P.entries;
 
+  // util.inspect hooks (Node 22's shapes). A hook returns text; `inspect` (the third argument) is only
+  // passed by util.inspect itself, so console.log falls back to the default layout below.
+  // ponytail: long values are not split at newlines as Node's formatPrimitive does.
+  var inspectSym = Symbol.for('nodejs.util.inspect.custom');
+  var INSPECT_META = { 8: '\\b', 9: '\\t', 10: '\\n', 12: '\\f', 13: '\\r', 92: '\\\\' };
+  function quoteInspect(s) {
+    var q = "'";
+    if (s.indexOf("'") >= 0) q = s.indexOf('"') < 0 ? '"' : (s.indexOf('`') < 0 && s.indexOf('${') < 0 ? '`' : "'");
+    var body = s.replace(/[\x00-\x1f\\\x7f-\x9f]/g, function (c) {
+      var code = c.charCodeAt(0);
+      return INSPECT_META[code] || '\\x' + (code < 16 ? '0' : '') + code.toString(16).toUpperCase();
+    });
+    if (q === "'") body = body.replace(/'/g, "\\'");
+    return q + body + q;
+  }
+  var uspInspect = { [inspectSym](recurseTimes, ctx) {
+    if (typeof recurseTimes === 'number' && recurseTimes < 0) return '[Object]';
+    var breakLength = ctx && typeof ctx.breakLength === 'number' ? ctx.breakLength : 80;
+    var out = this['@@list'].map(function (p) { return quoteInspect(p[0]) + ' => ' + quoteInspect(p[1]); });
+    if (out.length === 0) return 'URLSearchParams {}';
+    var length = out.reduce(function (total, text) { return total + text.length + 2; }, -2);
+    if (length > breakLength) return 'URLSearchParams {\n  ' + out.join(',\n  ') + ' }';
+    return 'URLSearchParams { ' + out.join(', ') + ' }';
+  } }[inspectSym];
+  def(P, inspectSym, uspInspect);
+
   // ----- URL -----
   function URLImpl(input, base) {
     if (arguments.length === 0) { var e = new TypeError('The "url" argument must be specified'); e.code = 'ERR_MISSING_ARGS'; throw e; }
@@ -401,6 +427,20 @@ const URL_PRELUDE: &str = r#"
   Object.defineProperty(U, 'searchParams', { get: function () { return this['@@sp']; }, enumerable: true, configurable: true });
   def(U, 'toString', function () { return this.href; });
   def(U, 'toJSON', function () { return this.href; });
+  var urlInspect = { [inspectSym](depth, options) {
+    if (typeof depth === 'number' && depth < 0) return this;
+    var keys = ['href', 'origin', 'protocol', 'username', 'password', 'host', 'hostname', 'port', 'pathname', 'search', 'searchParams', 'hash'];
+    var self = this, obj = {};
+    keys.forEach(function (k) { obj[k] = self[k]; });
+    if (typeof arguments[2] === 'function') return 'URL ' + arguments[2](obj, options);
+    var childDepth = options && typeof options.depth === 'number' ? options.depth - 1 : null;
+    var lines = keys.map(function (k) {
+      var v = k === 'searchParams' ? self.searchParams[inspectSym](childDepth, options) : quoteInspect(String(self[k]));
+      return k + ': ' + v;
+    });
+    return 'URL {\n  ' + lines.join(',\n  ') + '\n}';
+  } }[inspectSym];
+  def(U, inspectSym, urlInspect);
   def(URLImpl, 'canParse', function (u, b) { try { new URLImpl(u, b); return true; } catch (e) { return false; } });
   def(URLImpl, 'parse', function (u, b) { try { return new URLImpl(u, b); } catch (e) { return null; } });
   // ponytail: the registry only backs revoke; blob: URLs are not resolved by fetch or URL parsing.
