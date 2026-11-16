@@ -622,23 +622,6 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:cluster",
 ];
 
-/// `node:perf_hooks` marks, measures, observers, timerify and entries exist only on QuickJS's performance.js.
-fn thaw_js_perf_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    (pkg_name == "node:perf_hooks"
-        && [
-            "mark",
-            "measure",
-            "PerformanceObserver",
-            "timerify",
-            "getEntries",
-            "PerformanceEntry",
-            "clearMarks",
-        ]
-        .iter()
-        .any(|name| thaw_js_mentions(user_source, name)))
-    .then_some("performance marks/measures/observers are not implemented on thaw-js yet")
-}
-
 /// `node:cluster` worker processes (`cluster.fork()`) need child-process IPC that thaw-js does not run yet,
 /// so a program that forks stays on QuickJS. Metadata-only use (`isPrimary`, `settings`, ...) routes.
 fn thaw_js_cluster_fork_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
@@ -804,9 +787,6 @@ fn thaw_js_package_eligible(
         return reject(why.into());
     }
     if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
-        return reject(why.into());
-    }
-    if let Some(why) = thaw_js_perf_hooks_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_cluster_fork_blocker(&pkg.name, user_source) {
@@ -1086,18 +1066,6 @@ fn thaw_js_test_blocker_keeps_mock_timers_on_quickjs() {
     assert!(thaw_js_test_blocker("node:test", "const { mock } = require('node:test'); mock.fn();").is_none());
     assert!(thaw_js_test_blocker("node:test", "const timers = require('node:timers');").is_none());
     assert!(thaw_js_test_blocker("node:path", "mock.timers.enable();").is_none());
-}
-
-#[cfg(test)]
-#[test]
-fn thaw_js_perf_hooks_blocker_keeps_marks_on_quickjs() {
-    let marks = "import { performance } from 'node:perf_hooks'; performance.mark('a');";
-    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", marks).is_some());
-    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "new PerformanceObserver(cb);").is_some());
-    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "monitorEventLoopDelay(); performance.now();").is_none());
-    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "performance.eventLoopUtilization();").is_none());
-    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "const marked = 1;").is_none());
-    assert!(thaw_js_perf_hooks_blocker("node:path", marks).is_none());
 }
 
 #[cfg(test)]
