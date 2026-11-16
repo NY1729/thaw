@@ -732,7 +732,7 @@ fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
 
 #[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
-    // A `node:worker_threads` program that names `resourceLimits` (thaw-js does not serve it yet) keeps that module on
+    // A `node:worker_threads` program that names `SHARE_ENV` (thaw-js does not serve it yet) keeps that module on
     // QuickJS; the build falls back and the artifact reports the blocker.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "blockers-fallback",
@@ -740,7 +740,7 @@ fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
          import { isMainThread } from 'node:worker_threads';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
-           console.log(c.add(2), isMainThread, Object.keys({ resourceLimits: 1 }).length);\n\
+           console.log(c.add(2), isMainThread, Object.keys({ SHARE_ENV: 1 }).length);\n\
          }\n",
     );
     let output = dir.join("app");
@@ -1421,4 +1421,22 @@ fn routed_shared_array_buffer_and_atomics_match_node() {
         let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
         assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
     }
+}
+
+#[test]
+fn routed_worker_resource_limits_stop_a_runaway_worker() {
+    // Node 22.23.1 prints `error ERR_WORKER_OUT_OF_MEMORY` and the program ends with exit 0 (heap_limit, plan B3)
+    let body = "import { Worker } from 'node:worker_threads';\n\
+        async function main(): Promise<void> {\n\
+          const worker = new Worker(`const keep = []; while (true) { keep.push(new Array(100000).fill(1)); }`, { eval: true, resourceLimits: { maxOldGenerationSizeMb: 16 } });\n\
+          const result: string = await new Promise<string>((resolve) => { worker.on('error', (e: any) => { resolve('error ' + e.code); }); worker.on('exit', () => { resolve('exit'); }); });\n\
+          console.log(result);\n\
+        }";
+    let _env = RouteAllEnv::set();
+    let (_dir, registry, entry) = thaw_js_fixture("route-worker-limits", body);
+    let output = entry.with_file_name("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+    assert_eq!((stdout.as_str(), status), ("error ERR_WORKER_OUT_OF_MEMORY\n", Some(0)), "{stderr}");
 }
