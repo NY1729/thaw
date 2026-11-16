@@ -281,6 +281,7 @@ fn generate_registry_shims(
     external_native_staging: Option<&Path>,
     forced_jit_fallbacks: &std::collections::HashSet<(String, String)>,
     forced_runtime_only: &std::collections::HashSet<String>,
+    fetch_transport_bundles: &std::collections::HashSet<String>,
     thaw_js_routing: bool,
 ) -> Result<RegistryShims, String> {
     let routed = ThawJsPackages::new();
@@ -297,6 +298,7 @@ fn generate_registry_shims(
         external_native_staging,
         forced_jit_fallbacks,
         forced_runtime_only,
+        fetch_transport_bundles,
         thaw_js_routing,
         &routed,
     )?;
@@ -316,6 +318,7 @@ fn generate_registry_shims(
         external_native_staging,
         forced_jit_fallbacks,
         forced_runtime_only,
+        fetch_transport_bundles,
         thaw_js_routing,
         &eligible,
     )
@@ -336,6 +339,7 @@ fn generate_registry_shims_pass(
     external_native_staging: Option<&Path>,
     forced_jit_fallbacks: &std::collections::HashSet<(String, String)>,
     forced_runtime_only: &std::collections::HashSet<String>,
+    fetch_transport_bundles: &std::collections::HashSet<String>,
     thaw_js_routing: bool,
     thaw_js_routed: &ThawJsPackages,
 ) -> Result<(RegistryShims, ThawJsPackages), String> {
@@ -2183,6 +2187,7 @@ fn generate_registry_shims_pass(
                 .collect();
             if runtime_package
                 && (forced_runtime_only.contains(&pkg.name)
+                    || fetch_transport_bundles.contains(&pkg.name)
                     || dynamic_packages.contains(&pkg.name)
                     || !fallback_names.is_empty()
                     || !nested_namespace_aliases.is_empty()

@@ -4656,7 +4656,7 @@ fn poll_native_servers_symbol() -> u8 {
 }
 
 /// `drain_native` as a loop turn hook. A listen callback may queue continuations, so servers are polled first.
-fn drain_native_continuations(_: &mut Interp) -> bool {
+pub(crate) fn drain_native_continuations(_: &mut Interp) -> bool {
     let http = poll_native_servers();
     let ran = drain_native();
     ran || (http & 2) != 0

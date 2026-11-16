@@ -706,10 +706,13 @@ fn build_with_native_mode_routed(
     // bundles: link them as if imported, at runtime only (their module loads on the first fetch, not eagerly).
     // They are `forced_runtime_only`: no typed declarations, so they cannot clash with the program's own imports.
     let mut forced_runtime_only = std::collections::HashSet::new();
+    // the shim loads these even for an imported node:http, whose declarations it keeps (`generate_registry_shims`)
+    let mut fetch_transport_bundles = std::collections::HashSet::new();
     if thaw_js_routing {
         let sources = module_graph::graph_sources(input, &user_source)?;
         let sources = sources.iter().map(String::as_str).collect::<Vec<_>>();
-        if source_may_call_realm_fetch(&sources) {
+        fetch_transport_bundles = realm_fetch_transport_bundles(&sources);
+        if !fetch_transport_bundles.is_empty() {
             for builtin in REALM_FETCH_TRANSPORT_BUNDLES {
                 thaw_registry::resolve_builtin(builtin)?;
             }
@@ -769,6 +772,7 @@ fn build_with_native_mode_routed(
             external_native_dirs.as_ref().map(|dirs| dirs.0.as_path()),
             &forced_jit_fallbacks,
             &forced_runtime_only,
+            &fetch_transport_bundles,
             thaw_js_routing,
         )?;
         let external_resolutions =
