@@ -66,6 +66,7 @@ mod sysio;
 mod tls;
 mod typed;
 pub(crate) use typed::TypedKey;
+mod udp;
 mod url;
 mod vm;
 #[path = "web/abort.rs"]
