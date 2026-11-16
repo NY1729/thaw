@@ -1338,6 +1338,8 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
     if (typeof load !== 'function') throw new TypeError('fetch: no HTTP client is loaded in this runtime');
     return load(name);
   }
+  // A transport failure settles the fetch as Node's `TypeError: fetch failed` with the reason as its cause.
+  function networkFailure(error) { var failure = new TypeError('fetch failed'); failure.cause = error; return failure; }
   function fetch(input, init = undefined) {
     var request;
     try { request = new Request(input, init); } catch (error) { return Promise.reject(error); }
@@ -1382,7 +1384,8 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
           if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') { finishReject(new TypeError('fetch only supports http: and https: URLs')); return; }
           if (parsed.username || parsed.password) { finishReject(new TypeError('Request URL cannot contain credentials')); return; }
           parsed.hash = '';
-          var transport = fetchTransport(parsed.protocol === 'https:' ? 'https' : 'http');
+          var transport;
+          try { transport = fetchTransport(parsed.protocol === 'https:' ? 'https' : 'http'); } catch (error) { finishReject(networkFailure(error)); return; }
           if ((method === 'GET' || method === 'HEAD') && bytes.length) { bytes = new Uint8Array(); delete headers['content-length']; }
           var options = { method: method, headers: headers, signal: request.signal };
           try {
@@ -1427,7 +1430,7 @@ const encodeUtf8 = s => new TextEncoder().encode(s);
                 }, finishReject);
               } else if (!settled) { settled = true; cleanup(); resolve(response); }
             });
-            active.once('error', function(error) { var failure = new TypeError('fetch failed'); failure.cause = error; finishReject(failure); });
+            active.once('error', function(error) { finishReject(networkFailure(error)); });
             if (bytes.length) active.write(bytes);
             active.end();
           } catch (error) { finishReject(error); }

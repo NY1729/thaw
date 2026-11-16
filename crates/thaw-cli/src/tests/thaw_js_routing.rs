@@ -921,6 +921,36 @@ fn thaw_js_routed_node_http_fetch_from_listen_callback_refused() {
 }
 
 #[test]
+fn thaw_js_routed_fetch_without_node_http_import_runs_on_thaw_js() {
+    // Q9 PR 2b: a program that mentions `fetch` but never imports node:http still links the node:http /
+    // node:https bundles, so the realm fetch has its transport. The server is a raw node:net listener.
+    // Expected stdout is from a real `node` run of the same program.
+    let (dir, registry, entry) = thaw_js_fixture(
+        "fetch-without-node-http",
+        "import * as net from 'node:net';\n\
+         function main(): void {\n\
+           const server = net.createServer((socket: any) => {\n\
+             socket.once('data', () => {\n\
+               socket.end('HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\nok');\n\
+             });\n\
+           });\n\
+           server.listen(0, '127.0.0.1', async () => {\n\
+             const addr: any = server.address();\n\
+             const r: any = await fetch('http://127.0.0.1:' + addr.port + '/');\n\
+             console.log(r.status, await r.text());\n\
+             server.close();\n\
+           });\n\
+         }\n",
+    );
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run_guarded(&output), "200 ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn thaw_js_routed_node_http_get_from_listen_callback_refused() {
     let (dir, registry, entry) = thaw_js_fixture(
         "node-http-get-from-listen-callback",

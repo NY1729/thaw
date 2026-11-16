@@ -161,9 +161,12 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
                 .lookup(&it.global.clone(), "__thaw_crypto_module")
                 .unwrap_or(Value::Undefined));
         }
-        return Err(Ctl::Throw(Value::str(&format!(
-            "Cannot find module '{key}'"
-        ))));
+        let ctor = it
+            .lookup(&it.global.clone(), "Error")
+            .unwrap_or(Value::Undefined);
+        let err = it.construct(&ctor, &[Value::str(&format!("Cannot find module '{key}'"))])?;
+        it.set(&err, "code", Value::str("MODULE_NOT_FOUND"))?;
+        return Err(Ctl::Throw(err));
     };
     let module = Value::Object(it.plain());
     let exports = Value::Object(it.plain());
@@ -559,6 +562,8 @@ thread_local! {
 thread_local! {
     /// The package last entered by `with_package`.
     static LAST_PACKAGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The first loaded package whose bundle holds `node:http`: the realm whose `fetch` has a transport.
+    static FETCH_PACKAGE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 /// `THAW_JS_TRACE_WIRE` is read once; off, a trace point costs one load.
@@ -1311,9 +1316,10 @@ pub struct HandleResult {
     pub error: *mut c_char,
 }
 
-/// The realm user code without a package runs in (`new Function`, `eval`, `any` literals): the
-/// package last entered, or, in a program that loaded none, a bare interpreter created on first use.
-/// ponytail: a program mixing packages and dynamic code shares the last-entered package's realm.
+/// The realm user code without a package runs in (`new Function`, `eval`, `any` literals, global reads such as
+/// `fetch`): the package holding the fetch transport when one is loaded, else the package last entered, or, in a
+/// program that loaded none, a bare interpreter created on first use.
+/// ponytail: one shared realm for all dynamic code; per-realm globals are the documented limit.
 pub(crate) fn default_realm() -> usize {
     if PACKAGES.with(|ps| ps.borrow().is_empty()) {
         let mut interp = Box::new(Interp::runtime());
@@ -1331,7 +1337,9 @@ pub(crate) fn default_realm() -> usize {
         PACKAGES.with(|ps| ps.borrow_mut().push(Some(package)));
         LAST_PACKAGE.with(|l| l.set(0));
     }
-    LAST_PACKAGE.with(|l| l.get())
+    FETCH_PACKAGE
+        .with(Cell::get)
+        .unwrap_or_else(|| LAST_PACKAGE.with(Cell::get))
 }
 
 /// `new Function(...args)` from the JSON array of the constructor's string arguments (the last is the
@@ -5376,6 +5384,7 @@ struct HostTls {
     running: HashMap<usize, *mut Package>,
     by_name: HashMap<String, usize>,
     last_package: usize,
+    fetch_package: Option<usize>,
     handles: Vec<(usize, Value)>,
     handle_refs: Vec<u32>,
     live_by_object: HashMap<usize, Vec<u64>>,
@@ -5401,6 +5410,7 @@ pub(crate) fn park_host_tls(key: usize) {
         running: RUNNING.with(|c| std::mem::take(&mut *c.borrow_mut())),
         by_name: BY_NAME.with(|c| std::mem::take(&mut *c.borrow_mut())),
         last_package: LAST_PACKAGE.with(|c| c.take()),
+        fetch_package: FETCH_PACKAGE.with(|c| c.take()),
         handles: HANDLES.with(|c| std::mem::take(&mut *c.borrow_mut())),
         handle_refs: HANDLE_REFS.with(|c| std::mem::take(&mut *c.borrow_mut())),
         live_by_object: LIVE_BY_OBJECT.with(|c| std::mem::take(&mut *c.borrow_mut())),
@@ -5431,6 +5441,7 @@ pub(crate) fn adopt_host_tls(key: usize) {
         running,
         by_name,
         last_package,
+        fetch_package,
         handles,
         handle_refs,
         live_by_object,
@@ -5444,6 +5455,7 @@ pub(crate) fn adopt_host_tls(key: usize) {
     drop(RUNNING.with(|c| c.replace(running)));
     drop(BY_NAME.with(|c| c.replace(by_name)));
     LAST_PACKAGE.with(|c| c.set(last_package));
+    FETCH_PACKAGE.with(|c| c.set(fetch_package));
     drop(HANDLES.with(|c| c.replace(handles)));
     drop(HANDLE_REFS.with(|c| c.replace(handle_refs)));
     drop(LIVE_BY_OBJECT.with(|c| c.replace(live_by_object)));
@@ -5568,8 +5580,15 @@ pub extern "C" fn thaw_tjs_load(bundle: *const c_char) -> i64 {
     match Package::load(&src) {
         Ok(p) => PACKAGES.with(|ps| {
             let mut ps = ps.borrow_mut();
+            let handle = ps.len();
+            let transport = p
+                .interp
+                .lookup(&p.interp.global.clone(), "__thaw_fetch_transport");
+            if transport.is_some() && FETCH_PACKAGE.with(Cell::get).is_none() {
+                FETCH_PACKAGE.with(|f| f.set(Some(handle)));
+            }
             ps.push(Some(p));
-            ps.len() as i64 - 1
+            handle as i64
         }),
         Err(e) => {
             LAST_ERROR.with(|l| *l.borrow_mut() = e.to_string());

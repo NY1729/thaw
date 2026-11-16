@@ -145,6 +145,15 @@ fn thaw_js_mentions(user_source: &str, name: &str) -> bool {
     })
 }
 
+/// Whether a program of these module-graph sources may call the realm `fetch`: the rewrite that reads it
+/// needs the identifier in source, so a scan of every source is a safe over-approximation (a shadowed local
+/// or the word in a comment only costs the extra `node:http` / `node:https` bundles).
+fn source_may_call_realm_fetch(sources: &[&str]) -> bool {
+    sources
+        .iter()
+        .any(|source| thaw_js_mentions(source, "fetch"))
+}
+
 /// Whether the program uses the package's value export `name` as a value: any value but a class and
 /// anything but a namespace object whose only uses are calls of the package's own functions
 /// (`validator.isEmail(..)`, which the shim resolves to the typed functions) and its import. Such a
@@ -873,6 +882,21 @@ fn thaw_js_mentions_matches_whole_identifiers_only() {
     assert!(thaw_js_mentions("bcrypt.hash(a)", "hash"));
     assert!(thaw_js_mentions("import { $x } from 'p'", "$x"));
     assert!(thaw_js_mentions("ns.sub.hash(1)", "a.b.hash"));
+}
+
+#[cfg(test)]
+#[test]
+fn source_may_call_realm_fetch_is_a_whole_word_scan_of_every_source() {
+    assert!(source_may_call_realm_fetch(&["fetch('http://x/')"]));
+    assert!(source_may_call_realm_fetch(&["const r = await globalThis.fetch(u);"]));
+    assert!(source_may_call_realm_fetch(&["window.fetch(u)"]));
+    assert!(!source_may_call_realm_fetch(&["const fetchy = 1; refetch(x);"]));
+    assert!(!source_may_call_realm_fetch(&["const x = 1;"]));
+    assert!(!source_may_call_realm_fetch(&[]));
+    // any module of the graph counts, not only the entry
+    assert!(source_may_call_realm_fetch(&["export const x = 1;", "fetch(u);"]));
+    // a shadowed local or a word in a comment over-approximates: an extra bundle, never a missing one
+    assert!(source_may_call_realm_fetch(&["// fetch later"]));
 }
 
 #[cfg(test)]

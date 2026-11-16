@@ -702,6 +702,21 @@ fn build_with_native_mode_routed(
             resolved_packages.push(package);
         }
     }
+    // The realm `fetch` reads the global, which the thaw-js transport serves from the node:http and node:https
+    // bundles: link them as if imported, at runtime only (their module loads on the first fetch, not eagerly).
+    if thaw_js_routing {
+        let sources = module_graph::graph_sources(input, &user_source)?;
+        let sources = sources.iter().map(String::as_str).collect::<Vec<_>>();
+        if source_may_call_realm_fetch(&sources) {
+            for builtin in ["node:http", "node:https"] {
+                thaw_registry::resolve_builtin(builtin)?;
+                runtime_packages.insert(builtin.to_string());
+                if !resolved_packages.iter().any(|package| package == builtin) {
+                    resolved_packages.push(builtin.to_string());
+                }
+            }
+        }
+    }
     let mut native_addons = resolved_packages
         .iter()
         .filter(|package| runtime_packages.contains(*package))
