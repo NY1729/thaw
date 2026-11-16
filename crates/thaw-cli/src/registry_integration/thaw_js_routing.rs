@@ -535,6 +535,7 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:os",
     "node:util",
     "node:constants",
+    "node:console",
     "node:url",
     "node:fs",
     "node:timers/promises",
@@ -544,6 +545,7 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:querystring",
     "node:timers",
     "node:worker_threads",
+    "node:wasi",
     "node:stream/web",
     "node:stream",
     "node:readline",
@@ -692,6 +694,15 @@ fn thaw_js_path_bundle(root_bundle: &str, builtin: &str) -> String {
         )
 }
 
+/// `WebAssembly` exists on thaw-js only in a build with the `wasm` runtime feature, which the build selects
+/// when the program requires it (`required_runtime_features`, e.g. `node:wasi`). A bundle that uses
+/// `WebAssembly` without that feature stays on QuickJS.
+fn thaw_js_wasm_blocker(bundle_js: &str, user_source: &str) -> Option<&'static str> {
+    (thaw_js_mentions(bundle_js, "WebAssembly")
+        && !thaw_bridge::required_runtime_features(user_source).contains("wasm"))
+    .then_some("WebAssembly needs the wasm runtime feature, which this program does not require")
+}
+
 /// A `createHook` program whose timers or promises would become async resources: thaw-js does not report
 /// those resources to hooks yet, so the module stays on QuickJS. A plain `createHook` (no timer or promise
 /// words) keeps `node:async_hooks` on thaw-js.
@@ -745,6 +756,9 @@ fn thaw_js_package_eligible(
         return reject("builtin module not validated on thaw-js".into());
     }
     if let Some(why) = thaw_js_unready_addon_blocker(&pkg.name) {
+        return reject(why.into());
+    }
+    if let Some(why) = thaw_js_wasm_blocker(bundle_js, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {

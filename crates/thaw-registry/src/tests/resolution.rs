@@ -4054,6 +4054,22 @@ fn normalizes_dot_and_dot_dot_segments() {
 }
 
 #[test]
+fn cluster_declarations_return_live_handles_not_by_value_data() {
+    // Worker/workers/fork() hold ChildProcess streams and cycles; `any` marshals
+    // them by value and fails ("not plain data: cyclic or too deep").
+    let cluster = resolve_builtin("node:cluster").unwrap().dts_source;
+    for decl in [
+        "export declare const Worker: JsValue;",
+        "export declare const workers: JsValue;",
+        "export declare const worker: JsValue;",
+        "export declare const settings: Json;",
+        "export declare function fork(env?: Json): JsValue;",
+    ] {
+        assert!(cluster.contains(decl), "{cluster}");
+    }
+}
+
+#[test]
 fn builtin_declarations_cover_typed_buffer_crypto_and_fs_overloads() {
     let buffer = resolve_builtin("node:buffer").unwrap().dts_source;
     assert!(buffer.contains("static alloc(size: number"));
@@ -5179,6 +5195,74 @@ fn builtin_signature_siblings_include_generic_and_property_types() {
         &url, "url", "URL", &mut std::collections::BTreeSet::new(),
     ).unwrap();
     assert!(url_class.iter().any(|snippet| snippet.contains("class URLSearchParams")));
+}
+
+#[test]
+fn builtin_declared_classes_are_bundle_exports() {
+    // A declared class that the bundle does not export is treated as a Json
+    // copy at run time (node:test/reporters `Reporter`: `dot()` result lost
+    // `next`). Every declared class must be a whole-word bundle export.
+    fn is_identifier_char(character: char) -> bool {
+        character == '_' || character == '$' || character.is_ascii_alphanumeric()
+    }
+    fn mentions_identifier(bundle: &str, name: &str) -> bool {
+        bundle.match_indices(name).any(|(index, _)| {
+            let before = bundle[..index].chars().next_back();
+            let after = bundle[index + name.len()..].chars().next();
+            !before.is_some_and(is_identifier_char) && !after.is_some_and(is_identifier_char)
+        })
+    }
+    let specifiers = [
+        "domain",
+        "trace_events",
+        "inspector",
+        "inspector/promises",
+        "test/reporters",
+        "wasi",
+        "child_process",
+        "buffer",
+        "string_decoder",
+        "stream",
+        "stream/web",
+        "readline",
+        "readline/promises",
+        "dgram",
+        "async_hooks",
+        "console",
+        "crypto",
+        "perf_hooks",
+        "zlib",
+        "worker_threads",
+        "url",
+        "events",
+        "fs",
+    ];
+    let mut missing = Vec::new();
+    for specifier in specifiers {
+        let resolved = resolve_builtin(specifier).unwrap();
+        let bundle = resolved.bundle_js.unwrap_or_default();
+        // Whole-module delegates (`module.exports = globalThis.__thaw_*`)
+        // export names the runtime installs, not names this text declares.
+        if bundle.contains("module.exports = globalThis.") {
+            continue;
+        }
+        for line in resolved.dts_source.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("export declare class ") else {
+                continue;
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|c| is_identifier_char(*c))
+                .collect();
+            if !mentions_identifier(&bundle, &name) {
+                missing.push(format!("node:{specifier} {name}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "declared classes missing from bundle exports: {missing:?}"
+    );
 }
 
 #[test]

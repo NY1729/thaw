@@ -1,8 +1,64 @@
-fn record_acceptance_metrics(name: &str, build_time: Duration, output: &Path) {
+/// CPU time of a build: user+system of this process plus its waited-for
+/// children, as a delta of /proc/self/stat. Lets a slow wall clock be told
+/// apart from a loaded runner. Zero on non-Linux.
+struct CpuTimer {
+    start_ticks: Option<u64>,
+}
+
+impl CpuTimer {
+    fn start() -> Self {
+        Self {
+            start_ticks: cpu_ticks(),
+        }
+    }
+
+    fn cpu_ms(&self) -> u64 {
+        match (self.start_ticks, cpu_ticks()) {
+            // USER_HZ is 100 on Linux, so one clock tick is 10 ms.
+            (Some(start), Some(end)) => end.saturating_sub(start) * 10,
+            _ => 0,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cpu_ticks() -> Option<u64> {
+    parse_proc_stat_cpu_ticks(&std::fs::read_to_string("/proc/self/stat").ok()?)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cpu_ticks() -> Option<u64> {
+    None
+}
+
+/// utime+stime+cutime+cstime from a /proc/<pid>/stat line, in clock ticks.
+/// The comm field is parenthesised and may contain spaces or parentheses, so
+/// fields are counted from the last ')'.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_proc_stat_cpu_ticks(stat: &str) -> Option<u64> {
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    // after_comm starts at field 3 (state), so utime (field 14) is index 11.
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+    fields
+        .get(11..=14)?
+        .iter()
+        .map(|field| field.parse::<u64>().ok())
+        .sum()
+}
+
+#[test]
+fn proc_stat_cpu_ticks_parses_comm_with_spaces_and_parens() {
+    let stat = "1 (a b) c) S 0 1 1 0 -1 4194560 100 0 0 0 10 20 30 40 0 0 20 0 1 0";
+    assert_eq!(parse_proc_stat_cpu_ticks(stat), Some(100));
+    assert_eq!(parse_proc_stat_cpu_ticks("1 (x) S 0"), None);
+}
+
+fn record_acceptance_metrics(name: &str, build_time: Duration, build_cpu_ms: u64, output: &Path) {
     let executable_bytes = std::fs::metadata(output).unwrap().len();
     let metrics = serde_json::json!({
         "scenario": name,
         "build_ms": build_time.as_millis(),
+        "cpu_ms": build_cpu_ms,
         "executable_bytes": executable_bytes,
     });
     println!("thaw acceptance: {metrics}");
@@ -18,8 +74,12 @@ fn record_acceptance_metrics(name: &str, build_time: Duration, output: &Path) {
     // and hono+react+prisma+postgres, whose bundled Prisma client dominates)
     // legitimately take minutes on a slow, shared CI runner and can drift by
     // a few seconds run to run. Still catches a gross regression (a build
-    // that suddenly takes many minutes).
-    assert!(build_time < Duration::from_secs(420), "{metrics}");
+    // that suddenly takes many minutes). On a loaded runner the wall time of the
+    // identical build reached 455-482 s (usual 234-346 s, same executable size),
+    // so the wall ceiling is 900 s; `cpu_ms` (CPU time of the build, not counting
+    // time the runner spent waiting) is recorded alongside to take over as the
+    // regression gate once typical values are known.
+    assert!(build_time < Duration::from_secs(900), "{metrics}");
     assert!(executable_bytes < 100 * 1024 * 1024, "{metrics}");
 }
 

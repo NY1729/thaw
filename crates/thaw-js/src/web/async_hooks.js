@@ -162,7 +162,7 @@
   const thawQueueDestroy = id => {
     if (thawEnabledHooks.size === 0) return;
     if (thawDestroyQueue.length === 0) {
-      const timer = setTimeout(() => {
+      const timer = __thaw_set_timeout_internal(() => {
         const ids = thawDestroyQueue;
         thawDestroyQueue = [];
         for (const queued of ids) thawEmit('destroy', queued);
@@ -216,6 +216,7 @@
     const enabled = thawEnabledHooks.size > 0;
     if (enabled === thawBus.enabled) return;
     thawBus.enabled = enabled;
+    __thaw_async_hook_timers(enabled);
     globalThis.__thaw_async_hooks_promise_hook(enabled);
   };
   function AsyncHook(callbacks) {
