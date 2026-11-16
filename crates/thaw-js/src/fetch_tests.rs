@@ -1,8 +1,9 @@
 //! Host tests for the global `fetch` on thaw-js (Q9 plan-q9-thawjs-fetch.md, test 1).
 //!
-//! The scenario tests are `#[ignore]`d until PR 2 defines `globalThis.fetch` in the thaw-js realm; run them
-//! with `cargo test -p thaw-js fetch_ -- --ignored`. Each expected line is copied from the node oracle
-//! `tools/parity/routed/fetch.expected` (same scenario, same output lines). The fixture test runs now.
+//! Scenario tests for the thaw-js realm `fetch` (Q9 plan-q9-thawjs-fetch.md, test 1). Each expected line is copied
+//! from the node oracle `tools/parity/routed/fetch.expected` (same scenario, same output lines). Scenarios that
+//! need the HTTP transport are `#[ignore]`d: the transport is the node:http bundle, which only a loaded bundle
+//! provides; run them with `cargo test -p thaw-js fetch_ -- --ignored` once a bundle is loaded in the realm.
 use super::*;
 
 /// A loopback HTTP/1.1 server over the `__thaw_net_*` natives. `fx.listen(fn)` calls `fn(req)` per request;
@@ -81,7 +82,6 @@ fn fetch_fixture_answers_a_raw_loopback_request() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
 fn fetch_global_is_a_function() {
     let out = fetch_lines(
         r#"
@@ -94,7 +94,7 @@ fn fetch_global_is_a_function() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_get_returns_status_headers_and_text() {
     let out = fetch_lines(
         r#"
@@ -119,7 +119,7 @@ fn fetch_get_returns_status_headers_and_text() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_post_sends_the_request_body() {
     let out = fetch_lines(
         r#"
@@ -138,7 +138,7 @@ fn fetch_post_sends_the_request_body() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_follows_302_and_sets_redirected_and_url() {
     let out = fetch_lines(
         r#"
@@ -157,7 +157,7 @@ fn fetch_follows_302_and_sets_redirected_and_url() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_redirect_manual_returns_the_302() {
     let out = fetch_lines(
         r#"
@@ -175,7 +175,9 @@ fn fetch_redirect_manual_returns_the_302() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+// Note: without a transport the fetch rejects with a TypeError, so this expectation passes by accident here. Re-check
+// the redirect rejection (not the missing client) once a bundle is loaded.
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_redirect_error_rejects_with_type_error() {
     let out = fetch_lines(
         r#"
@@ -197,7 +199,7 @@ fn fetch_redirect_error_rejects_with_type_error() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_gzip_body_is_decoded() {
     let out = fetch_lines(
         r#"
@@ -217,7 +219,7 @@ fn fetch_gzip_body_is_decoded() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_chunked_body_is_read() {
     let out = fetch_lines(
         r#"
@@ -235,7 +237,7 @@ fn fetch_chunked_body_is_read() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_abort_mid_body_rejects_with_abort_error() {
     let out = fetch_lines(
         r#"
@@ -260,7 +262,6 @@ fn fetch_abort_mid_body_rejects_with_abort_error() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
 fn fetch_already_aborted_signal_rejects_with_abort_error() {
     let out = fetch_lines(
         r#"
@@ -278,7 +279,7 @@ fn fetch_already_aborted_signal_rejects_with_abort_error() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_connection_refused_is_fetch_failed() {
     let out = fetch_lines(
         r#"

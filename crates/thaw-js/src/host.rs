@@ -248,6 +248,21 @@ fn install_module_loader(it: &mut Interp, loader: &Rc<Loader>, bundle_js: &str) 
     Ok(())
 }
 
+/// The realm `fetch` (web/fetch.js) reads its HTTP client through `__thaw_fetch_transport(name)`: the
+/// `node:http` / `node:https` module of this bundle, evaluated on the first call (lazy, like any require).
+fn install_fetch_transport(it: &mut Interp, loader: &Rc<Loader>) -> R<()> {
+    let l = loader.clone();
+    let load = it.native(move |it, _, args| {
+        let name = it.to_str(&crate::arg(args, 0));
+        load_module(&l, it, &format!("node:{name}"))
+    });
+    let install = it.eval_function(
+        "function (load) { globalThis.__thaw_fetch_transport = function (name) { return load(name); }; }",
+    )?;
+    it.call(&install, &Value::Undefined, &[load])?;
+    Ok(())
+}
+
 /// A loaded package: one interpreter, the bundle's modules, and its entry exports.
 pub struct Package {
     /// Boxed: async functions hold its address while suspended.
@@ -311,6 +326,9 @@ impl Package {
         if entry == "node:module" {
             install_module_loader(&mut interp, &loader, bundle_js)
                 .map_err(|c| classify(&mut interp, c))?;
+        }
+        if loader.factories.contains_key("node:http") {
+            install_fetch_transport(&mut interp, &loader).map_err(|c| classify(&mut interp, c))?;
         }
         let exports =
             load_module(&loader, &mut interp, &entry).map_err(|c| classify(&mut interp, c))?;
