@@ -1310,6 +1310,9 @@ thread_local! {
     static STRINGIFY_ERROR: Cell<bool> = const { Cell::new(false) };
     /// Set by `thaw_json_stringify_tjs`: a Date-shaped value is written as the thaw-js Date wire node.
     static DATE_WIRE: Cell<bool> = const { Cell::new(false) };
+    /// Set by `thaw_json_stringify_tjs`: the identity of each Date object written so far, with its
+    /// `__thaw_tjs_id__` (1-based, in first-write order). A Date referenced twice keeps one id.
+    static DATE_IDS: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
     static STRINGIFY_ANCESTORS: RefCell<Vec<(usize, *const Value)>> = const { RefCell::new(Vec::new()) };
     static STRINGIFY_CYCLE_MESSAGE: RefCell<Option<String>> = const { RefCell::new(None) };
     static WRAPPER_BRANDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
@@ -2885,10 +2888,16 @@ fn ordered_json(value: &Value) -> Value {
         } else {
             Value::String("NaN".into())
         };
-        return Value::shared_object(indexmap::IndexMap::from([(
-            b"__thaw_tjs_date__".to_vec(),
-            time,
-        )]));
+        let mut node = vec![(b"__thaw_tjs_date__".to_vec(), time)];
+        if let Some(identity) = object_identity_key(value) {
+            let id = DATE_IDS.with(|ids| {
+                let mut ids = ids.borrow_mut();
+                let next = ids.len() as u64 + 1;
+                *ids.entry(identity).or_insert(next)
+            });
+            node.push((b"__thaw_tjs_id__".to_vec(), number_value(id as f64)));
+        }
+        return Value::shared_object(node.into_iter().collect());
     }
     // A BigInt crosses as `{"__thaw_tjs_bigint__": "<decimal>"}` and a negative zero or a
     // non-finite number as `{"__thaw_tjs_num__": "-0" | "NaN" | "Infinity" | "-Infinity"}`,
@@ -4881,7 +4890,9 @@ pub extern "C" fn thaw_json_stringify(value: *mut Value) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify_tjs(value: *mut Value) -> *const c_char {
     DATE_WIRE.with(|flag| flag.set(true));
+    DATE_IDS.with(|ids| ids.borrow_mut().clear());
     let text = thaw_json_stringify(value);
+    DATE_IDS.with(|ids| ids.borrow_mut().clear());
     DATE_WIRE.with(|flag| flag.set(false));
     text
 }
@@ -14373,12 +14384,38 @@ mod tests {
         thaw_json_object_set_json(root, CString::new("plain").unwrap().as_ptr(), plain);
         assert_eq!(
             read_c_string(thaw_json_stringify_tjs(root)),
-            r#"{"when":{"__thaw_tjs_date__":86400000},"plain":{"timestamp":0}}"#
+            r#"{"when":{"__thaw_tjs_date__":86400000,"__thaw_tjs_id__":1},"plain":{"timestamp":0}}"#
         );
         // the ordinary stringifier (and a later call) is unaffected
         assert_eq!(
             read_c_string(thaw_json_stringify(root)),
             r#"{"when":{"timestamp":86400000},"plain":{"timestamp":0}}"#
+        );
+    }
+
+    #[test]
+    fn tjs_stringify_gives_one_identity_to_a_shared_date_and_distinct_ids_to_distinct_dates() {
+        let branded = |json: &str| unsafe { (*thaw_json_brand_wrapper(parse(json))).clone() };
+        let shared = branded(r#"{"timestamp":1234}"#);
+        let root = Value::shared_object(indexmap::IndexMap::from([
+            (b"a".to_vec(), shared.clone()),
+            (b"b".to_vec(), shared),
+        ]));
+        let text = read_c_string(thaw_json_stringify_tjs(leak(root.clone())));
+        assert_eq!(
+            text,
+            r#"{"a":{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":1},"b":{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":1}}"#
+        );
+        // ids are per call: the same tree stringified again starts from 1 again
+        assert_eq!(read_c_string(thaw_json_stringify_tjs(leak(root))), text);
+        // two distinct Date objects with equal times get two ids
+        let twins = Value::shared_object(indexmap::IndexMap::from([
+            (b"a".to_vec(), branded(r#"{"timestamp":1234}"#)),
+            (b"b".to_vec(), branded(r#"{"timestamp":1234}"#)),
+        ]));
+        assert_eq!(
+            read_c_string(thaw_json_stringify_tjs(leak(twins))),
+            r#"{"a":{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":1},"b":{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":2}}"#
         );
     }
 

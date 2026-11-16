@@ -351,11 +351,7 @@ impl Package {
         export_fallback: bool,
         pending_ok: bool,
     ) -> Result<Value, HostError> {
-        let args = args.map(|a| {
-            a.iter()
-                .map(|a| to_value(&mut self.interp, a))
-                .collect::<Vec<_>>()
-        });
+        let args = args.map(|a| to_values(&mut self.interp, a));
         self.call_or_get_values(path, args.as_deref(), export_fallback, pending_ok)
     }
 
@@ -478,6 +474,8 @@ const CALLBACK_KEY: &str = "__thaw_tjs_cb__";
 const TIMER_KEY: &str = "__thaw_tjs_timer__";
 const HANDLE_KEY: &str = "__thaw_tjs_handle__";
 const DATE_KEY: &str = "__thaw_tjs_date__";
+/// Optional on a Date node: the identity of the Date object on one args wire (`to_values`).
+const DATE_ID_KEY: &str = "__thaw_tjs_id__";
 /// `{"__thaw_tjs_bigint__": "<decimal>"}`: a compiled BigInt, which a JSON number cannot carry exactly.
 const BIGINT_KEY: &str = "__thaw_tjs_bigint__";
 /// `{"__thaw_tjs_num__": "-0"}`: a compiled negative zero, which JSON integers lose; also `"NaN"`/`"Infinity"`/`"-Infinity"`.
@@ -850,7 +848,7 @@ fn class_call(
     };
     with_package(package_handle, |p| {
         let it = &mut p.interp;
-        let args: Vec<Value> = args.iter().map(|a| to_value(it, a)).collect();
+        let args = to_values(it, &args);
         let result = match op {
             ClassOp::New { class } => {
                 let ctor = p.exports_member(class)?;
@@ -1328,7 +1326,7 @@ pub extern "C" fn thaw_tjs_new_function(args_json: *const c_char) -> HandleResul
         let owner = default_realm();
         with_package(owner, |p| {
             let it = &mut p.interp;
-            let args = args.iter().map(|a| to_value(it, a)).collect::<Vec<_>>();
+            let args = to_values(it, &args);
             let ctor = it
                 .lookup(&it.global.clone(), "Function")
                 .unwrap_or(Value::Undefined);
@@ -4949,6 +4947,52 @@ pub(crate) fn frame_error(it: &mut Interp, v: &Value) -> Option<(String, String)
     Some((display, framed))
 }
 
+thread_local! {
+    /// The Dates of the args wire being decoded by `to_values`, keyed by their `__thaw_tjs_id__`.
+    static DATE_IDS: RefCell<Option<HashMap<u64, Value>>> = const { RefCell::new(None) };
+}
+
+fn is_date_node(fields: &[(String, Native)]) -> bool {
+    match fields {
+        [(k, _)] => k == DATE_KEY,
+        [(k, _), (i, Native::Number(_))] => k == DATE_KEY && i == DATE_ID_KEY,
+        _ => false,
+    }
+}
+
+/// A Date node. Nodes with the same id name one Date object, so they decode to one object.
+fn date_node(it: &mut Interp, fields: &[(String, Native)]) -> Value {
+    let id = match fields.get(1) {
+        Some((_, Native::Number(id))) => Some(*id as u64),
+        _ => None,
+    };
+    if let Some(id) = id {
+        let memo = DATE_IDS.with(|ids| ids.borrow().as_ref().and_then(|ids| ids.get(&id).cloned()));
+        if let Some(date) = memo {
+            return date;
+        }
+    }
+    let date = new_date(it, &fields[0].1).unwrap_or(Value::Undefined);
+    if let Some(id) = id {
+        DATE_IDS.with(|ids| {
+            if let Some(ids) = ids.borrow_mut().as_mut() {
+                ids.insert(id, date.clone());
+            }
+        });
+    }
+    date
+}
+
+/// `to_value` for one args wire: every node is decoded inside one Date-identity scope, so the same
+/// `__thaw_tjs_id__` decodes to the same object across the arguments. Nested scopes restore the outer one.
+pub fn to_values(it: &mut Interp, items: &[Native]) -> Vec<Value> {
+    let outer = DATE_IDS.with(|ids| ids.borrow_mut().replace(HashMap::new()));
+    let values = items.iter().map(|item| to_value(it, item)).collect();
+    let scope = DATE_IDS.with(|ids| std::mem::replace(&mut *ids.borrow_mut(), outer));
+    drop(scope);
+    values
+}
+
 pub fn to_value(it: &mut Interp, n: &Native) -> Value {
     match n {
         Native::Undefined => Value::Undefined,
@@ -4984,10 +5028,8 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
             };
             it.timer_object(*id as u64)
         }
-        // `{"__thaw_tjs_date__": ms}`: a compiled `Date` (`null` for an Invalid Date).
-        Native::Object(fields) if matches!(fields.as_slice(), [(k, _)] if k == DATE_KEY) => {
-            new_date(it, &fields[0].1).unwrap_or(Value::Undefined)
-        }
+        // `{"__thaw_tjs_date__": ms[, "__thaw_tjs_id__": n]}`: a compiled `Date` (`null` for an Invalid Date).
+        Native::Object(fields) if is_date_node(fields) => date_node(it, fields),
         // `{"__thaw_tjs_bigint__": "<decimal>"}`: a compiled BigInt.
         Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Str(_))] if k == BIGINT_KEY) =>
         {

@@ -4000,6 +4000,28 @@ fn a_regexp_marker_argument_becomes_a_real_regexp() {
 }
 
 #[test]
+fn a_shared_date_on_the_args_wire_arrives_as_one_date() {
+    use crate::host::Native;
+    let mut it = Interp::new();
+    // the same Date object is `id` 1 twice; a distinct equal Date is `id` 2
+    let wire = r#"[{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":1},{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":1},{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":2}]"#;
+    let Native::Array(items) = Native::from_json(wire).unwrap() else {
+        panic!("args wire is an array")
+    };
+    let values = crate::host::to_values(&mut it, &items);
+    assert!(
+        matches!((&values[0], &values[1]), (Value::Object(a), Value::Object(b)) if Rc::ptr_eq(a, b))
+    );
+    assert!(
+        matches!((&values[0], &values[2]), (Value::Object(a), Value::Object(b)) if !Rc::ptr_eq(a, b))
+    );
+    let time = it
+        .get(&values[0], "getTime")
+        .and_then(|f| it.call(&f, &values[0], &[]));
+    assert!(matches!(time, Ok(Value::Number(n)) if n == 1234.0));
+}
+
+#[test]
 fn async_generator_return_runs_finally() {
     let mut it = Interp::new();
     it.run(
