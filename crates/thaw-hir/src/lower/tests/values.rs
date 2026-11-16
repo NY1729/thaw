@@ -2897,6 +2897,33 @@ fn typeof_of_a_carrier_catch_binding_reads_its_string_member_as_a_framed_error()
     );
 }
 
+/// After `e.code = ...` the carrier slot holds a Json copy that may be a live Error lease in a
+/// routed build. Its `instanceof` must also ask the native Error identity, not only the
+/// constant-false dynamic-by-name check that routed builds lower to.
+#[test]
+fn routed_carrier_error_instanceof_after_property_write_asks_the_error_identity() {
+    let source_text = r#"
+            function main(): void {
+                try { throw new Error("boom"); } catch (e) {
+                    e.code = "E1";
+                    console.log(e instanceof Error);
+                }
+            }
+        "#;
+    crate::set_thaw_js_routed(true);
+    let routed = format!("{:?}", lower(source_text).functions);
+    crate::set_thaw_js_routed(false);
+    assert!(
+        routed.contains("__thaw_json_is_error_instance"),
+        "a routed carrier Json arm must answer a live Error lease by identity:\n{routed}"
+    );
+    let unrouted = format!("{:?}", lower(source_text).functions);
+    assert!(
+        !unrouted.contains("__thaw_json_is_error_instance"),
+        "non-routed lowering must stay unchanged by the routed Error identity check:\n{unrouted}"
+    );
+}
+
 /// An ordinary `string` union member (not a caught carrier) keeps the plain "string" typeof.
 #[test]
 fn typeof_of_an_ordinary_string_union_member_does_not_use_the_error_receiver() {
