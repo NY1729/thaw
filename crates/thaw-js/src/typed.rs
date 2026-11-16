@@ -784,11 +784,24 @@ impl Interp {
         // ----- typed arrays -----
         let ta_proto = self.plain(); // %TypedArray%.prototype: methods come from the JS prelude
         self.rt.typed_base_proto = Some(ta_proto.clone());
+        // %TypedArray% itself: abstract, and the [[Prototype]] of every concrete constructor (so
+        // `from`/`of` and `Function.prototype` are inherited, as in V8).
+        let Value::Object(ta_ctor) = self.native(|it, _, _| {
+            it.throw_error(
+                "TypeError",
+                "Abstract class TypedArray not directly constructable",
+            )
+        }) else {
+            unreachable!("a native is an object")
+        };
+        put_hidden(&ta_ctor, "prototype", Value::Object(ta_proto.clone()));
+        put_hidden(&ta_proto, "constructor", Value::Object(ta_ctor.clone()));
         for ty in ALL {
             let proto = new_obj(Some(ta_proto.clone()), Kind::Plain);
             self.rt.typed_protos.push(proto.clone());
             let ctor = self.native(move |it, _, args| it.construct_typed(ty, args));
             if let Value::Object(c) = &ctor {
+                *c.proto.borrow_mut() = Some(ta_ctor.clone());
                 put_hidden(c, "prototype", Value::Object(proto.clone()));
                 put_hidden(&proto, "constructor", ctor.clone());
                 put_hidden(c, "name", Value::str(ty.name()));
@@ -1013,14 +1026,15 @@ const TYPED_PRELUDE: &str = r#"
     for (var i = 0; i < end - start && target + i < n; i++) this[target + i] = vals[start + i];
     return this;
   });
-  [Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array, BigUint64Array].forEach(function (C) {
-    def(C, 'from', function (src, mapFn, thisArg) {
-      var items = Array.from(src);
-      if (mapFn) items = items.map(function (v, i) { return mapFn.call(thisArg, v, i); });
-      return new this(items);
-    });
-    def(C, 'of', function () { return new this(Array.from(arguments)); });
+  // %TypedArray%.from / .of: own on %TypedArray% only; the concrete constructors inherit them.
+  var TAC = Object.getPrototypeOf(Uint8Array);
+  def(TAC, 'from', function from(src) {
+    var mapFn = arguments[1], thisArg = arguments[2];
+    var items = Array.from(src);
+    if (mapFn) items = items.map(function (v, i) { return mapFn.call(thisArg, v, i); });
+    return new this(items);
   });
+  def(TAC, 'of', function of() { return new this(Array.from(arguments)); });
   // Detached-buffer guard for the methods V8 checks (message names as V8 prints them).
   var detachedNames = { forEach: 'forEach', some: 'some', every: 'every', find: 'find', findIndex: 'findIndex',
     findLast: 'findLast', findLastIndex: 'findIndexLast', reduce: 'reduce', reduceRight: 'reduceRight', fill: 'fill',
