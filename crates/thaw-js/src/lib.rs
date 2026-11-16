@@ -23,6 +23,7 @@ use classes::ClassInfo;
 use swc_ecma_visit::{Visit, VisitWith};
 use thaw_parser::ast as a;
 
+mod atomics;
 mod bigint;
 mod buffer;
 mod builtin_table;

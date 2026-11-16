@@ -15,6 +15,8 @@ fn thaw_js_worker_threads_blocker_keeps_unserved_worker_options_on_quickjs() {
         "const w = new Worker(src, { eval: true, stdin: true });\nw.stdin!.write('abc');",
         // SharedArrayBuffer crosses to a worker as a shared block (W-SAB), so it routes to thaw-js
         "const shared = new SharedArrayBuffer(8);",
+        // Atomics are real atomics on a shared block, with wait/notify parking (W-ATOMICS), so they route to thaw-js
+        "Atomics.store(view, 0, 42);",
     ] {
         assert!(
             thaw_js_worker_threads_blocker("node:worker_threads", &format!("{import}{routed}"))
@@ -25,7 +27,6 @@ fn thaw_js_worker_threads_blocker_keeps_unserved_worker_options_on_quickjs() {
     for blocked in [
         "process.stdin.on('data', f);",
         "new Worker(src, { eval: true, resourceLimits: { maxOldGenerationSizeMb: 16 } });",
-        "Atomics.store(view, 0, 42);",
         "w.postMessage(x, [buffer]); const transferList = [buffer];",
     ] {
         assert!(
