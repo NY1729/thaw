@@ -29,8 +29,24 @@ function randomUUID() {
   return h;
 }
 var hashSizes = { md5: 16, sha1: 20, sha256: 32, sha384: 48, sha512: 64 };
-var subtle = {};
-def(subtle, 'digest', function digest(algorithm, data) {
+// Node's classes are not constructible by users: only the instances built below pass the private token.
+var token = {};
+function illegalCtor(args) {
+  if (args[0] === token) return;
+  var e = new TypeError('Illegal constructor');
+  e.code = 'ERR_ILLEGAL_CONSTRUCTOR';
+  throw e;
+}
+class Crypto { constructor(...args) { illegalCtor(args); } }
+class SubtleCrypto { constructor(...args) { illegalCtor(args); } }
+class CryptoKey { constructor(...args) { illegalCtor(args); } }
+for (const C of [Crypto, SubtleCrypto, CryptoKey]) {
+  Object.defineProperty(C.prototype, Symbol.toStringTag, { value: C.name, configurable: true });
+  def(globalThis, C.name, C);
+}
+def(Crypto.prototype, 'getRandomValues', getRandomValues);
+def(Crypto.prototype, 'randomUUID', randomUUID);
+def(SubtleCrypto.prototype, 'digest', function digest(algorithm, data) {
   try {
     var name = String(typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name).toLowerCase().replace('-', '');
     if (name === 'md5' || !hashSizes[name]) throw new DOMException('Unrecognized algorithm name', 'NotSupportedError');
@@ -41,9 +57,7 @@ def(subtle, 'digest', function digest(algorithm, data) {
     return Promise.resolve(out.buffer);
   } catch (e) { return Promise.reject(e); }
 });
-var webcrypto = {};
-def(webcrypto, 'subtle', subtle);
-def(webcrypto, 'getRandomValues', getRandomValues);
-def(webcrypto, 'randomUUID', randomUUID);
-def(globalThis, 'crypto', webcrypto);
+var subtleInstance = new SubtleCrypto(token);
+Object.defineProperty(Crypto.prototype, 'subtle', { get: function () { return subtleInstance; }, enumerable: true, configurable: true });
+def(globalThis, 'crypto', new Crypto(token));
 
