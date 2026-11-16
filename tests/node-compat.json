@@ -4054,6 +4054,21 @@
       "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  console.log(performance.mark(\"d\", { detail: { z: 1 } }).detail);\n  const o = new PerformanceObserver((list) => { console.log(\"obs\", list.getEntries().map((e) => e.name)); });\n  o.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"c\");\n  setTimeout(() => o.disconnect(), 20);\n}\n"
     },
     {
+      "name": "perf_hooks observer getEntriesByName on the entry list",
+      "expect": "matched",
+      "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  const o = new PerformanceObserver((list) => { console.log(\"named\", list.getEntriesByName(\"c\").length, list.getEntriesByType(\"mark\").length, list.getEntriesByName(\"c\", \"mark\")[0].entryType); });\n  o.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"c\");\n  setTimeout(() => o.disconnect(), 20);\n}\n"
+    },
+    {
+      "name": "perf_hooks two PerformanceObserver callbacks on the same mark",
+      "expect": "matched",
+      "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  const a = new PerformanceObserver((list) => { console.log(\"a\", list.getEntries().map((e) => e.name)); });\n  const b = new PerformanceObserver((list) => { console.log(\"b\", list.getEntries().map((e) => e.name)); });\n  a.observe({ entryTypes: [\"mark\"] });\n  b.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"x\");\n  setTimeout(() => { a.disconnect(); b.disconnect(); console.log(\"done\"); }, 20);\n}\n"
+    },
+    {
+      "name": "perf_hooks observer disconnects itself through the declared observer parameter",
+      "expect": "matched",
+      "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  const o = new PerformanceObserver((list, observer) => { console.log(\"once\", list.getEntries().length); observer.disconnect(); });\n  o.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"y\");\n  setTimeout(() => performance.mark(\"z\"), 20);\n  setTimeout(() => console.log(\"after\"), 40);\n}\n"
+    },
+    {
       "name": "nd7 Intl supportedLocalesOf getCanonicalLocales RelativeTimeFormat formatToParts",
       "expect": "matched",
       "source": "function main(): void {\n  console.log(Intl.NumberFormat.supportedLocalesOf([\"en-US\", \"xx\", \"de\"]));\n  console.log(Intl.getCanonicalLocales(\"EN-us\"), Intl.getCanonicalLocales([\"en-US\", \"en-us\"]));\n  const rtf = new Intl.RelativeTimeFormat(\"en\", { numeric: \"auto\" });\n  console.log(rtf.format(-1, \"day\"), rtf.format(2, \"week\"));\n  console.log(rtf.formatToParts(-5, \"second\").map((p) => p.type + \":\" + p.value + \":\" + p.unit).join(\"|\"));\n  console.log(rtf.formatToParts(1, \"day\").map((p) => p.type + \":\" + p.value).join(\"|\"));\n}\n"
