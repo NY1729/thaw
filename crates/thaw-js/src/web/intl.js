@@ -2650,7 +2650,8 @@
   );
 
   // ECMA-402 `Intl.getCanonicalLocales` / `<Ctor>.supportedLocalesOf`.
-  const intlLocaleList = locales => {
+  // a method (not a function expression) so, as in Node, it has no `prototype`
+  const intlLocaleList = { getCanonicalLocales(locales) {
     if (locales === undefined) return [];
     if (locales === null) throw new TypeError('Cannot convert undefined or null to object');
     const list = typeof locales === 'string' || INTL_LOCALE_TAGS.has(locales) ? [locales] : Object(locales);
@@ -2671,7 +2672,7 @@
       if (out.indexOf(canonical) < 0) out.push(canonical);
     }
     return out;
-  };
+  } }.getCanonicalLocales;
   const intlSupported = locales => intlLocaleList(locales).filter(tag => {
     if (typeof __thaw_intl_locale_resolve !== 'function') return tag === 'en-US' || tag === 'en';
     const resolved = JSON.parse(__thaw_intl_locale_resolve(tag));
@@ -2681,8 +2682,15 @@
   for (const name of ['Collator', 'DateTimeFormat', 'DisplayNames', 'DurationFormat', 'ListFormat', 'NumberFormat', 'PluralRules', 'RelativeTimeFormat', 'Segmenter']) {
     const ctor = globalThis.Intl[name];
     if (typeof ctor === 'function' && !ctor.supportedLocalesOf) {
-      Object.defineProperty(ctor, 'supportedLocalesOf', { value: function supportedLocalesOf(locales) { return intlSupported(locales); }, writable: true, configurable: true });
+      // method shorthand: no `prototype`, as for Node's built-ins
+      Object.defineProperty(ctor, 'supportedLocalesOf', { value: { supportedLocalesOf(locales) { return intlSupported(locales); } }.supportedLocalesOf, writable: true, configurable: true });
     }
+  }
+  // Node: constructor lengths are 0, except `Locale` (1) and `DisplayNames` (2). The declared params are the polyfill's own.
+  const INTL_CTOR_LENGTHS = { Collator: 0, DateTimeFormat: 0, DisplayNames: 2, ListFormat: 0, Locale: 1, NumberFormat: 0, PluralRules: 0, RelativeTimeFormat: 0, Segmenter: 0 };
+  for (const [name, length] of Object.entries(INTL_CTOR_LENGTHS)) {
+    const ctor = globalThis.Intl[name];
+    if (typeof ctor === 'function') Object.defineProperty(ctor, 'length', { value: length, configurable: true });
   }
   // Node: `Intl` is a namespace object with no enumerable keys and `[object Intl]` tag.
   for (const k of Object.keys(globalThis.Intl)) Object.defineProperty(globalThis.Intl, k, { enumerable: false });

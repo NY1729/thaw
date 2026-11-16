@@ -737,7 +737,7 @@ fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
 
 #[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
-    // A `node:worker_threads` program that names `Atomics` (thaw-js does not serve it yet) keeps that module on
+    // A `node:worker_threads` program that names `resourceLimits` (thaw-js does not serve it yet) keeps that module on
     // QuickJS; the build falls back and the artifact reports the blocker.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "blockers-fallback",
@@ -745,7 +745,7 @@ fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
          import { isMainThread } from 'node:worker_threads';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
-           console.log(c.add(2), isMainThread, Atomics.isLockFree(4));\n\
+           console.log(c.add(2), isMainThread, Object.keys({ resourceLimits: 1 }).length);\n\
          }\n",
     );
     let output = dir.join("app");
@@ -913,7 +913,7 @@ fn thaw_js_routed_node_http_get_refused_without_a_server() {
 }
 
 #[test]
-fn thaw_js_routed_node_http_fetch_from_listen_callback_refused() {
+fn thaw_js_routed_node_http_fetch_from_listen_callback_runs_on_thaw_js() {
     let (dir, registry, entry) = thaw_js_fixture(
         "node-http-fetch-from-listen-callback",
         "import * as http from 'node:http';\n\
@@ -927,8 +927,8 @@ fn thaw_js_routed_node_http_fetch_from_listen_callback_refused() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    // Narrow blocker: a native createServer next to the fetch client keeps node:http on QuickJS.
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    // A native createServer next to the fetch client runs on thaw-js (the blocker is lifted).
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "err\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -963,8 +963,8 @@ fn thaw_js_routed_fetch_without_node_http_import_runs_on_thaw_js() {
 #[test]
 fn thaw_js_routed_native_server_with_own_fetch_builds_and_matches_node() {
     // Q9 PR 2b: the forced realm-fetch bundles must not add typed declarations, so the program's own
-    // `createServer` does not clash with node:https. The native server + fetch blocker still keeps node:http
-    // on QuickJS, which is what this build should report. Expected stdout is from a real `node` run.
+    // `createServer` does not clash with node:https, so the program stays on thaw-js with the native server
+    // and the global fetch. Expected stdout is from a real `node` run.
     let (dir, registry, entry) = thaw_js_fixture(
         "native-server-with-own-fetch",
         "import * as http from 'node:http';\n\
@@ -980,12 +980,7 @@ fn thaw_js_routed_native_server_with_own_fetch_builds_and_matches_node() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
-    let blockers = manifest["thaw_js_blockers"].to_string();
-    assert!(
-        blockers.contains("native createServer together with global fetch"),
-        "{manifest}"
-    );
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "200 ok\n");
     let _ = std::fs::remove_dir_all(dir);

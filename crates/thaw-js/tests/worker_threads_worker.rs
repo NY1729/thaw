@@ -255,3 +255,54 @@ fn worker_stack_overflow_is_a_catchable_range_error() {
       })().catch((e) => console.log('failed ' + e));";
     assert_eq!(run_main(src), "RangeError Maximum call stack size exceeded");
 }
+
+#[test]
+fn two_workers_add_to_one_shared_counter_exactly() {
+    // real worker threads: 2 x 20000 Atomics.add on one word of a shared block must total exactly 40000
+    let src = "const wt = __thaw_worker_threads_exports;
+      const shared = new SharedArrayBuffer(4); const view = new Int32Array(shared);
+      (async () => {
+        const body = `const { parentPort, workerData } = require('node:worker_threads'); const v = new Int32Array(workerData);
+          for (let i = 0; i < 20000; i++) Atomics.add(v, 0, 1); parentPort.postMessage('done');`;
+        const workers = [new wt.Worker(body, { eval: true, workerData: shared }), new wt.Worker(body, { eval: true, workerData: shared })];
+        await Promise.all(workers.map((w) => new Promise((resolve) => { w.once('message', resolve); })));
+        for (const w of workers) await w.terminate();
+        console.log(view[0]);
+      })().catch((e) => console.log('failed ' + e));";
+    assert_eq!(run_main(src), "40000");
+}
+
+#[test]
+fn main_thread_notify_wakes_a_worker_blocked_in_atomics_wait() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      const shared = new SharedArrayBuffer(4); const view = new Int32Array(shared);
+      (async () => {
+        const worker = new wt.Worker(`const { parentPort, workerData } = require('node:worker_threads'); const v = new Int32Array(workerData);
+          parentPort.postMessage('ready'); parentPort.postMessage(Atomics.wait(v, 0, 0));`, { eval: true, workerData: shared });
+        const log = [];
+        worker.on('message', (m) => { log.push(String(m)); });
+        await new Promise((resolve) => { worker.once('message', resolve); });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        Atomics.store(view, 0, 1);
+        log.push('woken ' + Atomics.notify(view, 0, 1));
+        await new Promise((resolve) => { worker.once('message', resolve); });
+        await worker.terminate();
+        console.log(log.join('|'));
+      })().catch((e) => console.log('failed ' + e));";
+    assert_eq!(run_main(src), "ready|woken 1|ok");
+}
+
+#[test]
+fn terminate_stops_a_worker_blocked_in_an_infinite_atomics_wait() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      const shared = new SharedArrayBuffer(4);
+      (async () => {
+        const worker = new wt.Worker(`const { parentPort, workerData } = require('node:worker_threads'); parentPort.postMessage('waiting'); Atomics.wait(new Int32Array(workerData), 0, 0);`, { eval: true, workerData: shared });
+        const seen = [];
+        worker.on('error', () => seen.push('error'));
+        await new Promise((resolve) => { worker.once('message', resolve); });
+        const code = await worker.terminate();
+        console.log(seen.concat(['exit ' + code]).join('|'));
+      })().catch((e) => console.log('failed ' + e));";
+    assert_eq!(run_main(src), "exit 1");
+}
