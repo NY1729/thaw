@@ -512,15 +512,21 @@ fn fs_name_bytes(name: &std::ffi::OsStr) -> Vec<u8> {
     name.to_string_lossy().as_bytes().to_vec()
 }
 
+/// A listed entry that changed under the listing: removed (ENOENT), or replaced by a file/directory
+/// of the other kind (ENOTDIR). Such entries are skipped, not errors.
+fn fs_is_vanished(error: &io::Error) -> bool {
+    matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
+}
+
 fn fs_readdir_entries(path: &std::path::Path, typed: bool, recursive: bool) -> io::Result<serde_json::Value> {
     fn visit(directory: &std::path::Path, prefix: &[u8], typed: bool, recursive: bool, output: &mut Vec<serde_json::Value>) -> io::Result<()> {
-        // An entry removed between the listing and its lstat is skipped (Node lists from d_type and
-        // never fails on a concurrent unlink); only the requested directory itself may be missing.
-        let gone = |error: &io::Error| error.kind() == io::ErrorKind::NotFound;
+        // An entry that vanishes or changes kind between the listing and its lstat/recursion is skipped
+        // (Node lists from d_type and never fails on a concurrent unlink); only the requested directory
+        // itself may fail with those, and an unreadable directory (EACCES) still errors.
         // libuv's scandir sorts each directory by name (byte order), and so does Node's readdir.
         let mut listed = Vec::new();
         for entry in std::fs::read_dir(directory)? {
-            let entry = match entry { Ok(entry) => entry, Err(error) if gone(&error) => continue, Err(error) => return Err(error) };
+            let entry = match entry { Ok(entry) => entry, Err(error) if fs_is_vanished(&error) => continue, Err(error) => return Err(error) };
             listed.push((fs_name_bytes(&entry.file_name()), entry));
         }
         listed.sort_by(|left, right| left.0.cmp(&right.0));
@@ -530,7 +536,7 @@ fn fs_readdir_entries(path: &std::path::Path, typed: bool, recursive: bool) -> i
             relative_bytes.extend_from_slice(&name_bytes);
             let entry_path = entry.path();
             let metadata = if typed || recursive {
-                match std::fs::symlink_metadata(&entry_path) { Ok(value) => Some(value), Err(error) if gone(&error) => continue, Err(error) => return Err(error) }
+                match std::fs::symlink_metadata(&entry_path) { Ok(value) => Some(value), Err(error) if fs_is_vanished(&error) => continue, Err(error) => return Err(error) }
             } else { None };
             let descend = recursive && metadata.as_ref().is_some_and(|value| value.is_dir() && !value.file_type().is_symlink());
             output.push(serde_json::json!({
@@ -541,7 +547,7 @@ fn fs_readdir_entries(path: &std::path::Path, typed: bool, recursive: bool) -> i
                 "stat": metadata.map(fs_metadata_record),
             }));
             if descend {
-                match visit(&entry_path, &relative_bytes, typed, recursive, output) { Err(error) if gone(&error) => {}, other => other? }
+                match visit(&entry_path, &relative_bytes, typed, recursive, output) { Err(error) if fs_is_vanished(&error) => {}, other => other? }
             }
         }
         Ok(())
@@ -1301,4 +1307,50 @@ fn readdir_entries_survive_entries_removed_while_listing() {
     churn.join().unwrap();
     let _ = std::fs::remove_dir_all(&root);
     assert!(failure.is_none(), "typed readdir failed on a vanishing entry: {failure:?}");
+}
+
+/// One entry flips directory<->file with no pause: the listing's `lstat` sees a directory, then the
+/// recursion finds a file (ENOTDIR). Must be tolerated like a vanished entry.
+#[test]
+fn readdir_entries_survive_directory_flipping_to_file() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let root = std::env::temp_dir().join(format!("thaw-readdir-flip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let churn = {
+        let (root, stop) = (root.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let flip = root.join("flip");
+            while !stop.load(Ordering::Relaxed) {
+                let _ = std::fs::create_dir_all(flip.join("inner"));
+                let _ = std::fs::remove_dir_all(&flip);
+                let _ = std::fs::write(&flip, b"x");
+                let _ = std::fs::remove_file(&flip);
+            }
+        })
+    };
+    let mut failure = None;
+    for round in 0..4000 {
+        if let Err(error) = fs_readdir_entries(&root, true, true) { failure = Some((round, error.to_string())); break; }
+    }
+    stop.store(true, Ordering::Relaxed);
+    churn.join().unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(failure.is_none(), "recursive typed readdir failed on a dir<->file flip: {failure:?}");
+}
+
+/// An unreadable subdirectory is a real error, not a vanished entry: it must still fail the listing.
+#[cfg(unix)]
+#[test]
+fn readdir_recursive_still_reports_unreadable_subdirectory() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("thaw-readdir-eacces-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("locked")).unwrap();
+    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = fs_readdir_entries(&root, true, true);
+    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+    assert_eq!(result.err().map(|error| error.kind()), Some(io::ErrorKind::PermissionDenied));
 }
