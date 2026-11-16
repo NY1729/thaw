@@ -1336,6 +1336,8 @@ impl Interp {
         it.install_reflect();
         it.run_prelude(builtins::PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js prelude must evaluate"));
+        it.capture_default_has_instance();
+        it.install_legacy_function_props();
         it.run_promise_prelude();
         if host {
             it.install_main_file_loader();
@@ -4383,7 +4385,7 @@ impl Interp {
                         }
                     };
                     let custom = self.get(r, &key)?;
-                    if custom.is_callable() {
+                    if custom.is_callable() && !self.is_default_has_instance(&custom) {
                         let res = self.call(&custom, r, std::slice::from_ref(l))?;
                         return Ok(Value::Bool(res.truthy()));
                     }
@@ -4860,6 +4862,8 @@ mod arraybuffer_detach_tests;
 #[cfg(test)]
 mod buffer_members_tests;
 #[cfg(test)]
+mod builtin_members_tests;
+#[cfg(test)]
 mod builtin_table_tests;
 #[cfg(test)]
 mod console_instance_tests;
@@ -4877,6 +4881,8 @@ mod handle_json_argument_tests;
 mod handle_zero_tests;
 #[cfg(test)]
 mod job_barrier_tests;
+#[cfg(test)]
+mod leak_audit_tests;
 #[cfg(test)]
 mod napi_bridge_tests;
 #[cfg(test)]
@@ -4930,6 +4936,8 @@ mod tests;
 mod coroutine_teardown_tests;
 #[cfg(test)]
 mod vm_realm_tests;
+#[cfg(test)]
+mod web_class_tag_tests;
 
 impl Interp {
     /// Empties every object and scope reachable from this realm's roots, breaking the Rc cycles among them

@@ -241,6 +241,8 @@ pub(crate) struct Rt {
     timeout_proto: Option<Obj>,
     immediate_proto: Option<Obj>,
     pub(crate) has_instance_key: Option<Rc<str>>,
+    /// The intrinsic `Function.prototype[Symbol.hasInstance]`: `instanceof` runs its native path for it.
+    pub(crate) default_has_instance: Option<Obj>,
     pub(crate) pending_nt: Option<Value>,
     pub(crate) bigint_proto: Option<Obj>,
     pub(crate) generator_proto: Option<Obj>,
@@ -2188,7 +2190,11 @@ impl Interp {
             if crate::sysio::fd_is_tty(if is_err { 2 } else { 1 }) {
                 put(&s, "isTTY", Value::Bool(true));
             }
-            put(&p, name, Value::Object(s));
+            put(&s, "fd", Value::Number(if is_err { 2.0 } else { 1.0 }));
+            // Node: `process.stdout` is a getter (no setter), not a data property
+            let stream = Value::Object(s);
+            let get = self.native(move |_, _, _| Ok(stream.clone()));
+            define_accessor(&p, name, Some(get), None, true);
         }
         g.declare("process", Value::Object(p), true);
     }
