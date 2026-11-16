@@ -878,10 +878,15 @@ DecompressionStream.prototype	constructor	data	w-c	function	1	DecompressionStrea
 Error	captureStackTrace	data	w-c	function	2	captureStackTrace	0	-	-
 Error	length	data	--c	number	1	-	-	-	-
 Error	name	data	--c	string	-	Error	-	-	-
+Error	prepareStackTrace	data	w-c	function	2	ErrorPrepareStackTrace	1	65	-
 Error	prototype	data	---	object	-	-	-	-	-
 Error	stackTraceLimit	data	wec	number	-	-	-	-	-
 Error.captureStackTrace	length	data	--c	number	2	-	-	-	-
 Error.captureStackTrace	name	data	--c	string	-	captureStackTrace	-	-	-
+Error.prepareStackTrace	length	data	--c	number	2	-	-	-	-
+Error.prepareStackTrace	name	data	--c	string	-	ErrorPrepareStackTrace	-	-	-
+Error.prepareStackTrace	prototype	data	w--	object	-	-	-	-	-
+Error.prepareStackTrace.prototype	constructor	data	w-c	function	2	ErrorPrepareStackTrace	1	65	-
 Error.prototype	constructor	data	w-c	function	1	Error	1	66	-
 Error.prototype	message	data	w-c	string	-	-	-	-	-
 Error.prototype	name	data	w-c	string	-	Error	-	-	-
