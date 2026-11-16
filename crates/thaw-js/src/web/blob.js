@@ -25,6 +25,7 @@ def(Blob.prototype, 'slice', function (start, end, type) {
 def(Blob.prototype, 'text', function () { return Promise.resolve(new TextDecoder().decode(this._bytes)); });
 def(Blob.prototype, 'arrayBuffer', function () { return Promise.resolve(this._bytes.slice().buffer); });
 def(Blob.prototype, 'bytes', function () { return Promise.resolve(this._bytes.slice()); });
+def(Blob.prototype, 'stream', function () { var bytes = this._bytes; return new ReadableStream({ start: function (c) { if (bytes.length) c.enqueue(bytes.slice()); c.close(); } }); });
 Object.defineProperty(Blob.prototype, Symbol.toStringTag, { value: 'Blob', configurable: true });
 function File(parts, name, options) {
   if (!(this instanceof File)) throw new TypeError("Class constructor File cannot be invoked without 'new'");
