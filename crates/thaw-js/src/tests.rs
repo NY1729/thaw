@@ -1107,6 +1107,75 @@ var __thaw_bundle_entry_key = "ns/index.js";
 }
 
 #[test]
+fn value_op_misses_on_an_esmodule_bundle_are_undefined_not_the_cyclic_exports() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    // process-like: module.exports, default and __esModule all point back at the object
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "esm/index.js": function(module, exports, require) {
+  var o = { a: 1 }; o.default = o; o.__esModule = true; module.exports = o;
+}, };
+var __thaw_bundle_require_maps = { "esm/index.js": {}, };
+var __thaw_bundle_entry_key = "esm/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (
+        CString::new("esm_undef").unwrap(),
+        CString::new(bundle).unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    // a missing member is undefined (Node: `process.connected` in a primary); top level JSON is `null`
+    assert_eq!(
+        class_call("$value$esm_undef::connected$arity0", "[]", 0, false),
+        Ok("null".into())
+    );
+    assert_eq!(
+        class_call("$value$esm_undef::a$arity0", "[]", 0, false),
+        Ok("1".into())
+    );
+}
+
+#[test]
+fn value_op_miss_on_a_plain_export_eq_bundle_still_returns_the_whole_exports() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    // `export = value` without __esModule: a missing one-segment name falls back to the object
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "cjs/index.js": function(module, exports, require) {
+  module.exports = { a: 1 };
+}, };
+var __thaw_bundle_require_maps = { "cjs/index.js": {}, };
+var __thaw_bundle_entry_key = "cjs/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (
+        CString::new("cjs_miss").unwrap(),
+        CString::new(bundle).unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    assert_eq!(
+        class_call("$value$cjs_miss::missing$arity0", "[]", 0, false),
+        Ok(r#"{"a":1}"#.into())
+    );
+}
+
+#[test]
+fn value_op_miss_on_an_esmodule_bundle_with_a_callable_default_returns_the_default() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "cdef/index.js": function(module, exports, require) {
+  module.exports = { default: function () { return 7; }, __esModule: true };
+}, };
+var __thaw_bundle_require_maps = { "cdef/index.js": {}, };
+var __thaw_bundle_entry_key = "cdef/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("cdef").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    // the callable default wins: a handle to it, not the undefined marker or the module object
+    let handle = class_call("$value$cdef::missing$arity0", "[]", 0, true).unwrap();
+    assert!(handle.parse::<i64>().is_ok(), "{handle}");
+}
+
+#[test]
 fn error_wire_framed_strings_revive_as_error_objects() {
     use crate::host::thaw_tjs_register;
     use std::ffi::CString;

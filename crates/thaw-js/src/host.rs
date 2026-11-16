@@ -444,6 +444,9 @@ impl Package {
                 .map_err(|c| classify(it, c))?;
             value = if default.is_callable() {
                 default
+            } else if matches!(it.get(&self.exports, "__esModule"), Ok(Value::Bool(true))) {
+                // an ES module has no such member: undefined, never the (possibly cyclic) module object
+                Value::Undefined
             } else {
                 self.exports.clone()
             };
