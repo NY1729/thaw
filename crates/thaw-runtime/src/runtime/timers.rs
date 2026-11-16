@@ -39,7 +39,17 @@ thread_local! {
     static TIMER_PHASE: Cell<(TimerPhase, f64)> = const { Cell::new((TimerPhase::Timers, -1.0)) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only fake clock (loop milliseconds); `None` reads the real clock.
+    static TEST_CLOCK: Cell<Option<f64>> = const { Cell::new(None) };
+}
+
 fn timer_now_ms() -> f64 {
+    #[cfg(test)]
+    if let Some(now) = TEST_CLOCK.with(Cell::get) {
+        return now;
+    }
     let epoch = *PROCESS_START.get_or_init(Instant::now);
     epoch.elapsed().as_millis() as f64
 }
