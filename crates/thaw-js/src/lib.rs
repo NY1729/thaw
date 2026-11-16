@@ -2015,10 +2015,14 @@ impl Interp {
         let ctor = self
             .lookup(&self.global.clone(), class)
             .unwrap_or(Value::Undefined);
-        // the error constructor must be callable even at the depth limit
+        // the error constructor must be callable even at the depth limit, and on a stack that is out of room:
+        // building it goes through `call_as`, whose stack guard would throw again and recurse until the real end.
+        // `construct` returns (never `?`), so both values are restored on every path; nested calls save and restore too.
         let depth = std::mem::replace(&mut self.depth, 0);
+        let stack_limit = std::mem::replace(&mut self.stack_limit, 0);
         let built = self.construct(&ctor, &[Value::str(message)]);
         self.depth = depth;
+        self.stack_limit = stack_limit;
         match built {
             Ok(err) => Err(Ctl::Throw(err)),
             Err(e) => Err(e),
@@ -4959,6 +4963,8 @@ mod regexp_proto_tests;
 mod regexp_statics_tests;
 #[cfg(test)]
 mod sab_tests;
+#[cfg(test)]
+mod stack_overflow_tests;
 #[cfg(test)]
 mod str_cursor_tests;
 #[cfg(test)]
