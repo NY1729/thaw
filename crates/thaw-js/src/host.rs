@@ -444,6 +444,9 @@ impl Package {
                 .map_err(|c| classify(it, c))?;
             value = if default.is_callable() {
                 default
+            } else if matches!(it.get(&self.exports, "__esModule"), Ok(Value::Bool(true))) {
+                // an ES module has no such member: undefined, never the (possibly cyclic) module object
+                Value::Undefined
             } else {
                 self.exports.clone()
             };
@@ -1702,6 +1705,22 @@ impl WireOut {
         format!("{{\"r\":{}}}", self.nodes.len() - 1)
     }
 
+    /// The node an object already has in this wire (its first occurrence), so a repeat is a back-reference.
+    fn node_of(&self, v: &Value) -> Option<usize> {
+        let Value::Object(o) = v else { return None };
+        let key = Rc::as_ptr(o);
+        self.seen.iter().find(|(p, _)| *p == key).map(|(_, i)| *i)
+    }
+
+    /// A live object's handle node, recorded in `seen` so a second occurrence in this wire reuses it.
+    fn lease_object(&mut self, v: &Value, id: u64) -> String {
+        let token = self.lease(id);
+        if let Value::Object(o) = v {
+            self.seen.push((Rc::as_ptr(o), self.nodes.len() - 1));
+        }
+        token
+    }
+
     /// A registered native Symbol: its native id and a handle to it (`{"nsy","hdl"}`, as the QuickJS wire).
     fn lease_symbol(&mut self, id: u64, native: u64) -> String {
         self.leases.push(id);
@@ -1714,22 +1733,28 @@ impl WireOut {
         let mut v = v.clone();
         if let Some((id, r)) = &self.receiver {
             if matches!((&v, r), (Value::Object(a), Value::Object(b)) if Rc::ptr_eq(a, b)) {
+                if let Some(node) = self.node_of(&v) {
+                    return Ok(format!("{{\"r\":{node}}}"));
+                }
                 let id = *id;
                 thaw_tjs_retain_handle(id as i64);
-                return Ok(self.lease(id));
+                return Ok(self.lease_object(&v, id));
             }
         }
         if let Some(native) = crate::napi_symbols::native_id_of_value(self.owner as u64, &v) {
             let id = store_handle(self.owner, v.clone()) as u64;
             return Ok(self.lease_symbol(id, native));
         }
-        // A Buffer/Uint8Array result crosses as the branded `{"b":[bytes]}` node, which thaw-std rebuilds
+        // A Buffer/Uint8Array/ArrayBuffer result crosses as the branded `{"b":[bytes]}` node, which thaw-std rebuilds
         // as a Buffer-shaped wrapper (json.rs:4378) instead of a graph-plain {type,data} copy it will not read as bytes.
         if self.plain {
             let bytes = match &v {
                 Value::Object(o) => match &*o.kind.borrow() {
                     Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8) => {
                         Some(t.window().iter().map(u8::to_string).collect::<Vec<_>>())
+                    }
+                    Kind::ArrayBuffer(b) if !crate::typed::is_detached(b) => {
+                        Some(b.borrow().iter().map(u8::to_string).collect::<Vec<_>>())
                     }
                     _ => None,
                 },
@@ -1753,8 +1778,11 @@ impl WireOut {
         // A plain result that compiled code already holds by handle stays that handle (same identity).
         if self.plain && (!v.is_callable() || self.live_functions) {
             if let Some(id) = live_handle_of(&v) {
+                if let Some(node) = self.node_of(&v) {
+                    return Ok(format!("{{\"r\":{node}}}"));
+                }
                 thaw_tjs_retain_handle(id as i64);
-                return Ok(self.lease(id));
+                return Ok(self.lease_object(&v, id));
             }
         }
         Ok(match &v {
@@ -1793,8 +1821,11 @@ impl WireOut {
                     || !matches!(&*o.kind.borrow(), Kind::Plain | Kind::Array(_));
                 if live {
                     // ponytail: Date/Map/Set/RegExp/typed-array results stay live handles; give them wire nodes if a package needs the copy
+                    if let Some(node) = self.node_of(&v) {
+                        return Ok(format!("{{\"r\":{node}}}"));
+                    }
                     let id = store_handle(self.owner, v.clone()) as u64;
-                    return Ok(self.lease(id));
+                    return Ok(self.lease_object(&v, id));
                 }
                 let key = Rc::as_ptr(o);
                 if let Some((_, i)) = self.seen.iter().find(|(p, _)| *p == key) {
@@ -2037,7 +2068,49 @@ fn typed_probe_text(it: &mut Interp, v: &Value) -> String {
             other => format!("\"{}n\"", it.to_str(&other)),
         });
     }
-    format!(r#"{{"n":"{name}","v":[{}]}}"#, items.join(","))
+    format!(
+        r#"{{"n":"{name}","v":[{}]{}}}"#,
+        items.join(","),
+        typed_probe_extra(it, v)
+    )
+}
+
+/// The non-index own properties of a typed array as `,"e":[[key,tag,text],..]` (the entries thaw-std's
+/// `typed_probe_node` prints after the items); `""` when there are none. Primitive values only.
+fn typed_probe_extra(it: &mut Interp, v: &Value) -> String {
+    let mut entries = Vec::new();
+    for key in it.own_keys(v) {
+        // an index (or a canonical numeric key such as `-0`) is an item, not a property
+        let canonical = key.as_ref() == "-0"
+            || key
+                .parse::<f64>()
+                .is_ok_and(|n| crate::number_to_string(n) == *key);
+        if canonical {
+            continue;
+        }
+        let Ok(item) = it.get(v, &key) else {
+            continue;
+        };
+        let (tag, text) = match &item {
+            Value::Str(s) => ("s", s.to_string()),
+            Value::Number(n) if *n == 0.0 && n.is_sign_negative() => ("n", "-0".to_string()),
+            Value::Number(n) => ("n", crate::number_to_string(*n)),
+            Value::BigInt(_) => ("g", it.to_str(&item).to_string()),
+            Value::Bool(b) => ("b", b.to_string()),
+            Value::Undefined | Value::Hole => ("u", String::new()),
+            Value::Null => ("l", String::new()),
+            Value::Object(_) => continue,
+        };
+        let (mut k, mut t) = (String::new(), String::new());
+        crate::builtins::json_quote(&key, &mut k);
+        crate::builtins::json_quote(&text, &mut t);
+        entries.push(format!("[{k},\"{tag}\",{t}]"));
+    }
+    if entries.is_empty() {
+        String::new()
+    } else {
+        format!(r#","e":[{}]"#, entries.join(","))
+    }
 }
 
 /// Operation 28: an Error's own extra properties as JSON (`message`, `name` and `stack` excluded), via the
@@ -3542,15 +3615,26 @@ pub extern "C" fn thaw_tjs_resolve_handle_graph_result(handle: u64) -> ThawResul
 }
 
 /// A function or class instance: it cannot cross as plain data, so compiled code keeps it by handle.
+/// A prototype stand-in (accessors or non-enumerable members on a Plain object) is live too: a copy would lose them.
+/// Generators, Map/Set iterators and Proxies have no plain-data form either (a copy would be `{}`).
 fn is_live_value(it: &Interp, v: &Value) -> bool {
     match v {
         Value::Object(o) => {
             v.is_callable()
+                || matches!(
+                    &*o.kind.borrow(),
+                    Kind::Generator(_) | Kind::CollIter(_) | Kind::Proxy(_)
+                )
                 || (matches!(&*o.kind.borrow(), Kind::Plain)
-                    && o.proto
+                    && (o
+                        .proto
                         .borrow()
                         .as_ref()
-                        .is_some_and(|p| !Rc::ptr_eq(p, &it.object_proto)))
+                        .is_some_and(|p| !Rc::ptr_eq(p, &it.object_proto))
+                        || o.props()
+                            .borrow()
+                            .iter()
+                            .any(|p| !p.enumerable || matches!(p.slot, Slot::Accessor { .. }))))
         }
         _ => false,
     }
@@ -3714,7 +3798,7 @@ fn console_function_text(it: &mut Interp, v: &Value) -> R<Option<String>> {
 }
 
 /// The string an object's `nodejs.util.inspect.custom` method returns; `None` otherwise.
-fn console_custom_text(it: &mut Interp, v: &Value) -> R<Option<String>> {
+pub(crate) fn console_custom_text(it: &mut Interp, v: &Value) -> R<Option<String>> {
     let sym = it.symbol_for("nodejs.util.inspect.custom".into())?;
     let key = it.key_of(&sym);
     let custom = it.get(v, &key)?;
@@ -3996,6 +4080,12 @@ pub extern "C" fn thaw_tjs_register_native_method_callback_graph(
     )
 }
 
+/// Test stand-in for the compiled runtime's `thaw_function_label_for` (process-wide, like the symbol).
+#[cfg(test)]
+pub(crate) static TEST_FUNCTION_LABEL: std::sync::Mutex<
+    Option<unsafe extern "C" fn(*const u8) -> *const std::ffi::c_char>,
+> = std::sync::Mutex::new(None);
+
 fn callback_value(it: &mut Interp, id: usize) -> Value {
     if let Some(v) = it.callback_values.get(&id) {
         return v.clone();
@@ -4016,8 +4106,60 @@ fn callback_value(it: &mut Interp, id: usize) -> Value {
     if let (Value::Object(o), Some(n)) = (&function, arity) {
         crate::put_hidden(o, "length", Value::Number(n as f64));
     }
+    // the compiled `"<kind><name>"` label, as the QuickJS wrapper sets it: `name` and `__thaw_label__`
+    let identity = CALLBACKS.lock().unwrap().get(id).map_or(0, |c| c.identity);
+    if let (Value::Object(o), Some(label)) = (&function, function_label(identity)) {
+        crate::put_hidden(
+            o,
+            "name",
+            Value::str(&label.chars().skip(1).collect::<String>()),
+        );
+        crate::put_hidden(o, "__thaw_label__", Value::str(&label));
+    }
     it.callback_values.insert(id, function.clone());
     function
+}
+
+/// The compiled label of the closure `identity` (`thaw_function_label_for`, thaw-std), if any. Looked up
+/// like the other optional runtime symbols: absent without the compiled runtime, so no label.
+fn function_label(identity: usize) -> Option<String> {
+    if identity == 0 {
+        return None;
+    }
+    #[cfg(test)]
+    let label = TEST_FUNCTION_LABEL
+        .lock()
+        .unwrap()
+        .map_or(std::ptr::null(), |f| unsafe { f(identity as *const u8) });
+    #[cfg(not(test))]
+    let label = function_label_symbol(identity);
+    (!label.is_null()).then(|| {
+        // SAFETY: a non-null label is a NUL-terminated string owned by the compiled program.
+        unsafe { std::ffi::CStr::from_ptr(label) }
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+/// Thaw-std's `thaw_function_label_for(closure)`, looked up by name like the other optional runtime
+/// symbols; null without the compiled runtime (no label).
+#[cfg(all(unix, not(test)))]
+fn function_label_symbol(identity: usize) -> *const std::ffi::c_char {
+    // SAFETY: the symbol is `extern "C" fn(*const u8) -> *const c_char`; its argument is a closure pointer.
+    unsafe {
+        let sym = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_function_label_for".as_ptr());
+        if sym.is_null() {
+            return std::ptr::null();
+        }
+        std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*const u8) -> *const std::ffi::c_char>(
+            sym,
+        )(identity as *const u8)
+    }
+}
+
+#[cfg(all(not(unix), not(test)))]
+fn function_label_symbol(_identity: usize) -> *const std::ffi::c_char {
+    std::ptr::null()
 }
 
 /// Rebuild a thrown error from the compiled side's `\u{1}Name\u{1}message` framing.
@@ -6552,6 +6694,148 @@ mod live_result_lease_tests {
         thaw_tjs_release_handle(id as i64);
         thaw_tjs_release_handle(id as i64);
     }
+
+    #[test]
+    fn plain_wire_emits_an_arraybuffer_as_b_node() {
+        // node 22: Buffer.from(await crypto.subtle.digest(...)) reads the digest bytes
+        let mut it = Interp::new();
+        let buf = object(&mut it, "new Uint8Array([1, 2]).buffer");
+        let (token, out) = token_of(&mut it, &buf);
+        assert_eq!(token, "{\"r\":0}");
+        assert_eq!(out.nodes, vec!["{\"b\":[1,2]}".to_string()]);
+    }
+
+    #[test]
+    fn prototype_stand_in_with_accessors_stays_live() {
+        // a class projection's stand-in prototype: accessors on a Plain object whose proto is Object.prototype
+        let mut it = Interp::new();
+        let stand_in = object(
+            &mut it,
+            "Object.defineProperty({}, 'value', {get() { return 1; }, configurable: true})",
+        );
+        let (token, out) = token_of(&mut it, &stand_in);
+        assert_eq!(token, "{\"r\":0}");
+        assert_eq!(out.leases.len(), 1, "{:?}", out.nodes);
+        thaw_tjs_release_handle(out.leases[0] as i64);
+
+        // plain data is still copied
+        let data = object(&mut it, "({x: 1})");
+        let (_, out) = token_of(&mut it, &data);
+        assert!(out.leases.is_empty());
+        assert!(out.nodes[0].starts_with("{\"o\":"), "{:?}", out.nodes);
+    }
+
+    #[test]
+    fn a_live_object_repeated_in_one_wire_is_one_node() {
+        // `[d, d, e]`: the second `d` is a back-reference to the first node, not a second handle node
+        let mut it = Interp::new();
+        let arr = object(
+            &mut it,
+            "(function () { const d = new Date(1234); return [d, d, new Date(1234)]; })()",
+        );
+        let (token, out) = token_of(&mut it, &arr);
+        assert_eq!(token, "{\"r\":0}");
+        assert_eq!(out.leases.len(), 2, "{:?}", out.nodes);
+        assert_eq!(
+            out.nodes[0], "{\"a\":[{\"r\":1},{\"r\":1},{\"r\":2}]}",
+            "{:?}",
+            out.nodes
+        );
+        assert_eq!(out.nodes[1], format!("{{\"hdl\":{}}}", out.leases[0]));
+        assert_eq!(out.nodes[2], format!("{{\"hdl\":{}}}", out.leases[1]));
+        for id in &out.leases {
+            thaw_tjs_release_handle(*id as i64);
+        }
+    }
+
+    #[test]
+    fn a_live_object_under_two_keys_is_one_lease() {
+        // `{a: i, b: i}` with an Invalid Date: one handle node, referenced from both members
+        let mut it = Interp::new();
+        let v = object(
+            &mut it,
+            "(function () { const i = new Date(NaN); return {a: i, b: i}; })()",
+        );
+        let (token, out) = token_of(&mut it, &v);
+        assert_eq!(token, "{\"r\":0}");
+        assert_eq!(out.leases.len(), 1, "{:?}", out.nodes);
+        assert_eq!(
+            out.nodes[0], "{\"o\":[[\"a\",{\"r\":1},7],[\"b\",{\"r\":1},7]]}",
+            "{:?}",
+            out.nodes
+        );
+        thaw_tjs_release_handle(out.leases[0] as i64);
+    }
+
+    fn kind_label(v: &Value) -> &'static str {
+        let Value::Object(o) = v else {
+            return "Primitive";
+        };
+        // exhaustive on purpose: a new `Kind` must be given a label (and a row below)
+        match &*o.kind.borrow() {
+            Kind::Plain => "Plain",
+            Kind::Array(_) => "Array",
+            Kind::Closure { .. } => "Closure",
+            Kind::Native(_) => "Native",
+            Kind::RegExp(_) => "RegExp",
+            Kind::Global => "Global",
+            Kind::Map(_) => "Map",
+            Kind::Set(_) => "Set",
+            Kind::CollIter(_) => "CollIter",
+            Kind::Symbol { .. } => "Symbol",
+            Kind::Promise(_) => "Promise",
+            Kind::Generator(_) => "Generator",
+            Kind::Proxy(_) => "Proxy",
+            Kind::ArrayBuffer(_) => "ArrayBuffer",
+            Kind::Typed(_) => "Typed",
+            Kind::Wrapper(_) => "Wrapper",
+            Kind::RawJson(_) => "RawJson",
+        }
+    }
+
+    #[test]
+    fn token_and_is_live_value_agree_for_every_kind() {
+        // A row with a tag is a deliberate, undecided difference: P2b (Map/Set/typed/ArrayBuffer, kept by
+        // value on the typed path) or "not in P2" (the kinds this change leaves alone). Other rows must agree.
+        let rows: &[(&str, &str, Option<&str>)] = &[
+            ("Plain", "({x: 1})", None),
+            ("Plain", "Object.create(null)", None),
+            ("Array", "[1]", None),
+            ("Closure", "(function f() {})", None),
+            ("Native", "Math.max", None),
+            ("Generator", "(function* () {})()", None),
+            ("Generator", "(async function* () {})()", None),
+            ("CollIter", "new Map().keys()", None),
+            ("Proxy", "new Proxy({}, {})", None),
+            ("Global", "globalThis", Some("not in P2")),
+            ("Map", "new Map()", Some("P2b")),
+            ("Set", "new Set()", Some("P2b")),
+            ("Typed", "new Float64Array(1)", Some("P2b")),
+            ("ArrayBuffer", "new ArrayBuffer(1)", Some("P2b")),
+            ("Symbol", "Symbol('x')", Some("not in P2")),
+            ("Promise", "Promise.resolve(1)", Some("not in P2")),
+            ("RegExp", "/a/", Some("not in P2")),
+            ("Wrapper", "new Number(1)", Some("not in P2")),
+            ("RawJson", "JSON.rawJSON('1')", Some("not in P2")),
+        ];
+        for (label, src, exception) in rows {
+            let mut it = Interp::new();
+            let v = object(&mut it, src);
+            assert_eq!(kind_label(&v), *label, "{src}");
+            let mut out = plain_wire_live_functions();
+            let Ok(_) = out.token(&mut it, &v) else {
+                panic!("token failed: {src}")
+            };
+            let token_live = out.leases.len() == 1;
+            let typed_live = is_live_value(&it, &v);
+            if exception.is_none() {
+                assert_eq!(token_live, typed_live, "{label}: {src}");
+            }
+            for id in &out.leases {
+                thaw_tjs_release_handle(*id as i64);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -6741,6 +7025,33 @@ mod console_function_text_tests {
         );
         assert_eq!(console(&mut it, "12n"), "12n");
     }
+
+    #[test]
+    fn compiled_callback_keeps_its_label_as_name_and_label() {
+        // node 22: a Map holding `async named() {}` prints [AsyncFunction: named]
+        unsafe extern "C" fn label(_: *const u8) -> *const std::ffi::c_char {
+            c"anamed".as_ptr()
+        }
+        *TEST_FUNCTION_LABEL.lock().unwrap() = Some(label);
+        let id = register_callback(
+            std::ptr::null(),
+            std::ptr::null(),
+            0x7f01,
+            0,
+            true,
+            0,
+            false,
+            0,
+            false,
+        ) as usize;
+        let mut it = Interp::new();
+        let f = callback_value(&mut it, id);
+        *TEST_FUNCTION_LABEL.lock().unwrap() = None;
+        let name = it.get(&f, "name").unwrap();
+        assert_eq!(format!("{}", it.to_str(&name)), "named");
+        let label = it.get(&f, "__thaw_label__").unwrap();
+        assert_eq!(format!("{}", it.to_str(&label)), "anamed");
+    }
 }
 
 #[cfg(test)]
@@ -6924,6 +7235,17 @@ mod host_query_live_tests {
         assert_eq!(
             typed_probe_text(&mut it, &v),
             r#"{"n":"BigInt64Array","v":["1n","-1n"]}"#
+        );
+    }
+
+    #[test]
+    fn host_query_typed_probe_lists_non_index_own_properties() {
+        // node 22: Object.assign(new Uint8Array(4), {x: 3}) prints Uint8Array(4) [ 0, 0, 0, 0, x: 3 ]
+        let mut it = Interp::new();
+        let v = it.run("Object.assign(new Uint8Array(4), {x: 3})").unwrap();
+        assert_eq!(
+            typed_probe_text(&mut it, &v),
+            r#"{"n":"Uint8Array","v":["0","0","0","0"],"e":[["x","n","3"]]}"#
         );
     }
 

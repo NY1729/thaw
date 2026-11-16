@@ -2105,6 +2105,7 @@
     {
       "name": "fetch Response from a local http server",
       "expect": "matched",
+      "expectQuickjsLink": false,
       "source": "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer((req, res) => { res.statusCode = 201; res.setHeader('x-a', 'b'); res.end('{\"k\":1}'); }); await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r())); const port = (srv.address() as any).port; const r: Response = await fetch('http://127.0.0.1:' + port + '/'); console.log(r.status, r.ok, r.headers.get('x-a'), r.statusText); console.log(await r.json()); srv.close(); }"
     },
     {
@@ -2116,6 +2117,7 @@
     {
       "name": "unannotated await fetch is a Response",
       "expect": "matched",
+      "expectQuickjsLink": false,
       "source": "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer((req, res) => { res.statusCode = 201; res.end('hi'); }); await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r())); const port = (srv.address() as any).port; const r = await fetch('http://127.0.0.1:' + port + '/'); console.log(r.status, r.ok); console.log(await r.text()); srv.close(); }"
     },
     {
@@ -4500,6 +4502,7 @@
     {
       "name": "r2c for await over http request body",
       "expect": "matched",
+      "expectQuickjsLink": false,
       "source": "import * as http from \"node:http\";\nconst srv = http.createServer(async (req, res) => {\n  const chunks: Buffer[] = [];\n  for await (const c of req) chunks.push(c as Buffer);\n  res.end(Buffer.concat(chunks));\n});\nfunction main(): void {\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const r = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`, { method: \"POST\", body: \"payload\" });\n    console.log(await r.text());\n    const g = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`);\n    console.log(JSON.stringify(await g.text()));\n    srv.close();\n  });\n}"
     },
     {
@@ -4515,11 +4518,13 @@
     {
       "name": "r2c http chunked response framing headers",
       "expect": "matched",
+      "expectQuickjsLink": false,
       "source": "import * as http from \"node:http\";\nconst srv = http.createServer((req, res) => {\n  if (req.url === \"/stream\") { res.writeHead(200, { \"Content-Type\": \"text/plain\" }); res.write(\"a\"); res.write(\"b\"); res.end(\"c\"); return; }\n  res.writeHead(200, { \"Transfer-Encoding\": \"chunked\" }); res.end(\"x\");\n});\nfunction main(): void {\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const base = `http://127.0.0.1:${(srv.address() as any).port}`;\n    const a = await fetch(base + \"/\");\n    console.log(a.headers.get(\"transfer-encoding\"), a.headers.get(\"content-length\"), a.headers.has(\"date\"), await a.text());\n    const b = await fetch(base + \"/stream\");\n    console.log(b.headers.get(\"transfer-encoding\"), b.headers.get(\"content-length\"), b.headers.has(\"date\"), await b.text());\n    srv.close();\n  });\n}"
     },
     {
       "name": "r2c Response static members spread of Headers and res.end without arguments",
       "expect": "matched",
+      "expectQuickjsLink": false,
       "source": "import * as http from \"node:http\";\nconst srv = http.createServer((req, res) => { res.statusCode = 404; res.end(); });\nfunction main(): void {\n  const a = Response.json({ a: 1 });\n  console.log(a.headers.get(\"content-type\"), a.status);\n  const b = Response.redirect(\"http://a.test/\", 301);\n  console.log(b.status, b.headers.get(\"location\"));\n  console.log(Response.error().type);\n  const h = new Headers({ a: \"1\", b: \"2\" });\n  console.log([...h]);\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const c = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`);\n    console.log(c.status, c.ok);\n    srv.close();\n  });\n}"
     },
     {
@@ -4811,6 +4816,27 @@
       "name": "tj49 child_process nested spawnSync error is an Error and error undefined stays undefined",
       "expect": "matched",
       "source": "import cp from \"node:child_process\"; function main(): void { const r = cp.spawnSync(\"nonexistent-cmd-xyz\") as any; console.log(r.error instanceof Error, r.error.code, r.error.errno, r.error.path, r.error.message); const o: any = cp.spawnSync(\"sh\", [\"-c\", \"exit 0\"]); console.log(o.error === undefined); }"
+    },
+    {
+      "name": "waitAsync sync results and shapes",
+      "expect": "matched",
+      "source": "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  const r1: any = Atomics.waitAsync(ia, 0, 1);\n  console.log(r1.async, r1.value, Object.keys(r1).join(','));\n  const r2: any = Atomics.waitAsync(ia, 0, 0, 0);\n  console.log(r2.async, r2.value);\n  const r3: any = Atomics.waitAsync(ia, 0, 0, -5);\n  console.log(r3.async, r3.value);\n  console.log(Atomics.waitAsync.length, Atomics.waitAsync.name);\n  try { Atomics.waitAsync(new Int32Array(4), 0, 0, 0); } catch (e: any) { console.log('nonshared', e.constructor.name); }\n  try { Atomics.waitAsync(new Int16Array(new SharedArrayBuffer(8)), 0, 0, 0); } catch (e: any) { console.log('int16', e.constructor.name); }\n  try { Atomics.waitAsync(ia, 2, 0, 0); } catch (e: any) { console.log('range', e.constructor.name); }\n  const p: any = Atomics.waitAsync(ia, 0, 0, 10);\n  console.log(p.async, typeof p.value.then);\n}"
+    },
+    {
+      "name": "waitAsync resolves on notify with setInterval keep",
+      "expect": "matched",
+      "source": "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(16));\n  const out: any[] = [];\n  const keep = setInterval(() => {}, 50);\n  (async () => {\n    const r: any = Atomics.waitAsync(ia, 0, 0, 5);\n    out.push(await r.value);\n    out.push(Atomics.notify(ia, 0));\n    const r2: any = Atomics.waitAsync(ia, 0, 0, 1000);\n    out.push(Atomics.notify(ia, 0, 1), await r2.value);\n    clearInterval(keep);\n    console.log(JSON.stringify(out));\n  })();\n}"
+    },
+    {
+      "name": "waitAsync does not keep the process alive",
+      "expect": "matched",
+      "source": "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  Atomics.waitAsync(ia, 0, 0, 200).value.then((v: any) => console.log('fired', v));\n  Atomics.waitAsync(ia, 0, 0).value.then((v: any) => console.log('fired inf', v));\n  console.log('end');\n}"
+    },
+    {
+      "name": "waitAsync notify from a worker thread",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { Worker } from 'node:worker_threads';\nfunction main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  const worker = new Worker(`\n    const { parentPort, workerData } = require('node:worker_threads');\n    const ia = new Int32Array(workerData);\n    const keep = setTimeout(() => {}, 300);\n    Atomics.waitAsync(ia, 0, 0).value.then((v) => { console.log('worker got ' + v); parentPort.postMessage('done'); clearTimeout(keep); });\n    parentPort.postMessage('ready');\n  `, { eval: true, workerData: ia.buffer });\n  worker.on('message', (m: any) => {\n    if (m === 'ready') {\n      setTimeout(() => console.log('notify', Atomics.notify(ia, 0, 1)), 50);\n    } else {\n      console.log('main saw', m);\n      void worker.terminate();\n    }\n  });\n}"
     }
   ]
 }

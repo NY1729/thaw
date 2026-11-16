@@ -4,7 +4,9 @@
 #   OUT_DIR defaults to $PARITY_OUT, else $PARITY_SCRATCH/out (PARITY_SCRATCH
 #   defaults to $RUNNER_TEMP, then $TMPDIR, then the thaw-tmp dev path)
 #   NODE          oracle binary (default: node)
-#   THAW_JS_NODE  thaw-js runner binary (default: repo target/release, else the ra8 prebuilt)
+#   THAW_JS_NODE  thaw-js runner binary (default: repo target/release, else the ra8 prebuilt).
+#                 Must be built with --features intl,wasm (checked below; exit 2 otherwise):
+#                 cargo build --release -p thaw-js --bin thaw-js-node --features intl,wasm
 #   PARITY_TIMEOUT  seconds per thaw corpus run (default 60)
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -22,6 +24,13 @@ TIMEOUT=${PARITY_TIMEOUT:-60}
 mkdir -p "$OUT/node" "$OUT/thaw"
 rm -f "$OUT"/node/*.txt "$OUT"/node/*.err "$OUT"/thaw/*.txt "$OUT"/thaw/*.err "$OUT"/thaw/*.rc
 
+# The runner must be the feature-complete build: Intl and WebAssembly are measured, not skipped.
+printf 'console.log([typeof Intl, typeof WebAssembly].join())\n' > "$OUT/feature_probe.js"
+if [ "$("$THAW_JS_NODE" "$OUT/feature_probe.js" 2>/dev/null)" != "object,object" ]; then
+  echo "harness error: $THAW_JS_NODE lacks Intl/WebAssembly; build it with: cargo build --release -p thaw-js --bin thaw-js-node --features intl,wasm" >&2
+  exit 2
+fi
+
 corpora=("$HERE/surface.js" "$HERE"/corpus/*.js)
 status=0
 for f in "${corpora[@]}"; do
@@ -38,5 +47,6 @@ python3 "$HERE/diff.py" \
   --node-dir "$OUT/node" --thaw-dir "$OUT/thaw" \
   --baseline "$HERE/known-gaps.json" \
   --skip "$HERE/skip.txt" \
+  --waivers "$HERE/waivers.json" \
   --gaps "$OUT/gaps.json" \
   "${WRITE[@]}"

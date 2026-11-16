@@ -850,6 +850,16 @@ fn stat_json(m: &std::fs::Metadata) -> String {
     )
 }
 
+/// A listed entry that changed under the listing: removed (ENOENT), or replaced by a file/directory
+/// of the other kind (ENOTDIR). Such entries are skipped, not errors (same rule as the QuickJS host).
+#[cfg(unix)]
+fn readdir_is_vanished(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
 #[cfg(unix)]
 fn readdir_json(dir: &std::path::Path, typed: bool, recursive: bool) -> std::io::Result<String> {
     fn visit(
@@ -864,7 +874,7 @@ fn readdir_json(dir: &std::path::Path, typed: bool, recursive: bool) -> std::io:
         for entry in std::fs::read_dir(dir)? {
             match entry {
                 Ok(e) => entries.push(e),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if readdir_is_vanished(&e) => continue,
                 Err(e) => return Err(e),
             }
         }
@@ -880,7 +890,7 @@ fn readdir_json(dir: &std::path::Path, typed: bool, recursive: bool) -> std::io:
             let meta = if typed || recursive {
                 match std::fs::symlink_metadata(&path) {
                     Ok(m) => Some(m),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) if readdir_is_vanished(&e) => continue,
                     Err(e) => return Err(e),
                 }
             } else {
@@ -895,7 +905,10 @@ fn readdir_json(dir: &std::path::Path, typed: bool, recursive: bool) -> std::io:
                 meta.as_ref().map_or("null".into(), stat_json)
             ));
             if recursive && meta.is_some_and(|m| m.is_dir()) {
-                visit(&path, &rel, typed, recursive, out)?;
+                match visit(&path, &rel, typed, recursive, out) {
+                    Err(e) if readdir_is_vanished(&e) => {}
+                    other => other?,
+                }
             }
         }
         Ok(())

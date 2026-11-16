@@ -27,5 +27,9 @@ impl Interp {
         }
         self.run(&format!("(function () {{\n{POLYFILL}"))
             .unwrap_or_else(|_| panic!("thaw-js Intl polyfill must evaluate"));
+        // thaw-js has no `Intl.DurationFormat` (Node 22 lacks it, so feature detection must see
+        // `undefined`). The shared polyfill keeps it for thaw-quickjs and the HIR lowering.
+        self.run("delete globalThis.Intl.DurationFormat")
+            .unwrap_or_else(|_| panic!("thaw-js must drop Intl.DurationFormat"));
     }
 }
