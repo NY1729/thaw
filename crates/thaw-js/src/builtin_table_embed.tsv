@@ -547,6 +547,25 @@ CountQueuingStrategy	prototype	data	---	object	-	-	-	-	-
 CountQueuingStrategy.prototype	@@toStringTag	data	--c	string	-	-	-	-	CountQueuingStrategy
 CountQueuingStrategy.prototype	constructor	data	w-c	function	1	CountQueuingStrategy	1	56	-
 CountQueuingStrategy.prototype	highWaterMark	accessor	-ec	-	-	get highWaterMark|-	-	-	-
+Crypto	length	data	--c	number	0	-	-	-	-
+Crypto	name	data	--c	string	-	Crypto	-	-	-
+Crypto	prototype	data	---	object	-	-	-	-	-
+Crypto.prototype	@@toStringTag	data	--c	string	-	-	-	-	Crypto
+Crypto.prototype	constructor	data	w-c	function	0	Crypto	1	57	-
+Crypto.prototype	getRandomValues	data	wec	function	1	getRandomValues	1	-	-
+Crypto.prototype	randomUUID	data	wec	function	0	randomUUID	1	-	-
+Crypto.prototype	subtle	accessor	-ec	-	-	get subtle|-	-	-	-
+Crypto.prototype.getRandomValues	length	data	--c	number	1	-	-	-	-
+Crypto.prototype.getRandomValues	name	data	--c	string	-	getRandomValues	-	-	-
+Crypto.prototype.getRandomValues	prototype	data	w--	object	-	-	-	-	-
+Crypto.prototype.randomUUID	length	data	--c	number	0	-	-	-	-
+Crypto.prototype.randomUUID	name	data	--c	string	-	randomUUID	-	-	-
+Crypto.prototype.randomUUID	prototype	data	w--	object	-	-	-	-	-
+CryptoKey	length	data	--c	number	0	-	-	-	-
+CryptoKey	name	data	--c	string	-	CryptoKey	-	-	-
+CryptoKey	prototype	data	---	object	-	-	-	-	-
+CryptoKey.prototype	@@toStringTag	data	--c	string	-	-	-	-	CryptoKey
+CryptoKey.prototype	constructor	data	w-c	function	0	CryptoKey	1	58	-
 CustomEvent	length	data	--c	number	1	-	-	-	-
 CustomEvent	name	data	--c	string	-	CustomEvent	-	-	-
 CustomEvent	prototype	data	---	object	-	-	-	-	-
@@ -2087,6 +2106,14 @@ String.prototype.valueOf	length	data	--c	number	0	-	-	-	-
 String.prototype.valueOf	name	data	--c	string	-	valueOf	-	-	-
 String.raw	length	data	--c	number	1	-	-	-	-
 String.raw	name	data	--c	string	-	raw	-	-	-
+SubtleCrypto	length	data	--c	number	0	-	-	-	-
+SubtleCrypto	name	data	--c	string	-	SubtleCrypto	-	-	-
+SubtleCrypto	prototype	data	---	object	-	-	-	-	-
+SubtleCrypto.prototype	@@toStringTag	data	--c	string	-	-	-	-	SubtleCrypto
+SubtleCrypto.prototype	constructor	data	w-c	function	0	SubtleCrypto	1	128	-
+SubtleCrypto.prototype	digest	data	wec	function	2	digest	0	-	-
+SubtleCrypto.prototype.digest	length	data	--c	number	2	-	-	-	-
+SubtleCrypto.prototype.digest	name	data	--c	string	-	digest	-	-	-
 Symbol	asyncDispose	data	---	symbol	-	-	-	-	-
 Symbol	asyncIterator	data	---	symbol	-	-	-	-	-
 Symbol	dispose	data	---	symbol	-	-	-	-	-
