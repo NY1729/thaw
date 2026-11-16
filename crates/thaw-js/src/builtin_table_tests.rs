@@ -319,3 +319,86 @@ SharedArrayBuffer function get [Symbol.species] 0  false true true
 {"value":"Promise","writable":false,"enumerable":false,"configurable":true}"#;
     assert_eq!(it.out.join("\n"), expected);
 }
+
+/// Stream, text, Blob, Request and FormData/Headers shape rows: the accessors are prototype getters with
+/// Node's flags, `Blob.prototype.stream` reads the blob, and the FormData/Headers methods carry `prototype`.
+/// The expected text was recorded with `node` 22 from the same script.
+const SHAPE_PROBE: &str = r##"const out = [];
+const d = (o, k) => {
+  const label = typeof k === 'symbol' ? 'sym' : k;
+  const x = Object.getOwnPropertyDescriptor(o, k);
+  if (!x) return label + ' none';
+  if ('get' in x) return [label, 'accessor', x.enumerable, x.configurable, x.get ? x.get.name : '-', x.get ? x.get.length : '-'].join(' ');
+  return [label, 'data', x.writable, x.enumerable, x.configurable, typeof x.value, typeof x.value === 'function' ? '' : String(x.value)].join(' ');
+};
+out.push(d(TextDecoder.prototype, 'encoding'), d(TextDecoder.prototype, 'fatal'), d(TextDecoder.prototype, 'ignoreBOM'));
+out.push(d(TextDecoderStream.prototype, 'readable'), d(TextDecoderStream.prototype, 'writable'), d(TextDecoderStream.prototype, 'fatal'), d(TextDecoderStream.prototype, 'encoding'), d(TextDecoderStream.prototype, 'ignoreBOM'));
+out.push(d(TextEncoderStream.prototype, 'readable'), d(TextEncoderStream.prototype, 'writable'), d(TextEncoderStream.prototype, 'encoding'));
+out.push(d(TransformStream.prototype, 'readable'), d(TransformStream.prototype, 'writable'));
+out.push(d(CompressionStream.prototype, 'readable'), d(DecompressionStream.prototype, 'writable'));
+out.push(d(WritableStreamDefaultController.prototype, 'signal'));
+out.push(d(ByteLengthQueuingStrategy.prototype, 'size'), d(CountQueuingStrategy.prototype, 'size'));
+out.push(d(Request.prototype, 'attribute'), d(Request.prototype, 'isHistoryNavigation'), d(Request.prototype, 'isReloadNavigation'));
+out.push(d(Blob.prototype, 'stream'), d(FormData.prototype, Symbol.toStringTag));
+out.push(d(FormData.prototype, Symbol.iterator), d(FormData.prototype, 'keys'), d(Headers.prototype, 'values'));
+out.push('keys proto ' + typeof FormData.prototype.keys.prototype + ' ' + typeof Headers.prototype.forEach.prototype + ' ' + typeof FormData.prototype[Symbol.iterator].prototype);
+out.push('fatal ' + new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).fatal + ' ' + new TextDecoder('utf-8', { ignoreBOM: true }).ignoreBOM + ' ' + new TextDecoder('latin1').encoding);
+out.push('tes ' + new TextEncoderStream().encoding + ' ' + new TextDecoderStream('utf-8', { fatal: true }).fatal);
+out.push('ts ' + (new TransformStream().readable instanceof ReadableStream) + ' ' + (new TransformStream().writable instanceof WritableStream));
+out.push('size ' + new ByteLengthQueuingStrategy({ highWaterMark: 1 }).size(new Uint8Array(3)) + ' ' + new CountQueuingStrategy({ highWaterMark: 1 }).size('x'));
+out.push('sizeFn ' + (new CountQueuingStrategy({ highWaterMark: 2 }).size === new CountQueuingStrategy({ highWaterMark: 3 }).size));
+out.push('fdtag ' + Object.prototype.toString.call(new FormData()));
+out.push('wsdc ' + typeof Object.getOwnPropertyDescriptor(WritableStreamDefaultController.prototype, 'signal').get);
+const probeStream = new Blob(['ab', 'cd']).stream();
+out.push('blobstream ' + (probeStream instanceof ReadableStream));
+(async () => {
+  const reader = new Blob(['ab', 'cd']).stream().getReader();
+  let text = '';
+  for (;;) { const r = await reader.read(); if (r.done) break; text += new TextDecoder().decode(r.value); }
+  out.push('blobtext ' + text);
+  console.log(out.join('\n'));
+})();"##;
+const SHAPE_EXPECTED: &str = r##"encoding accessor true true get encoding 0
+fatal accessor true true get fatal 0
+ignoreBOM accessor true true get ignoreBOM 0
+readable accessor true true get readable 0
+writable accessor true true get writable 0
+fatal accessor true true get fatal 0
+encoding accessor true true get encoding 0
+ignoreBOM accessor true true get ignoreBOM 0
+readable accessor true true get readable 0
+writable accessor true true get writable 0
+encoding accessor true true get encoding 0
+readable accessor true true get readable 0
+writable accessor true true get writable 0
+readable accessor true true get readable 0
+writable accessor true true get writable 0
+signal accessor true true get signal 0
+size accessor true true get size 0
+size accessor true true get size 0
+attribute data false true false undefined undefined
+isHistoryNavigation accessor true true get isHistoryNavigation 0
+isReloadNavigation accessor true true get isReloadNavigation 0
+stream data true true true function 
+sym data false false true string FormData
+sym data true false true function 
+keys data true true true function 
+values data true true true function 
+keys proto object object object
+fatal true true windows-1252
+tes utf-8 true
+ts true true
+size 3 1
+sizeFn true
+fdtag [object FormData]
+wsdc function
+blobstream true
+blobtext abcd"##;
+
+#[test]
+fn stream_text_blob_request_and_formdata_shapes_match_node() {
+    let mut it = Interp::new();
+    it.run(SHAPE_PROBE).expect("probe runs");
+    it.run_event_loop().expect("probe drains its promise");
+    assert_eq!(it.out.join("\n"), SHAPE_EXPECTED);
+}
