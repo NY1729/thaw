@@ -996,6 +996,7 @@ Headers	length	data	--c	number	0	-	-	-	-
 Headers	name	data	--c	string	-	Headers	-	-	-
 Headers	prototype	data	---	object	-	-	-	-	-
 Headers.prototype	@@iterator	data	w-c	function	0	entries	1	77	-
+Headers.prototype	@@toStringTag	data	--c	string	-	-	-	-	Headers
 Headers.prototype	append	data	wec	function	2	append	0	-	-
 Headers.prototype	constructor	data	w-c	function	0	Headers	1	78	-
 Headers.prototype	delete	data	wec	function	1	delete	0	-	-
@@ -1817,6 +1818,7 @@ RegExp.prototype.toString	name	data	--c	string	-	toString	-	-	-
 Request	length	data	--c	number	1	-	-	-	-
 Request	name	data	--c	string	-	Request	-	-	-
 Request	prototype	data	---	object	-	-	-	-	-
+Request.prototype	@@toStringTag	data	--c	string	-	-	-	-	Request
 Request.prototype	arrayBuffer	data	wec	function	0	arrayBuffer	0	-	-
 Request.prototype	attribute	data	-e-	undefined	-	-	-	-	-
 Request.prototype	blob	data	wec	function	0	blob	0	-	-
@@ -1868,6 +1870,7 @@ Response.error	length	data	--c	number	0	-	-	-	-
 Response.error	name	data	--c	string	-	error	-	-	-
 Response.json	length	data	--c	number	1	-	-	-	-
 Response.json	name	data	--c	string	-	json	-	-	-
+Response.prototype	@@toStringTag	data	--c	string	-	-	-	-	Response
 Response.prototype	arrayBuffer	data	wec	function	0	arrayBuffer	0	-	-
 Response.prototype	blob	data	wec	function	0	blob	0	-	-
 Response.prototype	body	accessor	-ec	-	-	get body|-	-	-	-

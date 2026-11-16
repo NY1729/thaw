@@ -77,8 +77,8 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
           pairs = normalizedHeaderEntries(this);
         }
       }
-      get [Symbol.toStringTag]() { return 'Headers'; }
     }
+    Object.defineProperty(Headers.prototype, Symbol.toStringTag, { value: 'Headers', configurable: true });
     // Node: Headers.prototype[Symbol.iterator] is the entries function itself
     Object.defineProperty(Headers.prototype, Symbol.iterator, { value: Headers.prototype.entries, writable: true, configurable: true });
     for (const name of ['append', 'delete', 'get', 'has', 'set', 'getSetCookie', 'keys', 'values', 'entries', 'forEach']) {
@@ -1225,8 +1225,8 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
       static error() { const response = new Response(); const record = responseData.get(response); record.status = 0; record.type = 'error'; thawImmutableResponseHeaders.add(record.headers); return response; }
       static json(value, init = {}) { const body = JSON.stringify(value); if (body === undefined) throw new TypeError('value is not JSON serializable'); const headers = new Headers(init.headers); if (!headers.has('content-type')) headers.set('content-type', 'application/json'); return new Response(body, { ...init, headers }); }
       static redirect(url, status = 302) { const code = Number(status); if (![301, 302, 303, 307, 308].includes(code)) throw new RangeError('invalid redirect status'); const response = new Response(null, { status: code, headers: { location: new URL(String(url)).href } }); thawImmutableResponseHeaders.add(responseData.get(response).headers); return response; }
-      get [Symbol.toStringTag]() { return 'Response'; }
     }
+    Object.defineProperty(Response.prototype, Symbol.toStringTag, { value: 'Response', configurable: true });
     Object.defineProperty(globalThis, '__thaw_set_response_metadata', {
       configurable: true,
       value(response, url, redirected) {
@@ -1338,8 +1338,8 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
       async text() { return new TextDecoder().decode(await consumeRequestBody(this)); }
       async formData() { const type = this.headers.get('content-type') || ''; return parseFormDataBody(type, await consumeRequestBody(this)); }
       clone() { const record = requestData.get(this); if (record.body && (record.body._disturbed || record.body.locked)) throw new TypeError('Body has already been consumed'); let body = null; if (record.body) { const branches = record.body.tee(); record.body = branches[0]; body = branches[1]; } const clone = new Request(record.url, { method: record.method, headers: record.headers, body, signal: record.signal, cache: record.cache, credentials: record.credentials, integrity: record.integrity, keepalive: record.keepalive, mode: record.mode, redirect: record.redirect, referrer: record.referrer, referrerPolicy: record.referrerPolicy, duplex: 'half' }); requestData.get(clone).bodyHasSource = record.bodyHasSource; return clone; }
-      get [Symbol.toStringTag]() { return 'Request'; }
     }
+    Object.defineProperty(Request.prototype, Symbol.toStringTag, { value: 'Request', configurable: true });
     globalThis.Response = Response;
     globalThis.Request = Request;
     Object.defineProperties(Request.prototype, Object.getOwnPropertyDescriptors({ get isHistoryNavigation() { return false; }, get isReloadNavigation() { return false; } }));
