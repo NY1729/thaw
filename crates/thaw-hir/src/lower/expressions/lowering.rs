@@ -2609,6 +2609,26 @@ impl<'a> FnLowerer<'a> {
                                         arguments,
                                     ],
                                 )));
+                                // A routed build lowers the dynamic check above to `false`, but a
+                                // Json copy of a caught Error (e.g. after `e.code = ...`) can be a
+                                // live Error lease: ask its identity too (same helper as the
+                                // direct Json arm). Non-routed lowering is unchanged.
+                                let identity = if extends_error_family && crate::lower::thaw_js_routed() {
+                                    let native = HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_json_is_error_instance".into())),
+                                        vec![
+                                            HirExpr::UnionValue(
+                                                Box::new(HirExpr::Var(name.clone())),
+                                                index,
+                                                elements.clone(),
+                                            ),
+                                            HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                                        ],
+                                    );
+                                    self.lower_logical_expr(native, identity, false)?
+                                } else {
+                                    identity
+                                };
                                 let check = self.lower_logical_expr(check, identity, true)?;
                                 result = self.lower_logical_expr(result, check, false)?;
                             }

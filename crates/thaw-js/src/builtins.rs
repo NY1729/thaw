@@ -1573,9 +1573,16 @@ impl Interp {
                         put(&d, "configurable", Value::Bool(true));
                         return Ok(Value::Object(d));
                     }
-                    let v = it.get(&arg(args, 0), &key)?;
-                    if matches!(&*o.kind.borrow(), Kind::Array(_)) && !matches!(v, Value::Undefined)
-                    {
+                    // only array index / length are virtual own props (served from the items); any other
+                    // key is absent, and a [[Get]] here would run inherited accessors with the wrong receiver
+                    let array_virtual = matches!(&*o.kind.borrow(), Kind::Array(_))
+                        && (array_index(&key).is_some() || key.as_ref() == "length");
+                    let v = if array_virtual {
+                        it.get(&arg(args, 0), &key)?
+                    } else {
+                        Value::Undefined
+                    };
+                    if array_virtual && !matches!(v, Value::Undefined) {
                         let d = it.plain();
                         // elements are derived from the object-wide flags; `length` is never configurable
                         let frozen = o.frozen.get();
@@ -1829,10 +1836,13 @@ impl Interp {
         // ----- Array -----
         let ap = self.array_proto.clone();
         let array = self.native(|it, _, args| {
-            Ok(match args {
+            let made = match args {
                 [Value::Number(n)] => it.array(vec![Value::Hole; *n as usize]),
                 _ => it.array(args.to_vec()),
-            })
+            };
+            // the slots were charged to the heap limit when made: stop here if that tripped it
+            it.check_interrupt()?;
+            Ok(made)
         });
         if let Value::Object(o) = &array {
             put_hidden(o, "prototype", Value::Object(ap.clone()));
@@ -1913,7 +1923,9 @@ impl Interp {
                 drop(kind);
                 return it.throw_error("TypeError", "push on non-array");
             };
+            let cap = items.capacity();
             items.extend(args.iter().cloned());
+            crate::grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
             Ok(Value::Number(items.len() as f64))
         });
         self.set_native(&ap, "pop", |it, this, _| {
@@ -1984,7 +1996,9 @@ impl Interp {
                     return Ok(Value::Number(it.array_items(this).len() as f64));
                 }
                 if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
+                    let cap = items.capacity();
                     items.splice(0..0, args.iter().cloned());
+                    crate::grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
                     return Ok(Value::Number(items.len() as f64));
                 }
             }
@@ -3402,7 +3416,9 @@ fn splice_restricted(it: &mut Interp, o: &Obj, s: usize, d: usize, ins: &[Value]
         w.truncate(newlen);
     }
     if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
+        let cap = items.capacity();
         *items = w;
+        crate::grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
     }
     match outcome {
         Ok(_) => Ok(removed),

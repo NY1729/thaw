@@ -732,7 +732,7 @@ fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
 
 #[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
-    // A `node:worker_threads` program that names `resourceLimits` (thaw-js does not serve it yet) keeps that module on
+    // A `node:worker_threads` program that names `SHARE_ENV` (thaw-js does not serve it yet) keeps that module on
     // QuickJS; the build falls back and the artifact reports the blocker.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "blockers-fallback",
@@ -740,7 +740,7 @@ fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
          import { isMainThread } from 'node:worker_threads';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
-           console.log(c.add(2), isMainThread, Object.keys({ resourceLimits: 1 }).length);\n\
+           console.log(c.add(2), isMainThread, Object.keys({ SHARE_ENV: 1 }).length);\n\
          }\n",
     );
     let output = dir.join("app");
@@ -1421,4 +1421,109 @@ fn routed_shared_array_buffer_and_atomics_match_node() {
         let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
         assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
     }
+}
+
+/// A routed `node:path` package whose `join` is declared (the typed function the shim resolves `path.join(..)` to).
+fn path_routing_package_with_join() -> ResolvedPackage {
+    let mut pkg = builtin_routing_package("node:path");
+    pkg.functions = thaw_bridge::parse_dts("export declare function join(...paths: string[]): string;").unwrap();
+    pkg
+}
+
+#[test]
+fn thaw_js_default_import_value_keeps_its_handle_export() {
+    let pkg = path_routing_package_with_join();
+    let needs = |user: &str| thaw_js_value_export_needs_handle(&pkg, user, "default");
+    // the path-contracts case: the default binding is compared, so it is a value
+    assert!(needs("import path, { posix, win32 } from 'node:path'; const ok = [path === posix];"));
+    // a bare alias of the default binding is a value use too
+    assert!(needs("import p from 'node:path'; const q = p;"));
+    // a value passed as an argument
+    assert!(needs("import p from 'node:path'; use(p);"));
+    // `import { default as p }` binds the same default export
+    assert!(needs("import { default as p } from 'node:path'; const q = p;"));
+    // `import p = require('node:path')` binds it as well
+    assert!(needs("import p = require('node:path'); const q = p;"));
+    // the bare `node:`-less specifier names the same builtin
+    assert!(needs("import p from 'path'; const q = p;"));
+}
+
+#[test]
+fn thaw_js_default_import_used_only_as_namespace_calls_stays_typed() {
+    let pkg = path_routing_package_with_join();
+    let needs = |user: &str| thaw_js_value_export_needs_handle(&pkg, user, "default");
+    assert!(!needs("import path from 'node:path'; const s = path.join('a', 'b');"));
+    // an unused default import must not force the export
+    assert!(!needs("import path from 'node:path'; const s = 1;"));
+    // a namespace import binds the module object, not the default export
+    assert!(!needs("import * as path from 'node:path'; const s = path.join('a');"));
+    assert!(!needs("import * as path from 'node:path'; const s = [path];"));
+}
+
+#[test]
+fn thaw_js_default_import_of_another_module_does_not_match() {
+    let pkg = path_routing_package_with_join();
+    let needs = |user: &str| thaw_js_value_export_needs_handle(&pkg, user, "default");
+    assert!(!needs("import p from 'node:url'; const q = [p];"));
+    assert!(!needs("import p from 'node:url'; import { join } from 'node:path'; const q = [p, join];"));
+    // a default import of another module with the same local name as an unused binding is not a use
+    assert!(!needs("import path from 'other-pkg'; const q = [path];"));
+}
+
+#[test]
+fn thaw_js_named_value_export_is_unchanged_by_default_import_bindings() {
+    let pkg = path_routing_package_with_join();
+    // `posix` is a named value export: its own members differ from the module's, so `posix.join(..)` needs it
+    assert!(thaw_js_value_export_needs_handle(&pkg, "import { posix } from 'node:path'; posix.join('a');", "posix"));
+    assert!(thaw_js_value_export_needs_handle(&pkg, "import path, { posix } from 'node:path'; path.join('a'); posix.join('a');", "posix"));
+}
+
+#[test]
+fn path_family_value_realms_split_needs_two_value_specifiers() {
+    // the default of `path` and a value of `path/posix` are objects of two interpreters on thaw-js
+    assert!(path_family_value_realms_split("import path from 'path'; import { posix } from 'node:path/posix'; const s = [path === posix];"));
+    // a namespace import binds the module object, which is a value too
+    assert!(path_family_value_realms_split("import * as p from 'node:path'; import win32 from 'path/win32'; const s = [p, win32];"));
+    // `import p = require()` binds the whole module
+    assert!(path_family_value_realms_split("import p = require('node:path'); import q from 'path/posix';"));
+    // the imported name decides, not the local alias
+    assert!(path_family_value_realms_split("import { posix as a } from 'path'; import { win32 as b } from 'node:path/win32';"));
+    assert!(path_family_value_realms_split("import { default as p } from 'node:path/posix'; import path from 'path';"));
+    // one specifier, however many values: one interpreter, so identity holds
+    assert!(!path_family_value_realms_split("import path, { posix, win32 } from 'node:path';"));
+    assert!(!path_family_value_realms_split("import path from 'path'; import { posix } from 'path';"));
+    // a function-only import of the second specifier takes no value export
+    assert!(!path_family_value_realms_split("import path from 'path'; import { join } from 'path/posix'; const s = path.join('a');"));
+    // other modules do not count
+    assert!(!path_family_value_realms_split("import path from 'node:path'; import posix from 'node:url';"));
+    assert!(!path_family_value_realms_split("import path from 'node:path'; const x = 1;"));
+}
+
+#[test]
+fn path_family_packages_stay_on_quickjs_when_their_values_split() {
+    let bundle = "module.exports = (function(require){ var __thaw_bundle_factories = { \"node:path\": function(module, exports, require) { exports.sep = '/'; } }; var __thaw_bundle_require_maps = { \"node:path\": {} }; var __thaw_bundle_entry_key = \"node:path\"; })(globalThis.require);";
+    let split = "import path from 'path'; import { posix } from 'path/posix'; const s = [path === posix];";
+    let one_specifier = "import path, { posix } from 'node:path'; const s = [path === posix];";
+    assert!(!thaw_js_package_eligible(&builtin_routing_package("path"), bundle, split, &Default::default(), ""));
+    assert!(thaw_js_package_eligible(&builtin_routing_package("node:path"), bundle, one_specifier, &Default::default(), ""));
+    // the guard is for the family only: another package with the same split source is unaffected
+    assert!(thaw_js_package_eligible(&builtin_routing_package("node:url"), bundle, split, &Default::default(), ""));
+}
+
+#[test]
+fn routed_worker_resource_limits_stop_a_runaway_worker() {
+    // Node 22.23.1 prints `error ERR_WORKER_OUT_OF_MEMORY` and the program ends with exit 0 (heap_limit, plan B3)
+    let body = "import { Worker } from 'node:worker_threads';\n\
+        async function main(): Promise<void> {\n\
+          const worker = new Worker(`const keep = []; while (true) { keep.push(new Array(100000).fill(1)); }`, { eval: true, resourceLimits: { maxOldGenerationSizeMb: 16 } });\n\
+          const result: string = await new Promise<string>((resolve) => { worker.on('error', (e: any) => { resolve('error ' + e.code); }); worker.on('exit', () => { resolve('exit'); }); });\n\
+          console.log(result);\n\
+        }";
+    let _env = RouteAllEnv::set();
+    let (_dir, registry, entry) = thaw_js_fixture("route-worker-limits", body);
+    let output = entry.with_file_name("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
+    assert_eq!((stdout.as_str(), status), ("error ERR_WORKER_OUT_OF_MEMORY\n", Some(0)), "{stderr}");
 }

@@ -281,3 +281,21 @@ fn dynamic_projection_prototype_chain_keeps_symbol_method_mapping() {
     // Node 22: `true false` (the method is served by the Proxy, the Base stand-in is not Object.prototype).
     assert_eq!(run_realm(src), vec!["true false"]);
 }
+
+/// Own-property checks on a class projection must not run its inherited native accessor: the getter
+/// throws unless it is called with the wrapper as receiver, and `hasOwnProperty`, `Object.keys` and
+/// `propertyIsEnumerable` still see no own `value`. Node 22: `false`, `[]`, `false`.
+#[test]
+fn dynamic_projection_own_checks_do_not_invoke_inherited_accessor() {
+    let src = r#"
+      var getter = function () { if (this !== a && this !== b) throw new TypeError('bad receiver'); return 42; };
+      var cb = [getter, () => undefined, () => true, () => false, () => false, () => true, () => 7, () => true, () => true];
+      var a = __thaw_object_with_native_getters(['value'], [true], [false], [true], ['Base'], 'Derived\u001fBase', ...cb);
+      var b = __thaw_object_with_native_getters(['value'], [true], [false], [true], ['Base'], 'Derived\u001fBase', ...cb);
+      console.log(Object.prototype.hasOwnProperty.call(a, 'value'));
+      console.log(JSON.stringify(Object.keys(a)));
+      console.log(a.propertyIsEnumerable('value'));
+      console.log(a.value);
+    "#;
+    assert_eq!(run_realm(src), vec!["false", "[]", "false", "42"]);
+}
