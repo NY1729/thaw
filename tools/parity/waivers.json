@@ -3,12 +3,11 @@
   "waivers": [
     {
       "id": "W1",
-      "reason": "Node-internal symbols and k* private fields, not part of the public surface",
+      "reason": "Node-internal symbols and k* private fields that are not documented API and not used for behaviour (nodejs.event_target and kCapture are excluded 2026-11-16)",
       "match": [
-        "surface::(globalThis\\.)?process\\.\\[Symbol\\((shapeMode|kCapture)\\)\\]",
+        "surface::(globalThis\\.)?process\\.\\[Symbol\\((shapeMode)\\)\\]",
         "surface::(globalThis\\.)?Buffer\\.\\[Symbol\\(kIsEncodingSymbol\\)\\]",
         "surface::(globalThis\\.)?AbortController\\.\\[Symbol\\(kMakeTransferable\\)\\]",
-        "surface::(globalThis\\.)?EventTarget\\.\\[Symbol\\(nodejs\\.event_target\\)\\]",
         "surface::(globalThis\\.)?console\\.\\[Symbol\\((kBindStreamsEager|kBindStreamsLazy|kBindProperties|kWriteToConsole|kGetInspectOptions|kFormatForStdout|kFormatForStderr|counts|kColorMode|kIsConsole|kGroupIndentWidth|kGroupIndentationString)\\)\\]",
         "surface::(globalThis\\.)?performance\\.\\[Symbol\\((kEvents|events\\.maxEventTargetListeners|events\\.maxEventTargetListenersWarned|kHandlers|performance)\\)\\]",
         "[a-z_]+::.*@@(nodejs\\.util\\.inspect\\.custom|messaging_\\w+|handle_\\w+|oninit|kCancel|nodejs\\.stream\\.\\w+|kAbort|kError|headers map sorted)",
@@ -17,30 +16,15 @@
       ]
     },
     {
-      "id": "W2",
-      "reason": "WebAssembly Tag/JSTag/Exception and the streaming compile/instantiate entry points",
-      "match": [
-        "surface::(globalThis\\.)?WebAssembly\\.(Tag|JSTag|Exception|compileStreaming|instantiateStreaming)"
-      ]
-    },
-    {
       "id": "W3",
-      "reason": "Atomics.waitAsync and resizable ArrayBuffer / SharedArrayBuffer members",
+      "reason": "Resizable ArrayBuffer / SharedArrayBuffer members (Atomics.waitAsync waiver withdrawn 2026-11-16)",
       "match": [
-        "surface::(globalThis\\.)?Atomics\\.waitAsync",
         "surface::(globalThis\\.)?(ArrayBuffer|SharedArrayBuffer)\\.prototype\\.(maxByteLength|resize|grow)"
       ]
     },
     {
-      "id": "W4",
-      "reason": "Intl (all)",
-      "match": [
-        "[a-z_]+::(globalThis\\.)*Intl\\b.*"
-      ]
-    },
-    {
       "id": "W5",
-      "reason": "Value-exact process facts that vary by host (ppid, groups, setuid family, usage counters)",
+      "reason": "Value differences only (ppid, groups, setuid family, usage counters); the set of keys/types of process.versions and process.release must match Node (limited 2026-11-16)",
       "match": [
         "process::process\\.(ppid|getgroups|setuid|seteuid|setgid|setegid|setgroups|initgroups|cpuUsage|resourceUsage|availableMemory)\\b.*"
       ]

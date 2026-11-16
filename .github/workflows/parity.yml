@@ -42,8 +42,8 @@ jobs:
           key: parity-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-arena/**') }}
           restore-keys: |
             parity-${{ runner.os }}-
-      - name: Build thaw-js-node runner (release)
-        run: cargo build --release -p thaw-js --bin thaw-js-node
+      - name: Build thaw-js-node runner (release, intl+wasm: run.sh rejects a build without them)
+        run: cargo build --release -p thaw-js --bin thaw-js-node --features intl,wasm
       - name: Harness self-test
         run: bash tools/parity/selftest.sh
       - name: Builtin table is current (non-gating)

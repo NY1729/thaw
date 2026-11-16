@@ -124,15 +124,17 @@ assert all(x['waived'] is False and x['waiver'] is None for x in json.load(open(
 " && echo "ok   no --waivers: every gap real" || { echo "FAIL no-waivers gaps.json"; fail=1; }
 # the checked-in waivers.json: a real ES symbol stays real, the approved Node-internal symbol is W1
 rm -f "$W"/node/*.txt "$W"/thaw/*.txt
-printf 'globalThis.console.[Symbol(kIsConsole)] = 1\nconsole.Console.[Symbol(Symbol.hasInstance)] = 1\nWebAssembly.Tag = 1\n' > "$W/node/surface.txt"; : > "$W/thaw/surface.txt"
+printf 'globalThis.console.[Symbol(kIsConsole)] = 1\nconsole.Console.[Symbol(Symbol.hasInstance)] = 1\nWebAssembly.Tag = 1\nglobalThis.process.[Symbol(kCapture)] = 1\nEventTarget.[Symbol(nodejs.event_target)] = 1\n' > "$W/node/surface.txt"; : > "$W/thaw/surface.txt"
 "${DIFF[@]}" --waivers "$HERE/waivers.json" --baseline "$W/empty.json" --gaps "$W/rw.json" >/dev/null 2>&1
 python3 -c "
 import json
 g={x['id']:x['waiver'] for x in json.load(open('$W/rw.json'))['gaps']}
 assert g['surface::globalThis.console.[Symbol(kIsConsole)]']=='W1', g
 assert g['surface::console.Console.[Symbol(Symbol.hasInstance)]'] is None, g
-assert g['surface::WebAssembly.Tag']=='W2', g
-" && echo "ok   checked-in waivers: ES symbol real, kIsConsole W1, WebAssembly.Tag W2" || { echo "FAIL checked-in waivers classification"; fail=1; }
+assert g['surface::WebAssembly.Tag'] is None, g
+assert g['surface::globalThis.process.[Symbol(kCapture)]'] is None, g
+assert g['surface::EventTarget.[Symbol(nodejs.event_target)]'] is None, g
+" && echo "ok   checked-in waivers: ES symbol real, kIsConsole W1, WebAssembly.Tag/kCapture/event_target real" || { echo "FAIL checked-in waivers classification"; fail=1; }
 # malformed waivers files are harness errors (exit 2)
 printf '{"waivers":[{"id":"W1","reason":"","match":["c::x"]}]}\n' > "$W/bw1.json"
 printf '{"waivers":[{"id":"W1","reason":"a","match":["c::x"]},{"id":"W1","reason":"b","match":["c::y"]}]}\n' > "$W/bw2.json"
