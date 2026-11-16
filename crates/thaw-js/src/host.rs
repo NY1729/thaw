@@ -1460,7 +1460,50 @@ pub(crate) fn slot(id: u64) -> Option<(usize, Value)> {
     if id == 0 {
         return Some((default_realm(), Value::Undefined));
     }
-    HANDLES.with(|h| h.borrow().get((id as usize).wrapping_sub(1)).cloned())
+    HANDLES.with(|h| {
+        h.borrow()
+            .get((id as usize).wrapping_sub(1))
+            .filter(|e| e.0 != UNLOADED_OWNER)
+            .cloned()
+    })
+}
+
+/// Owner of the handles of an unloaded package: no package has this index, so `slot` names none of them.
+const UNLOADED_OWNER: usize = usize::MAX;
+
+/// Release every handle `package` owns when it is unloaded. Their values are dropped with the package's
+/// realm, so the slots are retired: a later read fails with `stale_handle`, as for a released id.
+fn release_package_handles(package: usize) {
+    let values: Vec<Value> = HANDLES.with(|h| {
+        let mut h = h.borrow_mut();
+        let mut values = Vec::new();
+        for (index, entry) in h.iter_mut().enumerate() {
+            if entry.0 == package {
+                entry.0 = UNLOADED_OWNER;
+                values.push(std::mem::replace(&mut entry.1, Value::Undefined));
+                HANDLE_REFS.with(|r| {
+                    if let Some(refs) = r.borrow_mut().get_mut(index) {
+                        *refs = 0;
+                    }
+                });
+            }
+        }
+        values
+    });
+    LIVE_BY_OBJECT.with(|m| {
+        m.borrow_mut().retain(|_, ids| {
+            ids.retain(|&id| {
+                HANDLES.with(|h| {
+                    h.borrow()
+                        .get((id as usize).wrapping_sub(1))
+                        .is_some_and(|e| e.0 != UNLOADED_OWNER)
+                })
+            });
+            !ids.is_empty()
+        });
+    });
+    // dropped after every table borrow above is released
+    drop(values);
 }
 
 /// The error for an id past the handle table.
@@ -5564,6 +5607,7 @@ pub extern "C" fn thaw_tjs_unload(handle: i64) {
             Ok(())
         });
     }
+    release_package_handles(handle as usize);
     PACKAGES.with(|ps| {
         if let Some(slot) = ps.borrow_mut().get_mut(handle as usize) {
             *slot = None;
@@ -6419,6 +6463,27 @@ mod handle_identity_tests {
 
     fn refs_of(id: i64) -> u32 {
         HANDLE_REFS.with(|r| r.borrow()[id as usize - 1])
+    }
+
+    #[test]
+    fn unloading_a_package_retires_its_handles() {
+        let bundle = r#"module.exports = (function(require){ var __thaw_bundle_factories = {"a/index.js": function(module, exports, require) { exports.v = 1; }}; var __thaw_bundle_require_maps = {"a/index.js": {}}; var __thaw_bundle_entry_key = "a/index.js"; })(globalThis.require);"#;
+        let package = Package::load(bundle).expect("package loads");
+        let index = PACKAGES.with(|ps| {
+            let mut ps = ps.borrow_mut();
+            ps.push(Some(package));
+            ps.len() - 1
+        });
+        let mut it = Interp::new();
+        let id = store_handle(index, eval(&mut it, "({k: 1})"));
+        assert!(slot(id as u64).is_some());
+        thaw_tjs_unload(index as i64);
+        assert!(slot(id as u64).is_none());
+        assert!(!handle_is_live(id));
+        assert_eq!(
+            on_handle(id as u64, |_, _, _| Ok(())),
+            Err(stale_handle(id as u64))
+        );
     }
 
     #[test]

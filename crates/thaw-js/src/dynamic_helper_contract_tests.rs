@@ -26,7 +26,7 @@ fn run_realm(src: &str) -> Vec<String> {
         let message = it.get(&v, "message").unwrap_or(Value::Undefined);
         panic!("helper program threw: {}", it.to_str(&message));
     }
-    it.out
+    std::mem::take(&mut it.out)
 }
 
 /// Typeof of `name` in the default realm, looked up exactly as `thaw_tjs_get_global` does.

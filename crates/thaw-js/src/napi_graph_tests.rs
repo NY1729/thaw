@@ -509,3 +509,23 @@ fn napi_graph_encode_failed_retain_is_an_error_and_names_no_tag() {
     let err = encode_named("pair").unwrap_err();
     assert!(err.contains("Cannot retain native graph handle"), "{err}");
 }
+
+/// A tagged object of a realm that is torn down: the tag is forgotten, so the tag no longer holds it.
+#[test]
+fn tags_of_a_dropped_realm_are_forgotten() {
+    use crate::napi_graph::{is_tagged_for_test, tag, Tag};
+    let mut it = crate::Interp::new();
+    it.run("globalThis.o = { k: 1 };").expect("script runs");
+    let Some(Value::Object(o)) = it.lookup(&it.global.clone(), "o") else {
+        panic!("object global");
+    };
+    tag(&o, Tag::Function, "7");
+    assert!(is_tagged_for_test(&o));
+    drop(it);
+    assert!(!is_tagged_for_test(&o));
+    assert_eq!(
+        std::rc::Rc::strong_count(&o),
+        1,
+        "only the test holds the object"
+    );
+}

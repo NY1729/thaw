@@ -200,3 +200,18 @@ fn symbol_string_coercion_is_a_type_error_exception() {
     let unknown = thaw_tjs_napi_symbol_abstract_to_string_units_result(owner, 6161);
     assert!(!unknown.error.is_null());
 }
+
+/// A pinned native Symbol of a dropped realm is forgotten with the realm: its id names nothing.
+#[test]
+fn pins_of_a_dropped_realm_are_forgotten() {
+    use crate::napi_symbols::{is_registered_for_test, pin_for_test};
+    let mut it = crate::Interp::new();
+    it.run("globalThis.s = Symbol('x');").expect("script runs");
+    let Some(crate::Value::Object(s)) = it.lookup(&it.global.clone(), "s") else {
+        panic!("symbol global");
+    };
+    pin_for_test(9, 3, &s);
+    assert!(is_registered_for_test(9, 3));
+    drop(it);
+    assert!(!is_registered_for_test(9, 3));
+}
