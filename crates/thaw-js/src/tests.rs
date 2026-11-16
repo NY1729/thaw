@@ -3227,16 +3227,13 @@ fn a_date_crosses_the_typed_abi_as_a_wire_node_both_ways() {
         .starts_with("{\"__thaw_tjs_handle__\":"));
     assert_eq!(
         typed_call("\u{3}dt::plus", &format!("[{},5]", date("86400000"))).unwrap(),
-        date("86400005")
+        "{\"__thaw_tjs_date__\":86400005,\"__thaw_tjs_id__\":1}"
     );
     assert_eq!(
         typed_call("dt::nested", "[]").unwrap(),
-        format!(
-            "{{\"at\":{},\"n\":[{}],\"none\":{}}}",
-            date("5"),
-            date("7"),
-            date("\"NaN\"")
-        )
+        // each Date in the result carries its own `__thaw_tjs_id__` (first-write order)
+        r#"{"at":{"__thaw_tjs_date__":5,"__thaw_tjs_id__":1},"n":[{"__thaw_tjs_date__":7,"__thaw_tjs_id__":2}],"none":{"__thaw_tjs_date__":"NaN","__thaw_tjs_id__":3}}"#
+            .to_string()
     );
 }
 
