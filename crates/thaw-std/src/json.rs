@@ -1838,6 +1838,23 @@ fn error_prop_value(error: *const c_char, key: &[u8]) -> Value {
         return napi_undefined_value();
     };
     let json = unsafe { thaw_error_get_prop_json(error, key.as_ptr()) };
+    if trace13() {
+        let side = (!json.is_null()).then(|| {
+            unsafe { CStr::from_ptr(json) }
+                .to_string_lossy()
+                .into_owned()
+        });
+        let cause = unsafe { thaw_error_cause(error) };
+        let cause_text = (!cause.is_null()).then(|| {
+            unsafe { CStr::from_ptr(cause) }
+                .to_string_lossy()
+                .into_owned()
+        });
+        eprintln!(
+            "TRACE13 error_prop key={:?} side_table_json={side:?} cause_text={cause_text:?}",
+            String::from_utf8_lossy(key.as_bytes())
+        );
+    }
     if !json.is_null() {
         if let Some(value) = JsonParser::new(unsafe { CStr::from_ptr(json) }.to_bytes()).parse() {
             return live_handle_prop(value);
@@ -7220,6 +7237,14 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
     let key = to_key(key);
     if let Value::Host(lease) = value {
         return track_typed_decode_child(leak(host_get_property(lease, &key)));
+    }
+    if trace13() {
+        eprintln!(
+            "TRACE13 json_get error_ref={} key={:?} kind={}",
+            error_ref(value).is_some(),
+            String::from_utf8_lossy(&key),
+            trace13_kind(value)
+        );
     }
     if let Some(error) = error_ref(value) {
         return track_typed_decode_child(leak(error_prop_value(error, &key)));

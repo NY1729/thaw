@@ -2881,6 +2881,14 @@ pub extern "C" fn thaw_tjs_native_object_pointer(
             }
             if t13 {
                 eprintln!("TRACE13 native_object_pointer handle={handle} result={result:?}");
+                if result == 0 {
+                    // Rust cannot see the prelude's shadow target; same_as_wrapper_target stays unknown here.
+                    eprintln!(
+                        "TRACE13 non_owner handle={handle} proto_is_null={} own_keys={} same_as_wrapper_target=unknown_rust_side",
+                        obj.proto.borrow().is_none(),
+                        obj.props().borrow().len()
+                    );
+                }
             }
             result
         }))
@@ -4273,6 +4281,7 @@ fn error_object(it: &mut Interp, tagged: &str, id_hint: Option<u64>) -> Result<V
             .filter(|(n, m, _)| n.as_str() == name && m.as_str() == message)
             .map(|(_, _, err)| err.clone())
     });
+    let hit = cached.is_some();
     let err = match cached {
         Some(err) => err,
         None => {
@@ -4302,6 +4311,14 @@ fn error_object(it: &mut Interp, tagged: &str, id_hint: Option<u64>) -> Result<V
             err
         }
     };
+    if trace13() {
+        let cause_segment = suffix_segment(suffix, '\u{2}');
+        eprintln!(
+            "TRACE13 error_object key=id:{native_id:?} name={name:?} message={message:?} cache={} cause_segment={cause_segment:?} cause_applied={}",
+            if hit { "hit" } else { "miss" },
+            !hit && cause_segment.is_some_and(|c| !c.is_empty())
+        );
+    }
     // the bag is this crossing's own state: its writes are not echoed to the native side table
     let sync_off = std::mem::replace(&mut it.native_sync_off, true);
     let mut has_code = false;
@@ -4945,6 +4962,27 @@ fn native_promise_state(_promise: usize) -> u8 {
 fn native_promise_mark_handled(_promise: usize) {}
 
 fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<Value> {
+    if trace13() {
+        let (identity, label) = CALLBACKS
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|c| (c.identity, function_label(c.identity)))
+            .unwrap_or((0, None));
+        let receiver = match this {
+            Value::Object(o) => format!(
+                "{} proto_is_null={} own_keys={}",
+                trace13_value(Some(this)),
+                o.proto.borrow().is_none(),
+                o.props().borrow().len()
+            ),
+            other => trace13_value(Some(other)),
+        };
+        eprintln!(
+            "TRACE13 cb_enter registry_id={id} identity={identity:#x} name={label:?} receiver={receiver} argc={}",
+            args.len()
+        );
+    }
     let Some((adapter, context, params, graph, finish, has_rest, mask, method)) =
         CALLBACKS.lock().unwrap().get(id).map(|c| {
             (
