@@ -3746,11 +3746,15 @@ unsafe extern "C" fn mask_adapter(
 }
 
 fn mask_callback(mask: u64) -> u64 {
+    mask_callback_with_arity(mask, 1)
+}
+
+fn mask_callback_with_arity(mask: u64, arity: u64) -> u64 {
     let made = crate::host::thaw_tjs_register_native_callback_graph(
         mask_adapter as *const _,
         std::ptr::null(),
         mask,
-        1,
+        arity,
         0,
         std::ptr::null(),
         0,
@@ -3795,6 +3799,21 @@ fn graph_mask_passes_primitive_jsvalue_arguments_as_handles() {
         );
         assert_eq!(seen[0].1, [shown]);
     }
+}
+
+#[test]
+fn graph_mask_two_jsvalue_params_lease_both_as_nonzero_handles() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(MASK_BUNDLE).unwrap();
+    assert_eq!(thaw_tjs_register(c"mk".as_ptr(), source.as_ptr()), 1);
+    // bits 0 and 1: both declared parameters are JsValue (the class-instance shape)
+    let callback = mask_callback_with_arity(0x3, 2);
+    call_mask_callback(callback, r#"{"a":[{"v":"first"},{"v":"second"}]}"#);
+    let seen = seen_calls();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0.matches("\"hdl\":").count(), 2, "{}", seen[0].0);
+    assert!(!seen[0].0.contains("\"hdl\":0"), "{}", seen[0].0);
+    assert_eq!(seen[0].1, ["first", "second"]);
 }
 
 #[test]
@@ -8099,7 +8118,7 @@ fn lazy_prototype_json_assign_spread_and_inspect_skip_it() {
 fn lazy_prototype_generators_arrows_methods_and_bound_functions() {
     assert_eq!(
         one("function* gen(){}; var d = Object.getOwnPropertyDescriptor(gen,'prototype'); console.log(JSON.stringify(Object.getOwnPropertyNames(gen)), d.writable, d.enumerable, d.configurable, Object.getPrototypeOf(gen.prototype) === Object.getPrototypeOf(function*(){}).prototype, typeof gen.prototype);"),
-        r#"["length","name","prototype"] true false false false object"#
+        r#"["length","name","prototype"] true false false true object"#
     );
     assert_eq!(
         one("function* gen(){ yield 1; yield 2; }; console.log([...gen()].join(','), Object.getPrototypeOf(gen()) === gen.prototype);"),

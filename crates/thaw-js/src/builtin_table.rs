@@ -292,6 +292,18 @@ impl Interp {
                     _ => None,
                 };
             }
+            "%GeneratorFunction%" | "%AsyncFunction%" | "%AsyncGeneratorFunction%" => {
+                let kind = match name {
+                    "%GeneratorFunction%" => self.rt.generator_function_proto.clone(),
+                    "%AsyncFunction%" => self.rt.async_function_proto.clone(),
+                    _ => self.rt.async_generator_function_proto.clone(),
+                };
+                // the constructor is the `constructor` of its %...Function.prototype% object
+                return match find_own(&kind?, "constructor") {
+                    Some((Slot::Data(Value::Object(c)), _)) => Some(c),
+                    _ => None,
+                };
+            }
             "%AsyncIteratorPrototype%" => {
                 return self
                     .rt

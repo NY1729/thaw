@@ -36,6 +36,50 @@ pub fn allow_native_bytes_type(enabled: bool) -> NativeBytesTypeGuard {
     NativeBytesTypeGuard(previous)
 }
 
+thread_local! {
+    /// Bare names of the classes declared in the module being lowered by
+    /// `lower_dts_class`. A callback parameter typed as one of them (`(list:
+    /// PerformanceObserverEntryList) => void` on a same-module constructor)
+    /// lowers to `HirType::JsValue` instead of the `Json` fallback, so the
+    /// callback receives a live handle the closure can call methods on.
+    /// Empty everywhere else, so free functions and other packages are
+    /// unaffected.
+    static CLASS_CALLBACK_PARAM_NAMES: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+/// Restores the previous `CLASS_CALLBACK_PARAM_NAMES` set when dropped.
+pub struct ClassCallbackParamGuard(HashSet<String>);
+
+impl Drop for ClassCallbackParamGuard {
+    fn drop(&mut self) {
+        let previous = std::mem::take(&mut self.0);
+        CLASS_CALLBACK_PARAM_NAMES.with(|names| *names.borrow_mut() = previous);
+    }
+}
+
+/// Scopes `CLASS_CALLBACK_PARAM_NAMES` to the caller's own duration.
+pub fn allow_class_callback_params(names: HashSet<String>) -> ClassCallbackParamGuard {
+    ClassCallbackParamGuard(
+        CLASS_CALLBACK_PARAM_NAMES.with(|set| std::mem::replace(&mut *set.borrow_mut(), names)),
+    )
+}
+
+/// True when a callback parameter's annotation is a bare reference to a
+/// class declared in the module being lowered (see
+/// `CLASS_CALLBACK_PARAM_NAMES`). `Error | null` and undeclared names are
+/// not matched.
+fn is_declared_class_callback_param(ty: &TsType) -> bool {
+    matches!(
+        ty,
+        TsType::TsTypeRef(reference)
+            if reference.type_params.is_none()
+                && CLASS_CALLBACK_PARAM_NAMES.with(|names| {
+                    names.borrow().contains(&type_reference_name(&reference.type_name))
+                })
+    )
+}
+
 /// Mirrors `thaw_hir::lower::lower_ts_type`'s mapping rules, but never
 /// fails: anything it can't map becomes `DtsType::Unsupported` with a
 /// reason, for `classify` to report per-parameter/return instead of
@@ -290,6 +334,11 @@ fn classify_ts_type(
                 let mut ty = match classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
                 {
                     DtsType::Native(ty) => ty,
+                    // A same-module class instance is a live handle, not JSON
+                    // (see `CLASS_CALLBACK_PARAM_NAMES`).
+                    DtsType::Unsupported(_) if is_declared_class_callback_param(&annotation.type_ann) => {
+                        HirType::JsValue
+                    }
                     // Callback values cross the JavaScript/N-API boundary as
                     // dynamic JSON. In real Node declarations the error slot
                     // is normally `Error | null` and result slots are often

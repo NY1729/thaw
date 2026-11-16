@@ -795,6 +795,15 @@ impl Interp {
         // ----- typed arrays -----
         let ta_proto = self.plain(); // %TypedArray%.prototype: methods come from the JS prelude
         self.rt.typed_base_proto = Some(ta_proto.clone());
+        // %TypedArray%.prototype[@@toStringTag]: the [[TypedArrayName]] of the receiver (undefined for others)
+        let tag_get = self.native(|_, this, _| {
+            Ok(match Self::typed_of(this) {
+                Some(t) => Value::str(t.ty.name()),
+                None => Value::Undefined,
+            })
+        });
+        let tag_key = self.well_known_key("toStringTag");
+        crate::define_accessor(&ta_proto, &tag_key, Some(tag_get), None, false);
         // %TypedArray% itself: abstract, and the [[Prototype]] of every concrete constructor (so
         // `from`/`of` and `Function.prototype` are inherited, as in V8).
         let Value::Object(ta_ctor) = self.native(|it, _, _| {
@@ -961,7 +970,6 @@ const TYPED_PRELUDE: &str = r#"
       return this[k];
     } }[k]);
   });
-  acc(TP, TAG, function () { return isTA(this) ? this.constructor.name : undefined; });
   acc(ArrayBuffer.prototype, 'byteLength', function () {
     if (!(this instanceof ArrayBuffer)) throw new TypeError('Receiver is not an ArrayBuffer');
     return this.byteLength;

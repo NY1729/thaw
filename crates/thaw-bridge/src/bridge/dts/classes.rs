@@ -58,14 +58,19 @@ pub fn parse_dts_classes_named(
             instance_class_names.remove(&name);
         }
     }
-    let mut classes = scoped_class_decls.iter().map(|(qualified, _name, class)| {
-        let (context, generic_context) = scoped_type_context(
-            declaration_scope(qualified), &interfaces, &generic_interfaces,
+    let mut classes = {
+        let _class_callback_guard = allow_class_callback_params(
+            instance_class_names.keys().cloned().collect(),
         );
-        lower_dts_class(qualified, class, &context, &generic_context, &instance_class_names,
-            declaration_scope(qualified), &declared_type_names)
-    })
-        .collect::<Vec<_>>();
+        scoped_class_decls.iter().map(|(qualified, _name, class)| {
+            let (context, generic_context) = scoped_type_context(
+                declaration_scope(qualified), &interfaces, &generic_interfaces,
+            );
+            lower_dts_class(qualified, class, &context, &generic_context, &instance_class_names,
+                declaration_scope(qualified), &declared_type_names)
+        })
+            .collect::<Vec<_>>()
+    };
     let declared = classes
         .iter()
         .map(|class| (class.name.clone(), class.clone()))

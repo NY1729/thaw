@@ -366,6 +366,8 @@ impl Interp {
             return self.throw_error("RangeError", "Maximum call stack size exceeded");
         }
         self.depth += 1;
+        let mark = self.call_frames.len();
+        self.call_frames.push((def.clone(), true));
         let result = (|| {
             if !info.derived {
                 self.run_fields(ctor, this)?;
@@ -384,6 +386,7 @@ impl Interp {
                 Ok(Value::Undefined)
             }
         })();
+        self.call_frames.truncate(mark);
         self.depth -= 1;
         result
     }

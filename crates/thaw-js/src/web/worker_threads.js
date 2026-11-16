@@ -1,7 +1,7 @@
 // node:worker_threads, main-thread side (W1, W3, W5): isMainThread/threadId, MessageChannel, environment data, and the
 // `Worker` class over the `__thaw_worker_*` natives of worker.rs (one OS thread and one Interp per worker). The
-// stdio streams (W5) are the private shim of worker_stream.js. `resourceLimits` and SHARE_ENV are not
-// implemented yet; thaw-cli keeps programs that use them on QuickJS (thaw_js_worker_threads_blocker).
+// stdio streams (W5) are the private shim of worker_stream.js. The `resourceLimits` are reported but not enforced yet, and
+// SHARE_ENV is not implemented; thaw-cli keeps programs that use them on QuickJS (thaw_js_worker_threads_blocker).
 (function () {
   const environmentData = new Map();
   let nextThreadId = 1;
@@ -84,13 +84,25 @@
       opts.stdin = options.stdin === true;
       opts.stdout = options.stdout === true;
       opts.stderr = options.stderr === true;
-      const handle = __thaw_worker_spawn(code, JSON.stringify(opts));
+      // resourceLimits as Node 22 reports them right after construction: unset numbers are -1, stackSizeMb is 4
+      const limits = options.resourceLimits;
+      const limit = key => (limits && typeof limits[key] === 'number' ? limits[key] : -1);
+      const resourceLimits = {
+        maxYoungGenerationSizeMb: limit('maxYoungGenerationSizeMb'),
+        maxOldGenerationSizeMb: limit('maxOldGenerationSizeMb'),
+        codeRangeSizeMb: limit('codeRangeSizeMb'),
+        stackSizeMb: limits && typeof limits.stackSizeMb === 'number' ? limits.stackSizeMb : 4,
+      };
+      opts.resourceLimits = resourceLimits;
+      // heap limit (MiB, -1 = none) and stack (MiB): the natives' numeric arguments
+      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb);
       let resolveExit;
       const state = {
         handle,
         exited: false,
         exitCode: undefined,
         refd: true,
+        resourceLimits,
         exitPromise: new Promise(resolve => { resolveExit = resolve; }),
         resolveExit,
       };
@@ -133,6 +145,8 @@
     }
 
     hasRef() { return states.get(this).refd; }
+
+    get resourceLimits() { return states.get(this).resourceLimits; }
   }
 
   // Events from the Rust poll (worker.rs `poll`), delivered by the event loop: [{handle, type, ...}].
