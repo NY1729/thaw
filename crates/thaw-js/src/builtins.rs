@@ -30,9 +30,19 @@ pub(crate) const PRELUDE: &str = r#"
     var m = String(this.message);
     return m ? this.name + ': ' + m : String(this.name);
   });
-  def(E, 'captureStackTrace', function () {});
-  // V8 hook: unset by default (undefined), assignable by addon loaders (`bindings` saves and restores it)
-  def(E, 'prepareStackTrace', undefined);
+  // string stack only (header + one frame line, no call frames yet); ctorOpt is accepted and ignored
+  function captureStackTrace(target, ctorOpt) {
+    if (target === null || (typeof target !== 'object' && typeof target !== 'function')) throw new TypeError('invalid_argument');
+    var name = target.name === undefined ? 'Error' : String(target.name);
+    var msg = target.message === undefined ? '' : String(target.message);
+    var header = name && msg ? name + ': ' + msg : (name || msg);
+    Object.defineProperty(target, 'stack', { value: header + '\n    at <anonymous>', writable: true, enumerable: false, configurable: true });
+  }
+  def(E, 'captureStackTrace', captureStackTrace);
+  // V8 hook (plain node 22 default: a named function); assignable by addon loaders (`bindings` saves and restores it);
+  // the engine does not call it yet (no CallSites)
+  function ErrorPrepareStackTrace(error, callsites) { return String(error); }
+  def(E, 'prepareStackTrace', ErrorPrepareStackTrace);
   E.stackTraceLimit = 10;
   Error = E;
   TypeError = mkError('TypeError', E);

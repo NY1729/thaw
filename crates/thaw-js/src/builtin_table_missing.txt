@@ -363,11 +363,6 @@ DecompressionStream.prototype	readable
 DecompressionStream.prototype	writable
 DecompressionStream.prototype.@@nodejs.util.inspect.custom	length
 DecompressionStream.prototype.@@nodejs.util.inspect.custom	name
-Error	prepareStackTrace
-Error.prepareStackTrace	length
-Error.prepareStackTrace	name
-Error.prepareStackTrace	prototype
-Error.prepareStackTrace.prototype	constructor
 Event.prototype	@@nodejs.util.inspect.custom
 Event.prototype	bubbles
 Event.prototype	cancelBubble
