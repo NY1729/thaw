@@ -286,3 +286,30 @@ fn legacy_caller_and_arguments_match_node_by_receiver_kind() {
     it.run(LEGACY_PROBE).expect("probe runs");
     assert_eq!(it.out.join("\n"), LEGACY_EXPECTED);
 }
+
+/// Symbol-keyed own properties of the prototypes PR F touched, as Node 22 lists them (`String(symbol)`).
+const SYMBOL_KEYS_PROBE: &str = r##"const names = ['Object.prototype', 'Function.prototype', 'Array.prototype', 'Symbol.prototype', 'Date.prototype', 'DataView.prototype', 'Boolean.prototype'];
+const out = [];
+for (const n of names) {
+  const o = n.split('.').reduce((a, k) => a[k], globalThis);
+  out.push(n + ': ' + Object.getOwnPropertySymbols(o).map(String).join(' | '));
+}
+console.log(out.join('\n'));
+"##;
+
+/// Node 22 output for `SYMBOL_KEYS_PROBE`.
+const SYMBOL_KEYS_EXPECTED: &str = r##"Object.prototype: 
+Function.prototype: Symbol(Symbol.hasInstance)
+Array.prototype: Symbol(Symbol.iterator) | Symbol(Symbol.unscopables)
+Symbol.prototype: Symbol(Symbol.toStringTag) | Symbol(Symbol.toPrimitive)
+Date.prototype: Symbol(Symbol.toPrimitive)
+DataView.prototype: Symbol(Symbol.toStringTag)
+Boolean.prototype: "##;
+
+#[test]
+fn prototype_symbol_keys_match_node_and_stringify_as_symbols() {
+    let mut it = Interp::new();
+    it.run(SYMBOL_KEYS_PROBE).expect("probe runs");
+    assert_eq!(it.out.join("\n"), SYMBOL_KEYS_EXPECTED);
+    assert!(!it.out.join("\n").contains("[object Object]"));
+}

@@ -38,7 +38,10 @@
 %GeneratorFunction%.prototype.prototype	next
 %GeneratorFunction%.prototype.prototype	return
 %GeneratorFunction%.prototype.prototype	throw
+%TypedArray%	@@species
 %TypedArray%	from
+%TypedArray%	length
+%TypedArray%	name
 %TypedArray%	of
 %TypedArray%	prototype
 %TypedArray%.from	length

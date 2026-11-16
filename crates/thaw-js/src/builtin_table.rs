@@ -269,7 +269,20 @@ impl Interp {
             let Some(Value::Object(u)) = self.lookup(&self.global, "Uint8Array") else {
                 return None;
             };
-            return u.proto.borrow().clone();
+            let proto = u.proto.borrow().clone()?;
+            // thaw-js has no %TypedArray% constructor of its own: Uint8Array's prototype is then Function.prototype.
+            // Treat the owner as absent, so its rows are not applied to Function.prototype.
+            let function_proto = match self.lookup(&self.global, "Function") {
+                Some(Value::Object(f)) => match find_own(&f, "prototype") {
+                    Some((Slot::Data(Value::Object(p)), _)) => Some(p),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if function_proto.is_some_and(|f| Rc::ptr_eq(&f, &proto)) {
+                return None;
+            }
+            return Some(proto);
         }
         if name.starts_with('%') {
             return None;
