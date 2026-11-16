@@ -20,6 +20,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
+      THAW_JS_STRICT: "on"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
@@ -138,6 +139,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
+      THAW_JS_STRICT: "on"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
@@ -273,6 +275,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
+      THAW_JS_STRICT: "on"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
@@ -411,6 +414,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
+      THAW_JS_STRICT: "on"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
@@ -557,6 +561,7 @@ jobs:
       THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
+      THAW_JS_STRICT: "on"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
@@ -697,6 +702,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
+      THAW_JS_STRICT: "on"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
@@ -832,6 +838,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
+      THAW_JS_STRICT: "on"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       THAW_RUN_NPM_INTEGRATION: "1"
@@ -1013,6 +1020,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "1"
       CARGO_INCREMENTAL: "0"
+      THAW_JS_STRICT: "on"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -1121,6 +1129,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
+      THAW_JS_STRICT: "on"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
