@@ -419,6 +419,26 @@ impl Interp {
         self.to_str(v).into_rc()
     }
 
+    /// The `name` a function takes from property key `key`: `[desc]` for an internal `@@sym:<id>`
+    /// key (`[]` for an empty description, `""` for none), the key itself otherwise.
+    pub(crate) fn fn_name_of_key(&self, key: &str) -> Rc<str> {
+        let Some(id) = key
+            .strip_prefix("@@sym:")
+            .and_then(|i| i.parse::<u64>().ok())
+        else {
+            return key.into();
+        };
+        let desc = self
+            .rt
+            .symbols
+            .get(&id)
+            .and_then(|o| match &*o.kind.borrow() {
+                Kind::Symbol { desc, .. } => desc.clone(),
+                _ => None,
+            });
+        desc.map_or("".into(), |d| format!("[{d}]").into())
+    }
+
     /// A new symbol with `desc`, made by the intrinsic `Symbol` constructor (not the global `Symbol`).
     pub(crate) fn new_symbol(&mut self, desc: Option<Rc<str>>) -> R<Value> {
         let ctor = self
