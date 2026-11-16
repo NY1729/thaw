@@ -573,6 +573,25 @@ pub(crate) fn trace_wire() -> bool {
     *ON.get_or_init(|| std::env::var_os("THAW_JS_TRACE_WIRE").is_some())
 }
 
+/// TRACE13 scratch diagnostics (never merged): gate read once.
+pub(crate) fn trace13() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("THAW_TRACE13").is_some())
+}
+
+/// TRACE13: a slot's value as it matters for native receiver checks.
+fn trace13_value(value: Option<&Value>) -> String {
+    match value {
+        None => "no-slot".into(),
+        Some(Value::Object(obj)) => format!(
+            "Object(ptr={:?} in_native_owners={})",
+            Rc::as_ptr(obj),
+            NATIVE_OWNERS.with(|o| o.borrow().contains_key(&(Rc::as_ptr(obj) as usize)))
+        ),
+        Some(_) => "non-object".into(),
+    }
+}
+
 /// Trace one handle operation with its outstanding reference count (no-op unless tracing).
 /// Must not be called while `HANDLE_REFS` is borrowed.
 fn trace_h(op: &str, handle: i64) {
@@ -2679,6 +2698,13 @@ fn segment_matches(have: &str, want: &str) -> bool {
 /// wanted field matches a distinct actual field. The empty `expected` matches any well-formed layout.
 /// Port of QuickJS's `layoutContains`.
 fn layout_contains(actual: &str, expected: &str) -> bool {
+    if trace13() {
+        eprintln!(
+            "TRACE13 layout_contains actual={actual:?} expected={expected:?} have={:?} want={:?}",
+            layout_fields(actual),
+            layout_fields(expected)
+        );
+    }
     if actual == expected {
         return true;
     }
@@ -2809,8 +2835,15 @@ pub extern "C" fn thaw_tjs_native_object_pointer(
         let expected = cstr(expected_layout).ok_or("native object pointer requires a layout")?;
         let value = slot(handle).map(|(_, v)| v);
         let trace = std::env::var_os("THAW_JS_TRACE_WIRE").is_some();
+        let t13 = trace13();
         if trace {
             eprintln!("[tjs] native_object_pointer handle={handle} expected_layout={expected:?}");
+        }
+        if t13 {
+            eprintln!(
+                "TRACE13 native_object_pointer handle={handle} expected_layout={expected:?} slot={}",
+                trace13_value(value.as_ref())
+            );
         }
         let Some(Value::Object(obj)) = value else {
             return Ok(0);
@@ -2818,6 +2851,13 @@ pub extern "C" fn thaw_tjs_native_object_pointer(
         Ok(NATIVE_OWNERS.with(|o| {
             let o = o.borrow();
             let owners = o.get(&(Rc::as_ptr(&obj) as usize));
+            if t13 {
+                eprintln!(
+                    "TRACE13 native_object_pointer interned_owner_lookup found={} owner_count={}",
+                    owners.is_some(),
+                    owners.map_or(0, |owners| owners.len())
+                );
+            }
             if trace {
                 for (pointer, layout) in owners.into_iter().flatten() {
                     eprintln!("[tjs]   owner ptr={pointer:?} layout={layout:?}");
@@ -2827,11 +2867,20 @@ pub extern "C" fn thaw_tjs_native_object_pointer(
                 .and_then(|owners| {
                     owners
                         .iter()
-                        .find(|(_, layout)| layout_contains(layout, &expected))
+                        .find(|(_, layout)| {
+                    let verdict = layout_contains(layout, &expected);
+                    if t13 {
+                        eprintln!("TRACE13 native_object_pointer candidate layout={layout:?} verdict={verdict}");
+                    }
+                    verdict
+                })
                 })
                 .map_or(0, |(pointer, _)| *pointer as i64);
             if trace {
                 eprintln!("[tjs]   result={result:?}");
+            }
+            if t13 {
+                eprintln!("TRACE13 native_object_pointer handle={handle} result={result:?}");
             }
             result
         }))

@@ -1908,9 +1908,13 @@ fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
         }
         _ => None,
     };
+    let via_handle = marker.is_some();
     let Ok(json) = CString::new(marker.unwrap_or_else(|| value.to_string())) else {
         return;
     };
+    if trace13() {
+        eprintln!("TRACE13 set_error_prop key={key:?} via_handle={via_handle} value_kind={} stored={json:?}", trace13_kind(value));
+    }
     unsafe { thaw_error_set_prop(error, key.as_ptr(), json.as_ptr()) };
 }
 
@@ -8179,16 +8183,69 @@ unsafe extern "C" fn thaw_json_capture_stack_trace_at(
     0.0
 }
 
+/// TRACE13 scratch diagnostics (never merged): gate read once.
+fn trace13() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("THAW_TRACE13").is_some())
+}
+
+/// TRACE13: one-line description of a Json value's representation.
+fn trace13_kind(value: &Value) -> String {
+    match value {
+        Value::Null => "Null".into(),
+        Value::Bool(_) => "Bool".into(),
+        Value::Number(_) => "Number".into(),
+        Value::BigInt(_) => "BigInt".into(),
+        Value::String(text) => format!(
+            "String(framed={} error_ref={} head={:?})",
+            error_id(text.as_bytes()).is_some(),
+            error_ref(value).is_some(),
+            text.chars().take(80).collect::<String>()
+        ),
+        Value::Wtf8(_) => "Wtf8".into(),
+        Value::Array(_) => "Array".into(),
+        Value::Object(_) => format!(
+            "Object(branded={} keys={:?})",
+            is_branded_wrapper(value),
+            value.as_object().map(|fields| fields
+                .keys()
+                .map(|k| String::from_utf8_lossy(k).into_owned())
+                .collect::<Vec<_>>())
+        ),
+        Value::Host(lease) => format!("Host(handle={})", lease.handle),
+    }
+}
+
 /// `value instanceof <ErrorClass>` for a Json copy of an Error (0 for every other value).
 #[no_mangle]
 pub extern "C" fn thaw_json_is_error_instance(value: *const Value, class: *const c_char) -> u8 {
-    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
-        return u8::from(host_error_instance(lease, class));
+    let value_ref = unsafe { value.as_ref() };
+    if let Some(Value::Host(lease)) = value_ref {
+        let verdict = host_error_instance(lease, class);
+        if trace13() {
+            eprintln!(
+                "TRACE13 is_error_instance path=host class={:?} verdict={verdict}",
+                to_str(class)
+            );
+        }
+        return u8::from(verdict);
     }
-    let Some(error) = unsafe { value.as_ref() }.and_then(error_ref) else {
+    let Some(error) = value_ref.and_then(error_ref) else {
+        if trace13() {
+            let kind = value_ref.map(|v| trace13_kind(v)).unwrap_or_default();
+            eprintln!(
+                "TRACE13 is_error_instance path=unframed kind={kind} class={:?} verdict=false",
+                to_str(class)
+            );
+        }
         return 0;
     };
-    u8::from(unsafe { thaw_error_is_instance(error, class) })
+    let verdict = unsafe { thaw_error_is_instance(error, class) };
+    if trace13() {
+        let kind = value_ref.map(|v| trace13_kind(v)).unwrap_or_default();
+        eprintln!("TRACE13 is_error_instance path=framed kind={kind} class={:?} error_ptr={error:?} verdict={verdict}", to_str(class));
+    }
+    u8::from(verdict)
 }
 
 /// `instanceof` for a live thaw-js Error lease, gated on the Error factory (the QuickJS lane has
@@ -8197,16 +8254,33 @@ pub extern "C" fn thaw_json_is_error_instance(value: *const Value, class: *const
 /// matched.
 // ponytail: name-equality class check, not a prototype-chain walk; upgrade if a user subclass with an inherited name needs it.
 fn host_error_instance(lease: &HostLease, class: *const c_char) -> bool {
-    if ERROR_FACTORY_OPERATIONS.with(|slot| slot.get().is_none())
-        || host_query(lease, 22).as_deref() != Some("1")
-    {
+    let factory = ERROR_FACTORY_OPERATIONS.with(|slot| slot.get().is_some());
+    let query = if factory { host_query(lease, 22) } else { None };
+    let class = to_str(class);
+    if trace13() {
+        eprintln!("TRACE13 host_error_instance handle={} class={class:?} factory={factory} query22={query:?}", lease.handle);
+    }
+    if !factory || query.as_deref() != Some("1") {
+        if trace13() {
+            eprintln!("TRACE13 host_error_instance verdict=false reason=not_error_family");
+        }
         return false;
     }
-    let class = to_str(class);
     if class == "Error" {
+        if trace13() {
+            eprintln!("TRACE13 host_error_instance verdict=true reason=class_is_Error");
+        }
         return true;
     }
-    matches!(host_get_property(lease, b"name"), Value::String(name) if name.as_str() == class)
+    let name = host_get_property(lease, b"name");
+    let verdict = matches!(&name, Value::String(name) if name.as_str() == class);
+    if trace13() {
+        eprintln!(
+            "TRACE13 host_error_instance name={} verdict={verdict} reason=name_match",
+            trace13_kind(&name)
+        );
+    }
+    verdict
 }
 
 #[no_mangle]
@@ -11193,7 +11267,29 @@ fn object_insert(object: *mut Value, key: *const c_char, value: Value) {
         return;
     }
     if let Some(error) = unsafe { object.as_ref() }.and_then(error_ref) {
+        if trace13() {
+            eprintln!(
+                "TRACE13 error_write key={key:?} before={}",
+                trace13_kind(unsafe { &*object })
+            );
+        }
         set_error_prop(error, &key, &value);
+        if trace13() {
+            let live = match unsafe { &*object } {
+                Value::String(text) => format!(
+                    "{:?}",
+                    String::from_utf8_lossy(&live_error_bytes(text.as_bytes()))
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                ),
+                _ => "not-a-string".into(),
+            };
+            eprintln!(
+                "TRACE13 error_write after={} live_side_table={live}",
+                trace13_kind(unsafe { &*object })
+            );
+        }
         return;
     }
     if !object_writable(object, &key) {
@@ -11282,10 +11378,16 @@ pub extern "C" fn thaw_json_object_delete(object: *mut Value, key: *const c_char
     }
     let key = to_key(key);
     if let Some(error) = error_ref(value) {
-        return u8::from(
-            CString::new(key)
-                .is_ok_and(|key| unsafe { thaw_error_delete_prop(error, key.as_ptr()) }),
-        );
+        let shown = String::from_utf8_lossy(&key).into_owned();
+        let deleted = CString::new(key)
+            .is_ok_and(|key| unsafe { thaw_error_delete_prop(error, key.as_ptr()) });
+        if trace13() {
+            eprintln!(
+                "TRACE13 error_delete key={shown:?} deleted={deleted} after={}",
+                trace13_kind(value)
+            );
+        }
+        return u8::from(deleted);
     }
     if json_has_own_value(value, &key)
         && unsafe { thaw_object_state(thaw_json_state_key(object), 1) }
