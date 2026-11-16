@@ -91,5 +91,56 @@ sed '10s/$/\tmutated/' "$TSV" > "$W/bt-mut-cell.tsv"; bash "$CHK" "$W/bt-mut-cel
 sed '10d' "$TSV" > "$W/bt-mut-row.tsv"; bash "$CHK" "$W/bt-mut-row.tsv" >/dev/null 2>&1; check "check fails on a deleted row" 1 $?
 bash "$CHK" "$W/no-such-table.tsv" >/dev/null 2>&1; check "check on a missing table is harness error" 2 $?
 
+# 10. waivers: classify gaps (synthetic ids). The gate is unchanged; waived gaps stay baseline entries
+WV="$W/waivers.json"
+cat > "$WV" <<'EOF'
+{"waivers":[
+ {"id":"W1","reason":"synthetic internal","match":["c::k_\\w+","c::.*kBar"]},
+ {"id":"W2","reason":"synthetic ws","match":["c::WS"]},
+ {"id":"W3","reason":"synthetic overlap","match":["c::Foo.*"]}
+]}
+EOF
+rm -f "$W"/node/*.txt "$W"/thaw/*.txt
+printf 'p1 = 1\nk_internal = 1\nFoo kBar = 1\np2 = 1\nWS = 1\n' > "$W/node/c.txt"; printf 'p3 = 1\n' > "$W/thaw/c.txt"
+WDIFF=("${DIFF[@]}" --waivers "$WV")
+printf '{"gaps":[{"id":"c::k_internal","kind":"MISSING"},{"id":"c::Foo kBar","kind":"MISSING"},{"id":"c::WS","kind":"MISSING"},{"id":"c::p2","kind":"MISSING"}]}\n' > "$W/wb.json"
+"${WDIFF[@]}" --baseline "$W/wb.json" >/dev/null 2>&1 ; check "waivers: real gap missing from baseline still fails" 1 $?
+printf '{"gaps":[{"id":"c::p1","kind":"MISSING"},{"id":"c::p2","kind":"MISSING"},{"id":"c::k_internal","kind":"MISSING"},{"id":"c::Foo kBar","kind":"MISSING"},{"id":"c::WS","kind":"MISSING"}]}\n' > "$W/wb2.json"
+"${WDIFF[@]}" --baseline "$W/wb2.json" --gaps "$W/wg.json" >"$W/ow" 2>&1 ; check "waivers: all gaps baselined passes" 0 $?
+python3 -c "
+import json
+g={x['id']:x for x in json.load(open('$W/wg.json'))['gaps']}
+exp={'c::p1':None,'c::p2':None,'c::k_internal':'W1','c::Foo kBar':'W1','c::WS':'W2'}
+assert set(g)==set(exp), sorted(g)
+for k,w in exp.items(): assert g[k]['waiver']==w and g[k]['waived']==(w is not None), (k, g[k])
+" && echo "ok   gaps.json waived/waiver fields" || { echo "FAIL gaps.json waiver fields"; fail=1; }
+grep -qE '^c +5 +5 +0 +1 +2 +3$' "$W/ow" || { echo "FAIL corpus row real/waived 2/3"; fail=1; }
+grep -qE '^W1 +2 ' "$W/ow" && grep -qE '^W2 +1 ' "$W/ow" && grep -qE '^W3 +0 ' "$W/ow" || { echo "FAIL per-waiver counts W1=2 W2=1 W3=0"; fail=1; }
+grep -q 'matched 2 waivers (W1, W3), counted as W1: c::Foo kBar' "$W/ow" || { echo "FAIL multi-match not reported"; fail=1; }
+"${DIFF[@]}" --baseline "$W/wb2.json" --gaps "$W/ng.json" >/dev/null 2>&1 ; check "no --waivers: gate unchanged" 0 $?
+python3 -c "
+import json
+assert all(x['waived'] is False and x['waiver'] is None for x in json.load(open('$W/ng.json'))['gaps'])
+" && echo "ok   no --waivers: every gap real" || { echo "FAIL no-waivers gaps.json"; fail=1; }
+# the checked-in waivers.json: a real ES symbol stays real, the approved Node-internal symbol is W1
+rm -f "$W"/node/*.txt "$W"/thaw/*.txt
+printf 'globalThis.console.[Symbol(kIsConsole)] = 1\nconsole.Console.[Symbol(Symbol.hasInstance)] = 1\nWebAssembly.Tag = 1\nglobalThis.process.[Symbol(kCapture)] = 1\nEventTarget.[Symbol(nodejs.event_target)] = 1\n' > "$W/node/surface.txt"; : > "$W/thaw/surface.txt"
+"${DIFF[@]}" --waivers "$HERE/waivers.json" --baseline "$W/empty.json" --gaps "$W/rw.json" >/dev/null 2>&1
+python3 -c "
+import json
+g={x['id']:x['waiver'] for x in json.load(open('$W/rw.json'))['gaps']}
+assert g['surface::globalThis.console.[Symbol(kIsConsole)]']=='W1', g
+assert g['surface::console.Console.[Symbol(Symbol.hasInstance)]'] is None, g
+assert g['surface::WebAssembly.Tag'] is None, g
+assert g['surface::globalThis.process.[Symbol(kCapture)]'] is None, g
+assert g['surface::EventTarget.[Symbol(nodejs.event_target)]'] is None, g
+" && echo "ok   checked-in waivers: ES symbol real, kIsConsole W1, WebAssembly.Tag/kCapture/event_target real" || { echo "FAIL checked-in waivers classification"; fail=1; }
+# malformed waivers files are harness errors (exit 2)
+printf '{"waivers":[{"id":"W1","reason":"","match":["c::x"]}]}\n' > "$W/bw1.json"
+printf '{"waivers":[{"id":"W1","reason":"a","match":["c::x"]},{"id":"W1","reason":"b","match":["c::y"]}]}\n' > "$W/bw2.json"
+printf '{"waivers":[{"id":"X1","reason":"a","match":["c::x"]}]}\n' > "$W/bw3.json"
+for b in bw1 bw2 bw3; do "${DIFF[@]}" --waivers "$W/$b.json" --baseline "$W/empty.json" >/dev/null 2>&1; check "bad waivers file $b is harness error" 2 $?; done
+rm -f "$W"/node/*.txt "$W"/thaw/*.txt
+
 if [ $fail -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit $fail
