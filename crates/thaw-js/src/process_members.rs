@@ -4,8 +4,18 @@
 //! (the table rows of `process`), so this installer only has to create each member.
 
 use crate::eventloop::node_error;
-use crate::{arg, define_accessor, put, Interp, Obj, Value, R};
-use std::cell::Cell;
+use crate::{arg, define_accessor, put, Ctl, Interp, Obj, Value, R};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+const JS_MEMBERS: &str = include_str!("web/process_members.js");
+
+/// A `process.finalization` callback, run once at `event` ('exit' or 'beforeExit') as `callback(target, event)`.
+pub(crate) struct Finalizer {
+    target: Value,
+    callback: Value,
+    event: &'static str,
+}
 
 type MemberFn = fn(&mut Interp, &Value, &[Value]) -> R<Value>;
 
@@ -32,6 +42,16 @@ const FUNCTIONS: &[(&str, f64, MemberFn)] = &[
     ("setgroups", 1.0, setgroups),
     ("initgroups", 2.0, initgroups),
     ("setSourceMapsEnabled", 1.0, set_source_maps_enabled),
+    (
+        "hasUncaughtExceptionCaptureCallback",
+        0.0,
+        has_capture_callback,
+    ),
+    (
+        "setUncaughtExceptionCaptureCallback",
+        1.0,
+        set_capture_callback,
+    ),
 ];
 
 /// Node's `process.resourceUsage()` keys, in Node's order.
@@ -94,7 +114,138 @@ impl Interp {
         define_accessor(p, "report", Some(report), None, true);
         let source_maps = self.native(|_, _, _| Ok(Value::Bool(SOURCE_MAPS.with(Cell::get))));
         define_accessor(p, "sourceMapsEnabled", Some(source_maps), None, true);
+        // ponytail: always empty; thaw-js does not record which builtins it has loaded
+        let load_list = self.array(Vec::new());
+        put(p, "moduleLoadList", load_list);
+        put(p, "domain", Value::Null);
+        // the main-file loader sets it (web/main_file.js); -e and the plain realm have none, as in Node
+        put(p, "mainModule", Value::Undefined);
+        let exiting_get = self.native(|it, _, _| Ok(Value::Bool(it.rt.exiting)));
+        let exiting_set = self.native(|it, _, a| {
+            it.rt.exiting = arg(a, 0).truthy();
+            Ok(Value::Undefined)
+        });
+        define_accessor(p, "_exiting", Some(exiting_get), Some(exiting_set), true);
+        let fin = self.plain();
+        for (name, length, f) in [
+            (
+                "register",
+                2.0,
+                self.native(|it, _, a| add_finalizer(it, a, "exit")),
+            ),
+            (
+                "registerBeforeExit",
+                2.0,
+                self.native(|it, _, a| add_finalizer(it, a, "beforeExit")),
+            ),
+            ("unregister", 1.0, self.native(unregister_finalizer)),
+        ] {
+            if let Value::Object(o) = &f {
+                crate::builtin_table::set_fn_head(o, name, length);
+            }
+            put(&fin, name, f);
+        }
+        // `process.finalization` is an accessor whose setter replaces the object, as in Node
+        let fin_cell = Rc::new(RefCell::new(Value::Object(fin)));
+        let set_cell = fin_cell.clone();
+        let fin_get = self.native(move |_, _, _| Ok(fin_cell.borrow().clone()));
+        let fin_set = self.native(move |_, _, a| {
+            *set_cell.borrow_mut() = arg(a, 0);
+            Ok(Value::Undefined)
+        });
+        define_accessor(p, "finalization", Some(fin_get), Some(fin_set), true);
     }
+
+    /// Runs the JS members (web/process_members.js) in this realm; after `install_process_stdin`.
+    pub(crate) fn install_process_members_js(&mut self) {
+        self.run(JS_MEMBERS)
+            .unwrap_or_else(|_| panic!("thaw-js process members must evaluate"));
+    }
+}
+
+/// Runs the `process.finalization` callbacks for `event`, once each: the `exit` ones before the `exit` listeners.
+pub(crate) fn run_finalizers(it: &mut Interp, event: &'static str) -> R<()> {
+    if it.rt.finalizers.is_empty() {
+        return Ok(());
+    }
+    let (due, keep): (Vec<Finalizer>, Vec<Finalizer>) = std::mem::take(&mut it.rt.finalizers)
+        .into_iter()
+        .partition(|f| f.event == event);
+    it.rt.finalizers = keep;
+    for f in due {
+        it.call(
+            &f.callback,
+            &Value::Undefined,
+            &[f.target, Value::str(event)],
+        )?;
+    }
+    Ok(())
+}
+
+fn add_finalizer(it: &mut Interp, a: &[Value], event: &'static str) -> R<Value> {
+    let target = arg(a, 0);
+    if !matches!(target, Value::Object(_)) {
+        return Err(invalid_arg(it, "obj", "object", &target));
+    }
+    let callback = arg(a, 1);
+    if !callback.is_callable() {
+        return Err(invalid_arg(it, "onFinalization", "function", &callback));
+    }
+    it.rt.finalizers.push(Finalizer {
+        target,
+        callback,
+        event,
+    });
+    Ok(Value::Undefined)
+}
+
+fn unregister_finalizer(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
+    let target = arg(a, 0);
+    it.rt.finalizers.retain(|f| {
+        !matches!((&f.target, &target), (Value::Object(x), Value::Object(y)) if Rc::ptr_eq(x, y))
+    });
+    Ok(Value::Undefined)
+}
+
+/// Node's `ERR_INVALID_ARG_TYPE` for argument `name` of `expected` type.
+fn invalid_arg(it: &mut Interp, name: &str, expected: &str, v: &Value) -> Ctl {
+    let received = match v {
+        Value::Undefined => "undefined".to_string(),
+        Value::Null => "null".to_string(),
+        // ponytail: always "Object"; Node names the constructor
+        Value::Object(_) => "an instance of Object".to_string(),
+        Value::Str(_) => format!("type string ('{}')", it.to_str(v)),
+        Value::Number(_) => format!("type number ({})", it.to_str(v)),
+        Value::Bool(_) => format!("type boolean ({})", it.to_str(v)),
+        _ => format!("type bigint ({})", it.to_str(v)),
+    };
+    let msg = format!("The \"{name}\" argument must be of type {expected}. Received {received}");
+    node_error(it, "TypeError", "ERR_INVALID_ARG_TYPE", &msg)
+}
+
+fn has_capture_callback(it: &mut Interp, _: &Value, _: &[Value]) -> R<Value> {
+    Ok(Value::Bool(it.rt.capture_fn.is_some()))
+}
+
+/// `setUncaughtExceptionCaptureCallback(fn | null)`: while set, an uncaught exception goes to `fn`, not to
+/// `uncaughtException` listeners (eventloop.rs `uncaught`).
+fn set_capture_callback(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
+    match arg(a, 0) {
+        Value::Null => it.rt.capture_fn = None,
+        f if f.is_callable() => {
+            if it.rt.capture_fn.is_some() {
+                return Err(node_error(
+                    it,
+                    "Error",
+                    "ERR_UNCAUGHT_EXCEPTION_CAPTURE_ALREADY_SET",
+                    "`process.setupUncaughtExceptionCapture()` was called while a capture callback was already active",
+                ));
+            }
+            it.rt.capture_fn = Some(f);
+        }
+        other => return Err(invalid_arg(it, "fn", "function or null", &other)),
+    }
+    Ok(Value::Undefined)
 }
 
 /// A fresh `process.report` object: Node's default settings, the two methods as functions.
@@ -330,6 +481,15 @@ fn set_source_maps_enabled(_: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
 mod tests {
     use crate::Interp;
 
+    /// Like `output`, but also runs the event loop (for `exit`/`beforeExit` listeners).
+    fn run_loop_plain(src: &str) -> String {
+        let mut it = Interp::new();
+        it.run(src)
+            .unwrap_or_else(|_| panic!("script must run: {src}"));
+        it.run_event_loop().expect("loop runs");
+        it.out.join("|")
+    }
+
     /// Runs `src` in a fresh realm and returns what it logged, joined by `|`.
     fn output(src: &str) -> String {
         let mut it = Interp::new();
@@ -441,5 +601,83 @@ mod tests {
             output("try { process._linkedBinding('nope'); } catch (e) { console.log(e.message, e.code); }"),
             "No such binding was linked: nope ERR_INVALID_MODULE"
         );
+    }
+
+    #[test]
+    fn c1_members_have_node_shape() {
+        assert_eq!(
+            output(
+                "console.log([Array.isArray(process.moduleLoadList), process.domain === null, process._exiting, \
+                 typeof process.ref, process.ref.length, process.unref.length, typeof process.ref.prototype, \
+                 typeof process.finalization.register, process.finalization.register.length, \
+                 process.finalization.unregister.length, process.finalization.registerBeforeExit.length, \
+                 process.allowedNodeEnvironmentFlags.size > 0, process.allowedNodeEnvironmentFlags.has('--max-old-space-size'), \
+                 process.allowedNodeEnvironmentFlags.constructor.name, process.hasUncaughtExceptionCaptureCallback(), \
+                 process.setUncaughtExceptionCaptureCallback.length, process.getBuiltinModule('nope'), \
+                 process.mainModule === undefined, typeof process.assert, process.assert.length, process.assert.name, \
+                 process.openStdin.length, typeof process.openStdin.prototype, typeof process.getBuiltinModule.prototype, \
+                 process.getBuiltinModule.length].join(';'));"
+            ),
+            "true;true;false;function;1;1;object;function;2;1;2;true;true;NodeEnvironmentFlagsSet;false;1;;true;function;2;deprecated;0;object;object;1"
+        );
+    }
+
+    #[test]
+    fn ref_and_unref_call_the_resource_method_like_node() {
+        assert_eq!(
+            output(
+                "const o = { n: 0, ref() { this.n += 1; }, unref() { this.n += 10; } }; \
+                 process.ref(o); process.unref(o); process.ref(null); process.unref(undefined); process.ref({}); \
+                 console.log(o.n, process.ref.name, process.unref.name);"
+            ),
+            "11 ref unref"
+        );
+    }
+
+    // ponytail: Node's set reports size 271 with 3 duplicate names; a real Set holds the 268 distinct ones.
+    #[test]
+    fn allowed_node_environment_flags_is_a_read_only_set_like_node() {
+        assert_eq!(
+            output(
+                "const s = process.allowedNodeEnvironmentFlags; \
+                 console.log(s.constructor.name, s.size > 0, s.add('--zzz') === s, s.has('--zzz'), s.delete('--max-old-space-size'), \
+                 s.has('--max-old-space-size'), s.clear(), s.size > 0, s instanceof Set, process.allowedNodeEnvironmentFlags === s);"
+            ),
+            "NodeEnvironmentFlagsSet true true false false true undefined true true true"
+        );
+    }
+
+    #[test]
+    fn finalization_callbacks_run_at_before_exit_and_exit_like_node() {
+        assert_eq!(
+            run_loop_plain(
+                "const o = {}; process.finalization.register(o, (ref, ev) => console.log('fin', ev, ref === o));\n\
+                 const u = {}; process.finalization.register(u, () => console.log('never'));\n\
+                 console.log('unreg', process.finalization.unregister(u));\n\
+                 const b = {}; process.finalization.registerBeforeExit(b, (ref, ev) => console.log('bx', ev, ref === b));\n\
+                 process.on('beforeExit', () => console.log('beforeExit'));\n\
+                 process.on('exit', (c) => console.log('exit', c));"
+            ),
+            "unreg undefined|bx beforeExit true|beforeExit|fin exit true|exit 0"
+        );
+    }
+
+    #[test]
+    // ponytail: builtin identity (`getBuiltinModule('fs') === require('fs')`) needs the bundle's builtin loader,
+    // which the plain realm lacks; the binary path covers it.
+    fn main_module_and_get_builtin_module_follow_the_main_file() {
+        let dir = std::env::temp_dir().join(format!("thaw-c1-main-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("main.js"),
+            "console.log(process.mainModule === module, process.getBuiltinModule('lodash'));\n",
+        )
+        .unwrap();
+        let mut it = Interp::new();
+        let main = dir.join("main.js").display().to_string();
+        assert_eq!(it.run_main_file(&main).ok(), Some(0));
+        assert_eq!(it.out.join("|"), "true undefined");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

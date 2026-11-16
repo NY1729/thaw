@@ -2567,6 +2567,7 @@ isNaN	name	data	--c	string	-	isNaN	-	-	-
 process	@@toStringTag	data	w--	string	-	-	-	-	process
 process	_events	data	wec	object	-	-	-	-	-
 process	_eventsCount	data	wec	number	-	-	-	-	-
+process	_exiting	accessor	-ec	-	-	get|set	-	-	-
 process	_getActiveHandles	data	wec	function	0	_getActiveHandles	0	-	-
 process	_getActiveRequests	data	wec	function	0	_getActiveRequests	0	-	-
 process	_kill	data	wec	function	0	_kill	0	-	-
@@ -2574,9 +2575,11 @@ process	_linkedBinding	data	wec	function	1	_linkedBinding	1	174	-
 process	_maxListeners	data	wec	undefined	-	-	-	-	-
 process	_rawDebug	data	wec	function	0	_rawDebug	1	175	-
 process	abort	data	wec	function	0	abort	0	-	-
+process	allowedNodeEnvironmentFlags	accessor	-ec	-	-	get|set	-	-	-
 process	arch	data	-ec	string	-	-	-	-	-
 process	argv	data	wec	object	-	-	-	-	-
 process	argv0	data	-e-	string	-	-	-	-	-
+process	assert	data	wec	function	2	deprecated	1	-	-
 process	availableMemory	data	wec	function	0	availableMemory	0	-	-
 process	binding	data	wec	function	1	binding	1	177	-
 process	chdir	data	wec	function	1		1	178	-
@@ -2585,6 +2588,7 @@ process	constrainedMemory	data	wec	function	0	constrainedMemory	0	-	-
 process	cpuUsage	data	wec	function	1	cpuUsage	1	179	-
 process	cwd	data	wec	function	0	wrappedCwd	1	180	-
 process	debugPort	data	wec	number	-	-	-	-	-
+process	domain	data	wec	object	-	-	-	-	-
 process	emitWarning	data	wec	function	4	emitWarning	1	181	-
 process	env	data	wec	object	-	-	-	-	-
 process	execArgv	data	wec	object	-	-	-	-	-
@@ -2592,25 +2596,33 @@ process	execPath	data	wec	string	-	-	-	-	-
 process	exit	data	wec	function	1	exit	1	183	-
 process	exitCode	accessor	-e-	-	-	get|set	-	-	-
 process	features	data	-e-	object	-	-	-	-	-
+process	finalization	accessor	-ec	-	-	get|set	-	-	-
 process	getActiveResourcesInfo	data	wec	function	0	getActiveResourcesInfo	0	-	-
+process	getBuiltinModule	data	wec	function	1	getBuiltinModule	1	184	-
 process	getegid	data	wec	function	0	getegid	0	-	-
 process	geteuid	data	wec	function	0	geteuid	0	-	-
 process	getgid	data	wec	function	0	getgid	0	-	-
 process	getgroups	data	wec	function	0	getgroups	0	-	-
 process	getuid	data	wec	function	0	getuid	0	-	-
+process	hasUncaughtExceptionCaptureCallback	data	wec	function	0	hasUncaughtExceptionCaptureCallback	1	185	-
 process	hrtime	data	wec	function	1	hrtime	1	186	-
 process	initgroups	data	wec	function	2	initgroups	1	187	-
 process	kill	data	wec	function	2	kill	1	188	-
+process	mainModule	data	wec	object	-	-	-	-	-
 process	memoryUsage	data	wec	function	0	memoryUsage	1	190	-
+process	moduleLoadList	data	-ec	object	-	-	-	-	-
 process	nextTick	data	wec	function	1	nextTick	1	191	-
+process	openStdin	data	wec	function	0		1	192	-
 process	pid	data	-ec	number	-	-	-	-	-
 process	platform	data	-ec	string	-	-	-	-	-
 process	ppid	data	wec	number	-	-	-	-	-
 process	reallyExit	data	wec	function	0	reallyExit	0	-	-
+process	ref	data	wec	function	1	ref	1	193	-
 process	release	data	-ec	object	-	-	-	-	-
 process	report	accessor	-ec	-	-	get|-	-	-	-
 process	resourceUsage	data	wec	function	0	resourceUsage	1	194	-
 process	setSourceMapsEnabled	data	wec	function	1	setSourceMapsEnabled	1	195	-
+process	setUncaughtExceptionCaptureCallback	data	wec	function	1	setUncaughtExceptionCaptureCallback	1	196	-
 process	setegid	data	wec	function	1		1	197	-
 process	seteuid	data	wec	function	1		1	198	-
 process	setgid	data	wec	function	1		1	199	-
@@ -2620,6 +2632,7 @@ process	sourceMapsEnabled	accessor	-ec	-	-	get|-	-	-	-
 process	threadCpuUsage	data	wec	function	1	threadCpuUsage	1	202	-
 process	title	data	wec	string	-	-	-	-	-
 process	umask	data	wec	function	1	wrappedUmask	1	203	-
+process	unref	data	wec	function	1	unref	1	204	-
 process	uptime	data	wec	function	0	uptime	0	-	-
 process	version	data	-ec	string	-	-	-	-	-
 process	versions	data	-ec	object	-	-	-	-	-
@@ -2635,6 +2648,10 @@ process._rawDebug	length	data	--c	number	0	-	-	-	-
 process._rawDebug	name	data	--c	string	-	_rawDebug	-	-	-
 process.abort	length	data	--c	number	0	-	-	-	-
 process.abort	name	data	--c	string	-	abort	-	-	-
+process.assert	length	data	--c	number	2	-	-	-	-
+process.assert	name	data	--c	string	-	deprecated	-	-	-
+process.assert	prototype	data	w--	object	-	-	-	-	-
+process.assert.prototype	constructor	data	w-c	function	2	assert	1	-	-
 process.availableMemory	length	data	--c	number	0	-	-	-	-
 process.availableMemory	name	data	--c	string	-	availableMemory	-	-	-
 process.binding	length	data	--c	number	1	-	-	-	-
@@ -2653,6 +2670,10 @@ process.exit	length	data	--c	number	1	-	-	-	-
 process.exit	name	data	--c	string	-	exit	-	-	-
 process.getActiveResourcesInfo	length	data	--c	number	0	-	-	-	-
 process.getActiveResourcesInfo	name	data	--c	string	-	getActiveResourcesInfo	-	-	-
+process.getBuiltinModule	length	data	--c	number	1	-	-	-	-
+process.getBuiltinModule	name	data	--c	string	-	getBuiltinModule	-	-	-
+process.getBuiltinModule	prototype	data	w--	object	-	-	-	-	-
+process.getBuiltinModule.prototype	constructor	data	w-c	function	1	getBuiltinModule	1	184	-
 process.getegid	length	data	--c	number	0	-	-	-	-
 process.getegid	name	data	--c	string	-	getegid	-	-	-
 process.geteuid	length	data	--c	number	0	-	-	-	-
@@ -2663,6 +2684,8 @@ process.getgroups	length	data	--c	number	0	-	-	-	-
 process.getgroups	name	data	--c	string	-	getgroups	-	-	-
 process.getuid	length	data	--c	number	0	-	-	-	-
 process.getuid	name	data	--c	string	-	getuid	-	-	-
+process.hasUncaughtExceptionCaptureCallback	length	data	--c	number	0	-	-	-	-
+process.hasUncaughtExceptionCaptureCallback	name	data	--c	string	-	hasUncaughtExceptionCaptureCallback	-	-	-
 process.hrtime	bigint	data	wec	function	0	hrtimeBigInt	1	-	-
 process.hrtime	length	data	--c	number	1	-	-	-	-
 process.hrtime	name	data	--c	string	-	hrtime	-	-	-
@@ -2679,12 +2702,22 @@ process.memoryUsage.rss	length	data	--c	number	0	-	-	-	-
 process.memoryUsage.rss	name	data	--c	string	-	rss	-	-	-
 process.nextTick	length	data	--c	number	1	-	-	-	-
 process.nextTick	name	data	--c	string	-	nextTick	-	-	-
+process.openStdin	length	data	--c	number	0	-	-	-	-
+process.openStdin	name	data	--c	string	-		-	-	-
+process.openStdin	prototype	data	w--	object	-	-	-	-	-
+process.openStdin.prototype	constructor	data	w-c	function	0		1	192	-
 process.reallyExit	length	data	--c	number	0	-	-	-	-
 process.reallyExit	name	data	--c	string	-	reallyExit	-	-	-
+process.ref	length	data	--c	number	1	-	-	-	-
+process.ref	name	data	--c	string	-	ref	-	-	-
+process.ref	prototype	data	w--	object	-	-	-	-	-
+process.ref.prototype	constructor	data	w-c	function	1	ref	1	193	-
 process.resourceUsage	length	data	--c	number	0	-	-	-	-
 process.resourceUsage	name	data	--c	string	-	resourceUsage	-	-	-
 process.setSourceMapsEnabled	length	data	--c	number	1	-	-	-	-
 process.setSourceMapsEnabled	name	data	--c	string	-	setSourceMapsEnabled	-	-	-
+process.setUncaughtExceptionCaptureCallback	length	data	--c	number	1	-	-	-	-
+process.setUncaughtExceptionCaptureCallback	name	data	--c	string	-	setUncaughtExceptionCaptureCallback	-	-	-
 process.setegid	length	data	--c	number	1	-	-	-	-
 process.setegid	name	data	--c	string	-		-	-	-
 process.seteuid	length	data	--c	number	1	-	-	-	-
@@ -2699,6 +2732,10 @@ process.threadCpuUsage	length	data	--c	number	1	-	-	-	-
 process.threadCpuUsage	name	data	--c	string	-	threadCpuUsage	-	-	-
 process.umask	length	data	--c	number	1	-	-	-	-
 process.umask	name	data	--c	string	-	wrappedUmask	-	-	-
+process.unref	length	data	--c	number	1	-	-	-	-
+process.unref	name	data	--c	string	-	unref	-	-	-
+process.unref	prototype	data	w--	object	-	-	-	-	-
+process.unref.prototype	constructor	data	w-c	function	1	unref	1	204	-
 process.uptime	length	data	--c	number	0	-	-	-	-
 process.uptime	name	data	--c	string	-	uptime	-	-	-
 queueMicrotask	length	data	--c	number	1	-	-	-	-

@@ -157,3 +157,42 @@ process.on('exit', () => console.log(['exit-ran', saw, ran].join(';')));"
         "exit-ran;0;0"
     );
 }
+
+// The uncaught-exception capture callback (Node: `setUncaughtExceptionCaptureCallback`). Expected values were
+// recorded with Node v22.23.1: while a callback is set, `uncaughtException` listeners do not run, the monitor does.
+
+#[test]
+fn uncaught_capture_callback_takes_a_timer_throw_and_keeps_the_process_alive() {
+    assert_eq!(
+        run_loop(
+            "const log = [];
+process.on('uncaughtExceptionMonitor', () => log.push('monitor'));
+process.on('uncaughtException', () => log.push('handler'));
+process.on('exit', () => console.log(log.join('|')));
+console.log(process.hasUncaughtExceptionCaptureCallback());
+process.setUncaughtExceptionCaptureCallback((e) => log.push('cap:' + e.message));
+console.log(process.hasUncaughtExceptionCaptureCallback());
+try { process.setUncaughtExceptionCaptureCallback(() => {}); } catch (e) { console.log(e.name, e.code); }
+setTimeout(() => { throw new Error('boom'); }, 1);
+setTimeout(() => log.push('alive'), 5);"
+        ),
+        "false|true|Error ERR_UNCAUGHT_EXCEPTION_CAPTURE_ALREADY_SET|monitor|cap:boom|alive"
+    );
+}
+
+#[test]
+fn uncaught_capture_callback_null_restores_the_handler_path() {
+    assert_eq!(
+        run_loop(
+            "const log = [];
+process.on('uncaughtException', (e) => log.push('handler:' + e.message));
+process.on('exit', () => console.log(log.join('|')));
+process.setUncaughtExceptionCaptureCallback(() => log.push('cap'));
+process.setUncaughtExceptionCaptureCallback(null);
+console.log(process.hasUncaughtExceptionCaptureCallback());
+setTimeout(() => { throw new Error('boom2'); }, 1);
+try { process.setUncaughtExceptionCaptureCallback(1); } catch (e) { console.log(e.code); }"
+        ),
+        "false|ERR_INVALID_ARG_TYPE|handler:boom2"
+    );
+}
