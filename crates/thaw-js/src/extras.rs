@@ -259,6 +259,11 @@ pub(crate) const EXTRAS: &str = r#"
   def(AP, 'keys', function () { var r = []; for (var i = 0; i < this.length; i++) r.push(i); return makeIter(r, 'Array Iterator'); });
   def(AP, 'values', function () { var r = []; for (var i = 0; i < this.length; i++) r.push(this[i]); return makeIter(r, 'Array Iterator'); });
   def(AP, Symbol.iterator, AP.values);
+  // (in this file, after @@iterator: own symbol keys list in V8's order)
+  var unscopables = Object.create(null);
+  var unscopableNames = ['at', 'copyWithin', 'entries', 'fill', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'includes', 'keys', 'toReversed', 'toSorted', 'toSpliced', 'values'];
+  for (var u = 0; u < unscopableNames.length; u++) unscopables[unscopableNames[u]] = true;
+  Object.defineProperty(AP, Symbol.unscopables, { value: unscopables, writable: false, enumerable: false, configurable: true });
   def(SP, Symbol.iterator, function () { return makeIter(Array.from(String(this)), 'String Iterator'); });
   Object.defineProperty(Object.prototype, '__proto__', {
     get: function () { return Object.getPrototypeOf(this); },
@@ -366,8 +371,15 @@ impl crate::Interp {
                 k
             }
         };
+        // A symbol is a primitive here (a Symbol object, not a wrapper), so `Symbol.prototype[@@toPrimitive]`
+        // never applies to it: String(sym) and friends take `toString`, as before that method existed.
+        let is_symbol = matches!(&*o.kind.borrow(), crate::Kind::Symbol { .. });
         // [[Get]] (not a chain lookup): Proxy `get` traps and accessors see the lookup.
-        let f = self.get(v, &key)?;
+        let f = if is_symbol {
+            crate::Value::Undefined
+        } else {
+            self.get(v, &key)?
+        };
         if f.is_callable() {
             let h = match hint {
                 Hint::Default => "default",
@@ -421,15 +433,16 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     var len = byteLength === undefined ? total - off : (Math.trunc(byteLength) || 0);
     if (len < 0 || off + len > total) throw new RangeError('Invalid DataView length ' + len);
     if (buffer instanceof ArrayBuffer && detGet.call(buffer)) throw new TypeError('Cannot perform DataView constructor on a detached ArrayBuffer');
-    def(this, 'buffer', buffer);
+    def(this, '__buf', buffer);
     def(this, '__off', off);
     def(this, '__len', len);
     def(this, '__bytes', new Uint8Array(buffer, off, len));
   }
   // byteOffset / byteLength are accessors (a detached buffer makes them throw, as in V8).
   function dvLive(dv, what) {
-    if (dv.buffer instanceof ArrayBuffer && detGet.call(dv.buffer)) throw new TypeError('Cannot perform ' + what + ' on a detached ArrayBuffer');
+    if (dv.__buf instanceof ArrayBuffer && detGet.call(dv.__buf)) throw new TypeError('Cannot perform ' + what + ' on a detached ArrayBuffer');
   }
+  Object.defineProperty(DataView.prototype, 'buffer', { enumerable: false, configurable: true, get: function () { if (!Object.prototype.hasOwnProperty.call(this, '__buf')) throw new TypeError('Method get DataView.prototype.buffer called on incompatible receiver'); return this.__buf; } });
   Object.defineProperty(DataView.prototype, 'byteLength', { enumerable: false, configurable: true, get: function () { dvLive(this, 'get DataView.prototype.byteLength'); return this.__len; } });
   Object.defineProperty(DataView.prototype, 'byteOffset', { enumerable: false, configurable: true, get: function () { dvLive(this, 'get DataView.prototype.byteOffset'); return this.__off; } });
   var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
