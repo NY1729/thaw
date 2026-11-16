@@ -2601,6 +2601,34 @@ fn crypto_global_fills_random_values_and_makes_uuids() {
 }
 
 #[test]
+fn web_crypto_classes_are_illegal_constructors_with_node_tags() {
+    // expected values from node 22: Crypto/SubtleCrypto/CryptoKey throw `Illegal constructor`
+    assert_eq!(
+        one("var r = [];
+             for (const C of [Crypto, SubtleCrypto, CryptoKey]) {
+               try { new C(); r.push('no'); } catch (e) { r.push(e.name + ':' + e.message); }
+               r.push(C.name, C.length, Object.prototype.toString.call(C.prototype), typeof C);
+             }
+             r.push(Object.prototype.toString.call(crypto), Object.prototype.toString.call(crypto.subtle));
+             r.push(crypto instanceof Crypto, crypto.subtle instanceof SubtleCrypto, crypto.subtle === crypto.subtle, crypto.subtle.constructor.name);
+             console.log(r.join(' '));"),
+        "TypeError:Illegal constructor Crypto 0 [object Crypto] function TypeError:Illegal constructor SubtleCrypto 0 [object SubtleCrypto] function TypeError:Illegal constructor CryptoKey 0 [object CryptoKey] function [object Crypto] [object SubtleCrypto] true true true SubtleCrypto"
+    );
+}
+
+#[test]
+fn web_crypto_methods_live_on_prototypes() {
+    assert_eq!(
+        one("console.log(Object.keys(crypto).length, Object.getOwnPropertyNames(Crypto.prototype).sort().join(','),
+               crypto.getRandomValues.length, crypto.randomUUID.length,
+               Object.getOwnPropertyNames(SubtleCrypto.prototype).includes('digest'), Object.keys(crypto.subtle).length);
+             var d = Object.getOwnPropertyDescriptor(Crypto.prototype, 'subtle');
+             console.log(typeof d.get, d.get.name);"),
+        "0 constructor,getRandomValues,randomUUID,subtle 1 0 true 0|function get subtle"
+    );
+}
+
+#[test]
 fn crypto_create_hash_matches_node() {
     assert_eq!(
         one("var m = globalThis.__thaw_crypto_module;
@@ -8815,9 +8843,6 @@ fn host_for_in_keys_walk_prototype_chain_with_shadowing() {
 const ABSENT_IN_THAW_JS: &[&str] = &[
     "fetch",
     "WebSocket",
-    "Crypto",
-    "CryptoKey",
-    "SubtleCrypto",
     "DisposableStack",
     "AsyncDisposableStack",
 ];
