@@ -704,17 +704,20 @@ fn build_with_native_mode_routed(
     }
     // The realm `fetch` reads the global, which the thaw-js transport serves from the node:http and node:https
     // bundles: link them as if imported, at runtime only (their module loads on the first fetch, not eagerly).
+    // They are `forced_runtime_only`: no typed declarations, so they cannot clash with the program's own imports.
+    let mut forced_runtime_only = std::collections::HashSet::new();
     if thaw_js_routing {
         let sources = module_graph::graph_sources(input, &user_source)?;
         let sources = sources.iter().map(String::as_str).collect::<Vec<_>>();
         if source_may_call_realm_fetch(&sources) {
-            for builtin in ["node:http", "node:https"] {
+            for builtin in REALM_FETCH_TRANSPORT_BUNDLES {
                 thaw_registry::resolve_builtin(builtin)?;
-                runtime_packages.insert(builtin.to_string());
-                if !resolved_packages.iter().any(|package| package == builtin) {
-                    resolved_packages.push(builtin.to_string());
-                }
             }
+            force_realm_fetch_bundles(
+                &mut runtime_packages,
+                &mut resolved_packages,
+                &mut forced_runtime_only,
+            );
         }
     }
     let mut native_addons = resolved_packages
@@ -765,6 +768,7 @@ fn build_with_native_mode_routed(
             output,
             external_native_dirs.as_ref().map(|dirs| dirs.0.as_path()),
             &forced_jit_fallbacks,
+            &forced_runtime_only,
             thaw_js_routing,
         )?;
         let external_resolutions =
