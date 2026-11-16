@@ -86,5 +86,6 @@
     stdinPending.push(...intrinsicJsonParse(events));
     drainStdin();
   };
-  process.stdin = stdin;
+  // Node: a getter with no setter (process.stdin = x is ignored in sloppy code)
+  Object.defineProperty(process, 'stdin', { get: () => stdin, enumerable: true, configurable: true });
 })();
