@@ -1,4 +1,11 @@
 owner	key	kind	flags	vtype	length	name	hasPrototype	alias	tag
+%ArrayIteratorPrototype%	@@toStringTag	data	--c	string	-	-	-	-	Array Iterator
+%ArrayIteratorPrototype%	next	data	w-c	function	0	next	0	-	-
+%ArrayIteratorPrototype%.next	length	data	--c	number	0	-	-	-	-
+%ArrayIteratorPrototype%.next	name	data	--c	string	-	next	-	-	-
+%AsyncIteratorPrototype%	@@asyncIterator	data	w-c	function	0	[Symbol.asyncIterator]	0	-	-
+%AsyncIteratorPrototype%.@@asyncIterator	length	data	--c	number	0	-	-	-	-
+%AsyncIteratorPrototype%.@@asyncIterator	name	data	--c	string	-	[Symbol.asyncIterator]	-	-	-
 %TypedArray%	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
 %TypedArray%	length	data	--c	number	0	-	-	-	-
 %TypedArray%	name	data	--c	string	-	TypedArray	-	-	-
@@ -1038,6 +1045,8 @@ Iterator	prototype	data	---	object	-	-	-	91	-
 Iterator.from	length	data	--c	number	1	-	-	-	-
 Iterator.from	name	data	--c	string	-	from	-	-	-
 Iterator.prototype	@@iterator	data	w-c	function	0	[Symbol.iterator]	0	-	-
+Iterator.prototype	@@toStringTag	accessor	--c	-	-	get [Symbol.toStringTag]|set [Symbol.toStringTag]	-	-	-
+Iterator.prototype	constructor	accessor	--c	-	-	get constructor|set constructor	-	-	-
 Iterator.prototype	drop	data	w-c	function	1	drop	0	-	-
 Iterator.prototype	every	data	w-c	function	1	every	0	-	-
 Iterator.prototype	filter	data	w-c	function	1	filter	0	-	-
@@ -2464,10 +2473,16 @@ btoa	prototype	data	w--	object	-	-	-	-	-
 btoa.prototype	constructor	data	w-c	function	1	btoa	1	166	-
 clearImmediate	length	data	--c	number	1	-	-	-	-
 clearImmediate	name	data	--c	string	-	clearImmediate	-	-	-
+clearImmediate	prototype	data	w--	object	-	-	-	-	-
+clearImmediate.prototype	constructor	data	w-c	function	1	clearImmediate	1	167	-
 clearInterval	length	data	--c	number	1	-	-	-	-
 clearInterval	name	data	--c	string	-	clearInterval	-	-	-
+clearInterval	prototype	data	w--	object	-	-	-	-	-
+clearInterval.prototype	constructor	data	w-c	function	1	clearInterval	1	168	-
 clearTimeout	length	data	--c	number	1	-	-	-	-
 clearTimeout	name	data	--c	string	-	clearTimeout	-	-	-
+clearTimeout	prototype	data	w--	object	-	-	-	-	-
+clearTimeout.prototype	constructor	data	w-c	function	1	clearTimeout	1	169	-
 console	@@toStringTag	data	--c	string	-	-	-	-	console
 console	Console	data	wec	function	1	Console	1	170	-
 console	_ignoreErrors	data	w-c	boolean	-	-	-	-	-
@@ -2500,9 +2515,12 @@ console	timeLog	data	wec	function	0	timeLog	0	-	-
 console	timeStamp	data	wec	function	0	timeStamp	0	-	-
 console	trace	data	wec	function	0	trace	0	-	-
 console	warn	data	wec	function	0	warn	0	-	-
+console.Console	@@hasInstance	data	---	function	1	value	0	-	-
 console.Console	length	data	--c	number	1	-	-	-	-
 console.Console	name	data	--c	string	-	Console	-	-	-
 console.Console	prototype	data	w--	object	-	-	-	-	-
+console.Console.@@hasInstance	length	data	--c	number	1	-	-	-	-
+console.Console.@@hasInstance	name	data	--c	string	-	value	-	-	-
 console.Console.prototype	assert	data	wec	function	1	assert	0	-	-
 console.Console.prototype	clear	data	wec	function	0	clear	0	-	-
 console.Console.prototype	constructor	data	w-c	function	1	Console	1	170	-
@@ -2776,12 +2794,20 @@ process.uptime	length	data	--c	number	0	-	-	-	-
 process.uptime	name	data	--c	string	-	uptime	-	-	-
 queueMicrotask	length	data	--c	number	1	-	-	-	-
 queueMicrotask	name	data	--c	string	-	queueMicrotask	-	-	-
+queueMicrotask	prototype	data	w--	object	-	-	-	-	-
+queueMicrotask.prototype	constructor	data	w-c	function	1	queueMicrotask	1	205	-
 setImmediate	length	data	--c	number	1	-	-	-	-
 setImmediate	name	data	--c	string	-	setImmediate	-	-	-
+setImmediate	prototype	data	w--	object	-	-	-	-	-
+setImmediate.prototype	constructor	data	w-c	function	1	setImmediate	1	206	-
 setInterval	length	data	--c	number	2	-	-	-	-
 setInterval	name	data	--c	string	-	setInterval	-	-	-
+setInterval	prototype	data	w--	object	-	-	-	-	-
+setInterval.prototype	constructor	data	w-c	function	2	setInterval	1	207	-
 setTimeout	length	data	--c	number	2	-	-	-	-
 setTimeout	name	data	--c	string	-	setTimeout	-	-	-
+setTimeout	prototype	data	w--	object	-	-	-	-	-
+setTimeout.prototype	constructor	data	w-c	function	2	setTimeout	1	208	-
 structuredClone	length	data	--c	number	2	-	-	-	-
 structuredClone	name	data	--c	string	-	structuredClone	-	-	-
 structuredClone	prototype	data	w--	object	-	-	-	-	-
