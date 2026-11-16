@@ -6,7 +6,7 @@ use crate::*;
 
 impl Interp {
     pub(crate) fn install_url(&mut self) {
-        self.run(URL_PRELUDE)
+        self.run_builtin(URL_PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js URL prelude must evaluate"));
     }
 }

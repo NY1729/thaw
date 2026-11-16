@@ -7,7 +7,7 @@ use crate::Interp;
 const SOURCE: &str = include_str!("fetch.js");
 
 pub(crate) fn install(interp: &mut Interp) {
-    if let Err(why) = interp.run(&format!("(function () {{\n{SOURCE}\n}})();")) {
+    if let Err(why) = interp.run_builtin(&format!("(function () {{\n{SOURCE}\n}})();")) {
         let why = match why {
             crate::Ctl::Throw(v) => interp.to_str(&v).to_string(),
             crate::Ctl::Unsupported(f) => format!("unsupported {f}"),

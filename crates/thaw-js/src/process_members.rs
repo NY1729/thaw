@@ -174,7 +174,7 @@ impl Interp {
 
     /// Runs the JS members (web/process_members.js) in this realm; after `install_process_stdin`.
     pub(crate) fn install_process_members_js(&mut self) {
-        self.run(JS_MEMBERS)
+        self.run_builtin(JS_MEMBERS)
             .unwrap_or_else(|_| panic!("thaw-js process members must evaluate"));
     }
 }

@@ -133,8 +133,12 @@ pub(crate) fn compile(g: &mut Gen, e: &a::Expr) -> CG<Ex> {
 /// A name that an assignment or `++`/`--` writes: a slot of this frame, or a free name (closure scope).
 #[derive(Clone)]
 pub(crate) enum Place {
-    Slot { k: u32, mutable: bool },
-    Free(a::Ident),
+    Slot {
+        k: u32,
+        mutable: bool,
+    },
+    /// A free name, with the function's strictness at codegen (`Gen::strict`).
+    Free(a::Ident, bool),
 }
 
 impl Place {
@@ -144,7 +148,7 @@ impl Place {
                 k: l.slot,
                 mutable: l.mutable,
             },
-            None => Place::Free(id.clone()),
+            None => Place::Free(id.clone(), g.strict),
         }
     }
 
@@ -152,7 +156,7 @@ impl Place {
     fn read(&self, it: &mut Interp, f: &mut Frame) -> CR<Value> {
         match self {
             Place::Slot { k, .. } => Ok(f.slots[*k as usize].clone()),
-            Place::Free(id) => bx(it.eval_ident(id, &f.scope)),
+            Place::Free(id, _) => bx(it.eval_ident(id, &f.scope)),
         }
     }
 
@@ -166,7 +170,10 @@ impl Place {
             Place::Slot { mutable: false, .. } => {
                 bx(it.throw_error::<()>("TypeError", "Assignment to constant variable."))
             }
-            Place::Free(id) => bx(it.assign_var(&f.scope, &id.sym, v)),
+            Place::Free(id, st) => {
+                let strict = super::write_strict(*st, f);
+                bx(it.assign_var(&f.scope, &id.sym, v, strict))
+            }
         }
     }
 }
@@ -385,7 +392,7 @@ fn unary(g: &mut Gen, op: a::UnaryOp, arg: &a::Expr) -> CG<Ex> {
         return Ok(mk_ex(move |it, f| {
             let v = match &p {
                 Place::Slot { k, .. } => f.slots[*k as usize].clone(),
-                Place::Free(id) => it.lookup_ident(&f.scope, id).unwrap_or(Value::Undefined),
+                Place::Free(id, _) => it.lookup_ident(&f.scope, id).unwrap_or(Value::Undefined),
             };
             Ok(typeof_value(&v))
         }));

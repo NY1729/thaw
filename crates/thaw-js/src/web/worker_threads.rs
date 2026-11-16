@@ -6,6 +6,6 @@ const SOURCE: &str = include_str!("worker_threads.js");
 
 pub(crate) fn install(interp: &mut Interp) {
     interp
-        .run(SOURCE)
+        .run_builtin(SOURCE)
         .unwrap_or_else(|_| panic!("worker_threads prelude must evaluate"));
 }

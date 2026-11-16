@@ -753,6 +753,13 @@ pub(crate) type Ex = Box<dyn Fn(&mut Interp, &mut Frame) -> CR<Value>>;
 pub(crate) type St = Box<dyn Fn(&mut Interp, &mut Frame) -> CR<Flow>>;
 
 /// The locals of one call. Declared names live in `slots`; everything else resolves through `scope`.
+/// The strictness of a write in compiled code: the function's own (`Gen::strict`, from its directive or class),
+/// or the lexical scope it closes over (a nested function of strict code, which has no directive of its own).
+#[inline]
+pub(crate) fn write_strict(st: bool, f: &Frame) -> bool {
+    st || f.scope.strict.get()
+}
+
 pub(crate) struct Frame {
     /// Parameters first, then `var`s and block-level `let`/`const` (see `gen.rs`).
     pub(crate) slots: Vec<Value>,
