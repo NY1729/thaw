@@ -1,0 +1,12 @@
+function
+200 true OK b false basic /plain
+"hello"
+POST:payload
+200 true /final final
+302 false /final
+TypeError
+gzipped body
+chunk-one,chunk-two
+AbortError
+AbortError
+TypeError fetch failed ECONNREFUSED
