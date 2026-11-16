@@ -1160,6 +1160,8 @@ pub struct Interp {
     /// `node:vm` contexts by id (vm.rs).
     pub(crate) vm: HashMap<u32, vm::VmSlot>,
     pub(crate) vm_next: u32,
+    /// Host objects a vm realm shares (`Intl`, ...): teardown leaves them alone, the host still owns them.
+    pub(crate) vm_shared: Vec<Obj>,
     /// The sandbox of the `node:vm` run in progress, so `globalThis.x` / `this.x` reach it (vm.rs).
     pub(crate) vm_sandbox: Option<Obj>,
     /// When a `node:vm` run with a timeout must stop (vm.rs `arm`), and the timeout in ms.
@@ -1305,6 +1307,7 @@ impl Interp {
             rt: Default::default(),
             vm: HashMap::new(),
             vm_next: 0,
+            vm_shared: Vec::new(),
             vm_sandbox: None,
             deadline: None,
             dl_ms: 0,
@@ -4924,3 +4927,156 @@ mod tests;
 mod coroutine_teardown_tests;
 #[cfg(test)]
 mod vm_realm_tests;
+
+impl Interp {
+    /// Empties every object and scope reachable from this realm's roots, breaking the Rc cycles among them
+    /// (prototype <-> constructor, global scope <-> closures) so the realm's memory is freed on drop.
+    /// Values still referenced from outside keep their memory but read as empty objects.
+    pub(crate) fn teardown(&mut self) {
+        // Contexts this realm made die with it; their script scopes are cleared, the sandboxes are the host's.
+        for slot in std::mem::take(&mut self.vm).values_mut() {
+            if let Some(r) = slot.realm_mut() {
+                r.interp.teardown();
+                if let Some(script) = r.script.take() {
+                    if let Ok(mut vars) = script.vars.try_borrow_mut() {
+                        vars.list.clear();
+                        vars.index = None;
+                    }
+                }
+            }
+        }
+        let mut seen_objs: std::collections::HashSet<*const ObjData> = Default::default();
+        let mut seen_scopes: std::collections::HashSet<*const Scope> = Default::default();
+        // addresses of the objects this walk emptied: tables that name objects by address forget them
+        let mut cleared: std::collections::HashSet<usize> = Default::default();
+        for o in &self.vm_shared {
+            seen_objs.insert(Rc::as_ptr(o));
+        }
+        let mut objs: Vec<Obj> = vec![
+            self.object_proto.clone(),
+            self.function_proto.clone(),
+            self.array_proto.clone(),
+            self.string_proto.clone(),
+            self.regexp_proto.clone(),
+            self.number_proto.clone(),
+            self.bool_proto.clone(),
+            self.global_object.clone(),
+        ];
+        objs.extend(self.symbol_ctor.take());
+        objs.extend(self.symbol_registry.take());
+        objs.append(&mut self.well_known);
+        objs.extend(self.rt.arraybuffer_proto.take());
+        objs.extend(self.rt.sharedarraybuffer_proto.take());
+        objs.extend(self.rt.typed_base_proto.take());
+        objs.append(&mut self.rt.typed_protos);
+        objs.extend(self.rt.symbols.drain().map(|(_, o)| o));
+        self.rt.push_object_roots(&mut objs);
+        for v in self.callback_values.drain().map(|(_, v)| v) {
+            if let Value::Object(o) = v {
+                objs.push(o);
+            }
+        }
+        // Caches the walk cannot reach through objects: class data holds scopes and values, cached template
+        // strings are values, and the function cache keeps every function's class alive.
+        for v in self.tpl_cache.drain().map(|(_, v)| v) {
+            if let Value::Object(o) = v {
+                objs.push(o);
+            }
+        }
+        let mut scopes: Vec<Rc<Scope>> = vec![self.global.clone()];
+        for def in self.fn_cache.drain().map(|(_, d)| d) {
+            if let Some(class) = &def.class {
+                scopes.push(class.field_scope.clone());
+                if let Some(Value::Object(o)) = &class.parent {
+                    objs.push(o.clone());
+                }
+            }
+        }
+        // Work list instead of recursion: deep prototype or scope chains cannot overflow the stack.
+        loop {
+            if let Some(sc) = scopes.pop() {
+                if !seen_scopes.insert(Rc::as_ptr(&sc)) {
+                    continue;
+                }
+                if let Some(p) = &sc.parent {
+                    scopes.push(p.clone());
+                }
+                if let Some(w) = &sc.with {
+                    objs.push(w.clone());
+                }
+                if let Ok(mut vars) = sc.vars.try_borrow_mut() {
+                    let list = std::mem::take(&mut vars.list);
+                    vars.index = None;
+                    for (_, b) in &list {
+                        if let Value::Object(o) = &b.value {
+                            objs.push(o.clone());
+                        }
+                    }
+                }
+                if let Ok(mut t) = sc.this_val.try_borrow_mut() {
+                    if let Some(Value::Object(o)) = t.take() {
+                        objs.push(o);
+                    }
+                }
+                continue;
+            }
+            let Some(o) = objs.pop() else { break };
+            if !seen_objs.insert(Rc::as_ptr(&o)) {
+                continue;
+            }
+            cleared.insert(Rc::as_ptr(&o) as usize);
+            let props = o
+                .raw_props
+                .try_borrow_mut()
+                .map(|mut p| std::mem::take(&mut *p))
+                .unwrap_or_default();
+            for p in &props {
+                match &p.slot {
+                    Slot::Data(Value::Object(v)) => objs.push(v.clone()),
+                    Slot::Accessor { get, set } => {
+                        for v in [get, set].into_iter().flatten() {
+                            if let Value::Object(v) = v {
+                                objs.push(v.clone());
+                            }
+                        }
+                    }
+                    Slot::LazyProto { parent, .. } => objs.push(parent.clone()),
+                    Slot::Data(_) => {}
+                }
+            }
+            drop(props);
+            if let Ok(mut i) = o.index.try_borrow_mut() {
+                *i = None;
+            }
+            if let Ok(mut p) = o.proto.try_borrow_mut() {
+                objs.extend(p.take());
+            }
+            let kind = o
+                .kind
+                .try_borrow_mut()
+                .ok()
+                .map(|mut k| std::mem::replace(&mut *k, Kind::Plain));
+            match kind {
+                Some(Kind::Array(vs)) => {
+                    for v in vs {
+                        if let Value::Object(v) = v {
+                            objs.push(v);
+                        }
+                    }
+                }
+                Some(Kind::Closure { scope, .. }) => scopes.push(scope),
+                Some(Kind::Wrapper(Value::Object(v))) => objs.push(v),
+                _ => {}
+            }
+        }
+
+        crate::napi_graph::forget_objects(&cleared);
+        crate::napi_symbols::forget_objects(&cleared);
+    }
+}
+
+impl Drop for Interp {
+    fn drop(&mut self) {
+        self.teardown();
+    }
+}

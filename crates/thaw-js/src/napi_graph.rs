@@ -110,6 +110,21 @@ pub(crate) fn tag(object: &Obj, kind: Tag, native: &str) {
     });
 }
 
+#[cfg(test)]
+pub(crate) fn is_tagged_for_test(object: &Obj) -> bool {
+    TAGS.with(|t| t.borrow().contains_key(&(Rc::as_ptr(object) as usize)))
+}
+
+/// Forget the tags of objects a realm's teardown emptied: the entry's `Obj` would keep them alive, and a
+/// tagged object that reads empty must not keep its native identity.
+pub(crate) fn forget_objects(cleared: &std::collections::HashSet<usize>) {
+    let _ = TAGS.try_with(|t| {
+        if let Ok(mut t) = t.try_borrow_mut() {
+            t.retain(|address, _| !cleared.contains(address));
+        }
+    });
+}
+
 /// Whether `text` is a positive decimal (`^[1-9][0-9]*$`), the form the wire spells native handles in.
 pub(crate) fn is_decimal(text: &str) -> bool {
     !text.is_empty()
