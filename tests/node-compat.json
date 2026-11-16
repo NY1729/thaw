@@ -2100,6 +2100,7 @@
     {
       "name": "fetch Response from a local http server",
       "expect": "matched",
+      "expectQuickjsLink": false,
       "source": "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer((req, res) => { res.statusCode = 201; res.setHeader('x-a', 'b'); res.end('{\"k\":1}'); }); await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r())); const port = (srv.address() as any).port; const r: Response = await fetch('http://127.0.0.1:' + port + '/'); console.log(r.status, r.ok, r.headers.get('x-a'), r.statusText); console.log(await r.json()); srv.close(); }"
     },
     {
@@ -2111,6 +2112,7 @@
     {
       "name": "unannotated await fetch is a Response",
       "expect": "matched",
+      "expectQuickjsLink": false,
       "source": "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer((req, res) => { res.statusCode = 201; res.end('hi'); }); await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r())); const port = (srv.address() as any).port; const r = await fetch('http://127.0.0.1:' + port + '/'); console.log(r.status, r.ok); console.log(await r.text()); srv.close(); }"
     },
     {
@@ -4476,6 +4478,7 @@
     {
       "name": "r2c for await over http request body",
       "expect": "matched",
+      "expectQuickjsLink": false,
       "source": "import * as http from \"node:http\";\nconst srv = http.createServer(async (req, res) => {\n  const chunks: Buffer[] = [];\n  for await (const c of req) chunks.push(c as Buffer);\n  res.end(Buffer.concat(chunks));\n});\nfunction main(): void {\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const r = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`, { method: \"POST\", body: \"payload\" });\n    console.log(await r.text());\n    const g = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`);\n    console.log(JSON.stringify(await g.text()));\n    srv.close();\n  });\n}"
     },
     {
@@ -4491,11 +4494,13 @@
     {
       "name": "r2c http chunked response framing headers",
       "expect": "matched",
+      "expectQuickjsLink": false,
       "source": "import * as http from \"node:http\";\nconst srv = http.createServer((req, res) => {\n  if (req.url === \"/stream\") { res.writeHead(200, { \"Content-Type\": \"text/plain\" }); res.write(\"a\"); res.write(\"b\"); res.end(\"c\"); return; }\n  res.writeHead(200, { \"Transfer-Encoding\": \"chunked\" }); res.end(\"x\");\n});\nfunction main(): void {\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const base = `http://127.0.0.1:${(srv.address() as any).port}`;\n    const a = await fetch(base + \"/\");\n    console.log(a.headers.get(\"transfer-encoding\"), a.headers.get(\"content-length\"), a.headers.has(\"date\"), await a.text());\n    const b = await fetch(base + \"/stream\");\n    console.log(b.headers.get(\"transfer-encoding\"), b.headers.get(\"content-length\"), b.headers.has(\"date\"), await b.text());\n    srv.close();\n  });\n}"
     },
     {
       "name": "r2c Response static members spread of Headers and res.end without arguments",
       "expect": "matched",
+      "expectQuickjsLink": false,
       "source": "import * as http from \"node:http\";\nconst srv = http.createServer((req, res) => { res.statusCode = 404; res.end(); });\nfunction main(): void {\n  const a = Response.json({ a: 1 });\n  console.log(a.headers.get(\"content-type\"), a.status);\n  const b = Response.redirect(\"http://a.test/\", 301);\n  console.log(b.status, b.headers.get(\"location\"));\n  console.log(Response.error().type);\n  const h = new Headers({ a: \"1\", b: \"2\" });\n  console.log([...h]);\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const c = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`);\n    console.log(c.status, c.ok);\n    srv.close();\n  });\n}"
     },
     {

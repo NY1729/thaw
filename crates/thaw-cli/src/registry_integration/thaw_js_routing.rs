@@ -715,16 +715,6 @@ fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'st
     .then_some("createHook with timers/promises resources is not supported on thaw-js yet")
 }
 
-/// A native `createServer` next to the global `fetch` client: the fetch request never completes while the
-/// native server runs, so such a program keeps `node:http` on QuickJS. (`get` / `request` run on thaw-js
-/// next to a native server, see the Q9 Rust-closure this-entry fallback.)
-fn thaw_js_native_server_with_http_client_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    (pkg_name == "node:http"
-        && thaw_js_uses_function(user_source, "createServer")
-        && thaw_js_mentions(user_source, "fetch"))
-        .then_some("native createServer together with global fetch is not supported on thaw-js yet")
-}
-
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
 /// feature scan, the program touches no class of it (those are live JavaScript objects), and
 /// every function the program mentions is a typed call whose declaration only carries plain data, or
@@ -770,9 +760,6 @@ fn thaw_js_package_eligible(
         return reject(why.into());
     }
     if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
-        return reject(why.into());
-    }
-    if let Some(why) = thaw_js_native_server_with_http_client_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     // A class the program names is served through thaw-js handles (`new`, instance and static
@@ -914,24 +901,6 @@ fn thaw_js_async_hooks_create_hook_with_timers_or_promises_keeps_the_module_on_q
 
 #[cfg(test)]
 #[test]
-fn thaw_js_native_server_with_http_client_keeps_node_http_on_quickjs() {
-    let combo = "import * as http from 'node:http';\nconst s = http.createServer(() => {});\nhttp.get('http://x/', () => {});";
-    assert!(thaw_js_native_server_with_http_client_blocker("node:http", combo).is_none());
-    let request = "import * as http from 'node:http';\nhttp.createServer(() => {});\nhttp.request('http://x/', () => {});";
-    assert!(thaw_js_native_server_with_http_client_blocker("node:http", request).is_none());
-    let server_only = "import * as http from 'node:http';\nhttp.createServer(() => {}).listen(0);";
-    assert!(thaw_js_native_server_with_http_client_blocker("node:http", server_only).is_none());
-    let client_only = "import * as http from 'node:http';\nhttp.get('http://x/', () => {});";
-    assert!(thaw_js_native_server_with_http_client_blocker("node:http", client_only).is_none());
-    let fetch = "import * as http from 'node:http';\nhttp.createServer(() => {}).listen(0);\nawait fetch('http://x/');";
-    assert!(thaw_js_native_server_with_http_client_blocker("node:http", fetch).is_some());
-    let fetch_only = "import * as http from 'node:http';\nawait fetch('http://x/');";
-    assert!(thaw_js_native_server_with_http_client_blocker("node:http", fetch_only).is_none());
-    assert!(thaw_js_native_server_with_http_client_blocker("node:path", combo).is_none());
-}
-
-#[cfg(test)]
-#[test]
 fn thaw_js_function_use_ignores_imports_and_member_access() {
     let source = "import { marked } from \"marked\";\nconsole.log(marked.parse(\"x\"));\n";
     assert!(!thaw_js_uses_function(source, "marked"));
@@ -948,7 +917,6 @@ fn thaw_js_function_use_ignores_imports_and_member_access() {
 fn thaw_js_function_use_sees_code_sharing_a_line_with_an_import() {
     let one_line = "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer(() => {}); srv.listen(0); await fetch('http://x/'); }";
     assert!(thaw_js_uses_function(one_line, "createServer"));
-    assert!(thaw_js_native_server_with_http_client_blocker("node:http", one_line).is_some());
     let named = "import { createServer } from 'node:http'; createServer(() => {});";
     assert!(thaw_js_uses_function(named, "createServer"));
     let import_only = "import { createServer } from 'node:http';";
