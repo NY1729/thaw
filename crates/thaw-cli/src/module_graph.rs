@@ -2030,6 +2030,20 @@ pub fn external_specifiers(
     Ok(result)
 }
 
+/// The source text of every user module of the graph, the entry included.
+pub fn graph_sources(entry: &Path, entry_source: &str) -> Result<Vec<String>, String> {
+    let mut modules = Vec::new();
+    load_module(
+        entry.canonicalize().map_err(|error| error.to_string())?,
+        Some(entry_source),
+        None,
+        &mut modules,
+        &mut HashMap::new(),
+        &mut HashSet::new(),
+    )?;
+    Ok(modules.into_iter().map(|module| module.source).collect())
+}
+
 /// External packages needed at runtime. The complete specifier list above is
 /// still used to resolve `.d.ts` exports for type-only imports.
 pub fn external_runtime_specifiers(

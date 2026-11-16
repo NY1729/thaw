@@ -1,8 +1,9 @@
 //! Host tests for the global `fetch` on thaw-js (Q9 plan-q9-thawjs-fetch.md, test 1).
 //!
-//! The scenario tests are `#[ignore]`d until PR 2 defines `globalThis.fetch` in the thaw-js realm; run them
-//! with `cargo test -p thaw-js fetch_ -- --ignored`. Each expected line is copied from the node oracle
-//! `tools/parity/routed/fetch.expected` (same scenario, same output lines). The fixture test runs now.
+//! Scenario tests for the thaw-js realm `fetch` (Q9 plan-q9-thawjs-fetch.md, test 1). Each expected line is copied
+//! from the node oracle `tools/parity/routed/fetch.expected` (same scenario, same output lines). Scenarios that
+//! need the HTTP transport are `#[ignore]`d: the transport is the node:http bundle, which only a loaded bundle
+//! provides; run them with `cargo test -p thaw-js fetch_ -- --ignored` once a bundle is loaded in the realm.
 use super::*;
 
 /// A loopback HTTP/1.1 server over the `__thaw_net_*` natives. `fx.listen(fn)` calls `fn(req)` per request;
@@ -81,7 +82,6 @@ fn fetch_fixture_answers_a_raw_loopback_request() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
 fn fetch_global_is_a_function() {
     let out = fetch_lines(
         r#"
@@ -94,7 +94,7 @@ fn fetch_global_is_a_function() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_get_returns_status_headers_and_text() {
     let out = fetch_lines(
         r#"
@@ -119,7 +119,7 @@ fn fetch_get_returns_status_headers_and_text() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_post_sends_the_request_body() {
     let out = fetch_lines(
         r#"
@@ -138,7 +138,7 @@ fn fetch_post_sends_the_request_body() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_follows_302_and_sets_redirected_and_url() {
     let out = fetch_lines(
         r#"
@@ -157,7 +157,7 @@ fn fetch_follows_302_and_sets_redirected_and_url() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_redirect_manual_returns_the_302() {
     let out = fetch_lines(
         r#"
@@ -175,7 +175,9 @@ fn fetch_redirect_manual_returns_the_302() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+// Note: without a transport the fetch rejects with a TypeError, so this expectation passes by accident here. Re-check
+// the redirect rejection (not the missing client) once a bundle is loaded.
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_redirect_error_rejects_with_type_error() {
     let out = fetch_lines(
         r#"
@@ -197,7 +199,7 @@ fn fetch_redirect_error_rejects_with_type_error() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_gzip_body_is_decoded() {
     let out = fetch_lines(
         r#"
@@ -217,7 +219,7 @@ fn fetch_gzip_body_is_decoded() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_chunked_body_is_read() {
     let out = fetch_lines(
         r#"
@@ -235,7 +237,7 @@ fn fetch_chunked_body_is_read() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_abort_mid_body_rejects_with_abort_error() {
     let out = fetch_lines(
         r#"
@@ -260,7 +262,6 @@ fn fetch_abort_mid_body_rejects_with_abort_error() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
 fn fetch_already_aborted_signal_rejects_with_abort_error() {
     let out = fetch_lines(
         r#"
@@ -278,7 +279,7 @@ fn fetch_already_aborted_signal_rejects_with_abort_error() {
 }
 
 #[test]
-#[ignore = "Q9 PR 2: globalThis.fetch is not defined on thaw-js yet"]
+#[ignore = "needs a node:http client loaded in the realm (bundle hook); a bare Interp has none. Routed run: tools/parity/routed/fetch.js"]
 fn fetch_connection_refused_is_fetch_failed() {
     let out = fetch_lines(
         r#"
@@ -296,4 +297,144 @@ fn fetch_connection_refused_is_fetch_failed() {
         "#,
     );
     assert_eq!(out, vec!["TypeError fetch failed ECONNREFUSED".to_string()]);
+}
+
+/// A transport for the realm `fetch` over the `__thaw_net_*` natives: `http` is a loopback client (one GET, the
+/// status line and headers are parsed, the body is not read); any other module is missing, thrown as a bare string
+/// the way the host raised it before the Error fix.
+const LOOPBACK_HTTP_TRANSPORT: &str = r#"
+globalThis.__thaw_fetch_transport = function (name) {
+  if (name !== 'http') throw 'Cannot find module \'node:' + name + '\'';
+  return {
+    request: function (href, options, callback) {
+      var url = new URL(href), handlers = {};
+      var conn = Number(__thaw_net_connect(url.hostname, Number(url.port)).split(':')[1]);
+      var req = {
+        once: function (event, fn) { handlers[event] = fn; return req; },
+        write: function () {},
+        destroy: function () {},
+        end: function () {
+          __thaw_net_write(conn, Buffer.from('GET ' + url.pathname + ' HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n').toString('hex'));
+          var buf = '';
+          (function read() {
+            var d = __thaw_net_poll_read(conn);
+            if (d === 'pending') return setTimeout(read, 1);
+            if (d.indexOf('ok:') === 0) { buf += Buffer.from(d.slice(3), 'hex').toString(); return read(); }
+            var head = buf.slice(0, buf.indexOf('\r\n\r\n')).split('\r\n'), headers = {}, raw = [];
+            head.slice(1).forEach(function (line) {
+              var i = line.indexOf(':');
+              raw.push(line.slice(0, i), line.slice(i + 2));
+              headers[line.slice(0, i).toLowerCase()] = line.slice(i + 2);
+            });
+            callback({ statusCode: Number(head[0].split(' ')[1]), statusMessage: '', headers: headers, rawHeaders: raw,
+              on: function () { return this; }, resume: function () {}, pause: function () {}, destroy: function () {} });
+          })();
+        },
+      };
+      return req;
+    },
+  };
+};
+"#;
+
+#[test]
+fn fetch_redirect_to_a_missing_https_transport_rejects_fetch_failed() {
+    // Defect 1: the redirect is dispatched from the response callback; a throw there used to escape the event
+    // loop and the fetch promise never settled. Node follows to https://127.0.0.1:1/ and fails the same way.
+    let out = fetch_lines(
+        &[
+            LOOPBACK_HTTP_TRANSPORT,
+            r#"
+        fx.listen(function (req) {
+          return fx.text('HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1:1/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+        });
+        (async function () {
+          try {
+            await fetch('http://127.0.0.1:' + fx.port + '/start');
+            console.log('no error');
+          } catch (e) {
+            console.log(e.name, e.message);
+          }
+          __thaw_net_close_listener(fx.listener);
+        })();
+        "#,
+        ]
+        .concat(),
+    );
+    assert_eq!(out, vec!["TypeError fetch failed".to_string()]);
+}
+
+#[test]
+fn fetch_without_a_transport_rejects_fetch_failed_with_a_cause() {
+    // A realm whose bundle has no node:http rejects (never throws at the call), with the reason as the cause.
+    let out = fetch_lines(
+        r#"
+        (async function () {
+          try {
+            await fetch('http://127.0.0.1:1/');
+            console.log('no error');
+          } catch (e) {
+            console.log(e.name, e.message, e.cause && e.cause.message);
+          }
+        })();
+        "#,
+    );
+    assert_eq!(
+        out,
+        vec!["TypeError fetch failed fetch: no HTTP client is loaded in this runtime".to_string()]
+    );
+}
+
+#[test]
+fn fetch_missing_transport_module_is_thrown_as_an_error() {
+    // Defect 1 (host side): `load_module` of a module the bundle lacks throws an Error, not a bare string.
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"a/index.js": function(module, exports, require) {
+  exports.probe = function () {
+    try { globalThis.__thaw_fetch_transport('https'); return 'no error'; }
+    catch (e) { return (e instanceof Error ? 'Error ' : 'not Error ') + e.message; }
+  };
+},
+"node:http": function(module, exports) { exports.request = function () {}; },
+};
+var __thaw_bundle_require_maps = { "a/index.js": {} };
+var __thaw_bundle_entry_key = "a/index.js";
+})(globalThis.require);"#;
+    let mut p = crate::host::Package::load(bundle).expect("loads");
+    assert_eq!(
+        p.call("probe", &[]).ok(),
+        Some(crate::host::Native::Str(
+            "Error Cannot find module 'node:https'".into()
+        ))
+    );
+}
+
+#[test]
+fn fetch_realm_stays_on_the_transport_package_after_another_package_is_entered() {
+    // Defect 2: default_realm (the realm of a global read such as `fetch` in compiled code) used to be the
+    // last-entered package, which may have no node:http transport. The transport package wins.
+    let transport = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"a/index.js": function(module, exports) { exports.id = 'a'; },
+"node:http": function(module, exports) { exports.request = function () {}; },
+};
+var __thaw_bundle_require_maps = { "a/index.js": {} };
+var __thaw_bundle_entry_key = "a/index.js";
+})(globalThis.require);"#;
+    let plain = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "b/index.js": function(module, exports) { exports.id = 'b'; } };
+var __thaw_bundle_require_maps = { "b/index.js": {} };
+var __thaw_bundle_entry_key = "b/index.js";
+})(globalThis.require);"#;
+    let (c_transport, c_plain) = (
+        std::ffi::CString::new(transport).unwrap(),
+        std::ffi::CString::new(plain).unwrap(),
+    );
+    let a = crate::host::thaw_tjs_load(c_transport.as_ptr());
+    let b = crate::host::thaw_tjs_load(c_plain.as_ptr());
+    assert!(a >= 0 && b >= 0, "both bundles load");
+    crate::host::with_package(b as usize, |_| Ok::<(), crate::host::HostError>(()))
+        .expect("enter the plain package last");
+    assert_eq!(crate::host::default_realm(), a as usize);
 }
