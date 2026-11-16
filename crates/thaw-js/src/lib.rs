@@ -4929,6 +4929,8 @@ mod structured_clone_tests;
 mod sysio_stdin_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timers_shape_tests;
 
 #[cfg(test)]
 mod coroutine_teardown_tests;
