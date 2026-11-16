@@ -12,7 +12,9 @@ fn run_small_stack(src: String) -> Vec<String> {
     std::thread::Builder::new()
         .stack_size(SMALL_STACK)
         .spawn(move || {
-            let mut it = Interp::new();
+            // The engine's own guard is under test, whatever THAW_JS_COMPILE says: `check` mode runs every call
+            // twice (AST and compiled), so a recursion that never returns would take exponential time there.
+            let mut it = Interp::with_compile_mode(crate::compile::CompileMode::Off);
             it.configure_stack(SMALL_STACK);
             match it.run(&src) {
                 Ok(_) => {}
