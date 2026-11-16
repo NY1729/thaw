@@ -187,12 +187,83 @@ fn force_realm_fetch_bundles(
     }
 }
 
+/// The local names the program binds to the default export of the package `pkg_name`: `import p from`,
+/// `import { default as p } from`, `import p = require(..)`. Unparseable source binds none.
+fn thaw_js_default_import_locals(pkg_name: &str, user_source: &str) -> Vec<String> {
+    use thaw_parser::ast::{ImportSpecifier, ModuleDecl, ModuleExportName, ModuleItem, TsModuleRef};
+    let Ok((module, _)) = thaw_parser::parse_typescript_with_source_map_named(
+        user_source,
+        thaw_parser::common::FileName::Custom("thaw-js routing".into()),
+    ) else {
+        return Vec::new();
+    };
+    let same_module = |source: &str| {
+        source.trim_start_matches("node:") == pkg_name.trim_start_matches("node:")
+    };
+    let mut locals = Vec::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::Import(import))
+                if import.src.value.as_str().is_some_and(same_module) =>
+            {
+                for specifier in &import.specifiers {
+                    match specifier {
+                        ImportSpecifier::Default(default) => {
+                            locals.push(default.local.sym.to_string());
+                        }
+                        ImportSpecifier::Named(named)
+                            if matches!(&named.imported, Some(ModuleExportName::Ident(name)) if &*name.sym == "default") =>
+                        {
+                            locals.push(named.local.sym.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::TsImportEquals(decl)) => {
+                if let TsModuleRef::TsExternalModuleRef(external) = &decl.module_ref {
+                    if external.expr.value.as_str().is_some_and(same_module) {
+                        locals.push(decl.id.sym.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    locals
+}
+
 /// Whether the program uses the package's value export `name` as a value: any value but a class and
 /// anything but a namespace object whose only uses are calls of the package's own functions
 /// (`validator.isEmail(..)`, which the shim resolves to the typed functions) and its import. Such a
-/// value is served to the program as a thaw-js handle (`$value$` class operation).
+/// value is served to the program as a thaw-js handle (`$value$` class operation). The default export
+/// is also used under the program's own local name (`import p from 'node:path'`), so those uses count.
 fn thaw_js_value_export_needs_handle(pkg: &ResolvedPackage, user_source: &str, name: &str) -> bool {
-    if !thaw_js_mentions(user_source, name) || pkg.classes.iter().any(|class| class.name == name) {
+    if pkg.classes.iter().any(|class| class.name == name) {
+        return false;
+    }
+    // (a builtin's other value exports -- `path.posix`, `path.win32` -- are objects of their own
+    // whose members differ from the module's functions, so `posix.join(..)` needs the value)
+    let namespace_like = !pkg.name.starts_with("node:") || pkg.name.ends_with(name);
+    if thaw_js_binding_needs_handle(pkg, user_source, name, namespace_like) {
+        return true;
+    }
+    // A builtin's default is the module's own namespace object, so calls of its functions stay typed.
+    name == "default"
+        && thaw_js_default_import_locals(&pkg.name, user_source)
+            .iter()
+            .any(|local| thaw_js_binding_needs_handle(pkg, user_source, local, true))
+}
+
+/// Whether some use of the identifier `name` in the program is a value use rather than an import or a call
+/// of one of the package's functions through it (see `thaw_js_value_export_needs_handle`).
+fn thaw_js_binding_needs_handle(
+    pkg: &ResolvedPackage,
+    user_source: &str,
+    name: &str,
+    namespace_like: bool,
+) -> bool {
+    if !thaw_js_mentions(user_source, name) {
         return false;
     }
     let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
@@ -203,10 +274,11 @@ fn thaw_js_value_export_needs_handle(pkg: &ResolvedPackage, user_source: &str, n
         let (before, after) = (&user_source[..start], &user_source[start + name.len()..]);
         offset = start + name.len();
         rest = after;
-        if before.chars().next_back().is_some_and(is_word)
-            || after.chars().next().is_some_and(is_word)
+        let is_quote = |c: char| matches!(c, '\'' | '"' | '`');
+        if before.chars().next_back().is_some_and(|c| is_word(c) || is_quote(c))
+            || after.chars().next().is_some_and(|c| is_word(c) || is_quote(c))
         {
-            continue; // part of a longer identifier
+            continue; // part of a longer identifier, or the text of a string (`'node:path'`)
         }
         let import_binding = before.trim_end().ends_with("import")
             || before.trim_end().ends_with("* as")
@@ -222,9 +294,6 @@ fn thaw_js_value_export_needs_handle(pkg: &ResolvedPackage, user_source: &str, n
             let end = member.find(|c: char| !is_word(c)).unwrap_or(member.len());
             (&member[..end], member[end..].trim_start())
         });
-        // (a builtin's other value exports -- `path.posix`, `path.win32` -- are objects of their own
-        // whose members differ from the module's functions, so `posix.join(..)` needs the value)
-        let namespace_like = !pkg.name.starts_with("node:") || pkg.name.ends_with(name);
         let called_function = member.is_some_and(|(member, tail)| {
             namespace_like
                 && tail.starts_with('(')
@@ -733,6 +802,62 @@ fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'st
     .then_some("createHook with promise resources is not supported on thaw-js yet")
 }
 
+/// The six specifiers of the `node:path` family. Each is its own thaw-js package with its own interpreter
+/// (`pkg.name` is the user's specifier), so one value taken through two of them is two objects of two realms.
+const PATH_FAMILY_SPECIFIERS: [&str; 6] = [
+    "path",
+    "node:path",
+    "path/posix",
+    "node:path/posix",
+    "path/win32",
+    "node:path/win32",
+];
+
+/// Whether the program takes a value export (`default`, `posix`, `win32`: a default, namespace or named import
+/// of one of them) from two or more path-family specifiers. `===` between those values is false on thaw-js
+/// (different interpreters), so such a program keeps every path-family package on QuickJS, whose one realm
+/// shares the `node:path` bundle.
+/// ponytail: interim guard. Sharing one interpreter for the family's value exports would keep these on thaw-js;
+/// add that if a program needs it. Only the entry source is scanned, so a split across modules is not seen.
+fn path_family_value_realms_split(user_source: &str) -> bool {
+    use thaw_parser::ast::{ImportSpecifier, ModuleDecl, ModuleExportName, ModuleItem, TsModuleRef};
+    let Ok((module, _)) = thaw_parser::parse_typescript_with_source_map_named(
+        user_source,
+        thaw_parser::common::FileName::Custom("thaw-js routing".into()),
+    ) else {
+        return false;
+    };
+    let is_value_export = |name: &str| matches!(name, "default" | "posix" | "win32");
+    let mut value_specifiers = std::collections::HashSet::<String>::new();
+    for item in &module.body {
+        let (src, takes_value) = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
+                let takes_value = import.specifiers.iter().any(|specifier| match specifier {
+                    ImportSpecifier::Default(_) | ImportSpecifier::Namespace(_) => true,
+                    ImportSpecifier::Named(named) => match &named.imported {
+                        Some(ModuleExportName::Ident(name)) => is_value_export(&name.sym),
+                        Some(_) => false,
+                        None => is_value_export(&named.local.sym),
+                    },
+                });
+                (import.src.value.as_str(), takes_value)
+            }
+            // `import p = require('path')` binds the whole module, like a default import
+            ModuleItem::ModuleDecl(ModuleDecl::TsImportEquals(decl)) => match &decl.module_ref {
+                TsModuleRef::TsExternalModuleRef(external) => (external.expr.value.as_str(), true),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if takes_value {
+            if let Some(src) = src.filter(|src| PATH_FAMILY_SPECIFIERS.contains(src)) {
+                value_specifiers.insert(src.to_string());
+            }
+        }
+    }
+    value_specifiers.len() > 1
+}
+
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
 /// feature scan, the program touches no class of it (those are live JavaScript objects), and
 /// every function the program mentions is a typed call whose declaration only carries plain data, or
@@ -776,6 +901,9 @@ fn thaw_js_package_eligible(
     }
     if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
         return reject(why.into());
+    }
+    if PATH_FAMILY_SPECIFIERS.contains(&pkg.name.as_str()) && path_family_value_realms_split(user_source) {
+        return reject("path-family value exports from two specifiers do not share one realm on thaw-js".into());
     }
     // A class the program names is served through thaw-js handles (`new`, instance and static
     // methods); every operation the shim declares for it must be plain data or an instance handle.
