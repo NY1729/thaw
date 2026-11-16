@@ -205,6 +205,16 @@ Object.assign(Console.prototype, {
 });
 Console.prototype.dirxml = Console.prototype.log;
 Console.prototype.groupCollapsed = Console.prototype.group;
+// Node: `value(instance) { return instance[kIsConsole] }`, so a Console and anything inheriting from one.
+// Here a walk up the prototype chain over kStateOf (a boolean, where Node returns the marker's value).
+Object.defineProperty(Console, Symbol.hasInstance, {
+  value: fn('value', 1, (instance) => {
+    for (let o = instance; o !== null && o !== undefined; o = Object.getPrototypeOf(o)) {
+      if (kStateOf.has(o)) return true;
+    }
+    return false;
+  }),
+});
 
 // The global `console` is one `Console` instance on the process streams (Node: `console instanceof
 // console.Console`). Node's global methods report length 0 (context: 1); the extras below exist only on it.

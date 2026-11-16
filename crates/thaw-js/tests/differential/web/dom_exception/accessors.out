@@ -1,0 +1,13 @@
+code get code/0 undefined true true
+message get message/0 undefined true true
+name get name/0 undefined true true
+AbortError 20 msg AbortError: msg true [object DOMException]
+0 0
+Error 0 ""
+25 8
+0 3
+no throw AbortError
+no throw 20
+proto name true ERR_INVALID_THIS
+brand true
+NotFoundError: gone

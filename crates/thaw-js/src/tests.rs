@@ -2628,6 +2628,67 @@ fn web_crypto_methods_live_on_prototypes() {
     );
 }
 
+/// Run `src` on a fresh interpreter, drain the event loop, and join the console lines with `|`.
+fn run_async(src: &str) -> String {
+    let mut it = Interp::new();
+    it.run(src).ok().unwrap();
+    it.run_event_loop().ok().unwrap();
+    std::mem::take(&mut it.out).join("|")
+}
+
+#[test]
+fn web_crypto_operations_not_implemented_reject_not_supported() {
+    // part (a): encrypt/decrypt/sign/verify/derive/wrap/unwrap are not implemented yet, so a known
+    // algorithm must reject NotSupportedError (never resolve), and an unknown one reports node's text
+    assert_eq!(
+        run_async(
+            "(async function () {
+               var k = await crypto.subtle.importKey('raw', new Uint8Array(3), { name: 'HMAC', hash: 'SHA-256' }, true, ['sign']);
+               var calls = [
+                 () => crypto.subtle.encrypt({ name: 'AES-GCM', iv: new Uint8Array(12) }, k, new Uint8Array(1)),
+                 () => crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(12) }, k, new Uint8Array(1)),
+                 () => crypto.subtle.sign('HMAC', k, new Uint8Array(1)),
+                 () => crypto.subtle.verify('HMAC', k, new Uint8Array(1), new Uint8Array(1)),
+                 () => crypto.subtle.deriveBits({ name: 'PBKDF2' }, k, 8),
+                 () => crypto.subtle.deriveKey({ name: 'PBKDF2' }, k, { name: 'HMAC', hash: 'SHA-256' }, true, ['sign']),
+                 () => crypto.subtle.wrapKey('raw', k, k, 'AES-KW'),
+                 () => crypto.subtle.unwrapKey('raw', new Uint8Array(1), k, 'AES-KW', 'HMAC', true, ['sign']),
+                 () => crypto.subtle.generateKey({ name: 'RSA-PSS', modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign']),
+                 () => crypto.subtle.encrypt({ name: 'Foo' }, k, new Uint8Array(1)),
+                 () => crypto.subtle.sign({ name: 'Foo' }, k, new Uint8Array(1)),
+                 () => crypto.subtle.deriveBits({ name: 'Foo' }, k, 8),
+                 () => crypto.subtle.generateKey({ name: 'Foo' }, true, ['sign'])
+               ];
+               var out = [];
+               for (var c of calls) {
+                 try { await c(); out.push('resolved'); } catch (e) { out.push(e.name + ':' + e.message); }
+               }
+               console.log(out.join('|'));
+             })();"
+        ),
+        "NotSupportedError:AES-GCM encrypt is not implemented|NotSupportedError:AES-GCM decrypt is not implemented|\
+         NotSupportedError:HMAC sign is not implemented|NotSupportedError:HMAC verify is not implemented|\
+         NotSupportedError:PBKDF2 deriveBits is not implemented|NotSupportedError:PBKDF2 deriveKey is not implemented|\
+         NotSupportedError:AES-KW wrapKey is not implemented|NotSupportedError:AES-KW unwrapKey is not implemented|\
+         NotSupportedError:RSA-PSS generateKey is not implemented|NotSupportedError:Unrecognized algorithm name|\
+         NotSupportedError:Unrecognized algorithm name|NotSupportedError:Unrecognized algorithm name|\
+         NotSupportedError:Unrecognized algorithm name"
+    );
+}
+
+#[test]
+fn web_crypto_key_accessors_need_a_crypto_key_receiver() {
+    assert_eq!(
+        one("var r = [];
+             for (const k of ['type', 'algorithm', 'extractable', 'usages']) {
+               try { Object.getOwnPropertyDescriptor(CryptoKey.prototype, k).get.call({}); r.push('no'); }
+               catch (e) { r.push(e.name + ':' + e.message); }
+             }
+             console.log(r.join(' '));"),
+        "TypeError:Value of \"this\" must be of type CryptoKey TypeError:Value of \"this\" must be of type CryptoKey TypeError:Value of \"this\" must be of type CryptoKey TypeError:Value of \"this\" must be of type CryptoKey"
+    );
+}
+
 #[test]
 fn crypto_create_hash_matches_node() {
     assert_eq!(
@@ -8343,7 +8404,7 @@ fn q9_process_config_and_error_prepare_stack_trace_exist() {
          console.log(typeof Error.prepareStackTrace);",
     );
     assert_eq!(code, 0);
-    assert_eq!(out.join("|"), "object object object|true|function");
+    assert_eq!(out.join("|"), "object object object|false|function");
 }
 
 #[test]

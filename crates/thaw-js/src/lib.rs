@@ -4870,6 +4870,8 @@ mod console_instance_tests;
 #[cfg(test)]
 mod dynamic_helper_contract_tests;
 #[cfg(test)]
+mod errors_stack_tests;
+#[cfg(test)]
 mod fetch_tests;
 #[cfg(all(test, unix))]
 mod fs_tests;
@@ -4931,6 +4933,8 @@ mod structured_clone_tests;
 mod sysio_stdin_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timers_shape_tests;
 
 #[cfg(test)]
 mod coroutine_teardown_tests;

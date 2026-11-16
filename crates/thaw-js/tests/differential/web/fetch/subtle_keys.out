@@ -1,0 +1,40 @@
+true/true/truetruetrue true/true/truetruetrue true/true/truetruetrue true/true/truetruetrue true/true/truetruetrue true/true/truetruetrue true/true/truetruetrue true/true/truetruetrue true/true/truetruetrue true/true/truetruetrue true/true/truetruetrue
+[object CryptoKey] secret true sign,verify HMAC SHA-256 24
+type:truetrue:get type:0:undefined algorithm:truetrue:get algorithm:0:undefined extractable:truetrue:get extractable:0:undefined usages:truetrue:get usages:0:undefined
+true 0
+010203
+key_ops,ext,alg,kty,k oct HS256 AQID true sign,verify
+010203 sign
+SHA-1 32 HS1
+HMAC SHA-512 1024 sign,verify true 128
+128 false InvalidAccessException "key is not extractable"
+AES-CBC 128 A128CBC oct
+AES-GCM 128 decrypt 00000000000000000000000000000000
+AES-KW 256 wrapKey,unwrapKey
+AES-GCM 256 secret encrypt,decrypt 32
+SyntaxError "Unsupported key usage for an HMAC key"
+SyntaxError "Usages cannot be empty when importing a secret key."
+SyntaxError "Unsupported key usage for an AES key"
+DataError "Invalid key length"
+DataError "Zero-length key is not supported"
+NotSupportedError "Unrecognized algorithm name"
+NotSupportedError "Unrecognized algorithm name"
+DataError "Invalid JWK \"kty\" Parameter"
+DataError "JWK \"alg\" does not match the requested algorithm"
+DataError "JWK \"ext\" Parameter and extractable mismatch"
+DataError "Key operations and usage mismatch"
+InvalidAccessException "key is not extractable"
+NotSupportedError "Unable to export HMAC secret key using spki format"
+TypeError "Failed to execute 'exportKey' on 'SubtleCrypto': 1st argument value 'bogus' is not a valid enum value of type KeyFormat."
+SyntaxError "Usages cannot be empty when creating a key."
+SyntaxError "Unsupported key usage for an HMAC key"
+OperationError "AES key length must be 128, 192, or 256 bits"
+SyntaxError "Unsupported key usage for an AES key"
+DataError "Zero-length key is not supported"
+NotSupportedError "Unrecognized algorithm name"
+NotSupportedError "Unrecognized algorithm name"
+NotSupportedError "Unrecognized algorithm name"
+NotSupportedError "Unrecognized algorithm name"
+NotSupportedError "Unrecognized algorithm name"
+TypeError "Failed to execute 'exportKey' on 'SubtleCrypto': 2nd argument is not of type CryptoKey."
+ok undefined
