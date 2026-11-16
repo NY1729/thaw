@@ -42,6 +42,53 @@ thread_local! {
     static REGISTRY: RefCell<Registry> = RefCell::new(Registry::default());
 }
 
+#[cfg(test)]
+pub(crate) fn pin_for_test(owner: u64, native: u64, symbol: &Obj) {
+    REGISTRY.with(|r| {
+        r.borrow_mut().by_native.insert(
+            (owner, native),
+            Entry {
+                weak: Rc::downgrade(symbol),
+                pinned: Some(symbol.clone()),
+            },
+        );
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn is_registered_for_test(owner: u64, native: u64) -> bool {
+    REGISTRY.with(|r| r.borrow().by_native.contains_key(&(owner, native)))
+}
+
+/// Forget the native ids of Symbols a realm's teardown emptied (a pin is a strong `Obj`, and a cleared
+/// Symbol no longer is one): later lookups of those ids see an unknown id, as for any released one.
+pub(crate) fn forget_objects(cleared: &std::collections::HashSet<usize>) {
+    let _ = REGISTRY.try_with(|r| {
+        let Ok(mut r) = r.try_borrow_mut() else {
+            return;
+        };
+        let Registry {
+            by_native,
+            by_symbol,
+            ..
+        } = &mut *r;
+        let dead: Vec<(u64, u64)> = by_native
+            .iter()
+            .filter(|(_, e)| {
+                let pinned = e.pinned.as_ref().map(|o| Rc::as_ptr(o) as usize);
+                let weak = e.weak.upgrade().map(|o| Rc::as_ptr(&o) as usize);
+                pinned.is_some_and(|a| cleared.contains(&a))
+                    || weak.is_some_and(|a| cleared.contains(&a))
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in &dead {
+            by_native.remove(key);
+        }
+        by_symbol.retain(|(owner, _), native| by_native.contains_key(&(*owner, *native)));
+    });
+}
+
 /// Whether `owner` names a graph owner this registry serves. With a bridge, any owner is an opaque key. Without one
 /// (standalone), `owner` is a package index of this thread.
 fn valid_owner(owner: u64) -> bool {

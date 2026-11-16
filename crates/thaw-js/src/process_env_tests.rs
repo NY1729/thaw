@@ -7,7 +7,7 @@ fn lines(src: &str) -> Vec<String> {
     let mut it = Interp::new();
     it.run(src)
         .unwrap_or_else(|_| panic!("program must run: {src}"));
-    it.out
+    std::mem::take(&mut it.out)
 }
 
 #[test]
