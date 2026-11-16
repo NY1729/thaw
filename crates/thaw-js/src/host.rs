@@ -1702,6 +1702,22 @@ impl WireOut {
         format!("{{\"r\":{}}}", self.nodes.len() - 1)
     }
 
+    /// The node an object already has in this wire (its first occurrence), so a repeat is a back-reference.
+    fn node_of(&self, v: &Value) -> Option<usize> {
+        let Value::Object(o) = v else { return None };
+        let key = Rc::as_ptr(o);
+        self.seen.iter().find(|(p, _)| *p == key).map(|(_, i)| *i)
+    }
+
+    /// A live object's handle node, recorded in `seen` so a second occurrence in this wire reuses it.
+    fn lease_object(&mut self, v: &Value, id: u64) -> String {
+        let token = self.lease(id);
+        if let Value::Object(o) = v {
+            self.seen.push((Rc::as_ptr(o), self.nodes.len() - 1));
+        }
+        token
+    }
+
     /// A registered native Symbol: its native id and a handle to it (`{"nsy","hdl"}`, as the QuickJS wire).
     fn lease_symbol(&mut self, id: u64, native: u64) -> String {
         self.leases.push(id);
@@ -1714,9 +1730,12 @@ impl WireOut {
         let mut v = v.clone();
         if let Some((id, r)) = &self.receiver {
             if matches!((&v, r), (Value::Object(a), Value::Object(b)) if Rc::ptr_eq(a, b)) {
+                if let Some(node) = self.node_of(&v) {
+                    return Ok(format!("{{\"r\":{node}}}"));
+                }
                 let id = *id;
                 thaw_tjs_retain_handle(id as i64);
-                return Ok(self.lease(id));
+                return Ok(self.lease_object(&v, id));
             }
         }
         if let Some(native) = crate::napi_symbols::native_id_of_value(self.owner as u64, &v) {
@@ -1756,8 +1775,11 @@ impl WireOut {
         // A plain result that compiled code already holds by handle stays that handle (same identity).
         if self.plain && (!v.is_callable() || self.live_functions) {
             if let Some(id) = live_handle_of(&v) {
+                if let Some(node) = self.node_of(&v) {
+                    return Ok(format!("{{\"r\":{node}}}"));
+                }
                 thaw_tjs_retain_handle(id as i64);
-                return Ok(self.lease(id));
+                return Ok(self.lease_object(&v, id));
             }
         }
         Ok(match &v {
@@ -1796,8 +1818,11 @@ impl WireOut {
                     || !matches!(&*o.kind.borrow(), Kind::Plain | Kind::Array(_));
                 if live {
                     // ponytail: Date/Map/Set/RegExp/typed-array results stay live handles; give them wire nodes if a package needs the copy
+                    if let Some(node) = self.node_of(&v) {
+                        return Ok(format!("{{\"r\":{node}}}"));
+                    }
                     let id = store_handle(self.owner, v.clone()) as u64;
-                    return Ok(self.lease(id));
+                    return Ok(self.lease_object(&v, id));
                 }
                 let key = Rc::as_ptr(o);
                 if let Some((_, i)) = self.seen.iter().find(|(p, _)| *p == key) {
@@ -3588,10 +3613,15 @@ pub extern "C" fn thaw_tjs_resolve_handle_graph_result(handle: u64) -> ThawResul
 
 /// A function or class instance: it cannot cross as plain data, so compiled code keeps it by handle.
 /// A prototype stand-in (accessors or non-enumerable members on a Plain object) is live too: a copy would lose them.
+/// Generators, Map/Set iterators and Proxies have no plain-data form either (a copy would be `{}`).
 fn is_live_value(it: &Interp, v: &Value) -> bool {
     match v {
         Value::Object(o) => {
             v.is_callable()
+                || matches!(
+                    &*o.kind.borrow(),
+                    Kind::Generator(_) | Kind::CollIter(_) | Kind::Proxy(_)
+                )
                 || (matches!(&*o.kind.borrow(), Kind::Plain)
                     && (o
                         .proto
@@ -6690,6 +6720,118 @@ mod live_result_lease_tests {
         let (_, out) = token_of(&mut it, &data);
         assert!(out.leases.is_empty());
         assert!(out.nodes[0].starts_with("{\"o\":"), "{:?}", out.nodes);
+    }
+
+    #[test]
+    fn a_live_object_repeated_in_one_wire_is_one_node() {
+        // `[d, d, e]`: the second `d` is a back-reference to the first node, not a second handle node
+        let mut it = Interp::new();
+        let arr = object(
+            &mut it,
+            "(function () { const d = new Date(1234); return [d, d, new Date(1234)]; })()",
+        );
+        let (token, out) = token_of(&mut it, &arr);
+        assert_eq!(token, "{\"r\":0}");
+        assert_eq!(out.leases.len(), 2, "{:?}", out.nodes);
+        assert_eq!(
+            out.nodes[0], "{\"a\":[{\"r\":1},{\"r\":1},{\"r\":2}]}",
+            "{:?}",
+            out.nodes
+        );
+        assert_eq!(out.nodes[1], format!("{{\"hdl\":{}}}", out.leases[0]));
+        assert_eq!(out.nodes[2], format!("{{\"hdl\":{}}}", out.leases[1]));
+        for id in &out.leases {
+            thaw_tjs_release_handle(*id as i64);
+        }
+    }
+
+    #[test]
+    fn a_live_object_under_two_keys_is_one_lease() {
+        // `{a: i, b: i}` with an Invalid Date: one handle node, referenced from both members
+        let mut it = Interp::new();
+        let v = object(
+            &mut it,
+            "(function () { const i = new Date(NaN); return {a: i, b: i}; })()",
+        );
+        let (token, out) = token_of(&mut it, &v);
+        assert_eq!(token, "{\"r\":0}");
+        assert_eq!(out.leases.len(), 1, "{:?}", out.nodes);
+        assert_eq!(
+            out.nodes[0], "{\"o\":[[\"a\",{\"r\":1},7],[\"b\",{\"r\":1},7]]}",
+            "{:?}",
+            out.nodes
+        );
+        thaw_tjs_release_handle(out.leases[0] as i64);
+    }
+
+    fn kind_label(v: &Value) -> &'static str {
+        let Value::Object(o) = v else {
+            return "Primitive";
+        };
+        // exhaustive on purpose: a new `Kind` must be given a label (and a row below)
+        match &*o.kind.borrow() {
+            Kind::Plain => "Plain",
+            Kind::Array(_) => "Array",
+            Kind::Closure { .. } => "Closure",
+            Kind::Native(_) => "Native",
+            Kind::RegExp(_) => "RegExp",
+            Kind::Global => "Global",
+            Kind::Map(_) => "Map",
+            Kind::Set(_) => "Set",
+            Kind::CollIter(_) => "CollIter",
+            Kind::Symbol { .. } => "Symbol",
+            Kind::Promise(_) => "Promise",
+            Kind::Generator(_) => "Generator",
+            Kind::Proxy(_) => "Proxy",
+            Kind::ArrayBuffer(_) => "ArrayBuffer",
+            Kind::Typed(_) => "Typed",
+            Kind::Wrapper(_) => "Wrapper",
+            Kind::RawJson(_) => "RawJson",
+        }
+    }
+
+    #[test]
+    fn token_and_is_live_value_agree_for_every_kind() {
+        // A row with a tag is a deliberate, undecided difference: P2b (Map/Set/typed/ArrayBuffer, kept by
+        // value on the typed path) or "not in P2" (the kinds this change leaves alone). Other rows must agree.
+        let rows: &[(&str, &str, Option<&str>)] = &[
+            ("Plain", "({x: 1})", None),
+            ("Plain", "Object.create(null)", None),
+            ("Array", "[1]", None),
+            ("Closure", "(function f() {})", None),
+            ("Native", "Math.max", None),
+            ("Generator", "(function* () {})()", None),
+            ("Generator", "(async function* () {})()", None),
+            ("CollIter", "new Map().keys()", None),
+            ("Proxy", "new Proxy({}, {})", None),
+            ("Global", "globalThis", Some("not in P2")),
+            ("Map", "new Map()", Some("P2b")),
+            ("Set", "new Set()", Some("P2b")),
+            ("Typed", "new Float64Array(1)", Some("P2b")),
+            ("ArrayBuffer", "new ArrayBuffer(1)", Some("P2b")),
+            ("Symbol", "Symbol('x')", Some("not in P2")),
+            ("Promise", "Promise.resolve(1)", Some("not in P2")),
+            ("RegExp", "/a/", Some("not in P2")),
+            ("Wrapper", "new Number(1)", Some("not in P2")),
+            ("RawJson", "JSON.rawJSON('1')", Some("not in P2")),
+        ];
+        for (label, src, exception) in rows {
+            let mut it = Interp::new();
+            let v = object(&mut it, src);
+            assert_eq!(kind_label(&v), *label, "{src}");
+            let mut out = plain_wire_live_functions();
+            let Ok(_) = out.token(&mut it, &v) else {
+                panic!("token failed: {src}")
+            };
+            let token_live = out.leases.len() == 1;
+            let typed_live = is_live_value(&it, &v);
+            if exception.is_none() {
+                assert_eq!(token_live, typed_live, "{label}: {src}");
+            }
+            for id in &out.leases {
+                thaw_tjs_release_handle(*id as i64);
+            }
+        }
     }
 }
 
