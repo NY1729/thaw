@@ -1758,6 +1758,11 @@ impl Interp {
                     }
                     return self.inspect(&target, top);
                 }
+                // a `nodejs.util.inspect.custom` method's string stands for the value, nested or not
+                // ponytail: nested custom text gets console.log's fixed depth 2 and breakLength 80
+                if let Ok(Some(text)) = host::console_custom_text(self, v) {
+                    return text;
+                }
                 enum K {
                     Arr(Vec<Value>),
                     Fun,
@@ -4949,6 +4954,8 @@ mod timers_shape_tests;
 mod coroutine_teardown_tests;
 #[cfg(test)]
 mod ipc_tests;
+#[cfg(test)]
+mod url_tests;
 #[cfg(test)]
 mod vm_realm_tests;
 #[cfg(test)]
