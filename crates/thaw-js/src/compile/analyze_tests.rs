@@ -475,7 +475,22 @@ fn analysis_table_behaviour_matches_interpreter() {
         let ok_off = off.run_sloppy(&program).is_ok();
         let ok_on = on.run_sloppy(&program).is_ok();
         assert_eq!(ok_off, ok_on, "{src}");
-        assert_eq!(on.out, off.out, "{src}");
+        if src.contains("new Date()") {
+            // the two interpreters read the wall clock at different instants (a second boundary in between
+            // makes the printed time differ): compare the shape, not the instant
+            let shape = |out: &[String]| -> Vec<String> {
+                out.iter()
+                    .map(|l| {
+                        l.chars()
+                            .map(|c| if c.is_ascii_digit() { '0' } else { c })
+                            .collect()
+                    })
+                    .collect()
+            };
+            assert_eq!(shape(&on.out), shape(&off.out), "{src}");
+        } else {
+            assert_eq!(on.out, off.out, "{src}");
+        }
         assert!(!off.out.is_empty() || !ok_off, "{src}");
     }
 }
