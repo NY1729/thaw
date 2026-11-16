@@ -883,3 +883,73 @@ fn a_bare_constrained_type_parameter_return_is_not_the_constraint() {
         queries[0].ret
     );
 }
+
+#[test]
+fn constructor_callback_params_naming_same_module_classes_are_js_values() {
+    let classes = parse_dts_classes(
+        r#"export declare class PerformanceEntry { readonly name: string; }
+        export declare class PerformanceObserverEntryList { getEntries(): PerformanceEntry[]; }
+        export declare class PerformanceObserver {
+            constructor(callback: (list: PerformanceObserverEntryList, observer: PerformanceObserver) => void);
+        }
+        export declare class Other {
+            constructor(callback: (err: Error | null, value: any) => void, notDeclared: (x: Missing) => void);
+        }"#,
+    )
+    .unwrap();
+    let observer = classes
+        .iter()
+        .find(|class| class.name == "PerformanceObserver")
+        .unwrap();
+    assert!(
+        matches!(
+            &observer.constructors[0].params[0].1,
+            DtsType::Native(HirType::Function(params, _)) if params == &[HirType::JsValue, HirType::JsValue]
+        ),
+        "{:?}",
+        observer.constructors[0].params[0].1
+    );
+    let other = classes.iter().find(|class| class.name == "Other").unwrap();
+    assert!(
+        matches!(
+            &other.constructors[0].params[0].1,
+            DtsType::Native(HirType::Function(params, _)) if params == &[HirType::Json, HirType::Json]
+        ),
+        "{:?}",
+        other.constructors[0].params[0].1
+    );
+    assert!(
+        matches!(
+            &other.constructors[0].params[1].1,
+            DtsType::Native(HirType::Function(params, _)) if params == &[HirType::Json]
+        ),
+        "{:?}",
+        other.constructors[0].params[1].1
+    );
+}
+
+#[test]
+fn method_callback_params_naming_same_module_classes_are_js_values() {
+    let classes = parse_dts_classes(
+        r#"export declare class Entry { readonly name: string; }
+        export declare class Feed {
+            subscribe(callback: (entry: Entry) => void): void;
+            plain(callback: (entry: Entry) => void): void;
+        }"#,
+    )
+    .unwrap();
+    let feed = classes.iter().find(|class| class.name == "Feed").unwrap();
+    let method = feed
+        .methods
+        .iter()
+        .find(|method| method.name == "subscribe")
+        .unwrap();
+    assert!(
+        matches!(
+            &method.params[0].1,
+            DtsType::Native(HirType::Function(params, _)) if params == &[HirType::JsValue]
+        ),
+        "{:?}",
+        method.params[0].1
+    );
+}

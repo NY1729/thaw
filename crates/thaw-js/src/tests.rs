@@ -3746,11 +3746,15 @@ unsafe extern "C" fn mask_adapter(
 }
 
 fn mask_callback(mask: u64) -> u64 {
+    mask_callback_with_arity(mask, 1)
+}
+
+fn mask_callback_with_arity(mask: u64, arity: u64) -> u64 {
     let made = crate::host::thaw_tjs_register_native_callback_graph(
         mask_adapter as *const _,
         std::ptr::null(),
         mask,
-        1,
+        arity,
         0,
         std::ptr::null(),
         0,
@@ -3795,6 +3799,21 @@ fn graph_mask_passes_primitive_jsvalue_arguments_as_handles() {
         );
         assert_eq!(seen[0].1, [shown]);
     }
+}
+
+#[test]
+fn graph_mask_two_jsvalue_params_lease_both_as_nonzero_handles() {
+    use crate::host::*;
+    let source = std::ffi::CString::new(MASK_BUNDLE).unwrap();
+    assert_eq!(thaw_tjs_register(c"mk".as_ptr(), source.as_ptr()), 1);
+    // bits 0 and 1: both declared parameters are JsValue (the class-instance shape)
+    let callback = mask_callback_with_arity(0x3, 2);
+    call_mask_callback(callback, r#"{"a":[{"v":"first"},{"v":"second"}]}"#);
+    let seen = seen_calls();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0.matches("\"hdl\":").count(), 2, "{}", seen[0].0);
+    assert!(!seen[0].0.contains("\"hdl\":0"), "{}", seen[0].0);
+    assert_eq!(seen[0].1, ["first", "second"]);
 }
 
 #[test]
