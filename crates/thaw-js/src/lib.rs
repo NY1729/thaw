@@ -141,6 +141,13 @@ pub const SUPPORTED_FEATURES: &[&str] = &[
 
 const MAX_DEPTH: usize = 100;
 
+/// The message of a stack overflow, as Node and V8 word it (`RangeError`).
+pub(crate) const STACK_OVERFLOW: &str = "Maximum call stack size exceeded";
+
+/// Deepest bracket nesting the parser is given. swc and regress recurse once per level, and a level costs
+/// several KB of stack in a debug build, so this is what a 64 MiB worker thread can take. Node accepts about 3000.
+const MAX_NEST: usize = 2000;
+
 #[derive(Clone)]
 pub enum Value {
     Undefined,
@@ -1159,6 +1166,8 @@ pub struct Interp {
     /// Addresses of the arrays/objects whose native walk is in progress (`join`, `inspect`): meeting one
     /// again means the value contains itself. Shared guard for every native recursion over user objects.
     walking: Vec<usize>,
+    /// The members of `walking`: membership in a deep walk is O(1), not a scan of the stack.
+    walking_set: std::collections::HashSet<usize>,
     /// Address of the object a `[Circular *1]` pointed back to (inspect prints `<ref *1>` on it).
     circular_target: Option<usize>,
     /// Call-depth cap; replaced by the stack-address check once `configure_stack` was called.
@@ -1313,6 +1322,7 @@ impl Interp {
             depth: 0,
             call_frames: Vec::new(),
             walking: Vec::new(),
+            walking_set: Default::default(),
             circular_target: None,
             max_depth: MAX_DEPTH,
             stack_limit: 0,
@@ -1476,6 +1486,16 @@ impl Interp {
         // below the configured limit is only deep if this thread's own stack agrees: compiled code may
         // enter from a thread other than the one that configured the limit (an async continuation)
         self.stack_limit != 0 && sp < self.stack_limit && !thread_stack_has_room(sp)
+    }
+
+    /// `RangeError` once the stack guard trips. For natives that recurse without going through `call_as`
+    /// (JSON, join, the parser front door): they call this at each recursive step.
+    #[inline]
+    pub(crate) fn check_stack(&mut self) -> R<()> {
+        if self.too_deep() {
+            return self.throw_error("RangeError", STACK_OVERFLOW);
+        }
+        Ok(())
     }
 
     pub(crate) fn native(
@@ -1703,7 +1723,7 @@ impl Interp {
     /// a cycle: the caller stops there. Every `true` must be paired with `leave_walk`.
     pub(crate) fn enter_walk(&mut self, o: &Obj) -> bool {
         let addr = Rc::as_ptr(o) as usize;
-        if self.walking.contains(&addr) {
+        if !self.walking_set.insert(addr) {
             return false;
         }
         self.walking.push(addr);
@@ -1711,32 +1731,58 @@ impl Interp {
     }
 
     pub(crate) fn leave_walk(&mut self) {
-        self.walking.pop();
+        if let Some(addr) = self.walking.pop() {
+            self.walking_set.remove(&addr);
+        }
     }
 
-    pub(crate) fn join(&mut self, this: &Value, sep: &str) -> JsStr {
+    /// `to_str` for an array element, fallible: a nested array recurses through `try_join`.
+    pub(crate) fn try_to_str(&mut self, v: &Value) -> R<JsStr> {
+        if let Value::Object(o) = v {
+            if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                return self.try_join(v, ",");
+            }
+        }
+        Ok(self.to_str(v))
+    }
+
+    /// `Array.prototype.join`, fallible: a nested array past the stack guard is a `RangeError`, as in Node.
+    pub(crate) fn try_join(&mut self, this: &Value, sep: &str) -> R<JsStr> {
         let Value::Object(o) = this else {
-            return "".into();
+            return Ok("".into());
         };
         let items = match &*o.kind.borrow() {
             Kind::Array(v) => v.clone(),
-            _ => return "".into(),
+            _ => return Ok("".into()),
         };
         // ES: an array that reaches itself joins that reference as the empty string
         if !self.enter_walk(o) {
-            return "".into();
+            return Ok("".into());
         }
+        // the walk entry is popped on every path, the error ones included
+        let out = self.join_items(&items, sep);
+        self.leave_walk();
+        out.map(Into::into)
+    }
+
+    fn join_items(&mut self, items: &[Value], sep: &str) -> R<String> {
+        self.check_stack()?;
         let mut out = String::new();
         for (i, v) in items.iter().enumerate() {
             if i > 0 {
                 builtins::push_joined(&mut out, sep);
             }
             if !matches!(v, Value::Undefined | Value::Null | Value::Hole) {
-                builtins::push_joined(&mut out, &self.to_str(v));
+                builtins::push_joined(&mut out, &self.try_to_str(v)?);
             }
         }
-        self.leave_walk();
-        out.into()
+        Ok(out)
+    }
+
+    /// Infallible `join` for the `to_str` callers. ponytail: an array nested past the stack guard
+    /// joins as "" here (Node throws a RangeError); the paths that can throw use `try_join`.
+    pub(crate) fn join(&mut self, this: &Value, sep: &str) -> JsStr {
+        self.try_join(this, sep).unwrap_or_else(|_| "".into())
     }
 
     /// The string `Symbol.toStringTag` of a plain object on `Object.prototype` (Node prints it as
@@ -1766,6 +1812,15 @@ impl Interp {
             Value::Str(s) if top => s.to_string(),
             Value::Str(s) => format!("'{s}'"),
             Value::Object(o) => {
+                // inspect cannot throw: past the stack guard a nested value prints as a placeholder
+                if self.too_deep() {
+                    return if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                        "[Array]"
+                    } else {
+                        "[Object]"
+                    }
+                    .into();
+                }
                 let proxied = match &*o.kind.borrow() {
                     Kind::Proxy(p) => Some((p.target.clone(), p.env_view)),
                     _ => None,
@@ -2966,11 +3021,17 @@ impl Interp {
 
     /// Evaluate a script in the global scope; the value is that of the last expression statement.
     pub fn run(&mut self, source: &str) -> R<Value> {
+        if too_nested(source) {
+            return self.throw_error("RangeError", STACK_OVERFLOW);
+        }
         self.run_parsed(source, thaw_parser::parse_javascript(source), true)
     }
 
     /// Like [`run`](Self::run) for `eval` / `new Function` text: parsed as a sloppy-mode script.
     pub fn run_sloppy(&mut self, source: &str) -> R<Value> {
+        if too_nested(source) {
+            return self.throw_error("RangeError", STACK_OVERFLOW);
+        }
         let parsed = thaw_parser::parse_javascript_script(source);
         if let Err(msg) = &parsed {
             return self.throw_error("SyntaxError", msg);
@@ -4743,6 +4804,66 @@ pub(crate) fn order_keys(keys: Vec<Rc<str>>) -> Vec<Rc<str>> {
 
 /// Create or overwrite an enumerable, writable data property.
 /// Whether the calling thread's own stack still has room at `sp` (same reserve as `configure_stack`).
+/// Whether `src` nests brackets deeper than `MAX_NEST`. A byte scan: string, template and comment text is
+/// skipped, and so is a regex literal (a `/` after an operator or an opening token), so brackets there are not
+/// counted. ponytail: `return /re/` reads as division, and a template's `${}` code is skipped with the template.
+pub(crate) fn too_nested(src: &str) -> bool {
+    let b = src.as_bytes();
+    let (mut depth, mut max, mut i) = (0usize, 0usize, 0usize);
+    // the last byte that is not whitespace (0 at the start)
+    let mut prev = 0u8;
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            q @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'\\' => i += 1,
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'/' if prev == 0 || b"(,=:[!&|?{};+-*%<>~^".contains(&prev) => {
+                // a regex literal: up to its closing `/` outside a class
+                i += 1;
+                let mut class = false;
+                while i < b.len() && b[i] != b'\n' {
+                    match b[i] {
+                        b'\\' => i += 1,
+                        b'[' => class = true,
+                        b']' => class = false,
+                        b'/' if !class => break,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if !c.is_ascii_whitespace() {
+            prev = c;
+        }
+        i += 1;
+    }
+    max > MAX_NEST
+}
+
 #[cfg(target_os = "linux")]
 fn thread_stack_has_room(sp: usize) -> bool {
     // SAFETY: plain pthread queries on the current thread with a zeroed attribute object.
@@ -5025,6 +5146,8 @@ mod napi_proxy_tests;
 mod napi_symbol_protocol_tests;
 #[cfg(test)]
 mod napi_symbols_tests;
+#[cfg(test)]
+mod native_recursion_tests;
 #[cfg(test)]
 mod net_tests;
 #[cfg(test)]
