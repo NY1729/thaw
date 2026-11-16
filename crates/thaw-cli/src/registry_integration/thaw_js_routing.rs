@@ -535,15 +535,18 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:os",
     "node:util",
     "node:constants",
+    "node:console",
     "node:url",
     "node:fs",
     "node:timers/promises",
     "node:fs/promises",
     "node:vm",
+    "node:v8",
     "node:async_hooks",
     "node:querystring",
     "node:timers",
     "node:worker_threads",
+    "node:wasi",
     "node:stream/web",
     "node:stream",
     "node:readline",
@@ -575,25 +578,9 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:domain",
     "node:stream/promises",
     "node:test",
+    "node:test/reporters",
     "node:cluster",
 ];
-
-/// `node:perf_hooks` marks, measures, observers, timerify and entries exist only on QuickJS's performance.js.
-fn thaw_js_perf_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    (pkg_name == "node:perf_hooks"
-        && [
-            "mark",
-            "measure",
-            "PerformanceObserver",
-            "timerify",
-            "getEntries",
-            "PerformanceEntry",
-            "clearMarks",
-        ]
-        .iter()
-        .any(|name| thaw_js_mentions(user_source, name)))
-    .then_some("performance marks/measures/observers are not implemented on thaw-js yet")
-}
 
 /// `node:cluster` worker processes (`cluster.fork()`) need child-process IPC that thaw-js does not run yet,
 /// so a program that forks stays on QuickJS. Metadata-only use (`isPrimary`, `settings`, ...) routes.
@@ -693,17 +680,24 @@ fn thaw_js_path_bundle(root_bundle: &str, builtin: &str) -> String {
         )
 }
 
-/// A `createHook` program whose timers or promises would become async resources: thaw-js does not report
-/// those resources to hooks yet, so the module stays on QuickJS. A plain `createHook` (no timer or promise
-/// words) keeps `node:async_hooks` on thaw-js.
+/// A `createHook` program whose promises would become async resources: thaw-js does not report PROMISE
+/// events to hooks yet, so the module stays on QuickJS. A `createHook` with only timers or AsyncResource
+/// (no promise words) keeps `node:async_hooks` on thaw-js.
 fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    const RESOURCES: &[&str] = &[
-        "setTimeout", "setInterval", "setImmediate", "Promise", "then", "await", "async", "nextTick", "queueMicrotask",
-    ];
+    const PROMISE_RESOURCES: &[&str] = &["Promise", "then", "await", "async"];
     (pkg_name == "node:async_hooks"
         && thaw_js_mentions(user_source, "createHook")
-        && RESOURCES.iter().any(|name| thaw_js_mentions(user_source, name)))
-    .then_some("createHook with timers/promises resources is not supported on thaw-js yet")
+        && PROMISE_RESOURCES.iter().any(|name| thaw_js_mentions(user_source, name)))
+    .then_some("createHook with promise resources is not supported on thaw-js yet")
+}
+
+/// `WebAssembly` exists on thaw-js only in a build with the `wasm` runtime feature, which the build selects
+/// when the program requires it (`required_runtime_features`, e.g. `node:wasi`). A bundle that uses
+/// `WebAssembly` without that feature stays on QuickJS.
+fn thaw_js_wasm_blocker(bundle_js: &str, user_source: &str) -> Option<&'static str> {
+    (thaw_js_mentions(bundle_js, "WebAssembly")
+        && !thaw_bridge::required_runtime_features(user_source).contains("wasm"))
+    .then_some("WebAssembly needs the wasm runtime feature, which this program does not require")
 }
 
 /// A native `createServer` next to the global `fetch` client: the fetch request never completes while the
@@ -748,10 +742,10 @@ fn thaw_js_package_eligible(
     if let Some(why) = thaw_js_unready_addon_blocker(&pkg.name) {
         return reject(why.into());
     }
-    if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
+    if let Some(why) = thaw_js_wasm_blocker(bundle_js, user_source) {
         return reject(why.into());
     }
-    if let Some(why) = thaw_js_perf_hooks_blocker(&pkg.name, user_source) {
+    if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_cluster_fork_blocker(&pkg.name, user_source) {
@@ -877,15 +871,17 @@ fn thaw_js_mentions_matches_whole_identifiers_only() {
 
 #[cfg(test)]
 #[test]
-fn thaw_js_async_hooks_create_hook_with_timers_or_promises_keeps_the_module_on_quickjs() {
+fn thaw_js_async_hooks_create_hook_with_promises_keeps_the_module_on_quickjs() {
     let timers = "import { createHook } from 'node:async_hooks';\nsetTimeout(() => {}, 1);";
+    let resource = "import { createHook, AsyncResource } from 'node:async_hooks';\nnew AsyncResource('X');";
     let promises = "import { createHook } from 'node:async_hooks';\nawait Promise.resolve();";
     let hooks = "import { createHook } from 'node:async_hooks';\ncreateHook({ init() {} }).enable();";
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", timers).is_some());
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", timers).is_none());
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", resource).is_none());
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", promises).is_some());
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", hooks).is_none());
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", "new AsyncLocalStorage();").is_none());
-    assert!(thaw_js_async_hooks_blocker("node:path", timers).is_none());
+    assert!(thaw_js_async_hooks_blocker("node:path", promises).is_none());
 }
 
 #[cfg(test)]
@@ -961,18 +957,6 @@ fn thaw_js_test_blocker_keeps_mock_timers_on_quickjs() {
     assert!(thaw_js_test_blocker("node:test", "const { mock } = require('node:test'); mock.fn();").is_none());
     assert!(thaw_js_test_blocker("node:test", "const timers = require('node:timers');").is_none());
     assert!(thaw_js_test_blocker("node:path", "mock.timers.enable();").is_none());
-}
-
-#[cfg(test)]
-#[test]
-fn thaw_js_perf_hooks_blocker_keeps_marks_on_quickjs() {
-    let marks = "import { performance } from 'node:perf_hooks'; performance.mark('a');";
-    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", marks).is_some());
-    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "new PerformanceObserver(cb);").is_some());
-    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "monitorEventLoopDelay(); performance.now();").is_none());
-    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "performance.eventLoopUtilization();").is_none());
-    assert!(thaw_js_perf_hooks_blocker("node:perf_hooks", "const marked = 1;").is_none());
-    assert!(thaw_js_perf_hooks_blocker("node:path", marks).is_none());
 }
 
 #[cfg(test)]
