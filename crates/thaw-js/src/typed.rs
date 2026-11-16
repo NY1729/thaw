@@ -787,6 +787,10 @@ impl Interp {
         g.declare("__thaw_atomics_wait", wait, true);
         let notify = self.native(|it, _, a| crate::atomics::notify(it, a));
         g.declare("__thaw_atomics_notify", notify, true);
+        let wait_async = self.native(|it, _, a| crate::atomics::wait_async(it, a));
+        g.declare("__thaw_atomics_wait_async", wait_async, true);
+        let cancel = self.native(|it, _, a| crate::atomics::cancel(it, a));
+        g.declare("__thaw_atomics_cancel", cancel, true);
 
         // ----- typed arrays -----
         let ta_proto = self.plain(); // %TypedArray%.prototype: methods come from the JS prelude

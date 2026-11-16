@@ -1394,6 +1394,7 @@ impl Interp {
             || self.stdin_live()
             || self.ipc_live()
             || crate::napi_bridge::pending()
+            || crate::atomics::delivery_pending(self.realm_id)
     }
 
     /// This realm reads `process.stdin` and the reader is still open and referenced.
@@ -1439,6 +1440,15 @@ impl Interp {
             let f = self.get(&g, "__thaw_worker_dispatch")?;
             if matches!(f, Value::Object(_)) {
                 self.call(&f, &g, &[Value::str(&events)])?;
+                self.run_jobs()?;
+            }
+        }
+        // Atomics.waitAsync waiters that a notify took since the last poll settle here, a loop turn after the notify
+        let done = crate::atomics::poll_async(self);
+        if done != "[]" {
+            let f = self.get(&g, "__thaw_waitasync_dispatch")?;
+            if matches!(f, Value::Object(_)) {
+                self.call(&f, &g, &[Value::str(&done)])?;
                 self.run_jobs()?;
             }
         }
@@ -1506,6 +1516,7 @@ impl Interp {
                     || self.ipc_live()
                     || self.interrupt.is_some()
                     || crate::host::native_servers_live()
+                    || crate::atomics::async_pending()
                 {
                     wait = wait.min(2.0);
                 }
@@ -1522,6 +1533,7 @@ impl Interp {
                 || self.ipc_live()
                 || self.interrupt.is_some()
                 || crate::host::native_servers_live()
+                || crate::atomics::async_pending()
             {
                 loop_idle_sleep(Duration::from_millis(2));
             }

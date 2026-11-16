@@ -825,7 +825,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   // ----- Atomics. A SharedArrayBuffer goes to the natives (`__thaw_atomic`, `__thaw_atomics_wait/notify`, atomics.rs):
   // real atomic ops on the shared block, with waiters parked across threads. Any other buffer is one agent, so the
   // plain read-modify-write below is already atomic. ponytail: ledgered, not implemented: Atomics on BigInt64Array /
-  // BigUint64Array (intTA refuses them with a TypeError; Node accepts BigInt operands), and Atomics.waitAsync. -----
+  // BigUint64Array (intTA refuses them with a TypeError; Node accepts BigInt operands). Upgrade: widen atomics.rs to
+  // 64-bit elements (AtomicU64, 8-byte alignment) and accept BigInt values here. -----
   var Atomics = {};
   function intTA(ta, op) {
     if (!(ta instanceof Int8Array || ta instanceof Uint8Array || ta instanceof Int16Array ||
@@ -889,6 +890,44 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     var ms = timeout === undefined ? Infinity : Number(timeout);
     if (ms !== ms) ms = Infinity;
     return __thaw_atomics_wait(ta, k, toInt(v), ms);
+  });
+  // waitAsync: a queued waiter's promise settles from the loop (`__thaw_waitasync_dispatch`, fed by atomics.rs
+  // poll_async), and a finite timeout is an unref'd timer, so a pending waitAsync alone keeps nothing alive (Node 22).
+  // ponytail: Int32Array only; BigInt64Array waiters (Node accepts them) need 64-bit atomics in atomics.rs. Upgrade: AtomicU64.
+  var waitAsyncPending = {};
+  globalThis.__thaw_waitasync_dispatch = function (json) {
+    var ids = JSON.parse(json);
+    for (var j = 0; j < ids.length; j++) {
+      var p = waitAsyncPending[ids[j]];
+      if (!p) continue;
+      delete waitAsyncPending[ids[j]];
+      if (p.timer) clearTimeout(p.timer);
+      p.resolve('ok');
+    }
+  };
+  def(Atomics, 'waitAsync', function waitAsync(ta, i, v, timeout) {
+    if (!(ta instanceof Int32Array) || !isShared(ta)) {
+      throw new TypeError('Atomics.waitAsync requires a shared Int32Array');
+    }
+    var k = atomicIndex(ta, i), n = toInt(v);
+    var ms = timeout === undefined ? Infinity : Number(timeout);
+    if (ms !== ms) ms = Infinity;
+    var r = __thaw_atomics_wait_async(ta, k, n, ms <= 0);
+    if (typeof r === 'string') return { async: false, value: r };
+    var entry = { timer: null, resolve: null };
+    var promise = new Promise(function (resolve) { entry.resolve = resolve; });
+    waitAsyncPending[r] = entry;
+    if (ms !== Infinity) {
+      entry.timer = setTimeout(function () {
+        entry.timer = null;
+        if (__thaw_atomics_cancel(r)) {
+          delete waitAsyncPending[r];
+          entry.resolve('timed-out');
+        }
+      }, ms);
+      entry.timer.unref();
+    }
+    return { async: true, value: promise };
   });
   def(Atomics, 'notify', function (ta, i, count) {
     if (!(ta instanceof Int32Array)) throw new TypeError('Atomics.notify requires an Int32Array');
