@@ -160,6 +160,29 @@ const BUFFER_PRELUDE: &str = r#"
   });
   def(Buffer, 'allocUnsafe', function (n) { return Buffer.alloc(n); });
   def(Buffer, 'allocUnsafeSlow', function (n) { return Buffer.alloc(n); });
+  def(Buffer, 'of', (...items) => Buffer.from(items));
+  function rangeArg(v, name) {
+    if (typeof v !== 'number') { var te = new TypeError('The "' + name + '" argument must be of type number. Received type ' + typeof v + ' (' + String(v) + ')'); te.code = 'ERR_INVALID_ARG_TYPE'; throw te; }
+    if (!(v >= 0 && v <= 9007199254740991)) { var re = new RangeError('The value of "' + name + '" is out of range. It must be >= 0 && <= 9007199254740991. Received ' + v); re.code = 'ERR_OUT_OF_RANGE'; throw re; }
+    return v;
+  }
+  def(Buffer, 'copyBytesFrom', function copyBytesFrom(view, offset, length) {
+    if (!ArrayBuffer.isView(view) || view instanceof DataView) {
+      var e = new TypeError('The "view" argument must be an instance of TypedArray. Received ' + (view && typeof view === 'object' ? 'an instance of ' + view.constructor.name : 'type ' + typeof view + ' (' + String(view) + ')'));
+      e.code = 'ERR_INVALID_ARG_TYPE';
+      throw e;
+    }
+    offset = offset === undefined ? 0 : rangeArg(offset, 'offset');
+    var avail = Math.max(0, view.length - offset);
+    var count = length === undefined ? avail : Math.min(rangeArg(length, 'length'), avail);
+    if (count === 0) return wrap(new U8(0));
+    var bpe = view.BYTES_PER_ELEMENT;
+    return wrap(new U8(new U8(view.buffer, view.byteOffset + offset * bpe, count * bpe)));
+  });
+  // ponytail: Node's FastBuffer is its own class over Buffer.prototype; reusing Buffer only matches the name and `instanceof`.
+  function FastBuffer(a, b, c) { return Buffer(a, b, c); }
+  FastBuffer.prototype = Buffer.prototype;
+  Object.defineProperty(Buffer, Symbol.species, { get() { return FastBuffer; }, configurable: true });
   def(Buffer, 'isBuffer', function (b) { return b instanceof Buffer; });
   def(Buffer, 'isEncoding', function (e) { try { normEnc(e); return typeof e === 'string'; } catch (x) { return false; } });
   def(Buffer, 'byteLength', function (v, enc) {

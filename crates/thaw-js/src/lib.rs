@@ -1379,6 +1379,9 @@ impl Interp {
             web_navigator::install(&mut it);
             node_crypto::install(&mut it);
             it.install_url();
+            // host realm only: a vm context's global keeps the plain `Object` tag, as in Node
+            it.run("Object.defineProperty(globalThis, Symbol.toStringTag, { value: 'global', configurable: true });")
+                .unwrap_or_else(|_| panic!("thaw-js globalThis tag must install"));
             #[cfg(feature = "intl")]
             it.install_intl();
         }

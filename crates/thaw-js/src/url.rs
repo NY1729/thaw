@@ -403,6 +403,24 @@ const URL_PRELUDE: &str = r#"
   def(U, 'toJSON', function () { return this.href; });
   def(URLImpl, 'canParse', function (u, b) { try { new URLImpl(u, b); return true; } catch (e) { return false; } });
   def(URLImpl, 'parse', function (u, b) { try { return new URLImpl(u, b); } catch (e) { return null; } });
+  // ponytail: the registry only backs revoke; blob: URLs are not resolved by fetch or URL parsing.
+  var blobUrls = new Map();
+  def(URLImpl, 'createObjectURL', function createObjectURL(obj) {
+    if (!(obj instanceof Blob)) {
+      var e = new TypeError('The "obj" argument must be an instance of Blob. Received ' + (obj !== null && typeof obj === 'object' ? 'an instance of ' + obj.constructor.name : obj === null ? 'null' : obj === undefined ? 'undefined' : 'type ' + typeof obj + ' (' + String(obj) + ')'));
+      e.code = 'ERR_INVALID_ARG_TYPE';
+      throw e;
+    }
+    var h = '';
+    for (var i = 0; i < 32; i++) h += Math.floor(Math.random() * 16).toString(16);
+    var id = 'blob:nodedata:' + h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+    blobUrls.set(id, obj);
+    return id;
+  });
+  def(URLImpl, 'revokeObjectURL', function revokeObjectURL(url) {
+    if (arguments.length === 0) { var e = new TypeError('The "url" argument must be specified'); e.code = 'ERR_MISSING_ARGS'; throw e; }
+    blobUrls.delete(String(url));
+  });
   globalThis.URL = URLImpl;
   globalThis.URLSearchParams = USP;
 })();

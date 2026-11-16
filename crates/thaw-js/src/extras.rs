@@ -40,6 +40,24 @@ pub(crate) const EXTRAS: &str = r#"
     if (i < 0 || i >= this.length) throw new RangeError('Invalid index : ' + i);
     var c = this.slice(); c[i] = v; return c;
   });
+  // ponytail: no subclass `this` constructor; always a plain Array.
+  def(Array, 'fromAsync', async function fromAsync(items, mapfn, thisArg) {
+    if (mapfn !== undefined && typeof mapfn !== 'function') throw new TypeError(String(mapfn) + ' is not a function');
+    if (items == null) throw new TypeError('Array.fromAsync requires an iterable or array-like object');
+    var out = [], i = 0, v;
+    if (items[Symbol.asyncIterator] != null || items[Symbol.iterator] != null) {
+      for await (v of items) {
+        out.push(mapfn ? await mapfn.call(thisArg, v, i) : v);
+        i++;
+      }
+    } else {
+      for (var len = Math.trunc(Number(items.length)) || 0; i < len; i++) {
+        v = await items[i];
+        out.push(mapfn ? await mapfn.call(thisArg, v, i) : v);
+      }
+    }
+    return out;
+  });
   var SP = String.prototype;
   def(SP, 'at', function (i) { i = Math.trunc(i) || 0; if (i < 0) i += this.length; return i >= 0 && i < this.length ? this[i] : undefined; });
   def(SP, 'trimLeft', SP.trimStart);

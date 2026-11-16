@@ -209,3 +209,12 @@ fn vm_realms_share_prelude_source_text() {
     );
     assert_eq!(text, b.to_str(&fb).to_string());
 }
+
+#[test]
+fn vm_context_global_has_no_global_to_string_tag() {
+    let out = run_lines(&format!(
+        "{VM_PRELUDE}\n{}",
+        "console.log(runInNewContext(\"[Object.prototype.toString.call(this), typeof globalThis[Symbol.toStringTag]].join(' ')\", {}));"
+    ));
+    assert_eq!(out, vec!["[object Object] undefined".to_string()]);
+}
