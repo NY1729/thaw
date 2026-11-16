@@ -4054,6 +4054,22 @@ fn normalizes_dot_and_dot_dot_segments() {
 }
 
 #[test]
+fn cluster_declarations_return_live_handles_not_by_value_data() {
+    // Worker/workers/fork() hold ChildProcess streams and cycles; `any` marshals
+    // them by value and fails ("not plain data: cyclic or too deep").
+    let cluster = resolve_builtin("node:cluster").unwrap().dts_source;
+    for decl in [
+        "export declare const Worker: JsValue;",
+        "export declare const workers: JsValue;",
+        "export declare const worker: JsValue;",
+        "export declare const settings: Json;",
+        "export declare function fork(env?: Json): JsValue;",
+    ] {
+        assert!(cluster.contains(decl), "{cluster}");
+    }
+}
+
+#[test]
 fn builtin_declarations_cover_typed_buffer_crypto_and_fs_overloads() {
     let buffer = resolve_builtin("node:buffer").unwrap().dts_source;
     assert!(buffer.contains("static alloc(size: number"));

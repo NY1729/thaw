@@ -6,6 +6,110 @@ owner	key	kind	flags	vtype	length	name	hasPrototype	alias	tag
 %AsyncIteratorPrototype%	@@asyncIterator	data	w-c	function	0	[Symbol.asyncIterator]	0	-	-
 %AsyncIteratorPrototype%.@@asyncIterator	length	data	--c	number	0	-	-	-	-
 %AsyncIteratorPrototype%.@@asyncIterator	name	data	--c	string	-	[Symbol.asyncIterator]	-	-	-
+%TypedArray%	from	data	w-c	function	1	from	0	-	-
+%TypedArray%	length	data	--c	number	0	-	-	-	-
+%TypedArray%	name	data	--c	string	-	TypedArray	-	-	-
+%TypedArray%	of	data	w-c	function	0	of	0	-	-
+%TypedArray%	prototype	data	---	object	-	-	-	-	-
+%TypedArray%.from	length	data	--c	number	1	-	-	-	-
+%TypedArray%.from	name	data	--c	string	-	from	-	-	-
+%TypedArray%.of	length	data	--c	number	0	-	-	-	-
+%TypedArray%.of	name	data	--c	string	-	of	-	-	-
+%TypedArray%.prototype	@@iterator	data	w-c	function	0	values	0	8	-
+%TypedArray%.prototype	@@toStringTag	accessor	--c	-	-	get [Symbol.toStringTag]|-	-	-	-
+%TypedArray%.prototype	at	data	w-c	function	1	at	0	-	-
+%TypedArray%.prototype	buffer	accessor	--c	-	-	get buffer|-	-	-	-
+%TypedArray%.prototype	byteLength	accessor	--c	-	-	get byteLength|-	-	-	-
+%TypedArray%.prototype	byteOffset	accessor	--c	-	-	get byteOffset|-	-	-	-
+%TypedArray%.prototype	constructor	data	w-c	function	0	TypedArray	1	9	-
+%TypedArray%.prototype	copyWithin	data	w-c	function	2	copyWithin	0	-	-
+%TypedArray%.prototype	entries	data	w-c	function	0	entries	0	-	-
+%TypedArray%.prototype	every	data	w-c	function	1	every	0	-	-
+%TypedArray%.prototype	fill	data	w-c	function	1	fill	0	-	-
+%TypedArray%.prototype	filter	data	w-c	function	1	filter	0	-	-
+%TypedArray%.prototype	find	data	w-c	function	1	find	0	-	-
+%TypedArray%.prototype	findIndex	data	w-c	function	1	findIndex	0	-	-
+%TypedArray%.prototype	findLast	data	w-c	function	1	findLast	0	-	-
+%TypedArray%.prototype	findLastIndex	data	w-c	function	1	findLastIndex	0	-	-
+%TypedArray%.prototype	forEach	data	w-c	function	1	forEach	0	-	-
+%TypedArray%.prototype	includes	data	w-c	function	1	includes	0	-	-
+%TypedArray%.prototype	indexOf	data	w-c	function	1	indexOf	0	-	-
+%TypedArray%.prototype	join	data	w-c	function	1	join	0	-	-
+%TypedArray%.prototype	keys	data	w-c	function	0	keys	0	-	-
+%TypedArray%.prototype	lastIndexOf	data	w-c	function	1	lastIndexOf	0	-	-
+%TypedArray%.prototype	length	accessor	--c	-	-	get length|-	-	-	-
+%TypedArray%.prototype	map	data	w-c	function	1	map	0	-	-
+%TypedArray%.prototype	reduce	data	w-c	function	1	reduce	0	-	-
+%TypedArray%.prototype	reduceRight	data	w-c	function	1	reduceRight	0	-	-
+%TypedArray%.prototype	reverse	data	w-c	function	0	reverse	0	-	-
+%TypedArray%.prototype	set	data	w-c	function	1	set	0	-	-
+%TypedArray%.prototype	slice	data	w-c	function	2	slice	0	-	-
+%TypedArray%.prototype	some	data	w-c	function	1	some	0	-	-
+%TypedArray%.prototype	sort	data	w-c	function	1	sort	0	-	-
+%TypedArray%.prototype	subarray	data	w-c	function	2	subarray	0	-	-
+%TypedArray%.prototype	toLocaleString	data	w-c	function	0	toLocaleString	0	-	-
+%TypedArray%.prototype	toReversed	data	w-c	function	0	toReversed	0	-	-
+%TypedArray%.prototype	toSorted	data	w-c	function	1	toSorted	0	-	-
+%TypedArray%.prototype	toString	data	w-c	function	0	toString	0	10	-
+%TypedArray%.prototype	values	data	w-c	function	0	values	0	8	-
+%TypedArray%.prototype.@@iterator	length	data	--c	number	0	-	-	-	-
+%TypedArray%.prototype.@@iterator	name	data	--c	string	-	values	-	-	-
+%TypedArray%.prototype.at	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.at	name	data	--c	string	-	at	-	-	-
+%TypedArray%.prototype.copyWithin	length	data	--c	number	2	-	-	-	-
+%TypedArray%.prototype.copyWithin	name	data	--c	string	-	copyWithin	-	-	-
+%TypedArray%.prototype.entries	length	data	--c	number	0	-	-	-	-
+%TypedArray%.prototype.entries	name	data	--c	string	-	entries	-	-	-
+%TypedArray%.prototype.every	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.every	name	data	--c	string	-	every	-	-	-
+%TypedArray%.prototype.fill	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.fill	name	data	--c	string	-	fill	-	-	-
+%TypedArray%.prototype.filter	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.filter	name	data	--c	string	-	filter	-	-	-
+%TypedArray%.prototype.find	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.find	name	data	--c	string	-	find	-	-	-
+%TypedArray%.prototype.findIndex	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.findIndex	name	data	--c	string	-	findIndex	-	-	-
+%TypedArray%.prototype.findLast	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.findLast	name	data	--c	string	-	findLast	-	-	-
+%TypedArray%.prototype.findLastIndex	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.findLastIndex	name	data	--c	string	-	findLastIndex	-	-	-
+%TypedArray%.prototype.forEach	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.forEach	name	data	--c	string	-	forEach	-	-	-
+%TypedArray%.prototype.includes	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.includes	name	data	--c	string	-	includes	-	-	-
+%TypedArray%.prototype.indexOf	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.indexOf	name	data	--c	string	-	indexOf	-	-	-
+%TypedArray%.prototype.join	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.join	name	data	--c	string	-	join	-	-	-
+%TypedArray%.prototype.keys	length	data	--c	number	0	-	-	-	-
+%TypedArray%.prototype.keys	name	data	--c	string	-	keys	-	-	-
+%TypedArray%.prototype.lastIndexOf	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.lastIndexOf	name	data	--c	string	-	lastIndexOf	-	-	-
+%TypedArray%.prototype.map	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.map	name	data	--c	string	-	map	-	-	-
+%TypedArray%.prototype.reduce	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.reduce	name	data	--c	string	-	reduce	-	-	-
+%TypedArray%.prototype.reduceRight	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.reduceRight	name	data	--c	string	-	reduceRight	-	-	-
+%TypedArray%.prototype.reverse	length	data	--c	number	0	-	-	-	-
+%TypedArray%.prototype.reverse	name	data	--c	string	-	reverse	-	-	-
+%TypedArray%.prototype.set	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.set	name	data	--c	string	-	set	-	-	-
+%TypedArray%.prototype.slice	length	data	--c	number	2	-	-	-	-
+%TypedArray%.prototype.slice	name	data	--c	string	-	slice	-	-	-
+%TypedArray%.prototype.some	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.some	name	data	--c	string	-	some	-	-	-
+%TypedArray%.prototype.sort	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.sort	name	data	--c	string	-	sort	-	-	-
+%TypedArray%.prototype.subarray	length	data	--c	number	2	-	-	-	-
+%TypedArray%.prototype.subarray	name	data	--c	string	-	subarray	-	-	-
+%TypedArray%.prototype.toLocaleString	length	data	--c	number	0	-	-	-	-
+%TypedArray%.prototype.toLocaleString	name	data	--c	string	-	toLocaleString	-	-	-
+%TypedArray%.prototype.toReversed	length	data	--c	number	0	-	-	-	-
+%TypedArray%.prototype.toReversed	name	data	--c	string	-	toReversed	-	-	-
+%TypedArray%.prototype.toSorted	length	data	--c	number	1	-	-	-	-
+%TypedArray%.prototype.toSorted	name	data	--c	string	-	toSorted	-	-	-
 AbortController	length	data	--c	number	0	-	-	-	-
 AbortController	name	data	--c	string	-	AbortController	-	-	-
 AbortController	prototype	data	---	object	-	-	-	-	-
@@ -289,6 +393,7 @@ Blob.prototype	bytes	data	wec	function	0	bytes	0	-	-
 Blob.prototype	constructor	data	w-c	function	0	Blob	1	20	-
 Blob.prototype	size	accessor	-ec	-	-	get size|-	-	-	-
 Blob.prototype	slice	data	wec	function	0	slice	0	-	-
+Blob.prototype	stream	data	wec	function	0	stream	0	-	-
 Blob.prototype	text	data	wec	function	0	text	0	-	-
 Blob.prototype	type	accessor	-ec	-	-	get type|-	-	-	-
 Blob.prototype.arrayBuffer	length	data	--c	number	0	-	-	-	-
@@ -297,6 +402,8 @@ Blob.prototype.bytes	length	data	--c	number	0	-	-	-	-
 Blob.prototype.bytes	name	data	--c	string	-	bytes	-	-	-
 Blob.prototype.slice	length	data	--c	number	0	-	-	-	-
 Blob.prototype.slice	name	data	--c	string	-	slice	-	-	-
+Blob.prototype.stream	length	data	--c	number	0	-	-	-	-
+Blob.prototype.stream	name	data	--c	string	-	stream	-	-	-
 Blob.prototype.text	length	data	--c	number	0	-	-	-	-
 Blob.prototype.text	name	data	--c	string	-	text	-	-	-
 Boolean	length	data	--c	number	1	-	-	-	-
@@ -563,17 +670,21 @@ ByteLengthQueuingStrategy	prototype	data	---	object	-	-	-	-	-
 ByteLengthQueuingStrategy.prototype	@@toStringTag	data	--c	string	-	-	-	-	ByteLengthQueuingStrategy
 ByteLengthQueuingStrategy.prototype	constructor	data	w-c	function	1	ByteLengthQueuingStrategy	1	54	-
 ByteLengthQueuingStrategy.prototype	highWaterMark	accessor	-ec	-	-	get highWaterMark|-	-	-	-
+ByteLengthQueuingStrategy.prototype	size	accessor	-ec	-	-	get size|-	-	-	-
 CompressionStream	length	data	--c	number	1	-	-	-	-
 CompressionStream	name	data	--c	string	-	CompressionStream	-	-	-
 CompressionStream	prototype	data	---	object	-	-	-	-	-
 CompressionStream.prototype	@@toStringTag	data	--c	string	-	-	-	-	CompressionStream
 CompressionStream.prototype	constructor	data	w-c	function	1	CompressionStream	1	55	-
+CompressionStream.prototype	readable	accessor	-ec	-	-	get readable|-	-	-	-
+CompressionStream.prototype	writable	accessor	-ec	-	-	get writable|-	-	-	-
 CountQueuingStrategy	length	data	--c	number	1	-	-	-	-
 CountQueuingStrategy	name	data	--c	string	-	CountQueuingStrategy	-	-	-
 CountQueuingStrategy	prototype	data	---	object	-	-	-	-	-
 CountQueuingStrategy.prototype	@@toStringTag	data	--c	string	-	-	-	-	CountQueuingStrategy
 CountQueuingStrategy.prototype	constructor	data	w-c	function	1	CountQueuingStrategy	1	56	-
 CountQueuingStrategy.prototype	highWaterMark	accessor	-ec	-	-	get highWaterMark|-	-	-	-
+CountQueuingStrategy.prototype	size	accessor	-ec	-	-	get size|-	-	-	-
 Crypto	length	data	--c	number	0	-	-	-	-
 Crypto	name	data	--c	string	-	Crypto	-	-	-
 Crypto	prototype	data	---	object	-	-	-	-	-
@@ -886,6 +997,8 @@ DecompressionStream	name	data	--c	string	-	DecompressionStream	-	-	-
 DecompressionStream	prototype	data	---	object	-	-	-	-	-
 DecompressionStream.prototype	@@toStringTag	data	--c	string	-	-	-	-	DecompressionStream
 DecompressionStream.prototype	constructor	data	w-c	function	1	DecompressionStream	1	64	-
+DecompressionStream.prototype	readable	accessor	-ec	-	-	get readable|-	-	-	-
+DecompressionStream.prototype	writable	accessor	-ec	-	-	get writable|-	-	-	-
 Error	captureStackTrace	data	w-c	function	2	captureStackTrace	0	-	-
 Error	length	data	--c	number	1	-	-	-	-
 Error	name	data	--c	string	-	Error	-	-	-
@@ -995,6 +1108,7 @@ FormData	length	data	--c	number	1	-	-	-	-
 FormData	name	data	--c	string	-	FormData	-	-	-
 FormData	prototype	data	---	object	-	-	-	-	-
 FormData.prototype	@@iterator	data	w-c	function	0	entries	1	74	-
+FormData.prototype	@@toStringTag	data	--c	string	-	-	-	-	FormData
 FormData.prototype	append	data	wec	function	2	append	0	-	-
 FormData.prototype	constructor	data	w-c	function	1	FormData	1	75	-
 FormData.prototype	delete	data	wec	function	1	delete	0	-	-
@@ -1008,12 +1122,14 @@ FormData.prototype	set	data	wec	function	2	set	0	-	-
 FormData.prototype	values	data	wec	function	0	values	1	-	-
 FormData.prototype.@@iterator	length	data	--c	number	0	-	-	-	-
 FormData.prototype.@@iterator	name	data	--c	string	-	entries	-	-	-
+FormData.prototype.@@iterator	prototype	data	w--	object	-	-	-	-	-
 FormData.prototype.append	length	data	--c	number	2	-	-	-	-
 FormData.prototype.append	name	data	--c	string	-	append	-	-	-
 FormData.prototype.delete	length	data	--c	number	1	-	-	-	-
 FormData.prototype.delete	name	data	--c	string	-	delete	-	-	-
 FormData.prototype.forEach	length	data	--c	number	1	-	-	-	-
 FormData.prototype.forEach	name	data	--c	string	-	forEach	-	-	-
+FormData.prototype.forEach	prototype	data	w--	object	-	-	-	-	-
 FormData.prototype.get	length	data	--c	number	1	-	-	-	-
 FormData.prototype.get	name	data	--c	string	-	get	-	-	-
 FormData.prototype.getAll	length	data	--c	number	1	-	-	-	-
@@ -1022,10 +1138,12 @@ FormData.prototype.has	length	data	--c	number	1	-	-	-	-
 FormData.prototype.has	name	data	--c	string	-	has	-	-	-
 FormData.prototype.keys	length	data	--c	number	0	-	-	-	-
 FormData.prototype.keys	name	data	--c	string	-	keys	-	-	-
+FormData.prototype.keys	prototype	data	w--	object	-	-	-	-	-
 FormData.prototype.set	length	data	--c	number	2	-	-	-	-
 FormData.prototype.set	name	data	--c	string	-	set	-	-	-
 FormData.prototype.values	length	data	--c	number	0	-	-	-	-
 FormData.prototype.values	name	data	--c	string	-	values	-	-	-
+FormData.prototype.values	prototype	data	w--	object	-	-	-	-	-
 Function	length	data	--c	number	1	-	-	-	-
 Function	name	data	--c	string	-	Function	-	-	-
 Function	prototype	data	---	function	0		0	-	-
@@ -1067,12 +1185,14 @@ Headers.prototype	set	data	wec	function	2	set	0	-	-
 Headers.prototype	values	data	wec	function	0	values	1	-	-
 Headers.prototype.@@iterator	length	data	--c	number	0	-	-	-	-
 Headers.prototype.@@iterator	name	data	--c	string	-	entries	-	-	-
+Headers.prototype.@@iterator	prototype	data	w--	object	-	-	-	-	-
 Headers.prototype.append	length	data	--c	number	2	-	-	-	-
 Headers.prototype.append	name	data	--c	string	-	append	-	-	-
 Headers.prototype.delete	length	data	--c	number	1	-	-	-	-
 Headers.prototype.delete	name	data	--c	string	-	delete	-	-	-
 Headers.prototype.forEach	length	data	--c	number	1	-	-	-	-
 Headers.prototype.forEach	name	data	--c	string	-	forEach	-	-	-
+Headers.prototype.forEach	prototype	data	w--	object	-	-	-	-	-
 Headers.prototype.get	length	data	--c	number	1	-	-	-	-
 Headers.prototype.get	name	data	--c	string	-	get	-	-	-
 Headers.prototype.getSetCookie	length	data	--c	number	0	-	-	-	-
@@ -1081,10 +1201,12 @@ Headers.prototype.has	length	data	--c	number	1	-	-	-	-
 Headers.prototype.has	name	data	--c	string	-	has	-	-	-
 Headers.prototype.keys	length	data	--c	number	0	-	-	-	-
 Headers.prototype.keys	name	data	--c	string	-	keys	-	-	-
+Headers.prototype.keys	prototype	data	w--	object	-	-	-	-	-
 Headers.prototype.set	length	data	--c	number	2	-	-	-	-
 Headers.prototype.set	name	data	--c	string	-	set	-	-	-
 Headers.prototype.values	length	data	--c	number	0	-	-	-	-
 Headers.prototype.values	name	data	--c	string	-	values	-	-	-
+Headers.prototype.values	prototype	data	w--	object	-	-	-	-	-
 Int16Array	BYTES_PER_ELEMENT	data	---	number	-	-	-	-	-
 Int16Array	length	data	--c	number	3	-	-	-	-
 Int16Array	name	data	--c	string	-	Int16Array	-	-	-
@@ -1898,6 +2020,7 @@ Request	name	data	--c	string	-	Request	-	-	-
 Request	prototype	data	---	object	-	-	-	-	-
 Request.prototype	@@toStringTag	data	--c	string	-	-	-	-	Request
 Request.prototype	arrayBuffer	data	wec	function	0	arrayBuffer	0	-	-
+Request.prototype	attribute	data	-e-	undefined	-	-	-	-	-
 Request.prototype	blob	data	wec	function	0	blob	0	-	-
 Request.prototype	body	accessor	-ec	-	-	get body|-	-	-	-
 Request.prototype	bodyUsed	accessor	-ec	-	-	get bodyUsed|-	-	-	-
@@ -1911,6 +2034,8 @@ Request.prototype	duplex	accessor	-ec	-	-	get duplex|-	-	-	-
 Request.prototype	formData	data	wec	function	0	formData	0	-	-
 Request.prototype	headers	accessor	-ec	-	-	get headers|-	-	-	-
 Request.prototype	integrity	accessor	-ec	-	-	get integrity|-	-	-	-
+Request.prototype	isHistoryNavigation	accessor	-ec	-	-	get isHistoryNavigation|-	-	-	-
+Request.prototype	isReloadNavigation	accessor	-ec	-	-	get isReloadNavigation|-	-	-	-
 Request.prototype	json	data	wec	function	0	json	0	-	-
 Request.prototype	keepalive	accessor	-ec	-	-	get keepalive|-	-	-	-
 Request.prototype	method	accessor	-ec	-	-	get method|-	-	-	-
@@ -2294,12 +2419,20 @@ TextDecoder	prototype	data	---	object	-	-	-	-	-
 TextDecoder.prototype	@@toStringTag	data	--c	string	-	-	-	-	TextDecoder
 TextDecoder.prototype	constructor	data	w-c	function	0	TextDecoder	1	131	-
 TextDecoder.prototype	decode	data	wec	function	0	decode	0	-	-
+TextDecoder.prototype	encoding	accessor	-ec	-	-	get encoding|-	-	-	-
+TextDecoder.prototype	fatal	accessor	-ec	-	-	get fatal|-	-	-	-
+TextDecoder.prototype	ignoreBOM	accessor	-ec	-	-	get ignoreBOM|-	-	-	-
 TextDecoder.prototype.decode	length	data	--c	number	0	-	-	-	-
 TextDecoder.prototype.decode	name	data	--c	string	-	decode	-	-	-
 TextDecoderStream	length	data	--c	number	0	-	-	-	-
 TextDecoderStream	name	data	--c	string	-	TextDecoderStream	-	-	-
 TextDecoderStream	prototype	data	---	object	-	-	-	-	-
 TextDecoderStream.prototype	constructor	data	w-c	function	0	TextDecoderStream	1	132	-
+TextDecoderStream.prototype	encoding	accessor	-ec	-	-	get encoding|-	-	-	-
+TextDecoderStream.prototype	fatal	accessor	-ec	-	-	get fatal|-	-	-	-
+TextDecoderStream.prototype	ignoreBOM	accessor	-ec	-	-	get ignoreBOM|-	-	-	-
+TextDecoderStream.prototype	readable	accessor	-ec	-	-	get readable|-	-	-	-
+TextDecoderStream.prototype	writable	accessor	-ec	-	-	get writable|-	-	-	-
 TextEncoder	length	data	--c	number	0	-	-	-	-
 TextEncoder	name	data	--c	string	-	TextEncoder	-	-	-
 TextEncoder	prototype	data	---	object	-	-	-	-	-
@@ -2316,11 +2449,16 @@ TextEncoderStream	length	data	--c	number	0	-	-	-	-
 TextEncoderStream	name	data	--c	string	-	TextEncoderStream	-	-	-
 TextEncoderStream	prototype	data	---	object	-	-	-	-	-
 TextEncoderStream.prototype	constructor	data	w-c	function	0	TextEncoderStream	1	134	-
+TextEncoderStream.prototype	encoding	accessor	-ec	-	-	get encoding|-	-	-	-
+TextEncoderStream.prototype	readable	accessor	-ec	-	-	get readable|-	-	-	-
+TextEncoderStream.prototype	writable	accessor	-ec	-	-	get writable|-	-	-	-
 TransformStream	length	data	--c	number	0	-	-	-	-
 TransformStream	name	data	--c	string	-	TransformStream	-	-	-
 TransformStream	prototype	data	---	object	-	-	-	-	-
 TransformStream.prototype	@@toStringTag	data	--c	string	-	-	-	-	TransformStream
 TransformStream.prototype	constructor	data	w-c	function	0	TransformStream	1	135	-
+TransformStream.prototype	readable	accessor	-ec	-	-	get readable|-	-	-	-
+TransformStream.prototype	writable	accessor	-ec	-	-	get writable|-	-	-	-
 TransformStreamDefaultController	length	data	--c	number	0	-	-	-	-
 TransformStreamDefaultController	name	data	--c	string	-	TransformStreamDefaultController	-	-	-
 TransformStreamDefaultController	prototype	data	---	object	-	-	-	-	-
@@ -2593,6 +2731,7 @@ WritableStreamDefaultController	prototype	data	---	object	-	-	-	-	-
 WritableStreamDefaultController.prototype	@@toStringTag	data	--c	string	-	-	-	-	WritableStreamDefaultController
 WritableStreamDefaultController.prototype	constructor	data	w-c	function	0	WritableStreamDefaultController	1	163	-
 WritableStreamDefaultController.prototype	error	data	wec	function	0	error	0	-	-
+WritableStreamDefaultController.prototype	signal	accessor	-ec	-	-	get signal|-	-	-	-
 WritableStreamDefaultController.prototype.error	length	data	--c	number	0	-	-	-	-
 WritableStreamDefaultController.prototype.error	name	data	--c	string	-	error	-	-	-
 WritableStreamDefaultWriter	length	data	--c	number	1	-	-	-	-
