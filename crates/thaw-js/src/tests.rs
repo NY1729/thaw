@@ -2628,6 +2628,67 @@ fn web_crypto_methods_live_on_prototypes() {
     );
 }
 
+/// Run `src` on a fresh interpreter, drain the event loop, and join the console lines with `|`.
+fn run_async(src: &str) -> String {
+    let mut it = Interp::new();
+    it.run(src).ok().unwrap();
+    it.run_event_loop().ok().unwrap();
+    std::mem::take(&mut it.out).join("|")
+}
+
+#[test]
+fn web_crypto_operations_not_implemented_reject_not_supported() {
+    // part (a): encrypt/decrypt/sign/verify/derive/wrap/unwrap are not implemented yet, so a known
+    // algorithm must reject NotSupportedError (never resolve), and an unknown one reports node's text
+    assert_eq!(
+        run_async(
+            "(async function () {
+               var k = await crypto.subtle.importKey('raw', new Uint8Array(3), { name: 'HMAC', hash: 'SHA-256' }, true, ['sign']);
+               var calls = [
+                 () => crypto.subtle.encrypt({ name: 'AES-GCM', iv: new Uint8Array(12) }, k, new Uint8Array(1)),
+                 () => crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(12) }, k, new Uint8Array(1)),
+                 () => crypto.subtle.sign('HMAC', k, new Uint8Array(1)),
+                 () => crypto.subtle.verify('HMAC', k, new Uint8Array(1), new Uint8Array(1)),
+                 () => crypto.subtle.deriveBits({ name: 'PBKDF2' }, k, 8),
+                 () => crypto.subtle.deriveKey({ name: 'PBKDF2' }, k, { name: 'HMAC', hash: 'SHA-256' }, true, ['sign']),
+                 () => crypto.subtle.wrapKey('raw', k, k, 'AES-KW'),
+                 () => crypto.subtle.unwrapKey('raw', new Uint8Array(1), k, 'AES-KW', 'HMAC', true, ['sign']),
+                 () => crypto.subtle.generateKey({ name: 'RSA-PSS', modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign']),
+                 () => crypto.subtle.encrypt({ name: 'Foo' }, k, new Uint8Array(1)),
+                 () => crypto.subtle.sign({ name: 'Foo' }, k, new Uint8Array(1)),
+                 () => crypto.subtle.deriveBits({ name: 'Foo' }, k, 8),
+                 () => crypto.subtle.generateKey({ name: 'Foo' }, true, ['sign'])
+               ];
+               var out = [];
+               for (var c of calls) {
+                 try { await c(); out.push('resolved'); } catch (e) { out.push(e.name + ':' + e.message); }
+               }
+               console.log(out.join('|'));
+             })();"
+        ),
+        "NotSupportedError:AES-GCM encrypt is not implemented|NotSupportedError:AES-GCM decrypt is not implemented|\
+         NotSupportedError:HMAC sign is not implemented|NotSupportedError:HMAC verify is not implemented|\
+         NotSupportedError:PBKDF2 deriveBits is not implemented|NotSupportedError:PBKDF2 deriveKey is not implemented|\
+         NotSupportedError:AES-KW wrapKey is not implemented|NotSupportedError:AES-KW unwrapKey is not implemented|\
+         NotSupportedError:RSA-PSS generateKey is not implemented|NotSupportedError:Unrecognized algorithm name|\
+         NotSupportedError:Unrecognized algorithm name|NotSupportedError:Unrecognized algorithm name|\
+         NotSupportedError:Unrecognized algorithm name"
+    );
+}
+
+#[test]
+fn web_crypto_key_accessors_need_a_crypto_key_receiver() {
+    assert_eq!(
+        one("var r = [];
+             for (const k of ['type', 'algorithm', 'extractable', 'usages']) {
+               try { Object.getOwnPropertyDescriptor(CryptoKey.prototype, k).get.call({}); r.push('no'); }
+               catch (e) { r.push(e.name + ':' + e.message); }
+             }
+             console.log(r.join(' '));"),
+        "TypeError:Value of \"this\" must be of type CryptoKey TypeError:Value of \"this\" must be of type CryptoKey TypeError:Value of \"this\" must be of type CryptoKey TypeError:Value of \"this\" must be of type CryptoKey"
+    );
+}
+
 #[test]
 fn crypto_create_hash_matches_node() {
     assert_eq!(
@@ -4164,7 +4225,8 @@ fn timeout_to_primitive_id_clears_the_timer_and_dispose_clears_it() {
 }
 
 #[test]
-fn webassembly_stub_is_typeof_safe_and_scan_blocks_real_use() {
+fn webassembly_stub_is_typeof_safe_and_scan_leaves_real_use_to_the_routing_gate() {
+    // the scan no longer blocks a real WebAssembly use: thaw-cli's `thaw_js_wasm_blocker` gates it per program
     assert_eq!(
         one("console.log(typeof WebAssembly, typeof WebAssembly.compile)"),
         "object function"
@@ -4178,12 +4240,8 @@ fn webassembly_stub_is_typeof_safe_and_scan_blocks_real_use() {
         "exports.VERSION = '1.0';",
         "exports.VERSION = '1.0'; exports.run = function (x) { return WebAssembly.instantiate(x); };",
     );
-    let blocked = crate::scan::scan_bundle(&use_it).ok().unwrap();
-    assert!(
-        blocked.blockers.contains_key("global:WebAssembly"),
-        "{:?}",
-        blocked.blockers
-    );
+    let used = crate::scan::scan_bundle(&use_it).ok().unwrap();
+    assert!(used.is_clean(), "{:?}", used.blockers);
 }
 
 #[test]
@@ -4324,6 +4382,39 @@ fn als_resource_bind_and_disable() {
         run_loop(src),
         "undefined R B|function|now:undefined|later:undefined"
     );
+}
+
+/// node-compat case 'async_hooks createHook reports resources timers and promises' (timer part); Node 22's sequence.
+#[test]
+fn async_hooks_timeout_resources_follow_node_order() {
+    let src = "var A = __thaw_async_hooks_exports, types = new Map(), log = [];
+var hook = A.createHook({
+  init(id, type) { if (type === 'MyRes' || type === 'Timeout') { types.set(id, type); log.push('init:' + type); } },
+  before(id) { var t = types.get(id); if (t) log.push('before:' + t); },
+  after(id) { var t = types.get(id); if (t) log.push('after:' + t); },
+  destroy(id) { var t = types.get(id); if (t) log.push('destroy:' + t); },
+}).enable();
+var resource = new A.AsyncResource('MyRes');
+resource.runInAsyncScope(function () { log.push('scope ' + (A.executionAsyncId() === resource.asyncId()) + ' ' + (A.triggerAsyncId() === resource.triggerAsyncId())); });
+setTimeout(function () { log.push('timeout'); resource.emitDestroy(); }, 10);
+setTimeout(function () { hook.disable(); console.log(log.join(',')); }, 40);";
+    assert_eq!(
+        run_loop(src),
+        "init:MyRes,before:MyRes,scope true true,after:MyRes,init:Timeout,init:Timeout,before:Timeout,timeout,after:Timeout,destroy:MyRes,destroy:Timeout,before:Timeout"
+    );
+}
+
+/// Timers and immediates scheduled while no hook is enabled report no events, even if a hook is enabled and disabled meanwhile.
+#[test]
+fn async_hooks_timers_without_an_enabled_hook_report_nothing() {
+    let src = "var A = __thaw_async_hooks_exports, n = [];
+var hook = A.createHook({ init(id, type) { n.push(type); }, before() { n.push('b'); }, after() { n.push('a'); }, destroy() { n.push('d'); } });
+setTimeout(function () { n.push('t'); }, 1);
+setImmediate(function () { n.push('i'); });
+var t2 = setTimeout(function () {}, 1); clearTimeout(t2);
+hook.enable(); hook.disable();
+setTimeout(function () { console.log(n.join(',')); }, 5);";
+    assert_eq!(run_loop(src), "t,i");
 }
 
 static HOOK_INITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -8365,7 +8456,7 @@ fn q9_process_config_and_error_prepare_stack_trace_exist() {
          console.log(typeof Error.prepareStackTrace);",
     );
     assert_eq!(code, 0);
-    assert_eq!(out.join("|"), "object object object|true|function");
+    assert_eq!(out.join("|"), "object object object|false|function");
 }
 
 #[test]
