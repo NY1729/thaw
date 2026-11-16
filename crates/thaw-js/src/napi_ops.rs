@@ -41,7 +41,7 @@ fn instance_of(it: &mut Interp, object: &Value, constructor: &Value) -> R<bool> 
     }
     let key = it.well_known_key("hasInstance");
     let custom = it.get(constructor, &key)?;
-    if custom.is_callable() {
+    if custom.is_callable() && !it.is_default_has_instance(&custom) {
         return Ok(it
             .call(&custom, constructor, std::slice::from_ref(object))?
             .truthy());
