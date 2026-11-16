@@ -1337,9 +1337,18 @@ pub(crate) fn default_realm() -> usize {
         PACKAGES.with(|ps| ps.borrow_mut().push(Some(package)));
         LAST_PACKAGE.with(|l| l.set(0));
     }
-    FETCH_PACKAGE
-        .with(Cell::get)
+    let live = |h: Option<usize>| h.filter(|&h| package_is_live(h));
+    live(FETCH_PACKAGE.with(Cell::get))
+        .or_else(|| live(Some(LAST_PACKAGE.with(Cell::get))))
+        .or_else(|| PACKAGES.with(|ps| ps.borrow().iter().position(Option::is_some)))
         .unwrap_or_else(|| LAST_PACKAGE.with(Cell::get))
+}
+
+/// Whether `handle` names a package that can run: loaded, or taken out of its slot by a call in progress
+/// (`with_package` holds it in `RUNNING`). A retired (unloaded) handle is neither.
+fn package_is_live(handle: usize) -> bool {
+    PACKAGES.with(|ps| ps.borrow().get(handle).is_some_and(Option::is_some))
+        || RUNNING.with(|r| r.borrow().contains_key(&handle))
 }
 
 /// `new Function(...args)` from the JSON array of the constructor's string arguments (the last is the
@@ -5572,6 +5581,17 @@ fn leak(s: String) -> *mut c_char {
     CString::new(s.replace('\0', "\\u0000")).map_or(std::ptr::null_mut(), CString::into_raw)
 }
 
+/// Record `handle` as the fetch realm when its package holds the HTTP transport and none is recorded yet
+/// (first wins). Both package entry points call it: compiled programs load through `thaw_tjs_register`.
+fn note_fetch_package(p: &Package, handle: usize) {
+    let transport = p
+        .interp
+        .lookup(&p.interp.global.clone(), "__thaw_fetch_transport");
+    if transport.is_some() && FETCH_PACKAGE.with(Cell::get).is_none() {
+        FETCH_PACKAGE.with(|f| f.set(Some(handle)));
+    }
+}
+
 /// Load a registry bundle. Returns a handle (>= 0) or -1 on failure / unsupported construct
 /// (the reason is available from [`thaw_tjs_last_error`]).
 #[no_mangle]
@@ -5581,12 +5601,7 @@ pub extern "C" fn thaw_tjs_load(bundle: *const c_char) -> i64 {
         Ok(p) => PACKAGES.with(|ps| {
             let mut ps = ps.borrow_mut();
             let handle = ps.len();
-            let transport = p
-                .interp
-                .lookup(&p.interp.global.clone(), "__thaw_fetch_transport");
-            if transport.is_some() && FETCH_PACKAGE.with(Cell::get).is_none() {
-                FETCH_PACKAGE.with(|f| f.set(Some(handle)));
-            }
+            note_fetch_package(&p, handle);
             ps.push(Some(p));
             handle as i64
         }),
@@ -5648,6 +5663,12 @@ pub extern "C" fn thaw_tjs_unload(handle: i64) {
     PACKAGES.with(|ps| {
         if let Some(slot) = ps.borrow_mut().get_mut(handle as usize) {
             *slot = None;
+        }
+    });
+    // the fetch realm goes with its package; `default_realm` then falls back to the last package entered
+    FETCH_PACKAGE.with(|f| {
+        if f.get() == Some(handle as usize) {
+            f.set(None);
         }
     });
 }
@@ -5944,6 +5965,7 @@ pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) 
         Ok(p) => {
             PACKAGES.with(|ps| {
                 let mut ps = ps.borrow_mut();
+                note_fetch_package(&p, ps.len());
                 ps.push(Some(p));
                 BY_NAME.with(|m| m.borrow_mut().insert(name, ps.len() - 1));
             });
@@ -7023,5 +7045,176 @@ mod engine_id_tests {
     #[test]
     fn engine_id_is_thaw_js() {
         assert_eq!(super::thaw_tjs_engine_id(), 1);
+    }
+}
+
+#[cfg(test)]
+mod fetch_realm_package_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    /// A package bundle whose entry is `a/index.js`, with `factories` (raw `"key": function ...,` entries) added.
+    fn package(factories: &str) -> String {
+        format!(
+            r#"module.exports = (function(require){{
+var __thaw_bundle_factories = {{
+"a/index.js": function(module, exports) {{ exports.id = 'a'; }},
+{factories}
+}};
+var __thaw_bundle_require_maps = {{ "a/index.js": {{}} }};
+var __thaw_bundle_entry_key = "a/index.js";
+}})(globalThis.require);"#
+        )
+    }
+
+    /// A `node:http` module that is a loopback client over the `__thaw_net_*` natives (one request per
+    /// connection, the body is delivered whole through `data` and `end`), and an inert `node:https`.
+    const TRANSPORT_FACTORIES: &str = r#"
+"node:http": function(module, exports) {
+  exports.request = function (href, options, callback) {
+    var url = new URL(href), handlers = {};
+    var req = {
+      once: function (event, fn) { handlers[event] = fn; return req; },
+      write: function () {},
+      destroy: function () {},
+      end: function () {
+        var conn = Number(__thaw_net_connect(url.hostname, Number(url.port)).split(':')[1]);
+        __thaw_net_write(conn, Buffer.from('GET ' + url.pathname + ' HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n').toString('hex'));
+        var buf = '';
+        (function read() {
+          var d = __thaw_net_poll_read(conn);
+          if (d === 'pending') return setTimeout(read, 1);
+          if (d.indexOf('ok:') === 0) { buf += Buffer.from(d.slice(3), 'hex').toString(); return read(); }
+          var end = buf.indexOf('\r\n\r\n');
+          var head = buf.slice(0, end).split('\r\n'), headers = {}, listeners = {};
+          head.slice(1).forEach(function (line) {
+            var i = line.indexOf(':');
+            headers[line.slice(0, i).toLowerCase()] = line.slice(i + 2);
+          });
+          var incoming = {
+            statusCode: Number(head[0].split(' ')[1]), statusMessage: '', headers: headers,
+            on: function (event, fn) { listeners[event] = fn; return incoming; },
+            resume: function () {}, pause: function () {}, destroy: function () {},
+          };
+          callback(incoming);
+          if (listeners.data) listeners.data(Buffer.from(buf.slice(end + 4)));
+          if (listeners.end) listeners.end();
+        })();
+      },
+    };
+    return req;
+  };
+},
+"node:https": function(module, exports) { exports.request = function () { throw new Error('https unused'); }; },
+"#;
+
+    fn register(name: &str, source: &str) -> usize {
+        let (name_c, source_c) = (CString::new(name).unwrap(), CString::new(source).unwrap());
+        assert_eq!(
+            thaw_tjs_register(name_c.as_ptr(), source_c.as_ptr()),
+            1,
+            "register {name}"
+        );
+        BY_NAME.with(|m| m.borrow()[name])
+    }
+
+    /// Run `source` in package `handle` (the way compiled code reaches its realm); a throw fails the test.
+    fn run_in(handle: usize, source: &str) {
+        with_package(handle, |p| {
+            p.interp
+                .run(source)
+                .map(|_| ())
+                .map_err(|c| classify(&mut p.interp, c))
+        })
+        .unwrap_or_else(|e| panic!("script in package {handle} failed: {e}"));
+    }
+
+    /// Global `name` of package `handle`, as a string.
+    fn global_str(handle: usize, name: &str) -> String {
+        with_package(handle, |p| {
+            let v = p
+                .interp
+                .run(&format!("String(globalThis.{name})"))
+                .map_err(|c| classify(&mut p.interp, c))?;
+            Ok(p.interp.to_str(&v).to_string())
+        })
+        .unwrap_or_else(|e| panic!("reading {name}: {e}"))
+    }
+
+    #[test]
+    fn register_path_records_the_transport_package_as_the_fetch_realm() {
+        let transport = register("tp", &package(TRANSPORT_FACTORIES));
+        let plain = register("plain", &package(""));
+        // the package without a transport is the one entered last
+        with_package(plain, |_| Ok(())).unwrap();
+        assert_eq!(default_realm(), transport);
+        let has_transport = with_package(default_realm(), |p| {
+            Ok(p.interp
+                .lookup(&p.interp.global.clone(), "__thaw_fetch_transport")
+                .is_some())
+        })
+        .unwrap();
+        assert!(has_transport);
+        // unloading the transport package clears the fetch realm; the realm falls back to the last entered
+        thaw_tjs_unload(transport as i64);
+        assert_eq!(FETCH_PACKAGE.with(Cell::get), None);
+        assert_eq!(default_realm(), plain);
+        thaw_tjs_unload(plain as i64);
+    }
+
+    #[test]
+    fn fetch_in_the_transport_realm_reaches_a_server_in_another_package() {
+        let transport = register("tp", &package(TRANSPORT_FACTORIES));
+        let server = register("srv", &package(""));
+        // the server: the loopback listener of the fetch tests, in its own package
+        run_in(
+            server,
+            r#"
+            var fx = {};
+            fx.listen = function (respond) {
+              var l = __thaw_net_listen('127.0.0.1', 0).split(':');
+              fx.listener = Number(l[1]);
+              fx.port = Number(l[2]);
+              function accept() {
+                var acc = __thaw_net_poll_accept(fx.listener);
+                if (acc === 'err:pending') return setTimeout(accept, 1);
+                if (acc.indexOf('ok:') !== 0) return;
+                serve(Number(acc.split(':')[1]));
+                accept();
+              }
+              function serve(conn) {
+                var buf = '';
+                (function read() {
+                  var d = __thaw_net_poll_read(conn);
+                  if (d === 'pending') return setTimeout(read, 1);
+                  if (d.indexOf('ok:') === 0) buf += Buffer.from(d.slice(3), 'hex').toString();
+                  var end = buf.indexOf('\r\n\r\n');
+                  if (end < 0) return d === 'eof' ? undefined : read();
+                  __thaw_net_write(conn, Buffer.from(respond()).toString('hex'));
+                  __thaw_net_shutdown(conn);
+                  __thaw_net_destroy(conn);
+                })();
+              }
+              accept();
+            };
+            fx.listen(function () {
+              return 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok';
+            });
+            "#,
+        );
+        let port = global_str(server, "fx.port");
+        let listener = global_str(server, "fx.listener");
+        // the client runs in the realm compiled code reads `fetch` from
+        assert_eq!(default_realm(), transport);
+        run_in(
+            default_realm(),
+            &format!(
+                "fetch('http://127.0.0.1:{port}/').then(function (r) {{ return r.text().then(function (t) {{ globalThis.result = r.status + ' ' + t; }}); }}, function (e) {{ globalThis.result = 'rejected ' + e.name; }}).then(function () {{ __thaw_net_close_listener({listener}); }});"
+            ),
+        );
+        thaw_tjs_run_event_loop();
+        assert_eq!(global_str(transport, "result"), "200 ok");
+        thaw_tjs_unload(transport as i64);
+        thaw_tjs_unload(server as i64);
     }
 }
