@@ -65,6 +65,7 @@ mod sysio;
 mod tls;
 mod typed;
 pub(crate) use typed::TypedKey;
+mod udp;
 mod url;
 mod vm;
 #[path = "web/abort.rs"]
@@ -4867,6 +4868,8 @@ mod builtin_table_tests;
 mod console_instance_tests;
 #[cfg(test)]
 mod dynamic_helper_contract_tests;
+#[cfg(test)]
+mod errors_stack_tests;
 #[cfg(test)]
 mod fetch_tests;
 #[cfg(all(test, unix))]
