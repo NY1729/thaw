@@ -4876,6 +4876,8 @@ mod handle_zero_tests;
 #[cfg(test)]
 mod job_barrier_tests;
 #[cfg(test)]
+mod leak_audit_tests;
+#[cfg(test)]
 mod napi_bridge_tests;
 #[cfg(test)]
 mod napi_eval_tests;
@@ -4928,6 +4930,8 @@ mod tests;
 mod coroutine_teardown_tests;
 #[cfg(test)]
 mod vm_realm_tests;
+#[cfg(test)]
+mod web_class_tag_tests;
 
 impl Interp {
     /// Empties every object and scope reachable from this realm's roots, breaking the Rc cycles among them

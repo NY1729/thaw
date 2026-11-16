@@ -280,6 +280,7 @@ fn generate_registry_shims(
     output: &Path,
     external_native_staging: Option<&Path>,
     forced_jit_fallbacks: &std::collections::HashSet<(String, String)>,
+    forced_runtime_only: &std::collections::HashSet<String>,
     thaw_js_routing: bool,
 ) -> Result<RegistryShims, String> {
     let routed = ThawJsPackages::new();
@@ -295,6 +296,7 @@ fn generate_registry_shims(
         output,
         external_native_staging,
         forced_jit_fallbacks,
+        forced_runtime_only,
         thaw_js_routing,
         &routed,
     )?;
@@ -313,6 +315,7 @@ fn generate_registry_shims(
         output,
         external_native_staging,
         forced_jit_fallbacks,
+        forced_runtime_only,
         thaw_js_routing,
         &eligible,
     )
@@ -332,6 +335,7 @@ fn generate_registry_shims_pass(
     output: &Path,
     external_native_staging: Option<&Path>,
     forced_jit_fallbacks: &std::collections::HashSet<(String, String)>,
+    forced_runtime_only: &std::collections::HashSet<String>,
     thaw_js_routing: bool,
     thaw_js_routed: &ThawJsPackages,
 ) -> Result<(RegistryShims, ThawJsPackages), String> {
@@ -460,6 +464,14 @@ fn generate_registry_shims_pass(
             .collect::<std::collections::HashSet<_>>();
         let mut nested_namespaces =
             thaw_bridge::nested_namespace_members_named(&package.dts_source, &dts_filename);
+        // A forced runtime-only package (see `force_realm_fetch_bundles`) declares no names: its bundle is
+        // served lazily, and a same-named export of a program's own package must not clash with it.
+        if forced_runtime_only.contains(&package.name) {
+            functions.clear();
+            classes.clear();
+            values.clear();
+            nested_namespaces.clear();
+        }
         let live_namespace_origins = nested_namespaces
             .keys()
             .filter(|namespace| !type_only_namespaces.contains(*namespace))
@@ -2170,7 +2182,8 @@ fn generate_registry_shims_pass(
                 .map(|class| class.name.clone())
                 .collect();
             if runtime_package
-                && (dynamic_packages.contains(&pkg.name)
+                && (forced_runtime_only.contains(&pkg.name)
+                    || dynamic_packages.contains(&pkg.name)
                     || !fallback_names.is_empty()
                     || !nested_namespace_aliases.is_empty()
                     || pkg.native_addon.is_some()
