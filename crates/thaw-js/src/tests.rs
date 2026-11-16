@@ -5677,6 +5677,7 @@ const PROBE_BUNDLE: &str = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
 "tpa/index.js": function(module, exports, require) {
   exports.u8 = new Uint8Array([1, 2]);
+  exports.u8x = Object.assign(new Uint8Array([1, 2]), { x: 3 });
   exports.buf = Buffer.from([1]);
   exports.obj = { a: 1 };
 },
@@ -5707,7 +5708,12 @@ fn typed_array_handle_probe_reports_name_and_values() {
     };
     assert_eq!(
         probe_of("u8").as_deref(),
-        Some(r#"{"n":"Uint8Array","v":["1","2"],"e":[]}"#)
+        Some(r#"{"n":"Uint8Array","v":["1","2"]}"#)
+    );
+    // non-index own properties ride along as `e` (console.log prints `x: 3` after the items)
+    assert_eq!(
+        probe_of("u8x").as_deref(),
+        Some(r#"{"n":"Uint8Array","v":["1","2"],"e":[["x","n","3"]]}"#)
     );
     // a Buffer prints itself, and a plain object is not a typed array
     assert_eq!(probe_of("buf"), None);
