@@ -48,7 +48,10 @@ Object.defineProperty(globalThis, '__thaw_run_main_file', {
       const module = { id: found.path, filename: found.path, path: dirOf(found.path), exports: {}, loaded: false, children: [], parent };
       cache[found.path] = module;
       if (parent) parent.children.push(module);
-      if (!parent) mainModule = module;
+      if (!parent) {
+        mainModule = module;
+        globalThis.process.mainModule = module;
+      }
       try {
         if (found.path.endsWith('.json')) module.exports = JSON.parse(found.source);
         else {
