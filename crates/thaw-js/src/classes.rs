@@ -127,11 +127,12 @@ impl Interp {
                 *ctor_obj.proto.borrow_mut() = Some(p.clone()); // static inheritance
             }
         }
+        // Node: a class's `prototype` is non-writable for user and built-in classes alike.
         put_with(
             &ctor_obj,
             "prototype",
             Value::Object(proto.clone()),
-            true,
+            false,
             false,
             false,
         );
