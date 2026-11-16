@@ -3446,6 +3446,68 @@ fn intl_date_time_format_reports_parts_range_and_resolved_options() {
 
 #[cfg(feature = "intl")]
 #[test]
+fn intl_tolocale_methods_delegate_to_intl_formatters() {
+    let out = run(
+        "console.log((0.5).toLocaleString('en-US',{style:'percent'}));
+         console.log((1234.5).toLocaleString('de-DE'));
+         console.log((12345n).toLocaleString('de-DE'));
+         console.log([1234.5, 1234].toLocaleString('de-DE'));
+         console.log(new Date(0).toLocaleDateString('de-DE',{timeZone:'UTC'}));
+         console.log(new Date(0).toLocaleDateString('en-US',{timeZone:'UTC',dateStyle:'full'}));
+         console.log(new Date(NaN).toLocaleString('de-DE'));
+         console.log('a'.localeCompare('b','sv'), 'ä'.localeCompare('z','sv'), 'a'.localeCompare('b'));
+         console.log('a'.localeCompare('A',undefined,{sensitivity:'base'}), 'item10'.localeCompare('item9',undefined,{numeric:true}));
+         console.log('İ'.toLocaleLowerCase('tr'), 'i'.toLocaleUpperCase('tr'), 'I'.toLocaleLowerCase('az'));
+         console.log('I\\u0307'.toLocaleLowerCase('tr'), 'i\\u0307\\u0300'.toLocaleUpperCase('lt') === 'I\\u0300');
+         console.log(Number.prototype.toLocaleString.length, Date.prototype.toLocaleDateString.length, String.prototype.localeCompare.length, Array.prototype.toLocaleString.length);
+         console.log(Object.getOwnPropertyDescriptor(Number.prototype,'toLocaleString').enumerable);
+         try { Number.prototype.toLocaleString.call('5'); console.log('no throw'); } catch (e) { console.log(e.name); }
+         try { 'a'.localeCompare('b','x_y'); console.log('no throw'); } catch (e) { console.log(e.name); }",
+    );
+    assert_eq!(
+        out,
+        [
+            "50%",
+            "1.234,5",
+            "12.345",
+            "1.234,5,1.234",
+            "1.1.1970",
+            "Thursday, January 1, 1970",
+            "Invalid Date",
+            "-1 1 -1",
+            "0 1",
+            "i İ ı",
+            "i true",
+            "0 0 1 0",
+            "false",
+            "TypeError",
+            "RangeError",
+        ]
+    );
+}
+
+#[cfg(not(feature = "intl"))]
+#[test]
+fn tolocale_without_intl_feature_keeps_the_en_us_natives() {
+    let out = run("console.log(typeof Intl);
+         console.log((1234.5).toLocaleString(), (1234567n).toLocaleString());
+         console.log(new Date(0).toLocaleDateString('de-DE',{timeZone:'UTC'}));
+         console.log('a'.localeCompare('b'), 'a'.localeCompare('A'));
+         console.log([1234.5, 'x'].toLocaleString());");
+    assert_eq!(
+        out,
+        [
+            "undefined",
+            "1,234.5 1,234,567",
+            "1/1/1970",
+            "-1 -1",
+            "1,234.5,x"
+        ]
+    );
+}
+
+#[cfg(feature = "intl")]
+#[test]
 fn scan_knows_intl_globals_and_namespace_prototype_methods() {
     let src = "module.exports = (function(require) {
 var __thaw_bundle_factories = {
