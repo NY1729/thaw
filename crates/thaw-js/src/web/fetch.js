@@ -1345,3 +1345,114 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
     Object.defineProperties(Request.prototype, Object.getOwnPropertyDescriptors({ get isHistoryNavigation() { return false; }, get isReloadNavigation() { return false; } }));
     Object.defineProperty(Request.prototype, 'attribute', { value: undefined, enumerable: true });
   }
+  // Global fetch (Q9 plan-q9-thawjs-fetch.md). Defined in every thaw-js realm, beside Request/Response. The HTTP
+  // client is the node:http / node:https bundle modules: the host installs `__thaw_fetch_transport(name)` for a
+  // bundle that contains them and evaluates the module on the first call. Logic mirrors the QuickJS polyfill in
+  // thaw-registry's bundle/render.rs (kept until QuickJS is removed); this copy is the thaw-js one.
+  function fetchTransport(name) {
+    var load = globalThis.__thaw_fetch_transport;
+    if (typeof load !== 'function') throw new TypeError('fetch: no HTTP client is loaded in this runtime');
+    return load(name);
+  }
+  // A transport failure settles the fetch as Node's `TypeError: fetch failed` with the reason as its cause.
+  function networkFailure(error) { var failure = new TypeError('fetch failed'); failure.cause = error; return failure; }
+  function fetch(input, init = undefined) {
+    var request;
+    try { request = new Request(input, init); } catch (error) { return Promise.reject(error); }
+    return Promise.resolve().then(async function() {
+      var redirects = 0, bodyReplayable = !globalThis.__thaw_request_body_replayable || globalThis.__thaw_request_body_replayable(request);
+      function aborted() {
+        var reason = request.signal && request.signal.reason;
+        if (reason !== undefined) return reason;
+        var error = new Error('This operation was aborted'); error.name = 'AbortError'; return error;
+      }
+      if (request.signal && request.signal.aborted) throw aborted();
+      var body = request.body ? await (globalThis.__thaw_request_bytes_for_fetch ? globalThis.__thaw_request_bytes_for_fetch(request) : request.bytes()) : new Uint8Array();
+      return new Promise(function(resolve, reject) {
+        var active = null, settled = false;
+        function finishReject(error) { if (settled) return; settled = true; cleanup(); reject(error); }
+        function cleanup() { if (request.signal) request.signal.removeEventListener('abort', onAbort); }
+        function onAbort() { if (active && typeof active.destroy === 'function') active.destroy(); finishReject(aborted()); }
+        if (request.signal) request.signal.addEventListener('abort', onAbort, { once: true });
+        var initialHeaders = {}; request.headers.forEach(function(value, name) { initialHeaders[name] = value; }); if (initialHeaders['accept-encoding'] === undefined) initialHeaders['accept-encoding'] = 'gzip, deflate, br';
+        async function verifyIntegrity(response, url, redirected) {
+          var metadata = [], strongest = -1, algorithms = ['sha256', 'sha384', 'sha512'];
+          String(request.integrity).split(/[\t\n\f\r ]+/).forEach(function(item) {
+            var expression = item.split('?')[0], separator = expression.indexOf('-');
+            var algorithm = separator < 0 ? expression : expression.slice(0, separator), rank = algorithms.indexOf(algorithm);
+            if (rank < 0 || rank < strongest) return;
+            if (rank > strongest) { strongest = rank; metadata = []; }
+            metadata.push(separator < 0 ? '' : expression.slice(separator + 1).split('-')[0]);
+          });
+          var bytes = await response.bytes();
+          if (strongest >= 0) {
+            var digest = new Uint8Array(await crypto.subtle.digest(algorithms[strongest], bytes));
+            var actual = btoa(Array.from(digest, function(byte) { return String.fromCharCode(byte); }).join(''));
+            if (metadata.indexOf(actual) < 0) throw new TypeError('fetch integrity mismatch');
+          }
+          var verified = new Response(response.body === null ? null : bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
+          if (globalThis.__thaw_set_response_metadata) globalThis.__thaw_set_response_metadata(verified, url, redirected);
+          return verified;
+        }
+        function dispatch(url, method, bytes, redirected, headers) {
+          var parsed;
+          try { parsed = new URL(url); } catch (error) { finishReject(error); return; }
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') { finishReject(new TypeError('fetch only supports http: and https: URLs')); return; }
+          if (parsed.username || parsed.password) { finishReject(new TypeError('Request URL cannot contain credentials')); return; }
+          parsed.hash = '';
+          var transport;
+          try { transport = fetchTransport(parsed.protocol === 'https:' ? 'https' : 'http'); } catch (error) { finishReject(networkFailure(error)); return; }
+          if ((method === 'GET' || method === 'HEAD') && bytes.length) { bytes = new Uint8Array(); delete headers['content-length']; }
+          var options = { method: method, headers: headers, signal: request.signal };
+          try {
+            active = transport.request(parsed.href, options, function(incoming) {
+              var status = Number(incoming.statusCode), location = incoming.headers && incoming.headers.location;
+              if (location && [301, 302, 303, 307, 308].indexOf(status) >= 0) {
+                if (request.redirect === 'error') { finishReject(new TypeError('fetch redirect mode is set to error')); return; }
+                if (request.redirect === 'follow') {
+                  if (++redirects > 20) { finishReject(new TypeError('fetch redirect count exceeded')); return; }
+                  var nextUrl = new URL(String(location), parsed), nextMethod = method, nextBody = bytes, nextHeaders = Object.assign({}, headers);
+                  if (status !== 303 && !bodyReplayable) { finishReject(new TypeError('Cannot replay a streaming request body')); return; }
+                  if (status === 303 && method !== 'GET' && method !== 'HEAD' || (status === 301 || status === 302) && method === 'POST') { nextMethod = 'GET'; nextBody = new Uint8Array(); bodyReplayable = true; Object.keys(nextHeaders).forEach(function(name) { if (name.indexOf('content-') === 0) delete nextHeaders[name]; }); }
+                  if (nextUrl.origin !== parsed.origin) ['authorization', 'proxy-authorization', 'cookie', 'cookie2'].forEach(function(name) { delete nextHeaders[name]; });
+                  dispatch(nextUrl.href, nextMethod, nextBody, true, nextHeaders); return;
+                }
+              }
+              var responseHeaders = new Headers();
+              if (Array.isArray(incoming.rawHeaders)) for (var index = 0; index + 1 < incoming.rawHeaders.length; index += 2) responseHeaders.append(incoming.rawHeaders[index], incoming.rawHeaders[index + 1]);
+              else if (incoming.headers) Object.keys(incoming.headers).forEach(function(name) { var value = incoming.headers[name]; if (Array.isArray(value)) value.forEach(function(item) { responseHeaders.append(name, item); }); else if (value !== undefined) responseHeaders.append(name, value); });
+              var noBody = method === 'HEAD' || status === 101 || status === 204 || status === 205 || status === 304, controller, bodyAbort, bodyFinished = false;
+              function cleanupBody() { if (request.signal && bodyAbort) request.signal.removeEventListener('abort', bodyAbort); }
+              var stream = noBody ? null : new ReadableStream({ start: function(value) { controller = value; }, pull: function() { if (!bodyFinished && controller.desiredSize > 0 && incoming.resume) incoming.resume(); }, cancel: function(reason) { bodyFinished = true; cleanupBody(); if (incoming.destroy) incoming.destroy(reason); } }, { highWaterMark: 16384, size: function(chunk) { return chunk.byteLength; } });
+              if (stream) {
+                incoming.on('data', function(chunk) { if (bodyFinished || !controller) return; controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)); if (controller.desiredSize <= 0 && incoming.pause) incoming.pause(); });
+                incoming.on('end', function() { if (bodyFinished) return; bodyFinished = true; cleanupBody(); if (controller) controller.close(); });
+                incoming.on('error', function(error) { if (bodyFinished) return; bodyFinished = true; cleanupBody(); if (controller) controller.error(error); });
+                incoming.on('aborted', function() { if (bodyFinished) return; bodyFinished = true; cleanupBody(); if (controller) controller.error(new TypeError('terminated')); });
+                bodyAbort = function() { if (bodyFinished) return; bodyFinished = true; cleanupBody(); if (controller) controller.error(aborted()); if (incoming.destroy) incoming.destroy(); };
+                if (request.signal) request.signal.addEventListener('abort', bodyAbort, { once: true });
+                var contentEncodings = String(responseHeaders.get('content-encoding') || '').toLowerCase().split(',').map(function(value) { return value.trim(); });
+                var codecs = { gzip: 'gzip', 'x-gzip': 'gzip', deflate: 'deflate', br: 'brotli' };
+                if (contentEncodings.every(function(value) { return Object.prototype.hasOwnProperty.call(codecs, value); }))
+                  for (var coding = contentEncodings.length - 1; coding >= 0; coding--) stream = stream.pipeThrough(new DecompressionStream(codecs[contentEncodings[coding]]));
+              }
+              var response;
+              try { response = new Response(stream, { status: status, statusText: incoming.statusMessage || '', headers: responseHeaders }); }
+              catch (error) { finishReject(error); return; }
+              if (globalThis.__thaw_set_response_metadata) globalThis.__thaw_set_response_metadata(response, parsed.href, redirected);
+              if (request.integrity) {
+                verifyIntegrity(response, parsed.href, redirected).then(function(verified) {
+                  if (!settled) { settled = true; cleanup(); resolve(verified); }
+                }, finishReject);
+              } else if (!settled) { settled = true; cleanup(); resolve(response); }
+            });
+            active.once('error', function(error) { finishReject(networkFailure(error)); });
+            if (bytes.length) active.write(bytes);
+            active.end();
+          } catch (error) { finishReject(error); }
+        }
+        dispatch(request.url, request.method, body, false, initialHeaders);
+      });
+    });
+  }
+  Object.defineProperty(globalThis, 'fetch', { value: fetch, writable: true, enumerable: true, configurable: true });

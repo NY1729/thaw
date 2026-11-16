@@ -73,9 +73,30 @@ pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
     }
 }
 
-/// A callback whose parameters may also be live values: `JsValue` leaves and nested callbacks cross as handle
-/// leases, so it can only be registered on the graph route (`thaw_tjs_register_native_callback_graph`), never as
-/// a JSON-text `__thaw_tjs_cb__` marker. Superset of `thaw_js_callback_type`.
+/// A class instance parameter (a registry class such as `PerformanceObserverEntryList`): the object carries the
+/// `__thaw_class_identity_` marker. It crosses as a live handle lease, so it is never plain JSON data. Date has
+/// the same marker but keeps its own plain wire (`thaw_js_date_type`). The single source for "class instance
+/// param = handle leaf" in the class-call callback route.
+pub(crate) fn thaw_js_class_instance_type(ty: &HirType) -> bool {
+    matches!(ty, HirType::Object(fields) if fields.first().is_some_and(|(marker, _)| {
+        marker.starts_with("__thaw_class_identity_\u{1e}")
+    })) && !thaw_js_date_type(ty)
+}
+
+/// Whether a callback takes a class instance parameter, so a class operation registers it on the graph route
+/// (the closure's handle lease) instead of the JSON-text marker, which would send the instance as text.
+pub(crate) fn thaw_js_callback_takes_class_instance(ty: &HirType) -> bool {
+    let ty = match ty {
+        HirType::Optional(inner) => inner.as_ref(),
+        other => other,
+    };
+    thaw_js_callback_abi(ty)
+        .is_some_and(|(params, _, _)| params.iter().any(thaw_js_class_instance_type))
+}
+
+/// A callback whose parameters may also be live values: `JsValue` leaves, class instances and nested callbacks
+/// cross as handle leases, so it can only be registered on the graph route (`thaw_tjs_register_native_callback_graph`),
+/// never as a JSON-text `__thaw_tjs_cb__` marker. Superset of `thaw_js_callback_type`.
 pub(crate) fn thaw_js_graph_callback_type(ty: &HirType) -> bool {
     match ty {
         HirType::Optional(inner) => {
@@ -84,7 +105,9 @@ pub(crate) fn thaw_js_graph_callback_type(ty: &HirType) -> bool {
         }
         _ => thaw_js_callback_abi(ty).is_some_and(|(params, ret, _)| {
             params.iter().all(|p| {
-                (thaw_js_param_leaf_type(p) && !thaw_js_contains_bytes(p)) || thaw_js_ctor_nested_callback(p)
+                (thaw_js_param_leaf_type(p) && !thaw_js_contains_bytes(p))
+                    || thaw_js_class_instance_type(p)
+                    || thaw_js_ctor_nested_callback(p)
             }) && thaw_js_plain_type(&ret)
                 && !thaw_js_contains_bytes(&ret)
         }),
@@ -2376,7 +2399,9 @@ impl<'ctx> HirCompiler<'ctx> {
             let reads_receiver = self.callback_expr_reads_receiver(arg) || self.closure_returns_promise(arg);
             let live_listener = self.live_json_listener(arg, ty);
             // a callback with a live (handle) parameter has no text route: it is always a graph callback
-            let graph_only = thaw_js_graph_callback_type(ty) && !thaw_js_callback_type(ty);
+            // a class-instance parameter is a live handle, so it never takes the JSON-text route
+            let graph_only = thaw_js_graph_callback_type(ty)
+                && (!thaw_js_callback_type(ty) || thaw_js_callback_takes_class_instance(ty));
             if (thaw_js_callback_type(ty) && (reads_receiver || live_listener.is_some())) || graph_only {
                 let target = if reads_receiver { arg } else { live_listener.unwrap_or(arg) };
                 self.compile_thaw_js_receiver_callback_argument(array, target, !reads_receiver)
