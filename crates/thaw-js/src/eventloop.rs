@@ -976,6 +976,29 @@ impl Interp {
         let id = next_timer_id();
         let obj = new_obj(self.rt.timeout_proto.clone(), Kind::Plain);
         put_hidden(&obj, "@@tid", Value::Number(id as f64));
+        // Node's own properties, shape only: the Rust-side `Timer` stays authoritative for
+        // firing (reassigning `_onTimeout` does not change what runs).
+        let args_value = if args.len() > 2 {
+            self.array(args[2..].to_vec())
+        } else {
+            Value::Undefined
+        };
+        put(&obj, "_idleTimeout", Value::Number(delay));
+        put(&obj, "_idlePrev", Value::Null);
+        put(&obj, "_idleNext", Value::Null);
+        put(&obj, "_idleStart", Value::Number(clock_ms()));
+        put(&obj, "_onTimeout", cb.clone());
+        put(&obj, "_timerArgs", args_value);
+        put(
+            &obj,
+            "_repeat",
+            if repeat {
+                Value::Number(delay)
+            } else {
+                Value::Null
+            },
+        );
+        put(&obj, "_destroyed", Value::Bool(false));
         self.rt.timers.push(Timer {
             id,
             // the head start is for timers armed before the first loop turn only
@@ -1716,6 +1739,16 @@ impl Interp {
             let id = next_timer_id();
             let obj = new_obj(it.rt.immediate_proto.clone(), Kind::Plain);
             put_hidden(&obj, "@@tid", Value::Number(id as f64));
+            let argv = if a.len() > 1 {
+                it.array(a[1..].to_vec())
+            } else {
+                Value::Undefined
+            };
+            put(&obj, "_idleNext", Value::Null);
+            put(&obj, "_idlePrev", Value::Null);
+            put(&obj, "_onImmediate", cb.clone());
+            put(&obj, "_argv", argv);
+            put(&obj, "_destroyed", Value::Bool(false));
             it.rt.immediates.push(Imm {
                 id,
                 cb,
