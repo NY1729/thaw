@@ -1,6 +1,6 @@
 // node:worker_threads, main-thread side (W1, W3, W5): isMainThread/threadId, MessageChannel, environment data, and the
 // `Worker` class over the `__thaw_worker_*` natives of worker.rs (one OS thread and one Interp per worker). The
-// stdio streams (W5) are the private shim of worker_stream.js. `resourceLimits`, Atomics and SHARE_ENV are not
+// stdio streams (W5) are the private shim of worker_stream.js. `resourceLimits` and SHARE_ENV are not
 // implemented yet; thaw-cli keeps programs that use them on QuickJS (thaw_js_worker_threads_blocker).
 (function () {
   const environmentData = new Map();

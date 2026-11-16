@@ -1,0 +1,64 @@
+{
+  "note": "User-approved waivers (2026-11-16). A waiver only classifies a gap as waived in diff.py output; it never changes the gate. Waived gaps stay baseline entries in known-gaps.json. Match entries are regexes fullmatched against the gap id corpus::probe; an explicit id is a regex with no metacharacters. Add a rule only with user approval.",
+  "waivers": [
+    {
+      "id": "W1",
+      "reason": "Node-internal symbols and k* private fields that are not documented API and not used for behaviour (nodejs.event_target and kCapture are excluded 2026-11-16)",
+      "match": [
+        "surface::(globalThis\\.)?process\\.\\[Symbol\\((shapeMode)\\)\\]",
+        "surface::(globalThis\\.)?Buffer\\.\\[Symbol\\(kIsEncodingSymbol\\)\\]",
+        "surface::(globalThis\\.)?AbortController\\.\\[Symbol\\(kMakeTransferable\\)\\]",
+        "surface::(globalThis\\.)?console\\.\\[Symbol\\((kBindStreamsEager|kBindStreamsLazy|kBindProperties|kWriteToConsole|kGetInspectOptions|kFormatForStdout|kFormatForStderr|counts|kColorMode|kIsConsole|kGroupIndentWidth|kGroupIndentationString)\\)\\]",
+        "surface::(globalThis\\.)?performance\\.\\[Symbol\\((kEvents|events\\.maxEventTargetListeners|events\\.maxEventTargetListenersWarned|kHandlers|performance)\\)\\]",
+        "[a-z_]+::.*@@(nodejs\\.util\\.inspect\\.custom|messaging_\\w+|handle_\\w+|oninit|kCancel|nodejs\\.stream\\.\\w+|kAbort|kError|headers map sorted)",
+        "[a-z_]+::(globalThis\\.)?process\\._events.*",
+        "[a-z_]+::.*console @@counts"
+      ]
+    },
+    {
+      "id": "W3",
+      "reason": "Resizable ArrayBuffer / SharedArrayBuffer members (Atomics.waitAsync waiver withdrawn 2026-11-16)",
+      "match": [
+        "surface::(globalThis\\.)?(ArrayBuffer|SharedArrayBuffer)\\.prototype\\.(maxByteLength|resize|grow)"
+      ]
+    },
+    {
+      "id": "W5",
+      "reason": "Value differences only (ppid, groups, setuid family, usage counters); the set of keys/types of process.versions and process.release must match Node (limited 2026-11-16)",
+      "match": [
+        "process::process\\.(ppid|getgroups|setuid|seteuid|setgid|setegid|setgroups|initgroups|cpuUsage|resourceUsage|availableMemory)\\b.*"
+      ]
+    },
+    {
+      "id": "W6",
+      "reason": "Prelude Function.prototype.toString prints [native code] for builtins",
+      "match": [
+        "names_lengths::Function\\.prototype\\.toString native"
+      ]
+    },
+    {
+      "id": "W7",
+      "reason": "Global WebSocket client (not part of the runner surface)",
+      "match": [
+        "[a-z_]+::.*\\bWebSocket\\w*.*"
+      ]
+    },
+    {
+      "id": "W8",
+      "reason": "Legacy sloppy function own props, Array.prototype.length, globalThis accessor-vs-data shape ids",
+      "match": [
+        "names_lengths::Function own names of plain fn",
+        "surface::(globalThis\\.)?Array\\.prototype\\.length",
+        "surface::globalThis\\.globalThis\\.(process|Buffer|performance|navigator|crypto)"
+      ]
+    },
+    {
+      "id": "W9",
+      "reason": "arguments/caller rows on MessageChannel/MessagePort/WebAssembly constructors; performance.nodeTiming value rows",
+      "match": [
+        "surface::(globalThis\\.)?(MessageChannel|MessagePort|WebAssembly(\\.\\w+)?)\\.(arguments|caller)",
+        "[a-z_]+::(globalThis\\.)?performance\\.nodeTiming\\..*"
+      ]
+    }
+  ]
+}

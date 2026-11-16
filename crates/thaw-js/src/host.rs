@@ -3795,7 +3795,7 @@ fn console_function_text(it: &mut Interp, v: &Value) -> R<Option<String>> {
 }
 
 /// The string an object's `nodejs.util.inspect.custom` method returns; `None` otherwise.
-fn console_custom_text(it: &mut Interp, v: &Value) -> R<Option<String>> {
+pub(crate) fn console_custom_text(it: &mut Interp, v: &Value) -> R<Option<String>> {
     let sym = it.symbol_for("nodejs.util.inspect.custom".into())?;
     let key = it.key_of(&sym);
     let custom = it.get(v, &key)?;

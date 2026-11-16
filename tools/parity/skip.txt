@@ -1,6 +1,9 @@
 # Probe-name regexes dropped from BOTH sides before diffing (bare-runner limits, not gaps).
-# Intl: the bare thaw-js-node runner has no Intl global (plan section 7: runner variant).
-Intl
+# Matched with search() against the bare probe name (no corpus:: prefix).
 # require: the bare runner defines no require; node CJS only has module-scope require.
 ^timers exists
 ^timers/promises exists
+# bare runner (no CJS wrapper)
+^process\.mainModule typeof$
+^process\.mainModule$
+^globalThis\.process\.mainModule$

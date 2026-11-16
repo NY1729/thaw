@@ -780,6 +780,13 @@ impl Interp {
             }
         });
         g.declare("__thaw_sab_import", import, true);
+        // Atomics over a SharedArrayBuffer (extras.rs sends only shared buffers here; the logic is atomics.rs)
+        let atomic = self.native(|it, _, a| crate::atomics::atomic(it, a));
+        g.declare("__thaw_atomic", atomic, true);
+        let wait = self.native(|it, _, a| crate::atomics::wait(it, a));
+        g.declare("__thaw_atomics_wait", wait, true);
+        let notify = self.native(|it, _, a| crate::atomics::notify(it, a));
+        g.declare("__thaw_atomics_notify", notify, true);
 
         // ----- typed arrays -----
         let ta_proto = self.plain(); // %TypedArray%.prototype: methods come from the JS prelude
