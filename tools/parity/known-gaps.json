@@ -2,62 +2,6 @@
  "note": "gaps may only shrink; regenerate with --write-baseline only after a fix",
  "gaps": [
   {
-   "id": "invariants::strict frozen assign",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::strict frozen add",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::strict frozen array index assign",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::strict sealed delete",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::strict nonwritable assign",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::strict getter-only assign",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::strict non-extensible add",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::strict delete nonconfigurable",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::strict string index assign",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::strict primitive prop assign",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::strict undeclared assign",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::frozen array length set",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::frozen class instance strict",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::frozen fn property",
-   "kind": "DIFFERENT"
-  },
-  {
    "id": "names_lengths::fn WebSocket",
    "kind": "DIFFERENT"
   },
@@ -94,15 +38,7 @@
    "kind": "MISSING"
   },
   {
-   "id": "surface::globalThis.process.[Symbol(kCapture)]",
-   "kind": "MISSING"
-  },
-  {
    "id": "surface::process.[Symbol(shapeMode)]",
-   "kind": "MISSING"
-  },
-  {
-   "id": "surface::process.[Symbol(kCapture)]",
    "kind": "MISSING"
   },
   {

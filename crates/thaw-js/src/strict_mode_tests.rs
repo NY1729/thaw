@@ -256,3 +256,12 @@ fn strict_builtin_prelude_code_never_throws_with_the_switch_on() {
                const e = new TextEncoder().encode('a'); console.log(u.pathname, b.length, e.length);";
     assert_eq!(outcome(src, StrictMode::On), ["/c 2 1"]);
 }
+
+#[test]
+fn strict_env_default_is_on_and_off_or_audit_select_the_other_modes() {
+    assert_eq!(StrictMode::parse(None), StrictMode::On);
+    assert_eq!(StrictMode::parse(Some("bogus")), StrictMode::On);
+    assert_eq!(StrictMode::parse(Some(" on ")), StrictMode::On);
+    assert_eq!(StrictMode::parse(Some("off")), StrictMode::Off);
+    assert_eq!(StrictMode::parse(Some("audit")), StrictMode::Audit);
+}
