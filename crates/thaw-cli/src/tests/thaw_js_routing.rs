@@ -936,7 +936,7 @@ fn thaw_js_routed_fetch_without_node_http_import_runs_on_thaw_js() {
            });\n\
            server.listen(0, '127.0.0.1', async () => {\n\
              const addr: any = server.address();\n\
-             const r: any = await fetch('http://127.0.0.1:' + addr.port + '/');\n\
+             const r: Response = await fetch('http://127.0.0.1:' + addr.port + '/');\n\
              console.log(r.status, await r.text());\n\
              server.close();\n\
            });\n\
