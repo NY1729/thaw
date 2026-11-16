@@ -3678,7 +3678,7 @@ impl Interp {
                                 let k = self.prop_name(&kv.key, scope)?;
                                 let v = self.eval(&kv.value, scope)?;
                                 if is_anonymous_fn_def(&kv.value) {
-                                    name_anonymous_fn(&v, &k);
+                                    name_anonymous_fn(&v, &self.fn_name_of_key(&k));
                                 }
                                 put(&obj, &k, v);
                             }
@@ -3688,13 +3688,15 @@ impl Interp {
                             }
                             a::Prop::Method(m) => {
                                 let k = self.prop_name(&m.key, scope)?;
-                                let f = self.method_value(Some(k.clone()), &m.function, scope)?;
+                                let name = self.fn_name_of_key(&k);
+                                let f = self.method_value(Some(name), &m.function, scope)?;
                                 put(&obj, &k, f);
                             }
                             a::Prop::Getter(g) => {
                                 let k = self.prop_name(&g.key, scope)?;
+                                let name = self.fn_name_of_key(&k);
                                 let f = self.method_value(
-                                    Some(format!("get {k}").into()),
+                                    Some(format!("get {name}").into()),
                                     &g.function,
                                     scope,
                                 )?;
@@ -3702,8 +3704,9 @@ impl Interp {
                             }
                             a::Prop::Setter(s) => {
                                 let k = self.prop_name(&s.key, scope)?;
+                                let name = self.fn_name_of_key(&k);
                                 let f = self.method_value(
-                                    Some(format!("set {k}").into()),
+                                    Some(format!("set {name}").into()),
                                     &s.function,
                                     scope,
                                 )?;
@@ -4688,13 +4691,12 @@ fn is_anonymous_fn_def(e: &a::Expr) -> bool {
 /// Give an anonymous closure an own `name` (a function's `def.name` is shared by every
 /// closure from the same source, so the name lives on the object). Named functions and
 /// functions that already have an own `name` are left alone.
-// ponytail: symbol keys are not named "[desc]" (key_of stringifies them); add when needed.
-fn name_anonymous_fn(v: &Value, key: &str) {
+fn name_anonymous_fn(v: &Value, name: &str) {
     if let Value::Object(o) = v {
         let anonymous =
             matches!(&*o.kind.borrow(), Kind::Closure { def, .. } if def.name.is_none());
         if anonymous && find_own(o, "name").is_none() {
-            put_with(o, "name", Value::str(key), false, false, true);
+            put_with(o, "name", Value::str(name), false, false, true);
         }
     }
 }
@@ -4886,6 +4888,8 @@ mod handle_zero_tests;
 mod job_barrier_tests;
 #[cfg(test)]
 mod leak_audit_tests;
+#[cfg(test)]
+mod names_tests;
 #[cfg(test)]
 mod napi_bridge_tests;
 #[cfg(test)]

@@ -128,9 +128,9 @@
       if (encoding === null) {
         throw __thawTextErr(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', `The "${label}" encoding is not supported`);
       }
-      this.fatal = Boolean(options.fatal);
-      this.ignoreBOM = Boolean(options.ignoreBOM);
-      this.encoding = encoding;
+      this._fatal = Boolean(options.fatal);
+      this._ignoreBOM = Boolean(options.ignoreBOM);
+      this._encoding = encoding;
       this._pending = new __thawTextUint8Array();
       this._bomSeen = false;
       this._previousStreaming = false;
@@ -151,17 +151,17 @@
       let output = '';
       let index = 0;
       const invalid = () => {
-        if (this.fatal) throw __thawTextErr(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', `The encoded data was not valid for encoding ${this.encoding}`);
+        if (this._fatal) throw __thawTextErr(TypeError, 'ERR_ENCODING_INVALID_ENCODED_DATA', `The encoded data was not valid for encoding ${this._encoding}`);
         output += replacement;
       };
-      if (this.encoding === 'windows-1252') {
+      if (this._encoding === 'windows-1252') {
         const high = [0x20ac, 0x81, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030, 0x160, 0x2039, 0x152, 0x8d, 0x17d, 0x8f,
           0x90, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc, 0x2122, 0x161, 0x203a, 0x153, 0x9d, 0x17e, 0x178];
         for (; index < byteLength; index++) {
           const byte = bytes[index];
           output += String.fromCharCode(byte >= 0x80 && byte <= 0x9f ? high[byte - 0x80] : byte);
         }
-      } else if (this.encoding === 'utf-16le') {
+      } else if (this._encoding === 'utf-16le') {
         let end = byteLength - byteLength % 2;
         if (streaming && end >= 2) {
           const last = bytes[end - 2] | bytes[end - 1] << 8;
@@ -221,9 +221,15 @@
       }
       if (!this._bomSeen && output.length) {
         this._bomSeen = true;
-        if (!this.ignoreBOM && output.charCodeAt(0) === 0xfeff) output = output.slice(1);
+        if (!this._ignoreBOM && output.charCodeAt(0) === 0xfeff) output = output.slice(1);
       }
       if (!streaming) { this._pending = new __thawTextUint8Array(); this._bomSeen = false; }
       return output;
     }
   };
+  // Node: encoding, fatal and ignoreBOM are prototype getters, enumerable and configurable
+  Object.defineProperties(TextDecoder.prototype, Object.getOwnPropertyDescriptors({
+    get encoding() { return this._encoding; },
+    get fatal() { return this._fatal; },
+    get ignoreBOM() { return this._ignoreBOM; }
+  }));
