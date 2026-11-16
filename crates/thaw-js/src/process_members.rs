@@ -58,6 +58,13 @@ const FUNCTIONS: &[(&str, f64, MemberFn)] = &[
     ("loadEnvFile", 0.0, load_env_file),
     ("dlopen", 0.0, dlopen),
     ("execve", 1.0, execve),
+    // internal members: shape only (user-approved), they do nothing
+    ("_fatalException", 2.0, noop),
+    ("_debugProcess", 0.0, noop),
+    ("_debugEnd", 0.0, noop),
+    ("_startProfilerIdleNotifier", 0.0, noop),
+    ("_stopProfilerIdleNotifier", 0.0, noop),
+    ("_tickCallback", 0.0, tick_callback),
 ];
 
 /// Node's `process.resourceUsage()` keys, in Node's order.
@@ -123,6 +130,9 @@ impl Interp {
         // ponytail: always empty; thaw-js does not record which builtins it has loaded
         let load_list = self.array(Vec::new());
         put(p, "moduleLoadList", load_list);
+        // ponytail: `_preload_modules` is always empty (no preload list is read); its -ec flags come from the table
+        let preload = self.array(Vec::new());
+        put(p, "_preload_modules", preload);
         put(p, "domain", Value::Null);
         // the main-file loader sets it (web/main_file.js); -e and the plain realm have none, as in Node
         put(p, "mainModule", Value::Undefined);
@@ -307,6 +317,16 @@ fn linked_binding(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
     let name = it.to_str(&arg(a, 0)).to_string();
     let msg = format!("No such binding was linked: {name}");
     Err(node_error(it, "Error", "ERR_INVALID_MODULE", &msg))
+}
+
+fn noop(_: &mut Interp, _: &Value, _: &[Value]) -> R<Value> {
+    Ok(Value::Undefined)
+}
+
+/// `process._tickCallback()`: runs the queued `nextTick` callbacks, then the promise jobs, as Node's runNextTicks.
+fn tick_callback(it: &mut Interp, _: &Value, _: &[Value]) -> R<Value> {
+    it.run_jobs()?;
+    Ok(Value::Undefined)
 }
 
 fn empty_array(it: &mut Interp, _: &Value, _: &[Value]) -> R<Value> {
@@ -973,5 +993,45 @@ mod tests {
         assert_eq!(it.run_main_file(&main).ok(), Some(0));
         assert_eq!(it.out.join("|"), "true undefined");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn internal_members_have_node_shape() {
+        assert_eq!(
+            output(
+                "const want = {_fatalException:'function', _tickCallback:'function', _debugProcess:'function', \
+                 _debugEnd:'function', _startProfilerIdleNotifier:'function', _stopProfilerIdleNotifier:'function'}; \
+                 const bad = Object.keys(want).filter(k => typeof process[k] !== want[k]); \
+                 const d = (k) => { const x = Object.getOwnPropertyDescriptor(process, k); return [x.writable, x.enumerable, x.configurable].join(); }; \
+                 console.log(bad.join(','), process._fatalException.length, process._tickCallback.name, process._tickCallback.length, \
+                 process._debugProcess.name, process._fatalException.name === '', Array.isArray(process._preload_modules), \
+                 process._preload_modules.length, d('_preload_modules'));"
+            ),
+            " 2 runNextTicks 0 _debugProcess true true 0 false,true,true"
+        );
+    }
+
+    #[test]
+    fn stdio_fds_and_accessor_descriptors_have_node_shape() {
+        assert_eq!(
+            output(
+                "const acc = (k) => { const x = Object.getOwnPropertyDescriptor(process, k); return [typeof x.get, x.set, x.enumerable, x.configurable].join(); }; \
+                 const fd = (s) => { const x = Object.getOwnPropertyDescriptor(s, 'fd'); return [x.value, x.writable, x.enumerable, x.configurable].join(); }; \
+                 console.log(process.stdout.fd, process.stderr.fd, fd(process.stdout), fd(process.stderr), \
+                 acc('stdout'), acc('stderr'), acc('stdin'), process.stdout === process.stdout);"
+            ),
+            "1 2 1,true,true,true 2,true,true,true function,,true,true function,,true,true function,,true,true true"
+        );
+    }
+
+    #[test]
+    fn tick_callback_drains_ticks_then_microtasks_like_node() {
+        assert_eq!(
+            output(
+                "const log = []; process.nextTick(() => log.push('t')); Promise.resolve().then(() => log.push('p')); \
+                 process._tickCallback(); console.log(log.join(','));"
+            ),
+            "t,p"
+        );
     }
 }
