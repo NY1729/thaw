@@ -221,4 +221,5 @@
         return result;
       }
     };
+    globalThis.EventTarget[Symbol.for('nodejs.event_target')] = true;
   }
