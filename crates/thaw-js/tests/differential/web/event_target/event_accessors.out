@@ -1,0 +1,28 @@
+type accessor e1c1w0 get=get type/0 set=-
+target accessor e1c1w0 get=get target/0 set=-
+currentTarget accessor e1c1w0 get=get currentTarget/0 set=-
+srcElement accessor e1c1w0 get=get srcElement/0 set=-
+bubbles accessor e1c1w0 get=get bubbles/0 set=-
+cancelable accessor e1c1w0 get=get cancelable/0 set=-
+composed accessor e1c1w0 get=get composed/0 set=-
+defaultPrevented accessor e1c1w0 get=get defaultPrevented/0 set=-
+eventPhase accessor e1c1w0 get=get eventPhase/0 set=-
+timeStamp accessor e1c1w0 get=get timeStamp/0 set=-
+isTrusted accessor e1c0w0 get=get isTrusted/0 set=-
+cancelBubble accessor e1c1w0 get=get cancelBubble/0 set=set cancelBubble/1
+returnValue accessor e1c1w0 get=get returnValue/0 set=set returnValue/1
+composedPath data e1c1w1 function=composedPath/0
+initEvent data e1c1w1 function=initEvent/1
+0 0 false
+a true true true false 0
+null null null false false true
+0 number true
+no throw
+a
+cancelBubble true
+returnValue false true
+non-cancelable true false
+brand true ERR_INVALID_THIS
+in 2 true true true 1 true
+after 0 null true 0
+stopPropagation sets cancelBubble true
