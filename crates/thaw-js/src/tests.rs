@@ -4365,6 +4365,39 @@ fn als_resource_bind_and_disable() {
     );
 }
 
+/// node-compat case 'async_hooks createHook reports resources timers and promises' (timer part); Node 22's sequence.
+#[test]
+fn async_hooks_timeout_resources_follow_node_order() {
+    let src = "var A = __thaw_async_hooks_exports, types = new Map(), log = [];
+var hook = A.createHook({
+  init(id, type) { if (type === 'MyRes' || type === 'Timeout') { types.set(id, type); log.push('init:' + type); } },
+  before(id) { var t = types.get(id); if (t) log.push('before:' + t); },
+  after(id) { var t = types.get(id); if (t) log.push('after:' + t); },
+  destroy(id) { var t = types.get(id); if (t) log.push('destroy:' + t); },
+}).enable();
+var resource = new A.AsyncResource('MyRes');
+resource.runInAsyncScope(function () { log.push('scope ' + (A.executionAsyncId() === resource.asyncId()) + ' ' + (A.triggerAsyncId() === resource.triggerAsyncId())); });
+setTimeout(function () { log.push('timeout'); resource.emitDestroy(); }, 10);
+setTimeout(function () { hook.disable(); console.log(log.join(',')); }, 40);";
+    assert_eq!(
+        run_loop(src),
+        "init:MyRes,before:MyRes,scope true true,after:MyRes,init:Timeout,init:Timeout,before:Timeout,timeout,after:Timeout,destroy:MyRes,destroy:Timeout,before:Timeout"
+    );
+}
+
+/// Timers and immediates scheduled while no hook is enabled report no events, even if a hook is enabled and disabled meanwhile.
+#[test]
+fn async_hooks_timers_without_an_enabled_hook_report_nothing() {
+    let src = "var A = __thaw_async_hooks_exports, n = [];
+var hook = A.createHook({ init(id, type) { n.push(type); }, before() { n.push('b'); }, after() { n.push('a'); }, destroy() { n.push('d'); } });
+setTimeout(function () { n.push('t'); }, 1);
+setImmediate(function () { n.push('i'); });
+var t2 = setTimeout(function () {}, 1); clearTimeout(t2);
+hook.enable(); hook.disable();
+setTimeout(function () { console.log(n.join(',')); }, 5);";
+    assert_eq!(run_loop(src), "t,i");
+}
+
 static HOOK_INITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Counts `init` hook calls from the async_hooks dispatch; the result is ignored.
