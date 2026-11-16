@@ -4203,7 +4203,8 @@ fn timeout_to_primitive_id_clears_the_timer_and_dispose_clears_it() {
 }
 
 #[test]
-fn webassembly_stub_is_typeof_safe_and_scan_blocks_real_use() {
+fn webassembly_stub_is_typeof_safe_and_scan_leaves_real_use_to_the_routing_gate() {
+    // the scan no longer blocks a real WebAssembly use: thaw-cli's `thaw_js_wasm_blocker` gates it per program
     assert_eq!(
         one("console.log(typeof WebAssembly, typeof WebAssembly.compile)"),
         "object function"
@@ -4217,12 +4218,8 @@ fn webassembly_stub_is_typeof_safe_and_scan_blocks_real_use() {
         "exports.VERSION = '1.0';",
         "exports.VERSION = '1.0'; exports.run = function (x) { return WebAssembly.instantiate(x); };",
     );
-    let blocked = crate::scan::scan_bundle(&use_it).ok().unwrap();
-    assert!(
-        blocked.blockers.contains_key("global:WebAssembly"),
-        "{:?}",
-        blocked.blockers
-    );
+    let used = crate::scan::scan_bundle(&use_it).ok().unwrap();
+    assert!(used.is_clean(), "{:?}", used.blockers);
 }
 
 #[test]
