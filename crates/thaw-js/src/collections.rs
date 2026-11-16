@@ -570,6 +570,33 @@ impl Interp {
                 _ => "Symbol()".into(),
             }))
         });
+        // thisSymbolValue: a symbol, or the TypeError Node gives for any other receiver
+        let this_symbol = |it: &mut Interp, this: &Value, what: &str| -> R<Value> {
+            if let Value::Object(o) = this {
+                if matches!(&*o.kind.borrow(), Kind::Symbol { .. }) {
+                    return Ok(this.clone());
+                }
+            }
+            it.throw_error(
+                "TypeError",
+                &format!("{what} requires that 'this' be a Symbol"),
+            )
+        };
+        self.set_native(&sym_proto, "valueOf", move |it, this, _| {
+            this_symbol(it, this, "Symbol.prototype.valueOf")
+        });
+        let description = self.native(move |it, this, _| {
+            let sym = this_symbol(it, this, "Symbol.prototype.description")?;
+            let Value::Object(o) = &sym else {
+                return Ok(Value::Undefined);
+            };
+            let desc = match &*o.kind.borrow() {
+                Kind::Symbol { desc, .. } => desc.clone(),
+                _ => None,
+            };
+            Ok(desc.map_or(Value::Undefined, |d| Value::Str(d.into())))
+        });
+        define_accessor(&sym_proto, "description", Some(description), None, false);
         g.declare("Symbol", symbol, true);
 
         // ----- Map -----
