@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""AOT-compiler vs Node differential harness (non-gating, PR1).
+"""AOT-compiler vs Node differential harness.
 
 Each probes/<family>.ts holds one-line `p(name, () => expr)` probes inside
 `function main(): void { ... }`. Probes are compiled in batches (one thaw
 binary per BATCH probes), run, and compared with the same file run under node.
 
 Outcomes per probe: MATCH | COMPILE-REJECT | MISMATCH (only MISMATCH is a
-correctness gap). See README.md.
+correctness gap). Plain runs only report; --check gates shrink-only against
+known-gaps.json. See README.md.
 """
 import argparse
 import concurrent.futures as cf
@@ -36,10 +37,36 @@ MATCH = "MATCH"
 COMPILE_REJECT = "COMPILE-REJECT"
 MISMATCH = "MISMATCH"
 
+# Kind of a MISMATCH (informational; the gate counts every MISMATCH the same).
+TYPE = "TYPE"            # error constructor name differs (or one side threw, the other did not)
+MSG = "MSG"              # same error constructor, message wording differs
+OUTPUT = "OUTPUT"        # ordinary output line differs
+EXIT = "EXIT"            # thaw exited non-zero
+NO_OUTPUT = "NO-OUTPUT"  # thaw printed no line for the probe
+
+BASELINE_SCHEMA = 1
+DEFAULT_BASELINE = HERE / "known-gaps.json"
+GAP_CLASSES = ("MISMATCH", "REJECT")
+WAIVER_ID_RE = re.compile(r"^W\d+$")
+
 MAIN_LINE = "function main(): void {"
 PROBE_RE = re.compile(r'^  p\("([A-Za-z0-9_]+)", .*\);$')
 PROBE_START_RE = re.compile(r'^  p\(')
 OUT_RE = re.compile(r"^([A-Za-z0-9_]+) (=>|THROW) ")
+THROW_RE = re.compile(r"^\S+ THROW (\S+)(?: (.*))?$", re.S)
+STACK_RE = re.compile(r"^\s*at \S")
+
+# Output normalisers, applied to both the node and the thaw block before comparing.
+# Keep this list short: every entry hides a difference, so each needs a reason.
+NORMALISERS = [
+    ("abs-path", re.compile(r"(?<![\w.@-])/(?:[\w.@+-]+/){2,}[\w.@+-]*"), "<path>",
+     "absolute paths (two or more segments) -> <path>; the build dir is scratch"),
+    ("null-proto", re.compile(r"\[Object: null prototype\] "), "",
+     "node prints `[Object: null prototype] {..}`, thaw prints `{..}`: formatting only, prefix dropped"),
+    ("timing", re.compile(r"\b\d+(?:\.\d+)?ms\b"), "<ms>", "elapsed-time figures"),
+    ("address", re.compile(r"\b0x[0-9a-fA-F]{6,}\b"), "<addr>",
+     "object addresses (__thaw_js_handle_id__ is NOT normalised: it is a bug)"),
+]
 
 
 class HarnessError(Exception):
@@ -132,22 +159,51 @@ def split_outputs(text, names):
     return {k: normalise("\n".join(v)) for k, v in blocks.items()}
 
 
+def normalise_stack(lines):
+    """Stack frames after the header line become `    at <frame>`; repeats collapse to one."""
+    out = []
+    for i, ln in enumerate(lines):
+        if i > 0 and STACK_RE.match(ln):
+            ln = "    at <frame>"
+            if out and out[-1] == ln:
+                continue
+        out.append(ln)
+    return out
+
+
 def normalise(text):
     lines = [ln.rstrip() for ln in text.replace("\r\n", "\n").split("\n")]
+    lines = normalise_stack(lines)
+    text = "\n".join(lines)
+    for _, rx, repl, _ in NORMALISERS:
+        text = rx.sub(repl, text)
+    lines = text.split("\n")
     while lines and not lines[-1]:
         lines.pop()
     return "\n".join(lines)
 
 
+def error_kind(node_text, thaw_text):
+    """Kind of an output difference: error type, error wording, or plain output."""
+    n, t = THROW_RE.match(node_text), THROW_RE.match(thaw_text)
+    if n is None and t is None:
+        return OUTPUT
+    if n is None or t is None or n.group(1) != t.group(1):
+        return TYPE
+    if (n.group(2) or "") != (t.group(2) or ""):
+        return MSG
+    return OUTPUT
+
+
 def verdict(node_text, thaw_text, rc):
-    """Classify one probe that compiled and ran. Returns (outcome, reason)."""
+    """Classify one probe that compiled and ran. Returns (outcome, reason, kind)."""
     if rc != 0:
-        return MISMATCH, f"exit code {rc} (node 0)"
+        return MISMATCH, f"exit code {rc} (node 0)", EXIT
     if thaw_text is None:
-        return MISMATCH, "no output line"
+        return MISMATCH, "no output line", NO_OUTPUT
     if thaw_text == node_text:
-        return MATCH, ""
-    return MISMATCH, "output differs"
+        return MATCH, "", ""
+    return MISMATCH, "output differs", error_kind(node_text, thaw_text)
 
 
 def first_error(out):
@@ -234,8 +290,8 @@ class Runner:
             if rc == 0:
                 blocks = split_outputs(out, names)
                 for n, _ in probes:
-                    outcome, why = verdict(node_blocks[n], blocks.get(n), 0)
-                    results.append(self.entry(n, outcome, why, node_blocks[n], blocks.get(n)))
+                    outcome, why, kind = verdict(node_blocks[n], blocks.get(n), 0)
+                    results.append(self.entry(n, outcome, why, node_blocks[n], blocks.get(n), kind))
                 continue
             # Batch crashed or failed: rerun each probe alone to attribute it.
             for probe in probes:
@@ -245,13 +301,13 @@ class Runner:
                     continue
                 prc, pout, _ = self.run_bin(single[0][1])
                 text = split_outputs(pout, {probe[0]}).get(probe[0])
-                outcome, why = verdict(node_blocks[probe[0]], text, prc)
-                results.append(self.entry(probe[0], outcome, why, node_blocks[probe[0]], text))
+                outcome, why, kind = verdict(node_blocks[probe[0]], text, prc)
+                results.append(self.entry(probe[0], outcome, why, node_blocks[probe[0]], text, kind))
         return results
 
     @staticmethod
-    def entry(name, outcome, why, node_text, thaw_text):
-        return {"name": name, "outcome": outcome, "reason": why,
+    def entry(name, outcome, why, node_text, thaw_text, kind=""):
+        return {"name": name, "outcome": outcome, "reason": why, "kind": kind,
                 "node": node_text, "thaw": thaw_text}
 
 
@@ -276,6 +332,103 @@ def resolve_thaw(arg):
     return Path(FALLBACK_THAW)
 
 
+def probe_id(family, name):
+    return f"{family}/{name}"
+
+
+def current_state(pairs):
+    """pairs: [(family name, results)]. Returns (ids run, gap entries by id).
+
+    Gap entries exist only for MISMATCH and COMPILE-REJECT probes (class MISMATCH/REJECT).
+    """
+    ids, gaps = set(), {}
+    for fam, results in pairs:
+        for r in results:
+            pid = probe_id(fam, r["name"])
+            ids.add(pid)
+            if r["outcome"] == MISMATCH:
+                gaps[pid] = {"class": "MISMATCH", "kind": r["kind"], "reason": r["reason"]}
+            elif r["outcome"] == COMPILE_REJECT:
+                gaps[pid] = {"class": "REJECT", "reason": r["reason"]}
+    return ids, gaps
+
+
+def validate_gaps(gaps):
+    if not isinstance(gaps, dict):
+        raise HarnessError("gaps must be an object")
+    for pid, e in gaps.items():
+        where = f"{pid}"
+        if not isinstance(e, dict) or e.get("class") not in GAP_CLASSES:
+            raise HarnessError(f"{where}: class must be one of {GAP_CLASSES}")
+        if not isinstance(e.get("reason"), str) or not e["reason"]:
+            raise HarnessError(f"{where}: reason must be a non-empty string")
+        if e["class"] == "MISMATCH" and e.get("kind") not in (TYPE, MSG, OUTPUT, EXIT, NO_OUTPUT):
+            raise HarnessError(f"{where}: MISMATCH needs a kind (TYPE|MSG|OUTPUT|EXIT|NO-OUTPUT)")
+        w = e.get("waiver")
+        if w is not None:
+            if not isinstance(w, dict) or not WAIVER_ID_RE.match(str(w.get("id", ""))):
+                raise HarnessError(f"{where}: waiver.id must match W<number>")
+            if not isinstance(w.get("reason"), str) or not w["reason"]:
+                raise HarnessError(f"{where}: waiver.reason must be a non-empty string")
+
+
+def load_baseline(path):
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise HarnessError(f"cannot read baseline {path}: {e}")
+    if doc.get("schema") != BASELINE_SCHEMA:
+        raise HarnessError(f"baseline {path}: schema must be {BASELINE_SCHEMA}")
+    validate_gaps(doc.get("gaps", {}))
+    return doc["gaps"]
+
+
+def write_baseline(path, gaps, thaw_ver, node_ver):
+    validate_gaps(gaps)
+    doc = {"schema": BASELINE_SCHEMA, "thaw_version": thaw_ver, "node_version": node_ver,
+           "gaps": {k: gaps[k] for k in sorted(gaps)}}
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def merge_baseline(old, cur, run_fams):
+    """Entries of families not run are kept; run families take the current state.
+
+    A waiver survives a rerun only while the probe keeps the same gap class.
+    """
+    out = {i: e for i, e in old.items() if i.split("/", 1)[0] not in run_fams}
+    for i, e in cur.items():
+        e = dict(e)
+        w = old.get(i, {}).get("waiver")
+        if w and old[i]["class"] == e["class"]:
+            e["waiver"] = w
+        out[i] = e
+    return out
+
+
+def gate(base, cur, run_fams):
+    """Shrink-only check. Only a new MISMATCH fails; REJECT is informational.
+
+    base: baseline gap entries. cur: current gap entries (probes that now match are absent).
+    fixed: baseline entries of run families whose class changed or vanished. They pass.
+    """
+    new_mismatch = sorted(i for i, e in cur.items()
+                          if e["class"] == "MISMATCH" and base.get(i, {}).get("class") != "MISMATCH")
+    new_reject = sorted(i for i, e in cur.items()
+                        if e["class"] == "REJECT" and base.get(i, {}).get("class") != "REJECT")
+    fixed = []
+    for i, e in sorted(base.items()):
+        if i.split("/", 1)[0] not in run_fams:
+            continue
+        now = cur.get(i, {}).get("class")
+        if now != e["class"]:
+            fixed.append((i, e["class"], now))
+    open_m = [i for i, e in cur.items() if e["class"] == "MISMATCH" and "waiver" not in base.get(i, {})]
+    waived = [i for i, e in cur.items() if e["class"] == "MISMATCH" and "waiver" in base.get(i, {})]
+    return {"pass": not new_mismatch, "new_mismatch": new_mismatch, "new_reject": new_reject,
+            "fixed": fixed, "open_mismatch": len(open_m), "waived": len(waived)}
+
+
 def summarise(families):
     rows, totals = [], {MATCH: 0, COMPILE_REJECT: 0, MISMATCH: 0}
     for fam, results in families:
@@ -297,6 +450,12 @@ def main(argv=None):
     ap.add_argument("--out", help="report JSON path (default: target/aotdiff/report.json)")
     ap.add_argument("--keep", action="store_true", help="keep the scratch work dir")
     ap.add_argument("--no-systemd", action="store_true", help="do not wrap commands in systemd-run")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true",
+                      help="shrink-only gate vs --baseline: exit 1 if a MISMATCH is not in the baseline")
+    mode.add_argument("--update-baseline", action="store_true",
+                      help="write --baseline from this run (run against a CURRENT build only)")
+    ap.add_argument("--baseline", default=str(DEFAULT_BASELINE), help="known-gaps.json path")
     args = ap.parse_args(argv)
 
     only = {f for spec in args.family for f in spec.split(",") if f}
@@ -308,6 +467,12 @@ def main(argv=None):
     thaw = resolve_thaw(args.thaw)
     if not thaw.exists():
         print(f"error: thaw binary not found: {thaw}", file=sys.stderr)
+        return 2
+    if args.update_baseline and thaw == Path(FALLBACK_THAW) and not (args.thaw or os.environ.get("THAW")):
+        print("error: refusing --update-baseline with the stale fallback binary; pass --thaw", file=sys.stderr)
+        return 2
+    if args.check and not Path(args.baseline).exists():
+        print(f"error: no baseline at {args.baseline} (generate it with --update-baseline)", file=sys.stderr)
         return 2
     systemd = not args.no_systemd and shutil.which("systemd-run") is not None
     tmp_root = os.environ.get("TMPDIR") or tempfile.gettempdir()
@@ -347,7 +512,7 @@ def main(argv=None):
     for fam, results in families:
         for r in results:
             if r["outcome"] == MISMATCH:
-                print(f"  {fam.name}/{r['name']}: {r['reason']}")
+                print(f"  {fam.name}/{r['name']} [{r['kind']}]: {r['reason']}")
                 print(f"    node: {(r['node'] or '')[:160]!r}")
                 print(f"    thaw: {(r['thaw'] or '')[:160]!r}")
 
@@ -364,7 +529,34 @@ def main(argv=None):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print(f"\nreport: {out_path}")
+
+    pairs = [(f.name, results) for f, results in families]
+    run_fams = {f.name for f in fams}
+    ids, cur = current_state(pairs)
+    base_path = Path(args.baseline)
+    if args.update_baseline:
+        old = load_baseline(base_path) if base_path.exists() else {}
+        merged = merge_baseline(old, cur, run_fams)
+        write_baseline(base_path, merged, thaw_ver, node_ver)
+        print(f"baseline: {base_path} ({len(merged)} gaps)")
+        return 0
+    if args.check:
+        base = load_baseline(base_path)
+        g = gate(base, cur, run_fams)
+        print_gate(g, base_path)
+        return 0 if g["pass"] else 1
     return 0
+
+
+def print_gate(g, base_path):
+    print(f"\ncheck vs {base_path}")
+    for i in g["new_mismatch"]:
+        print(f"  NEW MISMATCH (gating): {i}")
+    for i, was, now in g["fixed"]:
+        print(f"  fixed since baseline: {i} ({was} -> {now or 'MATCH'}); delete it with --update-baseline")
+    print(f"  new COMPILE-REJECT (not gating): {len(g['new_reject'])}")
+    print(f"  open MISMATCH: {g['open_mismatch']}, waived: {g['waived']}")
+    print("RESULT: " + ("PASS" if g["pass"] else "FAIL"))
 
 
 if __name__ == "__main__":
