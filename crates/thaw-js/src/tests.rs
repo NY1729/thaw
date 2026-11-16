@@ -7864,7 +7864,8 @@ fn ident_hint_mask_collision_resolves_both_names() {
     let src = format!(
         "let {a} = 'outer'; function f() {{ let {b} = 'inner'; const out = []; for (let k = 0; k < 3; k++) out.push({a}, {b}); return out.join(','); }} console.log(f(), f());"
     );
-    let mut it = Interp::new();
+    // AST only: a compiled `f` reads its slots directly and never walks the hinted scopes
+    let mut it = Interp::with_compile_mode(crate::compile::CompileMode::Off);
     it.hint_stats.on = true;
     let _ = it.run(&src);
     assert_eq!(
