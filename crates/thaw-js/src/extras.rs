@@ -537,8 +537,11 @@ pub(crate) const EXTRAS_LATE: &str = r#"
         var dce = typeof DOMException === 'function' ? new DOMException('An ArrayBuffer is detached and could not be cloned.', 'DataCloneError') : new Error('An ArrayBuffer is detached and could not be cloned.');
         throw dce;
       }
+      // a SharedArrayBuffer clones to the same block (not a copy); a view over one keeps its window on that block
+      if (v instanceof SharedArrayBuffer) { out = __thaw_sab_import(__thaw_sab_export(v)); seen.set(v, out); return out; }
       if (v instanceof ArrayBuffer) { out = v.slice(0); seen.set(v, out); return out; }
       if (v instanceof DataView) { var cb = clone(v.buffer); out = new DataView(cb, v.byteOffset, v.byteLength); seen.set(v, out); return out; }
+      if (ArrayBuffer.isView(v) && v.buffer instanceof SharedArrayBuffer) { out = new v.constructor(clone(v.buffer), v.byteOffset, v.length); seen.set(v, out); return out; }
       if (ArrayBuffer.isView(v)) { out = new v.constructor(v); seen.set(v, out); return out; }
       if (v instanceof Error) {
         out = Object.create(Object.getPrototypeOf(v)); seen.set(v, out);

@@ -737,16 +737,15 @@ fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
 
 #[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
-    // A `node:worker_threads` program that names `SharedArrayBuffer` (a worker option thaw-js does not serve
-    // yet) keeps that module on QuickJS; the build falls back and the artifact reports the blocker.
+    // A `node:worker_threads` program that names `Atomics` (thaw-js does not serve it yet) keeps that module on
+    // QuickJS; the build falls back and the artifact reports the blocker.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "blockers-fallback",
         "import { Counter } from 'tjs-ctr';\n\
          import { isMainThread } from 'node:worker_threads';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
-           const shared = new SharedArrayBuffer(4);\n\
-           console.log(c.add(2), isMainThread, shared.byteLength);\n\
+           console.log(c.add(2), isMainThread, Atomics.isLockFree(4));\n\
          }\n",
     );
     let output = dir.join("app");

@@ -4929,6 +4929,8 @@ mod regexp_proto_tests;
 #[cfg(test)]
 mod regexp_statics_tests;
 #[cfg(test)]
+mod sab_tests;
+#[cfg(test)]
 mod str_cursor_tests;
 #[cfg(test)]
 mod str_unit_tests;
