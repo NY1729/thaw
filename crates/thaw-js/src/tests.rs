@@ -4,7 +4,7 @@ use super::*;
 fn run(src: &str) -> Vec<String> {
     let mut it = Interp::new();
     match it.run(src) {
-        Ok(_) => it.out,
+        Ok(_) => std::mem::take(&mut it.out),
         Err(Ctl::Throw(v)) => {
             let mut out = it.out.clone();
             out.push(format!("Uncaught {}", it.to_str(&v)));
@@ -6716,7 +6716,7 @@ fn async_method_this_survives_await() {
 fn run_sloppy(src: &str) -> Vec<String> {
     let mut it = Interp::new();
     match it.run_sloppy(src) {
-        Ok(_) => it.out,
+        Ok(_) => std::mem::take(&mut it.out),
         Err(Ctl::Throw(v)) => {
             let mut out = it.out.clone();
             out.push(format!("Uncaught {}", it.to_str(&v)));
@@ -7273,7 +7273,7 @@ fn one_sloppy(src: &str) -> String {
 fn run_sloppy_lines(src: &str) -> Vec<String> {
     let mut it = Interp::new();
     let _ = it.run_sloppy(src);
-    it.out
+    std::mem::take(&mut it.out)
 }
 
 #[test]
@@ -9080,7 +9080,7 @@ fn run_loop_checked(src: &str) -> Vec<String> {
     let mut it = Interp::new();
     it.run(src).expect("script runs");
     it.run_event_loop().expect("event loop runs");
-    it.out
+    std::mem::take(&mut it.out)
 }
 
 #[test]

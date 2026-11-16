@@ -60,6 +60,9 @@ fn new_realm(id: u32, host: &Interp) -> Box<Interp> {
     }
     for name in SHARED {
         if let Some(v) = host.lookup(&host.global, name) {
+            if let Value::Object(o) = &v {
+                sub.vm_shared.push(o.clone());
+            }
             sub.global.declare(name, v, true);
         }
     }
@@ -68,11 +71,11 @@ fn new_realm(id: u32, host: &Interp) -> Box<Interp> {
     sub
 }
 /// A context's realm plus what persists between runs of a sandboxed context.
-struct VmRealm {
-    interp: Box<Interp>,
+pub(crate) struct VmRealm {
+    pub(crate) interp: Box<Interp>,
     /// Scope `scope -> with(sandbox) -> global` holding the context's var/let/const/function
     /// bindings; built on the first run with a sandbox.
-    script: Option<Rc<Scope>>,
+    pub(crate) script: Option<Rc<Scope>>,
     /// Global bindings at index >= `n0` were made by sandboxed runs (implicit globals).
     n0: usize,
     /// Var and function names of earlier runs, and implicit globals already copied to the sandbox.
@@ -83,6 +86,12 @@ struct VmRealm {
 pub(crate) struct VmSlot {
     realm: Option<Box<VmRealm>>,
     busy: bool,
+}
+
+impl VmSlot {
+    pub(crate) fn realm_mut(&mut self) -> Option<&mut VmRealm> {
+        self.realm.as_deref_mut()
+    }
 }
 
 /// Runs `code` with `sb` as the sandbox: before the run, vars the host changed on `sb` are read
