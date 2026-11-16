@@ -457,7 +457,6 @@ Function.prototype.@@hasInstance	length
 Function.prototype.@@hasInstance	name
 Headers.prototype	@@headers map sorted
 Headers.prototype	@@nodejs.util.inspect.custom
-Headers.prototype	@@toStringTag
 Headers.prototype.@@iterator	prototype
 Headers.prototype.@@nodejs.util.inspect.custom	length
 Headers.prototype.@@nodejs.util.inspect.custom	name
@@ -737,14 +736,12 @@ ReadableStreamDefaultReader.prototype	@@nodejs.util.inspect.custom
 ReadableStreamDefaultReader.prototype.@@nodejs.util.inspect.custom	length
 ReadableStreamDefaultReader.prototype.@@nodejs.util.inspect.custom	name
 Request.prototype	@@nodejs.util.inspect.custom
-Request.prototype	@@toStringTag
 Request.prototype	attribute
 Request.prototype	isHistoryNavigation
 Request.prototype	isReloadNavigation
 Request.prototype.@@nodejs.util.inspect.custom	length
 Request.prototype.@@nodejs.util.inspect.custom	name
 Response.prototype	@@nodejs.util.inspect.custom
-Response.prototype	@@toStringTag
 Response.prototype.@@nodejs.util.inspect.custom	length
 Response.prototype.@@nodejs.util.inspect.custom	name
 SharedArrayBuffer.prototype	grow
