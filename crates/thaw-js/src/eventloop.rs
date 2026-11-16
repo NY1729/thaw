@@ -1954,7 +1954,7 @@ impl Interp {
 
     /// `process.stdin` (web/process_stdin.js). Needs `__thaw_process_is_tty` from `install_sysio`.
     pub(crate) fn install_process_stdin(&mut self) {
-        self.run(PROCESS_STDIN)
+        self.run_builtin(PROCESS_STDIN)
             .unwrap_or_else(|_| panic!("thaw-js process.stdin must evaluate"));
     }
 
@@ -1974,7 +1974,7 @@ impl Interp {
             }
         });
         self.global.declare("__thaw_worker_read_source", read, true);
-        self.run(MAIN_FILE_LOADER)
+        self.run_builtin(MAIN_FILE_LOADER)
             .unwrap_or_else(|_| panic!("thaw-js main file loader must evaluate"));
     }
 

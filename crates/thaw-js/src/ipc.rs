@@ -211,7 +211,7 @@ impl Interp {
             Ok(Value::Undefined)
         });
         g.declare("__thaw_ipc_disconnect", f, true);
-        self.run(IPC_CHILD)
+        self.run_builtin(IPC_CHILD)
             .unwrap_or_else(|_| panic!("thaw-js ipc channel must install"));
     }
 

@@ -273,7 +273,7 @@ fn assign_scoped(name: &str, init: super::Ex) -> St {
     let name: Rc<str> = name.into();
     mk_st(move |it, f| {
         let v = init(it, f)?;
-        bx(it.assign_var(&f.scope, &name, v))?;
+        bx(it.assign_var(&f.scope, &name, v, false))?;
         Ok(Flow::Next)
     })
 }

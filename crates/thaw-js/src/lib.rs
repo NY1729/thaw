@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use classes::ClassInfo;
+use strict::Refusal;
 use swc_ecma_visit::{Visit, VisitWith};
 use thaw_parser::ast as a;
 
@@ -65,6 +66,7 @@ mod procstate;
 mod proxy;
 mod reflect;
 pub mod scan;
+mod strict;
 mod sysio;
 mod tls;
 mod typed;
@@ -139,6 +141,13 @@ pub const SUPPORTED_FEATURES: &[&str] = &[
 ];
 
 const MAX_DEPTH: usize = 100;
+
+/// The message of a stack overflow, as Node and V8 word it (`RangeError`).
+pub(crate) const STACK_OVERFLOW: &str = "Maximum call stack size exceeded";
+
+/// Deepest bracket nesting the parser is given. swc and regress recurse once per level, and a level costs
+/// several KB of stack in a debug build, so this is what a 64 MiB worker thread can take. Node accepts about 3000.
+const MAX_NEST: usize = 2000;
 
 #[derive(Clone)]
 pub enum Value {
@@ -1185,6 +1194,11 @@ pub struct Interp {
     /// `THAW_JS_COMPILE` mode, `THAW_JS_COMPILE_AFTER` call threshold, `THAW_JS_COMPILE_STATS` report flag.
     compile_mode: compile::CompileMode,
     compile_after: u32,
+    /// `THAW_JS_STRICT` rollout switch (see `strict.rs`), and the run ids of builtin (prelude) code, whose
+    /// failed writes never throw. `builtin_pending` marks the next run started by `run_builtin`.
+    strict_mode: strict::StrictMode,
+    builtin_runs: std::collections::HashSet<u32>,
+    builtin_pending: bool,
     compile_stats: bool,
     /// Set by a prelude install that opts out of compilation (`web/console.rs`): the closures it creates get
     /// `FuncDef::no_compile`.
@@ -1202,6 +1216,8 @@ pub struct Interp {
     /// Addresses of the arrays/objects whose native walk is in progress (`join`, `inspect`): meeting one
     /// again means the value contains itself. Shared guard for every native recursion over user objects.
     walking: Vec<usize>,
+    /// The members of `walking`: membership in a deep walk is O(1), not a scan of the stack.
+    walking_set: std::collections::HashSet<usize>,
     /// Address of the object a `[Circular *1]` pointed back to (inspect prints `<ref *1>` on it).
     circular_target: Option<usize>,
     /// Call-depth cap; replaced by the stack-address check once `configure_stack` was called.
@@ -1337,12 +1353,12 @@ impl Interp {
             share_preludes: !host,
             hint_stats: hints::HintStats::from_env(),
             check_hints: cfg!(test) || std::env::var_os("THAW_JS_CHECK_HINTS").is_some(),
-            compile_mode: compile::CompileMode::parse(
-                std::env::var("THAW_JS_COMPILE").ok().as_deref(),
-            ),
-            compile_after: compile::parse_after(
-                std::env::var("THAW_JS_COMPILE_AFTER").ok().as_deref(),
-            ),
+            // the env is applied at the end of `build`, after the preludes: they are never analysed or counted
+            compile_mode: compile::CompileMode::Off,
+            compile_after: compile::DEFAULT_AFTER,
+            strict_mode: strict::StrictMode::parse(std::env::var("THAW_JS_STRICT").ok().as_deref()),
+            builtin_runs: Default::default(),
+            builtin_pending: false,
             compile_stats: compile::stats_enabled(
                 std::env::var("THAW_JS_COMPILE_STATS").ok().as_deref(),
             ),
@@ -1356,6 +1372,7 @@ impl Interp {
             depth: 0,
             call_frames: Vec::new(),
             walking: Vec::new(),
+            walking_set: Default::default(),
             circular_target: None,
             max_depth: MAX_DEPTH,
             stack_limit: 0,
@@ -1445,7 +1462,7 @@ impl Interp {
             node_crypto::install(&mut it);
             it.install_url();
             // host realm only: a vm context's global keeps the plain `Object` tag, as in Node
-            it.run("Object.defineProperty(globalThis, Symbol.toStringTag, { value: 'global', configurable: true });")
+            it.run_builtin("Object.defineProperty(globalThis, Symbol.toStringTag, { value: 'global', configurable: true });")
                 .unwrap_or_else(|_| panic!("thaw-js globalThis tag must install"));
             #[cfg(feature = "intl")]
             it.install_intl();
@@ -1454,6 +1471,11 @@ impl Interp {
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
         web_console::install(&mut it);
         it.apply_builtin_table();
+        // user code only: the env turns the compiler on after the preludes ran (`Interp::with_compile_mode` overrides)
+        it.compile_mode =
+            compile::CompileMode::parse(std::env::var("THAW_JS_COMPILE").ok().as_deref());
+        it.compile_after =
+            compile::parse_after(std::env::var("THAW_JS_COMPILE_AFTER").ok().as_deref());
         it
     }
 
@@ -1520,6 +1542,16 @@ impl Interp {
         // below the configured limit is only deep if this thread's own stack agrees: compiled code may
         // enter from a thread other than the one that configured the limit (an async continuation)
         self.stack_limit != 0 && sp < self.stack_limit && !thread_stack_has_room(sp)
+    }
+
+    /// `RangeError` once the stack guard trips. For natives that recurse without going through `call_as`
+    /// (JSON, join, the parser front door): they call this at each recursive step.
+    #[inline]
+    pub(crate) fn check_stack(&mut self) -> R<()> {
+        if self.too_deep() {
+            return self.throw_error("RangeError", STACK_OVERFLOW);
+        }
+        Ok(())
     }
 
     pub(crate) fn native(
@@ -1747,7 +1779,7 @@ impl Interp {
     /// a cycle: the caller stops there. Every `true` must be paired with `leave_walk`.
     pub(crate) fn enter_walk(&mut self, o: &Obj) -> bool {
         let addr = Rc::as_ptr(o) as usize;
-        if self.walking.contains(&addr) {
+        if !self.walking_set.insert(addr) {
             return false;
         }
         self.walking.push(addr);
@@ -1755,32 +1787,58 @@ impl Interp {
     }
 
     pub(crate) fn leave_walk(&mut self) {
-        self.walking.pop();
+        if let Some(addr) = self.walking.pop() {
+            self.walking_set.remove(&addr);
+        }
     }
 
-    pub(crate) fn join(&mut self, this: &Value, sep: &str) -> JsStr {
+    /// `to_str` for an array element, fallible: a nested array recurses through `try_join`.
+    pub(crate) fn try_to_str(&mut self, v: &Value) -> R<JsStr> {
+        if let Value::Object(o) = v {
+            if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                return self.try_join(v, ",");
+            }
+        }
+        Ok(self.to_str(v))
+    }
+
+    /// `Array.prototype.join`, fallible: a nested array past the stack guard is a `RangeError`, as in Node.
+    pub(crate) fn try_join(&mut self, this: &Value, sep: &str) -> R<JsStr> {
         let Value::Object(o) = this else {
-            return "".into();
+            return Ok("".into());
         };
         let items = match &*o.kind.borrow() {
             Kind::Array(v) => v.clone(),
-            _ => return "".into(),
+            _ => return Ok("".into()),
         };
         // ES: an array that reaches itself joins that reference as the empty string
         if !self.enter_walk(o) {
-            return "".into();
+            return Ok("".into());
         }
+        // the walk entry is popped on every path, the error ones included
+        let out = self.join_items(&items, sep);
+        self.leave_walk();
+        out.map(Into::into)
+    }
+
+    fn join_items(&mut self, items: &[Value], sep: &str) -> R<String> {
+        self.check_stack()?;
         let mut out = String::new();
         for (i, v) in items.iter().enumerate() {
             if i > 0 {
                 builtins::push_joined(&mut out, sep);
             }
             if !matches!(v, Value::Undefined | Value::Null | Value::Hole) {
-                builtins::push_joined(&mut out, &self.to_str(v));
+                builtins::push_joined(&mut out, &self.try_to_str(v)?);
             }
         }
-        self.leave_walk();
-        out.into()
+        Ok(out)
+    }
+
+    /// Infallible `join` for the `to_str` callers. ponytail: an array nested past the stack guard
+    /// joins as "" here (Node throws a RangeError); the paths that can throw use `try_join`.
+    pub(crate) fn join(&mut self, this: &Value, sep: &str) -> JsStr {
+        self.try_join(this, sep).unwrap_or_else(|_| "".into())
     }
 
     /// The string `Symbol.toStringTag` of a plain object on `Object.prototype` (Node prints it as
@@ -1810,6 +1868,15 @@ impl Interp {
             Value::Str(s) if top => s.to_string(),
             Value::Str(s) => format!("'{s}'"),
             Value::Object(o) => {
+                // inspect cannot throw: past the stack guard a nested value prints as a placeholder
+                if self.too_deep() {
+                    return if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                        "[Array]"
+                    } else {
+                        "[Object]"
+                    }
+                    .into();
+                }
                 let proxied = match &*o.kind.borrow() {
                     Kind::Proxy(p) => Some((p.target.clone(), p.env_view)),
                     _ => None,
@@ -2209,7 +2276,20 @@ impl Interp {
         }
     }
 
+    /// `[[Set]]` in sloppy mode: a refused write is silently ignored. Natives, the host and the preludes use this.
     pub fn set(&mut self, target: &Value, key: &str, value: Value) -> R<()> {
+        self.set_impl(target, key, value, false)
+    }
+
+    /// `[[Set]]` of `key`. `strict` is the lexical strictness of the writing code: only then does a refused
+    /// write throw (see `strict.rs`).
+    pub(crate) fn set_impl(
+        &mut self,
+        target: &Value,
+        key: &str,
+        value: Value,
+        strict: bool,
+    ) -> R<()> {
         let Value::Object(o) = target else {
             if matches!(target, Value::Undefined | Value::Null) {
                 return self.throw_error(
@@ -2224,11 +2304,8 @@ impl Interp {
                     ),
                 );
             }
-            return Ok(());
+            return self.refuse_primitive_write(strict, target, key);
         };
-        if o.frozen.get() {
-            return Ok(()); // sloppy mode: silently ignored
-        }
         if self.proxy_set(o, key, &value, target)? {
             return Ok(());
         }
@@ -2239,35 +2316,57 @@ impl Interp {
                     return Ok(());
                 }
             }
-            return self.assign_var(&self.global.clone(), key, value);
+            // a property write on the global object, not an identifier: never a ReferenceError
+            return self.assign_var(&self.global.clone(), key, value, false);
         }
+        // a frozen object is not extensible, and its own properties are non-writable (checked below);
+        // accessors survive a freeze, so the setter lookup still runs
+        let frozen = o.frozen.get();
+        let not_ext = frozen || o.ext.get() != 0;
         let len_ro = o.len_ro.get();
-        if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
-            if let Some(i) = array_index(key) {
-                if len_ro && i >= items.len() {
-                    return Ok(()); // sloppy mode: silently ignored (read-only `length` blocks growth)
+        let refused = {
+            let mut kind = o.kind.borrow_mut();
+            match &mut *kind {
+                Kind::Array(items) => {
+                    if let Some(i) = array_index(key) {
+                        let exists = i < items.len() && !matches!(items[i], Value::Hole);
+                        if frozen && exists {
+                            Some((key.to_string(), Refusal::ReadOnly))
+                        } else if len_ro && i >= items.len() {
+                            Some(("length".to_string(), Refusal::ReadOnly))
+                        } else if not_ext && !exists {
+                            Some((key.to_string(), Refusal::NotExtensible))
+                        } else {
+                            if i >= items.len() {
+                                let cap = items.capacity();
+                                items.resize(i + 1, Value::Hole);
+                                grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
+                            }
+                            items[i] = value.clone();
+                            return Ok(());
+                        }
+                    } else if key == "length" {
+                        if len_ro || frozen {
+                            Some(("length".to_string(), Refusal::ReadOnly))
+                        } else {
+                            let n = match value {
+                                Value::Number(n) if n >= 0.0 => n as usize,
+                                _ => 0,
+                            };
+                            let cap = items.capacity();
+                            items.resize(n, Value::Hole);
+                            grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
+                            return Ok(());
+                        }
+                    } else {
+                        None
+                    }
                 }
-                if i >= items.len() {
-                    let cap = items.capacity();
-                    items.resize(i + 1, Value::Hole);
-                    grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
-                }
-                items[i] = value;
-                return Ok(());
+                _ => None,
             }
-            if key == "length" {
-                if len_ro {
-                    return Ok(()); // sloppy mode: silently ignored
-                }
-                let n = match value {
-                    Value::Number(n) if n >= 0.0 => n as usize,
-                    _ => 0,
-                };
-                let cap = items.capacity();
-                items.resize(n, Value::Hole);
-                grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
-                return Ok(());
-            }
+        };
+        if let Some((k, why)) = refused {
+            return self.refuse_write(strict, o, &k, why);
         }
         let typed = match &*o.kind.borrow() {
             Kind::Typed(t) => Some(t.clone()),
@@ -2289,19 +2388,20 @@ impl Interp {
         }
         match find_in_chain(o, key) {
             Some(Slot::Accessor { set, .. }) => {
-                if let Some(s) = set {
-                    self.call(&s, target, &[value])?;
-                }
+                let Some(s) = set else {
+                    return self.refuse_write(strict, o, key, Refusal::GetterOnly);
+                };
+                self.call(&s, target, &[value])?;
                 return Ok(());
             }
             Some(Slot::LazyProto { .. }) => unreachable!("`find_own` forces the key"),
             Some(Slot::Data(_)) => {
-                // an inherited or own read-only data property ignores the write
+                // an inherited or own read-only data property refuses the write
                 let mut cur = Some(o.clone());
                 while let Some(c) = cur {
                     if let Some(p) = c.raw_props.borrow().iter().find(|p| &*p.key == key) {
                         if !p.writable {
-                            return Ok(());
+                            return self.refuse_write(strict, o, key, Refusal::ReadOnly);
                         }
                         break;
                     }
@@ -2310,8 +2410,8 @@ impl Interp {
             }
             None => {}
         }
-        if o.ext.get() != 0 && find_own(o, key).is_none() {
-            return Ok(()); // sloppy mode: silently ignored
+        if not_ext && find_own(o, key).is_none() {
+            return self.refuse_write(strict, o, key, Refusal::NotExtensible);
         }
         if let Some(id) = crate::host::native_error_target(self, o, key) {
             if let Some(json) = crate::host::plain_json(self, &value) {
@@ -2823,7 +2923,9 @@ impl Interp {
         true
     }
 
-    fn assign_var(&mut self, scope: &Rc<Scope>, name: &str, value: Value) -> R<()> {
+    /// Assigns the identifier `name`. `strict` is the lexical strictness of the writer: an undeclared name then
+    /// throws a ReferenceError instead of creating a global.
+    fn assign_var(&mut self, scope: &Rc<Scope>, name: &str, value: Value, strict: bool) -> R<()> {
         let bit = name_bit(name);
         let mut cur: Option<&Scope> = Some(scope);
         while let Some(s) = cur {
@@ -2853,7 +2955,10 @@ impl Interp {
                 None => cur = s.parent.as_deref(),
             }
         }
-        // sloppy-mode implicit global
+        // sloppy-mode implicit global (strict code: a ReferenceError, unless the switch is off)
+        self.strict_fail(strict, "ReferenceError", |_| {
+            format!("{name} is not defined")
+        })?;
         self.global.declare(name, value, true);
         self.global.set_origin(name, Origin::Prop);
         Ok(())
@@ -2884,7 +2989,7 @@ impl Interp {
                     scope.declare_rc(name, value, true);
                     Ok(())
                 } else {
-                    self.assign_var(scope, &id.id.sym, value)
+                    self.assign_var(scope, &id.id.sym, value, scope.strict.get())
                 }
             }
             a::Pat::Assign(d) => {
@@ -2976,11 +3081,17 @@ impl Interp {
 
     /// Evaluate a script in the global scope; the value is that of the last expression statement.
     pub fn run(&mut self, source: &str) -> R<Value> {
+        if too_nested(source) {
+            return self.throw_error("RangeError", STACK_OVERFLOW);
+        }
         self.run_parsed(source, thaw_parser::parse_javascript(source), true)
     }
 
     /// Like [`run`](Self::run) for `eval` / `new Function` text: parsed as a sloppy-mode script.
     pub fn run_sloppy(&mut self, source: &str) -> R<Value> {
+        if too_nested(source) {
+            return self.throw_error("RangeError", STACK_OVERFLOW);
+        }
         let parsed = thaw_parser::parse_javascript_script(source);
         if let Err(msg) = &parsed {
             return self.throw_error("SyntaxError", msg);
@@ -2999,6 +3110,7 @@ impl Interp {
         let mut module = parsed.map_err(|e| Ctl::Throw(Value::str(&e)))?;
         hints::annotate(&mut module, &mut self.ident_hints);
         self.run_id = next_run_id();
+        self.mark_builtin_run();
         self.sources.insert(self.run_id, Rc::from(source));
         let stmts = module_stmts(module)?;
         self.run_global(&stmts, script)
@@ -3020,14 +3132,33 @@ impl Interp {
         self.run_hoisted(stmts, &global)
     }
 
+    /// `run` for builtin JS (a prelude, or a native's JS helper): the run id is recorded in `builtin_runs`, so
+    /// its code never throws on a refused write (`strict.rs`). Every builtin run goes through here.
+    pub(crate) fn run_builtin(&mut self, source: &str) -> R<Value> {
+        self.builtin_pending = true;
+        let r = self.run(source);
+        self.builtin_pending = false;
+        r
+    }
+
+    /// Records the run id just assigned as builtin when the run was started by `run_builtin`.
+    fn mark_builtin_run(&mut self) {
+        if std::mem::take(&mut self.builtin_pending) {
+            self.builtin_runs.insert(self.run_id);
+        }
+    }
+
     /// A `'static` prelude: `run`, except that a vm realm reuses the parse and annotation of the same
-    /// text (`run_shared`).
+    /// text (`run_shared`). Builtin, as `run_builtin`.
     pub(crate) fn run_prelude(&mut self, src: &'static str) -> R<Value> {
-        if self.share_preludes {
+        self.builtin_pending = true;
+        let r = if self.share_preludes {
             self.run_shared(src)
         } else {
             self.run(src)
-        }
+        };
+        self.builtin_pending = false;
+        r
     }
 
     /// `run` for a prelude, parsed and annotated once per thread. The cache key is the text (pointer
@@ -3066,6 +3197,7 @@ impl Interp {
             }
         };
         self.run_id = shared.run_id;
+        self.mark_builtin_run();
         self.sources.insert(shared.run_id, shared.source.clone());
         self.run_global(&shared.stmts, true)
     }
@@ -3420,7 +3552,9 @@ impl Interp {
                     let name = self.intern(&id.id.sym);
                     scope.declare_rc(name, value, mutable);
                 }
-                a::Pat::Ident(id) => self.assign_var(scope, &id.id.sym, value)?,
+                a::Pat::Ident(id) => {
+                    self.assign_var(scope, &id.id.sym, value, scope.strict.get())?
+                }
                 pat if is_var => self.bind_pattern(pat, value, scope, false)?,
                 pat => self.bind_pattern(pat, value, scope, true)?,
             }
@@ -4088,7 +4222,12 @@ impl Interp {
                     let obj = self.eval(&m.obj, scope)?;
                     let key = self.member_key(&m.prop, scope)?;
                     if let Value::Object(o) = obj {
-                        return Ok(Value::Bool(crate::reflect::delete_own(self, &o, &key)?));
+                        let deleted = crate::reflect::delete_own(self, &o, &key)?;
+                        // a proxy's refused delete has its own message (a ceiling): not reported here
+                        if !deleted && !matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+                            self.refuse_delete(scope.strict.get(), &o, &key)?;
+                        }
+                        return Ok(Value::Bool(deleted));
                     }
                     Ok(Value::Bool(true))
                 }
@@ -4302,10 +4441,11 @@ impl Interp {
     }
 
     fn write_loc(&mut self, loc: &Loc<'_>, value: Value, scope: &Rc<Scope>) -> R<()> {
+        let strict = scope.strict.get();
         match loc {
-            Loc::Ident(i) => self.assign_var(scope, &i.sym, value),
-            Loc::Prop(obj, key) => self.set(obj, key, value),
-            Loc::Index(obj, i) => self.set_index(obj, *i, value),
+            Loc::Ident(i) => self.assign_var(scope, &i.sym, value, strict),
+            Loc::Prop(obj, key) => self.set_impl(obj, key, value, strict),
+            Loc::Index(obj, i) => self.set_index(obj, *i, value, strict),
         }
     }
 
@@ -4321,9 +4461,10 @@ impl Interp {
         self.get(obj, &i.to_string())
     }
 
-    fn set_index(&mut self, obj: &Value, i: usize, value: Value) -> R<()> {
+    /// `obj[i] = value` for an integer index; `strict` as for `set_impl`.
+    pub(crate) fn set_index(&mut self, obj: &Value, i: usize, value: Value, strict: bool) -> R<()> {
         if let Value::Object(o) = obj {
-            if !o.frozen.get() && o.ext.get() == 0 {
+            if !o.frozen.get() && o.ext.get() == 0 && !o.len_ro.get() {
                 if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
                     if i < items.len() {
                         items[i] = value;
@@ -4338,7 +4479,7 @@ impl Interp {
                 }
             }
         }
-        self.set(obj, &i.to_string(), value)
+        self.set_impl(obj, &i.to_string(), value, strict)
     }
 
     fn store(&mut self, target: &a::Expr, value: Value, scope: &Rc<Scope>) -> R<()> {
@@ -4727,6 +4868,66 @@ pub(crate) fn order_keys(keys: Vec<Rc<str>>) -> Vec<Rc<str>> {
 
 /// Create or overwrite an enumerable, writable data property.
 /// Whether the calling thread's own stack still has room at `sp` (same reserve as `configure_stack`).
+/// Whether `src` nests brackets deeper than `MAX_NEST`. A byte scan: string, template and comment text is
+/// skipped, and so is a regex literal (a `/` after an operator or an opening token), so brackets there are not
+/// counted. ponytail: `return /re/` reads as division, and a template's `${}` code is skipped with the template.
+pub(crate) fn too_nested(src: &str) -> bool {
+    let b = src.as_bytes();
+    let (mut depth, mut max, mut i) = (0usize, 0usize, 0usize);
+    // the last byte that is not whitespace (0 at the start)
+    let mut prev = 0u8;
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            q @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'\\' => i += 1,
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'/' if prev == 0 || b"(,=:[!&|?{};+-*%<>~^".contains(&prev) => {
+                // a regex literal: up to its closing `/` outside a class
+                i += 1;
+                let mut class = false;
+                while i < b.len() && b[i] != b'\n' {
+                    match b[i] {
+                        b'\\' => i += 1,
+                        b'[' => class = true,
+                        b']' => class = false,
+                        b'/' if !class => break,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if !c.is_ascii_whitespace() {
+            prev = c;
+        }
+        i += 1;
+    }
+    max > MAX_NEST
+}
+
 #[cfg(target_os = "linux")]
 fn thread_stack_has_room(sp: usize) -> bool {
     // SAFETY: plain pthread queries on the current thread with a zeroed attribute object.
@@ -5012,6 +5213,8 @@ mod napi_symbol_protocol_tests;
 #[cfg(test)]
 mod napi_symbols_tests;
 #[cfg(test)]
+mod native_recursion_tests;
+#[cfg(test)]
 mod net_tests;
 #[cfg(test)]
 mod process_env_tests;
@@ -5037,6 +5240,8 @@ mod stack_overflow_tests;
 mod str_cursor_tests;
 #[cfg(test)]
 mod str_unit_tests;
+#[cfg(test)]
+mod strict_mode_tests;
 #[cfg(test)]
 mod structured_clone_tests;
 #[cfg(test)]

@@ -550,6 +550,33 @@ pub(crate) fn dynamic_function_source(it: &mut Interp, args: &[Value]) -> String
     format!("anonymous({params}\n) {{\n{body}\n}}")
 }
 
+/// `(max group nesting, capture group count)` of regex `src`. Escapes and character classes are skipped.
+fn regex_shape(src: &str) -> (usize, usize) {
+    let b = src.as_bytes();
+    let (mut depth, mut max, mut caps, mut class, mut i) = (0usize, 0usize, 0usize, false, 0usize);
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 1,
+            b'[' => class = true,
+            b']' => class = false,
+            b'(' if !class => {
+                let named = b.get(i + 1) == Some(&b'?')
+                    && b.get(i + 2) == Some(&b'<')
+                    && !matches!(b.get(i + 3), Some(b'=' | b'!'));
+                if b.get(i + 1) != Some(&b'?') || named {
+                    caps += 1;
+                }
+                depth += 1;
+                max = max.max(depth);
+            }
+            b')' if !class => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    (max, caps)
+}
+
 impl Interp {
     /// Compile through the realm's cache; the caller stores the result in a RegExp object.
     pub(crate) fn compile_regex(&mut self, source: &str, flags: &str) -> R<Rc<regress::Regex>> {
@@ -558,6 +585,17 @@ impl Interp {
         match self.regex_cache.get(&key) {
             Some(re) => Ok(re.clone()),
             None => {
+                // Node's order: too many capture groups first, then a nesting the parser cannot recurse into
+                let (nest, captures) = regex_shape(source);
+                if captures > 65_535 {
+                    return self.throw_error(
+                        "SyntaxError",
+                        &format!("Invalid regular expression: /{source}/: Too many captures"),
+                    );
+                }
+                if nest > MAX_NEST {
+                    return self.throw_error("RangeError", STACK_OVERFLOW);
+                }
                 let compiled = match regress::Regex::with_flags(source, engine_flags.as_str()) {
                     Ok(r) => Rc::new(r),
                     Err(e) => {
@@ -2015,7 +2053,7 @@ impl Interp {
                 Value::Undefined => ",".into(),
                 v => it.to_str(&v),
             };
-            Ok(Value::Str(it.join(this, &sep)))
+            Ok(Value::Str(it.try_join(this, &sep)?))
         });
         for (name, last) in [("indexOf", false), ("lastIndexOf", true)] {
             self.set_native(&ap, name, move |it, this, args| {
@@ -2133,7 +2171,7 @@ impl Interp {
             Ok(Value::Str(if args.is_empty() {
                 "".into()
             } else {
-                it.to_str(&args[0])
+                it.try_to_str(&args[0])?
             }))
         });
         if let Value::Object(o) = &string {

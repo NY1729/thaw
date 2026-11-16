@@ -20,6 +20,8 @@ use crate::{bigint, Interp, Kind, Value};
 pub(crate) struct Elem {
     base: u32,
     key: Side,
+    /// The function's strictness at codegen (`Gen::strict`); see `mod.rs::write_strict`.
+    strict: bool,
 }
 
 /// The gate: `Some` only for `slot[pure key]`. Nothing is compiled when it returns `None`, so the caller can try
@@ -46,7 +48,11 @@ pub(crate) fn compile(g: &mut Gen, m: &a::MemberExpr) -> CG<Option<Elem>> {
         g.elem_built += 1;
     }
     let key = num::operand(g, &c.expr)?;
-    Ok(Some(Elem { base: l.slot, key }))
+    Ok(Some(Elem {
+        base: l.slot,
+        key,
+        strict: g.strict,
+    }))
 }
 
 /// Default-deny whitelist of keys that cannot write a slot of this frame. Assignments, updates, calls, `new`,
@@ -204,7 +210,7 @@ fn get_loc(it: &mut Interp, base: &Value, loc: &Loc) -> CR<Value> {
 }
 
 /// `write_loc`: a Number into a plain element takes `fast_set`; everything else is the helper the AST arm calls.
-fn store(it: &mut Interp, base: &Value, loc: &Loc, v: Value) -> CR<()> {
+fn store(it: &mut Interp, base: &Value, loc: &Loc, v: Value, strict: bool) -> CR<()> {
     if let (Loc::Idx(i), Value::Number(x)) = (loc, &v) {
         if fast_set(base, *i, *x) {
             it.cstats.note_elem_store_fast();
@@ -213,15 +219,17 @@ fn store(it: &mut Interp, base: &Value, loc: &Loc, v: Value) -> CR<()> {
     }
     it.cstats.note_elem_store_slow();
     match loc {
-        Loc::Idx(i) => bx(it.set_index(base, *i, v)),
-        Loc::Key(k) => bx(it.set(base, k, v)),
+        Loc::Idx(i) => bx(it.set_index(base, *i, v, strict)),
+        Loc::Key(k) => bx(it.set_impl(base, k, v, strict)),
     }
 }
 
 /// `s[k] = e`, `s[k] op= e`, `s[k] &&= e`, with the order of `member::assign`: the base, the key, then the
 /// current value (compound), the right-hand side, the store. The value of the assignment is the stored value.
 pub(crate) fn assign(el: Elem, rmw: Rmw, rhs: Ex) -> Ex {
+    let st = el.strict;
     mk_ex(move |it, f| {
+        let strict = super::write_strict(st, f);
         let base = f.slots[el.base as usize].clone();
         let key = el.key.eval_n(it, f)?;
         let loc = to_loc(it, key);
@@ -245,14 +253,16 @@ pub(crate) fn assign(el: Elem, rmw: Rmw, rhs: Ex) -> Ex {
                 bx(combine(it, bop, &cur, &r))?
             }
         };
-        store(it, &base, &loc, v.clone())?;
+        store(it, &base, &loc, v.clone(), strict)?;
         Ok(v)
     })
 }
 
 /// `s[k]++` / `++s[k]` / `s[k]--` / `--s[k]`, the same steps as `member::update`.
 pub(crate) fn update(el: Elem, inc: bool, prefix: bool) -> Ex {
+    let st = el.strict;
     mk_ex(move |it, f| {
+        let strict = super::write_strict(st, f);
         let base = f.slots[el.base as usize].clone();
         let key = el.key.eval_n(it, f)?;
         let loc = to_loc(it, key);
@@ -260,12 +270,12 @@ pub(crate) fn update(el: Elem, inc: bool, prefix: bool) -> Ex {
         if let Value::BigInt(b) = &old {
             let one = num_bigint::BigInt::from(1);
             let new = bigint::big(if inc { &**b + one } else { &**b - one });
-            store(it, &base, &loc, new.clone())?;
+            store(it, &base, &loc, new.clone(), strict)?;
             return Ok(if prefix { new } else { old.clone() });
         }
         let n = it.num(&old);
         let new = if inc { n + 1.0 } else { n - 1.0 };
-        store(it, &base, &loc, Value::Number(new))?;
+        store(it, &base, &loc, Value::Number(new), strict)?;
         Ok(Value::Number(if prefix { new } else { n }))
     })
 }

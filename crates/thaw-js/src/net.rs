@@ -832,7 +832,7 @@ pub(crate) fn install(it: &mut Interp) {
             Err(e) => it.throw_error("Error", &e.to_string()),
         }
     });
-    let _ = it.run(
+    let _ = it.run_builtin(
         "(function () {\n\
          Object.defineProperty(process, Symbol.toStringTag, { value: 'process', configurable: true });\n\
          globalThis.__thaw_set_timeout_ref = function (cb, delay, refed) { var t = setTimeout(cb, delay); if (!refed) t.unref(); return t; };\n\
