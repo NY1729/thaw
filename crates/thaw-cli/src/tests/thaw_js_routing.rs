@@ -923,30 +923,29 @@ fn thaw_js_routed_node_http_fetch_from_listen_callback_refused() {
 #[test]
 fn thaw_js_routed_fetch_without_node_http_import_runs_on_thaw_js() {
     // Q9 PR 2b: a program that mentions `fetch` but never imports node:http still links the node:http /
-    // node:https bundles, so the realm fetch has its transport. The server is a raw node:net listener.
-    // Expected stdout is from a real `node` run of the same program.
+    // node:https bundles, so the realm fetch has its transport. No server: fetch to a closed port is refused
+    // by the transport (ECONNREFUSED). Without the transport the cause is the "no HTTP client" TypeError.
+    // Expected stdout is from a real `node` run of the same program (port 59123 is closed and not on
+    // undici's bad-port list).
     let (dir, registry, entry) = thaw_js_fixture(
         "fetch-without-node-http",
-        "import * as net from 'node:net';\n\
-         function main(): void {\n\
-           const server = net.createServer((socket: any) => {\n\
-             socket.once('data', () => {\n\
-               socket.end('HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\nok');\n\
-             });\n\
-           });\n\
-           server.listen(0, '127.0.0.1', async () => {\n\
-             const addr: any = server.address();\n\
-             const r: Response = await fetch('http://127.0.0.1:' + addr.port + '/');\n\
-             console.log(r.status, await r.text());\n\
-             server.close();\n\
-           });\n\
+        "async function main(): Promise<void> {\n\
+           try {\n\
+             await fetch('http://127.0.0.1:59123/');\n\
+             console.log('unexpected');\n\
+           } catch (e: any) {\n\
+             console.log(e.name, e.message, e.cause && e.cause.code);\n\
+           }\n\
          }\n",
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
-    assert_eq!(thaw_js_run_guarded(&output), "200 ok\n");
+    assert_eq!(
+        thaw_js_run_guarded(&output),
+        "TypeError fetch failed ECONNREFUSED\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
