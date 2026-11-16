@@ -254,9 +254,11 @@ fn builtin_routing_package(name: &str) -> ResolvedPackage {
 #[test]
 fn thaw_js_newly_allowlisted_builtins_route_to_thaw_js() {
     // the module added to THAW_JS_BUILTIN_MODULES: a metadata-only program must be eligible for thaw-js
-    // old: four cases (node:v8, node:console, node:test/reporters, node:cluster); new: node:cluster only
+    // old: node:cluster only; new: node:cluster, node:console, node:wasi
     let cases = [
         ("node:cluster", "import cluster from 'node:cluster';\nconsole.log(cluster.isPrimary, cluster.settings);\n"),
+        ("node:console", "import { Console } from 'node:console';\nconsole.log(typeof Console);\n"),
+        ("node:wasi", "import { WASI } from 'node:wasi';\nconsole.log(typeof WASI);\n"),
     ];
     for (module, user) in cases {
         let bundle = thaw_registry::builtin_bundle_with(module, &[]).unwrap();
@@ -274,6 +276,17 @@ fn thaw_js_cluster_program_that_forks_stays_on_quickjs() {
     let bundle = thaw_registry::builtin_bundle_with("node:cluster", &[]).unwrap();
     let forks = "import cluster from 'node:cluster';\nif (cluster.isPrimary) { cluster.fork(); }\n";
     assert!(!thaw_js_package_eligible(&builtin_routing_package("node:cluster"), &bundle, forks, &Default::default(), ""));
+}
+
+#[test]
+fn thaw_js_wasi_bundle_routes_only_when_the_program_requires_wasm() {
+    // the wasi bundle uses WebAssembly: it routes when the program names node:wasi (the build then selects the `wasm` feature)
+    let bundle = thaw_registry::builtin_bundle_with("node:wasi", &[]).unwrap();
+    let wasi = "import { WASI } from 'node:wasi';\nconsole.log(typeof WASI);\n";
+    let pkg = builtin_routing_package("node:wasi");
+    assert!(thaw_js_package_eligible(&pkg, &bundle, wasi, &Default::default(), ""));
+    let no_wasm = "import { WASI } from 'node:path';\nconsole.log(typeof WASI);\n";
+    assert!(!thaw_js_package_eligible(&pkg, &bundle, no_wasm, &Default::default(), ""));
 }
 
 #[test]
@@ -537,6 +550,7 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:querystring",
         "node:timers",
         "node:worker_threads",
+        "node:wasi",
         "node:stream",
         "node:readline",
         "node:readline/promises",
@@ -567,6 +581,7 @@ fn thaw_js_builtin_modules_are_an_explicit_allowlist() {
         "node:domain",
         "node:stream/promises",
         "node:test",
+        "node:console",
     ] {
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module), "{module}");
     }
