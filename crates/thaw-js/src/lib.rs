@@ -4876,6 +4876,8 @@ mod handle_zero_tests;
 #[cfg(test)]
 mod job_barrier_tests;
 #[cfg(test)]
+mod leak_audit_tests;
+#[cfg(test)]
 mod napi_bridge_tests;
 #[cfg(test)]
 mod napi_eval_tests;
