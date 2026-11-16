@@ -4858,6 +4858,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
 #[cfg(test)]
 mod arraybuffer_detach_tests;
 #[cfg(test)]
+mod buffer_members_tests;
+#[cfg(test)]
 mod builtin_table_tests;
 #[cfg(test)]
 mod console_instance_tests;
