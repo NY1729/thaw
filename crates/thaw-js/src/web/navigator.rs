@@ -14,6 +14,6 @@ pub(crate) fn install(interp: &mut Interp) {
         .global
         .declare("__thaw_available_parallelism", par, true);
     interp
-        .run(&format!("(function () {{\n{SOURCE}\n}})();"))
+        .run_builtin(&format!("(function () {{\n{SOURCE}\n}})();"))
         .unwrap_or_else(|_| panic!("Navigator prelude must evaluate"));
 }

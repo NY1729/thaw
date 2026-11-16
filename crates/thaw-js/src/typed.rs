@@ -936,7 +936,7 @@ impl Interp {
             }
             Ok(out)
         });
-        self.run(TYPED_PRELUDE)
+        self.run_builtin(TYPED_PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js typed array prelude must evaluate"));
     }
 }

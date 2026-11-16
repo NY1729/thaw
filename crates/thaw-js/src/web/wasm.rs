@@ -13,7 +13,7 @@ const REAL: &str = include_str!("webassembly.js");
 
 fn run(interp: &mut Interp, source: &str) {
     interp
-        .run(source)
+        .run_builtin(source)
         .unwrap_or_else(|_| panic!("WebAssembly shim must evaluate"));
 }
 

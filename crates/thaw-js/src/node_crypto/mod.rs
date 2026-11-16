@@ -310,6 +310,6 @@ pub(crate) fn install(interp: &mut Interp) {
         .global
         .declare("__thaw_crypto_random_hex", random, true);
     interp
-        .run(&format!("(function () {{\n{SOURCE}\n}})();"))
+        .run_builtin(&format!("(function () {{\n{SOURCE}\n}})();"))
         .unwrap_or_else(|_| panic!("node:crypto prelude must evaluate"));
 }

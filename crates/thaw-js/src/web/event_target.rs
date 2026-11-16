@@ -7,7 +7,7 @@ const SOURCE: &str = include_str!("event_target.js");
 
 pub(crate) fn install(interp: &mut Interp) {
     interp
-        .run(&format!("(function () {{\n{SOURCE}\n}})();"))
+        .run_builtin(&format!("(function () {{\n{SOURCE}\n}})();"))
         .unwrap_or_else(|_| panic!("Event/EventTarget prelude must evaluate"));
 }
 

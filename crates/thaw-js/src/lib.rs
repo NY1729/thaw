@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use classes::ClassInfo;
+use strict::Refusal;
 use swc_ecma_visit::{Visit, VisitWith};
 use thaw_parser::ast as a;
 
@@ -63,6 +64,7 @@ mod procstate;
 mod proxy;
 mod reflect;
 pub mod scan;
+mod strict;
 mod sysio;
 mod tls;
 mod typed;
@@ -1134,6 +1136,11 @@ pub struct Interp {
     /// `THAW_JS_COMPILE` mode, `THAW_JS_COMPILE_AFTER` call threshold, `THAW_JS_COMPILE_STATS` report flag.
     compile_mode: compile::CompileMode,
     compile_after: u32,
+    /// `THAW_JS_STRICT` rollout switch (see `strict.rs`), and the run ids of builtin (prelude) code, whose
+    /// failed writes never throw. `builtin_pending` marks the next run started by `run_builtin`.
+    strict_mode: strict::StrictMode,
+    builtin_runs: std::collections::HashSet<u32>,
+    builtin_pending: bool,
     compile_stats: bool,
     /// Set by a prelude install that opts out of compilation (`web/console.rs`): the closures it creates get
     /// `FuncDef::no_compile`.
@@ -1290,6 +1297,9 @@ impl Interp {
             compile_after: compile::parse_after(
                 std::env::var("THAW_JS_COMPILE_AFTER").ok().as_deref(),
             ),
+            strict_mode: strict::StrictMode::parse(std::env::var("THAW_JS_STRICT").ok().as_deref()),
+            builtin_runs: Default::default(),
+            builtin_pending: false,
             compile_stats: compile::stats_enabled(
                 std::env::var("THAW_JS_COMPILE_STATS").ok().as_deref(),
             ),
@@ -1390,7 +1400,7 @@ impl Interp {
             node_crypto::install(&mut it);
             it.install_url();
             // host realm only: a vm context's global keeps the plain `Object` tag, as in Node
-            it.run("Object.defineProperty(globalThis, Symbol.toStringTag, { value: 'global', configurable: true });")
+            it.run_builtin("Object.defineProperty(globalThis, Symbol.toStringTag, { value: 'global', configurable: true });")
                 .unwrap_or_else(|_| panic!("thaw-js globalThis tag must install"));
             #[cfg(feature = "intl")]
             it.install_intl();
@@ -2144,7 +2154,20 @@ impl Interp {
         }
     }
 
+    /// `[[Set]]` in sloppy mode: a refused write is silently ignored. Natives, the host and the preludes use this.
     pub fn set(&mut self, target: &Value, key: &str, value: Value) -> R<()> {
+        self.set_impl(target, key, value, false)
+    }
+
+    /// `[[Set]]` of `key`. `strict` is the lexical strictness of the writing code: only then does a refused
+    /// write throw (see `strict.rs`).
+    pub(crate) fn set_impl(
+        &mut self,
+        target: &Value,
+        key: &str,
+        value: Value,
+        strict: bool,
+    ) -> R<()> {
         let Value::Object(o) = target else {
             if matches!(target, Value::Undefined | Value::Null) {
                 return self.throw_error(
@@ -2159,11 +2182,8 @@ impl Interp {
                     ),
                 );
             }
-            return Ok(());
+            return self.refuse_primitive_write(strict, target, key);
         };
-        if o.frozen.get() {
-            return Ok(()); // sloppy mode: silently ignored
-        }
         if self.proxy_set(o, key, &value, target)? {
             return Ok(());
         }
@@ -2174,31 +2194,53 @@ impl Interp {
                     return Ok(());
                 }
             }
-            return self.assign_var(&self.global.clone(), key, value);
+            // a property write on the global object, not an identifier: never a ReferenceError
+            return self.assign_var(&self.global.clone(), key, value, false);
         }
+        // a frozen object is not extensible, and its own properties are non-writable (checked below);
+        // accessors survive a freeze, so the setter lookup still runs
+        let frozen = o.frozen.get();
+        let not_ext = frozen || o.ext.get() != 0;
         let len_ro = o.len_ro.get();
-        if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
-            if let Some(i) = array_index(key) {
-                if len_ro && i >= items.len() {
-                    return Ok(()); // sloppy mode: silently ignored (read-only `length` blocks growth)
+        let refused = {
+            let mut kind = o.kind.borrow_mut();
+            match &mut *kind {
+                Kind::Array(items) => {
+                    if let Some(i) = array_index(key) {
+                        let exists = i < items.len() && !matches!(items[i], Value::Hole);
+                        if frozen && exists {
+                            Some((key.to_string(), Refusal::ReadOnly))
+                        } else if len_ro && i >= items.len() {
+                            Some(("length".to_string(), Refusal::ReadOnly))
+                        } else if not_ext && !exists {
+                            Some((key.to_string(), Refusal::NotExtensible))
+                        } else {
+                            if i >= items.len() {
+                                items.resize(i + 1, Value::Hole);
+                            }
+                            items[i] = value.clone();
+                            return Ok(());
+                        }
+                    } else if key == "length" {
+                        if len_ro || frozen {
+                            Some(("length".to_string(), Refusal::ReadOnly))
+                        } else {
+                            let n = match value {
+                                Value::Number(n) if n >= 0.0 => n as usize,
+                                _ => 0,
+                            };
+                            items.resize(n, Value::Hole);
+                            return Ok(());
+                        }
+                    } else {
+                        None
+                    }
                 }
-                if i >= items.len() {
-                    items.resize(i + 1, Value::Hole);
-                }
-                items[i] = value;
-                return Ok(());
+                _ => None,
             }
-            if key == "length" {
-                if len_ro {
-                    return Ok(()); // sloppy mode: silently ignored
-                }
-                let n = match value {
-                    Value::Number(n) if n >= 0.0 => n as usize,
-                    _ => 0,
-                };
-                items.resize(n, Value::Hole);
-                return Ok(());
-            }
+        };
+        if let Some((k, why)) = refused {
+            return self.refuse_write(strict, o, &k, why);
         }
         let typed = match &*o.kind.borrow() {
             Kind::Typed(t) => Some(t.clone()),
@@ -2220,19 +2262,20 @@ impl Interp {
         }
         match find_in_chain(o, key) {
             Some(Slot::Accessor { set, .. }) => {
-                if let Some(s) = set {
-                    self.call(&s, target, &[value])?;
-                }
+                let Some(s) = set else {
+                    return self.refuse_write(strict, o, key, Refusal::GetterOnly);
+                };
+                self.call(&s, target, &[value])?;
                 return Ok(());
             }
             Some(Slot::LazyProto { .. }) => unreachable!("`find_own` forces the key"),
             Some(Slot::Data(_)) => {
-                // an inherited or own read-only data property ignores the write
+                // an inherited or own read-only data property refuses the write
                 let mut cur = Some(o.clone());
                 while let Some(c) = cur {
                     if let Some(p) = c.raw_props.borrow().iter().find(|p| &*p.key == key) {
                         if !p.writable {
-                            return Ok(());
+                            return self.refuse_write(strict, o, key, Refusal::ReadOnly);
                         }
                         break;
                     }
@@ -2241,8 +2284,8 @@ impl Interp {
             }
             None => {}
         }
-        if o.ext.get() != 0 && find_own(o, key).is_none() {
-            return Ok(()); // sloppy mode: silently ignored
+        if not_ext && find_own(o, key).is_none() {
+            return self.refuse_write(strict, o, key, Refusal::NotExtensible);
         }
         if let Some(id) = crate::host::native_error_target(self, o, key) {
             if let Some(json) = crate::host::plain_json(self, &value) {
@@ -2742,7 +2785,9 @@ impl Interp {
         true
     }
 
-    fn assign_var(&mut self, scope: &Rc<Scope>, name: &str, value: Value) -> R<()> {
+    /// Assigns the identifier `name`. `strict` is the lexical strictness of the writer: an undeclared name then
+    /// throws a ReferenceError instead of creating a global.
+    fn assign_var(&mut self, scope: &Rc<Scope>, name: &str, value: Value, strict: bool) -> R<()> {
         let bit = name_bit(name);
         let mut cur: Option<&Scope> = Some(scope);
         while let Some(s) = cur {
@@ -2772,7 +2817,10 @@ impl Interp {
                 None => cur = s.parent.as_deref(),
             }
         }
-        // sloppy-mode implicit global
+        // sloppy-mode implicit global (strict code: a ReferenceError, unless the switch is off)
+        self.strict_fail(strict, "ReferenceError", |_| {
+            format!("{name} is not defined")
+        })?;
         self.global.declare(name, value, true);
         self.global.set_origin(name, Origin::Prop);
         Ok(())
@@ -2803,7 +2851,7 @@ impl Interp {
                     scope.declare_rc(name, value, true);
                     Ok(())
                 } else {
-                    self.assign_var(scope, &id.id.sym, value)
+                    self.assign_var(scope, &id.id.sym, value, scope.strict.get())
                 }
             }
             a::Pat::Assign(d) => {
@@ -2918,6 +2966,7 @@ impl Interp {
         let mut module = parsed.map_err(|e| Ctl::Throw(Value::str(&e)))?;
         hints::annotate(&mut module, &mut self.ident_hints);
         self.run_id = next_run_id();
+        self.mark_builtin_run();
         self.sources.insert(self.run_id, Rc::from(source));
         let stmts = module_stmts(module)?;
         self.run_global(&stmts, script)
@@ -2939,14 +2988,33 @@ impl Interp {
         self.run_hoisted(stmts, &global)
     }
 
+    /// `run` for builtin JS (a prelude, or a native's JS helper): the run id is recorded in `builtin_runs`, so
+    /// its code never throws on a refused write (`strict.rs`). Every builtin run goes through here.
+    pub(crate) fn run_builtin(&mut self, source: &str) -> R<Value> {
+        self.builtin_pending = true;
+        let r = self.run(source);
+        self.builtin_pending = false;
+        r
+    }
+
+    /// Records the run id just assigned as builtin when the run was started by `run_builtin`.
+    fn mark_builtin_run(&mut self) {
+        if std::mem::take(&mut self.builtin_pending) {
+            self.builtin_runs.insert(self.run_id);
+        }
+    }
+
     /// A `'static` prelude: `run`, except that a vm realm reuses the parse and annotation of the same
-    /// text (`run_shared`).
+    /// text (`run_shared`). Builtin, as `run_builtin`.
     pub(crate) fn run_prelude(&mut self, src: &'static str) -> R<Value> {
-        if self.share_preludes {
+        self.builtin_pending = true;
+        let r = if self.share_preludes {
             self.run_shared(src)
         } else {
             self.run(src)
-        }
+        };
+        self.builtin_pending = false;
+        r
     }
 
     /// `run` for a prelude, parsed and annotated once per thread. The cache key is the text (pointer
@@ -2985,6 +3053,7 @@ impl Interp {
             }
         };
         self.run_id = shared.run_id;
+        self.mark_builtin_run();
         self.sources.insert(shared.run_id, shared.source.clone());
         self.run_global(&shared.stmts, true)
     }
@@ -3339,7 +3408,9 @@ impl Interp {
                     let name = self.intern(&id.id.sym);
                     scope.declare_rc(name, value, mutable);
                 }
-                a::Pat::Ident(id) => self.assign_var(scope, &id.id.sym, value)?,
+                a::Pat::Ident(id) => {
+                    self.assign_var(scope, &id.id.sym, value, scope.strict.get())?
+                }
                 pat if is_var => self.bind_pattern(pat, value, scope, false)?,
                 pat => self.bind_pattern(pat, value, scope, true)?,
             }
@@ -4007,7 +4078,12 @@ impl Interp {
                     let obj = self.eval(&m.obj, scope)?;
                     let key = self.member_key(&m.prop, scope)?;
                     if let Value::Object(o) = obj {
-                        return Ok(Value::Bool(crate::reflect::delete_own(self, &o, &key)?));
+                        let deleted = crate::reflect::delete_own(self, &o, &key)?;
+                        // a proxy's refused delete has its own message (a ceiling): not reported here
+                        if !deleted && !matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+                            self.refuse_delete(scope.strict.get(), &o, &key)?;
+                        }
+                        return Ok(Value::Bool(deleted));
                     }
                     Ok(Value::Bool(true))
                 }
@@ -4221,10 +4297,11 @@ impl Interp {
     }
 
     fn write_loc(&mut self, loc: &Loc<'_>, value: Value, scope: &Rc<Scope>) -> R<()> {
+        let strict = scope.strict.get();
         match loc {
-            Loc::Ident(i) => self.assign_var(scope, &i.sym, value),
-            Loc::Prop(obj, key) => self.set(obj, key, value),
-            Loc::Index(obj, i) => self.set_index(obj, *i, value),
+            Loc::Ident(i) => self.assign_var(scope, &i.sym, value, strict),
+            Loc::Prop(obj, key) => self.set_impl(obj, key, value, strict),
+            Loc::Index(obj, i) => self.set_index(obj, *i, value, strict),
         }
     }
 
@@ -4240,9 +4317,10 @@ impl Interp {
         self.get(obj, &i.to_string())
     }
 
-    fn set_index(&mut self, obj: &Value, i: usize, value: Value) -> R<()> {
+    /// `obj[i] = value` for an integer index; `strict` as for `set_impl`.
+    pub(crate) fn set_index(&mut self, obj: &Value, i: usize, value: Value, strict: bool) -> R<()> {
         if let Value::Object(o) = obj {
-            if !o.frozen.get() && o.ext.get() == 0 {
+            if !o.frozen.get() && o.ext.get() == 0 && !o.len_ro.get() {
                 if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
                     if i < items.len() {
                         items[i] = value;
@@ -4255,7 +4333,7 @@ impl Interp {
                 }
             }
         }
-        self.set(obj, &i.to_string(), value)
+        self.set_impl(obj, &i.to_string(), value, strict)
     }
 
     fn store(&mut self, target: &a::Expr, value: Value, scope: &Rc<Scope>) -> R<()> {
@@ -4942,6 +5020,8 @@ mod sab_tests;
 mod str_cursor_tests;
 #[cfg(test)]
 mod str_unit_tests;
+#[cfg(test)]
+mod strict_mode_tests;
 #[cfg(test)]
 mod structured_clone_tests;
 #[cfg(test)]
