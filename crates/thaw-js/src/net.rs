@@ -775,6 +775,44 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
 
+    // ----- UDP (node:dgram): crate::udp holds the sockets and builds the wire strings -----
+    def!("__thaw_udp_bind", |it, _, a| {
+        let (host, port) = (s(it, a, 0), n(it, a, 1));
+        Ok(Value::str(&crate::udp::bind(&host, port)))
+    });
+    def!("__thaw_udp_send", |it, _, a| {
+        let (h, value, host, port) = (n(it, a, 0), s(it, a, 1), s(it, a, 2), n(it, a, 3));
+        Ok(Value::str(&crate::udp::send(
+            h,
+            &hex_decode(&value),
+            &host,
+            port,
+        )))
+    });
+    def!("__thaw_udp_receive", |it, _, a| Ok(Value::str(
+        &crate::udp::receive(n(it, a, 0))
+    )));
+    def!("__thaw_udp_connect", |it, _, a| {
+        let (h, host, port) = (n(it, a, 0), s(it, a, 1), n(it, a, 2));
+        Ok(Value::str(&crate::udp::connect(h, &host, port)))
+    });
+    def!("__thaw_udp_option", |it, _, a| {
+        let h = n(it, a, 0);
+        let (name, x, y, z) = (s(it, a, 1), s(it, a, 2), s(it, a, 3), s(it, a, 4));
+        Ok(Value::str(&crate::udp::option(h, &name, &x, &y, &z)))
+    });
+    def!("__thaw_udp_set_broadcast", |it, _, a| {
+        let enabled = arg(a, 1).truthy();
+        Ok(Value::str(&crate::udp::set_broadcast(n(it, a, 0), enabled)))
+    });
+    def!("__thaw_udp_disconnect", |it, _, a| Ok(Value::str(
+        &crate::udp::disconnect(n(it, a, 0))
+    )));
+    def!("__thaw_udp_close", |it, _, a| {
+        crate::udp::close(n(it, a, 0));
+        Ok(Value::Undefined)
+    });
+
     // ----- HPACK huffman (node:http2), hash, timer refs -----
     def!("__thaw_hpack_huffman_encode", |it, _, a| {
         let mut out = Vec::new();
