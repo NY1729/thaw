@@ -4962,11 +4962,11 @@ impl Interp {
         ];
         objs.extend(self.symbol_ctor.take());
         objs.extend(self.symbol_registry.take());
-        objs.extend(self.well_known.drain(..));
+        objs.append(&mut self.well_known);
         objs.extend(self.rt.arraybuffer_proto.take());
         objs.extend(self.rt.sharedarraybuffer_proto.take());
         objs.extend(self.rt.typed_base_proto.take());
-        objs.extend(self.rt.typed_protos.drain(..));
+        objs.append(&mut self.rt.typed_protos);
         objs.extend(self.rt.symbols.drain().map(|(_, o)| o));
         self.rt.push_object_roots(&mut objs);
         for v in self.callback_values.drain().map(|(_, v)| v) {
