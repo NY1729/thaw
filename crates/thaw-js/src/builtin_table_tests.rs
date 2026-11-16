@@ -246,6 +246,80 @@ fn builtin_names_lengths_and_native_text_match_node() {
     assert_eq!(it.out.join("\n"), expected);
 }
 
+/// Intl constructors, statics and data methods: `name` and `length` against Node 22. The expected lines are
+/// the output of `node intl_subset.js` under node 22.23.1, where the script is the JS run below with
+/// `console.log` at the end. Accessors (`format`, `compare`, the `Locale` getters) are left out: thaw-js still
+/// has them as data methods.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_names_and_lengths_match_node_22() {
+    let mut it = Interp::new();
+    it.run(
+        r#"const paths = ['Intl.getCanonicalLocales', 'Intl.Collator', 'Intl.DateTimeFormat', 'Intl.DisplayNames',
+  'Intl.ListFormat', 'Intl.Locale', 'Intl.NumberFormat', 'Intl.PluralRules', 'Intl.RelativeTimeFormat',
+  'Intl.Segmenter', 'Intl.Collator.prototype.resolvedOptions', 'Intl.Collator.supportedLocalesOf',
+  'Intl.DateTimeFormat.prototype.formatToParts', 'Intl.DateTimeFormat.prototype.formatRange',
+  'Intl.DateTimeFormat.prototype.formatRangeToParts', 'Intl.DateTimeFormat.prototype.resolvedOptions',
+  'Intl.DateTimeFormat.supportedLocalesOf', 'Intl.DisplayNames.prototype.of',
+  'Intl.DisplayNames.prototype.resolvedOptions', 'Intl.DisplayNames.supportedLocalesOf',
+  'Intl.ListFormat.prototype.format', 'Intl.ListFormat.supportedLocalesOf', 'Intl.Locale.prototype.toString',
+  'Intl.Locale.prototype.maximize', 'Intl.Locale.prototype.minimize',
+  'Intl.NumberFormat.prototype.formatToParts', 'Intl.NumberFormat.prototype.formatRange',
+  'Intl.NumberFormat.prototype.formatRangeToParts', 'Intl.NumberFormat.prototype.resolvedOptions',
+  'Intl.NumberFormat.supportedLocalesOf', 'Intl.PluralRules.prototype.select',
+  'Intl.PluralRules.prototype.selectRange', 'Intl.PluralRules.prototype.resolvedOptions',
+  'Intl.PluralRules.supportedLocalesOf', 'Intl.RelativeTimeFormat.prototype.format',
+  'Intl.RelativeTimeFormat.prototype.formatToParts', 'Intl.RelativeTimeFormat.prototype.resolvedOptions',
+  'Intl.RelativeTimeFormat.supportedLocalesOf', 'Intl.Segmenter.prototype.segment',
+  'Intl.Segmenter.prototype.resolvedOptions', 'Intl.Segmenter.supportedLocalesOf'];
+const out = paths.map(p => { const f = p.split('.').reduce((o, k) => o[k], globalThis); return `${p} ${f.name} ${f.length}`; });
+console.log(out.join('\n'));"#,
+    )
+    .expect("probe runs");
+    let expected = r#"Intl.getCanonicalLocales getCanonicalLocales 1
+Intl.Collator Collator 0
+Intl.DateTimeFormat DateTimeFormat 0
+Intl.DisplayNames DisplayNames 2
+Intl.ListFormat ListFormat 0
+Intl.Locale Locale 1
+Intl.NumberFormat NumberFormat 0
+Intl.PluralRules PluralRules 0
+Intl.RelativeTimeFormat RelativeTimeFormat 0
+Intl.Segmenter Segmenter 0
+Intl.Collator.prototype.resolvedOptions resolvedOptions 0
+Intl.Collator.supportedLocalesOf supportedLocalesOf 1
+Intl.DateTimeFormat.prototype.formatToParts formatToParts 1
+Intl.DateTimeFormat.prototype.formatRange formatRange 2
+Intl.DateTimeFormat.prototype.formatRangeToParts formatRangeToParts 2
+Intl.DateTimeFormat.prototype.resolvedOptions resolvedOptions 0
+Intl.DateTimeFormat.supportedLocalesOf supportedLocalesOf 1
+Intl.DisplayNames.prototype.of of 1
+Intl.DisplayNames.prototype.resolvedOptions resolvedOptions 0
+Intl.DisplayNames.supportedLocalesOf supportedLocalesOf 1
+Intl.ListFormat.prototype.format format 1
+Intl.ListFormat.supportedLocalesOf supportedLocalesOf 1
+Intl.Locale.prototype.toString toString 0
+Intl.Locale.prototype.maximize maximize 0
+Intl.Locale.prototype.minimize minimize 0
+Intl.NumberFormat.prototype.formatToParts formatToParts 1
+Intl.NumberFormat.prototype.formatRange formatRange 2
+Intl.NumberFormat.prototype.formatRangeToParts formatRangeToParts 2
+Intl.NumberFormat.prototype.resolvedOptions resolvedOptions 0
+Intl.NumberFormat.supportedLocalesOf supportedLocalesOf 1
+Intl.PluralRules.prototype.select select 1
+Intl.PluralRules.prototype.selectRange selectRange 2
+Intl.PluralRules.prototype.resolvedOptions resolvedOptions 0
+Intl.PluralRules.supportedLocalesOf supportedLocalesOf 1
+Intl.RelativeTimeFormat.prototype.format format 2
+Intl.RelativeTimeFormat.prototype.formatToParts formatToParts 2
+Intl.RelativeTimeFormat.prototype.resolvedOptions resolvedOptions 0
+Intl.RelativeTimeFormat.supportedLocalesOf supportedLocalesOf 1
+Intl.Segmenter.prototype.segment segment 1
+Intl.Segmenter.prototype.resolvedOptions resolvedOptions 0
+Intl.Segmenter.supportedLocalesOf supportedLocalesOf 1"#;
+    assert_eq!(it.out.join("\n"), expected);
+}
+
 /// Startup cost of `Interp::new()` (run with `--ignored --nocapture`; not a pass/fail check).
 #[test]
 #[ignore]
