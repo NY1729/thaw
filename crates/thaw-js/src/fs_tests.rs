@@ -441,3 +441,51 @@ fn fd_open_numeric_invalid_bits_are_einval() {
     assert_eq!(call("fd_open", &path, "#abc,438")["code"], "EINVAL");
     assert_eq!(call("fd_open", &path, "#3,438")["code"], "EINVAL");
 }
+
+/// One entry flips directory<->file with no pause (the QuickJS host has the same churn test):
+/// a directory that becomes a file (ENOTDIR) or loses a child (ENOENT) mid-recursion is skipped.
+#[cfg(unix)]
+#[test]
+fn readdir_recursive_survives_directory_flipping_to_file() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let d = scratch("readdir-flip");
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let churn = {
+        let (flip, stop) = (d.join("flip"), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = std::fs::create_dir_all(flip.join("inner"));
+                let _ = std::fs::remove_dir_all(&flip);
+                let _ = std::fs::write(&flip, b"x");
+                let _ = std::fs::remove_file(&flip);
+            }
+        })
+    };
+    let mut failure = None;
+    for round in 0..4000 {
+        let result = call_recursive("readdir", &d, "typed");
+        if result["ok"] != true {
+            failure = Some((round, result.to_string()));
+            break;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    churn.join().unwrap();
+    assert!(
+        failure.is_none(),
+        "recursive readdir failed on a dir<->file flip: {failure:?}"
+    );
+}
+
+/// An unreadable subdirectory is a real error, not a vanished entry: the listing must still fail.
+#[cfg(unix)]
+#[test]
+fn readdir_recursive_still_reports_unreadable_subdirectory() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = scratch("readdir-eacces");
+    std::fs::create_dir(d.join("locked")).unwrap();
+    std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = call_recursive("readdir", &d, "typed");
+    std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(result["code"], "EACCES");
+}
