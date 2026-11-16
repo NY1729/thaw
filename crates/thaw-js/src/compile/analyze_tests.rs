@@ -545,6 +545,8 @@ fn stats_follow_the_cstate_transitions() {
                function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2) } \
                add(1, 2); add(3, 4); add(5, 6); fib(5);";
     let mut it = Interp::with_compile_mode(CompileMode::On);
+    // pinned: the counts below assume the default threshold, whatever `THAW_JS_COMPILE_AFTER` says
+    it.compile_after = super::DEFAULT_AFTER;
     it.run(src).unwrap();
     let s = &it.cstats;
     assert_eq!(s.calls(), 18);

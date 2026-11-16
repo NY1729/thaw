@@ -109,6 +109,23 @@ fn runtime_realm_defaults_to_on_and_new_stays_off() {
     assert_eq!(Interp::new().compile_mode, CompileMode::Off);
 }
 
+/// The env picks the mode for user code only: a fresh `Interp::new()` analyses and counts no prelude function,
+/// whatever `THAW_JS_COMPILE` says, and its pools start empty.
+#[test]
+fn fresh_realm_counts_no_prelude_function_under_env() {
+    let it = Interp::new();
+    let mode = std::env::var("THAW_JS_COMPILE").ok();
+    let after = std::env::var("THAW_JS_COMPILE_AFTER").ok();
+    assert_eq!(it.compile_mode, CompileMode::parse(mode.as_deref()));
+    assert_eq!(it.compile_after, parse_after(after.as_deref()));
+    let s = &it.cstats;
+    assert_eq!(s.eligible, 0);
+    assert_eq!(s.rejected, [0; FallbackReason::COUNT]);
+    assert_eq!((s.calls, s.compiled, s.compiled_calls), (0, 0, 0));
+    assert!(it.frame_pool.is_empty());
+    assert!(it.arg_pool.is_empty());
+}
+
 /// W1: a function whose body has a loop is compiled on its first call, not on the `compile_after`-th call.
 #[test]
 fn loop_function_compiles_on_first_call() {
@@ -128,6 +145,7 @@ fn loop_function_compiles_on_first_call() {
 fn loop_free_function_still_waits_for_threshold() {
     let src = "function add(a, b) { return a + b; } console.log(add(1, 2));";
     let mut it = Interp::with_compile_mode(CompileMode::On);
+    it.compile_after = DEFAULT_AFTER; // pinned, whatever `THAW_JS_COMPILE_AFTER` says
     assert!(it.run(src).is_ok());
     assert_eq!(it.out, vec!["3".to_string()]);
     assert_eq!(it.cstats.compiled, 0);
@@ -138,6 +156,7 @@ fn loop_free_function_still_waits_for_threshold() {
 fn loop_in_nested_function_does_not_count_for_outer() {
     let src = "function outer() { const f = () => { for (let i = 0; i < 2; i++) {} }; return typeof f; } console.log(outer());";
     let mut it = Interp::with_compile_mode(CompileMode::On);
+    it.compile_after = DEFAULT_AFTER; // pinned, whatever `THAW_JS_COMPILE_AFTER` says
     assert!(it.run(src).is_ok());
     assert_eq!(it.out, vec!["function".to_string()]);
     assert_eq!(it.cstats.compiled, 0);
