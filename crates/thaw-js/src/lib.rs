@@ -5118,6 +5118,7 @@ impl Interp {
 impl Drop for Interp {
     fn drop(&mut self) {
         ipc::forget_realm(self.realm_id);
+        crate::atomics::forget_realm(self.realm_id);
         self.teardown();
     }
 }

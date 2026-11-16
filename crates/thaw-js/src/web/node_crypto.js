@@ -594,4 +594,5 @@ Object.assign(cryptoModule, { KeyObject: KeyObject, createSecretKey: createSecre
 def(globalThis, '__thaw_Hash', Hash); // globals so the scan knows update/digest/copy
 def(globalThis, '__thaw_Hmac', Hmac);
 def(globalThis, '__thaw_Cipheriv', Cipheriv);
+Object.defineProperty(cryptoModule, 'subtle', { get: function () { return webCrypto.subtle; }, enumerable: true }); // Node 22: module-level subtle is webcrypto.subtle
 def(globalThis, '__thaw_crypto_module', cryptoModule);

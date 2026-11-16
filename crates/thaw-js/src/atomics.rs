@@ -1,11 +1,14 @@
 //! Atomics on SharedArrayBuffer memory (plan A3). The JS prelude (extras.rs) sends a SharedArrayBuffer here: `__thaw_atomic`
 //! runs one read-modify-write as a real atomic op on the shared block, and `__thaw_atomics_wait` / `__thaw_atomics_notify`
-//! park and wake threads by absolute address. A non-shared buffer never reaches these natives.
+//! park and wake threads by absolute address. `__thaw_atomics_wait_async` queues a waiter that does not block: its
+//! promise settles from the loop (`poll_async`). A non-shared buffer never reaches these natives.
 
 use crate::typed::{Ty, TypedArr};
 use crate::*;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicI32, AtomicU16, AtomicU32, AtomicU8, Ordering::SeqCst};
+use std::sync::atomic::{
+    AtomicI32, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering::SeqCst,
+};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -18,10 +21,23 @@ struct Waiter {
     cv: Condvar,
 }
 
-/// Parked waiters by absolute element address, FIFO per address. A wait checks its value and queues itself under this
-/// lock; a notify pops and wakes under it. So a store that a notify follows cannot slip between a waiter's check and
-/// its park: either the waiter sees the new value or it is queued when the notify runs.
-static PARK: Mutex<BTreeMap<usize, VecDeque<Arc<Waiter>>>> = Mutex::new(BTreeMap::new());
+/// A parked waiter: a thread in `Atomics.wait`, or an `Atomics.waitAsync` waiter of realm `realm` (id `id`).
+enum Slot {
+    Sync(Arc<Waiter>),
+    Async { realm: usize, id: u64 },
+}
+
+/// Parked waiters by absolute element address, FIFO per address (sync and async waiters share one queue). A wait checks
+/// its value and queues itself under this lock; a notify pops and wakes under it. So a store that a notify follows
+/// cannot slip between a waiter's check and its park: either the waiter sees the new value or it is queued when the
+/// notify runs.
+static PARK: Mutex<BTreeMap<usize, VecDeque<Slot>>> = Mutex::new(BTreeMap::new());
+
+/// Async waiters a notify took, not yet delivered to their realm by `poll_async`: (realm, id). Taken under `PARK`.
+static ASYNC_DONE: Mutex<Vec<(usize, u64)>> = Mutex::new(Vec::new());
+/// Async waiters that are queued or taken but not yet delivered, on any thread. Zero means no realm has work to poll.
+static ASYNC_OPEN: AtomicUsize = AtomicUsize::new(0);
+static NEXT_ASYNC_ID: AtomicU64 = AtomicU64::new(1);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -137,7 +153,7 @@ fn unpark(addr: usize, waiter: &Arc<Waiter>) -> bool {
         return false;
     };
     let before = queue.len();
-    queue.retain(|w| !Arc::ptr_eq(w, waiter));
+    queue.retain(|s| !matches!(s, Slot::Sync(w) if Arc::ptr_eq(w, waiter)));
     let removed = queue.len() != before;
     if queue.is_empty() {
         park.remove(&addr);
@@ -175,7 +191,9 @@ pub(crate) fn wait(it: &mut Interp, a: &[Value]) -> R<Value> {
         if now != value {
             return Ok(Value::str("not-equal"));
         }
-        park.entry(addr).or_default().push_back(waiter.clone());
+        park.entry(addr)
+            .or_default()
+            .push_back(Slot::Sync(waiter.clone()));
     }
     let mut woken = lock(&waiter.woken);
     loop {
@@ -222,13 +240,114 @@ pub(crate) fn notify(it: &mut Interp, a: &[Value]) -> R<Value> {
         return Ok(Value::Number(0.0));
     };
     let n = (count.min(queue.len() as f64)) as usize;
-    let taken: Vec<Arc<Waiter>> = queue.drain(..n).collect();
+    let taken: Vec<Slot> = queue.drain(..n).collect();
     if queue.is_empty() {
         park.remove(&addr);
     }
-    for w in &taken {
-        *lock(&w.woken) = true;
-        w.cv.notify_one();
+    for slot in taken {
+        match slot {
+            Slot::Sync(w) => {
+                *lock(&w.woken) = true;
+                w.cv.notify_one();
+            }
+            Slot::Async { realm, id } => lock(&ASYNC_DONE).push((realm, id)),
+        }
     }
     Ok(Value::Number(n as f64))
+}
+
+/// Removes the queued async waiters that `pred(realm, id)` matches from `PARK`; returns how many. Those waiters are
+/// no longer open (nothing will deliver them).
+fn take_async(pred: impl Fn(usize, u64) -> bool) -> usize {
+    let mut park = lock(&PARK);
+    let mut removed = 0;
+    park.retain(|_, queue| {
+        queue.retain(|s| match s {
+            Slot::Async { realm, id } if pred(*realm, *id) => {
+                removed += 1;
+                false
+            }
+            _ => true,
+        });
+        !queue.is_empty()
+    });
+    ASYNC_OPEN.fetch_sub(removed, SeqCst);
+    removed
+}
+
+/// `__thaw_atomics_wait_async(ta, index, value, immediate)` on a shared Int32Array (the JS prelude checked the kind and
+/// the index): 'not-equal' when the element is not `value`; 'timed-out' when it is and `immediate` (the timeout is <= 0);
+/// otherwise it queues an async waiter of this realm and returns its id, which the prelude's timer or the notify settles.
+pub(crate) fn wait_async(it: &mut Interp, a: &[Value]) -> R<Value> {
+    let ta = integer_view(it, &arg(a, 0))?;
+    let k = it.num(&arg(a, 1)) as usize;
+    let value = wrap_bits(it.num(&arg(a, 2))) as i32;
+    let immediate = arg(a, 3).truthy();
+    let addr = element_addr(it, &ta, k)?;
+    let mut park = lock(&PARK);
+    // SAFETY: an aligned i32 element inside the live view (`element_addr`); the load is atomic.
+    let now = unsafe { AtomicI32::from_ptr(addr as *mut i32) }.load(SeqCst);
+    if now != value {
+        return Ok(Value::str("not-equal"));
+    }
+    if immediate {
+        return Ok(Value::str("timed-out"));
+    }
+    let id = NEXT_ASYNC_ID.fetch_add(1, SeqCst);
+    park.entry(addr).or_default().push_back(Slot::Async {
+        realm: it.realm_id,
+        id,
+    });
+    ASYNC_OPEN.fetch_add(1, SeqCst);
+    Ok(Value::Number(id as f64))
+}
+
+/// `__thaw_atomics_cancel(id)`: an async waiter's timeout takes it off the queue. True when it was still queued (the
+/// timeout wins: the caller settles 'timed-out'); false when a notify took it first (its 'ok' comes from `poll_async`).
+pub(crate) fn cancel(it: &mut Interp, a: &[Value]) -> R<Value> {
+    let id = it.num(&arg(a, 0)) as u64;
+    Ok(Value::Bool(take_async(|_, w| w == id) == 1))
+}
+
+/// The async waiters of realm `it` that a notify took since the last poll, as a JSON array of ids ("[]" when none).
+/// The event loop hands it to the prelude's `__thaw_waitasync_dispatch`, so a settle is a loop turn, not a microtask.
+pub(crate) fn poll_async(it: &Interp) -> String {
+    if ASYNC_OPEN.load(SeqCst) == 0 {
+        return "[]".to_string();
+    }
+    let mut ids = Vec::new();
+    lock(&ASYNC_DONE).retain(|&(realm, id)| {
+        if realm == it.realm_id {
+            ids.push(id);
+            false
+        } else {
+            true
+        }
+    });
+    ASYNC_OPEN.fetch_sub(ids.len(), SeqCst);
+    let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+    format!("[{}]", ids.join(","))
+}
+
+/// True while any realm has an async waiter queued or undelivered. An otherwise idle loop polls at 2 ms for it.
+pub(crate) fn async_pending() -> bool {
+    ASYNC_OPEN.load(SeqCst) > 0
+}
+
+/// True when realm `realm` has a waiter a notify took whose 'ok' is not yet delivered: the loop must run a turn for it.
+/// (A waiter still queued does not count, so a pending waitAsync does not keep the process alive.)
+pub(crate) fn delivery_pending(realm: usize) -> bool {
+    ASYNC_OPEN.load(SeqCst) > 0 && lock(&ASYNC_DONE).iter().any(|&(r, _)| r == realm)
+}
+
+/// A realm is being dropped: its queued async waiters leave the queue and its undelivered results are discarded.
+pub(crate) fn forget_realm(realm: usize) {
+    if ASYNC_OPEN.load(SeqCst) == 0 {
+        return;
+    }
+    take_async(|r, _| r == realm);
+    let mut done = lock(&ASYNC_DONE);
+    let before = done.len();
+    done.retain(|&(r, _)| r != realm);
+    ASYNC_OPEN.fetch_sub(before - done.len(), SeqCst);
 }

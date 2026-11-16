@@ -1361,7 +1361,7 @@ fn routed_error_factory_runs_in_a_program_with_no_package() {
 /// derived from Node 22 semantics for that source). Cross-worker SAB sharing is not covered here.
 #[test]
 fn routed_shared_array_buffer_and_atomics_match_node() {
-    let cases: [(&str, &str, &str); 9] = [
+    let cases: [(&str, &str, &str); 11] = [
         (
             "sab-byte-length",
             "function main(): void { const b: SharedArrayBuffer = new SharedArrayBuffer(16); console.log(b.byteLength, b.slice(4).byteLength); }",
@@ -1401,6 +1401,16 @@ fn routed_shared_array_buffer_and_atomics_match_node() {
             "atomics-wait-main-thread",
             "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  console.log(Atomics.wait(ia, 0, 1, 0));\n  console.log(Atomics.wait(ia, 0, 0, 0));\n  console.log(Atomics.wait(ia, 0, 0, 5));\n}",
             "not-equal\ntimed-out\ntimed-out\n",
+        ),
+        (
+            "atomics-wait-async-shapes",
+            "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  const r1: any = Atomics.waitAsync(ia, 0, 1);\n  console.log(r1.async, r1.value, Object.keys(r1).join(','));\n  const r2: any = Atomics.waitAsync(ia, 0, 0, 0);\n  console.log(r2.async, r2.value);\n  console.log(Atomics.waitAsync.length, Atomics.waitAsync.name);\n  try { Atomics.waitAsync(new Int32Array(4), 0, 0, 0); } catch (e: any) { console.log('nonshared', e.constructor.name); }\n  const p: any = Atomics.waitAsync(ia, 0, 0, 10);\n  console.log(p.async, typeof p.value.then);\n}",
+            "false not-equal async,value\nfalse timed-out\n4 waitAsync\nnonshared TypeError\ntrue function\n",
+        ),
+        (
+            "atomics-wait-async-does-not-keep-the-process-alive",
+            "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  Atomics.waitAsync(ia, 0, 0, 200).value.then((v: any) => console.log('fired', v));\n  Atomics.waitAsync(ia, 0, 0).value.then((v: any) => console.log('fired inf', v));\n  console.log('end');\n}",
+            "end\n",
         ),
         (
             "text-decode-real-buffer-sources",

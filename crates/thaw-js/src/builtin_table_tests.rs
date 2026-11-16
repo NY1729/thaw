@@ -15,6 +15,26 @@ fn missing_path() -> std::path::PathBuf {
         .join(MISSING_FILE)
 }
 
+/// Intl rows the polyfill does not serve yet under `--features intl` (`owner<TAB>key`). Each row is
+/// removed when it is served; the test fails while a listed row is served but still here.
+const INTL_PENDING: &[&str] = &[
+    "Intl\tsupportedValuesOf",
+    "Intl.supportedValuesOf\tlength",
+    "Intl.supportedValuesOf\tname",
+    "Intl.ListFormat.prototype\tformatToParts",
+    "Intl.ListFormat.prototype\tresolvedOptions",
+    "Intl.Locale.prototype\tcalendars",
+    "Intl.Locale.prototype\tcaseFirst",
+    "Intl.Locale.prototype\tcollations",
+    "Intl.Locale.prototype\thourCycle",
+    "Intl.Locale.prototype\thourCycles",
+    "Intl.Locale.prototype\tnumberingSystems",
+    "Intl.Locale.prototype\tnumeric",
+    "Intl.Locale.prototype\ttextInfo",
+    "Intl.Locale.prototype\ttimeZones",
+    "Intl.Locale.prototype\tweekInfo",
+];
+
 /// The listed `owner<TAB>key` rows (comments and blank lines skipped).
 fn listed_missing() -> BTreeSet<String> {
     std::fs::read_to_string(missing_path())
@@ -32,6 +52,15 @@ fn own(o: &Obj, key: &str) -> Option<Prop> {
         .iter()
         .find(|p| &*p.key == key)
         .cloned()
+}
+
+/// `name`/`length` of closure `f`: its own prop when it has one, else the value synthesized on read
+/// (`synth_fn_own`), which is what a JS read of the closure sees.
+fn own_or_synth(f: &Obj, key: &str) -> Option<Value> {
+    own(f, key)
+        .as_ref()
+        .and_then(data)
+        .or_else(|| synth_fn_own(f, key))
 }
 
 fn data(p: &Prop) -> Option<Value> {
@@ -62,7 +91,11 @@ fn builtin_table_descriptors_match_node_and_missing_list_is_exact() {
             missing.insert(format!("{}\t{}", row.owner, row.key));
             continue;
         };
-        if !it.table_row_present(&o, &k, &row) {
+        // a closure's `name`/`length` is present when it is synthesized on read (`synth_fn_own`); the
+        // value itself is checked through the function row that owns it
+        let synthesized =
+            !row.accessor && matches!(&*k, "name" | "length") && synth_fn_own(&o, &k).is_some();
+        if !(synthesized || it.table_row_present(&o, &k, &row)) {
             missing.insert(format!("{}\t{}", row.owner, row.key));
             continue;
         }
@@ -106,12 +139,8 @@ fn builtin_table_descriptors_match_node_and_missing_list_is_exact() {
                     let (Some(Value::Object(f)), true) = (half, name != "-") else {
                         continue;
                     };
-                    let got_name = own(f, "name")
-                        .as_ref()
-                        .and_then(data)
-                        .as_ref()
-                        .and_then(text);
-                    let got_len = own(f, "length").as_ref().and_then(data);
+                    let got_name = own_or_synth(f, "name").as_ref().and_then(text);
+                    let got_len = own_or_synth(f, "length");
                     if got_name.as_deref() != Some(name)
                         || !matches!(got_len, Some(Value::Number(n)) if n == len)
                     {
@@ -130,21 +159,14 @@ fn builtin_table_descriptors_match_node_and_missing_list_is_exact() {
                 ));
                 continue;
             };
-            let len = own(&f, "length")
-                .as_ref()
-                .and_then(data)
-                .and_then(|v| match v {
-                    Value::Number(n) => Some(n),
-                    _ => None,
-                });
+            let len = own_or_synth(&f, "length").and_then(|v| match v {
+                Value::Number(n) => Some(n),
+                _ => None,
+            });
             if len != row.length {
                 failures.push(format!("{what}: length {len:?}, table {:?}", row.length));
             }
-            let name = own(&f, "name")
-                .as_ref()
-                .and_then(data)
-                .as_ref()
-                .and_then(text);
+            let name = own_or_synth(&f, "name").as_ref().and_then(text);
             if name.as_deref() != Some(row.name) {
                 failures.push(format!("{what}: name {name:?}, table {:?}", row.name));
             }
@@ -167,14 +189,34 @@ fn builtin_table_descriptors_match_node_and_missing_list_is_exact() {
         eprintln!("wrote {} missing rows", missing.len());
     } else {
         let listed = listed_missing();
+        let intl = cfg!(feature = "intl");
         for absent in missing.difference(&listed) {
             failures.push(format!("absent row not listed: {absent:?}"));
+        }
+        if intl {
+            // Under `intl` the Intl rows are served by the polyfill, so the list (built without Intl)
+            // cannot be exact for them. Every Intl row still absent must be in INTL_PENDING, and every
+            // INTL_PENDING row must still be absent: the list shrinks as rows are served.
+            let pending: BTreeSet<String> = INTL_PENDING.iter().map(|r| r.to_string()).collect();
+            for absent in missing.iter().filter(|r| r.starts_with("Intl")) {
+                if !pending.contains(absent) {
+                    failures.push(format!(
+                        "Intl row absent and not in INTL_PENDING: {absent:?}"
+                    ));
+                }
+            }
+            for row in pending.difference(&missing) {
+                failures.push(format!("INTL_PENDING row is served, remove it: {row:?}"));
+            }
         }
         for present in listed.difference(&missing) {
             // The `wasm` feature installs the real WebAssembly namespace (web/webassembly.js): its
             // listed rows are present, and the descriptor loop above has already compared each one
-            // with the table. The default build keeps the list exact.
-            if cfg!(feature = "wasm") && present.starts_with("WebAssembly") {
+            // with the table. The `intl` feature does the same for the Intl rows. The default build
+            // keeps the list exact.
+            if (cfg!(feature = "wasm") && present.starts_with("WebAssembly"))
+                || (intl && present.starts_with("Intl"))
+            {
                 continue;
             }
             failures.push(format!("listed row is present: {present:?}"));
@@ -317,6 +359,71 @@ Intl.RelativeTimeFormat.supportedLocalesOf supportedLocalesOf 1
 Intl.Segmenter.prototype.segment segment 1
 Intl.Segmenter.prototype.resolvedOptions resolvedOptions 0
 Intl.Segmenter.supportedLocalesOf supportedLocalesOf 1"#;
+    assert_eq!(it.out.join("\n"), expected);
+}
+
+/// Intl constructor shapes against Node 22.23.1: call without `new`, bound `format`/`compare` accessors,
+/// `Symbol.toStringTag` and the absent `Intl.DurationFormat`. The expected text is the stdout of
+/// `node shapes_probe.js` (the script below, which ends in `console.log`). Instance internals (`Object.keys`,
+/// own `_` fields) are not checked here; they come with hiding the helpers.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_constructor_and_accessor_shapes_match_node_22() {
+    let mut it = Interp::new();
+    it.run(
+        r#"const out = [];
+const push = (...a) => out.push(a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' '));
+const nf = new Intl.NumberFormat('en');
+const dtf = new Intl.DateTimeFormat('en', { timeZone: 'UTC' });
+const col = new Intl.Collator('en');
+push('call', Intl.NumberFormat('en').format(1234.5), Intl.Collator('en').compare('a', 'b'), Intl.DateTimeFormat('en', { timeZone: 'UTC' }).format(0));
+push('instanceof', Intl.NumberFormat('en') instanceof Intl.NumberFormat, Intl.Collator() instanceof Intl.Collator);
+for (const n of ['PluralRules', 'ListFormat', 'RelativeTimeFormat', 'Segmenter', 'Locale']) {
+  let r; try { Intl[n]('en'); r = 'no throw'; } catch (e) { r = e.constructor.name; }
+  push('nonew', n, r);
+}
+push('map', [1, 2.5, 1000].map(nf.format).join('|'));
+push('sort', ['b', 'a'].sort(col.compare).join());
+push('tag', Object.prototype.toString.call(nf), Object.prototype.toString.call(dtf), Object.prototype.toString.call(col),
+  Object.prototype.toString.call(new Intl.PluralRules()), Object.prototype.toString.call(new Intl.ListFormat()),
+  Object.prototype.toString.call(new Intl.RelativeTimeFormat()), Object.prototype.toString.call(new Intl.Segmenter()),
+  Object.prototype.toString.call(new Intl.Locale('en')), Object.prototype.toString.call(new Intl.DisplayNames('en', { type: 'region' })));
+push('identity', nf.format === nf.format, col.compare === col.compare, dtf.format === dtf.format, nf.format === new Intl.NumberFormat('en').format);
+push('fnshape', nf.format.name, nf.format.length, col.compare.name, col.compare.length, dtf.format.name, dtf.format.length, typeof nf.format);
+push('noown', Object.prototype.hasOwnProperty.call(nf, 'format'), Object.prototype.hasOwnProperty.call(dtf, 'format'), Object.prototype.hasOwnProperty.call(col, 'compare'));
+const acc = Object.getOwnPropertyDescriptor(Intl.NumberFormat.prototype, 'format');
+push('accessor', typeof acc.get, typeof acc.set, acc.enumerable, acc.configurable, acc.get.name, acc.get.length);
+push('protodesc', Object.getOwnPropertyDescriptor(Intl.NumberFormat, 'prototype'), Object.getOwnPropertyDescriptor(Intl.NumberFormat.prototype, 'constructor').enumerable);
+push('ctor', Intl.NumberFormat.prototype.constructor === Intl.NumberFormat, Intl.Collator.prototype.constructor === Intl.Collator);
+let r1; try { acc.get.call({}); r1 = 'no throw'; } catch (e) { r1 = e.constructor.name; }
+push('brand', r1);
+push('durationformat', typeof Intl.DurationFormat);
+push('tagdesc', Object.getOwnPropertyDescriptor(Intl.Collator.prototype, Symbol.toStringTag));
+push('detached', [3, 1].map(col.compare), new Intl.NumberFormat('de-DE').format(1234.5));
+console.log(out.join('\n'));
+"#,
+    )
+    .expect("probe runs");
+    let expected = r#"call 1,234.5 -1 1/1/1970
+instanceof true true
+nonew PluralRules TypeError
+nonew ListFormat TypeError
+nonew RelativeTimeFormat TypeError
+nonew Segmenter TypeError
+nonew Locale TypeError
+map 1|2.5|1,000
+sort a,b
+tag [object Intl.NumberFormat] [object Intl.DateTimeFormat] [object Intl.Collator] [object Intl.PluralRules] [object Intl.ListFormat] [object Intl.RelativeTimeFormat] [object Intl.Segmenter] [object Intl.Locale] [object Intl.DisplayNames]
+identity true true true false
+fnshape  1  2  1 function
+noown false false false
+accessor function undefined false true get format 0
+protodesc {"value":{},"writable":false,"enumerable":false,"configurable":false} false
+ctor true true
+brand TypeError
+durationformat undefined
+tagdesc {"value":"Intl.Collator","writable":false,"enumerable":false,"configurable":true}
+detached [1,0] 1.234,5"#;
     assert_eq!(it.out.join("\n"), expected);
 }
 

@@ -41,7 +41,7 @@ if (typeof Atomics === 'object' && typeof Atomics.waitAsync !== 'function') {
     return list;
   }
 
-  Atomics.waitAsync = function (typedArray, index, value, timeout) {
+  Atomics.waitAsync = function waitAsync(typedArray, index, value, timeout) {
     const [buffer, offset, element] = location(typedArray, index);
     // Spec order: convert the expected value, then the timeout, then compare.
     const expected = typedArray instanceof Int32Array ? value | 0 : BigInt.asIntN(64, toBigInt(value));
@@ -68,6 +68,8 @@ if (typeof Atomics === 'object' && typeof Atomics.waitAsync !== 'function') {
         }
         settle('timed-out');
       }, delay);
+      // Node: a pending waitAsync never keeps the process alive
+      if (waiter.timer && typeof waiter.timer.unref === 'function') waiter.timer.unref();
     }
     return { async: true, value: valuePromise };
   };
