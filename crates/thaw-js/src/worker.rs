@@ -7,12 +7,13 @@
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use crate::builtins::json_quote;
+use crate::typed::SabBlock;
 use crate::*;
 
 /// Stack reserved for a worker's JS (virtual memory, committed on use).
@@ -66,6 +67,42 @@ pub(crate) struct WorkerState {
     next: u32,
     workers: BTreeMap<u32, Worker>,
     side: Option<Side>,
+}
+
+/// SharedArrayBuffer blocks in flight between Interps: the wire carries only the id. An encode enters the block
+/// under a new id, the one decode that reads that wire takes it out (`sab_import`), and `release_wire` takes out
+/// the ones a wire nobody decodes would have carried.
+static SAB_IN_FLIGHT: Mutex<BTreeMap<u64, Arc<SabBlock>>> = Mutex::new(BTreeMap::new());
+static SAB_NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn sab_table() -> MutexGuard<'static, BTreeMap<u64, Arc<SabBlock>>> {
+    SAB_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Enters `block` for one wire; returns the id that wire carries.
+pub(crate) fn sab_export(block: Arc<SabBlock>) -> u64 {
+    let id = SAB_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    sab_table().insert(id, block);
+    id
+}
+
+/// Takes the block of a wire node (once: the decode that reads the node owns the reference now).
+pub(crate) fn sab_import(id: u64) -> Option<Arc<SabBlock>> {
+    sab_table().remove(&id)
+}
+
+/// Releases the blocks a wire carries when nobody will decode it. The wire is JSON and quotes inside strings are
+/// escaped, so every `"t":"SAB","id":N` found here is a node the encoder wrote.
+pub(crate) fn release_wire(wire: &str) {
+    const NODE: &str = r#""t":"SAB","id":"#;
+    let mut rest = wire;
+    while let Some(at) = rest.find(NODE) {
+        rest = &rest[at + NODE.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(id) = digits.parse::<u64>() {
+            sab_table().remove(&id);
+        }
+    }
 }
 
 fn quoted(s: &str) -> String {
@@ -149,7 +186,16 @@ fn run_worker(
             capture_out: false,
             capture_err: false,
         });
-        run_script(&mut it, source, opts)
+        let code = run_script(&mut it, source, opts);
+        // messages the parent sent that this worker never read still carry their blocks
+        if let Some(side) = &it.worker.side {
+            while let Ok(cmd) = side.rx.try_recv() {
+                if let Cmd::Message(v) = cmd {
+                    release_wire(&v);
+                }
+            }
+        }
+        code
     }))
     .unwrap_or(1);
     let _ = exit_tx.send(Evt::Exit(code));
@@ -247,6 +293,12 @@ pub(crate) fn poll(it: &mut Interp) -> String {
     }
     it.worker.workers.retain(|_, w| {
         if w.exited {
+            // events the parent never polled still carry their blocks
+            while let Ok(e) = w.rx.try_recv() {
+                if let Evt::Message(v) | Evt::Error(v) = e {
+                    release_wire(&v);
+                }
+            }
             if let Some(j) = w.join.take() {
                 let _ = j.join();
             }

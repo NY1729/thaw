@@ -5,6 +5,7 @@ use crate::*;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Ty {
@@ -84,6 +85,64 @@ const ALL: [Ty; 11] = [
     Ty::U64,
 ];
 
+/// The memory of a SharedArrayBuffer. Every store over it (`sab_store`) and every in-flight wire that names it
+/// (worker.rs) holds an `Arc`, so the memory lives while any of them does.
+///
+/// SAFETY invariants (the unsafe code is `new_sab_block`, `sab_store`, `Store::drop` and `SabBlock::drop`):
+/// 1. A SAB store's `cell` is a `Vec<u8>` aliasing `[ptr, ptr + len)` with capacity `len`. That Vec is never
+///    dropped, reallocated, resized, shrunk or replaced: `Store::drop` forgets it, `detach_bytes` leaves a shared
+///    store alone, and no code calls a length-changing method on a store's Vec (test
+///    `grep_guard_no_length_change_on_a_sab_backed_vec`).
+/// 2. The allocation is freed only by `SabBlock::drop`, when the last `Arc` goes.
+/// 3. `ptr` comes from a `u64` allocation, so it is 8-byte aligned; element offsets that are multiples of the
+///    element size are aligned for atomic access.
+/// 4. The length is fixed for the block's lifetime (SharedArrayBuffer growth is not supported).
+/// 5. Two threads may touch the bytes at once through their own stores, so racing plain accesses are a data race in
+///    Rust's model. ponytail: accepted because JS permits racy SAB access and the hot path has no atomic branch;
+///    upgrade path: relaxed atomic bytes in `TypedArr::{get,set}` when `store.sab` is set.
+pub(crate) struct SabBlock {
+    ptr: *mut u64,
+    words: usize,
+    len: usize,
+}
+
+// SAFETY: raw memory that every holder reaches only through its store, under the invariants above.
+unsafe impl Send for SabBlock {}
+unsafe impl Sync for SabBlock {}
+
+impl Drop for SabBlock {
+    fn drop(&mut self) {
+        // SAFETY: `ptr` and `words` are the `Box::into_raw` of `new_sab_block`, and the Vec aliases were forgotten
+        // (invariant 1), so this is the only free.
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(self.ptr, self.words)) });
+    }
+}
+
+/// A zeroed block of `len` bytes.
+pub(crate) fn new_sab_block(len: usize) -> Arc<SabBlock> {
+    let words = len.div_ceil(8);
+    let ptr = Box::into_raw(vec![0u64; words].into_boxed_slice()) as *mut u64;
+    Arc::new(SabBlock { ptr, words, len })
+}
+
+/// A zeroed SharedArrayBuffer storage of `len` bytes.
+pub(crate) fn new_sab_bytes(len: usize) -> Bytes {
+    sab_store(new_sab_block(len))
+}
+
+/// An attached storage over `block`: the same bytes as every other store of the block.
+pub(crate) fn sab_store(block: Arc<SabBlock>) -> Bytes {
+    // SAFETY: the Vec aliases the block's allocation (`words * 8 >= len` bytes, so `len` bytes are live). It is
+    // never dropped (invariant 1), which is why its allocation layout (align 8) never has to match a `Vec<u8>`'s.
+    let alias = unsafe { Vec::from_raw_parts(block.ptr.cast::<u8>(), block.len, block.len) };
+    Rc::new(Store {
+        cell: RefCell::new(alias),
+        shared: None,
+        detached: Cell::new(false),
+        sab: Some(block),
+    })
+}
+
 /// An ArrayBuffer's storage. `detached` is set by `detach_bytes` (ArrayBuffer.prototype.transfer and
 /// the wasm memory grow path); a detached store is empty and its views clamp to length 0.
 #[derive(Default)]
@@ -93,6 +152,17 @@ pub(crate) struct Store {
     /// The owner empties it when the memory is replaced, which is how a stale view sees length 0.
     shared: Option<Rc<RefCell<Vec<u8>>>>,
     detached: Cell<bool>,
+    /// The block of a SharedArrayBuffer; `cell` then aliases it (see `SabBlock`).
+    sab: Option<Arc<SabBlock>>,
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        if self.sab.is_some() {
+            // invariant 1: the alias must not free the block; `sab` then drops its Arc
+            std::mem::forget(std::mem::take(self.cell.get_mut()));
+        }
+    }
 }
 
 impl std::ops::Deref for Store {
@@ -113,6 +183,7 @@ pub(crate) fn new_bytes(v: Vec<u8>) -> Bytes {
         cell: RefCell::new(v),
         shared: None,
         detached: Cell::new(false),
+        sab: None,
     })
 }
 
@@ -123,12 +194,18 @@ pub(crate) fn shared_bytes(shared: Rc<RefCell<Vec<u8>>>) -> Bytes {
         cell: RefCell::new(Vec::new()),
         shared: Some(shared),
         detached: Cell::new(false),
+        sab: None,
     })
 }
 
 /// Detach a storage: its bytes are released (length 0) and it reports `detached`. Idempotent.
 /// A shared storage keeps its bytes (the engine owns them); only the flag changes.
 pub(crate) fn detach_bytes(b: &Bytes) {
+    // a SharedArrayBuffer is never detached: its Vec aliases a shared block (invariant 1)
+    if b.sab.is_some() {
+        debug_assert!(false, "detach_bytes on a SharedArrayBuffer");
+        return;
+    }
     if b.shared.is_none() {
         *b.cell.borrow_mut() = Vec::new();
     }
@@ -367,9 +444,13 @@ impl Interp {
         new_obj(self.rt.arraybuffer_proto.clone(), Kind::ArrayBuffer(data))
     }
 
-    /// A SharedArrayBuffer: the same storage kind as an ArrayBuffer under its own prototype.
-    // ponytail: no cross-worker sharing; a SAB handed to a worker is a copy (worker_wire.js refuses it).
-    fn new_shared_buffer(&self, data: Bytes) -> Obj {
+    /// A SharedArrayBuffer: the same storage kind as an ArrayBuffer under its own prototype, over a shared block
+    /// (`new_sab_bytes` / `sab_store`); the prototype and the block are the two faces of one fact.
+    pub(crate) fn new_shared_buffer(&self, data: Bytes) -> Obj {
+        debug_assert!(
+            data.sab.is_some(),
+            "a SharedArrayBuffer is over a shared block"
+        );
         new_obj(
             self.rt.sharedarraybuffer_proto.clone(),
             Kind::ArrayBuffer(data),
@@ -442,11 +523,10 @@ impl Interp {
         if !(0.0..=2f64.powi(32)).contains(&n) {
             return self.throw_error("RangeError", "Array buffer allocation failed");
         }
-        let data: Bytes = new_bytes(vec![0; n as usize]);
         let obj = if shared {
-            self.new_shared_buffer(data)
+            self.new_shared_buffer(new_sab_bytes(n as usize))
         } else {
-            self.new_array_buffer(data)
+            self.new_array_buffer(new_bytes(vec![0; n as usize]))
         };
         Ok(Value::Object(obj))
     }
@@ -679,9 +759,27 @@ impl Interp {
                 return it.throw_error("TypeError", "Receiver is not a SharedArrayBuffer");
             };
             let out = Self::slice_bytes(it, &data, a);
-            Ok(Value::Object(it.new_shared_buffer(new_bytes(out))))
+            let copy = new_sab_bytes(out.len());
+            copy.borrow_mut().copy_from_slice(&out);
+            Ok(Value::Object(it.new_shared_buffer(copy)))
         });
         g.declare("SharedArrayBuffer", sab, true);
+        // the wire and structuredClone move a block between Interps as an id (the table is in worker.rs)
+        let export = self.native(|it, _, a| {
+            let Some(block) = Self::bytes_of_buffer(&arg(a, 0)).and_then(|b| b.sab.clone()) else {
+                return it.throw_error("TypeError", "value is not a SharedArrayBuffer");
+            };
+            Ok(Value::Number(crate::worker::sab_export(block) as f64))
+        });
+        g.declare("__thaw_sab_export", export, true);
+        let import = self.native(|it, _, a| {
+            let id = it.num(&arg(a, 0)) as u64;
+            match crate::worker::sab_import(id) {
+                Some(block) => Ok(Value::Object(it.new_shared_buffer(sab_store(block)))),
+                None => it.throw_error("TypeError", "unknown SharedArrayBuffer id"),
+            }
+        });
+        g.declare("__thaw_sab_import", import, true);
 
         // ----- typed arrays -----
         let ta_proto = self.plain(); // %TypedArray%.prototype: methods come from the JS prelude
