@@ -1,0 +1,7 @@
+1 initEvent
+b false false
+c false false
+no args true ERR_MISSING_ARGS
+during dispatch z false true
+after dispatch z false true
+cc 5 true true
