@@ -39,6 +39,13 @@
       stopImmediatePropagation() { this.__thawImmediateStopped = true; }
     };
     Object.defineProperty(globalThis.Event.prototype, Symbol.toStringTag, { value: 'Event', configurable: true });
+    // Node defines the phase constants on the constructor only, not on Event.prototype.
+    Object.defineProperties(globalThis.Event, {
+      NONE: { value: 0, enumerable: true },
+      CAPTURING_PHASE: { value: 1, enumerable: true },
+      AT_TARGET: { value: 2, enumerable: true },
+      BUBBLING_PHASE: { value: 3, enumerable: true },
+    });
   }
   if (typeof globalThis.CustomEvent !== 'function') {
     globalThis.CustomEvent = class CustomEvent extends globalThis.Event {
