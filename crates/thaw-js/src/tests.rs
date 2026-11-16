@@ -9600,3 +9600,48 @@ fn global_object_has_global_to_string_tag_only_in_the_host_realm() {
         "[object global] {\"value\":\"global\",\"writable\":false,\"enumerable\":false,\"configurable\":true}"
     );
 }
+
+/// gOPD / hasOwnProperty / Object.hasOwn / propertyIsEnumerable on a key that is not an own property
+/// must not run an inherited accessor (the receiver would be the inspected object, the result discarded).
+#[test]
+fn descriptor_lookup_does_not_invoke_inherited_getters() {
+    let src = r#"
+      var calls = 0, seen = [];
+      var P = {};
+      Object.defineProperty(P, 'value', { get() { calls++; seen.push(this === t); return 1; }, configurable: true });
+      var t = Object.create(P); t.n = 1;
+      var px = new Proxy(t, {});
+      console.log(Object.getOwnPropertyDescriptor(t, 'value'), Object.prototype.hasOwnProperty.call(t, 'value'), Object.hasOwn(t, 'value'), t.propertyIsEnumerable('value'), Object.getOwnPropertyDescriptor(px, 'value'), Object.prototype.hasOwnProperty.call(px, 'value'), Object.hasOwn(px, 'value'), px.propertyIsEnumerable('value'), calls, seen.length);
+      Object.defineProperty(Array.prototype, 'tag', { get() { calls++; return 1; }, configurable: true });
+      var a = [1, 2];
+      console.log(Object.getOwnPropertyDescriptor(a, 'tag'), Object.prototype.hasOwnProperty.call(a, 'tag'), Object.hasOwn(a, 'tag'), a.propertyIsEnumerable('tag'), Object.getOwnPropertyDescriptor([], 'map'), calls);
+      delete Array.prototype.tag;
+    "#;
+    // Node 22 prints the same two lines.
+    assert_eq!(
+        run(src),
+        vec![
+            "undefined false false false undefined false false false 0 0",
+            "undefined false false false undefined 0",
+        ]
+    );
+}
+
+/// Array index / length descriptors are served from the array items and keep their attributes.
+/// Node 22 output for `[1,,3]['1']` is undefined (a hole), `[5]['length']` and `[5]['0']` as printed.
+#[test]
+fn array_index_and_length_descriptors_are_unchanged() {
+    let src = r#"
+      console.log(JSON.stringify(Object.getOwnPropertyDescriptor([1,,3], '1')));
+      console.log(JSON.stringify(Object.getOwnPropertyDescriptor([5], 'length')));
+      console.log(JSON.stringify(Object.getOwnPropertyDescriptor([5], '0')));
+    "#;
+    assert_eq!(
+        run(src),
+        vec![
+            "undefined",
+            r#"{"value":1,"writable":true,"enumerable":false,"configurable":false}"#,
+            r#"{"value":5,"writable":true,"enumerable":true,"configurable":true}"#,
+        ]
+    );
+}
