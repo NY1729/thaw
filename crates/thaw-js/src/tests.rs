@@ -2351,6 +2351,37 @@ var __thaw_bundle_entry_key = "h/index.js";
     assert_eq!(typed_call("held::make", "[]").unwrap(), r#"{"a":1}"#);
 }
 
+#[test]
+fn a_generator_result_of_the_typed_call_stays_a_live_handle() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    // a copy of a generator would be `{}`, and compiled code then calls `.next` on nothing
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "g/index.js": function(module, exports, require) {
+  exports.make = function () { return (function* () { yield 1; })(); };
+  exports.make_async = function () { return (async function* () { yield 1; })(); };
+  exports.step = function (g) { return g.next().value; };
+  exports.kind = function (g) { return typeof g.next; };
+}, };
+var __thaw_bundle_require_maps = { "g/index.js": {}, };
+var __thaw_bundle_entry_key = "g/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("gen").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let marker = typed_call("gen::make", "[]").unwrap();
+    assert!(marker.starts_with("{\"__thaw_tjs_handle__\":"), "{marker}");
+    assert_eq!(
+        typed_call("gen::step", &format!("[{marker}]")),
+        Ok("1".into())
+    );
+    let marker = typed_call("gen::make_async", "[]").unwrap();
+    assert!(marker.starts_with("{\"__thaw_tjs_handle__\":"), "{marker}");
+    assert_eq!(
+        typed_call("gen::kind", &format!("[{marker}]")),
+        Ok("\"function\"".into())
+    );
+}
+
 // ----- class instances as handles (`thaw_tjs_class_call`) -----
 
 const CLASS_BUNDLE: &str = r#"module.exports = (function(require){
