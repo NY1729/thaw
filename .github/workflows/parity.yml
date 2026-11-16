@@ -42,7 +42,7 @@ jobs:
           key: parity-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-arena/**') }}
           restore-keys: |
             parity-${{ runner.os }}-
-      - name: Build thaw-js-node runner (release, intl+wasm: run.sh rejects a build without them)
+      - name: Build thaw-js-node runner (release, with the intl and wasm features that run.sh requires)
         run: cargo build --release -p thaw-js --bin thaw-js-node --features intl,wasm
       - name: Harness self-test
         run: bash tools/parity/selftest.sh
