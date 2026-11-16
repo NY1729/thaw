@@ -69,6 +69,112 @@ fn zlib_one_shot_and_async_jobs_round_trip() {
     assert_eq!(out, "hello hello hello|brotli!|true 01020304");
 }
 
+/// Runs `src` to completion and returns the console lines (`it.out` is taken, not moved: Interp has Drop).
+fn udp_run(src: &str) -> String {
+    let mut it = Interp::new();
+    it.run(src).unwrap_or_else(|_| panic!("script must run"));
+    it.run_event_loop().unwrap_or_else(|_| panic!("event loop"));
+    std::mem::take(&mut it.out).join("|")
+}
+
+#[test]
+fn udp_loopback_bind_send_receive_close() {
+    let out = udp_run(
+        r#"
+        var a = __thaw_udp_bind('127.0.0.1', 0).split('|'); // ok|<handle>|<ip>|<port>
+        var c = __thaw_udp_bind('127.0.0.1', 0).split('|');
+        console.log(__thaw_udp_send(Number(c[1]), Buffer.from('hi').toString('hex'), '127.0.0.1', Number(a[3])));
+        (function poll() {
+          var r = __thaw_udp_receive(Number(a[1]));
+          if (r === 'pending') return setTimeout(poll, 1);
+          var p = r.split('|'); // ok|<hex>|<ip>|<port>|<length>
+          console.log(Buffer.from(p[1], 'hex').toString(), p[2], p[3] === c[3], p[4]);
+          console.log(__thaw_udp_close(Number(a[1])), __thaw_udp_receive(Number(a[1])));
+          __thaw_udp_close(Number(c[1]));
+        })();
+        "#,
+    );
+    assert_eq!(
+        out,
+        "ok|2|hi 127.0.0.1 true 2|undefined err|EBADF|socket is closed"
+    );
+}
+
+#[test]
+fn udp_bind_in_use_reports_eaddrinuse_like_node() {
+    // Node 22: `bind EADDRINUSE 127.0.0.1:<port>`, code EADDRINUSE, errno -98.
+    let out = udp_run(
+        r#"
+        var a = __thaw_udp_bind('127.0.0.1', 0).split('|');
+        var r = __thaw_udp_bind('127.0.0.1', Number(a[3]));
+        console.log(r === 'err|EADDRINUSE|bind EADDRINUSE 127.0.0.1:' + a[3]);
+        __thaw_udp_close(Number(a[1]));
+        "#,
+    );
+    assert_eq!(out, "true");
+}
+
+#[test]
+fn udp_connect_disconnect_broadcast_and_options() {
+    let out = udp_run(
+        r#"
+        var s = __thaw_udp_bind('127.0.0.1', 0).split('|'), h = Number(s[1]);
+        var t = __thaw_udp_bind('127.0.0.1', 0).split('|');
+        console.log(__thaw_udp_connect(h, '127.0.0.1', Number(t[3])), __thaw_udp_set_broadcast(h, true),
+          __thaw_udp_option(h, 'ttl', '5', '', ''), __thaw_udp_option(h, 'multicast_loop', '1', '', ''),
+          __thaw_udp_disconnect(h), __thaw_udp_close(h), __thaw_udp_close(Number(t[1])));
+        "#,
+    );
+    assert_eq!(out, "ok ok ok ok ok undefined undefined");
+}
+
+/// A receive pump shaped like the node:dgram shim's `_startReceive`: a timer per poll, unref'd when the socket is unref'd.
+/// After 200 ticks the pump prints `kept-alive` and closes the socket.
+fn udp_pump_script(unref: bool) -> String {
+    format!(
+        r#"
+        var s = __thaw_udp_bind('127.0.0.1', 0).split('|'), h = Number(s[1]), ticks = 0, timer = null;
+        function pump() {{
+          timer = null; ticks++;
+          if (ticks === 200) {{ console.log('kept-alive'); __thaw_udp_close(h); return; }}
+          __thaw_udp_receive(h);
+          timer = setTimeout(pump, 1);
+          if ({unref}) timer.unref();
+        }}
+        timer = setTimeout(pump, 1);
+        if ({unref}) timer.unref();
+        "#
+    )
+}
+
+/// The scan reports `global:<name>` for a bundle's free names that no interpreter global declares; the dgram natives must be among the declared ones.
+#[test]
+fn udp_natives_are_declared_globals_for_the_scan() {
+    let names = Interp::new().global_names();
+    for name in [
+        "__thaw_udp_bind",
+        "__thaw_udp_send",
+        "__thaw_udp_receive",
+        "__thaw_udp_connect",
+        "__thaw_udp_option",
+        "__thaw_udp_set_broadcast",
+        "__thaw_udp_disconnect",
+        "__thaw_udp_close",
+    ] {
+        assert!(names.iter().any(|n| n == name), "{name} is not a global");
+    }
+}
+
+#[test]
+fn udp_open_socket_with_a_ref_pump_keeps_the_loop_alive() {
+    assert_eq!(udp_run(&udp_pump_script(false)), "kept-alive");
+}
+
+#[test]
+fn udp_unref_pump_lets_the_event_loop_exit() {
+    assert_eq!(udp_run(&udp_pump_script(true)), "");
+}
+
 #[test]
 fn hpack_hash_and_timer_ref_hosts() {
     let out = run_ok(

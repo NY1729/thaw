@@ -258,7 +258,7 @@ pub(crate) fn object(g: &mut Gen, o: &a::ObjectLit) -> CG<Ex> {
             };
             let v = v(it, f)?;
             if *name_it {
-                crate::name_anonymous_fn(&v, &k);
+                crate::name_anonymous_fn(&v, &it.fn_name_of_key(&k));
             }
             put(&obj, &k, v);
         }
