@@ -153,7 +153,7 @@ fn js_bytes(bytes: &[u8]) -> String {
 /// Runs `src` and returns the console.log lines joined with `|` (or the uncaught error).
 fn run(src: &str) -> String {
     let mut it = Interp::new();
-    match it.run(src) {
+    match it.run_builtin(src) {
         Ok(_) => it.out.join("|"),
         Err(Ctl::Throw(v)) => format!("Uncaught {}", it.to_str(&v)),
         Err(_) => "stray completion".into(),

@@ -216,7 +216,7 @@ fn run_worker(
 fn run_script(it: &mut Interp, source: &str, opts: &str) -> i32 {
     it.global
         .declare("__thaw_worker_opts", Value::str(opts), true);
-    match it.run(BOOTSTRAP) {
+    match it.run_builtin(BOOTSTRAP) {
         Ok(_) => {}
         // terminate() arrived before the bootstrap finished: the worker exits with the interrupt's code
         Err(Ctl::Exit(code)) => return code,

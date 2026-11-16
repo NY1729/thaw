@@ -88,10 +88,10 @@ fn load(it: &mut Interp, loc: &MLoc) -> R<Value> {
 }
 
 /// `write_loc`
-fn store(it: &mut Interp, loc: &MLoc, v: Value) -> R<()> {
+fn store(it: &mut Interp, loc: &MLoc, v: Value, strict: bool) -> R<()> {
     match loc {
-        MLoc::Index(o, i) => it.set_index(o, *i, v),
-        MLoc::Prop(o, k) => it.set(o, k, v),
+        MLoc::Index(o, i) => it.set_index(o, *i, v, strict),
+        MLoc::Prop(o, k) => it.set_impl(o, k, v, strict),
     }
 }
 
@@ -135,7 +135,9 @@ pub(crate) fn assign(g: &mut Gen, m: &a::MemberExpr, asg: &a::AssignExpr) -> CG<
     let obj = expr::compile(g, &m.obj)?;
     let key = prop_key(g, &m.prop)?;
     let rhs = expr::compile(g, &asg.right)?;
+    let st = g.strict;
     Ok(mk_ex(move |it, f| {
+        let strict = super::write_strict(st, f);
         let o = obj(it, f)?;
         let loc = locate(it, f, o, &key)?;
         let v = match rmw {
@@ -158,7 +160,7 @@ pub(crate) fn assign(g: &mut Gen, m: &a::MemberExpr, asg: &a::AssignExpr) -> CG<
                 bx(combine(it, bop, &cur, &r))?
             }
         };
-        bx(store(it, &loc, v.clone()))?;
+        bx(store(it, &loc, v.clone(), strict))?;
         Ok(v)
     }))
 }
@@ -170,19 +172,21 @@ pub(crate) fn update(g: &mut Gen, m: &a::MemberExpr, inc: bool, prefix: bool) ->
     }
     let obj = expr::compile(g, &m.obj)?;
     let key = prop_key(g, &m.prop)?;
+    let st = g.strict;
     Ok(mk_ex(move |it, f| {
+        let strict = super::write_strict(st, f);
         let o = obj(it, f)?;
         let loc = locate(it, f, o, &key)?;
         let old = bx(load(it, &loc))?;
         if let Value::BigInt(b) = &old {
             let one = num_bigint::BigInt::from(1);
             let new = bigint::big(if inc { &**b + one } else { &**b - one });
-            bx(store(it, &loc, new.clone()))?;
+            bx(store(it, &loc, new.clone(), strict))?;
             return Ok(if prefix { new } else { old.clone() });
         }
         let n = it.num(&old);
         let new = if inc { n + 1.0 } else { n - 1.0 };
-        bx(store(it, &loc, Value::Number(new)))?;
+        bx(store(it, &loc, Value::Number(new), strict))?;
         Ok(Value::Number(if prefix { new } else { n }))
     }))
 }

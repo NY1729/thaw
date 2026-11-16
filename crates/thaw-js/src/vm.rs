@@ -150,6 +150,9 @@ fn run_in_sandbox(it: &mut Interp, realm: &mut VmRealm, sb: &Obj, code: &str) ->
 /// A `SyntaxError` in this realm if `code` does not parse. Parses a second time when it runs; fine
 /// for vm-sized scripts. ponytail: the parser's own message is dropped, add it when a test needs it.
 fn syntax_check(it: &mut Interp, code: &str) -> R<()> {
+    if crate::too_nested(code) {
+        return it.throw_error("RangeError", crate::STACK_OVERFLOW);
+    }
     match thaw_parser::parse_javascript_script(code) {
         Ok(_) => Ok(()),
         Err(_) => it.throw_error("SyntaxError", "Invalid or unexpected token"),

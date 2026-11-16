@@ -54,6 +54,6 @@ pub(crate) fn install(interp: &mut Interp) {
     interp.global.declare("__thaw_hash", hash, true);
     interp.global.declare("__thaw_random_fill", fill, true);
     interp
-        .run(&format!("(function () {{\n{SOURCE}\n}})();"))
+        .run_builtin(&format!("(function () {{\n{SOURCE}\n}})();"))
         .unwrap_or_else(|_| panic!("crypto prelude must evaluate"));
 }

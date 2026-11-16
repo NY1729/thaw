@@ -5,7 +5,7 @@
 
 use crate::eventloop::node_error;
 use crate::process_env::apply_dotenv;
-use crate::{arg, define_accessor, put, Ctl, Interp, Kind, Obj, Value, R};
+use crate::{arg, define_accessor, put, put_with, Ctl, Interp, Kind, Obj, Value, R};
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
 use std::io::Write;
@@ -95,6 +95,23 @@ thread_local! {
 impl Interp {
     /// Installs the table members on `p` (eventloop.rs `install_process`).
     pub(crate) fn install_process_members(&mut self, p: &Obj) {
+        // Node's EventEmitter internal flag, an own plain symbol of `process` (`process[Symbol(kCapture)]` is false).
+        // Installed before the table pass, so it precedes `Symbol.toStringTag` in `getOwnPropertySymbols`, as in Node.
+        let capture = self
+            .new_symbol(Some("kCapture".into()))
+            .unwrap_or_else(|_| panic!("thaw-js kCapture symbol must be created"));
+        if let Value::Object(s) = &capture {
+            if let Kind::Symbol { id, .. } = &*s.kind.borrow() {
+                put_with(
+                    p,
+                    &format!("@@sym:{id}"),
+                    Value::Bool(false),
+                    true,
+                    true,
+                    true,
+                );
+            }
+        }
         for &(name, _, f) in FUNCTIONS {
             self.set_native(p, name, f);
         }
@@ -174,7 +191,7 @@ impl Interp {
 
     /// Runs the JS members (web/process_members.js) in this realm; after `install_process_stdin`.
     pub(crate) fn install_process_members_js(&mut self) {
-        self.run(JS_MEMBERS)
+        self.run_builtin(JS_MEMBERS)
             .unwrap_or_else(|_| panic!("thaw-js process members must evaluate"));
     }
 }
@@ -1021,6 +1038,23 @@ mod tests {
                  acc('stdout'), acc('stderr'), acc('stdin'), process.stdout === process.stdout);"
             ),
             "1 2 1,true,true,true 2,true,true,true function,,true,true function,,true,true function,,true,true true"
+        );
+    }
+
+    /// Node 22 (`node -e "for (const s of Object.getOwnPropertySymbols(process)) console.log(String(s), Object.getOwnPropertyDescriptor(process, s))"`):
+    /// `Symbol(shapeMode)` (waived W1), then `Symbol(kCapture) { value: false, writable: true, enumerable: true,
+    /// configurable: true }`, then `Symbol(Symbol.toStringTag)`. The kCapture symbol is a plain non-registry symbol.
+    #[test]
+    fn kcapture_own_symbol_matches_node_22() {
+        assert_eq!(
+            output(
+                "const syms = Object.getOwnPropertySymbols(process); \
+                 const s = syms.find((x) => String(x) === 'Symbol(kCapture)'); \
+                 const d = Object.getOwnPropertyDescriptor(process, s); \
+                 console.log(s.description, Symbol.keyFor(s), d.value, d.writable, d.enumerable, d.configurable, \
+                 syms.indexOf(s) < syms.indexOf(Symbol.toStringTag));"
+            ),
+            "kCapture undefined false true true true true"
         );
     }
 

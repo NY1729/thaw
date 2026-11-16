@@ -28,7 +28,7 @@ impl Interp {
             Ok(Value::str(&String::from_utf8_lossy(slice)))
         });
         g.declare("__thaw_utf8_decode", f, true);
-        self.run(BUFFER_PRELUDE)
+        self.run_builtin(BUFFER_PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js buffer prelude must evaluate"));
     }
 }

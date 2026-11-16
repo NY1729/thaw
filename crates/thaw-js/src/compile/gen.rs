@@ -33,6 +33,8 @@ pub(crate) struct Gen {
     scopes: Vec<Vec<Local>>,
     next_slot: u32,
     pub(crate) arrow: bool,
+    /// The function's own strictness (`FuncDef::strict`): its writes throw when the switch is on (`strict.rs`).
+    pub(crate) strict: bool,
     /// Loops enclosing the statement being compiled: an unlabeled `break`/`continue` needs one.
     pub(crate) loops: u32,
     /// Loops and `switch`es enclosing the statement being compiled: an unlabeled `break` needs one. Separate from
@@ -54,6 +56,7 @@ impl Gen {
             scopes: vec![Vec::new()],
             next_slot: 0,
             arrow,
+            strict: false,
             loops: 0,
             breakables: 0,
             scoped,
@@ -145,6 +148,7 @@ pub(crate) fn compile(
         .map(|n| n.name.clone())
         .collect();
     let mut g = Gen::new(def.arrow, scoped);
+    g.strict = def.strict;
     // the self name: the prologue stores the callee here, before the parameters; a `var` of the same name reuses it
     let self_slot = plan
         .names

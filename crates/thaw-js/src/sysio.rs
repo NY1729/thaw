@@ -401,7 +401,7 @@ fn network_interfaces_json() -> Result<String, String> {
 
 impl Interp {
     pub(crate) fn install_sysio(&mut self) {
-        self.run(DYNAMIC_HELPERS)
+        self.run_builtin(DYNAMIC_HELPERS)
             .unwrap_or_else(|_| panic!("thaw-js dynamic helper prelude must evaluate"));
         #[cfg(unix)]
         ignore_sigpipe();

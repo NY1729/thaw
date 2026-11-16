@@ -91,6 +91,7 @@ impl Interp {
             };
             let v = match p.top(it) {
                 Ok(v) => v,
+                Err(msg) if msg == STACK_OVERFLOW => return it.throw_error("RangeError", &msg),
                 Err(msg) => return it.throw_error("SyntaxError", &msg),
             };
             let reviver = arg(args, 1);
@@ -181,6 +182,7 @@ impl Interp {
         cur: &str,
         out: &mut String,
     ) -> R<bool> {
+        self.check_stack()?;
         if matches!(v, Value::Object(_) | Value::BigInt(_)) {
             let f = self.get(&v, "toJSON")?;
             if f.is_callable() {
@@ -438,8 +440,10 @@ impl Parser<'_> {
     }
 
     fn value(&mut self, it: &mut Interp, depth: usize) -> Result<Value, String> {
-        if depth > 5000 {
-            return Err("Maximum call stack size exceeded".into());
+        // the depth cap is fixed (Node parses deeper: a documented gap); the stack guard covers a shallow parse
+        // that starts close to the end of a configured stack
+        if depth > 5000 || it.too_deep() {
+            return Err(STACK_OVERFLOW.into());
         }
         self.ws();
         match self.s.get(self.i).copied() {
