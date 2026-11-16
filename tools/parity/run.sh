@@ -38,5 +38,6 @@ python3 "$HERE/diff.py" \
   --node-dir "$OUT/node" --thaw-dir "$OUT/thaw" \
   --baseline "$HERE/known-gaps.json" \
   --skip "$HERE/skip.txt" \
+  --waivers "$HERE/waivers.json" \
   --gaps "$OUT/gaps.json" \
   "${WRITE[@]}"
