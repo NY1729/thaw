@@ -133,7 +133,10 @@ pub(crate) fn compile(g: &mut Gen, e: &a::Expr) -> CG<Ex> {
 /// A name that an assignment or `++`/`--` writes: a slot of this frame, or a free name (closure scope).
 #[derive(Clone)]
 pub(crate) enum Place {
-    Slot { k: u32, mutable: bool },
+    Slot {
+        k: u32,
+        mutable: bool,
+    },
     /// A free name, with the function's strictness at codegen (`Gen::strict`).
     Free(a::Ident, bool),
 }
