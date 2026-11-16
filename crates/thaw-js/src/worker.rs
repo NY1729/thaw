@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use crate::builtins::json_quote;
+use crate::heap_limit;
 use crate::typed::SabBlock;
 use crate::*;
 
@@ -22,6 +23,8 @@ const STACK: usize = 64 << 20;
 const OPAQUE_ERROR: &str = r#"{"root":{"v":"uncaught exception"},"nodes":[]}"#;
 /// The worker-side bootstrap (worker_bootstrap.js), run in the worker's own realm before its source.
 const BOOTSTRAP: &str = include_str!("web/worker_bootstrap.js");
+/// Wire of the error a worker over its heap limit reports (Node: ERR_WORKER_OUT_OF_MEMORY, exit code 1).
+const OOM_WIRE: &str = r#"{"root":{"r":0},"nodes":[{"t":"Error","n":"Error","m":"Worker terminated due to reaching memory limit: JS heap out of memory","k":"ERR_WORKER_OUT_OF_MEMORY"}]}"#;
 
 /// Parent to worker commands. `Terminate` also sets the interrupt flag, which is what stops a busy worker.
 enum Cmd {
@@ -111,6 +114,11 @@ fn quoted(s: &str) -> String {
     out
 }
 
+/// Heap limit in bytes for a worker's `maxOldGenerationSizeMb` (NaN, not positive or -1: no limit).
+fn heap_bytes(heap_mb: f64) -> Option<usize> {
+    (heap_mb.is_finite() && heap_mb > 0.0).then(|| (heap_mb * f64::from(1u32 << 20)) as usize)
+}
+
 /// Thread stack for a worker's `stackSizeMb` (NaN or not positive: unset, [`STACK`]). Best effort: 16 MiB per Node
 /// MiB, since an interpreter frame is much larger than a V8 frame; clamped to [8 MiB, 512 MiB].
 pub(crate) fn stack_bytes(stack_mb: f64) -> usize {
@@ -121,16 +129,17 @@ pub(crate) fn stack_bytes(stack_mb: f64) -> usize {
     }
 }
 
-fn spawn(it: &mut Interp, source: String, opts: String, stack_mb: f64) -> u32 {
+fn spawn(it: &mut Interp, source: String, opts: String, stack_mb: f64, heap_mb: f64) -> u32 {
     let (tx, cmd_rx) = mpsc::channel();
     let (evt_tx, rx) = mpsc::channel();
     let interrupt = Arc::new(AtomicBool::new(false));
     let flag = interrupt.clone();
     let stack = stack_bytes(stack_mb);
+    let heap = heap_bytes(heap_mb);
     let join = std::thread::Builder::new()
         .name("thaw-js-worker".into())
         .stack_size(stack)
-        .spawn(move || run_worker(&source, &opts, stack, cmd_rx, evt_tx, flag))
+        .spawn(move || run_worker(&source, &opts, stack, heap, cmd_rx, evt_tx, flag))
         .expect("worker thread spawns");
     it.worker.next += 1;
     let id = it.worker.next;
@@ -180,6 +189,7 @@ fn run_worker(
     source: &str,
     opts: &str,
     stack: usize,
+    heap: Option<usize>,
     rx: Receiver<Cmd>,
     tx: Sender<Evt>,
     interrupt: Arc<AtomicBool>,
@@ -187,6 +197,10 @@ fn run_worker(
     let exit_tx = tx.clone();
     let code = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut it = Box::new(Interp::runtime());
+        // the limit counts what the script allocates, not the runtime built above
+        if let Some(bytes) = heap {
+            heap_limit::enable(bytes);
+        }
         it.configure_stack(stack);
         it.set_stream(true);
         it.interrupt = Some(interrupt.clone());
@@ -219,7 +233,7 @@ fn run_script(it: &mut Interp, source: &str, opts: &str) -> i32 {
     match it.run(BOOTSTRAP) {
         Ok(_) => {}
         // terminate() arrived before the bootstrap finished: the worker exits with the interrupt's code
-        Err(Ctl::Exit(code)) => return code,
+        Err(Ctl::Exit(code)) => return check_heap(it).unwrap_or(code),
         Err(_) => panic!("worker bootstrap must evaluate"),
     }
     let global = Value::Object(it.global_object.clone());
@@ -232,6 +246,9 @@ fn run_script(it: &mut Interp, source: &str, opts: &str) -> i32 {
     ]);
     to_parent(it, Evt::Online);
     let r = it.run_commonjs(source).and_then(|_| it.run_event_loop());
+    if let Some(code) = check_heap(it) {
+        return code;
+    }
     match r {
         Ok(code) | Err(Ctl::Exit(code)) => code,
         Err(e) => {
@@ -243,6 +260,15 @@ fn run_script(it: &mut Interp, source: &str, opts: &str) -> i32 {
             1
         }
     }
+}
+
+/// The worker's exit when it tripped its heap limit (`heap_limit`): the ERR_WORKER_OUT_OF_MEMORY error to the parent,
+/// then exit code 1. None when the limit was not tripped.
+fn check_heap(it: &Interp) -> Option<i32> {
+    heap_limit::tripped().then(|| {
+        to_parent(it, Evt::Error(OOM_WIRE.into()));
+        1
+    })
 }
 
 fn wire_of(it: &mut Interp, v: &Value) -> String {
@@ -344,10 +370,13 @@ pub(crate) fn install(it: &mut Interp) {
         } else {
             it.to_str(&arg(a, 1)).to_string()
         };
-        // arg 2 is the heap limit in MiB (-1 = none), enforced by heap_limit (B2); arg 3 is `stackSizeMb`
-        // (absent or not positive = the default stack)
+        // arg 2 is the heap limit in MiB (-1 = none, enforced by heap_limit); arg 3 is `stackSizeMb` (absent or not
+        // positive = the default stack)
         let stack_mb = it.num(&arg(a, 3));
-        Ok(Value::Number(f64::from(spawn(it, source, opts, stack_mb))))
+        let heap_mb = it.num(&arg(a, 2));
+        Ok(Value::Number(f64::from(spawn(
+            it, source, opts, stack_mb, heap_mb,
+        ))))
     });
     g.declare("__thaw_worker_spawn", f, true);
     let f = it.native(|it, _, a| {

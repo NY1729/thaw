@@ -1,5 +1,5 @@
 //! Worker options (plan B1): the Error `code` on the worker wire, the `resourceLimits` getter (shapes recorded from
-//! Node 22.23.1), and `stackSizeMb` as the worker thread's stack. Limits are not enforced yet (B2).
+//! Node 22.23.1), and `stackSizeMb` as the worker thread's stack. The heap limit is tested in `heap_limit_tests`.
 
 use super::*;
 

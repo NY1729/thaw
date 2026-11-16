@@ -42,6 +42,7 @@ mod esm;
 mod eventloop;
 mod extras;
 mod generators;
+mod heap_limit;
 mod hints;
 pub mod host;
 #[cfg(feature = "intl")]
@@ -181,6 +182,52 @@ pub struct ObjData {
     ext: Cell<u8>,
     /// Key -> position in `props`, built lazily for objects with many properties (`None` = stale).
     index: RefCell<Option<FxMap<Rc<str>, usize>>>,
+    /// Bytes this object has charged to the heap limit (`heap_limit`); credited back when it drops.
+    charged: Cell<usize>,
+}
+
+impl Drop for ObjData {
+    fn drop(&mut self) {
+        heap_limit::credit(self.charged.get());
+    }
+}
+
+/// Charges (or credits) the change in a slot table's capacity: `elem` bytes per slot, `before` and `after` the
+/// capacity around one mutation of `o`'s array slots or property slots. It only touches `o.charged` and the heap
+/// counter, so it may run while `o.kind` is mutably borrowed. A no-op unless a heap limit is on (`heap_limit`).
+pub(crate) fn grow_slots(o: &ObjData, elem: usize, before: usize, after: usize) {
+    if !heap_limit::enabled() || before == after {
+        return;
+    }
+    if after > before {
+        let n = heap_limit::charge(elem * (after - before));
+        o.charged.set(o.charged.get() + n);
+    } else {
+        let n = elem * (before - after);
+        heap_limit::credit(n);
+        o.charged.set(o.charged.get().saturating_sub(n));
+    }
+}
+
+/// Recomputes `o`'s estimated size (the object record, its array slots, its property slots) and charges or credits
+/// the change since its last `account`/`grow_slots`. Call it where no borrow of `o.kind` is live. A no-op unless a
+/// heap limit is on (see `heap_limit`).
+pub(crate) fn account(o: &ObjData) {
+    if !heap_limit::enabled() {
+        return;
+    }
+    let slots = match &*o.kind.borrow() {
+        Kind::Array(items) => std::mem::size_of::<Value>() * items.capacity(),
+        _ => 0,
+    };
+    let props = std::mem::size_of::<Prop>() * o.raw_props.borrow().capacity();
+    let now = std::mem::size_of::<ObjData>() + slots + props;
+    let before = o.charged.replace(now);
+    if now > before {
+        heap_limit::charge(now - before);
+    } else {
+        heap_limit::credit(before - now);
+    }
 }
 
 /// Objects with fewer properties than this are searched linearly.
@@ -1008,7 +1055,7 @@ impl Value {
 }
 
 fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
-    Rc::new(ObjData {
+    let obj = Rc::new(ObjData {
         raw_props: RefCell::new(Vec::new()),
         lazy_proto: Cell::new(false),
         native_text: Cell::new(false),
@@ -1018,7 +1065,10 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         len_ro: Cell::new(false),
         ext: Cell::new(0),
         index: RefCell::new(None),
-    })
+        charged: Cell::new(0),
+    });
+    account(&obj);
+    obj
 }
 
 pub(crate) fn number_to_string(n: f64) -> String {
@@ -1419,10 +1469,16 @@ impl Interp {
     /// Errors with `Ctl::Exit(1)` once the parent of this worker has asked it to terminate. Not catchable by JS.
     #[inline]
     pub(crate) fn check_interrupt(&self) -> R<()> {
-        match &self.interrupt {
-            Some(flag) if flag.load(std::sync::atomic::Ordering::Relaxed) => Err(Ctl::Exit(1)),
-            _ => Ok(()),
+        if let Some(flag) = &self.interrupt {
+            if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(Ctl::Exit(1));
+            }
         }
+        // a worker over its heap limit stops here too (`heap_limit`; the sentinel is not a JS exit code)
+        if heap_limit::tripped() {
+            return Err(Ctl::Exit(heap_limit::OOM_EXIT));
+        }
+        Ok(())
     }
 
     /// Errors with `ERR_SCRIPT_EXECUTION_TIMEOUT` once the `node:vm` deadline has passed. Clock reads
@@ -2192,7 +2248,9 @@ impl Interp {
                     return Ok(()); // sloppy mode: silently ignored (read-only `length` blocks growth)
                 }
                 if i >= items.len() {
+                    let cap = items.capacity();
                     items.resize(i + 1, Value::Hole);
+                    grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
                 }
                 items[i] = value;
                 return Ok(());
@@ -2205,7 +2263,9 @@ impl Interp {
                     Value::Number(n) if n >= 0.0 => n as usize,
                     _ => 0,
                 };
+                let cap = items.capacity();
                 items.resize(n, Value::Hole);
+                grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
                 return Ok(());
             }
         }
@@ -4270,7 +4330,9 @@ impl Interp {
                         return Ok(());
                     }
                     if i == items.len() {
+                        let cap = items.capacity();
                         items.push(value);
+                        grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
                         return Ok(());
                     }
                 }
@@ -4601,7 +4663,9 @@ pub(crate) fn push_prop(o: &ObjData, props: &mut Vec<Prop>, p: Prop) {
     // Insertion order is kept; the integer-keys-first rule is applied when keys are enumerated
     // (`order_keys`), so appending stays O(1) and the hash index stays valid.
     let key = p.key.clone();
+    let cap = props.capacity();
     props.push(p);
+    grow_slots(o, std::mem::size_of::<Prop>(), cap, props.capacity());
     if let Some(map) = o.index.borrow_mut().as_mut() {
         map.insert(key, props.len() - 1);
     }
@@ -4919,6 +4983,8 @@ mod global_object_view_tests;
 mod handle_json_argument_tests;
 #[cfg(test)]
 mod handle_zero_tests;
+#[cfg(test)]
+mod heap_limit_tests;
 #[cfg(test)]
 mod job_barrier_tests;
 #[cfg(test)]

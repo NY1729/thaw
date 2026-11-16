@@ -5615,6 +5615,7 @@ struct HostTls {
     native_owners: HashMap<usize, Vec<(usize, String)>>,
     last_frame: Option<(String, String)>,
     watches: Vec<Watch>,
+    heap: crate::heap_limit::State,
 }
 
 // SAFETY: the host thread and the coroutine thread strictly alternate (each hands control to the
@@ -5641,6 +5642,7 @@ pub(crate) fn park_host_tls(key: usize) {
         native_owners: NATIVE_OWNERS.with(|c| std::mem::take(&mut *c.borrow_mut())),
         last_frame: LAST_FRAME.with(|c| std::mem::take(&mut *c.borrow_mut())),
         watches: WATCHES.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        heap: crate::heap_limit::take(),
     };
     PARKED.lock().unwrap().push((key, SendHostTls(tls)));
 }
@@ -5672,7 +5674,9 @@ pub(crate) fn adopt_host_tls(key: usize) {
         native_owners,
         last_frame,
         watches,
+        heap,
     } = tls;
+    crate::heap_limit::restore(heap);
     // the replaced values are empty (the other thread parked them), so dropping them runs no code
     drop(PACKAGES.with(|c| c.replace(packages)));
     drop(RUNNING.with(|c| c.replace(running)));
