@@ -11,17 +11,34 @@
     INVALID_MODIFICATION_ERR: 13, NAMESPACE_ERR: 14, INVALID_ACCESS_ERR: 15, VALIDATION_ERR: 16,
     TYPE_MISMATCH_ERR: 17, SECURITY_ERR: 18, NETWORK_ERR: 19, ABORT_ERR: 20, URL_MISMATCH_ERR: 21,
     QUOTA_EXCEEDED_ERR: 22, TIMEOUT_ERR: 23, INVALID_NODE_TYPE_ERR: 24, DATA_CLONE_ERR: 25 };
+  // name/message/code are prototype getters over this record (Node has no own name/message/code).
+  const fields = new WeakMap();
+  const fieldsOf = self => {
+    const record = fields.get(self);
+    if (!record) {
+      const error = new TypeError('Value of "this" must be of DOMException');
+      error.code = 'ERR_INVALID_THIS';
+      throw error;
+    }
+    return record;
+  };
   class DOMException extends Error {
     constructor(message = '', options = 'Error') {
       super(String(message));
+      Reflect.deleteProperty(this, 'message');
       let name = 'Error';
       if (options !== null && typeof options === 'object') {
         name = options.name === undefined ? 'Error' : String(options.name);
         if ('cause' in options) Object.defineProperty(this, 'cause', { value: options.cause, writable: true, configurable: true });
       } else name = String(options);
-      Object.defineProperty(this, 'name', { value: name, writable: true, configurable: true });
-      Object.defineProperty(this, 'code', { value: codes[name] || 0, writable: true, configurable: true });
+      fields.set(this, { name, message: String(message), code: codes[name] || 0 });
     }
+  }
+  for (const key of ['name', 'message', 'code']) {
+    Object.defineProperty(DOMException.prototype, key, {
+      get() { return fieldsOf(this)[key]; },
+      enumerable: true, configurable: true,
+    });
   }
   for (const k in constants) {
     Object.defineProperty(DOMException, k, { value: constants[k], enumerable: true });

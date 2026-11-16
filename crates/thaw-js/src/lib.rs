@@ -4868,6 +4868,8 @@ mod console_instance_tests;
 #[cfg(test)]
 mod dynamic_helper_contract_tests;
 #[cfg(test)]
+mod errors_stack_tests;
+#[cfg(test)]
 mod fetch_tests;
 #[cfg(all(test, unix))]
 mod fs_tests;

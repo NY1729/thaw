@@ -73,6 +73,11 @@ impl Interp {
         let agp = self.plain();
         self.rt.generator_proto = Some(gp.clone());
         self.rt.async_generator_proto = Some(agp.clone());
+        // %AsyncIteratorPrototype%, the prototype of %AsyncGeneratorPrototype%: `[Symbol.asyncIterator]() { return this }`
+        let aip = self.plain();
+        *agp.proto.borrow_mut() = Some(aip.clone());
+        let async_iter = self.native(|_, this, _| Ok(this.clone()));
+        put_hidden(&aip, &self.well_known_key("asyncIterator"), async_iter);
         for (proto, asyn) in [(&gp, false), (&agp, true)] {
             for (name, req) in [
                 ("next", Req::Next),
