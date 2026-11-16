@@ -75,7 +75,7 @@
     threadName: '',
     workerData,
     parentPort,
-    resourceLimits: {},
+    resourceLimits: opts.resourceLimits === undefined ? {} : opts.resourceLimits,
     MessageChannel: globalThis.MessageChannel,
     MessagePort: globalThis.MessagePort,
     BroadcastChannel: globalThis.BroadcastChannel,
