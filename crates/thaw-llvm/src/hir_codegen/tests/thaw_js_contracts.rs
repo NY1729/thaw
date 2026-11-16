@@ -652,3 +652,52 @@ fn routed_set_process_env_declares_the_thaw_tjs_symbol_and_not_quickjs() {
     let quickjs = compile(false);
     assert!(quickjs.contains("@thaw_js_set_process_env("), "{quickjs}");
 }
+
+/// The perf_hooks `new PerformanceObserver(cb)` shape: the declared callback takes class instances
+/// (`PerfList`, `PerfObs`), which the registry lowers as marker-only objects. The closure's own params
+/// are unannotated, so they are lowered as live handles (`JsValue`).
+#[test]
+fn a_callback_with_a_class_instance_param_registers_on_the_graph_route() {
+    let sym = thaw_js_class_symbol_hex("$new$PerformanceObserver$arity1");
+    let source = format!(
+        "class PerfList {{ getEntries(): number[] {{ return []; }} }} class PerfObs {{ disconnect(): void {{}} }}
+         declare function __thaw_typed_tjs_{sym}(callback: (list: PerfList, observer: PerfObs) => void): JsValue;
+         function main(): void {{ const o = __thaw_typed_tjs_{sym}((list, observer) => {{ console.log(\"obs\"); }}); }}"
+    );
+    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_class_source(&source).unwrap();
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(ir.contains("call { i64, ptr } @thaw_tjs_register_native_callback_graph("), "{ir}");
+    assert!(!ir.contains("call i64 @thaw_tjs_register_callback("), "{ir}");
+}
+
+/// Plain callback params (Json, number) keep the JSON-text route: only class instances move to the graph.
+#[test]
+fn plain_callback_params_keep_the_text_route_for_class_calls() {
+    for ptype in ["Json", "number"] {
+        let sym = thaw_js_class_symbol_hex("$new$PerformanceObserver$arity1");
+        let source = format!(
+            "declare function __thaw_typed_tjs_{sym}(callback: (list: {ptype}, observer: {ptype}) => void): JsValue;
+             function main(): void {{ const o = __thaw_typed_tjs_{sym}((list: {ptype}, observer: {ptype}): void => {{ console.log(\"obs\"); }}); }}"
+        );
+        let (_, _, ir) = compile_thaw_js_class_source(&source).unwrap();
+        assert!(ir.contains("call i64 @thaw_tjs_register_callback("), "{ptype}: {ir}");
+        assert!(!ir.contains("call { i64, ptr } @thaw_tjs_register_native_callback_graph("), "{ptype}: {ir}");
+    }
+}
+
+#[test]
+fn class_instance_params_are_handle_leaves_but_date_stays_plain() {
+    use thaw_hir::HirType::*;
+    let marker = |name: &str| ("__thaw_class_identity_\u{1e}".to_string() + name, Bool);
+    let instance = Object(vec![marker("PerfList")]);
+    let callback = |param: HirType| Function(vec![param], Box::new(Void));
+    assert!(thaw_js_class_instance_type(&instance));
+    assert!(thaw_js_callback_takes_class_instance(&callback(instance)));
+    let date = Object(vec![marker("Date"), ("timestamp".into(), F64)]);
+    assert!(!thaw_js_class_instance_type(&date));
+    assert!(!thaw_js_callback_takes_class_instance(&callback(date)));
+    assert!(!thaw_js_class_instance_type(&Object(vec![(
+        "a".into(),
+        F64
+    )])));
+}
