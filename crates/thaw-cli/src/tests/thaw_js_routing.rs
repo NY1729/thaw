@@ -953,8 +953,8 @@ fn thaw_js_routed_fetch_without_node_http_import_runs_on_thaw_js() {
 #[test]
 fn thaw_js_routed_native_server_with_own_fetch_builds_and_matches_node() {
     // Q9 PR 2b: the forced realm-fetch bundles must not add typed declarations, so the program's own
-    // `createServer` does not clash with node:https. The native server + fetch blocker still keeps node:http
-    // on QuickJS, which is what this build should report. Expected stdout is from a real `node` run.
+    // `createServer` does not clash with node:https, so the program stays on thaw-js with the native server
+    // and the global fetch. Expected stdout is from a real `node` run.
     let (dir, registry, entry) = thaw_js_fixture(
         "native-server-with-own-fetch",
         "import * as http from 'node:http';\n\
@@ -970,12 +970,7 @@ fn thaw_js_routed_native_server_with_own_fetch_builds_and_matches_node() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
-    let blockers = manifest["thaw_js_blockers"].to_string();
-    assert!(
-        blockers.contains("native createServer together with global fetch"),
-        "{manifest}"
-    );
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "200 ok\n");
     let _ = std::fs::remove_dir_all(dir);
