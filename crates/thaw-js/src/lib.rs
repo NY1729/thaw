@@ -4961,6 +4961,8 @@ mod url_tests;
 mod vm_realm_tests;
 #[cfg(test)]
 mod web_class_tag_tests;
+#[cfg(test)]
+mod worker_limits_tests;
 
 impl Interp {
     /// Empties every object and scope reachable from this realm's roots, breaking the Rc cycles among them

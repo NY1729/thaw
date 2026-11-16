@@ -16,7 +16,7 @@ use crate::builtins::json_quote;
 use crate::typed::SabBlock;
 use crate::*;
 
-/// Stack reserved for a worker's JS (virtual memory, committed on use).
+/// Stack reserved for a worker's JS (virtual memory, committed on use) when `stackSizeMb` is not given.
 const STACK: usize = 64 << 20;
 /// Wire of an error value that could not itself be encoded.
 const OPAQUE_ERROR: &str = r#"{"root":{"v":"uncaught exception"},"nodes":[]}"#;
@@ -111,15 +111,26 @@ fn quoted(s: &str) -> String {
     out
 }
 
-fn spawn(it: &mut Interp, source: String, opts: String) -> u32 {
+/// Thread stack for a worker's `stackSizeMb` (NaN or not positive: unset, [`STACK`]). Best effort: 16 MiB per Node
+/// MiB, since an interpreter frame is much larger than a V8 frame; clamped to [8 MiB, 512 MiB].
+pub(crate) fn stack_bytes(stack_mb: f64) -> usize {
+    if stack_mb.is_finite() && stack_mb > 0.0 {
+        ((stack_mb * f64::from(16u32 << 20)) as usize).clamp(8 << 20, 512 << 20)
+    } else {
+        STACK
+    }
+}
+
+fn spawn(it: &mut Interp, source: String, opts: String, stack_mb: f64) -> u32 {
     let (tx, cmd_rx) = mpsc::channel();
     let (evt_tx, rx) = mpsc::channel();
     let interrupt = Arc::new(AtomicBool::new(false));
     let flag = interrupt.clone();
+    let stack = stack_bytes(stack_mb);
     let join = std::thread::Builder::new()
         .name("thaw-js-worker".into())
-        .stack_size(STACK)
-        .spawn(move || run_worker(&source, &opts, cmd_rx, evt_tx, flag))
+        .stack_size(stack)
+        .spawn(move || run_worker(&source, &opts, stack, cmd_rx, evt_tx, flag))
         .expect("worker thread spawns");
     it.worker.next += 1;
     let id = it.worker.next;
@@ -168,6 +179,7 @@ pub(crate) fn capture_line(it: &Interp, fd: u8, text: &str) -> bool {
 fn run_worker(
     source: &str,
     opts: &str,
+    stack: usize,
     rx: Receiver<Cmd>,
     tx: Sender<Evt>,
     interrupt: Arc<AtomicBool>,
@@ -175,7 +187,7 @@ fn run_worker(
     let exit_tx = tx.clone();
     let code = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut it = Box::new(Interp::runtime());
-        it.configure_stack(STACK);
+        it.configure_stack(stack);
         it.set_stream(true);
         it.interrupt = Some(interrupt.clone());
         it.worker.side = Some(Side {
@@ -332,7 +344,10 @@ pub(crate) fn install(it: &mut Interp) {
         } else {
             it.to_str(&arg(a, 1)).to_string()
         };
-        Ok(Value::Number(f64::from(spawn(it, source, opts))))
+        // arg 2 is the heap limit in MiB (-1 = none), enforced by heap_limit (B2); arg 3 is `stackSizeMb`
+        // (absent or not positive = the default stack)
+        let stack_mb = it.num(&arg(a, 3));
+        Ok(Value::Number(f64::from(spawn(it, source, opts, stack_mb))))
     });
     g.declare("__thaw_worker_spawn", f, true);
     let f = it.native(|it, _, a| {

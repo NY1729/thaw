@@ -33,6 +33,7 @@ globalThis.__thaw_worker_encode = value => {
     else if (ArrayBuffer.isView(input)) node = { t: input instanceof DataView ? 'DataView' : 'TypedArray', c: input.constructor.name, b: encode(input.buffer), o: input.byteOffset, l: input instanceof DataView ? input.byteLength : input.length };
     else if (input instanceof Error) {
       node = { t: 'Error', n: String(input.name), m: String(input.message), s: input.stack === undefined ? undefined : String(input.stack) };
+      if (typeof input.code === 'string') node.k = input.code;
       if ('cause' in input) node.c = encode(input.cause);
     }
     else node = { t: 'Object', v: Object.keys(input).map(key => [key, encode(input[key])]) };
@@ -73,6 +74,7 @@ globalThis.__thaw_worker_decode = source => {
       values[id] = new Ctor(node.m);
       if (values[id].name !== node.n) values[id].name = node.n;
       if (node.s !== undefined) Object.defineProperty(values[id], 'stack', { value: node.s, writable: true, configurable: true });
+      if (node.k !== undefined) values[id].code = node.k;
     }
   });
   // views need their ArrayBuffer (pass 1)
