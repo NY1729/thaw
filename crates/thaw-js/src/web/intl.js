@@ -455,7 +455,24 @@
     }
   }
 
-  class DateTimeFormat {
+  // ECMA-402 constructors callable without `new` (`Intl.NumberFormat('en')`): the public function forwards
+  // to the class, and shares the class's `prototype`, which is non-writable as in Node.
+  function intlCallable(Impl, ctor) {
+    Object.defineProperty(ctor, 'prototype', { value: Impl.prototype, writable: false });
+    Object.defineProperty(Impl.prototype, 'constructor', { value: ctor, writable: true, enumerable: false, configurable: true });
+  }
+  // `format`/`compare` are getters returning one cached, unnamed function per instance (`nf.format ===
+  // nf.format`, and `arr.map(nf.format)` works detached). Other receivers fail the brand check.
+  const DTF_FORMAT = new WeakMap();
+  const NF_FORMAT = new WeakMap();
+  const COLLATOR_COMPARE = new WeakMap();
+  function intlBoundFunction(cache, self, brand, label, make) {
+    if (!(self instanceof brand)) throw new TypeError(`Method get ${label} called on incompatible receiver`);
+    if (!cache.has(self)) cache.set(self, make(self));
+    return cache.get(self);
+  }
+
+  class DateTimeFormatImpl {
     constructor(locale, options) {
       const opts = options || {};
       // Real per-locale rendering (M4) only when the `intl` Cargo
@@ -483,7 +500,6 @@
         const local = __thaw_intl_default_time_zone();
         if (intlZonedParts(local, Date.now()).valid) this._timeZone = local;
       }
-      this.format = this.format.bind(this);
       // Eager validation -- real Intl throws a `RangeError` for an
       // unrecognized `timeZone` at construction time, which is exactly
       // what real luxon's own `IANAZone.isValidZone` relies on (a
@@ -1002,8 +1018,12 @@
       return leading.length ? leading : trailing;
     }
 
-    format(date) {
+    _format(date) {
       return this.formatToParts(date).map(part => part.value).join('');
+    }
+
+    get format() {
+      return intlBoundFunction(DTF_FORMAT, this, DateTimeFormatImpl, 'Intl.DateTimeFormat.prototype.format', dtf => date => dtf._format(date));
     }
 
     // The ECMA-402 default field set (year/month/day numeric) when no
@@ -1115,7 +1135,7 @@
     }
   }
 
-  class NumberFormat {
+  class NumberFormatImpl {
     constructor(locale, options) {
       const opts = options || {};
       // Same real-per-locale-or-English-fast-path split as
@@ -1199,7 +1219,6 @@
       this._notation = this._style === 'decimal' && requestedNotation !== 'standard'
         ? requestedNotation
         : 'standard';
-      this.format = this.format.bind(this);
     }
 
     // Real `SetNumberFormatDigitOptions`' `signDisplay` handling: `-0`
@@ -1464,7 +1483,11 @@
       return { intPart, fracPart, groupDigits, nonzero: /[1-9]/.test(intPart + fracPart) };
     }
 
-    format(value) {
+    get format() {
+      return intlBoundFunction(NF_FORMAT, this, NumberFormatImpl, 'Intl.NumberFormat.prototype.format', nf => value => nf._format(value));
+    }
+
+    _format(value) {
       const input = Number(value);
       const number = this._style === 'percent' ? input * 100 : input;
       const exact = this._exactNotationDigits(value);
@@ -1790,7 +1813,7 @@
     formatToParts(value) {
       const exact = this._exactNotationDigits(value);
       const input = exact !== null ? value : Number(value);
-      const full = this.format(input);
+      const full = this._format(input);
       const number = this._style === 'percent' ? Number(input) * 100 : Number(input);
       if (!Number.isFinite(number) && exact === null) {
         const type = Number.isNaN(number) ? 'nan' : 'infinity';
@@ -1947,10 +1970,10 @@
           : startExact.intPart === endExact.intPart && startExact.fracPart === endExact.fracPart) &&
           this._signFor(startNumber, startExact) === this._signFor(endNumber, endExact)
         : startNumber === endNumber;
-      if (same) return `~${this.format(start)}`;
+      if (same) return `~${this._format(start)}`;
       const separator = this._numberRangeSeparator();
       if (!this._rangeSharesAffixes()) {
-        return `${this.format(start)}${separator}${this.format(end)}`;
+        return `${this._format(start)}${separator}${this._format(end)}`;
       }
       const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
         this.formatToParts(start),
@@ -2271,7 +2294,7 @@
   // `Intl.Collator` (M9) -- entirely new. `usage: 'search'` isn't
   // supported (falls back to plain `'sort'` behavior, see
   // `intl_collator.rs`'s own doc comment).
-  class Collator {
+  class CollatorImpl {
     constructor(locale, options) {
       const opts = options || {};
       this.locale = intlRequestedLocale(locale);
@@ -2280,10 +2303,13 @@
       this._ignorePunctuation = Boolean(opts.ignorePunctuation);
       this._numeric = Boolean(opts.numeric);
       this._caseFirst = intlEnumOption(opts.caseFirst, ['upper', 'lower', 'false'], 'false', 'caseFirst');
-      this.compare = this.compare.bind(this);
     }
 
-    compare(a, b) {
+    get compare() {
+      return intlBoundFunction(COLLATOR_COMPARE, this, CollatorImpl, 'Intl.Collator.prototype.compare', c => (a, b) => c._compare(a, b));
+    }
+
+    _compare(a, b) {
       // `usage: 'search'` needs ICU4C's search collation (ICU4X has no
       // search-collation concept); only present with the opt-in `icu4c`
       // feature, otherwise `usage: 'search'` keeps sort behavior.
@@ -2321,6 +2347,14 @@
       };
     }
   }
+
+  // `Intl.NumberFormat`, `DateTimeFormat` and `Collator` are callable without `new`, as in Node.
+  function NumberFormat(...args) { return Reflect.construct(NumberFormatImpl, args, new.target || NumberFormat); }
+  function DateTimeFormat(...args) { return Reflect.construct(DateTimeFormatImpl, args, new.target || DateTimeFormat); }
+  function Collator(...args) { return Reflect.construct(CollatorImpl, args, new.target || Collator); }
+  intlCallable(NumberFormatImpl, NumberFormat);
+  intlCallable(DateTimeFormatImpl, DateTimeFormat);
+  intlCallable(CollatorImpl, Collator);
 
   // `Intl.Segmenter` (M10) -- entirely new. The iterable protocol
   // (`for (const s of segmenter.segment(text))`, by far the common
@@ -2691,6 +2725,11 @@
   for (const [name, length] of Object.entries(INTL_CTOR_LENGTHS)) {
     const ctor = globalThis.Intl[name];
     if (typeof ctor === 'function') Object.defineProperty(ctor, 'length', { value: length, configurable: true });
+  }
+  // Node: each prototype carries its `Intl.<Name>` tag (`Object.prototype.toString`).
+  for (const name of ['Collator', 'DateTimeFormat', 'DisplayNames', 'ListFormat', 'Locale', 'NumberFormat', 'PluralRules', 'RelativeTimeFormat', 'Segmenter']) {
+    const ctor = globalThis.Intl[name];
+    if (typeof ctor === 'function') Object.defineProperty(ctor.prototype, Symbol.toStringTag, { value: `Intl.${name}`, configurable: true });
   }
   // Node: `Intl` is a namespace object with no enumerable keys and `[object Intl]` tag.
   for (const k of Object.keys(globalThis.Intl)) Object.defineProperty(globalThis.Intl, k, { enumerable: false });
