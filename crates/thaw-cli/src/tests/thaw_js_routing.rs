@@ -732,7 +732,7 @@ fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
 
 #[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
-    // A `node:worker_threads` program that names `Atomics` (thaw-js does not serve it yet) keeps that module on
+    // A `node:worker_threads` program that names `resourceLimits` (thaw-js does not serve it yet) keeps that module on
     // QuickJS; the build falls back and the artifact reports the blocker.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "blockers-fallback",
@@ -740,7 +740,7 @@ fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
          import { isMainThread } from 'node:worker_threads';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
-           console.log(c.add(2), isMainThread, Atomics.isLockFree(4));\n\
+           console.log(c.add(2), isMainThread, Object.keys({ resourceLimits: 1 }).length);\n\
          }\n",
     );
     let output = dir.join("app");
@@ -908,7 +908,7 @@ fn thaw_js_routed_node_http_get_refused_without_a_server() {
 }
 
 #[test]
-fn thaw_js_routed_node_http_fetch_from_listen_callback_refused() {
+fn thaw_js_routed_node_http_fetch_from_listen_callback_runs_on_thaw_js() {
     let (dir, registry, entry) = thaw_js_fixture(
         "node-http-fetch-from-listen-callback",
         "import * as http from 'node:http';\n\
@@ -922,8 +922,8 @@ fn thaw_js_routed_node_http_fetch_from_listen_callback_refused() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    // Narrow blocker: a native createServer next to the fetch client keeps node:http on QuickJS.
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    // A native createServer next to the fetch client runs on thaw-js (the blocker is lifted).
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "err\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -958,8 +958,8 @@ fn thaw_js_routed_fetch_without_node_http_import_runs_on_thaw_js() {
 #[test]
 fn thaw_js_routed_native_server_with_own_fetch_builds_and_matches_node() {
     // Q9 PR 2b: the forced realm-fetch bundles must not add typed declarations, so the program's own
-    // `createServer` does not clash with node:https. The native server + fetch blocker still keeps node:http
-    // on QuickJS, which is what this build should report. Expected stdout is from a real `node` run.
+    // `createServer` does not clash with node:https, so the program stays on thaw-js with the native server
+    // and the global fetch. Expected stdout is from a real `node` run.
     let (dir, registry, entry) = thaw_js_fixture(
         "native-server-with-own-fetch",
         "import * as http from 'node:http';\n\
@@ -975,12 +975,7 @@ fn thaw_js_routed_native_server_with_own_fetch_builds_and_matches_node() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
-    let blockers = manifest["thaw_js_blockers"].to_string();
-    assert!(
-        blockers.contains("native createServer together with global fetch"),
-        "{manifest}"
-    );
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "200 ok\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1361,7 +1356,7 @@ fn routed_error_factory_runs_in_a_program_with_no_package() {
 /// derived from Node 22 semantics for that source). Cross-worker SAB sharing is not covered here.
 #[test]
 fn routed_shared_array_buffer_and_atomics_match_node() {
-    let cases: [(&str, &str, &str); 9] = [
+    let cases: [(&str, &str, &str); 11] = [
         (
             "sab-byte-length",
             "function main(): void { const b: SharedArrayBuffer = new SharedArrayBuffer(16); console.log(b.byteLength, b.slice(4).byteLength); }",
@@ -1401,6 +1396,16 @@ fn routed_shared_array_buffer_and_atomics_match_node() {
             "atomics-wait-main-thread",
             "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  console.log(Atomics.wait(ia, 0, 1, 0));\n  console.log(Atomics.wait(ia, 0, 0, 0));\n  console.log(Atomics.wait(ia, 0, 0, 5));\n}",
             "not-equal\ntimed-out\ntimed-out\n",
+        ),
+        (
+            "atomics-wait-async-shapes",
+            "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  const r1: any = Atomics.waitAsync(ia, 0, 1);\n  console.log(r1.async, r1.value, Object.keys(r1).join(','));\n  const r2: any = Atomics.waitAsync(ia, 0, 0, 0);\n  console.log(r2.async, r2.value);\n  console.log(Atomics.waitAsync.length, Atomics.waitAsync.name);\n  try { Atomics.waitAsync(new Int32Array(4), 0, 0, 0); } catch (e: any) { console.log('nonshared', e.constructor.name); }\n  const p: any = Atomics.waitAsync(ia, 0, 0, 10);\n  console.log(p.async, typeof p.value.then);\n}",
+            "false not-equal async,value\nfalse timed-out\n4 waitAsync\nnonshared TypeError\ntrue function\n",
+        ),
+        (
+            "atomics-wait-async-does-not-keep-the-process-alive",
+            "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  Atomics.waitAsync(ia, 0, 0, 200).value.then((v: any) => console.log('fired', v));\n  Atomics.waitAsync(ia, 0, 0).value.then((v: any) => console.log('fired inf', v));\n  console.log('end');\n}",
+            "end\n",
         ),
         (
             "text-decode-real-buffer-sources",

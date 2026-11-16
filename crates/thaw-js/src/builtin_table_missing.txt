@@ -64,9 +64,6 @@ ArrayBuffer.prototype	maxByteLength
 ArrayBuffer.prototype	resize
 ArrayBuffer.prototype.resize	length
 ArrayBuffer.prototype.resize	name
-Atomics	waitAsync
-Atomics.waitAsync	length
-Atomics.waitAsync	name
 Blob.prototype	@@messaging_clone_symbol
 Blob.prototype	@@messaging_deserialize_symbol
 Blob.prototype	@@nodejs.util.inspect.custom
