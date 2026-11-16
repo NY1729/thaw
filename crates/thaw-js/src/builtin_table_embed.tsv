@@ -592,7 +592,11 @@ CryptoKey	length	data	--c	number	0	-	-	-	-
 CryptoKey	name	data	--c	string	-	CryptoKey	-	-	-
 CryptoKey	prototype	data	---	object	-	-	-	-	-
 CryptoKey.prototype	@@toStringTag	data	--c	string	-	-	-	-	CryptoKey
+CryptoKey.prototype	algorithm	accessor	-ec	-	-	get algorithm|-	-	-	-
 CryptoKey.prototype	constructor	data	w-c	function	0	CryptoKey	1	58	-
+CryptoKey.prototype	extractable	accessor	-ec	-	-	get extractable|-	-	-	-
+CryptoKey.prototype	type	accessor	-ec	-	-	get type|-	-	-	-
+CryptoKey.prototype	usages	accessor	-ec	-	-	get usages|-	-	-	-
 CustomEvent	length	data	--c	number	1	-	-	-	-
 CustomEvent	name	data	--c	string	-	CustomEvent	-	-	-
 CustomEvent	prototype	data	---	object	-	-	-	-	-
@@ -2206,9 +2210,42 @@ SubtleCrypto	name	data	--c	string	-	SubtleCrypto	-	-	-
 SubtleCrypto	prototype	data	---	object	-	-	-	-	-
 SubtleCrypto.prototype	@@toStringTag	data	--c	string	-	-	-	-	SubtleCrypto
 SubtleCrypto.prototype	constructor	data	w-c	function	0	SubtleCrypto	1	128	-
+SubtleCrypto.prototype	decrypt	data	wec	function	3	decrypt	0	-	-
+SubtleCrypto.prototype	deriveBits	data	wec	function	2	deriveBits	0	-	-
+SubtleCrypto.prototype	deriveKey	data	wec	function	5	deriveKey	0	-	-
 SubtleCrypto.prototype	digest	data	wec	function	2	digest	0	-	-
+SubtleCrypto.prototype	encrypt	data	wec	function	3	encrypt	0	-	-
+SubtleCrypto.prototype	exportKey	data	wec	function	2	exportKey	0	-	-
+SubtleCrypto.prototype	generateKey	data	wec	function	3	generateKey	0	-	-
+SubtleCrypto.prototype	importKey	data	wec	function	5	importKey	0	-	-
+SubtleCrypto.prototype	sign	data	wec	function	3	sign	0	-	-
+SubtleCrypto.prototype	unwrapKey	data	wec	function	7	unwrapKey	0	-	-
+SubtleCrypto.prototype	verify	data	wec	function	4	verify	0	-	-
+SubtleCrypto.prototype	wrapKey	data	wec	function	4	wrapKey	0	-	-
+SubtleCrypto.prototype.decrypt	length	data	--c	number	3	-	-	-	-
+SubtleCrypto.prototype.decrypt	name	data	--c	string	-	decrypt	-	-	-
+SubtleCrypto.prototype.deriveBits	length	data	--c	number	2	-	-	-	-
+SubtleCrypto.prototype.deriveBits	name	data	--c	string	-	deriveBits	-	-	-
+SubtleCrypto.prototype.deriveKey	length	data	--c	number	5	-	-	-	-
+SubtleCrypto.prototype.deriveKey	name	data	--c	string	-	deriveKey	-	-	-
 SubtleCrypto.prototype.digest	length	data	--c	number	2	-	-	-	-
 SubtleCrypto.prototype.digest	name	data	--c	string	-	digest	-	-	-
+SubtleCrypto.prototype.encrypt	length	data	--c	number	3	-	-	-	-
+SubtleCrypto.prototype.encrypt	name	data	--c	string	-	encrypt	-	-	-
+SubtleCrypto.prototype.exportKey	length	data	--c	number	2	-	-	-	-
+SubtleCrypto.prototype.exportKey	name	data	--c	string	-	exportKey	-	-	-
+SubtleCrypto.prototype.generateKey	length	data	--c	number	3	-	-	-	-
+SubtleCrypto.prototype.generateKey	name	data	--c	string	-	generateKey	-	-	-
+SubtleCrypto.prototype.importKey	length	data	--c	number	5	-	-	-	-
+SubtleCrypto.prototype.importKey	name	data	--c	string	-	importKey	-	-	-
+SubtleCrypto.prototype.sign	length	data	--c	number	3	-	-	-	-
+SubtleCrypto.prototype.sign	name	data	--c	string	-	sign	-	-	-
+SubtleCrypto.prototype.unwrapKey	length	data	--c	number	7	-	-	-	-
+SubtleCrypto.prototype.unwrapKey	name	data	--c	string	-	unwrapKey	-	-	-
+SubtleCrypto.prototype.verify	length	data	--c	number	4	-	-	-	-
+SubtleCrypto.prototype.verify	name	data	--c	string	-	verify	-	-	-
+SubtleCrypto.prototype.wrapKey	length	data	--c	number	4	-	-	-	-
+SubtleCrypto.prototype.wrapKey	name	data	--c	string	-	wrapKey	-	-	-
 Symbol	asyncDispose	data	---	symbol	-	-	-	-	-
 Symbol	asyncIterator	data	---	symbol	-	-	-	-	-
 Symbol	dispose	data	---	symbol	-	-	-	-	-
