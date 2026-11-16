@@ -914,13 +914,10 @@ fn host_get_property(lease: &HostLease, key: &[u8]) -> Value {
         set_host_error(error);
         return Value::Null;
     }
-    // A framed Error string the host record holds (e.g. an error's `cause`) is an Error here.
-    host_value_from_owned_handle(result.value)
-        .map(revive_framed_errors)
-        .unwrap_or_else(|| {
-            set_host_error("Invalid host value handle".into());
-            Value::Null
-        })
+    host_value_from_owned_handle(result.value).unwrap_or_else(|| {
+        set_host_error("Invalid host value handle".into());
+        Value::Null
+    })
 }
 
 fn host_set_property(lease: &HostLease, key: &[u8], value: &Value) {
@@ -12037,85 +12034,6 @@ mod tests {
                 matches!(error_prop_value(error, b"plain"), Value::String(text) if text == "x")
             );
             assert_eq!(RETAIN_CALLS.with(Cell::get), 2);
-            thaw_json_set_js_engine(0);
-        })
-        .join()
-        .unwrap();
-    }
-
-    // Handle 7 is a host record: `cause` is a framed Error string, `plain` a plain string.
-    extern "C" fn framed_get_test(handle: u64, key: *const c_char) -> HostHandleResult {
-        let key = unsafe { CStr::from_ptr(key) }.to_str().unwrap().to_owned();
-        let value = match (handle, key.as_str()) {
-            (7, "\"cause\"") => 40,
-            (7, "\"plain\"") => 41,
-            _ => 0,
-        };
-        HostHandleResult {
-            value,
-            error: std::ptr::null(),
-        }
-    }
-
-    extern "C" fn framed_get_test_query(handle: u64, operation: u8) -> HostTextResult {
-        let text = match (handle, operation) {
-            (40 | 41, 0) => "string".to_string(),
-            (40, 3) => framed_error_json_text("in"),
-            (41, 3) => "\"x\"".to_string(),
-            _ => String::new(),
-        };
-        HostTextResult {
-            value: thaw_arena::owned_string(text),
-            error: std::ptr::null(),
-        }
-    }
-
-    fn framed_error_json_text(message: &str) -> String {
-        unsafe extern "C" {
-            fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char;
-        }
-        let message = CString::new(message).unwrap();
-        let framed =
-            unsafe { CStr::from_ptr(thaw_error_frame(c"Error".as_ptr(), message.as_ptr())) };
-        let mut json = Vec::new();
-        write_json_string(framed.to_bytes(), &mut json);
-        String::from_utf8(json).unwrap()
-    }
-
-    #[test]
-    fn a_framed_error_string_read_from_a_host_record_is_revived_once() {
-        std::thread::spawn(|| {
-            HOST_OPERATIONS.with(|slot| {
-                slot.set(Some(HostOperations {
-                    retain: factory_test_retain,
-                    release: factory_test_release,
-                    get: framed_get_test,
-                    query: framed_get_test_query,
-                    date_set: unused_typed_scope_date,
-                    set: unused_typed_scope_set,
-                    predicate: unused_typed_scope_predicate,
-                    enumerate: unused_typed_scope_text,
-                }))
-            });
-            thaw_json_set_js_engine(1);
-            let record = HostLease {
-                handle: 7,
-                release: factory_test_release,
-            };
-            // `nested.cause.message` reads through the revived Error, not the raw frame text.
-            let cause = host_get_property(&record, b"cause");
-            let fields = cause
-                .as_object()
-                .expect("a framed Error string is revived into an Error object");
-            assert!(matches!(
-                fields.get(b"message".as_slice()),
-                Some(Value::String(text)) if text.as_str() == "in"
-            ));
-            // A plain string is not an Error and stays exactly as read.
-            assert!(matches!(
-                host_get_property(&record, b"plain"),
-                Value::String(text) if text.as_str() == "x"
-            ));
             thaw_json_set_js_engine(0);
         })
         .join()
