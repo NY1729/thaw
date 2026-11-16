@@ -2,27 +2,11 @@
  "note": "gaps may only shrink; regenerate with --write-baseline only after a fix",
  "gaps": [
   {
-   "id": "errors::throw in prepareStackTrace is catchable",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "errors::prepareStackTrace receives callsites array",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "errors::callsite getFunctionName typeof",
-   "kind": "DIFFERENT"
-  },
-  {
    "id": "invariants::strict frozen assign",
    "kind": "DIFFERENT"
   },
   {
    "id": "invariants::strict frozen add",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "invariants::strict frozen array push",
    "kind": "DIFFERENT"
   },
   {
@@ -50,10 +34,6 @@
    "kind": "DIFFERENT"
   },
   {
-   "id": "invariants::setPrototypeOf on frozen",
-   "kind": "DIFFERENT"
-  },
-  {
    "id": "invariants::strict string index assign",
    "kind": "DIFFERENT"
   },
@@ -78,59 +58,11 @@
    "kind": "DIFFERENT"
   },
   {
-   "id": "invariants::freeze typed array element strict",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "iterators::generator shares IteratorPrototype",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "iterators::Array iter sees mutation",
-   "kind": "DIFFERENT"
-  },
-  {
    "id": "names_lengths::fn WebSocket",
    "kind": "DIFFERENT"
   },
   {
-   "id": "names_lengths::fn Intl.Collator",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "names_lengths::fn Intl.NumberFormat",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "names_lengths::fn Intl.DateTimeFormat",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "names_lengths::fn Intl.Segmenter",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "names_lengths::fn Intl.getCanonicalLocales",
-   "kind": "DIFFERENT"
-  },
-  {
    "id": "names_lengths::Function own names of plain fn",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "process::process.versions keys sorted",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "process::process.release keys sorted",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "process::process.versions.modules typeof",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "process::process.versions.napi typeof",
    "kind": "DIFFERENT"
   },
   {
@@ -174,14 +106,6 @@
    "kind": "MISSING"
   },
   {
-   "id": "surface::globalThis.Atomics.waitAsync",
-   "kind": "MISSING"
-  },
-  {
-   "id": "surface::Atomics.waitAsync",
-   "kind": "MISSING"
-  },
-  {
    "id": "surface::globalThis.Buffer.[Symbol(kIsEncodingSymbol)]",
    "kind": "MISSING"
   },
@@ -195,14 +119,6 @@
   },
   {
    "id": "surface::AbortController.[Symbol(kMakeTransferable)]",
-   "kind": "MISSING"
-  },
-  {
-   "id": "surface::globalThis.EventTarget.[Symbol(nodejs.event_target)]",
-   "kind": "MISSING"
-  },
-  {
-   "id": "surface::EventTarget.[Symbol(nodejs.event_target)]",
    "kind": "MISSING"
   },
   {
@@ -352,50 +268,6 @@
   {
    "id": "surface::ArrayBuffer.prototype.resize",
    "kind": "MISSING"
-  },
-  {
-   "id": "surface::Generator.prototype(instance-proto).constructor",
-   "kind": "MISSING"
-  },
-  {
-   "id": "surface::Generator.prototype(instance-proto).next",
-   "kind": "MISSING"
-  },
-  {
-   "id": "surface::Generator.prototype(instance-proto).return",
-   "kind": "MISSING"
-  },
-  {
-   "id": "surface::Generator.prototype(instance-proto).throw",
-   "kind": "MISSING"
-  },
-  {
-   "id": "surface::Generator.prototype(instance-proto).[Symbol(Symbol.toStringTag)]",
-   "kind": "MISSING"
-  },
-  {
-   "id": "tags::tag generator function",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "tags::tag async function",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "tags::tag async generator function",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "tags::tag Buffer instance",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "tags::toStringTag Generator.prototype value",
-   "kind": "DIFFERENT"
-  },
-  {
-   "id": "tags::toStringTag AsyncFunction.prototype value",
-   "kind": "DIFFERENT"
   }
  ]
 }
