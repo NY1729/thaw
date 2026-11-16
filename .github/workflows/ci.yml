@@ -635,7 +635,21 @@ jobs:
         run: |
           cargo test --workspace --exclude thaw-cli --exclude thaw-llvm --exclude thaw-registry
           cargo test -p thaw-registry -- --test-threads=1
-      # Non-gating (plan TJ150 section 7, PR7): the thaw-js tests with every eligible function compiled.
+      # Gating: the compiler's own tests (AST/compiled agreement, stats, diff tests) in the compiled modes. They need
+      # the compile env applied after the prelude (fix #689) and run in about a minute; any engine change that makes
+      # the AST and the compiled path disagree fails here.
+      - name: thaw-js compile tests with compiled functions
+        env:
+          THAW_JS_COMPILE: "on"
+          THAW_JS_COMPILE_AFTER: "1"
+        run: 'cargo test -p thaw-js --lib compile::'
+      - name: thaw-js compile tests in compile check mode
+        env:
+          THAW_JS_COMPILE: "check"
+          THAW_JS_COMPILE_AFTER: "1"
+        run: 'cargo test -p thaw-js --lib compile::'
+      # Non-gating (plan TJ150 section 7, PR7): the whole thaw-js suite with every eligible function compiled (to be gated
+      # once it is green in both modes).
       - name: thaw-js tests with compiled functions (non-gating)
         continue-on-error: true
         env:
