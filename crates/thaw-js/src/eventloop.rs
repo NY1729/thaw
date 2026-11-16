@@ -241,6 +241,8 @@ pub(crate) struct Rt {
     timeout_proto: Option<Obj>,
     immediate_proto: Option<Obj>,
     pub(crate) has_instance_key: Option<Rc<str>>,
+    /// The intrinsic `Function.prototype[Symbol.hasInstance]`: `instanceof` runs its native path for it.
+    pub(crate) default_has_instance: Option<Obj>,
     pub(crate) pending_nt: Option<Value>,
     pub(crate) bigint_proto: Option<Obj>,
     pub(crate) generator_proto: Option<Obj>,
