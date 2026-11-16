@@ -257,6 +257,20 @@ pub(crate) struct Rt {
     pub(crate) stdin_started: bool,
 }
 
+impl Rt {
+    /// The intrinsic prototypes and host objects this realm's loop holds (teardown roots, lib.rs).
+    pub(crate) fn push_object_roots(&mut self, out: &mut Vec<Obj>) {
+        out.extend(self.promise_proto.take());
+        out.extend(self.timeout_proto.take());
+        out.extend(self.immediate_proto.take());
+        out.extend(self.bigint_proto.take());
+        out.extend(self.generator_proto.take());
+        out.extend(self.async_generator_proto.take());
+        out.extend(self.process.take());
+        out.append(&mut self.unhandled);
+    }
+}
+
 /// Node's `process.kill` signal names with their Linux numbers (the QuickJS runtime.js table).
 const PROCESS_SIGNALS: [(&str, i32); 15] = [
     ("SIGHUP", libc::SIGHUP),
