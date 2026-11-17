@@ -2000,6 +2000,21 @@ fn wasm_host_detection_only_enables_wasm_users() {
 }
 
 #[test]
+fn wasm_feature_scan_reads_bundle_text_textually() {
+    // The build scans the bundles' text (shim_generation: `required_runtime_features` over each bundle).
+    // The scan is a plain substring match, so it is conservative: a mention in a comment or a string also
+    // selects the `wasm` feature. A false positive only costs the feature's link size.
+    assert!(source_uses_wasm(
+        "const m = new WebAssembly.Instance(new WebAssembly.Module(bytes));"
+    ));
+    assert!(source_uses_wasm("WebAssembly.validate(bytes)"));
+    assert!(source_uses_wasm("// WebAssembly is not used here"));
+    assert!(source_uses_wasm("const s = 'WebAssembly';"));
+    assert!(source_uses_wasm("require('node:wasi')"));
+    assert!(!source_uses_wasm("module.exports = value => value + 1"));
+}
+
+#[test]
 fn tls_host_detection_only_enables_tls_bundles() {
     assert!(!source_uses_tls("module.exports = value => value + 1"));
     assert!(source_uses_tls("__thaw_tls_connect(host, port)"));

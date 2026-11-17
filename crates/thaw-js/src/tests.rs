@@ -4426,7 +4426,7 @@ fn timeout_to_primitive_id_clears_the_timer_and_dispose_clears_it() {
 
 #[test]
 fn webassembly_stub_is_typeof_safe_and_scan_leaves_real_use_to_the_routing_gate() {
-    // the scan no longer blocks a real WebAssembly use: thaw-cli's `thaw_js_wasm_blocker` gates it per program
+    // the scan no longer blocks a real WebAssembly use: the build selects the `wasm` feature from the routed bundles
     assert_eq!(
         one("console.log(typeof WebAssembly, typeof WebAssembly.compile)"),
         "object function"
