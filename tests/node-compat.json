@@ -4878,6 +4878,24 @@
       "expect": "matched",
       "expectQuickjsLink": false,
       "source": "import { Worker } from 'node:worker_threads';\nfunction main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  const worker = new Worker(`\n    const { parentPort, workerData } = require('node:worker_threads');\n    const ia = new Int32Array(workerData);\n    const keep = setTimeout(() => {}, 300);\n    Atomics.waitAsync(ia, 0, 0).value.then((v) => { console.log('worker got ' + v); parentPort.postMessage('done'); clearTimeout(keep); });\n    parentPort.postMessage('ready');\n  `, { eval: true, workerData: ia.buffer });\n  worker.on('message', (m: any) => {\n    if (m === 'ready') {\n      setTimeout(() => console.log('notify', Atomics.notify(ia, 0, 1)), 50);\n    } else {\n      console.log('main saw', m);\n      void worker.terminate();\n    }\n  });\n}"
+    },
+    {
+      "name": "direct eval forms: expression literals",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "function main(): void { console.log(eval('1+2'), eval('[1,2,3].length * 2')); }"
+    },
+    {
+      "name": "globalThis.eval defines a global var, eval reads it",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "function main(): void { (globalThis as any).eval('var gx = 41'); console.log(typeof (globalThis as any).gx, eval('gx + 1')); }"
+    },
+    {
+      "name": "eval object literal, completion value, and SyntaxError",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "function main(): void { const v: any = eval('({ a: 1, b: [2, 3], c: \"x\" })'); console.log(JSON.stringify(v), eval('var q = 5; q * 2')); try { eval('1 +'); } catch (e: any) { console.log(e instanceof SyntaxError, e.name); } }"
     }
   ]
 }

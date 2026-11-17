@@ -122,23 +122,8 @@ fn error_class(line: &str) -> Option<&str> {
     Some(&line[start..end])
 }
 
-/// Gaps that only show when the compile lane (`THAW_JS_COMPILE=on|check`) is enabled: compile/ is
-/// PR2's to fix (`(eval)(...)` is not yet a direct-eval callee in compile/analyze.rs).
-fn compile_mode_gaps() -> Vec<Gap> {
-    let compiling = std::env::var("THAW_JS_COMPILE").is_ok_and(|m| !m.is_empty() && m != "off");
-    if compiling {
-        vec![Divergence(
-            "paren \"number\"",
-            "compile/analyze.rs only sees a bare `eval(...)` callee: `(eval)(...)` in a compiled function is indirect (PR2)",
-        )]
-    } else {
-        Vec::new()
-    }
-}
-
 fn check_golden(path: &str, golden: &str, base: &[Gap]) {
-    let extra = compile_mode_gaps();
-    let gaps: Vec<&Gap> = base.iter().chain(extra.iter()).collect();
+    let gaps: Vec<&Gap> = base.iter().collect();
     let actual = normalize(&probe_output(path));
     let expected: Vec<String> = golden.lines().map(str::to_string).collect();
     let expected = normalize(&expected);
@@ -165,7 +150,7 @@ fn check_golden(path: &str, golden: &str, base: &[Gap]) {
         let (line, reason) = match g {
             Message(l, r) | Divergence(l, r) => (*l, *r),
         };
-        // an entry for a line this golden does not have (a compile-mode gap elsewhere) is not stale
+        // an entry for a line this golden does not have is not stale
         if !used[k] && expected.iter().any(|e| e == line) {
             diffs.push(format!("stale gap entry (now matches; {reason}): {line:?}"));
         }

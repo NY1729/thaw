@@ -387,6 +387,11 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         "a:slot | free: eval",
     ),
     (
+        "function f(a) { return (eval)('a') }",
+        Some(R::DirectEval),
+        "a:slot | free: eval",
+    ),
+    (
         "function f() { return Function('return 1') }",
         Some(R::FunctionCtor),
         "| free: Function",
@@ -508,6 +513,35 @@ fn tier_a_six_programs_report_read_before_decl() {
     for src in programs {
         assert_eq!(verdict(&def_of(src)), Some(R::ReadBeforeDecl), "{src}");
     }
+}
+
+/// An eval anywhere below a function blocks that function and every function enclosing it: the eval
+/// may declare vars or read slots of any of them, so none of their frames can be compiled. The
+/// for-let loop case is the per-iteration capture of direct eval (the whole function stays on the AST).
+#[test]
+fn direct_eval_blocks_every_enclosing_function() {
+    let blocked = [
+        "function f(a) { return (eval)('a') }",
+        "function f() { var a = 1; return function () { return eval('a') } }",
+        "function f() { return () => { return () => eval('1') } }",
+        "function f() { return class { m() { return eval('1') } } }",
+        "function f() { var g = function () { return { m: () => eval('1') } }; return g }",
+        "function f() { const fns = []; for (let i = 0; i < 2; i++) { fns.push(() => eval('i')) } return fns }",
+    ];
+    for src in blocked {
+        let plan = analyze(&def_of(src));
+        assert!(
+            plan.all_reasons().contains(&R::DirectEval),
+            "{src}: {:?}",
+            plan.all_reasons()
+        );
+        assert!(plan.verdict().is_err(), "{src}");
+    }
+    // a nested function without eval is not blocked by its siblings
+    let clean = "function f() { var a = 1; return function () { return a } }";
+    assert!(!analyze(&def_of(clean))
+        .all_reasons()
+        .contains(&R::DirectEval));
 }
 
 #[test]

@@ -1889,6 +1889,15 @@ fn quickjs_manifest_detection_tracks_dynamic_host_calls() {
     ));
 }
 
+/// `eval(` stays a QuickJS marker: it is the route trigger of a thaw-js build (`THAW_JS_USER_DYNAMIC`
+/// on) and the reason a QuickJS-lane build keeps the archive, since a QuickJS build has no other engine.
+#[test]
+fn direct_eval_source_is_a_dynamic_code_marker() {
+    assert!(source_uses_quickjs(
+        "function main(): void { console.log(eval('1 + 2')); }"
+    ));
+}
+
 #[test]
 fn manifest_quickjs_flag_matches_the_linked_quickjs_archive() {
     let directory =
