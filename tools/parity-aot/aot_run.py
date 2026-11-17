@@ -15,6 +15,10 @@ Driven by run.sh (which runs gen_probes.py first). For each program in the manif
      different THROW name), WRONG-VALUE, LEAK (engine handle marker in output), MISSING (no output block).
   4. The gate reuses tools/parity/diff.py (--blocks, baseline, waivers, skip) on the ran probes only.
      Exit 1 from diff.py means gaps not in the baseline: reported, not a failure. Exit 2 is a harness error.
+Module programs (gen_modules.py, manifest `imports`): each program renders its `import * as M from "node:x"` lines
+(render_program). Every run gets PA_TMP=<out>/pa-tmp/<program>, the SAME path on both sides, and module programs run
+with that directory as cwd on both sides: path.resolve and cwd-derived values then print identically (diff.py masks the
+path to <tmp>). Module programs run under TZ=UTC LANG=C on the Node side too.
 """
 import argparse
 import concurrent.futures as cf
@@ -49,6 +53,12 @@ CLASS_ORDER = ("MATCH", "MSG", "WRONG-TYPE", "WRONG-VALUE", "LEAK", "MISSING", "
 # Compile rejects that Node reproduces as a runtime TypeError: a non-function callback (`(1 as any)`) to an array or
 # promise method. The AOT cannot express that call, so the reject is the expected answer, classed apart from REJECT.
 EXPECTED_REJECT_RE = re.compile(r"must be an arrow or function value|is not a function value")
+# REJECT sub-kinds for the module report (details are normalised: digits become N). Heuristic on the diagnostic text;
+# anything unmatched is "other". missing-export: the d.ts or lowering lacks a member Node has. type: a type or
+# arity mismatch on a Node-valid call. other: unsupported syntax or lowering.
+REJECT_MISSING_RE = re.compile(r"has no exported member|does not exist on type|Cannot find name|Property '[^']*' does not")
+REJECT_TYPE_RE = re.compile(r"not assignable|Argument of type|No overload matches|not callable|cannot be used as|"
+                            r"has no call signatures|expected N arguments?|Type '")
 
 
 class HarnessError(Exception):
@@ -76,8 +86,14 @@ def node_stage(cfg, manifest):
         if cfg.only and not prog["name"].startswith(cfg.only):
             continue
         path = os.path.join(cfg.programs, prog["name"] + ".mts")
+        env = dict(os.environ, PA_TMP=pa_tmp_dir(cfg, prog))
+        os.makedirs(env["PA_TMP"], exist_ok=True)
+        cwd = cfg.programs
+        if prog.get("imports"):
+            env.update(TZ="UTC", LANG="C")
+            cwd = env["PA_TMP"]
         try:
-            p = subprocess.run([cfg.node, *flags, path], cwd=cfg.programs, capture_output=True, text=True,
+            p = subprocess.run([cfg.node, *flags, path], cwd=cwd, env=env, capture_output=True, text=True,
                                timeout=120)
         except subprocess.TimeoutExpired:
             raise HarnessError(f"node timed out on {prog['name']}")
@@ -118,6 +134,32 @@ def expected_reject(node_raw, detail):
     return node_raw.startswith("THROW") and EXPECTED_REJECT_RE.search(detail) is not None
 
 
+def reject_kind(detail):
+    """missing-export / type / other for a REJECT detail (see REJECT_MISSING_RE)."""
+    if REJECT_MISSING_RE.search(detail):
+        return "missing-export"
+    if REJECT_TYPE_RE.search(detail):
+        return "type"
+    return "other"
+
+
+def render_program(prog, lines, node):
+    """Program text for probe lines. Module programs carry their `import * as M` lines in prog["imports"], which
+    gen_probes.render does not write; they go right after the header line."""
+    text = gen_probes.render(lines, prog["module"], node)
+    imports = prog.get("imports") or []
+    if imports:
+        head, rest = text.split("\n", 1)
+        text = head + "\n" + "\n".join(imports) + "\n" + rest
+    return text
+
+
+def pa_tmp_dir(cfg, prog):
+    """Per-program scratch directory exported as PA_TMP. The same path for Node and the engine, so that a value
+    derived from the path (length included) cannot differ between the two sides. diff.py masks it to <tmp>."""
+    return os.path.join(cfg.out, "pa-tmp", prog["name"])
+
+
 def diag_detail(diag):
     lines = [l.strip() for l in diag.splitlines() if l.strip()]
     pick = next((l for l in lines if "error" in l.lower()), lines[0] if lines else "build failed, no diagnostic")
@@ -131,7 +173,12 @@ class Program:
         self.cfg, self.engine, self.prog = cfg, engine, prog
         self.line_of = {p["name"]: p["line"] for p in prog["probes"]}
         self.work = os.path.join(cfg.out, engine, "work", safe(prog["name"]))
-        self.env = dict(os.environ, THAW_JS_ENGINE=engine, TZ="UTC", LANG="C")
+        self.cwd = self.work
+        self.env = dict(os.environ, THAW_JS_ENGINE=engine, TZ="UTC", LANG="C",
+                        PA_TMP=pa_tmp_dir(cfg, prog))
+        os.makedirs(self.env["PA_TMP"], exist_ok=True)
+        if prog.get("imports"):
+            self.cwd = self.env["PA_TMP"]   # same cwd as the Node side, see the module docstring
         self.builds = 0
         self.reruns = 0
         self.n = 0
@@ -146,7 +193,7 @@ class Program:
         self.builds += 1
         self.n += 1
         stem = f"g{self.n}"
-        texts = gen_probes.render([self.line_of[n] for n in names], self.prog["module"], node=False).split("\n")
+        texts = render_program(self.prog, [self.line_of[n] for n in names], node=False).split("\n")
         src = os.path.join(self.work, stem + ".ts")
         with open(src, "w", encoding="utf-8") as fh:
             fh.write("\n".join(texts))
@@ -221,7 +268,7 @@ class Program:
         binary = os.path.join(self.work, stem)
         out_path = os.path.join(self.work, stem + ".out")
         try:
-            p = subprocess.run([binary], cwd=self.work, env=self.env, capture_output=True, timeout=RUN_TIMEOUT)
+            p = subprocess.run([binary], cwd=self.cwd, env=self.env, capture_output=True, timeout=RUN_TIMEOUT)
             status, rc, data = ("OK" if p.returncode == 0 else "CRASH"), p.returncode, p.stdout
         except subprocess.TimeoutExpired as e:
             status, rc, data = "HANG", None, e.stdout or b""
@@ -307,6 +354,8 @@ def engine_stage(cfg, engine, manifest, node_blocks):
             thaw_src.update(res["thaw"])
             for n, (cls, detail) in res["classes"].items():
                 classes[n] = {"corpus": corpus, "class": cls, "detail": detail}
+                if cls == "REJECT":
+                    classes[n]["sub"] = reject_kind(detail)
         write_blocks(os.path.join(eng, "corpus/node", corpus + ".txt"), ran, node_src)
         write_blocks(os.path.join(eng, "corpus/thaw", corpus + ".txt"), ran, thaw_src)
         for n in ran:
@@ -445,6 +494,8 @@ def main(argv):
             out[engine] = engine_stage(cfg, engine, manifest, node_blocks)
             if not cfg.keep_work:
                 shutil.rmtree(os.path.join(cfg.out, engine, "work"), ignore_errors=True)
+        if not cfg.keep_work:
+            shutil.rmtree(os.path.join(cfg.out, "pa-tmp"), ignore_errors=True)
         print(summarise(cfg, engines, out))
         if cfg.write_baseline:
             n = write_baseline(os.path.join(HERE, "known-gaps.json"), out)
