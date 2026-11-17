@@ -9153,6 +9153,28 @@ pub unsafe extern "C" fn thaw_json_is_buffer(value: *const Value) -> u8 {
     )
 }
 
+/// Whether a number[] request for `value` reads an ArrayBuffer's bytes (`thaw_json_to_number_array`)
+/// rather than the per-element loop: thaw-js only, a host lease that is neither an array nor a Buffer
+/// and whose op 31 answers its bytes. Any other value (the QuickJS lane included) answers 0.
+///
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_is_host_arraybuffer(value: *const Value) -> u8 {
+    if !engine_is_thaw_js() {
+        return 0;
+    }
+    let Some(Value::Host(lease)) = (unsafe { value.as_ref() }) else {
+        return 0;
+    };
+    if host_query(lease, 4).as_deref() == Some("1") || host_query(lease, 11).as_deref() == Some("1")
+    {
+        return 0;
+    }
+    u8::from(host_query(lease, 31).is_some_and(|bytes| bytes != "null"))
+}
+
 #[no_mangle]
 /// Returns whether a live Host value is an actual JavaScript Error-family instance.
 /// Plain Json values and non-Host values are not authenticated as Errors.
@@ -13838,6 +13860,66 @@ mod tests {
             let native = thaw_json_to_number_array(value);
             assert_eq!(unsafe { (native as *const i64).read() }, 0);
             unsafe { thaw_json_destroy(value) };
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn host_arraybuffer_predicate_follows_op_31_under_thaw_js_only() {
+        std::thread::spawn(|| {
+            extern "C" fn predicate_query(handle: u64, operation: u8) -> HostTextResult {
+                let text: &[u8] = match (handle, operation) {
+                    // an ArrayBuffer lease: not an array, not a Buffer, op 31 has its bytes
+                    (21, 4) | (21, 11) => b"0",
+                    (21, 31) => b"[1,2]",
+                    // an array lease
+                    (22, 4) => b"1",
+                    (22, 31) => b"null",
+                    // a lease op 31 does not answer for (a plain object)
+                    (23, 4) | (23, 11) => b"0",
+                    (23, 31) => b"null",
+                    _ => b"null",
+                };
+                HostTextResult {
+                    value: thaw_arena::owned_string(text),
+                    error: std::ptr::null(),
+                }
+            }
+            HOST_OPERATIONS.with(|slot| {
+                slot.set(Some(HostOperations {
+                    retain: host_array_test_retain,
+                    release: host_array_test_release,
+                    get: host_array_test_get,
+                    query: predicate_query,
+                    date_set: unused_typed_scope_date,
+                    set: unused_typed_scope_set,
+                    predicate: unused_typed_scope_predicate,
+                    enumerate: unused_typed_scope_text,
+                }))
+            });
+            let lease = |handle| {
+                leak(Value::Host(Rc::new(HostLease {
+                    handle,
+                    release: host_array_test_release,
+                })))
+            };
+            thaw_json_set_js_engine(1);
+            let arraybuffer = lease(21);
+            assert_eq!(unsafe { thaw_json_is_host_arraybuffer(arraybuffer) }, 1);
+            let array = lease(22);
+            assert_eq!(unsafe { thaw_json_is_host_arraybuffer(array) }, 0);
+            let plain = lease(23);
+            assert_eq!(unsafe { thaw_json_is_host_arraybuffer(plain) }, 0);
+            let number = leak(Value::Null);
+            assert_eq!(unsafe { thaw_json_is_host_arraybuffer(number) }, 0);
+
+            // the QuickJS lane (engine 0) never reads the bytes
+            thaw_json_set_js_engine(0);
+            assert_eq!(unsafe { thaw_json_is_host_arraybuffer(arraybuffer) }, 0);
+            for value in [arraybuffer, array, plain, number] {
+                unsafe { thaw_json_destroy(value) };
+            }
         })
         .join()
         .unwrap();
