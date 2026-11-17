@@ -275,7 +275,8 @@ The routed Node built-in modules are `node:events`, `node:module`, `node:path` (
 `readline/promises`), `node:dns` (with `dns/promises`), `node:inspector` (with
 `inspector/promises`), `node:string_decoder`, `node:tty`, `node:dgram`, `node:tls`,
 `node:buffer`, `node:process`, `node:http`, `node:https`, `node:http2`, `node:child_process`,
-`node:perf_hooks`, `node:zlib`, `node:net` and `node:crypto`. Other `node:*` modules, including
+`node:perf_hooks`, `node:zlib`, `node:net`, `node:crypto`, `node:sys` (an alias of `node:util`)
+and `node:sea`. Other `node:*` modules, including
 `node:cluster`, keep using QuickJS.
 
 Some routed modules still fall back to QuickJS when the program uses specific names:
