@@ -4617,6 +4617,244 @@ setTimeout(function () { console.log(n.join(',')); }, 5);";
     assert_eq!(run_loop(src), "t,i");
 }
 
+/// new Promise(r => r(1)).then: init, resolve, before/after around the reaction. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_ctor_resolve_then() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+new Promise(function (r) { r(1); }).then(function () { L('cb'); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|resolve #1|init #3 PROMISE trig=#1|before #3|cb|resolve #3|after #3"
+    );
+}
+
+/// Promise.resolve().then().then(): each then-result is a child of the promise it hangs off. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_then_chain() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+Promise.resolve().then(function () { L('a'); }).then(function () { L('b'); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|resolve #1|init #3 PROMISE trig=#1|init #4 PROMISE trig=#3|before #3|a|resolve #3|after #3|before #4|b|resolve #4|after #4"
+    );
+}
+
+/// resolve(thenable): no resolve at the call; the adoption job runs before/after on the promise being resolved. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_thenable_resolve() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+new Promise(function (r) { r(Promise.resolve(2)); }).then(function () { L('cb'); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|init #3 PROMISE trig=#2|resolve #3|init #4 PROMISE trig=#1|before #1|init #5 PROMISE trig=#3|after #1|before #5|resolve #1|resolve #5|after #5|before #4|cb|resolve #4|after #4"
+    );
+}
+
+/// a then callback returning a promise: the derived promise adopts it through a thenable job. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_thenable_return() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+Promise.resolve(1).then(function () { return Promise.resolve(3); }).then(function (v) { L('cb ' + v); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|resolve #1|init #3 PROMISE trig=#1|init #4 PROMISE trig=#3|before #3|init #5 PROMISE trig=#3|resolve #5|after #3|before #3|init #6 PROMISE trig=#5|after #3|before #6|resolve #3|resolve #6|after #6|before #4|cb 3|resolve #4|after #4"
+    );
+}
+
+/// Promise.reject().catch(): reject fires promiseResolve once, catch is a then-result. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_reject_catch() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+Promise.reject(1).catch(function () { L('c'); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|resolve #1|init #3 PROMISE trig=#1|before #3|c|resolve #3|after #3"
+    );
+}
+
+/// settling twice fires promiseResolve once. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_resolve_once() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+new Promise(function (r, j) { r(1); r(2); j(3); }).then(function (v) { L('v ' + v); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|resolve #1|init #3 PROMISE trig=#1|before #3|v 1|resolve #3|after #3"
+    );
+}
+
+/// async function with awaits, including a timer inside a later continuation. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_async_fn_awaits() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+(async function () { L('a'); await 1; L('b'); await new Promise(function (r) { setTimeout(r, 1); }); L('c'); })();"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|a|init #3 PROMISE trig=#1|resolve #3|init #4 PROMISE trig=#3|before #4|b|init #5 PROMISE trig=#4|init #6 Timeout trig=#4|init #7 PROMISE trig=#5|resolve #4|after #4|before #6|resolve #5|after #6|before #7|c|resolve #1|resolve #7|after #7"
+    );
+}
+
+/// Promise.all([1, 2]).then(): V8 creates six promises (result, per-element resolve and then, the user then). Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_all() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+Promise.all([1, 2]).then(function () { L('cb'); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|init #3 PROMISE trig=#2|resolve #3|init #4 PROMISE trig=#3|init #5 PROMISE trig=#2|resolve #5|init #6 PROMISE trig=#5|init #7 PROMISE trig=#1|before #4|resolve #4|after #4|before #6|resolve #1|resolve #6|after #6|before #7|cb|resolve #7|after #7"
+    );
+}
+
+/// allSettled, race and any: init and resolve counts and order match V8. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_combinators_match_v8() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+Promise.allSettled([1]).then(function () { L('s'); }); Promise.race([2, 3]).then(function () { L('r'); }); Promise.any([4]).then(function () { L('y'); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|init #3 PROMISE trig=#2|resolve #3|init #4 PROMISE trig=#3|init #5 PROMISE trig=#1|init #6 PROMISE trig=#2|init #7 PROMISE trig=#2|resolve #7|init #8 PROMISE trig=#7|init #9 PROMISE trig=#2|resolve #9|init #10 PROMISE trig=#9|init #11 PROMISE trig=#6|init #12 PROMISE trig=#2|init #13 PROMISE trig=#2|resolve #13|init #14 PROMISE trig=#13|init #15 PROMISE trig=#12|before #4|resolve #1|resolve #4|after #4|before #8|resolve #6|resolve #8|after #8|before #10|resolve #10|after #10|before #14|resolve #12|resolve #14|after #14|before #5|s|resolve #5|after #5|before #11|r|resolve #11|after #11|before #15|y|resolve #15|after #15"
+    );
+}
+
+/// executionAsyncId, triggerAsyncId and executionAsyncResource inside a then callback. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_execution_ids_in_then() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+Promise.resolve().then(function () { L('exec ' + n(A.executionAsyncId()) + ' trig ' + n(A.triggerAsyncId()) + ' res ' + Object.prototype.toString.call(A.executionAsyncResource())); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|resolve #1|init #3 PROMISE trig=#1|before #3|exec #3 trig #1 res [object Promise]|resolve #3|after #3"
+    );
+}
+
+/// AsyncLocalStorage store is visible in a then callback while a hook is enabled. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_als_store_survives() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+var S = new A.AsyncLocalStorage(); S.run(5, function () { Promise.resolve().then(function () { L('store ' + S.getStore()); }); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|resolve #1|init #3 PROMISE trig=#1|before #3|store 5|resolve #3|after #3"
+    );
+}
+
+/// a hook enabled then disabled: promise work emits no events. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_disabled_hook_reports_nothing() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var h = A.createHook({ init: function () { L('init'); } }).enable(); h.disable(); Promise.resolve(1).then(function () { L('cb'); });"#;
+    assert_eq!(run_loop(src), "cb");
+}
+
+/// Live promises get their destroy at exit (before the `exit` listeners run), counted here, not timed: Node destroys them at GC.
+#[test]
+fn async_hooks_promise_destroy_flushes_at_exit() {
+    let src = "var A = __thaw_async_hooks_exports, inits = 0, destroys = 0;
+A.createHook({ init(id, type) { if (type === 'PROMISE') inits++; }, destroy(id) { destroys++; } }).enable();
+var p = Promise.resolve(1).then(function () {});
+process.on('exit', function () { console.log('inits ' + inits + ' destroys ' + destroys); });";
+    assert_eq!(run_loop(src), "inits 2 destroys 2");
+}
+
 static HOOK_INITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Counts `init` hook calls from the async_hooks dispatch; the result is ignored.
