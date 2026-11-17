@@ -133,7 +133,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              module.exports.__esModule = true;\n",
         ),
         "sys" => Some(
-            "module.exports = require('node:util');\n",
+            "if (typeof process !== 'undefined' && typeof process.emitWarning === 'function') process.emitWarning('sys is deprecated. Use util instead.', 'DeprecationWarning', 'DEP0025');\nmodule.exports = require('node:util');\n",
         ),
         _ => None,
     }

@@ -1076,3 +1076,14 @@ fn opaque_builtins_async_and_catch() {
     assert_eq!(slot(s, "t", "e"), "unknown");
     assert_eq!(fnr(s, Config::default(), "t").class, crate::Class::Union);
 }
+
+#[test]
+fn node_sys_is_typed_as_util_and_sea_is_known() {
+    // `sys` is an alias of `util` (DEP0025); `sea` is a known builtin with opaque members.
+    assert_eq!(
+        crate::builtins::ns_of_require("sys"),
+        crate::builtins::ns_of_require("util")
+    );
+    assert!(crate::builtins::ns_of_require("sys").is_some());
+    assert!(crate::builtins::ns_of_require("sea").is_some());
+}

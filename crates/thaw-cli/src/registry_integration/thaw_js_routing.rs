@@ -691,6 +691,8 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:test",
     "node:test/reporters",
     "node:cluster",
+    "node:sys",
+    "node:sea",
 ];
 
 

@@ -59,7 +59,7 @@ pub fn ns_of_require(spec: &str) -> Option<u8> {
         "path" | "path/posix" => PATH,
         "os" => OS,
         "fs" => FS,
-        "util" => UTIL,
+        "util" | "sys" => UTIL,
         "assert" | "assert/strict" => ASSERT,
         "crypto" => CRYPTO,
         "buffer" => BUFFER,
@@ -67,7 +67,7 @@ pub fn ns_of_require(spec: &str) -> Option<u8> {
         | "dns" | "child_process" | "readline" | "querystring" | "string_decoder" | "timers"
         | "vm" | "worker_threads" | "module" | "perf_hooks" | "async_hooks" | "cluster"
         | "dgram" | "tty" | "v8" | "punycode" | "constants" | "fs/promises" | "stream/promises"
-        | "timers/promises" => OPAQUE,
+        | "timers/promises" | "sea" => OPAQUE,
         _ => return None,
     })
 }

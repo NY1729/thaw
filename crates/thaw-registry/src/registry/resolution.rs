@@ -265,6 +265,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "test/reporters" => {
             "export interface ReporterResult { done: boolean; value?: string; }\nexport declare class Reporter { next(): Promise<ReporterResult>; }\nexport declare function dot(source: Json): Reporter;\nexport declare function junit(source: Json): Reporter;\nexport declare function lcov(source: Json): Reporter;\nexport declare function spec(source: Json): Reporter;\nexport declare function tap(source: Json): Reporter;\n"
         }
+        "sea" => {
+            "export declare function isSea(): boolean;\nexport declare function getAsset(key: string, encoding?: string): JsValue;\nexport declare function getRawAsset(key: string): JsValue;\nexport declare function getAssetAsBlob(key: string, options?: Json): JsValue;\nexport declare function getAssetKeys(): Json;\n"
+        }
         "wasi" => {
             "export declare class WASI { constructor(options: any); wasiImport: JsValue; getImportObject(): JsValue; start(instance: JsValue): number | undefined; initialize(instance: JsValue): void; }\n"
         }
