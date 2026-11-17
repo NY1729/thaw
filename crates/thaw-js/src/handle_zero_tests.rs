@@ -84,6 +84,7 @@ const TABLE: &[(&str, Policy)] = &[
     ("thaw_tjs_intern_native_object", Policy::Lenient),
     ("thaw_tjs_iterator_step_exact_result", Policy::Lenient),
     ("thaw_tjs_native_object_pointer", Policy::Lenient),
+    ("thaw_tjs_origin_serial", Policy::Lenient),
     (
         "thaw_tjs_property_predicate_json_key_result",
         Policy::Lenient,
@@ -244,7 +245,8 @@ fn call_with_zero(name: &str) -> Option<String> {
         thaw_tjs_call_handle_graph_result, thaw_tjs_get_property_result,
         thaw_tjs_handle_is_plain_data, thaw_tjs_handle_to_console_string,
         thaw_tjs_handle_to_string, thaw_tjs_handle_typed_array_probe, thaw_tjs_has_property_result,
-        thaw_tjs_native_object_pointer, thaw_tjs_resolve_handle_graph_result,
+        thaw_tjs_native_object_pointer, thaw_tjs_origin_serial,
+        thaw_tjs_resolve_handle_graph_result,
     };
     let layout = CString::new("probe").unwrap();
     let property = CString::new("x").unwrap();
@@ -277,6 +279,11 @@ fn call_with_zero(name: &str) -> Option<String> {
         }
         "thaw_tjs_call_handle_graph_result" => {
             text_of(thaw_tjs_call_handle_graph_result(0, args.as_ptr()).error)
+        }
+        "thaw_tjs_origin_serial" => {
+            // handle 0 is `undefined`: it has no origin container
+            assert_eq!(thaw_tjs_origin_serial(0), 0);
+            String::new()
         }
         "thaw_tjs_native_object_pointer" => {
             let r = thaw_tjs_native_object_pointer(0, layout.as_ptr());
