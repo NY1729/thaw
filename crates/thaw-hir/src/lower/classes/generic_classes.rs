@@ -1730,6 +1730,7 @@ fn specialize_generic_classes(
                 Ok(resolved) => resolved,
                 Err(error)
                     if error.contains("generics are not supported yet")
+                        || error.contains("unsupported type reference `")
                         || error.contains("cannot infer generic class")
                         || (can_defer_inference && error.contains("type argument(s), got 0")) =>
                 {
@@ -1840,7 +1841,9 @@ fn specialize_generic_classes(
     };
     specialized.visit_mut_with(&mut rewriter);
     if let Some(error) = rewriter.error {
-        if error.contains("generics are not supported yet") {
+        if error.contains("generics are not supported yet")
+            || error.contains("unsupported type reference `")
+        {
             return Err(format!(
                 "recursive or unresolved generic class type cannot use Thaw's fixed-size native layout: {error}"
             ));

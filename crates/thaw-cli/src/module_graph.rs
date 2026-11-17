@@ -1258,6 +1258,17 @@ struct RenameReferences<'a> {
 }
 
 impl RenameReferences<'_> {
+    /// The flattened export ident that `namespace.member` rewrites to, or
+    /// `None` when `namespace` is shadowed or is not a namespace import with
+    /// that member. Shared by the expression and type-position rewrites so
+    /// `M.URL` names the same target in both.
+    fn namespace_member_target(&self, namespace: &str, member: &str) -> Option<&String> {
+        if self.shadowed.contains(namespace) {
+            return None;
+        }
+        self.namespaces.get(namespace)?.get(member)
+    }
+
     /// A destructuring-assignment target (`[a, b] = [b, a]`) names existing bindings, so
     /// they follow the same renaming as a plain `a = b` target.
     fn rename_assignment_pattern(&self, pattern: &mut thaw_parser::ast::Pat) {
@@ -1703,18 +1714,14 @@ impl VisitMut for RenameReferences<'_> {
         if let (Expr::Ident(namespace), thaw_parser::ast::MemberProp::Ident(property)) =
             (member.obj.as_ref(), &member.prop)
         {
-            if !self.shadowed.contains(namespace.sym.as_ref()) {
-                if let Some(target) = self
-                    .namespaces
-                    .get(namespace.sym.as_ref())
-                    .and_then(|exports| exports.get(property.sym.as_ref()))
-                {
-                    *expr = Expr::Ident(thaw_parser::ast::Ident::new_no_ctxt(
-                        target.clone().into(),
-                        member.span,
-                    ));
-                    return;
-                }
+            if let Some(target) =
+                self.namespace_member_target(namespace.sym.as_ref(), property.sym.as_ref())
+            {
+                *expr = Expr::Ident(thaw_parser::ast::Ident::new_no_ctxt(
+                    target.clone().into(),
+                    member.span,
+                ));
+                return;
             }
         }
         let Expr::MetaProp(meta) = member.obj.as_ref() else {
@@ -1770,8 +1777,24 @@ impl VisitMut for RenameReferences<'_> {
 
     fn visit_mut_ts_type_ref(&mut self, reference: &mut TsTypeRef) {
         reference.visit_mut_children_with(self);
-        if let TsEntityName::Ident(ident) = &mut reference.type_name {
-            self.rename_ident(ident);
+        match &mut reference.type_name {
+            TsEntityName::Ident(ident) => self.rename_ident(ident),
+            // `M.URL` in a type position names the same flattened export the
+            // expression `M.URL` rewrites to. Other qualified names are left
+            // alone.
+            TsEntityName::TsQualifiedName(qualified) => {
+                let TsEntityName::Ident(namespace) = &qualified.left else {
+                    return;
+                };
+                let span = qualified.span;
+                if let Some(target) = self
+                    .namespace_member_target(namespace.sym.as_ref(), qualified.right.sym.as_ref())
+                {
+                    reference.type_name = TsEntityName::Ident(
+                        thaw_parser::ast::Ident::new_no_ctxt(target.clone().into(), span),
+                    );
+                }
+            }
         }
     }
 
