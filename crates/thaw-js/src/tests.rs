@@ -10168,6 +10168,41 @@ fn array_index_and_length_descriptors_are_unchanged() {
     );
 }
 
+/// createHook enable/disable registers the native promise sink with the runtime, and disable clears it.
+#[test]
+fn async_hooks_enable_registers_the_native_promise_sink() {
+    let src = "var A = __thaw_async_hooks_exports; var h = A.createHook({ init: function () {} }); h.enable(); h.disable();";
+    run_loop(src);
+    let sets = crate::host::TEST_ASYNC_HOOK_SET.with(|sets| sets.borrow().clone());
+    assert_eq!(sets.len(), 2, "enable then disable: {sets:?}");
+    assert_eq!(sets[0].0, 1);
+    assert_ne!(sets[0].1, 0, "enable passes the sink");
+    assert_eq!(sets[1], (0, 0));
+}
+
+/// The id-only native entry shares the realm's id counter and scope stack with realm promises.
+#[test]
+fn async_hooks_native_entry_maps_keys_to_ids_and_scopes() {
+    let src = r#"var A = __thaw_async_hooks_exports; var out = [];
+A.createHook({
+  init: function (id, type, trig) { out.push('init ' + id + ' ' + type + ' ' + trig); },
+  before: function (id) { out.push('before ' + id); },
+  after: function (id) { out.push('after ' + id); },
+  promiseResolve: function (id) { out.push('resolve ' + id); },
+}).enable();
+__thaw_async_hooks_native(0, 77, 0);
+__thaw_async_hooks_native(0, 78, 77);
+__thaw_async_hooks_native(1, 78, 0);
+__thaw_async_hooks_native(2, 78, 0);
+__thaw_async_hooks_native(3, 77, 0);
+__thaw_async_hooks_native(1, 99, 0);
+console.log(out.join('|'));"#;
+    assert_eq!(
+        run_loop(src),
+        "init 2 PROMISE 1|init 3 PROMISE 2|before 3|after 3|resolve 2"
+    );
+}
+
 #[test]
 fn class_op_constructs_and_calls_dotted_nested_namespace_classes() {
     use crate::host::thaw_tjs_register;

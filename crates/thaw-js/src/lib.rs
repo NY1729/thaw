@@ -6033,6 +6033,7 @@ impl Drop for Interp {
     fn drop(&mut self) {
         ipc::forget_realm(self.realm_id);
         crate::atomics::forget_realm(self.realm_id);
+        host::native_async_hooks_release(self as *mut Interp);
         self.teardown();
     }
 }

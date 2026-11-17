@@ -1651,7 +1651,7 @@ fn quickjs_callback_export_args() -> [&'static str; 4] {
 
 /// The thaw-js loop's native-continuation drain (`drain_native_continuations`, host.rs) looks this symbol up via
 /// RTLD_DEFAULT; it is not in `quickjs_callback_export_args` and must be exported from a thaw-js routed build.
-fn thaw_js_extra_export_args() -> [&'static str; 6] {
+fn thaw_js_extra_export_args() -> [&'static str; 7] {
     [
         "-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle",
         // the thaw-js loop polls a compiled http server through RTLD_DEFAULT (host.rs poll_native_servers)
@@ -1662,6 +1662,8 @@ fn thaw_js_extra_export_args() -> [&'static str; 6] {
         "-Wl,--export-dynamic-symbol=thaw_json_borrowed_tracked_handle_id",
         // compiled closure labels, looked up via RTLD_DEFAULT (host.rs function_label_symbol)
         "-Wl,--export-dynamic-symbol=thaw_function_label_for",
+        // the realm's createHook registers its native promise sink through RTLD_DEFAULT (host.rs native_async_hooks_set)
+        "-Wl,--export-dynamic-symbol=thaw_runtime_async_hooks_set",
     ]
 }
 
@@ -1763,6 +1765,7 @@ fn thaw_js_builds_export_the_native_continuation_drain() {
             "-Wl,--export-dynamic-symbol=thaw_error_delete_prop",
             "-Wl,--export-dynamic-symbol=thaw_json_borrowed_tracked_handle_id",
             "-Wl,--export-dynamic-symbol=thaw_function_label_for",
+            "-Wl,--export-dynamic-symbol=thaw_runtime_async_hooks_set",
         ]
     );
     assert!(thaw_js_drain_export_needed(true));
