@@ -2337,3 +2337,45 @@ fn to_spliced_saves_length_after_arguments_before_numeric_conversion() {
     assert_eq!(compile_and_run(source, "to_spliced_length_order"),
         "1,2 1,2,3\n1,2\n1,2,3\n1,2 1,2,3,4 1 1\n1\ntrue\n");
 }
+
+/// `(b as T).m()` and `b!.m()` on a `T | null` native collection: the cast/assertion dispatches
+/// natively, and a null at run time throws Node's TypeError rather than crashing.
+#[test]
+fn member_calls_through_nullable_casts_and_assertions_on_collections() {
+    let source = r#"function flip(): boolean { return true; }
+function nothing(): boolean { return false; }
+function main(): void {
+  const b: Map<number, string> | null = flip() ? new Map<number, string>([[1, "a"], [2, "b"]]) : null;
+  console.log((b as Map<number, string>).get(1), (b as Map<number, string>).has(2), (b as Map<number, string>).size);
+  console.log(b!.get(2), b!.has(3));
+  (b as Map<number, string>).set(3, "c");
+  console.log(b!.size);
+  (b as Map<number, string>).delete(1);
+  console.log(b!.size, b!.get(1));
+  (b as Map<number, string>).clear();
+  console.log(b!.size);
+  const s: Set<number> | null = flip() ? new Set<number>([1, 2]) : null;
+  console.log((s as Set<number>).has(1), s!.has(5));
+  (s as Set<number>).add(7);
+  console.log(s!.size);
+  (s as Set<number>).clear();
+  console.log(s!.size);
+  const key = {};
+  const w: WeakMap<object, number> | null = flip() ? new WeakMap<object, number>() : null;
+  (w as WeakMap<object, number>).set(key, 9);
+  console.log((w as WeakMap<object, number>).has(key), w!.get(key));
+  const ws: WeakSet<object> | null = flip() ? new WeakSet<object>() : null;
+  (ws as WeakSet<object>).add(key);
+  console.log(ws!.has(key), (ws as WeakSet<object>).has({}));
+  const absent: Map<number, string> | null = nothing() ? new Map<number, string>() : null;
+  try { (absent as Map<number, string>).clear(); console.log("no throw"); } catch (e: any) { console.log(e.name, e.message); }
+  try { absent!.get(1); } catch (e: any) { console.log(e.name, e.message); }
+  const none: Set<number> | undefined = nothing() ? new Set<number>() : undefined;
+  try { (none as Set<number>).add(1); } catch (e: any) { console.log(e.name, e.message); }
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "nullable_cast_collection_calls"),
+        "a true 2\nb false\n3\n2 undefined\n0\ntrue false\n3\n0\ntrue 9\ntrue false\nTypeError Cannot read properties of null (reading 'clear')\nTypeError Cannot read properties of null (reading 'get')\nTypeError Cannot read properties of undefined (reading 'add')\n"
+    );
+}

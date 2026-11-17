@@ -146,6 +146,16 @@ pub unsafe extern "C" fn thaw_exception_native_tag(
 /// `thaw_promise_destroy` after no coroutine can reference the handle.
 #[no_mangle]
 pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
+    new_promise_with_trigger(0)
+}
+
+/// A promise derived from `source` (a `then`/`catch`/`finally` output, an adoption, a combinator
+/// child): its async_hooks trigger is `source`'s id. `source` null or untracked: the current execution.
+fn new_promise_linked(source: *const ThawPromise) -> *mut ThawPromise {
+    new_promise_with_trigger(unsafe { source.as_ref() }.map_or(0, |source| source.hook_key))
+}
+
+fn new_promise_with_trigger(trigger_key: u64) -> *mut ThawPromise {
     let hook_key = async_hook_new_key();
     let promise = Box::into_raw(Box::new(ThawPromise {
         result: None,
@@ -171,7 +181,7 @@ pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
         unsafe { (*promise).external_root = Some(thaw_arena::ArenaRoot::new(promise as usize)); }
     }
     ACTIVE_PROMISES.with(|active| active.borrow_mut().push(promise));
-    async_hook_emit(0, hook_key, 0);
+    async_hook_emit(0, hook_key, trigger_key);
     promise
 }
 
@@ -240,7 +250,25 @@ pub unsafe extern "C" fn thaw_promise_subscribe(
     resume: PromiseResumeFn,
     frame: *mut u8,
 ) -> u8 {
-    unsafe { subscribe_with_roots(promise, resume, frame, Vec::new()) }
+    unsafe { subscribe_with_roots(promise, resume, frame, Vec::new(), 0, false) }
+}
+
+/// Registers an `await` continuation on `promise`. With the async_hooks sink on, the continuation runs as
+/// the throwaway promise of Node's `await`: its trigger is `promise`, and it resolves when the
+/// continuation returns.
+///
+/// # Safety
+///
+/// Same contract as `thaw_promise_subscribe`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_subscribe_await(
+    promise: *mut ThawPromise,
+    resume: PromiseResumeFn,
+    frame: *mut u8,
+) -> u8 {
+    let parent = unsafe { promise.as_ref() }.map_or(0, |promise| promise.hook_key);
+    let throwaway = async_hook_throwaway(parent);
+    unsafe { subscribe_with_roots(promise, resume, frame, Vec::new(), throwaway, true) }
 }
 
 unsafe fn subscribe_with_roots(
@@ -248,6 +276,8 @@ unsafe fn subscribe_with_roots(
     resume: PromiseResumeFn,
     frame: *mut u8,
     payload_roots: Vec<thaw_arena::ArenaRoot>,
+    hook_key: u64,
+    hook_settles: bool,
 ) -> u8 {
     let Some(promise) = (unsafe { promise.as_mut() }) else {
         return 0;
@@ -256,7 +286,8 @@ unsafe fn subscribe_with_roots(
     let subscription = PromiseSubscription {
         resume,
         frame,
-        hook_key: 0,
+        hook_key,
+        hook_settles,
         _frame_root: thaw_arena::ArenaRoot::new(frame as usize),
         _payload_roots: payload_roots,
     };
@@ -790,7 +821,7 @@ unsafe fn promise_chain_with_handlers(
     fulfilled: Option<(PromiseTransformFn, *mut u8)>,
     rejected: Option<(PromiseTransformFn, *mut u8)>,
 ) -> *mut ThawPromise {
-    let output = thaw_promise_new();
+    let output = new_promise_linked(input);
     if input.is_null() {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
@@ -807,7 +838,10 @@ unsafe fn promise_chain_with_handlers(
         fulfilled,
         rejected,
     }));
-    unsafe { subscribe_with_roots(input, resume_promise_chain, state.cast(), payload_roots) };
+    let hook_key = unsafe { (*output).hook_key };
+    unsafe {
+        subscribe_with_roots(input, resume_promise_chain, state.cast(), payload_roots, hook_key, false)
+    };
     output
 }
 
@@ -815,6 +849,24 @@ struct PromiseAdoptState {
     output: *mut ThawPromise,
     _output: OutputRef,
     input: *mut ThawPromise,
+    /// The reaction's promise, created when the adoption job runs (set on the second hop only).
+    derived: *mut ThawPromise,
+}
+
+/// The adoption job (Node's NewPromiseResolveThenableJob): one tick after `resolve(thenable)`, in the
+/// scope of the adopting promise. It subscribes to `input` from there, so the settlement arrives one
+/// more tick later, as in Node.
+extern "C" fn resume_promise_adopt_job(frame: *mut u8, _result: *const u8) {
+    let state = unsafe { Box::from_raw(frame.cast::<PromiseAdoptState>()) };
+    let derived = new_promise_linked(state.input);
+    let hook_key = unsafe { (*derived).hook_key };
+    let reaction = Box::into_raw(Box::new(PromiseAdoptState {
+        output: state.output,
+        _output: OutputRef::new(state.output),
+        input: state.input,
+        derived,
+    }));
+    unsafe { subscribe_with_roots(state.input, resume_promise_adopt, reaction.cast(), Vec::new(), hook_key, false) };
 }
 
 extern "C" fn resume_promise_adopt(frame: *mut u8, result: *const u8) {
@@ -823,6 +875,11 @@ extern "C" fn resume_promise_adopt(frame: *mut u8, result: *const u8) {
         forward_promise_rejection(state.output, state.input, result);
     } else {
         forward_promise_fulfillment(state.output, state.input, result);
+    }
+    // The reaction promise settles after the forwarding, inside its own reaction (Node's order).
+    if !state.derived.is_null() {
+        thaw_promise_resolve(state.derived, std::ptr::null());
+        unsafe { thaw_promise_destroy(state.derived) };
     }
     unsafe { thaw_promise_destroy(state.input) };
 }
@@ -849,8 +906,27 @@ pub unsafe extern "C" fn thaw_promise_adopt(
         output,
         _output: OutputRef::new(output),
         input,
+        derived: std::ptr::null_mut(),
     }));
-    thaw_promise_subscribe(input, resume_promise_adopt, state.cast());
+    // ponytail: the two-hop adoption is only taken while a hook sink is registered. Always-on, it
+    // broke programs that adopt a settled promise (the adopted handle is read a tick later); the
+    // single-hop path below is the pre-existing behaviour and stays the default.
+    if ASYNC_HOOK_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        let hook_key = unsafe { (*output).hook_key };
+        enqueue_continuation(
+            PromiseSubscription {
+                resume: resume_promise_adopt_job,
+                frame: state.cast(),
+                hook_key,
+                hook_settles: false,
+                _frame_root: thaw_arena::ArenaRoot::new(state as usize),
+                _payload_roots: Vec::new(),
+            },
+            std::ptr::null(),
+        );
+    } else {
+        unsafe { subscribe_with_roots(input, resume_promise_adopt, state.cast(), Vec::new(), 0, false) };
+    }
     1
 }
 
@@ -888,7 +964,7 @@ pub unsafe extern "C" fn thaw_promise_finally(
     callback: PromiseFinallyFn,
     context: *mut u8,
 ) -> *mut ThawPromise {
-    let output = thaw_promise_new();
+    let output = new_promise_linked(input);
     if input.is_null() {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
@@ -901,7 +977,10 @@ pub unsafe extern "C" fn thaw_promise_finally(
         context,
     }));
     let payload_roots = vec![thaw_arena::ArenaRoot::new(context as usize)];
-    unsafe { subscribe_with_roots(input, resume_promise_finally, state.cast(), payload_roots) };
+    let hook_key = unsafe { (*output).hook_key };
+    unsafe {
+        subscribe_with_roots(input, resume_promise_finally, state.cast(), payload_roots, hook_key, false)
+    };
     output
 }
 
@@ -1962,6 +2041,8 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
                 resume_promise_all_settled_child,
                 child.cast(),
                 payload_roots,
+                0,
+                false,
             )
         };
     }

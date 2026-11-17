@@ -1314,6 +1314,10 @@ pub struct Interp {
     depth: usize,
     /// Closures being run, innermost last, with whether the call constructs (`call_frames.rs`).
     pub(crate) call_frames: Vec<(Rc<FuncDef>, bool)>,
+    /// Index in `call_frames` where the running coroutine's own segment starts (0 on the host). Marks
+    /// taken by call sites are relative to it, so a coroutine resumed at another depth still truncates
+    /// only its own frames (`call_frames.rs`).
+    pub(crate) frame_base: usize,
     /// Addresses of the arrays/objects whose native walk is in progress (`join`, `inspect`): meeting one
     /// again means the value contains itself. Shared guard for every native recursion over user objects.
     walking: Vec<usize>,
@@ -1489,6 +1493,7 @@ impl Interp {
             realm_id: next_realm_id(),
             depth: 0,
             call_frames: Vec::new(),
+            frame_base: 0,
             walking: Vec::new(),
             walking_set: Default::default(),
             circular_target: None,
@@ -2776,10 +2781,10 @@ impl Interp {
                 n(self, prim.as_ref().unwrap_or(this), args)
             }
             Callee::Closure(def, scope) => {
-                let mark = self.call_frames.len();
+                let mark = self.frame_mark();
                 self.call_frames.push((def.clone(), constructing));
                 let r = self.call_closure(f, &def, &scope, this, args);
-                self.call_frames.truncate(mark);
+                self.frame_truncate(mark);
                 r
             }
             Callee::Class(n) => self.throw_error(
@@ -5466,8 +5471,18 @@ pub(crate) fn too_nested(src: &str) -> bool {
     max > MAX_NEST
 }
 
-#[cfg(target_os = "linux")]
+/// Whether `sp` is well above the bottom of the stack this thread runs on. A costack reports its own
+/// bounds (the host thread's are wrong while it runs); otherwise the thread's stack from pthread.
 fn thread_stack_has_room(sp: usize) -> bool {
+    if let Some((lo, hi)) = costack::current_bounds() {
+        let size = hi - lo;
+        return sp >= lo + (size / 8 + (4 << 20)).min(size / 2);
+    }
+    host_thread_stack_has_room(sp)
+}
+
+#[cfg(target_os = "linux")]
+fn host_thread_stack_has_room(sp: usize) -> bool {
     // SAFETY: plain pthread queries on the current thread with a zeroed attribute object.
     unsafe {
         let mut attr: libc::pthread_attr_t = std::mem::zeroed();
@@ -5483,7 +5498,7 @@ fn thread_stack_has_room(sp: usize) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn thread_stack_has_room(_sp: usize) -> bool {
+fn host_thread_stack_has_room(_sp: usize) -> bool {
     false
 }
 
