@@ -1823,3 +1823,90 @@ fn node_timers_value_reads_name_the_realm_global_and_calls_keep_the_shim() {
     assert_eq!(count("timers"), 1, "{:?}", idents.0);
     assert_eq!(count("later"), 1, "{:?}", idents.0);
 }
+
+/// Bundles `source` with `node:url` exporting `URL` and `Buffer` (as flattened
+/// idents) and returns every type-reference name left in the bundled module,
+/// dotted for qualified names.
+fn qualified_type_ref_names(source: &str) -> Vec<String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+
+    #[derive(Default)]
+    struct Names(Vec<String>);
+    impl Visit for Names {
+        fn visit_ts_type_ref(&mut self, reference: &thaw_parser::ast::TsTypeRef) {
+            fn text(name: &thaw_parser::ast::TsEntityName) -> String {
+                match name {
+                    thaw_parser::ast::TsEntityName::Ident(ident) => ident.sym.to_string(),
+                    thaw_parser::ast::TsEntityName::TsQualifiedName(qualified) => {
+                        format!("{}.{}", text(&qualified.left), qualified.right.sym)
+                    }
+                }
+            }
+            self.0.push(text(&reference.type_name));
+            reference.visit_children_with(self);
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("thaw qualified type {}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, source).unwrap();
+    let external_exports = std::collections::HashMap::from([(
+        "node:url".to_string(),
+        std::collections::HashMap::from([
+            ("URL".to_string(), "__thaw_url_URL".to_string()),
+            ("Buffer".to_string(), "__thaw_buffer_Buffer".to_string()),
+        ]),
+    )]);
+    let module = module_graph::bundle(
+        &entry,
+        source,
+        &external_exports,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    let mut names = Names::default();
+    module.visit_with(&mut names);
+    names.0
+}
+
+#[test]
+fn qualified_namespace_type_refs_rewrite_to_the_member_target() {
+    let names = qualified_type_ref_names(
+        "import * as M from 'node:url';\n\
+         function main(): void { const u: M.URL = new M.URL('http://a.b/c'); let b: M.Buffer; }",
+    );
+    assert!(names.contains(&"__thaw_url_URL".to_string()), "{names:?}");
+    assert!(names.contains(&"__thaw_buffer_Buffer".to_string()), "{names:?}");
+    assert!(!names.iter().any(|name| name.starts_with("M.")), "{names:?}");
+}
+
+#[test]
+fn qualified_type_refs_of_a_shadowed_namespace_or_unknown_member_stay_qualified() {
+    let shadowed = qualified_type_ref_names(
+        "import * as M from 'node:url';\n\
+         function main(M: any): void { const u: M.URL = M; }",
+    );
+    assert!(shadowed.contains(&"M.URL".to_string()), "{shadowed:?}");
+
+    let unknown = qualified_type_ref_names(
+        "import * as M from 'node:url';\n\
+         function main(): void { const x: M.Nope | null = null; const y: Foo.Bar | null = null; }",
+    );
+    assert!(unknown.contains(&"M.Nope".to_string()), "{unknown:?}");
+    assert!(unknown.contains(&"Foo.Bar".to_string()), "{unknown:?}");
+}
+
+#[test]
+fn qualified_namespace_type_annotation_builds_and_runs() {
+    let (stdout, stderr, code) = run_async_streams_program(
+        "qualified-type-ref-url",
+        "import * as M from 'node:url';\n\
+         function main(): void { const u: M.URL = new M.URL('http://a.b/c?d=1'); console.log(u.pathname, u.search); }\n",
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "/c ?d=1\n");
+}
