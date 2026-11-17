@@ -2146,6 +2146,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 .fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        // (error, key, Json value): the value entry, `thaw_error_set_prop` with the value's encoding.
+        self.module.add_function(
+            "thaw_error_set_prop_value",
+            self.context
+                .bool_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_object_stack_set",
             self.context

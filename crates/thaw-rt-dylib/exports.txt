@@ -197,6 +197,7 @@ thaw_error_property
 thaw_error_property_json
 thaw_error_register_owner_props
 thaw_error_set_prop
+thaw_error_set_prop_value
 thaw_error_set_stack_trace_limit
 thaw_error_stack
 thaw_error_stack_frames
