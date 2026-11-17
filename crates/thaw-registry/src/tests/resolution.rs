@@ -6010,3 +6010,17 @@ fn zlib_crc32_accepts_the_tagged_buffer_shape_thaw_js_passes() {
     let bundle = builtin_bundle_with("node:zlib", &[]).unwrap();
     assert!(bundle.contains("data.type === 'Buffer' && Array.isArray(data.data)"));
 }
+
+#[test]
+fn node_sqlite_is_prefix_only_with_its_declarations_and_natives() {
+    // Node 22 lists node:sqlite neither in builtinModules nor as a bare name
+    assert_eq!(bare_node_builtin_specifier("sqlite"), None);
+    let resolved = resolve_builtin("node:sqlite").unwrap();
+    assert_eq!(resolved.name, "node:sqlite");
+    for declaration in ["class DatabaseSync", "class StatementSync", "const constants", "function backup"] {
+        assert!(resolved.dts_source.contains(declaration), "{declaration}");
+    }
+    let bundle = builtin_bundle_with("node:sqlite", &[]).unwrap();
+    assert!(bundle.contains("__thaw_sqlite_open"));
+    assert!(bundle.contains("'SQLite is an experimental feature and might change at any time'"));
+}

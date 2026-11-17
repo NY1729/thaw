@@ -851,6 +851,7 @@ pub fn required_runtime_features(source: &str) -> std::collections::BTreeSet<&'s
         ("intl", &["Intl.Locale", "Intl.PluralRules", "Intl.Collator", "Intl.Segmenter",
             "Intl.RelativeTimeFormat", "Intl.NumberFormat", "Intl.DateTimeFormat", "Intl.ListFormat",
             "Intl.DisplayNames", "Intl"][..]),
+        ("sqlite", &["node:sqlite", "__thaw_sqlite_"][..]),
     ].into_iter().filter_map(|(feature, markers)| {
         markers.iter().any(|marker| source.contains(marker)).then_some(feature)
     }).collect()

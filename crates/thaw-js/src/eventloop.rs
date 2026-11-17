@@ -2062,7 +2062,7 @@ impl Interp {
             ("openssl", "3.5.9"),
             ("simdjson", "4.5.0"),
             ("simdutf", "6.4.2"),
-            ("sqlite", "3.51.2"),
+            ("sqlite", "3.51.3"),
             ("tz", "2025c"),
             ("undici", "6.27.0"),
             ("unicode", "17.0"),
