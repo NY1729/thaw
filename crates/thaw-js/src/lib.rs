@@ -114,6 +114,8 @@ mod web_wasm_natives;
 #[cfg(all(test, feature = "wasm"))]
 #[path = "web/wasm_tests.rs"]
 mod web_wasm_tests;
+#[path = "web/websocket.rs"]
+mod web_websocket;
 #[path = "web/worker_stream.rs"]
 mod web_worker_stream;
 #[path = "web/worker_threads.rs"]
@@ -434,6 +436,14 @@ impl std::fmt::Debug for Ctl {
 }
 
 pub type R<T> = Result<T, Ctl>;
+
+/// Where an identifier resolves on a scope chain that holds a `with` record.
+enum Resolved<'s> {
+    /// The object of a `with` record whose `HasBinding` holds.
+    Object(Obj),
+    /// A declarative scope that binds the name.
+    Declared(&'s Scope),
+}
 
 struct Binding {
     value: Value,
@@ -1540,6 +1550,7 @@ impl Interp {
             web_wasm::install(&mut it);
             web_crypto::install(&mut it);
             web_navigator::install(&mut it);
+            web_websocket::install(&mut it);
             node_crypto::install(&mut it);
             it.install_url();
             // host realm only: a vm context's global keeps the plain `Object` tag, as in Node
@@ -3038,6 +3049,21 @@ impl Interp {
 
     // ----- scopes -----
 
+    /// ToObject of a primitive: its wrapper object (`Object(v)`).
+    pub(crate) fn box_primitive(&self, v: Value) -> Obj {
+        let proto = match &v {
+            Value::Number(_) => self.number_proto.clone(),
+            Value::Str(_) => self.string_proto.clone(),
+            Value::BigInt(_) => self
+                .rt
+                .bigint_proto
+                .clone()
+                .unwrap_or_else(|| self.object_proto.clone()),
+            _ => self.bool_proto.clone(),
+        };
+        new_obj(Some(proto), Kind::Wrapper(v))
+    }
+
     /// The `this` of the nearest scope that binds one. `with` records never supply it.
     fn this_of(&self, scope: &Rc<Scope>) -> Value {
         let mut cur: &Scope = scope;
@@ -3095,20 +3121,62 @@ impl Interp {
         Some(v)
     }
 
-    /// The `with` object that resolves `name` (the `this` of a call through it), if any.
-    fn with_base(&self, scope: &Rc<Scope>, name: &str) -> Option<Obj> {
+    /// `HasBinding` of an object environment record (spec 9.1.1.2.1): `HasProperty` on the record's
+    /// object, then a truthy `name` on its `Symbol.unscopables` hides it. Proxy traps and accessors run.
+    pub(crate) fn with_has(&mut self, o: &Obj, name: &str) -> R<bool> {
+        if !self.has_property(&Value::Object(o.clone()), name)? {
+            return Ok(false);
+        }
+        let key = self.well_known_key("unscopables");
+        match self.get(&Value::Object(o.clone()), &key)? {
+            Value::Object(u) => Ok(!self.get(&Value::Object(u), name)?.truthy()),
+            _ => Ok(true),
+        }
+    }
+
+    /// The scope that binds `name` on the chain, where a `with` record binds it when `with_has` holds.
+    /// `None` when nothing on the chain binds it.
+    fn find_binding<'s>(&mut self, scope: &'s Scope, name: &str) -> R<Option<Resolved<'s>>> {
         let bit = name_bit(name);
-        let mut cur: &Scope = scope;
+        let mut cur: &'s Scope = scope;
         loop {
             if cur.mask.get() & bit != 0 {
-                match &cur.with {
-                    Some(o) if self.with_get(o, name).is_some() => return Some(o.clone()),
-                    Some(_) => {}
-                    None if cur.vars.borrow().contains_key(name) => return None,
-                    None => {}
+                if let Some(o) = &cur.with {
+                    if self.with_has(o, name)? {
+                        return Ok(Some(Resolved::Object(o.clone())));
+                    }
+                } else if cur.vars.borrow().contains_key(name) {
+                    return Ok(Some(Resolved::Declared(cur)));
                 }
             }
-            cur = cur.parent.as_deref()?;
+            match cur.parent.as_deref() {
+                Some(p) => cur = p,
+                None => return Ok(None),
+            }
+        }
+    }
+
+    /// Reads identifier `name` through a chain that holds a `with` record: the value and the `with`
+    /// object that supplied it (the `this` of a call). `None` when the name is unresolvable.
+    pub(crate) fn with_ref_get(
+        &mut self,
+        scope: &Rc<Scope>,
+        name: &str,
+    ) -> R<Option<(Value, Option<Obj>)>> {
+        match self.find_binding(scope, name)? {
+            Some(Resolved::Object(o)) => {
+                let v = self.get(&Value::Object(o.clone()), name)?;
+                Ok(Some((v, Some(o))))
+            }
+            Some(Resolved::Declared(s)) => {
+                let v = s.vars.borrow().get(name).map(|b| b.value.clone());
+                Ok(v.map(|v| (v, None)))
+            }
+            // the global object inherits from Object.prototype (`toString`, `hasOwnProperty`, ...)
+            None => match find_in_chain(&self.object_proto, name) {
+                Some(Slot::Data(v)) => Ok(Some((v, None))),
+                _ => Ok(None),
+            },
         }
     }
 
@@ -3132,23 +3200,26 @@ impl Interp {
         }
     }
 
-    /// `delete name` (sloppy): only a global binding can be refused or removed.
-    fn delete_ident(&mut self, scope: &Rc<Scope>, name: &str) -> bool {
+    /// `delete name` (sloppy): a `with` object loses the property; otherwise only a global binding can
+    /// be refused or removed.
+    fn delete_ident(&mut self, scope: &Rc<Scope>, name: &str) -> R<bool> {
         let bit = name_bit(name);
         let mut cur: Option<&Scope> = Some(scope);
         while let Some(s) = cur {
-            if s.with.is_some() {
-                return true;
-            }
-            if s.mask.get() & bit != 0 && s.vars.borrow().contains_key(name) {
-                if !std::ptr::eq(s, &*self.global) {
-                    return true;
+            if let Some(o) = &s.with {
+                if self.with_has(o, name)? {
+                    let o = o.clone();
+                    return crate::reflect::delete_own(self, &o, name);
                 }
-                return self.delete_global_binding(name).unwrap_or(true);
+            } else if s.mask.get() & bit != 0 && s.vars.borrow().contains_key(name) {
+                if !std::ptr::eq(s, &*self.global) {
+                    return Ok(true);
+                }
+                return Ok(self.delete_global_binding(name).unwrap_or(true));
             }
             cur = s.parent.as_deref();
         }
-        true
+        Ok(true)
     }
 
     /// Assigns the identifier `name`. `strict` is the lexical strictness of the writer: an undeclared name then
@@ -3162,9 +3233,9 @@ impl Interp {
                 continue;
             }
             if let Some(o) = &s.with {
-                if self.with_get(o, name).is_some() {
-                    put(o, name, value);
-                    return Ok(());
+                if self.with_has(o, name)? {
+                    let o = Value::Object(o.clone());
+                    return self.set_impl(&o, name, value, strict);
                 }
                 cur = s.parent.as_deref();
                 continue;
@@ -3763,8 +3834,15 @@ impl Interp {
                 result
             }
             a::Stmt::With(w) => {
-                let Value::Object(o) = self.eval(&w.obj, scope)? else {
-                    return self.throw_error("TypeError", "with: object expected");
+                let o = match self.eval(&w.obj, scope)? {
+                    Value::Object(o) => o,
+                    Value::Undefined | Value::Null | Value::Hole => {
+                        return self.throw_error(
+                            "TypeError",
+                            "Cannot convert undefined or null to object",
+                        );
+                    }
+                    prim => self.box_primitive(prim),
                 };
                 self.exec(&w.body, &Scope::new_with(scope.clone(), o))
             }
@@ -4197,11 +4275,15 @@ impl Interp {
                         let key = self.member_key(&m.prop, scope)?;
                         (self.get(&obj, &key)?, obj)
                     }
-                    a::Expr::Ident(i) if scope.in_with => (
-                        self.eval(callee, scope)?,
-                        self.with_base(scope, &i.sym)
-                            .map_or(Value::Undefined, Value::Object),
-                    ),
+                    a::Expr::Ident(i) if scope.in_with => match self.with_ref_get(scope, &i.sym)? {
+                        Some((f, base)) => (f, base.map_or(Value::Undefined, Value::Object)),
+                        None => {
+                            return self.throw_error(
+                                "ReferenceError",
+                                &format!("{} is not defined", &*i.sym),
+                            );
+                        }
+                    },
                     other => (self.eval(other, scope)?, Value::Undefined),
                 };
                 let args = self.eval_args(&c.args, scope)?;
@@ -4433,6 +4515,9 @@ impl Interp {
             a::UnaryOp::TypeOf => {
                 // typeof of an undeclared identifier must not throw
                 let v = match &*u.arg {
+                    a::Expr::Ident(i) if scope.in_with => self
+                        .with_ref_get(scope, &i.sym)?
+                        .map_or(Value::Undefined, |(v, _)| v),
                     a::Expr::Ident(i) => self.lookup_ident(scope, i).unwrap_or(Value::Undefined),
                     other => self.eval(other, scope)?,
                 };
@@ -4464,7 +4549,7 @@ impl Interp {
                     }
                     Ok(Value::Bool(true))
                 }
-                a::Expr::Ident(i) => Ok(Value::Bool(self.delete_ident(scope, &i.sym))),
+                a::Expr::Ident(i) => Ok(Value::Bool(self.delete_ident(scope, &i.sym)?)),
                 _ => Ok(Value::Bool(true)),
             },
             _ => {
@@ -4622,6 +4707,12 @@ impl Interp {
     }
 
     fn eval_ident(&mut self, i: &a::Ident, scope: &Rc<Scope>) -> R<Value> {
+        if scope.in_with {
+            return match self.with_ref_get(scope, &i.sym)? {
+                Some((v, _)) => Ok(v),
+                None => self.throw_error("ReferenceError", &format!("{} is not defined", &*i.sym)),
+            };
+        }
         match self.lookup_ident(scope, i) {
             Some(v) => Ok(v),
             // the global object inherits from Object.prototype (`toString`, `hasOwnProperty`, ...)
@@ -5517,6 +5608,8 @@ mod sysio_stdin_tests;
 mod tests;
 #[cfg(test)]
 mod timers_shape_tests;
+#[cfg(test)]
+mod websocket_tests;
 
 #[cfg(test)]
 mod coroutine_teardown_tests;

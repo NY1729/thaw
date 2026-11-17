@@ -2988,13 +2988,6 @@ impl<'a> FnLowerer<'a> {
                         );
                                 }
                             };
-                            // A list held in a dynamic-storage slot (captured by a closure
-                            // handed to a JS callback) reads as `Json`: decode it back.
-                            let list = &if self.infer_expr_type(list)? == HirType::Json {
-                                self.coerce_to_declared(&HirType::Array(Box::new(HirType::Bytes)), list.clone())?
-                            } else {
-                                list.clone()
-                            };
                             // `Buffer.concat([])`: nothing to join, so an empty buffer.
                             if matches!(call.args.first().map(|arg| arg.expr.as_ref()),
                                 Some(Expr::Array(array)) if array.elems.is_empty())
@@ -3007,14 +3000,9 @@ impl<'a> FnLowerer<'a> {
                                     &bindings,
                                 );
                             }
-                            // A list of dynamic buffers (`cipher.update()` results) decodes back.
-                            let list = &if matches!(self.infer_expr_type(list)?,
-                                HirType::Array(element) if *element == HirType::Json)
-                            {
-                                self.coerce_to_declared(&HirType::Array(Box::new(HirType::Bytes)), list.clone())?
-                            } else {
-                                list.clone()
-                            };
+                            // Dynamic buffers (`cipher.update()` results, a list captured by a
+                            // closure, a mixed literal) decode back to bytes element-wise.
+                            let list = &self.coerce_byte_list(list.clone(), HirType::Bytes)?;
                             let list_type = self.infer_expr_type(list)?;
                             if !matches!(&list_type, HirType::Array(element)
                                 if matches!(element.as_ref(), HirType::Bytes)
@@ -3107,6 +3095,22 @@ impl<'a> FnLowerer<'a> {
                         }
                         if let Some(invalid) = self.buffer_from_invalid_argument(source.clone(), &source_type)? {
                             return self.wrap_call_argument_bindings(invalid, &bindings);
+                        }
+                        // A number list with a dynamic element (`[0x81, anyValue]`) is a tuple:
+                        // decode it element-wise like `Buffer.concat`'s byte lists.
+                        if matches!(source_type, HirType::Tuple(_)) {
+                            let numbers = self.coerce_byte_list(source.clone(), HirType::F64)?;
+                            if matches!(self.infer_expr_type(&numbers)?,
+                                HirType::Array(ref element) if **element == HirType::F64)
+                            {
+                                return self.wrap_call_argument_bindings(
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_bytes_from_array".to_string())),
+                                        vec![numbers],
+                                    ),
+                                    &bindings,
+                                );
+                            }
                         }
                         // A string / number list held in a dynamic-storage slot (captured by a
                         // closure handed to a JS callback) reads as `Json`: pick by its shape.
@@ -3265,6 +3269,7 @@ impl<'a> FnLowerer<'a> {
                         let [source] = arguments.as_slice() else {
                 return Err("`Uint8Array.from` expects exactly one array source".into());
                         };
+                        let source = &self.coerce_byte_list(source.clone(), HirType::F64)?;
                         let source_type = self.infer_expr_type(source)?;
                         if !matches!(source_type, HirType::Array(_) | HirType::Bytes) {
                             return Err(format!(

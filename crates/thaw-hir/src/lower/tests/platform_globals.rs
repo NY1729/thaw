@@ -22,11 +22,24 @@ fn every_platform_global_lowers_in_value_and_typeof_position() {
     assert!(failures.is_empty(), "platform globals rejected as unknown variables: {failures:?}");
 }
 
+/// Platform constructors that `new` still rejects at lowering (`only new Promise<T>` diagnostic).
+/// Pending decisions, not a design: each needs its own `DYNAMIC_NEW_CTORS` entry or a deliberate
+/// reason to stay rejected. Shrink-only: a name that starts lowering must leave this list.
+const UNLISTED_NEW_CTORS_PENDING: &[&str] = &[
+    "AbortSignal", "Buffer", "ByteLengthQueuingStrategy", "CompressionStream", "CountQueuingStrategy",
+    "Crypto", "CryptoKey", "DecompressionStream", "Navigator", "Performance", "PerformanceEntry",
+    "PerformanceMark", "PerformanceMeasure", "PerformanceObserver", "PerformanceObserverEntryList",
+    "PerformanceResourceTiming", "ReadableByteStreamController", "ReadableStreamBYOBReader",
+    "ReadableStreamBYOBRequest", "ReadableStreamDefaultController", "ReadableStreamDefaultReader",
+    "SubtleCrypto", "TextDecoderStream", "TextEncoderStream", "TransformStreamDefaultController",
+    "WritableStreamDefaultController", "WritableStreamDefaultWriter",
+];
+
 #[test]
 fn platform_constructors_lower_under_new_to_the_realm_constructor() {
     let mut failures = Vec::new();
     for (name, kind) in platform_globals::PLATFORM_GLOBALS {
-        if *kind != platform_globals::GlobalKind::Ctor {
+        if *kind != platform_globals::GlobalKind::Ctor || UNLISTED_NEW_CTORS_PENDING.contains(name) {
             continue;
         }
         let source = format!("function main(): void {{ const made: any = new {name}(); }}");
@@ -39,13 +52,25 @@ fn platform_constructors_lower_under_new_to_the_realm_constructor() {
             Err(error) => {
                 // A dedicated `new` path with its own argument rules (`new WeakRef()`) may reject
                 // the bare call; only an unresolved name is a failure here.
-                if error.contains("unknown variable") {
+                if error.contains("unknown variable") || error.contains("only `new Promise") {
                     failures.push(format!("{name}: {error}"));
                 }
             }
         }
     }
     assert!(failures.is_empty(), "platform constructors not lowered under new: {failures:?}");
+}
+
+#[test]
+fn websocket_constructs_through_the_realm_under_any_and_typed_bindings() {
+    for annotation in ["any", "WebSocket"] {
+        let source = format!(
+            "function main(): void {{ const ws: {annotation} = new WebSocket(\"ws://127.0.0.1:1/chat\"); }}"
+        );
+        let program = lower_module(&thaw_parser::parse_typescript(&source).expect("parse error"))
+            .unwrap_or_else(|error| panic!("`{annotation}` WebSocket failed to lower: {error}"));
+        assert!(format!("{program:?}").contains("constructDynamicValue"), "`{annotation}` WebSocket not realm-constructed");
+    }
 }
 
 #[test]
@@ -130,4 +155,32 @@ fn cast_wrapped_class_static_getter_only_is_still_rejected_as_readonly() {
     let bare = lowering_error(&source("Box")).expect("bare readonly static assignment should be rejected");
     assert!(bare.contains("readonly static member `Box.current`"), "unexpected error: {bare}");
     assert_eq!(lowering_error(&source("(Box as any)")).as_deref(), Some(bare.as_str()));
+}
+
+// `Date(...)` without `new` and the bare `Date` value are the realm's Date (a mocked clock must
+// reach them, like timers); `new Date`, `Date.now|UTC|parse` and `instanceof Date` keep their lowering.
+
+#[test]
+fn date_call_without_new_lowers_through_the_realm_date_as_a_string() {
+    let call = lowered_debug(
+        "function main(): void { const stamp: string = Date(); const width: number = Date().length; const kind: string = typeof Date(); const args: string = (Date as any)(0); }",
+    );
+    assert!(call.contains("getDynamicValue"), "Date() not read through the realm: {call}");
+    assert!(call.contains("Str(\"Date\")"), "Date() not read through the realm: {call}");
+}
+
+#[test]
+fn bare_date_value_is_the_realm_global_and_identity_compares() {
+    let value = lowered_debug(
+        "function main(): void { const realDate: any = Date; const same: boolean = Date === realDate; }",
+    );
+    assert!(value.contains("Str(\"Date\")"), "bare Date not read through the realm: {value}");
+}
+
+#[test]
+fn native_date_forms_keep_their_lowering() {
+    let native = lowered_debug(
+        "function main(): void { const d: Date = new Date(0); const now: number = Date.now(); const utc: number = Date.UTC(2020, 0, 1); const parsed: number = Date.parse(\"2020-01-01\"); const is: boolean = d instanceof Date; }",
+    );
+    assert!(!native.contains("Str(\"Date\")"), "native Date form read through the realm: {native}");
 }

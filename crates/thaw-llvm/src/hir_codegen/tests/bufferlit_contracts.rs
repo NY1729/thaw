@@ -55,3 +55,70 @@ function main(): void {
     let output = compile_and_run(source, "mixed_buffer_and_number_array_literal_stays_number_array_of_arrays");
     assert_eq!(output, "2 2\n010203\n010203 7\n");
 }
+
+// Byte lists with a dynamic or mixed element type (`Json` / `Tuple`) coerce element-wise
+// to bytes. Expected output from node 22.
+
+#[test]
+fn buffer_concat_mixed_literal_with_any_element() {
+    let source = r#"
+function f(p: any): any {
+  return Buffer.concat([Buffer.from([0x81, p.length]), p]);
+}
+function main(): void {
+  console.log(f(Buffer.from("hi")).toString("hex"));
+}
+"#;
+    let output = compile_and_run(source, "buffer_concat_mixed_literal_with_any_element");
+    assert_eq!(output, "81026869\n");
+}
+
+#[test]
+fn buffer_concat_any_list_of_any_buffers_still_joins() {
+    let source = r#"
+function main(): void {
+  let b: any = Buffer.alloc(0);
+  const d: any = Buffer.from("ab");
+  b = Buffer.concat([b, d]);
+  console.log(b.length, b.toString());
+}
+"#;
+    let output = compile_and_run(source, "buffer_concat_any_list_of_any_buffers_still_joins");
+    assert_eq!(output, "2 ab\n");
+}
+
+#[test]
+fn buffer_concat_mixed_literal_with_total_length() {
+    let source = r#"
+function main(): void {
+  const anyBuf: any = Buffer.from("cd");
+  console.log(Buffer.concat([Buffer.from("ab"), anyBuf], 3).toString("hex"));
+}
+"#;
+    let output = compile_and_run(source, "buffer_concat_mixed_literal_with_total_length");
+    assert_eq!(output, "616263\n");
+}
+
+#[test]
+fn buffer_concat_non_byte_element_is_a_compile_error() {
+    let source = r#"
+function main(): void {
+  console.log(Buffer.concat([Buffer.from("a"), "s" as any as string]).length);
+}
+"#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let error = thaw_hir::lower_module(&module).unwrap_err();
+    assert!(error.contains("expects an array of byte buffers"), "unexpected diagnostic: {error}");
+}
+
+#[test]
+fn uint8array_from_any_array_source() {
+    let source = r#"
+function main(): void {
+  const anyArr: any = [1, 2, 3];
+  console.log(Uint8Array.from(anyArr).length);
+}
+"#;
+    let output = compile_and_run(source, "uint8array_from_any_array_source");
+    assert_eq!(output, "3\n");
+}

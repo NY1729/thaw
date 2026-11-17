@@ -9,6 +9,20 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
         "crypto" => Some(
             "module.exports = globalThis.__thaw_crypto_module; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
+        // Not a single-executable app: `isSea()` is false and the asset readers throw Node 22's errors.
+        "sea" => Some(
+            r#"function seaError(Type, message, code) { var error = new Type(message); error.code = code; return error; }
+function notSea() { return seaError(Error, 'Operation cannot be invoked when not in a single-executable application', 'ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION'); }
+function assertKey(key) { if (typeof key !== 'string') throw seaError(TypeError, 'The "key" argument must be of type string. Received ' + (key === undefined ? 'undefined' : 'type ' + typeof key), 'ERR_INVALID_ARG_TYPE'); }
+module.exports = {
+  isSea: function isSea() { return false; },
+  getAsset: function getAsset(key) { assertKey(key); throw notSea(); },
+  getRawAsset: function getRawAsset(key) { assertKey(key); throw notSea(); },
+  getAssetAsBlob: function getAssetAsBlob(key) { assertKey(key); throw notSea(); },
+  getAssetKeys: function getAssetKeys() { throw notSea(); }
+};
+"#,
+        ),
         "perf_hooks" => Some(
             r#"var recordableBrand = new WeakSet(), recordablePrevious = new WeakMap(), recordableNow = process.hrtime.bigint;
 function histogramError(Type, code, message) { var error = new Type(message); error.code = code; return error; }

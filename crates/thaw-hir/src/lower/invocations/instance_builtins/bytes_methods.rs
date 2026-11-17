@@ -9,6 +9,51 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    /// A byte-list argument (`Buffer.concat` list, `Uint8Array.from` source) whose static
+    /// type is dynamic or mixed (`Json`, `JsValue`, `Array` of those, `Tuple`) is coerced to `Array(elem)`,
+    /// which inserts the runtime element checks. Other shapes pass through unchanged.
+    fn coerce_byte_list(&mut self, list: HirExpr, elem: HirType) -> Result<HirExpr, String> {
+        let elem_ty = elem.clone();
+        let array = HirType::Array(Box::new(elem));
+        let ty = self.infer_expr_type(&list)?;
+        match &ty {
+            HirType::Json | HirType::JsValue => self.coerce_to_declared(&array, list),
+            HirType::Array(element) if matches!(element.as_ref(), HirType::Json | HirType::JsValue) => {
+                self.coerce_to_declared(&array, list)
+            }
+            // A tuple literal coerces element-wise; a tuple value decodes through its Json form.
+            // A member that cannot be a byte (or element) is left for the caller's strict check.
+            HirType::Tuple(_) if matches!(list, HirExpr::ArrayLit(_)) => self.coerce_to_declared(&array, list),
+            HirType::Tuple(members)
+                if members.iter().all(|member| {
+                    matches!(member, HirType::Json | HirType::JsValue | HirType::Array(_)) || *member == elem_ty
+                }) =>
+            {
+                // Each member is read by index from a bound temp and coerced on its own, so a
+                // `Bytes` member stays bytes instead of being round-tripped through Json.
+                let name = format!("__thaw_byte_list_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let values = members
+                    .iter()
+                    .enumerate()
+                    .map(|(index, member)| {
+                        let read = HirExpr::TypedIndex(
+                            Box::new(HirExpr::Var(name.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            member.clone(),
+                        );
+                        self.coerce_to_declared(&elem_ty, read)
+                            .map_err(|error| format!("array element {index}: {error}"))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let literal = self.lower_native_array_literal(values, elem_ty)?;
+                self.wrap_call_argument_bindings(literal, &[(name, ty.clone(), list)])
+            }
+            _ => Ok(list),
+        }
+    }
+
     /// A lambda-wrapped statement block (captures inferred from the scope), so a statement
     /// sequence with a `throw` can sit in expression position.
     fn block_as_expr(&mut self, body: HirExpr, ret: HirType) -> HirExpr {
