@@ -10167,3 +10167,56 @@ fn array_index_and_length_descriptors_are_unchanged() {
         ]
     );
 }
+
+#[test]
+fn class_op_constructs_and_calls_dotted_nested_namespace_classes() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    // `export declare namespace kdf { class OpenSSL }` and a depth-3 `deep.a.B`: class paths resolve through exports
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "nestcls/index.js": function(module, exports, require) {
+  function OpenSSL(pw) { this.pw = pw; }
+  OpenSSL.prototype.derive = function (n) { return this.pw + n; };
+  function B(v) { this.v = v; }
+  B.prototype.get = function () { return this.v; };
+  module.exports = { kdf: { OpenSSL: OpenSSL }, deep: { a: { B: B } } };
+}, };
+var __thaw_bundle_require_maps = { "nestcls/index.js": {}, };
+var __thaw_bundle_entry_key = "nestcls/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (
+        CString::new("nestcls").unwrap(),
+        CString::new(bundle).unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let handle: i64 = class_call("$new$nestcls::kdf.OpenSSL$arity1", r#"["x"]"#, 0, true)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        class_call(
+            "$method$nestcls::kdf.OpenSSL$derive$overload0$arity1",
+            "[3]",
+            handle,
+            false
+        )
+        .unwrap(),
+        r#""x3""#
+    );
+    let handle: i64 = class_call("$new$nestcls::deep.a.B$arity1", "[7]", 0, true)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        class_call(
+            "$method$nestcls::deep.a.B$get$overload0$arity0",
+            "[]",
+            handle,
+            false
+        )
+        .unwrap(),
+        "7"
+    );
+    // a missing intermediate namespace is an error, as in Node (`undefined.X`)
+    assert!(class_call("$new$nestcls::kdf.Missing.X$arity0", "[]", 0, false).is_err());
+}

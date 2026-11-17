@@ -1646,3 +1646,77 @@ fn wasm_in_bundle_only_routes_to_thaw_js_and_runs() {
     assert_eq!(thaw_js_run_guarded(&output), "true\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn thaw_js_nested_namespace_class_is_not_a_routing_blocker() {
+    // `kdf.OpenSSL` is a dotted class path: thaw-js resolves it through its own class operations (exports_member),
+    // so a program naming it routes to thaw-js. Old: the nested-alias blocker kept the package on QuickJS.
+    let mut pkg = builtin_routing_package("tjs-nested");
+    pkg.classes.push(thaw_bridge::DtsClass {
+        name: "kdf.OpenSSL".into(),
+        extends: None,
+        constructible: true,
+        constructors: Vec::new(),
+        methods: Vec::new(),
+        properties: Vec::new(),
+    });
+    let bundle = "module.exports = (function(require){ var __thaw_bundle_factories = { \"tjs-nested/index.js\": function(module, exports, require) { function OpenSSL(pw) { this.pw = pw; } OpenSSL.prototype.derive = function (n) { return this.pw + n; }; exports.kdf = { OpenSSL: OpenSSL }; } }; var __thaw_bundle_require_maps = { \"tjs-nested/index.js\": {} }; var __thaw_bundle_entry_key = \"tjs-nested/index.js\"; })(globalThis.require);";
+    let user = "import { kdf } from 'tjs-nested';\nfunction main(): void { console.log(new kdf.OpenSSL('x').derive(3)); }\n";
+    assert!(thaw_js_package_eligible(&pkg, bundle, user, &Default::default(), ""));
+}
+
+#[test]
+fn nested_namespace_alias_class_routes_to_thaw_js_without_linking_quickjs() {
+    // A `.d.ts` `export declare namespace kdf { class OpenSSL }`: the program builds a dotted class path on thaw-js.
+    let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-nested-alias-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("tjs-nested");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare namespace kdf {\n\
+         \x20 class OpenSSL {\n\
+         \x20   constructor(password: string);\n\
+         \x20   derive(length: number): string;\n\
+         \x20 }\n\
+         }\n",
+    )
+    .unwrap();
+    // Same bundle layout and evaluation tail as `thaw_js_fixture`'s package.
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = (function(require){\n\
+         var __thaw_bundle_factories = {\n\
+         \"tjs-nested/index.js\": function(module, exports, require) {\n\
+           function OpenSSL(pw) { this.pw = pw; }\n\
+           OpenSSL.prototype.derive = function (n) { return this.pw + n; };\n\
+           exports.kdf = { OpenSSL: OpenSSL };\n\
+         },\n\
+         };\n\
+         var __thaw_bundle_require_maps = { \"tjs-nested/index.js\": {}, };\n\
+         var __thaw_bundle_entry_key = \"tjs-nested/index.js\";\n\
+         var __thaw_entry = { exports: {} };\n\
+         __thaw_bundle_factories[__thaw_bundle_entry_key](__thaw_entry, __thaw_entry.exports, require);\n\
+         return __thaw_entry.exports;\n\
+         })(globalThis.require);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { kdf } from 'tjs-nested';\nfunction main(): void { console.log(new kdf.OpenSSL('x').derive(3)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-nested"]));
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run(&output), "x3\n");
+    let bytes = std::fs::read(&output).unwrap();
+    assert!(
+        !bytes.windows(8).any(|window| window == b"rquickjs"),
+        "QuickJS was linked"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
