@@ -1349,6 +1349,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 .ok_or("thaw_json_to_number_array returned no value")?
                 .into_pointer_value();
             self.compile_check_json_host_error(numbers.into(), None)?;
+            // `numbers` is a raw buffer: wrap it in an array handle like the element-copy path does, or
+            // the consumer would read the buffer's length word as the buffer pointer
+            let numbers = self.compile_array_wrap(numbers)?;
             let bytes_end = self.builder.get_insert_block().unwrap();
             self.builder
                 .build_unconditional_branch(done)
