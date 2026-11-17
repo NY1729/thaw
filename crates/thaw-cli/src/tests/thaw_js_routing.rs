@@ -272,14 +272,27 @@ fn thaw_js_newly_allowlisted_builtins_route_to_thaw_js() {
 }
 
 #[test]
-fn thaw_js_wasi_bundle_routes_only_when_the_program_requires_wasm() {
-    // the wasi bundle uses WebAssembly: it routes when the program names node:wasi (the build then selects the `wasm` feature)
+fn thaw_js_wasi_bundle_routes_without_a_wasm_mention_in_the_program() {
+    // the wasi bundle uses WebAssembly: it routes whatever the program says (the build selects the `wasm` feature from the routed bundle)
     let bundle = thaw_registry::builtin_bundle_with("node:wasi", &[]).unwrap();
     let wasi = "import { WASI } from 'node:wasi';\nconsole.log(typeof WASI);\n";
     let pkg = builtin_routing_package("node:wasi");
     assert!(thaw_js_package_eligible(&pkg, &bundle, wasi, &Default::default(), ""));
+    // old: `assert!(!thaw_js_package_eligible(&pkg, &bundle, no_wasm, ...))`; new: routes (the wasm blocker is deleted)
     let no_wasm = "import { WASI } from 'node:path';\nconsole.log(typeof WASI);\n";
-    assert!(!thaw_js_package_eligible(&pkg, &bundle, no_wasm, &Default::default(), ""));
+    assert!(thaw_js_package_eligible(&pkg, &bundle, no_wasm, &Default::default(), ""));
+}
+
+#[test]
+fn thaw_js_bundle_only_webassembly_routes_without_a_user_mention() {
+    // a package bundle that uses WebAssembly routes although the user source never names it.
+    // old: rejected by `thaw_js_wasm_blocker` (stayed on QuickJS); new: routed, the build adds the `wasm` feature
+    let bundle = "module.exports = { check: function () { return String(new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])) instanceof WebAssembly.Module); } };";
+    let pkg = builtin_routing_package("wasm-kit");
+    let user = "import { check } from 'wasm-kit';\nconsole.log(check());\n";
+    // routing sees the registry form of a plain script (`thaw_js_bundle_form` -> `script_as_bundle`)
+    let form = thaw_js::scan::script_as_bundle(bundle);
+    assert!(thaw_js_package_eligible(&pkg, &form, user, &Default::default(), ""));
 }
 
 #[test]
@@ -1526,4 +1539,39 @@ fn routed_worker_resource_limits_stop_a_runaway_worker() {
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
     assert_eq!((stdout.as_str(), status), ("error ERR_WORKER_OUT_OF_MEMORY\n", Some(0)), "{stderr}");
+}
+
+/// A registry package whose bundle uses WebAssembly through a hand-written 8-byte module header; the user
+/// source never mentions WebAssembly, so only the routed bundle can select the `wasm` runtime feature.
+#[test]
+fn wasm_in_bundle_only_routes_to_thaw_js_and_runs() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-wasm-bundle-only-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("wasm-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), "export declare function check(): string;\n").unwrap();
+    // The Map keeps the function on the runtime path, as in `thaw_js_fixture`.
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { check: function () {\n\
+           var seen = new Map();\n\
+           var module = new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));\n\
+           seen.set('ok', module instanceof WebAssembly.Module);\n\
+           return String(seen.get('ok'));\n\
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { check } from 'wasm-kit';\nfunction main(): void { console.log(check()); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["wasm-kit"]));
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run_guarded(&output), "true\n");
+    let _ = std::fs::remove_dir_all(dir);
 }
