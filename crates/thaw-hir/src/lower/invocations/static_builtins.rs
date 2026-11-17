@@ -907,6 +907,94 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &[(value_name, value_type, value)])
     }
 
+    /// Whether a value of static type `ty` could be an `ArrayBuffer` view at runtime.
+    fn may_be_array_buffer_view(ty: &HirType) -> bool {
+        match ty {
+            HirType::Bytes | HirType::Json | HirType::JsValue | HirType::Dynamic => true,
+            HirType::Union(elements) => elements.iter().any(Self::may_be_array_buffer_view),
+            HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
+                Self::may_be_array_buffer_view(inner)
+            }
+            _ => false,
+        }
+    }
+
+    /// `ArrayBuffer.isView` of the value held in `held` (a variable bound to a value of static
+    /// type `ty`). A `Bytes` value is a view unless its byte kind is an `ArrayBuffer` (kind 1,
+    /// `bytes_methods.rs`); a `Json` value is a Buffer wrapper or a live handle placeholder;
+    /// a `JsValue` asks the live engine; unions and optionals recurse per payload; any other
+    /// static type is never a view.
+    fn lower_array_buffer_is_view_test(&mut self, held: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
+        Ok(match ty {
+            HirType::Bytes => {
+                let kind = HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_kind".into())), vec![held]);
+                HirExpr::Conditional(
+                    Box::new(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(kind),
+                        Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                    Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                    HirType::Bool,
+                )
+            }
+            HirType::Json => {
+                let is_handle = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_has_wrapper_key".into())),
+                    vec![held.clone(), HirExpr::Lit(HirLit::Str("__thaw_js_handle_id__".into()))],
+                );
+                let resolved = self.coerce_to_declared(&HirType::JsValue, held.clone())?;
+                let live = self.dynamic_value_check("__thaw_is_view_dynamic_value", resolved);
+                let buffer_wrapper =
+                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_buffer".into())), vec![held]);
+                HirExpr::Conditional(Box::new(is_handle), Box::new(live), Box::new(buffer_wrapper), HirType::Bool)
+            }
+            HirType::JsValue | HirType::Dynamic => {
+                self.dynamic_value_check("__thaw_is_view_dynamic_value", held)
+            }
+            HirType::Union(elements) => {
+                let mut result = HirExpr::Lit(HirLit::Bool(false));
+                for (index, element) in elements.iter().enumerate() {
+                    if !Self::may_be_array_buffer_view(element) {
+                        continue;
+                    }
+                    let payload = HirExpr::UnionValue(Box::new(held.clone()), index, elements.clone());
+                    let test = self.lower_array_buffer_is_view_test(payload, element)?;
+                    let selected = HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(Box::new(held.clone()), elements.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    );
+                    result = HirExpr::Conditional(Box::new(selected), Box::new(test), Box::new(result), HirType::Bool);
+                }
+                result
+            }
+            HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner)
+                if Self::may_be_array_buffer_view(inner) =>
+            {
+                let inner = inner.as_ref().clone();
+                let (absent, payload) = match ty {
+                    HirType::Optional(_) => (
+                        HirExpr::OptionalIsNone(Box::new(held.clone()), inner.clone()),
+                        HirExpr::OptionalValue(Box::new(held), inner.clone()),
+                    ),
+                    HirType::Nullable(_) => (
+                        HirExpr::NullableIsNone(Box::new(held.clone()), inner.clone()),
+                        HirExpr::NullableValue(Box::new(held), inner.clone()),
+                    ),
+                    _ => (
+                        HirExpr::NullishIsNone(Box::new(held.clone()), inner.clone()),
+                        HirExpr::NullishValue(Box::new(held), inner.clone()),
+                    ),
+                };
+                let test = self.lower_array_buffer_is_view_test(payload, &inner)?;
+                HirExpr::Conditional(Box::new(absent), Box::new(HirExpr::Lit(HirLit::Bool(false))), Box::new(test), HirType::Bool)
+            }
+            _ => HirExpr::Lit(HirLit::Bool(false)),
+        })
+    }
+
     fn is_static_builtin_call(object: &str, property: &str) -> bool {
         matches!(
             (object, property),
@@ -916,6 +1004,7 @@ impl<'a> FnLowerer<'a> {
                     "from" | "alloc" | "allocUnsafe" | "allocUnsafeSlow" | "concat" | "byteLength" | "isBuffer"
                 )
                 | ("Uint8Array", "fromHex" | "fromBase64" | "from")
+                | ("ArrayBuffer", "isView")
                 | ("BigInt", "asIntN" | "asUintN")
                 | ("Error", "isError" | "captureStackTrace")
                 | ("Proxy", "revocable")
@@ -4606,6 +4695,24 @@ impl<'a> FnLowerer<'a> {
                             ],
                         );
                         return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"ArrayBuffer" && property.sym == *"isView" {
+                        let (arguments, mut bindings) =
+                            self.lower_native_spread_values(&call.args, "ArrayBuffer.isView")?;
+                        // No operand at all is simply `false` in Node, not an error.
+                        let Some(value) = arguments.first().cloned() else {
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::Lit(HirLit::Bool(false)),
+                                &bindings,
+                            );
+                        };
+                        let ty = self.infer_expr_type_inner(&value)?;
+                        let name = format!("__thaw_is_view_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), ty.clone());
+                        let test = self.lower_array_buffer_is_view_test(HirExpr::Var(name.clone()), &ty)?;
+                        bindings.push((name, ty, value));
+                        return self.wrap_call_argument_bindings(test, &bindings);
                     }
                     if object.sym == *"Array" && property.sym == *"isArray" {
                         let (arguments, mut bindings) =
