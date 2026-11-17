@@ -300,6 +300,7 @@ const DYNAMIC_HELPERS: &str = r#"
   put('__thaw_is_null_dynamic_value', function (v) { return v === null; });
   put('__thaw_is_nullish_dynamic_value', function (v) { return v == null; });
   put('__thaw_is_array_dynamic_value', function (v) { return Array.isArray(v); });
+  put('__thaw_is_view_dynamic_value', function (v) { return ArrayBuffer.isView(v) || (typeof DataView === 'function' && v instanceof DataView); });
   put('__thaw_is_buffer_dynamic_value', function (v) { return typeof Buffer === 'function' && Buffer.isBuffer(v); });
   put('__thaw_strict_equal_dynamic', function (l, r) { return l === r; });
   put('__thaw_strict_equal_null_dynamic', function (v) { return v === null; });
