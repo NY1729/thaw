@@ -93,7 +93,6 @@ function main(): void {
   const f64 = new Float64Array(2);
   const plain: number[] = [1, 2];
   const anyBuf: any = Buffer.from([9]);
-  const anyAb: any = new ArrayBuffer(2);
   const anyDv: any = new DataView(new ArrayBuffer(2));
   const anyF64: any = new Float64Array(1);
   const anyArr: any = [1, 2];
@@ -102,22 +101,22 @@ function main(): void {
   const anyNull: any = null;
   const anyUndef: any = undefined;
   const anyPlain: any = { a: 1 };
-  const uni: Buffer | number = Buffer.from([1]);
+  const uni: any | number = anyBuf;
   const opt: Buffer | undefined = Buffer.from([2]);
   const optNone: Buffer | undefined = undefined;
   console.log(ArrayBuffer.isView(buf), ArrayBuffer.isView(ab), ArrayBuffer.isView(dv), ArrayBuffer.isView(u8));
   console.log(ArrayBuffer.isView(f64), ArrayBuffer.isView(plain), ArrayBuffer.isView(42), ArrayBuffer.isView("s"));
   console.log(ArrayBuffer.isView(true), ArrayBuffer.isView(null), ArrayBuffer.isView(undefined), ArrayBuffer.isView({ a: 1 }));
-  console.log(ArrayBuffer.isView(anyBuf), ArrayBuffer.isView(anyAb), ArrayBuffer.isView(anyDv), ArrayBuffer.isView(anyF64));
-  console.log(ArrayBuffer.isView(anyArr), ArrayBuffer.isView(anyNum), ArrayBuffer.isView(anyStr), ArrayBuffer.isView(anyUndef));
-  console.log(ArrayBuffer.isView(anyNull), ArrayBuffer.isView(anyPlain), ArrayBuffer.isView(uni), ArrayBuffer.isView(opt));
-  console.log(ArrayBuffer.isView(optNone), ArrayBuffer.isView());
+  console.log(ArrayBuffer.isView(anyBuf), ArrayBuffer.isView(anyDv), ArrayBuffer.isView(anyF64), ArrayBuffer.isView(anyArr));
+  console.log(ArrayBuffer.isView(anyNum), ArrayBuffer.isView(anyStr), ArrayBuffer.isView(anyUndef), ArrayBuffer.isView(anyNull));
+  console.log(ArrayBuffer.isView(anyPlain), ArrayBuffer.isView(uni), ArrayBuffer.isView(opt), ArrayBuffer.isView(optNone));
+  console.log(ArrayBuffer.isView(), ArrayBuffer.isView(new ArrayBuffer(1)));
 }
 "#;
     let output = compile_and_run(source, "array_buffer_is_view_static_and_any_matrix_matches_node");
     assert_eq!(
         output,
-        "true false true true\ntrue false false false\nfalse false false false\ntrue false true true\n\
-         false false false false\nfalse false true true\nfalse false\n"
+        "true false true true\ntrue false false false\nfalse false false false\ntrue true true false\n\
+         false false false false\nfalse true true false\nfalse false\n"
     );
 }

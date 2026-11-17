@@ -5894,7 +5894,9 @@ fn lowers_array_buffer_is_view_for_every_operand_type() {
         declare function raw(): Buffer;
         declare function wrap(): any;
         declare function live(): JsValue;
+        declare function either(): any | number;
         function main(): void {
+            console.log(ArrayBuffer.isView(either()));
             const buffer = raw();
             const array = new ArrayBuffer(8);
             console.log(ArrayBuffer.isView(buffer), ArrayBuffer.isView(array));
