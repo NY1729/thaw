@@ -2556,3 +2556,53 @@ fn blocking_and_async_exception_handoffs_copy_native_descriptor_before_release()
         line.contains("call void @thaw_promise_destroy(")
     ), "reachable cleanup release block must contain the Promise destroy call:\n{release}");
 }
+
+#[test]
+fn promise_value_resolver_adopts_promises_like_node() {
+    // Node 22 output for this program (queueMicrotask ordering included).
+    let source = r#"
+        function main(): void {
+            const failing: Promise<number> = new Promise<number>((_resolve: (v: number) => void, reject: (r: string) => void): void => {
+                reject("boom");
+            });
+            const late: Promise<number> = new Promise<number>((done: (v: number) => void): void => {
+                setTimeout((): void => { done(5); }, 5);
+            });
+            new Promise<number>((resolve: (v: number) => void): void => {
+                resolve(Promise.resolve(2));
+            }).then((v: number): void => { console.log("thenable", v); });
+            new Promise<number>((resolve: (v: number) => void): void => {
+                resolve(late);
+            }).then((v: number): void => { console.log("pending", v); });
+            new Promise<number>((resolve: (v: number) => void): void => {
+                resolve(failing);
+            }).catch((reason: string): void => { console.log("rejected", reason); });
+            queueMicrotask((): void => { console.log("qm1"); });
+            new Promise<number>((resolve: (v: number) => void): void => {
+                resolve(Promise.resolve(3));
+            }).then((v: number): void => { console.log("adopt-order", v); });
+            queueMicrotask((): void => { console.log("qm2"); });
+            Promise.resolve(0).then((): Promise<number> => Promise.resolve(4)).then((v: number): void => { console.log("then-order", v); });
+            queueMicrotask((): void => { console.log("qm3"); });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_value_resolver_adopts_promises"),
+        "qm1\nqm2\nqm3\nthenable 2\nrejected boom\nadopt-order 3\nthen-order 4\npending 5\n"
+    );
+}
+
+#[test]
+fn promise_then_callback_returning_a_promise_flattens_like_node() {
+    // Node 22 output: a then callback returning Promise<T> settles the chained promise with T.
+    let source = r#"
+        function main(): void {
+            Promise.resolve(1).then((): Promise<number> => Promise.resolve(2)).then((v: number): void => { console.log("returned", v); });
+            Promise.resolve(1).then(() => Promise.resolve(3)).then((v: number): void => { console.log("untyped", v); });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_then_returns_promise"),
+        "returned 2\nuntyped 3\n"
+    );
+}

@@ -1033,6 +1033,10 @@ impl<'a> FnLowerer<'a> {
         } else {
             inferred_resolve.map(|(result, _)| result)?
         };
+        // A value-typed resolver (`(v: number) => void`) still adopts a Promise
+        // passed to it at runtime (`resolve(Promise.resolve(2))`), so it widens
+        // to the mixed resolver when the executor body passes one.
+        let mut declared_widened = false;
         let kind = if let Some(declared) = &declared_resolver {
             let (declared_result, kind) = promise_resolver_parameter(declared)?;
             if declared_result != resolved {
@@ -1040,16 +1044,25 @@ impl<'a> FnLowerer<'a> {
                     "Promise resolve callback has result {declared_result:?}, expected {resolved:?}"
                 ));
             }
-            kind
+            if kind == PromiseResolveKind::Value
+                && spread_executor.is_none()
+                && self.executor_resolve_adopts_promise(&executor.expr)?
+            {
+                declared_widened = true;
+                PromiseResolveKind::Mixed
+            } else {
+                kind
+            }
         } else if legacy_unobserved_void {
             PromiseResolveKind::Value
         } else {
             PromiseResolveKind::Mixed
         };
         let resolve = if kind == PromiseResolveKind::Mixed {
-            declared_resolver.unwrap_or_else(|| {
-                promise_mixed_resolver_type(&resolved, resolved == HirType::Void)
-            })
+            match declared_resolver {
+                Some(declared) if !declared_widened => declared,
+                _ => promise_mixed_resolver_type(&resolved, resolved == HirType::Void),
+            }
         } else {
             let resolve_value = if kind == PromiseResolveKind::Adopt {
                 vec![HirType::Promise(Box::new(resolved.clone()))]
@@ -1085,8 +1098,17 @@ impl<'a> FnLowerer<'a> {
             )?;
             self.normalize_promise_callback(executor, &available[..arity])?
         } else {
+            // A widened resolver is contextually typed by the mixed parameter, so the
+            // executor's own `resolve: (v: T) => void` annotation must not pin it back.
+            let widened_executor;
+            let executor_expr = if declared_widened {
+                widened_executor = without_resolver_annotation(&executor.expr);
+                &widened_executor
+            } else {
+                &executor.expr
+            };
             self.lower_promise_callback(
-                &executor.expr,
+                executor_expr,
                 &available[..arity],
                 Some(&HirType::Void),
             )?
@@ -1100,6 +1122,43 @@ impl<'a> FnLowerer<'a> {
             )
         };
         self.wrap_call_argument_bindings(result, &spread_bindings)
+    }
+
+    /// Whether a direct `resolve(...)` call in the executor passes a Promise (or a
+    /// `T | Promise<T>` union), which the resolver must accept by adoption.
+    fn executor_resolve_adopts_promise(&mut self, executor: &Expr) -> Result<bool, String> {
+        let name = match executor {
+            Expr::Arrow(arrow) => match arrow.params.first() {
+                Some(Pat::Ident(binding)) => binding.id.sym.to_string(),
+                Some(Pat::Assign(assignment)) => match assignment.left.as_ref() {
+                    Pat::Ident(binding) => binding.id.sym.to_string(),
+                    _ => return Ok(false),
+                },
+                _ => return Ok(false),
+            },
+            Expr::Fn(function) => match function.function.params.first().map(|param| &param.pat) {
+                Some(Pat::Ident(binding)) => binding.id.sym.to_string(),
+                _ => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+        let calls = scan_resolve_calls(executor, &name);
+        for (mut value, spread) in calls.values {
+            if spread {
+                continue;
+            }
+            value.visit_mut_with(&mut ExpandExecutorLocals {
+                locals: &calls.locals,
+                expanding: BTreeSet::new(),
+            });
+            // Lowering errors are reported by the constructor lowering itself.
+            let Ok(lowered) = self.lower_expr(&value) else { continue };
+            let Ok(actual) = self.infer_expr_type(&lowered) else { continue };
+            if promise_resolved_argument(&actual).1 != PromiseResolveKind::Value {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn infer_promise_constructor_value_type(
@@ -1128,8 +1187,6 @@ impl<'a> FnLowerer<'a> {
         executor: &Expr,
         explicit: Option<&HirType>,
     ) -> Result<(HirType, bool), String> {
-        use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
-
         if let Expr::Ident(ident) = executor {
             let name = self.resolve_binding(ident.sym.as_ref());
             let callback_type = self.scope.get(&name).cloned().or_else(|| {
@@ -1189,123 +1246,8 @@ impl<'a> FnLowerer<'a> {
                 return Ok((promise_resolver_parameter(&declared)?.0, true));
             }
         }
-        struct ResolveCalls {
-            name: Symbol,
-            values: Vec<(Expr, bool)>,
-            zero_arg_calls: usize,
-            locals: HashMap<Symbol, Expr>,
-            // Whether `resolve` is referenced anywhere at all, in any
-            // position -- including handed off *by reference* rather
-            // than called directly (`setTimeout(resolve, ms)`, the
-            // standard zero-dependency "sleep" idiom, or a one-shot
-            // event listener/"done" callback). `values` alone can't see
-            // this: `resolve` never appears in call-callee position at
-            // all in that shape.
-            referenced: bool,
-        }
-        impl ResolveCalls {
-            fn shadows_resolve(&self, pattern: &Pat) -> bool {
-                match pattern {
-                    Pat::Ident(binding) => binding.id.sym == self.name,
-                    Pat::Assign(assignment) => self.shadows_resolve(&assignment.left),
-                    _ => false,
-                }
-            }
-        }
-        impl Visit for ResolveCalls {
-            fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
-                if !arrow.params.iter().any(|pattern| self.shadows_resolve(pattern)) {
-                    arrow.visit_children_with(self);
-                }
-            }
+        let calls = scan_resolve_calls(executor, resolve_binding.id.sym.as_ref());
 
-            fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
-                if !function.params.iter().any(|param| self.shadows_resolve(&param.pat)) {
-                    function.visit_children_with(self);
-                }
-            }
-
-            fn visit_call_expr(&mut self, call: &CallExpr) {
-                if let Callee::Expr(callee) = &call.callee {
-                    if let Expr::Ident(ident) = callee.as_ref() {
-                        let mut current = ident.sym.to_string();
-                        let mut seen = BTreeSet::new();
-                        while current != self.name && seen.insert(current.clone()) {
-                            let Some(Expr::Ident(next)) = self.locals.get(&current) else {
-                                break;
-                            };
-                            current = next.sym.to_string();
-                        }
-                        if current == self.name {
-                            if let [arg] = call.args.as_slice() {
-                                self.values.push((arg.expr.as_ref().clone(), arg.spread.is_some()));
-                            } else if call.args.is_empty() {
-                                self.zero_arg_calls += 1;
-                            }
-                        }
-                    }
-                }
-                call.visit_children_with(self);
-            }
-
-            fn visit_expr(&mut self, expr: &Expr) {
-                if let Expr::Ident(ident) = expr {
-                    if ident.sym == self.name {
-                        self.referenced = true;
-                    }
-                }
-                expr.visit_children_with(self);
-            }
-
-            fn visit_var_declarator(&mut self, declarator: &swc_ecma_ast::VarDeclarator) {
-                if let (Pat::Ident(binding), Some(initializer)) =
-                    (&declarator.name, &declarator.init)
-                {
-                    self.locals
-                        .insert(binding.id.sym.to_string(), initializer.as_ref().clone());
-                }
-                declarator.visit_children_with(self);
-            }
-
-        }
-        let mut calls = ResolveCalls {
-            name: resolve_binding.id.sym.to_string(),
-            values: Vec::new(),
-            zero_arg_calls: 0,
-            locals: HashMap::new(),
-            referenced: false,
-        };
-        match executor {
-            Expr::Arrow(arrow) => arrow.body.visit_with(&mut calls),
-            Expr::Fn(function) => {
-                if let Some(body) = &function.function.body {
-                    body.visit_with(&mut calls);
-                }
-            }
-            _ => unreachable!(),
-        }
-
-        struct ExpandExecutorLocals<'a> {
-            locals: &'a HashMap<Symbol, Expr>,
-            expanding: BTreeSet<Symbol>,
-        }
-        impl VisitMut for ExpandExecutorLocals<'_> {
-            fn visit_mut_expr(&mut self, expr: &mut Expr) {
-                if let Expr::Ident(ident) = expr {
-                    let name = ident.sym.to_string();
-                    if let Some(initializer) = self.locals.get(&name) {
-                        if self.expanding.insert(name.clone()) {
-                            let mut replacement = initializer.clone();
-                            replacement.visit_mut_with(self);
-                            self.expanding.remove(&name);
-                            *expr = replacement;
-                        }
-                        return;
-                    }
-                }
-                expr.visit_mut_children_with(self);
-            }
-        }
         let mut inferred = None;
         let mut unobservable_argument = false;
         for (mut value, mut spread) in calls.values {
@@ -1413,4 +1355,146 @@ impl<'a> FnLowerer<'a> {
 fn supplied_is_rest_array(supplied: &[HirType], element: &HirType) -> bool {
     matches!(supplied, [HirType::Array(inner)] if inner.as_ref() == element)
         && !callback_param_compatible(&supplied[0], element)
+}
+
+struct ResolveCalls {
+    name: Symbol,
+    values: Vec<(Expr, bool)>,
+    zero_arg_calls: usize,
+    locals: HashMap<Symbol, Expr>,
+    // Whether `resolve` is referenced anywhere at all, in any
+    // position -- including handed off *by reference* rather
+    // than called directly (`setTimeout(resolve, ms)`, the
+    // standard zero-dependency "sleep" idiom, or a one-shot
+    // event listener/"done" callback). `values` alone can't see
+    // this: `resolve` never appears in call-callee position at
+    // all in that shape.
+    referenced: bool,
+}
+impl ResolveCalls {
+    fn shadows_resolve(&self, pattern: &Pat) -> bool {
+        match pattern {
+            Pat::Ident(binding) => binding.id.sym == self.name,
+            Pat::Assign(assignment) => self.shadows_resolve(&assignment.left),
+            _ => false,
+        }
+    }
+}
+impl Visit for ResolveCalls {
+    fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
+        if !arrow.params.iter().any(|pattern| self.shadows_resolve(pattern)) {
+            arrow.visit_children_with(self);
+        }
+    }
+
+    fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
+        if !function.params.iter().any(|param| self.shadows_resolve(&param.pat)) {
+            function.visit_children_with(self);
+        }
+    }
+
+    fn visit_call_expr(&mut self, call: &CallExpr) {
+        if let Callee::Expr(callee) = &call.callee {
+            if let Expr::Ident(ident) = callee.as_ref() {
+                let mut current = ident.sym.to_string();
+                let mut seen = BTreeSet::new();
+                while current != self.name && seen.insert(current.clone()) {
+                    let Some(Expr::Ident(next)) = self.locals.get(&current) else {
+                        break;
+                    };
+                    current = next.sym.to_string();
+                }
+                if current == self.name {
+                    if let [arg] = call.args.as_slice() {
+                        self.values.push((arg.expr.as_ref().clone(), arg.spread.is_some()));
+                    } else if call.args.is_empty() {
+                        self.zero_arg_calls += 1;
+                    }
+                }
+            }
+        }
+        call.visit_children_with(self);
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        if let Expr::Ident(ident) = expr {
+            if ident.sym == self.name {
+                self.referenced = true;
+            }
+        }
+        expr.visit_children_with(self);
+    }
+
+    fn visit_var_declarator(&mut self, declarator: &swc_ecma_ast::VarDeclarator) {
+        if let (Pat::Ident(binding), Some(initializer)) =
+            (&declarator.name, &declarator.init)
+        {
+            self.locals
+                .insert(binding.id.sym.to_string(), initializer.as_ref().clone());
+        }
+        declarator.visit_children_with(self);
+    }
+
+}
+
+struct ExpandExecutorLocals<'a> {
+    locals: &'a HashMap<Symbol, Expr>,
+    expanding: BTreeSet<Symbol>,
+}
+impl VisitMut for ExpandExecutorLocals<'_> {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        if let Expr::Ident(ident) = expr {
+            let name = ident.sym.to_string();
+            if let Some(initializer) = self.locals.get(&name) {
+                if self.expanding.insert(name.clone()) {
+                    let mut replacement = initializer.clone();
+                    replacement.visit_mut_with(self);
+                    self.expanding.remove(&name);
+                    *expr = replacement;
+                }
+                return;
+            }
+        }
+        expr.visit_mut_children_with(self);
+    }
+}
+
+/// Scans an executor body for the direct calls to its resolve parameter.
+fn scan_resolve_calls(executor: &Expr, resolve: &str) -> ResolveCalls {
+    let mut calls = ResolveCalls {
+        name: resolve.to_string(),
+        values: Vec::new(),
+        zero_arg_calls: 0,
+        locals: HashMap::new(),
+        referenced: false,
+    };
+    match executor {
+        Expr::Arrow(arrow) => arrow.body.visit_with(&mut calls),
+        Expr::Fn(function) => {
+            if let Some(body) = &function.function.body {
+                body.visit_with(&mut calls);
+            }
+        }
+        _ => unreachable!(),
+    }
+    calls
+}
+
+/// The executor with its first (resolve) parameter's type annotation removed.
+fn without_resolver_annotation(executor: &Expr) -> Expr {
+    let mut executor = executor.clone();
+    match &mut executor {
+        Expr::Arrow(arrow) => {
+            if let Some(Pat::Ident(binding)) = arrow.params.first_mut() {
+                binding.type_ann = None;
+            }
+        }
+        Expr::Fn(function) => {
+            if let Some(Pat::Ident(binding)) = function.function.params.first_mut().map(|param| &mut param.pat) {
+                binding.type_ann = None;
+            }
+        }
+        _ => {}
+    }
+    executor
 }
