@@ -911,6 +911,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("thaw_json_array_assign returned no value".into());
             }
+            "__thaw_json_buffer_sync" => {
+                let [target, source] = args else {
+                    return Err("buffer write-back expects two operands".into());
+                };
+                let target = self.compile_expr(target)?;
+                let source = self.compile_expr(source)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_buffer_sync").unwrap(),
+                        &[target.into(), source.into()],
+                        "json_buffer_sync",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_buffer_sync returned no value".into());
+            }
             "__thaw_json_array_slice" => {
                 let [value, start] = args else {
                     return Err("dynamic array rest expects two operands".into());
