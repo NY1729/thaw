@@ -1043,22 +1043,6 @@ impl<'a> FnLowerer<'a> {
                                 vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_THIS.into()))],
                             ))
                         }
-                        // A timer function passed or stored as a value: a forwarding arrow
-                        // (extra callback arguments are not forwarded).
-                        timer @ ("setTimeout" | "setInterval" | "setImmediate") => {
-                            let arrow = if timer == "setImmediate" {
-                                "(cb: () => void) => setImmediate(cb)".to_string()
-                            } else {
-                                format!("(cb: () => void, ms?: number) => {timer}(cb, ms)")
-                            };
-                            let module = thaw_parser::parse_typescript(&format!("({arrow});"))?;
-                            if let Some(swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Expr(
-                                statement,
-                            ))) = module.body.first()
-                            {
-                                return self.lower_expr(&statement.expr.clone());
-                            }
-                        }
                         // Every other standard global in the platform table
                         // (`platform_globals.rs`): the realm has the real global, so a
                         // bare reference is an opaque dynamic value. Placed after the
