@@ -19,7 +19,7 @@
       "id": "W3",
       "reason": "Resizable ArrayBuffer / SharedArrayBuffer members (Atomics.waitAsync waiver withdrawn 2026-11-16)",
       "match": [
-        "surface::(globalThis\\.)?(ArrayBuffer|SharedArrayBuffer)\\.prototype\\.(maxByteLength|resize|grow)"
+        "surface::(globalThis\\.)?SharedArrayBuffer\\.prototype\\.(maxByteLength|grow)"
       ]
     },
     {

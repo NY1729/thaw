@@ -67,7 +67,7 @@ fn elem_value(ty: Ty, bits: u32) -> f64 {
 /// The absolute address of element `k` of an integer typed array, or a RangeError when it is not an element of a
 /// live view (the caller has already checked the Atomics index).
 fn element_addr(it: &mut Interp, ta: &TypedArr, k: usize) -> R<usize> {
-    if !ta.live() || k >= ta.len {
+    if !ta.live() || k >= ta.cur_len() {
         return it.throw_error("RangeError", "Invalid atomic access index");
     }
     let base = ta.data.borrow().as_ptr() as usize;

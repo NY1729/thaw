@@ -93,8 +93,11 @@ fn builtin_table_descriptors_match_node_and_missing_list_is_exact() {
         };
         // a closure's `name`/`length` is present when it is synthesized on read (`synth_fn_own`); the
         // value itself is checked through the function row that owns it
-        let synthesized =
-            !row.accessor && matches!(&*k, "name" | "length") && synth_fn_own(&o, &k).is_some();
+        // an Array exotic's `length` is derived from its elements, so it has no raw prop either
+        let array_length = &*k == "length" && matches!(&*o.kind.borrow(), Kind::Array(_));
+        let synthesized = !row.accessor
+            && ((matches!(&*k, "name" | "length") && synth_fn_own(&o, &k).is_some())
+                || array_length);
         if !(synthesized || it.table_row_present(&o, &k, &row)) {
             missing.insert(format!("{}\t{}", row.owner, row.key));
             continue;

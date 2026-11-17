@@ -1,0 +1,4 @@
+{
+ "note": "gaps may only shrink; regenerate with run.sh --write-baseline only after a fix lands. Empty at slice 1: findings are reported, not gated.",
+ "gaps": []
+}

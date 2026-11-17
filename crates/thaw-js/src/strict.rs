@@ -82,6 +82,17 @@ impl Interp {
         }
     }
 
+    /// The source text of a script function, as `Function.prototype.toString` prints it (`None` otherwise).
+    fn fn_source_text(&self, o: &Obj) -> Option<String> {
+        let Kind::Closure { def, .. } = &*o.kind.borrow() else {
+            return None;
+        };
+        let (run, lo, hi) = def.src;
+        let src = self.sources.get(&run)?;
+        src.get(lo.saturating_sub(1) as usize..hi.saturating_sub(1) as usize)
+            .map(|t| t.trim_start().to_string())
+    }
+
     /// V8's name for an object in a message: `[object Array]` for arrays, `#<Ctor>` for an instance of a named
     /// class, `#<Object>` as the fallback, and `[object Object]` for a null-prototype object.
     pub(crate) fn obj_name(&mut self, o: &Obj) -> String {
@@ -100,10 +111,15 @@ impl Interp {
     /// The text of a refused write to `key` on `o`, V8's wording for `why`.
     pub(crate) fn refusal_message(&mut self, o: &Obj, key: &str, why: Refusal) -> String {
         match why {
-            Refusal::ReadOnly => format!(
-                "Cannot assign to read only property '{key}' of object '{}'",
-                self.obj_name(o)
-            ),
+            Refusal::ReadOnly => match self.fn_source_text(o) {
+                Some(text) => {
+                    format!("Cannot assign to read only property '{key}' of function '{text}'")
+                }
+                None => format!(
+                    "Cannot assign to read only property '{key}' of object '{}'",
+                    self.obj_name(o)
+                ),
+            },
             Refusal::NotExtensible => {
                 format!("Cannot add property {key}, object is not extensible")
             }
@@ -155,8 +171,9 @@ impl Interp {
 
     /// A refused `delete` of `key` on `o` (a sealed or non-configurable property).
     pub(crate) fn refuse_delete(&mut self, strict: bool, o: &Obj, key: &str) -> R<()> {
-        self.strict_fail(strict, "TypeError", |it| {
-            format!("Cannot delete property '{key}' of {}", it.obj_name(o))
+        self.strict_fail(strict, "TypeError", |it| match it.fn_source_text(o) {
+            Some(text) => format!("Cannot delete property '{key}' of {text}"),
+            None => format!("Cannot delete property '{key}' of {}", it.obj_name(o)),
         })
     }
 }

@@ -1,0 +1,3 @@
+# Probe-name regexes dropped from BOTH sides before diffing (same contract as tools/parity/skip.txt).
+# Matched with search() against the bare probe name, e.g. buffer.typed.indexOf.
+# Empty at slice 1: no probe is skipped. Async, clock, random and process probes are excluded by construction.

@@ -173,7 +173,8 @@ fn fast_set(v: &Value, i: usize, x: f64) -> bool {
                 _ => false,
             }
         }
-        Kind::Typed(t) if i < t.len && !t.ty.is_big() => {
+        // a resizable buffer's view takes the slow path: its length is re-derived on each access
+        Kind::Typed(t) if !t.rz && i < t.fixed_len && !t.ty.is_big() => {
             t.set(i, x);
             true
         }

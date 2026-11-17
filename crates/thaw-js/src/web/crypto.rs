@@ -32,8 +32,8 @@ pub(crate) fn install(interp: &mut Interp) {
             return it.throw_error("TypeError", "argument must be an integer typed array");
         };
         let size = t.ty.size();
-        if t.live() {
-            fill_os_random(&mut t.data.borrow_mut()[t.off..t.off + t.len * size]);
+        if let Some(n) = t.view_len() {
+            fill_os_random(&mut t.data.borrow_mut()[t.off..t.off + n * size]);
         }
         Ok(arg(a, 0))
     });
@@ -46,7 +46,7 @@ pub(crate) fn install(interp: &mut Interp) {
         let Some(sum) = digest(&alg, &d.window()) else {
             return Ok(Value::Bool(false));
         };
-        if o.live() && o.len >= sum.len() {
+        if o.live() && o.cur_len() >= sum.len() {
             o.data.borrow_mut()[o.off..o.off + sum.len()].copy_from_slice(&sum);
         }
         Ok(Value::Bool(true))

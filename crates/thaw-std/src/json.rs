@@ -7490,7 +7490,20 @@ pub unsafe extern "C" fn thaw_json_index_set(
     if !object_writable(array, &to_key(key)) {
         return value;
     }
+    let stored = value;
     if let (Some(container), Some(value)) = (unsafe { array.as_mut() }, unsafe { value.as_ref() }) {
+        // A Buffer-shaped wrapper is a byte array: an index write goes into
+        // its `data`, mirroring `thaw_json_index`'s Buffer arm. Non-index keys
+        // fall through to the ordinary key insert, as the read path does.
+        if index.is_finite()
+            && index >= 0.0
+            && index <= (u32::MAX - 1) as f64
+            && index.fract() == 0.0
+            && thaw_json_is_buffer_shape(container) == 1
+        {
+            json_buffer_index_store(container, index, value);
+            return stored;
+        }
         match container {
             Value::Array(items)
                 if index.is_finite()
@@ -7521,6 +7534,29 @@ pub unsafe extern "C" fn thaw_json_index_set(
         }
     }
     value
+}
+
+/// The write twin of `thaw_json_index`'s Buffer arm: stores `value` as a
+/// byte (`ToUint8`) into a Buffer-shaped wrapper's `data`. Out-of-range
+/// indices are a no-op, like a typed array's. Callers have already checked
+/// `container` is Buffer-shaped (`thaw_json_is_buffer_shape`) and `index`
+/// is a valid array index.
+fn json_buffer_index_store(container: &Value, index: f64, value: &Value) {
+    let Value::Object(fields) = container else {
+        return;
+    };
+    let Some(Value::Array(data)) = shared_object_ref(fields).get(b"data".as_slice()) else {
+        return;
+    };
+    let number = json_to_number(value);
+    let byte = if number.is_finite() {
+        number.trunc().rem_euclid(256.0)
+    } else {
+        0.0
+    };
+    if let Some(slot) = shared_array_ref_mut(data).get_mut(index as usize) {
+        *slot = number_value(byte);
+    }
 }
 
 /// Like `thaw_json_get`, but returns a pointer *into* `value`'s own
@@ -11147,6 +11183,31 @@ pub extern "C" fn thaw_json_array_assign(target: *mut Value, source: *mut Value)
     target
 }
 
+/// Write-back for a Buffer-shaped `any` receiver: replaces the bytes of the
+/// wrapper `target` (its `data` array) with those of `source` (a Buffer wrapper
+/// or byte array) and returns `target`. A non-Buffer target is left unchanged.
+#[no_mangle]
+pub extern "C" fn thaw_json_buffer_sync(target: *mut Value, source: *mut Value) -> *mut Value {
+    let Some(items) = (unsafe { source.as_ref() })
+        .and_then(json_array_or_buffer_data)
+        .map(|items| items.to_vec())
+    else {
+        return target;
+    };
+    if thaw_json_is_buffer_shape(target) != 1 {
+        return target;
+    }
+    if let Some(mut fields) = (unsafe { target.as_ref() }).and_then(Value::as_object_mut) {
+        if let Some(mut data) = fields
+            .get_mut(b"data".as_slice())
+            .and_then(|slot| slot.as_array_mut())
+        {
+            *data = items;
+        }
+    }
+    target
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_array_slice(value: *mut Value, start: i64) -> *mut Value {
     // A live JS array (a nested value of a native `any` wrapper) is read through its host.
@@ -14195,6 +14256,103 @@ mod tests {
             thaw_json_as_number(thaw_json_get(not_a_buffer, length_key.as_ptr())),
             99.0
         );
+    }
+
+    fn set_index_on(target: *mut Value, index: f64, value: &str) -> *mut Value {
+        let key = CString::new(format!("{}", index)).unwrap();
+        unsafe { thaw_json_index_set(target, index, key.as_ptr(), parse(value)) }
+    }
+
+    fn index_number(target: *mut Value, index: f64) -> f64 {
+        let key = CString::new(format!("{}", index)).unwrap();
+        thaw_json_as_number(thaw_json_index(target, index, key.as_ptr()))
+    }
+
+    #[test]
+    fn buffer_shaped_index_write_stores_into_data_and_reads_back() {
+        let buffer = parse(r#"{"type":"Buffer","data":[0,0,0]}"#);
+        set_index_on(buffer, 1.0, "5");
+        // The write lands in `data`; the wrapper gains no `"1"` key.
+        assert_eq!(
+            read_c_string(thaw_json_stringify(buffer)),
+            r#"{"type":"Buffer","data":[0,5,0]}"#
+        );
+        assert_eq!(index_number(buffer, 1.0), 5.0);
+        assert_eq!(index_number(buffer, 0.0), 0.0);
+    }
+
+    #[test]
+    fn buffer_shaped_index_write_truncates_to_a_uint8() {
+        let buffer = parse(r#"{"type":"Buffer","data":[0,0,0,0]}"#);
+        set_index_on(buffer, 0.0, "300");
+        set_index_on(buffer, 1.0, "-1");
+        set_index_on(buffer, 2.0, "1.7");
+        set_index_on(buffer, 3.0, "\"300\"");
+        assert_eq!(
+            read_c_string(thaw_json_stringify(buffer)),
+            r#"{"type":"Buffer","data":[44,255,1,44]}"#
+        );
+    }
+
+    #[test]
+    fn buffer_shaped_out_of_range_index_write_is_a_no_op() {
+        let buffer = parse(r#"{"type":"Buffer","data":[1,2]}"#);
+        set_index_on(buffer, 2.0, "9");
+        set_index_on(buffer, 99.0, "9");
+        assert_eq!(
+            read_c_string(thaw_json_stringify(buffer)),
+            r#"{"type":"Buffer","data":[1,2]}"#
+        );
+        assert!(index_number(buffer, 2.0).is_nan());
+    }
+
+    #[test]
+    fn buffer_shaped_negative_or_fractional_index_write_matches_read_key_lookup() {
+        // The read path sends a non-index key to the ordinary key lookup,
+        // so the write must store under that same key and leave `data` alone.
+        let buffer = parse(r#"{"type":"Buffer","data":[7,8]}"#);
+        set_index_on(buffer, -1.0, "5");
+        set_index_on(buffer, 1.5, "6");
+        assert_eq!(index_number(buffer, -1.0), 5.0);
+        assert_eq!(index_number(buffer, 1.5), 6.0);
+        let data = CString::new("data").unwrap();
+        let data = thaw_json_get(buffer, data.as_ptr());
+        assert_eq!(read_c_string(thaw_json_stringify(data)), "[7,8]");
+    }
+
+    #[test]
+    fn buffer_shape_predicate_gates_the_index_write_arm() {
+        // No `data` array: a plain object, so the write keeps its key semantics.
+        let no_data = parse(r#"{"type":"Buffer"}"#);
+        set_index_on(no_data, 0.0, "5");
+        assert_eq!(index_number(no_data, 0.0), 5.0);
+        let type_key = CString::new("type").unwrap();
+        assert_eq!(
+            read_c_string(thaw_json_as_string(thaw_json_get(
+                no_data,
+                type_key.as_ptr()
+            ))),
+            "Buffer"
+        );
+
+        // A same-named pair that is not Buffer-shaped also keeps key semantics.
+        let widget = parse(r#"{"type":"Widget","data":[1,2,3]}"#);
+        set_index_on(widget, 1.0, "9");
+        assert_eq!(index_number(widget, 1.0), 9.0);
+        let data = CString::new("data").unwrap();
+        let data = thaw_json_get(widget, data.as_ptr());
+        assert_eq!(read_c_string(thaw_json_stringify(data)), "[1,2,3]");
+    }
+
+    #[test]
+    fn plain_array_and_object_index_writes_are_unchanged() {
+        let array = parse("[1,2,3]");
+        set_index_on(array, 1.0, "9");
+        assert_eq!(read_c_string(thaw_json_stringify(array)), "[1,9,3]");
+
+        let object = parse(r#"{"0":"one"}"#);
+        set_index_on(object, 0.0, "5");
+        assert_eq!(index_number(object, 0.0), 5.0);
     }
 
     #[test]

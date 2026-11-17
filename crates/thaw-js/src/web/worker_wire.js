@@ -29,8 +29,12 @@ globalThis.__thaw_worker_encode = value => {
     else if (input instanceof Map) node = { t: 'Map', v: Array.from(input, ([key, item]) => [encode(key), encode(item)]) };
     else if (input instanceof Set) node = { t: 'Set', v: Array.from(input, item => encode(item)) };
     else if (input instanceof SharedArrayBuffer) node = { t: 'SAB', id: __thaw_sab_export(input) };
-    else if (input instanceof ArrayBuffer) node = { t: 'ArrayBuffer', v: Array.from(new Uint8Array(input), byte => byte.toString(16).padStart(2, '0')).join('') };
-    else if (ArrayBuffer.isView(input)) node = { t: input instanceof DataView ? 'DataView' : 'TypedArray', c: input.constructor.name, b: encode(input.buffer), o: input.byteOffset, l: input instanceof DataView ? input.byteLength : input.length };
+    else if (input instanceof ArrayBuffer) node = { t: 'ArrayBuffer', v: Array.from(new Uint8Array(input), byte => byte.toString(16).padStart(2, '0')).join(''), m: input.resizable ? input.maxByteLength : undefined };
+    else if (ArrayBuffer.isView(input)) {
+      // a length-tracking view (over a resizable buffer) travels as tracking: no length (`tr`)
+      const tr = input instanceof DataView ? input.__track === true : __thaw_ta_track(input);
+      node = { t: input instanceof DataView ? 'DataView' : 'TypedArray', c: input.constructor.name, b: encode(input.buffer), o: input.byteOffset, l: tr ? undefined : input instanceof DataView ? input.byteLength : input.length, tr };
+    }
     else if (input instanceof Error) {
       node = { t: 'Error', n: String(input.name), m: String(input.message), s: input.stack === undefined ? undefined : String(input.stack) };
       if (typeof input.code === 'string') node.k = input.code;
@@ -66,7 +70,8 @@ globalThis.__thaw_worker_decode = source => {
     else if (node.t === 'ArrayBuffer') {
       const bytes = new Uint8Array(node.v.length / 2);
       for (let index = 0; index < bytes.length; index++) bytes[index] = parseInt(node.v.slice(index * 2, index * 2 + 2), 16);
-      values[id] = bytes.buffer;
+      values[id] = node.m === undefined ? bytes.buffer : new ArrayBuffer(bytes.length, { maxByteLength: node.m });
+      if (node.m !== undefined) new Uint8Array(values[id]).set(bytes);
     }
     else if (node.t === 'Error') {
       const named = globalThis[node.n];
@@ -79,8 +84,8 @@ globalThis.__thaw_worker_decode = source => {
   });
   // views need their ArrayBuffer (pass 1)
   graph.nodes.forEach((node, id) => {
-    if (node.t === 'DataView') values[id] = new DataView(primitive(node.b), node.o, node.l);
-    else if (node.t === 'TypedArray') values[id] = new globalThis[node.c](primitive(node.b), node.o, node.l);
+    if (node.t === 'DataView') values[id] = new DataView(primitive(node.b), node.o, node.tr ? undefined : node.l);
+    else if (node.t === 'TypedArray') values[id] = new globalThis[node.c](primitive(node.b), node.o, node.tr ? undefined : node.l);
   });
   // pass 2: fill contents (references to any node now resolve)
   graph.nodes.forEach((node, id) => {

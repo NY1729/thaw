@@ -980,6 +980,7 @@ impl Interp {
         // first, or a nonextensible closure refuses to redefine it as if it were a new key.
         if o.position(key).is_none() {
             if let Some(v) = synth_fn_own(o, key) {
+                let legacy = is_legacy_fn_key(o, key);
                 let mut props = o.raw_props.borrow_mut();
                 crate::push_prop(
                     o,
@@ -989,7 +990,7 @@ impl Interp {
                         slot: Slot::Data(v),
                         enumerable: false,
                         writable: false,
-                        configurable: true,
+                        configurable: !legacy,
                     },
                 );
             }
@@ -1023,6 +1024,9 @@ impl Interp {
                 v.clone(),
                 d.writable.as_ref().is_some_and(Value::truthy),
             );
+            // a data descriptor ends a Node accessor global's accessor form (`node_accessor`).
+            // ponytail: only a descriptor with a value redefines; a writable-only one keeps the accessor form.
+            self.global.set_redefined(key);
         }
         let existing = o.position(key);
         let flag = |v: &Option<Value>, default: bool| v.as_ref().map_or(default, |v| v.truthy());
@@ -1483,27 +1487,36 @@ impl Interp {
                     .filter(|k| !raw_set.contains(&**k))
                     .map(|k| Value::Str(k.into()))
                     .collect();
+                // an Array's `length` follows its indices and leads the named keys (V8 order)
+                if let Value::Object(o) = &t {
+                    if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                        names.push(Value::str("length"));
+                    }
+                }
                 names.extend(order_keys(raw).into_iter().map(|k| Value::Str(k.into())));
                 if matches!(t, Value::Str(_)) {
                     names.push(Value::str("length"));
                 }
                 if let Value::Object(o) = &t {
-                    if matches!(&*o.kind.borrow(), Kind::Array(_)) {
-                        names.push(Value::str("length"));
-                    }
                     // A closure lists `length` then `name` first, as in V8, whether each is synthesized or a
                     // real `Prop`. Natives are a ceiling: they get no synthesized `length`/`name`.
+                    // A sloppy plain function adds `arguments` and `caller` to that head, as V8 does.
                     if matches!(&*o.kind.borrow(), Kind::Closure { .. }) {
                         let is_fn_key =
                             |v: &Value, k: &str| matches!(v, Value::Str(s) if &**s == k);
+                        let head_keys: &[&str] = if sloppy_ordinary_obj(o) {
+                            &["length", "name", "arguments", "caller"]
+                        } else {
+                            &["length", "name"]
+                        };
                         let mut head = Vec::new();
-                        for k in ["length", "name"] {
+                        for &k in head_keys {
                             if synth_fn_own(o, k).is_some() || names.iter().any(|v| is_fn_key(v, k))
                             {
                                 head.push(Value::str(k));
                             }
                         }
-                        names.retain(|v| !is_fn_key(v, "length") && !is_fn_key(v, "name"));
+                        names.retain(|v| !head_keys.iter().any(|k| is_fn_key(v, k)));
                         names.splice(0..0, head);
                     }
                 }
@@ -1551,8 +1564,19 @@ impl Interp {
                 if matches!(&*o.kind.borrow(), Kind::Global) {
                     if let Some(g) = it.global_prop(&key) {
                         let d = it.plain();
-                        put(&d, "value", g.value);
-                        put(&d, "writable", Value::Bool(g.writable));
+                        match g.slot {
+                            Slot::Data(v) => {
+                                put(&d, "value", v);
+                                put(&d, "writable", Value::Bool(g.writable));
+                            }
+                            Slot::Accessor { get, set } => {
+                                put(&d, "get", get.unwrap_or(Value::Undefined));
+                                put(&d, "set", set.unwrap_or(Value::Undefined));
+                            }
+                            Slot::LazyProto { .. } => {
+                                unreachable!("a global binding is never a lazy prototype")
+                            }
+                        }
                         put(&d, "enumerable", Value::Bool(g.enumerable));
                         put(&d, "configurable", Value::Bool(g.configurable));
                         return Ok(Value::Object(d));
@@ -1570,7 +1594,7 @@ impl Interp {
                         put(&d, "value", v);
                         put(&d, "writable", Value::Bool(false));
                         put(&d, "enumerable", Value::Bool(false));
-                        put(&d, "configurable", Value::Bool(true));
+                        put(&d, "configurable", Value::Bool(!is_legacy_fn_key(&o, &key)));
                         return Ok(Value::Object(d));
                     }
                     // only array index / length are virtual own props (served from the items); any other
@@ -1622,7 +1646,7 @@ impl Interp {
             });
             self.set_native(o, "freeze", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
-                    if matches!(&*o.kind.borrow(), Kind::Typed(t) if t.len > 0) {
+                    if matches!(&*o.kind.borrow(), Kind::Typed(t) if t.cur_len() > 0) {
                         return it.throw_error(
                             "TypeError",
                             "Cannot freeze array buffer views with elements",
@@ -3512,9 +3536,14 @@ const LEGACY_CALLER_MSG: &str = "'caller', 'callee', and 'arguments' properties 
 
 /// True for a sloppy ordinary function: not strict, not an arrow, class, method, generator or async function.
 fn sloppy_ordinary_fn(v: &Value) -> bool {
-    matches!(v, Value::Object(o) if matches!(
+    matches!(v, Value::Object(o) if sloppy_ordinary_obj(o))
+}
+
+/// `sloppy_ordinary_fn` for an object: the only closures that V8 gives own `arguments`/`caller`.
+pub(crate) fn sloppy_ordinary_obj(o: &Obj) -> bool {
+    matches!(
         &*o.kind.borrow(),
         Kind::Closure { def, scope }
             if !def.strict && !scope.strict.get() && !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype && def.class.is_none()
-    ))
+    )
 }

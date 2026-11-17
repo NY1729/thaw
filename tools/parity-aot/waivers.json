@@ -1,0 +1,4 @@
+{
+  "note": "User-approved waivers, same schema as tools/parity/waivers.json. Empty: no AOT-by-design row is waived yet. A waiver only classifies a gap; it never changes the gate.",
+  "waivers": []
+}

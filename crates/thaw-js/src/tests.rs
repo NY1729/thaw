@@ -8029,41 +8029,41 @@ fn no_prototype_async_and_method_closures_free_their_scope() {
 fn lazy_prototype_key_order_is_unchanged_by_materialisation() {
     assert_eq!(
         one("function f(){}; f.a=1; console.log(JSON.stringify(Object.getOwnPropertyNames(f)), JSON.stringify(Reflect.ownKeys(f)), JSON.stringify(Object.keys(f)));"),
-        r#"["length","name","prototype","a"] ["length","name","prototype","a"] ["a"]"#
+        r#"["length","name","arguments","caller","prototype","a"] ["length","name","arguments","caller","prototype","a"] ["a"]"#
     );
     assert_eq!(
         one("function f(){}; f.a=1; f.prototype; console.log(JSON.stringify(Object.getOwnPropertyNames(f)), JSON.stringify(Reflect.ownKeys(f)), JSON.stringify(Object.keys(f)));"),
-        r#"["length","name","prototype","a"] ["length","name","prototype","a"] ["a"]"#
+        r#"["length","name","arguments","caller","prototype","a"] ["length","name","arguments","caller","prototype","a"] ["a"]"#
     );
     assert_eq!(
         one("var g = function(){}; console.log(JSON.stringify(Object.getOwnPropertyNames(g)));"),
-        r#"["length","name","prototype"]"#
+        r#"["length","name","arguments","caller","prototype"]"#
     );
     assert_eq!(
         one("var g = function(){}; g.prototype; g.x = 2; console.log(JSON.stringify(Object.getOwnPropertyNames(g)), JSON.stringify(Object.keys(g)));"),
-        r#"["length","name","prototype","x"] ["x"]"#
+        r#"["length","name","arguments","caller","prototype","x"] ["x"]"#
     );
     // more than INDEX_MIN properties: the hash index must still find the placeholder
     assert_eq!(
         one("function m(){}; for (var i=0;i<12;i++) m['k'+i]=i; console.log(JSON.stringify(Object.getOwnPropertyNames(m)).length, JSON.stringify(Object.getOwnPropertyNames(m).slice(0,4)), Object.getOwnPropertyNames(m).indexOf('prototype')); m.prototype; console.log(JSON.stringify(Object.getOwnPropertyNames(m).slice(0,4)), Object.getOwnPropertyNames(m).indexOf('prototype'), Object.getOwnPropertyNames(m).length);"),
-        r#"91 ["length","name","prototype","k0"] 2|["length","name","prototype","k0"] 2 15"#
+        r#"112 ["length","name","arguments","caller"] 4|["length","name","arguments","caller"] 4 17"#
     );
     // a later non-enumerable key stays after the prototype, as before
     assert_eq!(
         one("function f(){}; f.a=1; Object.defineProperty(f,'z',{value:1,enumerable:true}); console.log(JSON.stringify(Object.getOwnPropertyNames(f)), JSON.stringify(Object.keys(f)));"),
-        r#"["length","name","prototype","a","z"] ["a","z"]"#
+        r#"["length","name","arguments","caller","prototype","a","z"] ["a","z"]"#
     );
     assert_eq!(
         one("function f(){}; f.z=3; console.log(Object.keys(Object.getOwnPropertyDescriptors(f)).join(','));"),
-        "length,name,prototype,z"
+        "length,name,arguments,caller,prototype,z"
     );
     assert_eq!(
         one("function f(){}; console.log(Object.getOwnPropertyNames(f).join(','), Object.getOwnPropertyDescriptor(f,'name').value, Object.getOwnPropertyDescriptor(f,'length').value);"),
-        "length,name,prototype f 0"
+        "length,name,arguments,caller,prototype f 0"
     );
     assert_eq!(
         one("function f(){}; console.log(f.hasOwnProperty('prototype'), 'prototype' in f, Object.prototype.hasOwnProperty.call(f,'prototype'), Object.getOwnPropertyNames(f).indexOf('prototype'));"),
-        "true true true 2"
+        "true true true 4"
     );
 }
 
@@ -8155,7 +8155,7 @@ fn lazy_prototype_integrity_and_seal_flags() {
     );
     assert_eq!(
         one("function f(){}; Object.preventExtensions(f); console.log(Object.isExtensible(f), Object.isFrozen(f), Object.isSealed(f), JSON.stringify(Object.getOwnPropertyNames(f)));"),
-        r#"false false true ["length","name","prototype"]"#
+        r#"false false true ["length","name","arguments","caller","prototype"]"#
     );
     assert_eq!(
         one("function f(){}; Object.freeze(f); f.prototype.q = 1; console.log(f.prototype.q, Object.isFrozen(f.prototype));"),
@@ -8203,7 +8203,7 @@ fn lazy_prototype_generators_arrows_methods_and_bound_functions() {
     );
     assert_eq!(
         one("function f(a,b){}; console.log(f.call(null), f.apply(null, []), f.name, f.length, JSON.stringify(Object.getOwnPropertyNames(f)));"),
-        r#"undefined undefined f 2 ["length","name","prototype"]"#
+        r#"undefined undefined f 2 ["length","name","arguments","caller","prototype"]"#
     );
     assert_eq!(
         one("function F(){}; F.prototype.m = function(){}; var inst = new F(); console.log(inst.m === F.prototype.m, JSON.stringify(Object.getOwnPropertyNames(F.prototype)), Object.getOwnPropertyDescriptor(F,'prototype').writable);"),

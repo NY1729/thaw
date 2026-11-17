@@ -32,11 +32,6 @@ AbortSignal.prototype.@@messaging_transfer_symbol	length
 AbortSignal.prototype.@@messaging_transfer_symbol	name
 AbortSignal.prototype.@@nodejs.util.inspect.custom	length
 AbortSignal.prototype.@@nodejs.util.inspect.custom	name
-Array.prototype	length
-ArrayBuffer.prototype	maxByteLength
-ArrayBuffer.prototype	resize
-ArrayBuffer.prototype.resize	length
-ArrayBuffer.prototype.resize	name
 Blob.prototype	@@messaging_clone_symbol
 Blob.prototype	@@messaging_deserialize_symbol
 Blob.prototype	@@nodejs.util.inspect.custom
