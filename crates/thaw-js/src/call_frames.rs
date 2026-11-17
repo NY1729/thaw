@@ -15,6 +15,17 @@ fn closure_def(v: &Value) -> Option<Rc<FuncDef>> {
 }
 
 impl Interp {
+    /// A mark for `frame_truncate`: the depth of the running coroutine's segment. Relative to
+    /// `frame_base`, so it stays valid when the coroutine is resumed at another depth of the shared stack.
+    pub(crate) fn frame_mark(&self) -> usize {
+        self.call_frames.len().saturating_sub(self.frame_base)
+    }
+
+    /// Pops the frames pushed since `mark` (a `frame_mark`); never below the running segment's base.
+    pub(crate) fn frame_truncate(&mut self, mark: usize) {
+        self.call_frames.truncate(self.frame_base + mark);
+    }
+
     pub(crate) fn install_call_frames(&mut self) {
         let g = self.global.clone();
         let f = self.native(|it, _, a| {
