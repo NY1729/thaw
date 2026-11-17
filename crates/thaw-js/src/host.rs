@@ -2125,6 +2125,20 @@ fn error_properties_json(it: &mut Interp, v: &Value) -> String {
     }
 }
 
+/// The bytes of a non-detached ArrayBuffer as a JSON number array (host query 31), `null` for anything else.
+fn array_buffer_bytes_json(v: &Value) -> String {
+    let Value::Object(o) = v else {
+        return "null".into();
+    };
+    match &*o.kind.borrow() {
+        Kind::ArrayBuffer(b) if !crate::typed::is_detached(b) => {
+            let items: Vec<String> = b.borrow().iter().map(u8::to_string).collect();
+            format!("[{}]", items.join(","))
+        }
+        _ => "null".into(),
+    }
+}
+
 /// Introspection of the value behind `handle` for the Json host bridge (the numbering is the QuickJS
 /// `__thaw_json_host_query`'s). Kinds thaw-js has no value for (Date, Buffer, Map, Set, native
 /// wrappers) answer "no" to the copy queries; operation 29 says whether the value must stay a live handle,
@@ -2217,6 +2231,9 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             30 => flag(
                 matches!(&v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Plain | Kind::Array(_))),
             ),
+            // 31: the bytes of an ArrayBuffer (a resizable or SharedArrayBuffer answers its current bytes) as a
+            // JSON number array, so a Json number[] request can read a digest result; `null` for any other value
+            31 => array_buffer_bytes_json(&v),
             _ => {
                 return Err(HostError::Thrown(format!(
                     "TypeError: thaw-js does not support the host query {operation}"
@@ -7173,6 +7190,16 @@ mod host_query_live_tests {
         assert_eq!(query(construct("Float64Array", "[{\"v\":2}]"), 11), "0");
         assert_eq!(query(construct("Object", "[]"), 11), "0");
         assert_eq!(query(construct("Buffer", "[{\"v\":3}]"), 25), "0");
+    }
+
+    #[test]
+    fn host_query_arraybuffer_bytes_answers_the_bytes_or_null() {
+        assert_eq!(query(construct("ArrayBuffer", "[{\"v\":2}]"), 31), "[0,0]");
+        assert_eq!(query(construct("Uint8Array", "[{\"v\":2}]"), 31), "null");
+        assert_eq!(query(construct("Object", "[]"), 31), "null");
+        let mut it = Interp::new();
+        let view = it.run("new Uint8Array([1, 2]).buffer").unwrap();
+        assert_eq!(array_buffer_bytes_json(&view), "[1,2]");
     }
 
     #[test]

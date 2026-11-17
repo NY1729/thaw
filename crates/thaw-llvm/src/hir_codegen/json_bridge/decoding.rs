@@ -1295,11 +1295,76 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(copy);
+        let mut incoming = vec![(native, native_end)];
+        if matches!(element, HirType::F64) {
+            // thaw-js: an ArrayBuffer lease (a digest result) has no elements to index, so it reads its
+            // bytes through the number[] conversion; every other value keeps the per-element loop below
+            let function = self.current_function();
+            let bytes = self
+                .context
+                .append_basic_block(function, "json_host_arraybuffer");
+            let elements = self
+                .context
+                .append_basic_block(function, "json_host_elements");
+            let is_bytes = self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_json_is_host_arraybuffer")
+                        .unwrap(),
+                    &[json.into()],
+                    "json_is_host_arraybuffer",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_is_host_arraybuffer returned no value")?
+                .into_int_value();
+            let is_bytes = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    is_bytes,
+                    is_bytes.get_type().const_zero(),
+                    "json_is_host_arraybuffer_present",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_conditional_branch(is_bytes, bytes, elements)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(bytes);
+            let numbers = self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_json_to_number_array")
+                        .unwrap(),
+                    &[json.into()],
+                    "json_host_arraybuffer_numbers",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_to_number_array returned no value")?
+                .into_pointer_value();
+            self.compile_check_json_host_error(numbers.into(), None)?;
+            // `numbers` is a raw buffer: wrap it in an array handle like the element-copy path does, or
+            // the consumer would read the buffer's length word as the buffer pointer
+            let numbers = self.compile_array_wrap(numbers)?;
+            let bytes_end = self.builder.get_insert_block().unwrap();
+            self.builder
+                .build_unconditional_branch(done)
+                .map_err(|error| error.to_string())?;
+            incoming.push((numbers, bytes_end));
+            self.builder.position_at_end(elements);
+        }
         let copied = self.compile_json_to_native_array_copy(json, element)?;
         let copy_end = self.builder.get_insert_block().unwrap();
         self.builder
             .build_unconditional_branch(done)
             .map_err(|error| error.to_string())?;
+        incoming.push((copied, copy_end));
 
         self.builder.position_at_end(done);
         let result = self
@@ -1309,7 +1374,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 "json_native_array",
             )
             .map_err(|error| error.to_string())?;
-        result.add_incoming(&[(&native, native_end), (&copied, copy_end)]);
+        for (value, block) in &incoming {
+            result.add_incoming(&[(value, *block)]);
+        }
         Ok(result.as_basic_value())
     }
 
