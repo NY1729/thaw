@@ -1,18 +1,5 @@
 #[test]
 fn pure_numeric_registry_export_uses_jit_without_quickjs() {
-    // The lowering recurses once per left-nested `+` in main (28 here), and a debug lowering frame is
-    // ~550 KB, so the build needs the CLI's 512 MB main-thread stack (main.rs), not a 2 MB test thread.
-    // Both engine paths share that lowering. The body runs on such a thread; panics are re-raised.
-    let body = std::thread::Builder::new()
-        .stack_size(512 << 20)
-        .spawn(pure_numeric_registry_export_body)
-        .expect("spawn build-sized thread");
-    if let Err(panic) = body.join() {
-        std::panic::resume_unwind(panic);
-    }
-}
-
-fn pure_numeric_registry_export_body() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-{}",
         std::process::id()
