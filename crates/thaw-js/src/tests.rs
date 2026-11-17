@@ -10154,6 +10154,138 @@ fn array_index_and_length_descriptors_are_unchanged() {
     );
 }
 
+// node:test mock timers (Node 22 MockTimers semantics) on the thaw-js prelude. Each body is shared with the
+// Node run that pinned its expected line; the thaw header maps `mock.timers` onto the host globals.
+const MOCK_TIMERS_THAW_HEADER: &str = r#"var clock = null;
+var mock = { timers: {
+  enable: function (o) { clock = __thaw_test_mock_timers_enable(o); },
+  tick: function (ms) { __thaw_test_mock_timers_tick(clock, ms); },
+  runAll: function () { __thaw_test_mock_timers_run_all(clock); },
+  setTime: function (ms) { __thaw_test_mock_timers_set_time(clock, ms); },
+  reset: function () { if (clock) __thaw_test_mock_timers_reset(clock); clock = null; }
+} };
+"#;
+
+fn mock_timers_case(body: &str) -> String {
+    one(&format!("{MOCK_TIMERS_THAW_HEADER}{body}"))
+}
+
+const MOCK_TIMERS_ORDER: &str = r#"const out = [];
+const log = (...a) => out.push(a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' '));
+mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'setImmediate', 'Date'], now: 1000 });
+log('enabled', Date.now(), new Date().getTime(), typeof Date());
+const t = setTimeout((a, b) => log('timeout', a, b, Date.now()), 100, 'x', 'y');
+log(typeof t, t.constructor.name, typeof t.ref, typeof t.hasRef, t.hasRef(), typeof t[Symbol.toPrimitive]);
+let n = 0;
+const iv = setInterval(() => { log('iv', ++n, Date.now()); if (n === 3) clearInterval(iv); }, 50);
+const imm = setImmediate(() => log('imm', Date.now()));
+log(imm.constructor.name);
+const t2 = setTimeout(() => log('cancelled'), 10);
+clearTimeout(t2);
+mock.timers.tick(49); log('after49');
+mock.timers.tick(1); log('after50');
+mock.timers.tick(50); log('after100');
+mock.timers.tick(100); log('after200');
+setTimeout(() => log('nested1'), 10);
+setTimeout(() => { log('nested2'); setTimeout(() => log('nested3'), 5); }, 10);
+mock.timers.runAll(); log('runAll now', Date.now());
+let k = 0;
+const iv2 = setInterval(() => { k++; }, 10);
+mock.timers.runAll(); log('runAll interval k', k);
+clearInterval(iv2);
+const args = [];
+setTimeout((...xs) => args.push(xs.length), 1, 1, 2, 3);
+mock.timers.tick(1); log('args', args.join(','));
+const cleared = [];
+const ci = setInterval(() => cleared.push(Date.now()), 5);
+mock.timers.tick(12); clearInterval(ci); mock.timers.tick(20); log('interval cleared', cleared.join(','));
+mock.timers.reset();
+console.log(out.join('|'));
+"#;
+
+const MOCK_TIMERS_DATE: &str = r#"const out = [];
+const log = (...a) => out.push(a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' '));
+const realDate = Date;
+log('real', Date.now() > 1e12);
+mock.timers.enable({ apis: ['Date'], now: 1000 });
+log('date only', Date.now(), new Date().getTime(), Date.UTC(2000, 0, 1), Date.parse('2000-01-01'), new Date(5).getTime(), typeof Date());
+mock.timers.setTime(5000); log('setTime', Date.now());
+mock.timers.reset();
+log('reset', Date === realDate, Date.now() > 1e12);
+mock.timers.enable({ apis: ['setTimeout'] });
+log('timeout-only date real', Date.now() > 1e12);
+let fired = false;
+setImmediate(() => { fired = true; });
+mock.timers.tick(10);
+log('immediate not mocked', fired);
+mock.timers.reset();
+mock.timers.enable({ now: new Date(7) });
+log('now Date object', Date.now());
+mock.timers.reset();
+mock.timers.enable({ now: 5 });
+mock.timers.setTime();
+log('setTime default', Date.now());
+mock.timers.tick();
+log('tick default', Date.now());
+mock.timers.tick(1.5);
+log('tick fraction', Date.now());
+mock.timers.reset();
+console.log(out.join('|'));
+"#;
+
+const MOCK_TIMERS_ERRORS: &str = r#"const out = [];
+const show = (l, f) => { try { const r = f(); out.push(l + ' ok ' + (r === undefined ? '' : JSON.stringify(r))); } catch (e) { out.push(l + ' ' + e.name + ' ' + e.code + ' | ' + e.message); } };
+show('tick before', () => mock.timers.tick(1));
+show('setTime before', () => mock.timers.setTime(1));
+show('runAll before', () => mock.timers.runAll());
+show('reset before', () => mock.timers.reset());
+show('enable bogus', () => mock.timers.enable({ apis: ['bogus'] }));
+mock.timers.reset();
+show('enable apis str', () => mock.timers.enable({ apis: 'setTimeout' }));
+mock.timers.reset();
+show('enable now str', () => mock.timers.enable({ now: 'abc' }));
+mock.timers.reset();
+show('enable now neg', () => mock.timers.enable({ now: -1 }));
+mock.timers.reset();
+show('enable now NaN', () => mock.timers.enable({ now: NaN }));
+mock.timers.reset();
+mock.timers.enable({ now: 5 });
+show('tick -1', () => mock.timers.tick(-1));
+show('setTime -1', () => mock.timers.setTime(-1));
+show('setTime str', () => mock.timers.setTime('x'));
+show('tick 1.5', () => { mock.timers.tick(1.5); return Date.now(); });
+mock.timers.reset();
+show('tick after reset', () => mock.timers.tick(1));
+console.log(out.join('|'));
+"#;
+
+const MOCK_TIMERS_HANDLES: &str = r#"const out = [];
+const log = (...a) => out.push(a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' '));
+mock.timers.enable({ apis: ['setTimeout', 'setImmediate', 'Date'], now: 0 });
+const h = setTimeout(() => log('h fired', Date.now()), 10);
+log('ref', h.ref() === h, h.unref() === h, h.hasRef());
+h.ref();
+log('hasRef after ref', h.hasRef());
+const c = setTimeout(() => log('cleared fired'), 3);
+clearTimeout(c);
+const im = setImmediate(() => log('imm', Date.now()));
+im.unref();
+log('imm hasRef', im.hasRef());
+mock.timers.tick(9); log('after 9');
+mock.timers.tick(1); log('after 10');
+mock.timers.tick(5); log('after 15');
+mock.timers.reset();
+console.log(out.join('|'));
+"#;
+
+#[test]
+fn mock_timers_fires_in_due_order_with_clock_at_target() {
+    assert_eq!(
+        mock_timers_case(MOCK_TIMERS_ORDER),
+        r#"enabled 1000 1000 string|object Timeout function function true undefined|Timeout|imm 1049|after49|iv 1 1050|after50|timeout x y 1100|iv 2 1100|after100|iv 3 1200|after200|nested1|nested2|runAll now 1210|nested3|runAll interval k 1|args 3|interval cleared 1233,1233"#
+    );
+}
+
 /// createHook enable/disable registers the native promise sink with the runtime, and disable clears it.
 #[test]
 fn async_hooks_enable_registers_the_native_promise_sink() {
@@ -10186,6 +10318,54 @@ console.log(out.join('|'));"#;
     assert_eq!(
         run_loop(src),
         "init 2 PROMISE 1|init 3 PROMISE 2|before 3|after 3|resolve 2"
+    );
+}
+
+#[test]
+fn mock_timers_date_mocking_setime_reset_and_apis_filter() {
+    assert_eq!(
+        mock_timers_case(MOCK_TIMERS_DATE),
+        r#"real true|date only 1000 1000 946684800000 946684800000 5 string|setTime 5000|reset true true|timeout-only date real true|immediate not mocked false|now Date object 7|setTime default 0|tick default 1|tick fraction 2.5"#
+    );
+}
+
+// The compiled lane's mock cell (`thaw_mock_clock_set`/`clear`) follows the mocked Date: enable, tick, setTime and
+// reset all sync it, and a clock that does not mock Date leaves the wall clock in place.
+#[test]
+fn mock_timers_date_clock_cell_follows_enable_tick_set_time_reset() {
+    use crate::web_test_mock_timers::recorded_native_clock;
+    let mut it = Interp::new();
+    let steps = [
+        (
+            "mock.timers.enable({ apis: ['Date'], now: 1000 });",
+            Some(Some(1000.0)),
+        ),
+        ("mock.timers.tick(5);", Some(Some(1005.0))),
+        ("mock.timers.setTime(7000);", Some(Some(7000.0))),
+        ("mock.timers.reset();", Some(None)),
+        ("mock.timers.enable({ apis: ['setTimeout'] });", Some(None)),
+        ("mock.timers.reset();", Some(None)),
+    ];
+    assert!(it.run(MOCK_TIMERS_THAW_HEADER).is_ok());
+    for (step, expected) in steps {
+        assert!(it.run(step).is_ok(), "step failed: {step}");
+        assert_eq!(recorded_native_clock(), expected, "after {step}");
+    }
+}
+
+#[test]
+fn mock_timers_host_errors_carry_node_codes_and_messages() {
+    assert_eq!(
+        mock_timers_case(MOCK_TIMERS_ERRORS),
+        r#"tick before Error ERR_INVALID_STATE | Invalid state: You should enable MockTimers first by calling the .enable function|setTime before Error ERR_INVALID_STATE | Invalid state: You should enable MockTimers first by calling the .enable function|runAll before Error ERR_INVALID_STATE | Invalid state: You should enable MockTimers first by calling the .enable function|reset before ok |enable bogus TypeError ERR_INVALID_ARG_VALUE | The property 'options.apis' option bogus is not supported. Received 'bogus'|enable apis str TypeError ERR_INVALID_ARG_TYPE | The "options.apis" property must be an instance of Array. Received type string ('setTimeout')|enable now str TypeError ERR_INVALID_ARG_TYPE | The "initialTime" argument must be of type number. Received type string ('abc')|enable now neg TypeError ERR_INVALID_ARG_VALUE | The argument 'time' -1. Received 'positive integer'|enable now NaN TypeError ERR_INVALID_ARG_VALUE | The argument 'now' epoch must be a positive integer received NaN. Received NaN|tick -1 TypeError ERR_INVALID_ARG_VALUE | The argument 'time' -1. Received 'positive integer'|setTime -1 TypeError ERR_INVALID_ARG_VALUE | The argument 'time' -1. Received 'positive integer'|setTime str TypeError ERR_INVALID_ARG_TYPE | The "time" argument must be of type number. Received type string ('x')|tick 1.5 ok 6.5|tick after reset Error ERR_INVALID_STATE | Invalid state: You should enable MockTimers first by calling the .enable function"#
+    );
+}
+
+#[test]
+fn mock_timers_handles_ref_unref_and_immediates() {
+    assert_eq!(
+        mock_timers_case(MOCK_TIMERS_HANDLES),
+        r#"ref true true true|hasRef after ref true|imm hasRef true|imm 9|after 9|h fired 10|after 10|after 15"#
     );
 }
 
