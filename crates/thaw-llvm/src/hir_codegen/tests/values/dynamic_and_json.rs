@@ -3095,8 +3095,6 @@ fn compiles_dynamic_live_handle_object_prototype_to_string_tags() {
     "#;
     assert_eq!(
         compile_and_run(source, "dynamic_live_handle_object_prototype_to_string_tags"),
-        concat!(
-            "[object Date]\n",
-        )
+        "[object Date]\n"
     );
 }
