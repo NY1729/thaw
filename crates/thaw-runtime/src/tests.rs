@@ -5499,3 +5499,25 @@ fn native_promise_hooks_stay_silent_for_linked_promises_while_off() {
     assert!(take_hook_events().is_empty());
     unsafe { thaw_promise_destroy(chained) };
 }
+
+#[test]
+fn unhandled_failure_peek_keeps_the_latch_until_take() {
+    extern "C" fn failed_listener(_: *const u8) -> PromiseReportResult {
+        PromiseReportResult {
+            value: 1,
+            error: CString::new("listener failed").unwrap().into_raw(),
+        }
+    }
+    thaw_promise_set_unhandled_reporter_result(Some(failed_listener));
+    let promise = thaw_promise_new();
+    thaw_promise_reject(promise, c"boom".as_ptr().cast());
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    // the hook the JS engines use peeks: repeated peeks still see the latch
+    assert_eq!(peek_unhandled_failure(), 1);
+    assert_eq!(peek_unhandled_failure(), 1);
+    assert_eq!(thaw_promise_take_unhandled_failure(), 1);
+    assert_eq!(peek_unhandled_failure(), 0);
+    thaw_promise_set_unhandled_reporter_result(None);
+    assert_eq!(unsafe { thaw_promise_mark_handled(promise) }, 1);
+    unsafe { thaw_promise_destroy(promise) };
+}
