@@ -83,3 +83,47 @@ fn error_capture_stack_trace_defines_writable_data_stack() {
     it.run("const o = {}; Error.captureStackTrace(o); const d = Object.getOwnPropertyDescriptor(o, 'stack'); console.log([d.writable, d.enumerable, d.configurable, typeof d.value].join(' '));").expect("runs");
     assert_eq!(it.out.join("\n"), "true false true string");
 }
+
+/// `call_frames` across suspensions (#684). A coroutine keeps its own frames while suspended and gets
+/// them back on resume; the frames of whoever resumes it sit below them. Node also lists native frames
+/// (`next`) and async-chain frames, which this engine does not record, so the expected text is thaw's.
+const CALL_FRAMES_PROBE: &str = r##"Error.prepareStackTrace = (e, s) => s.map((c) => c.getFunctionName()).filter(Boolean).join(',');
+const out = [];
+async function co() { await null; return new Error('a').stack; }
+async function inner() { await null; return new Error('b').stack; }
+async function outer() { await null; const s = await inner(); return [s, new Error('c').stack].join(' | '); }
+function* g() { yield 1; yield new Error('d').stack; }
+function* gen4() { yield 0; yield new Error('e').stack; }
+function pull(it) { return it.next().value; }
+function leaf() { return new Error('f').stack; }
+async function callsLeaf() { await null; return leaf(); }
+async function cap() { await null; const o = {}; Error.captureStackTrace(o); return o.stack; }
+function hostAfter(it) { pull(it); return new Error('h').stack; }
+(async () => {
+  out.push('P1 ' + await co());
+  out.push('P2 ' + await outer());
+  const it = g(); it.next(); out.push('P3 ' + it.next().value);
+  const gi = gen4(); gi.next(); out.push('P4 ' + pull(gi));
+  out.push('P5 ' + await callsLeaf());
+  out.push('P6 ' + await cap());
+  out.push('P7 ' + hostAfter(gen4()));
+  console.log(out.join('\n'));
+})();
+"##;
+
+/// Thaw's output for `CALL_FRAMES_PROBE`: every coroutine's own frame is in its stack after each resume.
+const CALL_FRAMES_EXPECTED: &str = "P1 co
+P2 inner | outer
+P3 g
+P4 gen4,pull
+P5 leaf,callsLeaf
+P6 cap
+P7 hostAfter";
+
+#[test]
+fn call_frames_stay_with_their_coroutine_across_awaits_and_yields() {
+    let mut it = Interp::new();
+    it.run_main(CALL_FRAMES_PROBE).expect("probe runs");
+    it.flush_partial();
+    assert_eq!(it.out.join("\n"), CALL_FRAMES_EXPECTED);
+}
