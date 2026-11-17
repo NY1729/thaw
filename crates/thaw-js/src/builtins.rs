@@ -1329,17 +1329,7 @@ impl Interp {
             Ok(match arg(args, 0) {
                 v @ Value::Object(_) => v,
                 v @ (Value::Number(_) | Value::Str(_) | Value::Bool(_) | Value::BigInt(_)) => {
-                    let proto = match v {
-                        Value::Number(_) => it.number_proto.clone(),
-                        Value::Str(_) => it.string_proto.clone(),
-                        Value::BigInt(_) => it
-                            .rt
-                            .bigint_proto
-                            .clone()
-                            .unwrap_or_else(|| it.object_proto.clone()),
-                        _ => it.bool_proto.clone(),
-                    };
-                    Value::Object(new_obj(Some(proto), Kind::Wrapper(v)))
+                    Value::Object(it.box_primitive(v))
                 }
                 _ => Value::Object(it.plain()),
             })

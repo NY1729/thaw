@@ -342,10 +342,135 @@ impl<'a> FnLowerer<'a> {
         } else {
             self.coerce_to_declared(&HirType::Json, result)?
         };
-        self.wrap_call_argument_bindings(
+        let fallback = self.wrap_call_argument_bindings(
             result,
             &[(handle_name, HirType::I64, borrowed_handle), (live_name, HirType::JsValue, live)],
-        )
+        )?;
+        match buffer_method_mutates(name) {
+            Some(mutates) => self.buffer_aware_select(json_name, name, args, span, mutates, fallback),
+            None => Ok(fallback),
+        }
+    }
+
+    /// The typed `Buffer` lowering of `name(..args)` on the Buffer-shaped `any` binding
+    /// `json_name`: the wrapper's bytes are copied into a `Bytes` local, the method runs on that
+    /// local, and a mutator (`mutates`) writes the bytes back into the wrapper's `data`
+    /// (`__thaw_json_buffer_sync`). The result is `Json`.
+    fn buffer_aware_json_call(
+        &mut self,
+        json_name: &str,
+        name: &str,
+        args: &[swc_ecma_ast::ExprOrSpread],
+        span: swc_common::Span,
+        mutates: bool,
+    ) -> Result<HirExpr, String> {
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let bytes_name = format!("__thaw_buffer_recv_{id}");
+        let result_name = format!("__thaw_buffer_result_{id}");
+        let written_name = format!("__thaw_buffer_written_{id}");
+        self.scope.insert(bytes_name.clone(), HirType::Bytes);
+        self.scope.insert(result_name.clone(), HirType::Json);
+        self.scope.insert(written_name.clone(), HirType::Json);
+        let member = swc_ecma_ast::MemberExpr {
+            span,
+            obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(bytes_name.clone().into(), span))),
+            prop: swc_ecma_ast::MemberProp::Ident(swc_ecma_ast::IdentName::new(name.into(), span)),
+        };
+        let call = swc_ecma_ast::CallExpr {
+            span,
+            ctxt: swc_common::SyntaxContext::empty(),
+            callee: Callee::Expr(Box::new(Expr::Member(member.clone()))),
+            args: args.to_vec(),
+            type_args: None,
+        };
+        let property = swc_ecma_ast::IdentName::new(name.into(), span);
+        let typed = self.lower_native_instance_builtin_unchecked(&member, &property, &call)?;
+        let typed_type = self.infer_expr_type(&typed)?;
+        let json = HirExpr::Var(json_name.to_string());
+        // A detached copy of the wrapper's `data`, as `Buffer.from(number[])` makes.
+        let data = self.coerce_to_declared(
+            &HirType::Array(Box::new(HirType::F64)),
+            HirExpr::JsonGet(Box::new(json.clone()), "data".to_string()),
+        )?;
+        let bytes = HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_from_array".into())), vec![data]);
+        let result = if matches!(typed_type, HirType::Void | HirType::Undefined) {
+            let undefined = HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new());
+            HirExpr::EvalThen(Box::new(typed), Box::new(undefined))
+        } else if mutates && typed_type == HirType::Bytes {
+            // `fill` / `reverse` / `copyWithin` return the receiver itself.
+            HirExpr::EvalThen(Box::new(typed), Box::new(json.clone()))
+        } else {
+            self.coerce_to_declared(&HirType::Json, typed)?
+        };
+        let mut bindings = vec![(bytes_name.clone(), HirType::Bytes, bytes), (result_name.clone(), HirType::Json, result)];
+        if mutates {
+            let written = self.coerce_to_declared(&HirType::Json, HirExpr::Var(bytes_name))?;
+            let sync = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_buffer_sync".into())), vec![json, written]);
+            bindings.push((written_name, HirType::Json, sync));
+        }
+        self.wrap_call_argument_bindings(HirExpr::Var(result_name), &bindings)
+    }
+
+    /// Whether the arguments of Buffer method `name` have a type a Buffer method takes: `set` and
+    /// `copy` a byte source or target, `fill` a value, `write*` a number/bigint/string. Other
+    /// names (search, slice, swap, reverse) take what the typed lowering accepts, so they pass.
+    fn buffer_args_fit(&mut self, name: &str, args: &[swc_ecma_ast::ExprOrSpread]) -> Result<bool, String> {
+        if args.iter().any(|argument| argument.spread.is_some()) {
+            return Ok(false);
+        }
+        let accepted: &[HirType] = match name {
+            "set" | "copy" => &[HirType::Bytes, HirType::Json, HirType::JsValue],
+            "fill" => &[HirType::F64, HirType::Str, HirType::Bytes, HirType::Json, HirType::JsValue],
+            _ if name.starts_with("write") => &[HirType::F64, HirType::Str, HirType::BigInt, HirType::Json, HirType::JsValue],
+            _ => return Ok(true),
+        };
+        let Some(first) = args.first() else {
+            return Ok(name == "fill");
+        };
+        if name == "set" && args.len() > 2 {
+            return Ok(false);
+        }
+        let lowered = self.lower_expr(&first.expr)?;
+        let ty = self.infer_expr_type_inner(&lowered)?;
+        Ok(accepted.contains(&ty) || matches!(ty, HirType::Array(ref element) if **element == HirType::F64) && matches!(name, "set" | "copy"))
+    }
+
+    /// Selects the Buffer lowering of a Json-receiver call when the receiver is Buffer-shaped
+    /// at run time, else `fallback` (the existing string/array/live lowering). A Buffer lowering
+    /// that cannot be built falls back too, so only Buffer receivers change behaviour.
+    fn buffer_aware_select(
+        &mut self,
+        json_name: &str,
+        name: &str,
+        args: &[swc_ecma_ast::ExprOrSpread],
+        span: swc_common::Span,
+        mutates: bool,
+        fallback: HirExpr,
+    ) -> Result<HirExpr, String> {
+        // Only a call whose arguments can be Buffer-method arguments gets the Buffer branch:
+        // a Map's `set(key, value)` with a scalar key keeps its Map lowering alone.
+        if !self.buffer_args_fit(name, args)? {
+            return Ok(fallback);
+        }
+        let result_type = self.infer_expr_type(&fallback)?;
+        let buffer = match self.buffer_aware_json_call(json_name, name, args, span, mutates) {
+            // `set` / `copy` answer `undefined`: run the buffer call, then the `undefined` result.
+            Ok(buffer) if result_type == HirType::Undefined => HirExpr::EvalThen(
+                Box::new(buffer),
+                Box::new(HirExpr::Lit(HirLit::Undefined)),
+            ),
+            Ok(buffer) => match self.coerce_to_declared(&result_type, buffer) {
+                Ok(buffer) => buffer,
+                Err(_) => return Ok(fallback),
+            },
+            Err(_) => return Ok(fallback),
+        };
+        let shape = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_is_buffer_shape".into())),
+            vec![HirExpr::Var(json_name.to_string())],
+        );
+        Ok(HirExpr::Conditional(Box::new(shape), Box::new(buffer), Box::new(fallback), result_type))
     }
 
     /// Whether `expr` is probably an `any` (Json) value, decided without lowering it: a
@@ -660,6 +785,14 @@ impl<'a> FnLowerer<'a> {
         copy_call.callee = Callee::Expr(Box::new(Expr::Member(copy_member.clone())));
         let native = self.lower_native_instance_builtin_unchecked(&copy_member, property, &copy_call)?;
         let native_type = self.infer_expr_type(&native)?;
+        // A Buffer-shaped wrapper has no live handle, so it takes the `native` (Map/Set) branch
+        // here: select the Buffer method there too.
+        let native = match buffer_method_mutates(name) {
+            Some(mutates) => {
+                self.buffer_aware_select(&receiver_name, name, &call.args, member.span, mutates, native)?
+            }
+            None => native,
+        };
         let live = self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span)?;
         if matches!(name, "keys" | "values" | "entries") {
             let native = self.coerce_to_declared(&HirType::Json, native)?;
@@ -803,5 +936,15 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Lit(HirLit::F64(0.0))),
             element,
         ))
+    }
+}
+
+/// Buffer methods that a Buffer-shaped `any` receiver runs on a typed copy (`Some(true)` for
+/// the mutators, whose bytes are written back); `None` for every other name.
+fn buffer_method_mutates(name: &str) -> Option<bool> {
+    match name {
+        "fill" | "set" | "copy" | "reverse" | "copyWithin" | "swap16" | "swap32" | "swap64" => Some(true),
+        _ if name.starts_with("write") => Some(true),
+        _ => None,
     }
 }

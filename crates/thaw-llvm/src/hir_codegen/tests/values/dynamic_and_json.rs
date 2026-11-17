@@ -2941,3 +2941,68 @@ fn json_discard_candidates_are_revoked_by_field_index_and_json_writes() {
             "{name}: no statement-discard cleanup belongs on this ownership path");
     }
 }
+
+// Buffer methods on an `any` receiver whose value is a Buffer: the search and
+// slice methods run on the bytes, not on a string or plain array. Expected
+// output from node 22; the last two lines are the plain-array and string controls.
+#[test]
+fn any_buffer_search_and_slice_methods_run_on_bytes() {
+    let source = r#"
+function main(): void {
+  const a: any = Buffer.from('xx\r\n\r\nyy');
+  console.log(a.indexOf('\r\n\r\n'), a.indexOf('yy'), a.lastIndexOf('y'), a.indexOf(121), a.includes('yy'));
+  const c: any = Buffer.from('hello');
+  console.log(c.slice(1, 3).toString());
+  const s: any = 'hello';
+  console.log(s.indexOf('l'), s.slice(1, 3));
+  const p: any = [1, 2, 3];
+  console.log(p.indexOf(2));
+  const q: any = [1, 2, 3];
+  q.fill(0);
+  console.log(JSON.stringify(q));
+}
+"#;
+    let output = compile_and_run(source, "any_buffer_search_and_slice_methods_run_on_bytes");
+    assert_eq!(output, "2 6 7 6 true\nel\n2 el\n1\n[0,0,0]\n");
+}
+
+// Mutators on an `any` Buffer write their bytes back into the value, so the
+// change is visible through the same `any` binding afterwards.
+#[test]
+fn any_buffer_mutators_write_back_into_the_value() {
+    let source = r#"
+function main(): void {
+  const f: any = Buffer.alloc(4);
+  f.fill(7);
+  console.log(f.toString('hex'));
+  const w: any = Buffer.alloc(4);
+  w.writeUInt16BE(258, 0);
+  console.log(w.toString('hex'));
+  const s: any = Buffer.alloc(4);
+  s.set([1, 2], 1);
+  console.log(s.toString('hex'));
+  const t = Buffer.alloc(4);
+  const src: any = Buffer.from('abcd');
+  src.copy(t);
+  console.log(t.toString());
+  const h: any = Buffer.from('hello');
+  console.log(h.toString('hex'), h.readUInt16BE(0));
+}
+"#;
+    let output = compile_and_run(source, "any_buffer_mutators_write_back_into_the_value");
+    assert_eq!(output, "07070707\n01020000\n00010200\nabcd\n68656c6c6f 26725\n");
+}
+
+// `Buffer.from(number[])` assigned to `any` keeps all four bytes (the
+// `Buffer.from([1,2,3,4])` under-`any` length finding).
+#[test]
+fn any_buffer_from_number_array_keeps_its_length() {
+    let source = r#"
+function main(): void {
+  const a4: any = Buffer.from([1, 2, 3, 4]);
+  console.log(a4.length, a4.toString('hex'));
+}
+"#;
+    let output = compile_and_run(source, "any_buffer_from_number_array_keeps_its_length");
+    assert_eq!(output, "4 01020304\n");
+}

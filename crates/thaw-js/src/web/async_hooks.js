@@ -2,10 +2,6 @@
   // The native bridge is captured before the temporary bootstrap property is
   // removed. Only the public async_hooks exports remain reachable by bundles.
   const thawAsyncContext = globalThis.__thaw_async_context_bootstrap;
-  // createHook PROMISE events are not produced by thaw-js (no promise init hook);
-  // AsyncResource and timers/nextTick still emit. Documented limitation.
-  if (typeof globalThis.__thaw_async_hooks_promise_hook !== 'function')
-    globalThis.__thaw_async_hooks_promise_hook = function () {};
   const thawWeakMap = WeakMap;
   const thawSet = Set;
   const thawAsyncHooksRegistrations = new thawSet();
@@ -197,17 +193,40 @@
   Object.defineProperty(globalThis, '__thaw_async_hook_bus', {
     value: thawBus, configurable: false, enumerable: false, writable: false,
   });
-  // QuickJS reports promise creation (with the parent of a `then` result) and resolution.
+  // Promise events, called by the runtime only while a hook is enabled (`rt.async_hooks_on`): 0 init (parent is
+  // the source of a `then`, or an await's trigger), 1 before / 2 after a reaction or thenable job, 3 resolve
+  // (once, at settlement), 4 destroy for every live promise at exit. An entry {id, trigger} exists only for
+  // promises created while enabled; kinds 1-3 ignore promises without one.
+  // ponytail: live promise ids are kept until exit, so a long-running process with a hook grows that Set;
+  // emit destroy from a FinalizationRegistry when that matters.
+  const thawLivePromiseIds = new thawSet();
   Object.defineProperty(globalThis, '__thaw_async_hooks_promise', {
     value: function(kind, promise, parent) {
       if (kind === 0) {
-        const id = thawNextAsyncId++;
         const known = parent === undefined ? undefined : thawApply(thawWeakGet, thawPromiseIds, [parent]);
-        thawApply(thawWeakSet, thawPromiseIds, [promise, { id }]);
-        thawEmit('init', id, 'PROMISE', known ? known.id : thawCurrentAsyncId, promise);
+        const id = thawNextAsyncId++;
+        const trigger = known ? known.id : thawCurrentAsyncId;
+        thawApply(thawWeakSet, thawPromiseIds, [promise, { id, trigger }]);
+        thawApply(thawSetAdd, thawLivePromiseIds, [id]);
+        thawEmit('init', id, 'PROMISE', trigger, promise);
+        return;
+      }
+      if (kind === 4) {
+        const ids = Array.from(thawLivePromiseIds).sort((a, b) => a - b);
+        thawLivePromiseIds.clear();
+        for (const id of ids) thawEmit('destroy', id);
+        return;
+      }
+      const known = thawApply(thawWeakGet, thawPromiseIds, [promise]);
+      if (!known) return;
+      if (kind === 1) {
+        thawEnterScope(known.id, known.trigger, promise);
+        thawEmit('before', known.id);
+      } else if (kind === 2) {
+        thawEmit('after', known.id);
+        thawLeaveScope();
       } else if (kind === 3) {
-        const known = thawApply(thawWeakGet, thawPromiseIds, [promise]);
-        if (known) thawEmit('promiseResolve', known.id);
+        thawEmit('promiseResolve', known.id);
       }
     },
     configurable: false, enumerable: false, writable: false,
@@ -217,7 +236,6 @@
     if (enabled === thawBus.enabled) return;
     thawBus.enabled = enabled;
     __thaw_async_hook_timers(enabled);
-    globalThis.__thaw_async_hooks_promise_hook(enabled);
   };
   function AsyncHook(callbacks) {
     if (callbacks === null || typeof callbacks !== 'object') {
