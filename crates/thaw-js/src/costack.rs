@@ -385,11 +385,23 @@ mod imp {
                 len >= 256 << 10 && len.is_multiple_of(4096),
                 "bad costack size {len}"
             );
-            IN_USE
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                    (n < MAX_LIVE).then_some(n + 1)
-                })
-                .map_err(|_| CostackError::TooManyLive)?;
+            // claim a live slot (a manual CAS loop: `fetch_update` is deprecated on newer toolchains,
+            // its replacement `try_update` does not exist on older ones)
+            let mut live = IN_USE.load(Ordering::SeqCst);
+            loop {
+                if live >= MAX_LIVE {
+                    return Err(CostackError::TooManyLive);
+                }
+                match IN_USE.compare_exchange_weak(
+                    live,
+                    live + 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(now) => live = now,
+                }
+            }
             let stack = match acquire(len) {
                 Ok(s) => s,
                 Err(e) => {
