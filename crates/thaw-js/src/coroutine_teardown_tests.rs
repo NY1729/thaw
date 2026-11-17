@@ -47,5 +47,9 @@ fn suspended_coroutines_survive_realm_drop_across_threads() {
                 .unwrap();
         }
     });
-    assert!(DISCONNECT_PARKS.load(Ordering::SeqCst) > before);
+    // the park counter is a thread-backend detail: the stack backend never parks a thread, so only the
+    // survival of the suspended coroutines (no crash in the loop above) is checked for it
+    if crate::co::backend() == crate::co::Backend::Thread {
+        assert!(DISCONNECT_PARKS.load(Ordering::SeqCst) > before);
+    }
 }

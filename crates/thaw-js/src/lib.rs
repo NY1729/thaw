@@ -36,6 +36,7 @@ mod jsstr;
 mod regexp_statics;
 pub use jsstr::JsStr;
 mod co;
+mod co_stack;
 mod co_thread;
 mod collections;
 mod compile;
