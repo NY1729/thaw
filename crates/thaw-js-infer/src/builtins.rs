@@ -67,7 +67,7 @@ pub fn ns_of_require(spec: &str) -> Option<u8> {
         | "dns" | "child_process" | "readline" | "querystring" | "string_decoder" | "timers"
         | "vm" | "worker_threads" | "module" | "perf_hooks" | "async_hooks" | "cluster"
         | "dgram" | "tty" | "v8" | "punycode" | "constants" | "fs/promises" | "stream/promises"
-        | "timers/promises" | "sea" => OPAQUE,
+        | "timers/promises" | "sea" | "sqlite" => OPAQUE,
         _ => return None,
     })
 }

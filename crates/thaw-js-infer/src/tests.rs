@@ -1086,4 +1086,5 @@ fn node_sys_is_typed_as_util_and_sea_is_known() {
     );
     assert!(crate::builtins::ns_of_require("sys").is_some());
     assert!(crate::builtins::ns_of_require("sea").is_some());
+    assert!(crate::builtins::ns_of_require("sqlite").is_some());
 }
