@@ -5648,7 +5648,7 @@ fn starts_with_use_strict(stmts: &[a::Stmt]) -> bool {
 
 /// Whether a call's callee is the plain identifier `eval` (parenthesized or not): a direct eval when
 /// the identifier resolves to the intrinsic `eval`.
-fn is_direct_eval(callee: &a::Expr) -> bool {
+pub(crate) fn is_direct_eval(callee: &a::Expr) -> bool {
     match callee {
         a::Expr::Ident(i) => &*i.sym == "eval",
         a::Expr::Paren(p) => is_direct_eval(&p.expr),

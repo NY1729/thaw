@@ -472,7 +472,7 @@ fn scan_addon_mode_tolerates_native_loader_keys_only() {
         ["require:./build/Release/addon.node"]
     );
     // the addon-mode tolerance is scoped to native loader keys: a dynamic require with no `.node`
-    // require beside it (and an unrelated `eval`) stays blocked in addon mode
+    // require beside it stays blocked in addon mode
     let dynamic_only = plain.replace(
         "require('./build/Release/addon.node')",
         "require(exports.p)",
@@ -491,14 +491,8 @@ fn scan_addon_mode_tolerates_native_loader_keys_only() {
         "exports.e = function (s) { return eval(s); };\n  exports.value = function ()",
     );
     let report = crate::scan::scan_addon_bundle(&with_eval).ok().unwrap();
-    assert_eq!(
-        report
-            .blockers
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["direct-eval"]
-    );
+    // a direct eval is no scan blocker any more (thaw-js serves it): the same bundle is clean
+    assert!(report.is_clean(), "{:?}", report.blockers);
 }
 
 #[test]
@@ -3205,7 +3199,6 @@ fn with_probe_conf() {
 }
 
 #[test]
-#[ignore = "direct eval scope capture is not implemented in thaw-js (no direct eval at all)"]
 fn with_probe_evalin() {
     assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar o8={e:5}; with(o8){ log(eval('e+1')); }\nconsole.log(out.join('\\n'));"), "6");
 }
@@ -9228,20 +9221,13 @@ fn q9_addon_mode_tolerates_method_exports_only() {
     );
     let addon = crate::scan::scan_addon_bundle(src).ok().unwrap();
     assert!(addon.is_clean(), "{:?}", addon.blockers);
-    // addon mode keeps the other rules: an unrelated direct eval is still reported
     let with_eval = src.replace(
         "exports.v = b.encrypt_sync('a');",
         "exports.v = b.encrypt_sync('a'); eval('1');",
     );
     let report = crate::scan::scan_addon_bundle(&with_eval).ok().unwrap();
-    assert_eq!(
-        report
-            .blockers
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["direct-eval"]
-    );
+    // addon mode: a direct eval beside the method export is no scan blocker any more
+    assert!(report.is_clean(), "{:?}", report.blockers);
 }
 
 #[test]
