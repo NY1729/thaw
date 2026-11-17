@@ -2304,6 +2304,10 @@ impl<'a> FnLowerer<'a> {
             self.lower_optional_undefined_equality(left.clone(), right.clone())?
         {
             result
+        } else if let Some(result) =
+            self.lower_scalar_union_pair(left.clone(), &lhs_type, right.clone(), &rhs_type, false)?
+        {
+            result
         } else if lhs_type == HirType::Json && rhs_type == HirType::Json {
             self.strict_json_pair(left, right)?
         } else if lhs_type == HirType::JsValue && rhs_type == HirType::JsValue {
@@ -3152,6 +3156,22 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
+        // `string | null` (or `| undefined`, `| null | undefined`) against a plain value of the same
+        // scalar: the absent members never equal it, and a same-kind scalar compares as `===`.
+        let absent_scalar_pair = |absent: &HirType, value: &HirType| match absent {
+            HirType::Nullable(p) | HirType::Nullish(p) | HirType::Optional(p) => {
+                p.as_ref() == value && Self::absence_scalar_payload(value)
+            }
+            _ => false,
+        };
+        if absent_scalar_pair(&lhs_type, &rhs_type) || absent_scalar_pair(&rhs_type, &lhs_type) {
+            return self.lower_strict_equality(lhs, rhs);
+        }
+        if let Some(result) =
+            self.lower_scalar_union_pair(lhs.clone(), &lhs_type, rhs.clone(), &rhs_type, true)?
+        {
+            return Ok(result);
+        }
         if lhs_type == HirType::Json && rhs_type == HirType::Json {
             // Two dynamic values may hold different primitive kinds, so `==`
             // is not `===`: nullish pairs are equal and a string, number or
@@ -4869,10 +4889,10 @@ impl<'a> FnLowerer<'a> {
             (other, HirType::Optional(payload)) if payload.as_ref() == other => {
                 return self.lower_optional_undefined_equality(rhs, lhs);
             }
-            // `bigint | null` / `bigint | null | undefined` against a `bigint`: absent is never
-            // equal, a present payload compares by value.
+            // `string | null` / `number | null | undefined` / `bigint | null` ... against the same
+            // scalar: absent is never equal, a present payload compares by value.
             (HirType::Nullable(payload) | HirType::Nullish(payload), other)
-                if payload.as_ref() == other && *other == HirType::BigInt =>
+                if payload.as_ref() == other && Self::absence_scalar_payload(other) =>
             {
                 let kind = if matches!(lhs_type, HirType::Nullable(_)) {
                     AbsenceKind::Nullable
@@ -4901,7 +4921,7 @@ impl<'a> FnLowerer<'a> {
                 )?)
             }
             (other, HirType::Nullable(payload) | HirType::Nullish(payload))
-                if payload.as_ref() == other && *other == HirType::BigInt =>
+                if payload.as_ref() == other && Self::absence_scalar_payload(other) =>
             {
                 return self.lower_optional_undefined_equality(rhs, lhs);
             }
@@ -5122,6 +5142,120 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Block(stmts),
             &[(left_name, lhs_type, lhs), (right_name, rhs_type, rhs)],
         )
+    }
+
+    /// Payloads whose `===` against a present value is a plain scalar compare, so the absence
+    /// arms can compare the unwrapped value directly.
+    fn absence_scalar_payload(ty: &HirType) -> bool {
+        matches!(ty, HirType::Str | HirType::F64 | HirType::Bool | HirType::BigInt)
+    }
+
+    /// Members of a union whose members are all scalars or absent (`string | number`,
+    /// `string | null`, `number | undefined`, ...), or None for any other type.
+    fn scalar_union_members(ty: &HirType) -> Option<Vec<HirType>> {
+        let members = match ty {
+            HirType::Union(members) => members.clone(),
+            HirType::Optional(payload) => vec![payload.as_ref().clone(), HirType::Undefined],
+            HirType::Nullable(payload) => vec![payload.as_ref().clone(), HirType::Null],
+            HirType::Nullish(payload) => {
+                vec![payload.as_ref().clone(), HirType::Null, HirType::Undefined]
+            }
+            _ => return None,
+        };
+        members
+            .iter()
+            .all(|member| {
+                matches!(
+                    member,
+                    HirType::Str
+                        | HirType::StrLiteral(_)
+                        | HirType::F64
+                        | HirType::Bool
+                        | HirType::Null
+                        | HirType::Undefined
+                )
+            })
+            .then_some(members)
+    }
+
+    /// `union` against `other` when one side is a scalar union and the other is a scalar or
+    /// another scalar union: the union is tested one member at a time, and each member compares
+    /// with `other` under the same operator, so every member keeps its own rule. Both operands
+    /// are bound once, before any member test reads them.
+    fn lower_scalar_union_expansion(
+        &mut self,
+        union: HirExpr,
+        union_type: &HirType,
+        other: HirExpr,
+        other_type: &HirType,
+        union_left: bool,
+        loose: bool,
+    ) -> Result<HirExpr, String> {
+        let members = Self::scalar_union_members(union_type)
+            .ok_or("scalar union expansion needs a scalar union operand")?;
+        let union_ty = HirType::Union(members.clone());
+        let union_value = self.coerce_to_declared(&union_ty, union)?;
+        let union_name = format!("__thaw_scalar_union_{}", self.next_binding);
+        self.next_binding += 1;
+        let other_name = format!("__thaw_scalar_union_other_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(union_name.clone(), union_ty.clone());
+        self.scope.insert(other_name.clone(), other_type.clone());
+        let union_var = HirExpr::Var(union_name.clone());
+        let other_var = HirExpr::Var(other_name.clone());
+        let mut result = HirExpr::Lit(HirLit::Bool(false));
+        for index in 0..members.len() {
+            let member_value =
+                HirExpr::UnionValue(Box::new(union_var.clone()), index, members.clone());
+            let compare = match (union_left, loose) {
+                (true, false) => self.lower_strict_equality(member_value, other_var.clone())?,
+                (false, false) => self.lower_strict_equality(other_var.clone(), member_value)?,
+                (true, true) => self.lower_loose_equality(member_value, other_var.clone())?,
+                (false, true) => self.lower_loose_equality(other_var.clone(), member_value)?,
+            };
+            let is_member = HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::UnionTag(Box::new(union_var.clone()), members.clone())),
+                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+            );
+            let hit = self.lower_logical_expr(is_member, compare, true)?;
+            result = self.lower_logical_expr(result, hit, false)?;
+        }
+        let union_binding = (union_name, union_ty, union_value);
+        let other_binding = (other_name, other_type.clone(), other);
+        let bindings = if union_left {
+            [union_binding, other_binding]
+        } else {
+            [other_binding, union_binding]
+        };
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
+    /// Routes a scalar-union operand pair to `lower_scalar_union_expansion`; None when neither
+    /// side is a scalar union paired with a scalar or another scalar union.
+    fn lower_scalar_union_pair(
+        &mut self,
+        lhs: HirExpr,
+        lhs_type: &HirType,
+        rhs: HirExpr,
+        rhs_type: &HirType,
+        loose: bool,
+    ) -> Result<Option<HirExpr>, String> {
+        let is_scalar =
+            |ty: &HirType| matches!(ty, HirType::Str | HirType::StrLiteral(_) | HirType::F64 | HirType::Bool);
+        let lhs_union = Self::scalar_union_members(lhs_type).is_some();
+        let rhs_union = Self::scalar_union_members(rhs_type).is_some();
+        if lhs_union && (rhs_union || is_scalar(rhs_type)) {
+            return self
+                .lower_scalar_union_expansion(lhs, lhs_type, rhs, rhs_type, true, loose)
+                .map(Some);
+        }
+        if rhs_union && is_scalar(lhs_type) {
+            return self
+                .lower_scalar_union_expansion(rhs, rhs_type, lhs, lhs_type, false, loose)
+                .map(Some);
+        }
+        Ok(None)
     }
 
     fn absence_is_none(&self, kind: AbsenceKind, value: HirExpr, payload: HirType) -> HirExpr {
