@@ -633,6 +633,77 @@ fn node_module_thaw_js_bundle_scans_clean_with_path_inside() {
     assert_eq!(report.entry, "node:module");
 }
 
+/// Node 22.23.1 `require('module').builtinModules` with the `_`-prefixed internals removed (54 names).
+/// Regenerate with: `node -e "console.log(require('module').builtinModules.filter(n => !n.startsWith('_')))"`.
+const NODE22_BUILTIN_MODULES: &[&str] = &[
+    "assert", "assert/strict", "async_hooks", "buffer", "child_process", "cluster", "console",
+    "constants", "crypto", "dgram", "diagnostics_channel", "dns", "dns/promises", "domain", "events",
+    "fs", "fs/promises", "http", "http2", "https", "inspector", "inspector/promises", "module", "net",
+    "os", "path", "path/posix", "path/win32", "perf_hooks", "process", "punycode", "querystring",
+    "readline", "readline/promises", "repl", "stream", "stream/consumers", "stream/promises",
+    "stream/web", "string_decoder", "sys", "timers", "timers/promises", "tls", "trace_events", "tty",
+    "url", "util", "util/types", "v8", "vm", "wasi", "worker_threads", "zlib",
+];
+
+#[test]
+fn thaw_js_builtin_allowlist_matches_node22_builtin_modules() {
+    // Prefix-only builtins Node 22 loads but does not list in builtinModules.
+    // `node:sqlite` is deliberately absent from both sides: a new module, out of scope here.
+    const PREFIX_ONLY: &[&str] = &["node:test", "node:test/reporters", "node:sea"];
+    for name in NODE22_BUILTIN_MODULES {
+        let module = format!("node:{name}");
+        assert!(THAW_JS_BUILTIN_MODULES.contains(&module.as_str()), "{module}");
+    }
+    for module in THAW_JS_BUILTIN_MODULES {
+        assert!(
+            NODE22_BUILTIN_MODULES.contains(&module.trim_start_matches("node:"))
+                || PREFIX_ONLY.contains(module),
+            "{module} is allowlisted but is not a Node 22 builtin"
+        );
+    }
+    assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:sqlite"));
+}
+
+#[test]
+fn thaw_js_sys_is_util_and_sea_reports_not_a_single_executable_app() {
+    // Node 22: `require('sys') === require('util')` (DEP0025 warning on stderr only), `isSea()` is false
+    // and the asset readers throw ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION.
+    assert!(THAW_JS_BUILTIN_MODULES.contains(&"node:sys"));
+    assert!(THAW_JS_BUILTIN_MODULES.contains(&"node:sea"));
+    let sys = thaw_registry::resolve_builtin("node:sys").unwrap();
+    assert_eq!(sys.name, "node:sys");
+    let mut sys_package =
+        thaw_js::host::Package::load(&thaw_registry::builtin_bundle_with("node:sys", &[]).unwrap())
+            .unwrap();
+    let format_args = [
+        thaw_js::host::Native::Str("%s-%d".into()),
+        thaw_js::host::Native::Str("a".into()),
+        thaw_js::host::Native::Number(2.0),
+    ];
+    assert_eq!(
+        sys_package.call("format", &format_args).ok(),
+        Some(thaw_js::host::Native::Str("a-2".into()))
+    );
+    let sea = thaw_registry::resolve_builtin("node:sea").unwrap();
+    assert!(sea.dts_source.contains("isSea"));
+    let mut sea_package =
+        thaw_js::host::Package::load(&thaw_registry::builtin_bundle_with("node:sea", &[]).unwrap())
+            .unwrap();
+    assert_eq!(
+        sea_package.call("isSea", &[]).ok(),
+        Some(thaw_js::host::Native::Bool(false))
+    );
+    let error = sea_package
+        .call("getAsset", &[thaw_js::host::Native::Str("key".into())])
+        .unwrap_err()
+        .to_string();
+    // the host renders a thrown error as `Name: message`, so the code is not part of the text
+    assert_eq!(
+        error,
+        "Error: Operation cannot be invoked when not in a single-executable application"
+    );
+}
+
 #[test]
 fn thaw_js_builtin_modules_include_promise_variants() {
     // every mini-manifest node-compat case of these modules matches Node under THAW_JS_RUNTIME=1 (tj9)
