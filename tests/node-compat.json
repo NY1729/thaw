@@ -4913,6 +4913,36 @@
       "name": "eval object literal, completion value, and SyntaxError",
       "expect": "matched",
       "source": "function main(): void { const v: any = eval('({ a: 1, b: [2, 3], c: \"x\" })'); console.log(JSON.stringify(v), eval('var q = 5; q * 2')); try { eval('1 +'); } catch (e: any) { console.log(e instanceof SyntaxError, e.name); } }"
+    },
+    {
+      "name": "async listen callback throws after await while a server listens",
+      "expect": "matched",
+      "exitCode": 1,
+      "source": "import * as net from 'node:net';\nfunction main(): void {\n  const srv = net.createServer((s: any) => { s.end('x'); });\n  srv.listen(0, '127.0.0.1', async (): Promise<void> => {\n    console.log('listening');\n    await new Promise<void>((r) => setTimeout(r, 5));\n    throw new Error('boom');\n  });\n}"
+    },
+    {
+      "name": "timer throw while a server listens exits 1",
+      "expect": "matched",
+      "exitCode": 1,
+      "source": "import * as net from 'node:net';\nfunction main(): void {\n  const srv = net.createServer((s: any) => { s.end('x'); });\n  srv.listen(0, '127.0.0.1', (): void => { console.log('up'); });\n  setTimeout((): void => { throw new Error('t'); }, 5);\n}"
+    },
+    {
+      "name": "unhandled rejection while a server listens exits 1",
+      "expect": "matched",
+      "exitCode": 1,
+      "source": "import * as net from 'node:net';\nfunction main(): void {\n  const srv = net.createServer((s: any) => { s.end('x'); });\n  srv.listen(0, '127.0.0.1', (): void => { console.log('up'); });\n  Promise.reject(new Error('x'));\n}"
+    },
+    {
+      "name": "unhandled rejection with only a setInterval alive exits 1",
+      "expect": "matched",
+      "exitCode": 1,
+      "source": "function main(): void {\n  setInterval((): void => {}, 1000);\n  Promise.reject(new Error('x'));\n}"
+    },
+    {
+      "name": "unhandledRejection handler handles the rejection and exits 0 while a server listens",
+      "expect": "matched",
+      "exitCode": 0,
+      "source": "import * as net from 'node:net';\nimport process from 'node:process';\nfunction main(): void {\n  const srv = net.createServer((s: any) => { s.end('x'); });\n  process.on('unhandledRejection', (): void => { console.log('h'); srv.close(); });\n  srv.listen(0, '127.0.0.1', (): void => { Promise.reject(new Error('x')); });\n}"
     }
   ]
 }
