@@ -583,11 +583,13 @@ impl Visit for Walk {
 
     fn visit_call_expr(&mut self, n: &a::CallExpr) {
         if let a::Callee::Expr(e) = &n.callee {
-            if let a::Expr::Ident(id) = &**e {
-                match &*id.sym {
-                    "eval" => self.block(FallbackReason::DirectEval),
-                    "Function" => self.block(FallbackReason::FunctionCtor),
-                    _ => {}
+            // `(eval)(...)` is direct too; the nested-function walk makes an eval anywhere below a
+            // function block that function and every function enclosing it
+            if crate::is_direct_eval(e) {
+                self.block(FallbackReason::DirectEval);
+            } else if let a::Expr::Ident(id) = &**e {
+                if &*id.sym == "Function" {
+                    self.block(FallbackReason::FunctionCtor);
                 }
             }
         }
