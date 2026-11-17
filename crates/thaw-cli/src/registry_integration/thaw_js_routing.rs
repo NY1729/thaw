@@ -43,19 +43,104 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    /// Packages the LAST shim-generation pass left on QuickJS (`THAW_JS_FALLBACK` warn/error). A pass can refuse a
+    /// package that the next pass (with forced fallbacks) accepts, so only the final pass's list counts.
+    static THAW_JS_REFUSALS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Replaces the refusal list with the current pass's.
+fn set_thaw_js_refusals(refusals: Vec<String>) {
+    THAW_JS_REFUSALS.with(|r| *r.borrow_mut() = refusals);
+}
+
+/// The final pass's refusals (cleared).
+fn take_thaw_js_refusals() -> Vec<String> {
+    THAW_JS_REFUSALS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+}
+
 /// Starts a fresh blocker list for a build (a build's routing attempts all record into it).
 fn clear_thaw_js_blockers() {
     THAW_JS_BLOCKERS.with(|blockers| blockers.borrow_mut().clear());
+    set_thaw_js_refusals(Vec::new());
 }
 
-fn record_thaw_js_blocker(package: &str, why: &str) {
+/// Records a blocker; returns whether it was new to this build.
+fn record_thaw_js_blocker(package: &str, why: &str) -> bool {
     THAW_JS_BLOCKERS.with(|blockers| {
         let entry = (package.to_string(), why.to_string());
         let mut blockers = blockers.borrow_mut();
-        if !blockers.contains(&entry) {
+        if blockers.contains(&entry) {
+            false
+        } else {
             blockers.push(entry);
+            true
         }
-    });
+    })
+}
+
+/// Every reason recorded for `package` in this build, joined: the text of a refusal error.
+fn thaw_js_package_refusal(package: &str) -> String {
+    THAW_JS_BLOCKERS.with(|blockers| {
+        blockers
+            .borrow()
+            .iter()
+            .filter(|(name, _)| name == package)
+            .map(|(_, why)| why.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
+/// Every package refusal recorded in this build as `package `X`: why`, joined (appended to a fallback error).
+fn thaw_js_recorded_refusals_text() -> String {
+    THAW_JS_BLOCKERS.with(|blockers| {
+        blockers
+            .borrow()
+            .iter()
+            .filter(|(name, _)| name != "<build>")
+            .map(|(name, why)| format!("package `{name}` refused: {why}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
+/// What happens when thaw-js cannot serve something (`THAW_JS_FALLBACK`): `Silent` keeps the QuickJS
+/// fallback quiet, `Warn` prints it as a `FALLBACK:` line, `Error` fails the build instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThawJsFallbackMode {
+    Silent,
+    Warn,
+    Error,
+}
+
+/// Pure parser for `THAW_JS_FALLBACK`. Unset, empty and unknown values are `Silent`.
+fn thaw_js_fallback_mode_from(value: Option<&str>) -> ThawJsFallbackMode {
+    match value {
+        Some("warn") => ThawJsFallbackMode::Warn,
+        Some("error") => ThawJsFallbackMode::Error,
+        _ => ThawJsFallbackMode::Silent,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only per-thread `THAW_JS_FALLBACK` override, so parallel tests never share the process env.
+    static FALLBACK_MODE_OVERRIDE: std::cell::Cell<Option<ThawJsFallbackMode>> = const { std::cell::Cell::new(None) };
+}
+
+/// Sets the calling thread's fallback-mode override (tests only; the build reads it on the same thread).
+#[cfg(test)]
+fn set_thaw_js_fallback_mode_override(mode: Option<ThawJsFallbackMode>) {
+    FALLBACK_MODE_OVERRIDE.with(|cell| cell.set(mode));
+}
+
+fn thaw_js_fallback_mode() -> ThawJsFallbackMode {
+    #[cfg(test)]
+    if let Some(mode) = FALLBACK_MODE_OVERRIDE.with(|cell| cell.get()) {
+        return mode;
+    }
+    thaw_js_fallback_mode_from(std::env::var("THAW_JS_FALLBACK").ok().as_deref())
 }
 
 /// The manifest's `thaw_js_blockers` value: `[{"package", "why"}]`.
