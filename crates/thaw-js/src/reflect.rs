@@ -37,7 +37,7 @@ fn list_from(it: &mut Interp, v: &Value) -> R<Vec<Value>> {
 fn own_prop(it: &Interp, o: &Obj, key: &str) -> Option<(Slot, bool)> {
     if matches!(&*o.kind.borrow(), Kind::Global) {
         if let Some(p) = it.global_prop(key) {
-            return Some((Slot::Data(p.value), p.writable));
+            return Some((p.slot, p.writable));
         }
     }
     let writable = !o.frozen.get();
@@ -260,6 +260,9 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
     // a typed array's element is never deletable; any other numeric key is not an own property
     if let Some(valid) = crate::typed::typed_own_key(o, key) {
         return Ok(!valid);
+    }
+    if crate::is_legacy_fn_key(o, key) {
+        return Ok(false);
     }
     if own_prop(it, o, key).is_none() {
         return Ok(true);
