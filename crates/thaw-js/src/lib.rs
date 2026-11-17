@@ -35,6 +35,8 @@ mod classes;
 mod jsstr;
 mod regexp_statics;
 pub use jsstr::JsStr;
+mod co;
+mod co_thread;
 mod collections;
 mod compile;
 mod date;
@@ -1401,8 +1403,9 @@ impl Interp {
                 |_: &mut Interp, _: &Value, _: &[Value]| -> R<Value> { Ok(Value::Undefined) },
             )),
         );
-        let (array_proto, string_proto, regexp_proto) =
-            (mk(&object_proto), mk(&object_proto), mk(&object_proto));
+        // Array.prototype is itself an Array exotic object (`Array.isArray` true, length 0)
+        let array_proto = new_obj(Some(object_proto.clone()), Kind::Array(vec![]));
+        let (string_proto, regexp_proto) = (mk(&object_proto), mk(&object_proto));
         let (number_proto, bool_proto) = (mk(&object_proto), mk(&object_proto));
         let mut it = Interp {
             global: Scope::new(None),
@@ -1547,6 +1550,7 @@ impl Interp {
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
         web_console::install(&mut it);
         it.apply_builtin_table();
+        it.order_array_proto();
         // the preludes redefine `navigator`, `crypto` and `performance` as data; their Node form is an
         // accessor, so only a redefinition by user code counts (`node_accessor`)
         it.global.clear_redefined();
@@ -1880,6 +1884,61 @@ impl Interp {
         names
     }
 
+    /// Node 22's own-key order of `Array.prototype` after `length` (which `getOwnPropertyNames` lists first).
+    /// The methods are installed by several passes in other orders, so they are sorted once at the end.
+    fn order_array_proto(&self) {
+        const NODE_ORDER: &[&str] = &[
+            "constructor",
+            "at",
+            "concat",
+            "copyWithin",
+            "fill",
+            "find",
+            "findIndex",
+            "findLast",
+            "findLastIndex",
+            "lastIndexOf",
+            "pop",
+            "push",
+            "reverse",
+            "shift",
+            "unshift",
+            "slice",
+            "sort",
+            "splice",
+            "includes",
+            "indexOf",
+            "join",
+            "keys",
+            "entries",
+            "values",
+            "forEach",
+            "filter",
+            "flat",
+            "flatMap",
+            "map",
+            "every",
+            "some",
+            "reduce",
+            "reduceRight",
+            "toReversed",
+            "toSorted",
+            "toSpliced",
+            "with",
+            "toLocaleString",
+            "toString",
+        ];
+        let ap = &self.array_proto;
+        // stable: keys Node does not list (none today) keep their place at the end
+        ap.raw_props.borrow_mut().sort_by_key(|p| {
+            NODE_ORDER
+                .iter()
+                .position(|k| **k == *p.key)
+                .unwrap_or(usize::MAX)
+        });
+        *ap.index.borrow_mut() = None;
+    }
+
     // ----- conversions -----
 
     pub fn to_str(&mut self, v: &Value) -> JsStr {
@@ -2137,6 +2196,10 @@ impl Interp {
                     self.circular_target = Some(Rc::as_ptr(o) as usize);
                     return "[Circular *1]".into();
                 }
+                let array_proto_len = match &kind {
+                    K::Arr(items) if Rc::ptr_eq(o, &self.array_proto) => Some(items.len()),
+                    _ => None,
+                };
                 let text: String = match kind {
                     K::Arr(items) if items.is_empty() => "[]".into(),
                     K::Arr(items) => {
@@ -2214,6 +2277,10 @@ impl Interp {
                             format!("{head}{{ {} }}", parts.join(", "))
                         }
                     }
+                };
+                let text = match array_proto_len {
+                    Some(n) => format!("Object({n}) {text}"),
+                    None => text,
                 };
                 if walks {
                     self.leave_walk();
@@ -4939,7 +5006,20 @@ enum Fast {
 
 fn read_own(o: &ObjData, key: &str) -> Option<Read> {
     o.force_key(key);
-    let i = o.position(key)?;
+    let Some(i) = o.position(key) else {
+        // an Array exotic keeps its length and elements outside `raw_props`: a prototype that is an
+        // Array (`Array.prototype`) serves them to the objects that inherit from it
+        return match &*o.kind.borrow() {
+            Kind::Array(items) if key == "length" => {
+                Some(Read::Data(Value::Number(items.len() as f64)))
+            }
+            Kind::Array(items) => array_index(key)
+                .and_then(|i| items.get(i))
+                .filter(|v| !matches!(v, Value::Hole))
+                .map(|v| Read::Data(v.clone())),
+            _ => None,
+        };
+    };
     let props = o.raw_props.borrow();
     Some(match &props[i].slot {
         Slot::Data(v) => Read::Data(v.clone()),
@@ -5331,6 +5411,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
     }
 }
 
+#[cfg(test)]
+mod array_proto_tests;
 #[cfg(test)]
 mod arraybuffer_detach_tests;
 #[cfg(test)]
