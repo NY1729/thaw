@@ -1,4 +1,18 @@
 impl<'a> FnLowerer<'a> {
+    /// Storage type of an `any`/`Json`-annotated binding given the type its initializer actually produces.
+    /// A live `JsValue` initializer keeps the live handle as storage (a class token/prototype, an npm object,
+    /// a timer handle, ...) instead of the `Json` handle-placeholder snapshot -- otherwise a
+    /// dynamically-obtained method (`const p: any = A.prototype; p.greet`) reads back `undefined`, since the
+    /// placeholder object only carries the handle id. Shared by the self-reference pre-bind and the final
+    /// storage so the two cannot diverge.
+    fn live_handle_storage(declared: HirType, value: &HirType) -> HirType {
+        if matches!(declared, HirType::Dynamic | HirType::Json) && *value == HirType::JsValue {
+            HirType::JsValue
+        } else {
+            declared
+        }
+    }
+
     fn initializer_callback_references(expression: &Expr, name: &str) -> bool {
         use swc_ecma_visit::{Visit, VisitWith};
 
@@ -766,7 +780,9 @@ impl<'a> FnLowerer<'a> {
                 let recursive_binding_type = if Self::initializer_callback_references(init, &name)
                     || (annotated.is_some() && Self::initializer_closure_references(init, &name))
                 {
-                    annotated.clone().or_else(|| {
+                    // The callback is lowered now, against this pre-bound type, so it must equal the final storage
+                    // type of the initializer (checked below). The initializer's own type is predicted here.
+                    let predicted = (|| {
                         let Expr::Call(call) = init else {
                             return None;
                         };
@@ -794,7 +810,14 @@ impl<'a> FnLowerer<'a> {
                                 },
                             )
                             })
-                    })
+                    })();
+                    match annotated.clone() {
+                        Some(declared) => Some(match &predicted {
+                            Some(value) => Self::live_handle_storage(declared, value),
+                            None => declared,
+                        }),
+                        None => predicted,
+                    }
                 } else {
                     None
                 };
@@ -1128,13 +1151,7 @@ impl<'a> FnLowerer<'a> {
                 // dynamically-obtained method (`const p: any =
                 // A.prototype; p.greet`) reads back `undefined`, since the
                 // placeholder object only carries the handle id.
-                let ty = if matches!(ty, HirType::Dynamic | HirType::Json)
-                    && actual_type == HirType::JsValue
-                {
-                    HirType::JsValue
-                } else {
-                    ty
-                };
+                let ty = Self::live_handle_storage(ty, &actual_type);
                 let private_receiver_alias = if binding.type_ann.is_none() {
                     match &value {
                         HirExpr::NonArrowThis {
@@ -1177,6 +1194,12 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     ty.clone()
                 };
+                if let Some(pre_bound) = &recursive_binding_type {
+                    debug_assert_eq!(
+                        pre_bound, &storage_type,
+                        "self-referencing `{name}` pre-bound with a type that differs from its storage type"
+                    );
+                }
                 let hir_name = if let Some(hir_name) = recursive_binding {
                     self.scope.insert(hir_name.clone(), storage_type.clone());
                     value = HirExpr::RecursiveClosure(

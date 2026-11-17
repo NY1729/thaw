@@ -40,6 +40,38 @@ fn timer_callback_may_capture_its_own_handle() {
 }
 
 #[test]
+fn any_timer_handle_self_clear_callback_captures_the_storage_type() {
+    // The self-referencing `any` handle is stored as `JsValue` (the RecursiveClosure cell type), so every
+    // capture of `iv` inside the callback must carry that same storage type, not the `Json` annotation.
+    let program = lower(
+        r#"function main(): void {
+            const iv: any = setInterval((): void => { clearInterval(iv); console.log('once'); }, 5);
+        }"#,
+    );
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .expect("main");
+    let dump = format!("{:?}", main.body);
+    assert!(
+        dump.contains("RecursiveClosure(\"iv\", JsValue,"),
+        "expected a JsValue RecursiveClosure cell for `iv`: {dump}"
+    );
+    let captures: Vec<&str> = dump
+        .match_indices("HirParam { name: \"iv\", ty: ")
+        .map(|(at, pat)| &dump[at + pat.len()..at + pat.len() + 9])
+        .collect();
+    assert!(!captures.is_empty(), "callback should capture `iv`: {dump}");
+    for capture in captures {
+        assert!(
+            capture.starts_with("JsValue"),
+            "capture of `iv` typed {capture:?} but the RecursiveClosure cell is JsValue: {dump}"
+        );
+    }
+}
+
+#[test]
 fn module_level_timer_callback_may_name_its_own_global() {
     lower(
         r#"const handle = setInterval(() => clearInterval(handle), 1);
