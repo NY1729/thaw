@@ -127,6 +127,11 @@ extern "C" {
     pub fn sqlite3_column_text(stmt: *mut sqlite3_stmt, i: c_int) -> *const u8;
     pub fn sqlite3_column_blob(stmt: *mut sqlite3_stmt, i: c_int) -> *const c_void;
     pub fn sqlite3_column_bytes(stmt: *mut sqlite3_stmt, i: c_int) -> c_int;
+    pub fn sqlite3_column_decltype(stmt: *mut sqlite3_stmt, i: c_int) -> *const c_char;
+    pub fn sqlite3_column_database_name(stmt: *mut sqlite3_stmt, i: c_int) -> *const c_char;
+    pub fn sqlite3_column_table_name(stmt: *mut sqlite3_stmt, i: c_int) -> *const c_char;
+    pub fn sqlite3_column_origin_name(stmt: *mut sqlite3_stmt, i: c_int) -> *const c_char;
+    pub fn sqlite3_clear_bindings(stmt: *mut sqlite3_stmt) -> c_int;
 
     pub fn sqlite3_create_function_v2(
         db: *mut sqlite3,

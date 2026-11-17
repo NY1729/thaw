@@ -116,6 +116,44 @@ impl Stmt {
         Ok(())
     }
 
+    /// Clears every binding (unbound parameters become NULL again).
+    pub fn clear_bindings(&mut self) {
+        if !self.raw.is_null() {
+            // SAFETY: raw is a live statement.
+            unsafe { ffi::sqlite3_clear_bindings(self.raw) };
+        }
+    }
+
+    /// 1-based index of a named parameter (`:a`, `$a`, `@a`, `?1`), if the statement has it.
+    pub fn param_index(&self, name: &str) -> Option<i32> {
+        let c = std::ffi::CString::new(name).ok()?;
+        // SAFETY: raw may be null (sqlite returns 0); c is NUL-terminated.
+        match unsafe { ffi::sqlite3_bind_parameter_index(self.raw, c.as_ptr()) } {
+            0 => None,
+            i => Some(i),
+        }
+    }
+
+    /// Origin metadata of column `i` (needs SQLITE_ENABLE_COLUMN_METADATA, built in).
+    pub fn column_meta(&self, i: i32) -> ColumnMeta {
+        // SAFETY: raw is live; each name is copied out, null becomes None.
+        let opt = |p: *const std::ffi::c_char| unsafe {
+            if p.is_null() {
+                None
+            } else {
+                Some(cstr(p))
+            }
+        };
+        unsafe {
+            ColumnMeta {
+                database: opt(ffi::sqlite3_column_database_name(self.raw, i)),
+                table: opt(ffi::sqlite3_column_table_name(self.raw, i)),
+                origin: opt(ffi::sqlite3_column_origin_name(self.raw, i)),
+                decltype: opt(ffi::sqlite3_column_decltype(self.raw, i)),
+            }
+        }
+    }
+
     pub fn column_count(&self) -> i32 {
         if self.raw.is_null() {
             return 0;
@@ -183,4 +221,13 @@ impl Stmt {
         // SAFETY: raw is live.
         unsafe { ffi::sqlite3_stmt_readonly(self.raw) != 0 }
     }
+}
+
+/// Where a result column comes from (`sqlite3_column_*_name`); None where SQLite has none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnMeta {
+    pub database: Option<String>,
+    pub table: Option<String>,
+    pub origin: Option<String>,
+    pub decltype: Option<String>,
 }
