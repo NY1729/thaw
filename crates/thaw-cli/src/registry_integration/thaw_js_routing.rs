@@ -309,13 +309,6 @@ fn thaw_js_binding_needs_handle(
     false
 }
 
-/// Whether the program names the nested-namespace class `path` (`kdf.OpenSSL`), which only the QuickJS
-/// loader can capture at its dotted runtime path. A function or value member (`marked.parse`,
-/// `chalk.red`) is served through its package's value export handle or typed function instead.
-fn thaw_js_blocking_nested_alias(pkg: &ResolvedPackage, user_source: &str, path: &str) -> bool {
-    user_source.contains(path) && pkg.classes.iter().any(|class| class.name == path)
-}
-
 /// A thaw-js package returns plain data, so a bare alias' opaque `JsValue` result becomes `Json`.
 fn thaw_js_retarget_alias(alias: String, thaw_js_package: bool) -> String {
     if thaw_js_package {

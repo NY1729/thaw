@@ -2199,20 +2199,6 @@ fn generate_registry_shims_pass(
                     || !value_exports.is_empty())
             {
                 if thaw_js_routing
-                    && std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1")
-                    && !thaw_js_routed.contains(&pkg.name)
-                {
-                    if let Some((path, _)) = nested_namespace_aliases
-                        .iter()
-                        .find(|(path, _)| thaw_js_blocking_nested_alias(pkg, user_source, path))
-                    {
-                        eprintln!("thaw-js routing: package `{}` stays on QuickJS: nested namespace member `{path}`", pkg.name);
-                    }
-                }
-                if thaw_js_routing
-                    // (The aliases only capture dotted runtime paths for the QuickJS loader; a program that
-                    // never names one, or names a non-class member, does not need them.)
-                    && nested_namespace_aliases.iter().all(|(path, _)| !thaw_js_blocking_nested_alias(pkg, user_source, path))
                     && thaw_js_package_eligible(
                         pkg,
                         &thaw_js_bundle_form(&thaw_js_bundles, &pkg.name, bundle_js),
