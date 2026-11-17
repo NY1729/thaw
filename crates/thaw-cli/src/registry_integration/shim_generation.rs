@@ -344,6 +344,8 @@ fn generate_registry_shims_pass(
     thaw_js_routed: &ThawJsPackages,
 ) -> Result<(RegistryShims, ThawJsPackages), String> {
     let mut thaw_js_eligible = ThawJsPackages::new();
+    // `THAW_JS_FALLBACK=error`: every package thaw-js refuses, failing the build with all of them.
+    let mut thaw_js_refusals: Vec<String> = Vec::new();
     let observed_arities = observed_member_call_arities_named(user_source, user_source_name)?;
     let observed_constructor_arities =
         observed_constructor_arities_named(user_source, user_source_name)?;
@@ -2198,16 +2200,22 @@ fn generate_registry_shims_pass(
                         .any(|class| !pkg.type_only_value_names.contains(&class.name))
                     || !value_exports.is_empty())
             {
-                if thaw_js_routing
-                    && thaw_js_package_eligible(
+                if thaw_js_routing {
+                    if thaw_js_package_eligible(
                         pkg,
                         &thaw_js_bundle_form(&thaw_js_bundles, &pkg.name, bundle_js),
                         user_source,
                         &typed_targets,
                         &shim[segment_start..segment_end],
-                    )
-                {
-                    thaw_js_eligible.insert(pkg.name.clone());
+                    ) {
+                        thaw_js_eligible.insert(pkg.name.clone());
+                    } else if thaw_js_fallback_mode() == ThawJsFallbackMode::Error {
+                        thaw_js_refusals.push(format!(
+                            "package `{}` stays on QuickJS: {}",
+                            pkg.name,
+                            thaw_js_package_refusal(&pkg.name)
+                        ));
+                    }
                 }
                 bundles.push((
                     pkg.name.clone(),
@@ -2224,6 +2232,9 @@ fn generate_registry_shims_pass(
                 ));
             }
         }
+    }
+    if !thaw_js_refusals.is_empty() {
+        return Err(thaw_js_refusals.join("; "));
     }
 
     let module_bundles: Vec<thaw_bridge::ModuleBundle> = bundles

@@ -542,8 +542,14 @@ fn build_with_thaw_js_routing_shared(
             routing,
         );
         thaw_hir::set_native_timers(false);
-        if native.is_ok() {
-            return native;
+        match native {
+            Ok(()) => return Ok(()),
+            // Logged, never failed: the engine-timer rebuild below is the designed retry, and a
+            // lowering gap here is only a missing native fast path (see the plan's R2 risks).
+            Err(error) if error != NATIVE_TIMERS_NEED_ENGINE && thaw_js_fallback_mode() != ThawJsFallbackMode::Silent => {
+                eprintln!("FALLBACK: native timers retried on engine-served timers: {error}");
+            }
+            Err(_) => {}
         }
     }
     build_with_thaw_js_routing_inner(
@@ -581,8 +587,14 @@ fn build_with_thaw_js_routing_inner(
         // rejected a construct) is built the ordinary way: never a build failure or a wrong result
         // that the unrouted path would not have had.
         Err(error) if routing && routed_failure_falls_back(&error) => {
-            if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
-                eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
+            match thaw_js_fallback_mode() {
+                ThawJsFallbackMode::Error => return Err(format!("unsupported on thaw-js: {error}")),
+                ThawJsFallbackMode::Warn => eprintln!("FALLBACK: {error}"),
+                ThawJsFallbackMode::Silent => {
+                    if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
+                        eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
+                    }
+                }
             }
             record_thaw_js_fallback_blocker(&error);
             build_with_native_mode_routed(
