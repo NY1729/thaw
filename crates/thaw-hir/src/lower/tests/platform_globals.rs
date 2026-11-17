@@ -157,6 +157,28 @@ fn cast_wrapped_class_static_getter_only_is_still_rejected_as_readonly() {
     assert_eq!(lowering_error(&source("(Box as any)")).as_deref(), Some(bare.as_str()));
 }
 
+// A timer global read as a value is the realm's function, so `===` against `globalThis.X` holds and a mock of
+// the realm global is seen. Calls keep their own lowering (calls.rs / native_timers.rs).
+#[test]
+fn bare_timer_global_values_lower_to_the_realm_global() {
+    for name in ["setTimeout", "setInterval", "setImmediate", "clearTimeout", "clearInterval", "clearImmediate"] {
+        let bare = lowered_debug(&format!("function main(): void {{ const f: any = {name}; }}"));
+        assert!(
+            bare.contains(&format!("Lit(Str(\"{name}\"))")) && !bare.contains("TypedClosure"),
+            "bare `{name}` value not read through getDynamicValue: {bare}"
+        );
+    }
+}
+
+#[test]
+fn global_object_timer_values_lower_to_the_realm_property() {
+    for object in ["globalThis", "global"] {
+        let debug = lowered_debug(&format!("function main(): void {{ const f: any = {object}.setTimeout; }}"));
+        assert!(debug.contains("getDynamicProperty"), "{object}.setTimeout not a realm property read: {debug}");
+        assert!(!debug.contains("TypedClosure"), "{object}.setTimeout lowered to a typed wrapper: {debug}");
+    }
+}
+
 // `Date(...)` without `new` and the bare `Date` value are the realm's Date (a mocked clock must
 // reach them, like timers); `new Date`, `Date.now|UTC|parse` and `instanceof Date` keep their lowering.
 

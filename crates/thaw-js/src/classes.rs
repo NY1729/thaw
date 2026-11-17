@@ -257,6 +257,7 @@ impl Interp {
             _ => return Ok(()),
         };
         let frame = Scope::new(Some(scope));
+        frame.kind.set(SK_VAR | SK_FIELD);
         frame.set_this(this.clone());
         for (key, init) in fields {
             let v = match init {

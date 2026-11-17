@@ -4034,3 +4034,90 @@ fn array_from_length_literal_lowers_as_array_like_when_result_is_dynamic() {
         "the array-like source must not be spread as Json:\n{source}"
     );
 }
+
+/// A present element iterated out of an `any[]` parameter is `Optional(Json)` (array holes), so its
+/// `typeof` must read the Json runtime type, not the constant "object" of the Json payload.
+#[test]
+fn typeof_of_optional_json_iteration_element_uses_json_runtime_type() {
+    let program = lower(
+        r#"
+            function main(): void {
+                const f = (arr: any[]): void => {
+                    for (const x of arr) {
+                        const r: string = typeof x;
+                        console.log(r);
+                    }
+                };
+                f(['real', true]);
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    assert!(
+        source.contains("__thaw_json_typeof"),
+        "a present Optional(Json) element must be typed through the Json runtime type:\n{source}"
+    );
+    assert!(
+        !source.contains("Str(\"object\")"),
+        "no constant \"object\" typeof for a present Json element:\n{source}"
+    );
+}
+
+/// forEach and map callback parameters, and a rest parameter, over an `any[]` all type a present
+/// element through the Json runtime type (no constant "object").
+#[test]
+fn typeof_of_optional_json_callback_and_rest_elements_uses_json_runtime_type() {
+    for source in [
+        "function main(): void { const f = (arr: any[]): void => { arr.forEach((x: any): void => { const r: string = typeof x; console.log(r); }); }; f(['real', true]); }",
+        "function main(): void { const f = (arr: any[]): void => { const out: string[] = arr.map((x: any): string => typeof x); console.log(out.join(' ')); }; f(['real', true]); }",
+        "function main(): void { const f = (...a: any[]): void => { a.forEach((x: any): void => { const r: string = typeof x; console.log(r); }); }; f('real', true); }",
+    ] {
+        let source_text = format!("{:?}", lower(source).functions);
+        assert!(
+            source_text.contains("__thaw_json_typeof"),
+            "a present Optional(Json) callback element must use the Json runtime type:\n{source}\n{source_text}"
+        );
+        assert!(
+            !source_text.contains("Str(\"object\")"),
+            "no constant \"object\" typeof for a present Json element:\n{source}\n{source_text}"
+        );
+    }
+}
+
+/// A present `any | null` operand is `Nullable(Json)`; its typeof reads the Json runtime type too.
+#[test]
+fn typeof_of_nullable_json_present_value_uses_json_runtime_type() {
+    let program = lower(
+        r#"
+            function main(): void {
+                const f = (n: any | null): void => {
+                    const r: string = typeof n;
+                    console.log(r);
+                };
+                f('real');
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    // The absent (`null`) branch keeps its legitimate "object"; the present branch must go through
+    // the Json runtime type rather than the constant.
+    assert!(
+        source.contains("Return(Some(Call(Var(\"__thaw_json_typeof\"), [NullableValue("),
+        "a present Nullable(Json) operand must be typed through the Json runtime type:\n{source}"
+    );
+}
+
+/// The ternary form and a holey `[1,,3]` parameter both read the element through the Json type.
+#[test]
+fn typeof_of_optional_json_ternary_and_holey_parameter_uses_json_runtime_type() {
+    for source in [
+        "function main(): void { const f = (arr: any[]): void => { for (const x of arr) { const s: string = typeof x === 'string' ? 'S' : 'O'; console.log(s); } }; f(['real', true]); }",
+        "function main(): void { const f = (arr: any[]): void => { for (const x of arr) { const r: string = typeof x; console.log(r); } }; f([1, , 3]); }",
+    ] {
+        let source_text = format!("{:?}", lower(source).functions);
+        assert!(
+            source_text.contains("__thaw_json_typeof") && !source_text.contains("Str(\"object\")"),
+            "{source}\n{source_text}"
+        );
+    }
+}

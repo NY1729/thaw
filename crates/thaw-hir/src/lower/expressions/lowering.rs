@@ -1043,22 +1043,6 @@ impl<'a> FnLowerer<'a> {
                                 vec![HirExpr::Lit(HirLit::Str(crate::compiler_helpers::GLOBAL_THIS.into()))],
                             ))
                         }
-                        // A timer function passed or stored as a value: a forwarding arrow
-                        // (extra callback arguments are not forwarded).
-                        timer @ ("setTimeout" | "setInterval" | "setImmediate") => {
-                            let arrow = if timer == "setImmediate" {
-                                "(cb: () => void) => setImmediate(cb)".to_string()
-                            } else {
-                                format!("(cb: () => void, ms?: number) => {timer}(cb, ms)")
-                            };
-                            let module = thaw_parser::parse_typescript(&format!("({arrow});"))?;
-                            if let Some(swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Expr(
-                                statement,
-                            ))) = module.body.first()
-                            {
-                                return self.lower_expr(&statement.expr.clone());
-                            }
-                        }
                         // Every other standard global in the platform table
                         // (`platform_globals.rs`): the realm has the real global, so a
                         // bare reference is an opaque dynamic value. Placed after the
@@ -4263,6 +4247,24 @@ impl<'a> FnLowerer<'a> {
                                     Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
                                     Box::new(HirExpr::Lit(HirLit::Str("function".into()))),
                                     HirType::Str,
+                                )
+                            } else if matches!(payload, HirType::Json) {
+                                // A present Json payload (e.g. an `any[]` iteration element) is a
+                                // string/boolean/number/... at runtime; the constant "object" is wrong.
+                                let present = if nullable {
+                                    HirExpr::NullableValue(
+                                        Box::new(HirExpr::Var(parameter.clone())),
+                                        payload.clone(),
+                                    )
+                                } else {
+                                    HirExpr::OptionalValue(
+                                        Box::new(HirExpr::Var(parameter.clone())),
+                                        payload.clone(),
+                                    )
+                                };
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                                    vec![present],
                                 )
                             } else {
                                 HirExpr::Lit(HirLit::Str(type_name.into()))

@@ -1786,3 +1786,40 @@ fn entry_module_kind_follows_node_syntax_detection() {
     assert!(!kind("a.mts", "function main(): void {}"));
     assert!(kind("a.cts", "function main(): void {}"));
 }
+
+#[test]
+fn node_timers_value_reads_name_the_realm_global_and_calls_keep_the_shim() {
+    use swc_ecma_visit::{Visit, VisitWith};
+    let source = r#"
+        import * as timers from 'node:timers';
+        import { setImmediate as wait } from 'node:timers';
+        import { setTimeout as later } from 'node:timers/promises';
+        function main(): void {
+            const same = timers.setTimeout === globalThis.setTimeout;
+            const other = wait;
+            timers.setTimeout(() => {}, 1);
+            const kept = later;
+        }
+    "#;
+    let mut module = thaw_parser::parse_typescript(source).unwrap();
+    crate::module_graph::rewrite_node_timers_value_reads(&mut module);
+    #[derive(Default)]
+    struct ValueIdents(Vec<String>);
+    impl Visit for ValueIdents {
+        fn visit_expr(&mut self, expr: &thaw_parser::ast::Expr) {
+            if let thaw_parser::ast::Expr::Ident(ident) = expr {
+                self.0.push(ident.sym.to_string());
+            }
+            expr.visit_children_with(self);
+        }
+    }
+    let mut idents = ValueIdents::default();
+    module.visit_with(&mut idents);
+    let count = |name: &str| idents.0.iter().filter(|ident| ident.as_str() == name).count();
+    // `timers.setTimeout` as a value and `wait` (named import) name the realm globals.
+    assert_eq!(count("setTimeout"), 1, "{:?}", idents.0);
+    assert_eq!(count("setImmediate"), 1, "{:?}", idents.0);
+    // The callee `timers.setTimeout(...)` keeps its namespace object; `timers/promises` is not a timer global.
+    assert_eq!(count("timers"), 1, "{:?}", idents.0);
+    assert_eq!(count("later"), 1, "{:?}", idents.0);
+}

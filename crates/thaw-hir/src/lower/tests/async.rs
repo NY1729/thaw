@@ -629,3 +629,60 @@ fn promise_tuple_combinators_evaluate_sources_once_even_when_empty() {
     assert_eq!(body.matches("\"empty\"").count(), 4, "{body}");
     assert_eq!(body.matches("\"mixed\"").count(), 1, "{body}");
 }
+
+#[test]
+fn promise_value_resolver_adopts_a_promise_argument() {
+    // Node: `resolve(thenable)` adopts the thenable even when the resolver is annotated
+    // `(v: number) => void`, so the resolver must widen to the mixed value-or-promise kind.
+    let program = lower(r#"async function main(): Promise<void> {
+        const adopted: number = await new Promise<number>((resolve: (v: number) => void): void => {
+            resolve(Promise.resolve(2));
+        });
+        console.log(adopted);
+    }"#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("PromiseNewMixed"), "{body}");
+}
+
+#[test]
+fn promise_then_callback_returning_a_promise_adopts_its_value() {
+    // Node: a `then` callback that returns a Promise<T> is flattened into the chained Promise<T>.
+    let program = lower(r#"async function main(): Promise<void> {
+        const returned: number = await Promise.resolve(1).then((): Promise<number> => Promise.resolve(2));
+        console.log(returned);
+    }"#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(
+        matches!(&main.body[0], HirStmt::Let(_, HirType::F64, _)),
+        "{:?}",
+        main.body[0]
+    );
+}
+
+#[test]
+fn promise_value_resolver_adopts_a_pending_promise_argument() {
+    // Node: `resolve(pending)` adopts the pending promise and settles with its later value.
+    let program = lower(r#"async function main(): Promise<void> {
+        const late: Promise<number> = new Promise<number>((done: (v: number) => void): void => {
+            done(5);
+        });
+        const adopted: number = await new Promise<number>((resolve: (v: number) => void): void => {
+            resolve(late);
+        });
+        console.log(adopted);
+    }"#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("PromiseNewMixed"), "{body}");
+}
+
+#[test]
+fn promise_untyped_then_callback_returning_a_promise_feeds_a_typed_then() {
+    // Node: `.then(() => Promise.resolve(2))` flattens to Promise<number> for the next `.then`.
+    lower(r#"async function main(): Promise<void> {
+        Promise.resolve(1).then(() => Promise.resolve(2)).then((v: number): void => {
+            console.log("returned", v);
+        });
+    }"#);
+}

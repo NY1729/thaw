@@ -1,0 +1,29 @@
+SyntaxError: Unexpected end of input
+SyntaxError: Identifier 'a' has already been declared
+SyntaxError: Unexpected number
+SyntaxError: Unexpected token '}'
+SyntaxError: Unexpected end of input
+SyntaxError: Invalid or unexpected token
+SyntaxError: Invalid or unexpected token
+Error: x
+ReferenceError: foo is not defined
+TypeError: Cannot read properties of null (reading 'x')
+SyntaxError: Unexpected end of input
+SyntaxError: Unexpected token '{'
+SyntaxError: Unexpected identifier 'b'
+SyntaxError: Invalid left-hand side in assignment
+ok
+SyntaxError: 'super' keyword unexpected here
+SyntaxError: Unexpected number
+SyntaxError: await is only valid in async functions and the top level bodies of modules
+SyntaxError: Illegal break statement
+SyntaxError: Duplicate __proto__ fields are not allowed in object literals
+SyntaxError: Strict mode code may not include a with statement
+SyntaxError: Octal literals are not allowed in strict mode.
+SyntaxError: Illegal return statement
+1
+ReferenceError: foo is not defined
+SyntaxError: Unexpected token '}'
+TypeError ERR_INVALID_ARG_TYPE
+undefined
+function eval 1 {"writable":true,"enumerable":false,"configurable":true}

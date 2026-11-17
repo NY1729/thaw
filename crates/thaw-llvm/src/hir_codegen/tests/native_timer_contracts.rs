@@ -197,3 +197,14 @@ fn any_timer_handle_cleared_from_outside_its_callback() {
 }"#;
     assert_eq!(compile_and_run(cleared, "any_timeout_outside_clear"), "cleared\n");
 }
+
+// A timer global read as a value is the realm's function (Node 22: `setTimeout === globalThis.setTimeout`).
+#[test]
+fn timer_global_values_are_the_realm_functions() {
+    let source = r#"function main(): void {
+  const same: boolean = setTimeout === globalThis.setTimeout && clearTimeout === globalThis.clearTimeout;
+  const kind: string = typeof setTimeout;
+  console.log(same, kind, setImmediate === globalThis.setImmediate);
+}"#;
+    assert_eq!(compile_and_run(source, "timer_global_values_are_the_realm_functions").trim(), "true function true");
+}
