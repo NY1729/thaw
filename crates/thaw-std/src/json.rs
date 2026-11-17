@@ -11183,6 +11183,31 @@ pub extern "C" fn thaw_json_array_assign(target: *mut Value, source: *mut Value)
     target
 }
 
+/// Write-back for a Buffer-shaped `any` receiver: replaces the bytes of the
+/// wrapper `target` (its `data` array) with those of `source` (a Buffer wrapper
+/// or byte array) and returns `target`. A non-Buffer target is left unchanged.
+#[no_mangle]
+pub extern "C" fn thaw_json_buffer_sync(target: *mut Value, source: *mut Value) -> *mut Value {
+    let Some(items) = (unsafe { source.as_ref() })
+        .and_then(json_array_or_buffer_data)
+        .map(|items| items.to_vec())
+    else {
+        return target;
+    };
+    if thaw_json_is_buffer_shape(target) != 1 {
+        return target;
+    }
+    if let Some(mut fields) = (unsafe { target.as_ref() }).and_then(Value::as_object_mut) {
+        if let Some(mut data) = fields
+            .get_mut(b"data".as_slice())
+            .and_then(|slot| slot.as_array_mut())
+        {
+            *data = items;
+        }
+    }
+    target
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_array_slice(value: *mut Value, start: i64) -> *mut Value {
     // A live JS array (a nested value of a native `any` wrapper) is read through its host.

@@ -272,14 +272,27 @@ fn thaw_js_newly_allowlisted_builtins_route_to_thaw_js() {
 }
 
 #[test]
-fn thaw_js_wasi_bundle_routes_only_when_the_program_requires_wasm() {
-    // the wasi bundle uses WebAssembly: it routes when the program names node:wasi (the build then selects the `wasm` feature)
+fn thaw_js_wasi_bundle_routes_without_a_wasm_mention_in_the_program() {
+    // the wasi bundle uses WebAssembly: it routes whatever the program says (the build selects the `wasm` feature from the routed bundle)
     let bundle = thaw_registry::builtin_bundle_with("node:wasi", &[]).unwrap();
     let wasi = "import { WASI } from 'node:wasi';\nconsole.log(typeof WASI);\n";
     let pkg = builtin_routing_package("node:wasi");
     assert!(thaw_js_package_eligible(&pkg, &bundle, wasi, &Default::default(), ""));
+    // old: `assert!(!thaw_js_package_eligible(&pkg, &bundle, no_wasm, ...))`; new: routes (the wasm blocker is deleted)
     let no_wasm = "import { WASI } from 'node:path';\nconsole.log(typeof WASI);\n";
-    assert!(!thaw_js_package_eligible(&pkg, &bundle, no_wasm, &Default::default(), ""));
+    assert!(thaw_js_package_eligible(&pkg, &bundle, no_wasm, &Default::default(), ""));
+}
+
+#[test]
+fn thaw_js_bundle_only_webassembly_routes_without_a_user_mention() {
+    // a package bundle that uses WebAssembly routes although the user source never names it.
+    // old: rejected by `thaw_js_wasm_blocker` (stayed on QuickJS); new: routed, the build adds the `wasm` feature
+    let bundle = "module.exports = { check: function () { return String(new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])) instanceof WebAssembly.Module); } };";
+    let pkg = builtin_routing_package("wasm-kit");
+    let user = "import { check } from 'wasm-kit';\nconsole.log(check());\n";
+    // routing sees the registry form of a plain script (`thaw_js_bundle_form` -> `script_as_bundle`)
+    let form = thaw_js::scan::script_as_bundle(bundle);
+    assert!(thaw_js_package_eligible(&pkg, &form, user, &Default::default(), ""));
 }
 
 #[test]
@@ -618,6 +631,77 @@ fn node_module_thaw_js_bundle_scans_clean_with_path_inside() {
     let report = thaw_js::scan::scan_bundle(&bundle).unwrap();
     assert!(report.is_clean(), "{:?}", report.blockers);
     assert_eq!(report.entry, "node:module");
+}
+
+/// Node 22.23.1 `require('module').builtinModules` with the `_`-prefixed internals removed (54 names).
+/// Regenerate with: `node -e "console.log(require('module').builtinModules.filter(n => !n.startsWith('_')))"`.
+const NODE22_BUILTIN_MODULES: &[&str] = &[
+    "assert", "assert/strict", "async_hooks", "buffer", "child_process", "cluster", "console",
+    "constants", "crypto", "dgram", "diagnostics_channel", "dns", "dns/promises", "domain", "events",
+    "fs", "fs/promises", "http", "http2", "https", "inspector", "inspector/promises", "module", "net",
+    "os", "path", "path/posix", "path/win32", "perf_hooks", "process", "punycode", "querystring",
+    "readline", "readline/promises", "repl", "stream", "stream/consumers", "stream/promises",
+    "stream/web", "string_decoder", "sys", "timers", "timers/promises", "tls", "trace_events", "tty",
+    "url", "util", "util/types", "v8", "vm", "wasi", "worker_threads", "zlib",
+];
+
+#[test]
+fn thaw_js_builtin_allowlist_matches_node22_builtin_modules() {
+    // Prefix-only builtins Node 22 loads but does not list in builtinModules.
+    // `node:sqlite` is deliberately absent from both sides: a new module, out of scope here.
+    const PREFIX_ONLY: &[&str] = &["node:test", "node:test/reporters", "node:sea"];
+    for name in NODE22_BUILTIN_MODULES {
+        let module = format!("node:{name}");
+        assert!(THAW_JS_BUILTIN_MODULES.contains(&module.as_str()), "{module}");
+    }
+    for module in THAW_JS_BUILTIN_MODULES {
+        assert!(
+            NODE22_BUILTIN_MODULES.contains(&module.trim_start_matches("node:"))
+                || PREFIX_ONLY.contains(module),
+            "{module} is allowlisted but is not a Node 22 builtin"
+        );
+    }
+    assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:sqlite"));
+}
+
+#[test]
+fn thaw_js_sys_is_util_and_sea_reports_not_a_single_executable_app() {
+    // Node 22: `require('sys') === require('util')` (DEP0025 warning on stderr only), `isSea()` is false
+    // and the asset readers throw ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION.
+    assert!(THAW_JS_BUILTIN_MODULES.contains(&"node:sys"));
+    assert!(THAW_JS_BUILTIN_MODULES.contains(&"node:sea"));
+    let sys = thaw_registry::resolve_builtin("node:sys").unwrap();
+    assert_eq!(sys.name, "node:sys");
+    let mut sys_package =
+        thaw_js::host::Package::load(&thaw_registry::builtin_bundle_with("node:sys", &[]).unwrap())
+            .unwrap();
+    let format_args = [
+        thaw_js::host::Native::Str("%s-%d".into()),
+        thaw_js::host::Native::Str("a".into()),
+        thaw_js::host::Native::Number(2.0),
+    ];
+    assert_eq!(
+        sys_package.call("format", &format_args).ok(),
+        Some(thaw_js::host::Native::Str("a-2".into()))
+    );
+    let sea = thaw_registry::resolve_builtin("node:sea").unwrap();
+    assert!(sea.dts_source.contains("isSea"));
+    let mut sea_package =
+        thaw_js::host::Package::load(&thaw_registry::builtin_bundle_with("node:sea", &[]).unwrap())
+            .unwrap();
+    assert_eq!(
+        sea_package.call("isSea", &[]).ok(),
+        Some(thaw_js::host::Native::Bool(false))
+    );
+    let error = sea_package
+        .call("getAsset", &[thaw_js::host::Native::Str("key".into())])
+        .unwrap_err()
+        .to_string();
+    // the host renders a thrown error as `Name: message`, so the code is not part of the text
+    assert_eq!(
+        error,
+        "Error: Operation cannot be invoked when not in a single-executable application"
+    );
 }
 
 #[test]
@@ -1526,4 +1610,39 @@ fn routed_worker_resource_limits_stop_a_runaway_worker() {
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
     assert_eq!((stdout.as_str(), status), ("error ERR_WORKER_OUT_OF_MEMORY\n", Some(0)), "{stderr}");
+}
+
+/// A registry package whose bundle uses WebAssembly through a hand-written 8-byte module header; the user
+/// source never mentions WebAssembly, so only the routed bundle can select the `wasm` runtime feature.
+#[test]
+fn wasm_in_bundle_only_routes_to_thaw_js_and_runs() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-wasm-bundle-only-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("wasm-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), "export declare function check(): string;\n").unwrap();
+    // The Map keeps the function on the runtime path, as in `thaw_js_fixture`.
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { check: function () {\n\
+           var seen = new Map();\n\
+           var module = new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));\n\
+           seen.set('ok', module instanceof WebAssembly.Module);\n\
+           return String(seen.get('ok'));\n\
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { check } from 'wasm-kit';\nfunction main(): void { console.log(check()); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["wasm-kit"]));
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(thaw_js_run_guarded(&output), "true\n");
+    let _ = std::fs::remove_dir_all(dir);
 }
