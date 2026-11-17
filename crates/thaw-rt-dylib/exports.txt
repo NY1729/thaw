@@ -249,7 +249,6 @@ thaw_jit_dictionary_query
 thaw_jit_format_number
 thaw_json_adopt_native_date
 thaw_json_array_assign
-thaw_json_buffer_sync
 thaw_json_array_extend
 thaw_json_array_join
 thaw_json_array_length
@@ -274,6 +273,7 @@ thaw_json_brand_handle_placeholder
 thaw_json_brand_wrapper
 thaw_json_brand_wrapper_if
 thaw_json_buffer_inspect
+thaw_json_buffer_sync
 thaw_json_callback_error
 thaw_json_callback_error_tuple
 thaw_json_callback_origin_acquire

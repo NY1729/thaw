@@ -412,6 +412,30 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(HirExpr::Var(result_name), &bindings)
     }
 
+    /// Whether the arguments of Buffer method `name` have a type a Buffer method takes: `set` and
+    /// `copy` a byte source or target, `fill` a value, `write*` a number/bigint/string. Other
+    /// names (search, slice, swap, reverse) take what the typed lowering accepts, so they pass.
+    fn buffer_args_fit(&mut self, name: &str, args: &[swc_ecma_ast::ExprOrSpread]) -> Result<bool, String> {
+        if args.iter().any(|argument| argument.spread.is_some()) {
+            return Ok(false);
+        }
+        let accepted: &[HirType] = match name {
+            "set" | "copy" => &[HirType::Bytes, HirType::Json, HirType::JsValue],
+            "fill" => &[HirType::F64, HirType::Str, HirType::Bytes, HirType::Json, HirType::JsValue],
+            _ if name.starts_with("write") => &[HirType::F64, HirType::Str, HirType::BigInt, HirType::Json, HirType::JsValue],
+            _ => return Ok(true),
+        };
+        let Some(first) = args.first() else {
+            return Ok(name == "fill");
+        };
+        if name == "set" && args.len() > 2 {
+            return Ok(false);
+        }
+        let lowered = self.lower_expr(&first.expr)?;
+        let ty = self.infer_expr_type_inner(&lowered)?;
+        Ok(accepted.contains(&ty) || matches!(ty, HirType::Array(ref element) if **element == HirType::F64) && matches!(name, "set" | "copy"))
+    }
+
     /// Selects the Buffer lowering of a Json-receiver call when the receiver is Buffer-shaped
     /// at run time, else `fallback` (the existing string/array/live lowering). A Buffer lowering
     /// that cannot be built falls back too, so only Buffer receivers change behaviour.
@@ -424,6 +448,11 @@ impl<'a> FnLowerer<'a> {
         mutates: bool,
         fallback: HirExpr,
     ) -> Result<HirExpr, String> {
+        // Only a call whose arguments can be Buffer-method arguments gets the Buffer branch:
+        // a Map's `set(key, value)` with a scalar key keeps its Map lowering alone.
+        if !self.buffer_args_fit(name, args)? {
+            return Ok(fallback);
+        }
         let result_type = self.infer_expr_type(&fallback)?;
         let buffer = match self.buffer_aware_json_call(json_name, name, args, span, mutates) {
             // `set` / `copy` answer `undefined`: run the buffer call, then the `undefined` result.
