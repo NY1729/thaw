@@ -11033,6 +11033,39 @@ fn json_array_or_buffer_data(value: &Value) -> Option<&Vec<Value>> {
 #[no_mangle]
 pub extern "C" fn thaw_json_to_number_array(value: *mut Value) -> *mut u8 {
     if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        // thaw-js: an ArrayBuffer lease (a digest result) converts to its bytes where a number[] is requested
+        if engine_is_thaw_js()
+            && host_query(lease, 4).as_deref() != Some("1")
+            && host_query(lease, 11).as_deref() != Some("1")
+        {
+            if HOST_ERROR.with(|error| error.borrow().is_some()) {
+                return std::ptr::null_mut();
+            }
+            let bytes = host_query(lease, 31)
+                .and_then(|text| JsonParser::new(text.as_bytes()).parse())
+                .and_then(|parsed| {
+                    parsed.as_array().map(|items| {
+                        items
+                            .iter()
+                            .map(|item| item.as_f64().unwrap_or(0.0))
+                            .collect::<Vec<f64>>()
+                    })
+                });
+            if HOST_ERROR.with(|error| error.borrow().is_some()) {
+                return std::ptr::null_mut();
+            }
+            if let Some(values) = bytes {
+                let output = thaw_arena::thaw_arena_alloc(8 + values.len() * 8, 8);
+                if output.is_null() {
+                    return output;
+                }
+                unsafe { (output as *mut i64).write(values.len() as i64) };
+                for (index, value) in values.iter().enumerate() {
+                    unsafe { (output.add(8 + index * 8) as *mut f64).write(*value) };
+                }
+                return output;
+            }
+        }
         let length = thaw_json_array_length(value);
         if HOST_ERROR.with(|error| error.borrow().is_some()) {
             return std::ptr::null_mut();
@@ -13688,6 +13721,62 @@ mod tests {
                 thaw_arena::destroy_string(error.cast_mut());
                 thaw_json_destroy(value);
             }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn number_array_conversion_reads_an_arraybuffer_lease_as_bytes_under_thaw_js() {
+        std::thread::spawn(|| {
+            extern "C" fn arraybuffer_query(handle: u64, operation: u8) -> HostTextResult {
+                let text: &[u8] = match (handle, operation) {
+                    (21, 4) | (21, 11) => b"0",
+                    (21, 31) => b"[1,2]",
+                    _ => b"null",
+                };
+                HostTextResult {
+                    value: thaw_arena::owned_string(text),
+                    error: std::ptr::null(),
+                }
+            }
+            HOST_OPERATIONS.with(|slot| {
+                slot.set(Some(HostOperations {
+                    retain: host_array_test_retain,
+                    release: host_array_test_release,
+                    get: host_array_test_get,
+                    query: arraybuffer_query,
+                    date_set: unused_typed_scope_date,
+                    set: unused_typed_scope_set,
+                    predicate: unused_typed_scope_predicate,
+                    enumerate: unused_typed_scope_text,
+                }))
+            });
+            thaw_json_set_js_engine(1);
+            let value = host_array_test_value(21);
+            let native = thaw_json_to_number_array(value);
+            assert!(!native.is_null());
+            unsafe {
+                assert_eq!((native as *const i64).read(), 2);
+                assert_eq!((native.add(8) as *const f64).read(), 1.0);
+                assert_eq!((native.add(16) as *const f64).read(), 2.0);
+                thaw_json_destroy(value);
+            }
+            assert!(thaw_json_take_host_error().is_null());
+
+            // a lease that answers null for op 31 keeps today's empty conversion
+            let value = host_array_test_value(22);
+            let native = thaw_json_to_number_array(value);
+            assert!(!native.is_null());
+            assert_eq!(unsafe { (native as *const i64).read() }, 0);
+            unsafe { thaw_json_destroy(value) };
+
+            // the QuickJS lane (engine 0) never asks op 31
+            thaw_json_set_js_engine(0);
+            let value = host_array_test_value(21);
+            let native = thaw_json_to_number_array(value);
+            assert_eq!(unsafe { (native as *const i64).read() }, 0);
+            unsafe { thaw_json_destroy(value) };
         })
         .join()
         .unwrap();
