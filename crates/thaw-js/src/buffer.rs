@@ -142,7 +142,8 @@ const BUFFER_PRELUDE: &str = r#"
   }
   def(Buffer, 'from', function (v, a, b) {
     if (typeof v === 'string') return wrap(fromString(v, a));
-    if (v instanceof ArrayBuffer) return wrap(new U8(v, a === undefined ? 0 : a, b === undefined ? v.byteLength - (a || 0) : b));
+    // no length: a view to the buffer's end (length-tracking when it is resizable, as in Node)
+    if (v instanceof ArrayBuffer) return wrap(new U8(v, a === undefined ? 0 : a, b));
     if (ArrayBuffer.isView(v)) return wrap(new U8(Array.from(v)));
     if (v && typeof v === 'object') {
       if (v.type === 'Buffer' && Array.isArray(v.data)) return wrap(new U8(v.data));

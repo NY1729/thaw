@@ -1622,7 +1622,7 @@ impl Interp {
             });
             self.set_native(o, "freeze", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
-                    if matches!(&*o.kind.borrow(), Kind::Typed(t) if t.len > 0) {
+                    if matches!(&*o.kind.borrow(), Kind::Typed(t) if t.cur_len() > 0) {
                         return it.throw_error(
                             "TypeError",
                             "Cannot freeze array buffer views with elements",
