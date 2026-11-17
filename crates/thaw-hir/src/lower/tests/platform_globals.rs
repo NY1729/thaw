@@ -22,11 +22,24 @@ fn every_platform_global_lowers_in_value_and_typeof_position() {
     assert!(failures.is_empty(), "platform globals rejected as unknown variables: {failures:?}");
 }
 
+/// Platform constructors that `new` still rejects at lowering (`only new Promise<T>` diagnostic).
+/// Pending decisions, not a design: each needs its own `DYNAMIC_NEW_CTORS` entry or a deliberate
+/// reason to stay rejected. Shrink-only: a name that starts lowering must leave this list.
+const UNLISTED_NEW_CTORS_PENDING: &[&str] = &[
+    "AbortSignal", "Buffer", "ByteLengthQueuingStrategy", "CompressionStream", "CountQueuingStrategy",
+    "Crypto", "CryptoKey", "DecompressionStream", "Navigator", "Performance", "PerformanceEntry",
+    "PerformanceMark", "PerformanceMeasure", "PerformanceObserver", "PerformanceObserverEntryList",
+    "PerformanceResourceTiming", "ReadableByteStreamController", "ReadableStreamBYOBReader",
+    "ReadableStreamBYOBRequest", "ReadableStreamDefaultController", "ReadableStreamDefaultReader",
+    "SubtleCrypto", "TextDecoderStream", "TextEncoderStream", "TransformStreamDefaultController",
+    "WritableStreamDefaultController", "WritableStreamDefaultWriter",
+];
+
 #[test]
 fn platform_constructors_lower_under_new_to_the_realm_constructor() {
     let mut failures = Vec::new();
     for (name, kind) in platform_globals::PLATFORM_GLOBALS {
-        if *kind != platform_globals::GlobalKind::Ctor {
+        if *kind != platform_globals::GlobalKind::Ctor || UNLISTED_NEW_CTORS_PENDING.contains(name) {
             continue;
         }
         let source = format!("function main(): void {{ const made: any = new {name}(); }}");
@@ -39,13 +52,25 @@ fn platform_constructors_lower_under_new_to_the_realm_constructor() {
             Err(error) => {
                 // A dedicated `new` path with its own argument rules (`new WeakRef()`) may reject
                 // the bare call; only an unresolved name is a failure here.
-                if error.contains("unknown variable") {
+                if error.contains("unknown variable") || error.contains("only `new Promise") {
                     failures.push(format!("{name}: {error}"));
                 }
             }
         }
     }
     assert!(failures.is_empty(), "platform constructors not lowered under new: {failures:?}");
+}
+
+#[test]
+fn websocket_constructs_through_the_realm_under_any_and_typed_bindings() {
+    for annotation in ["any", "WebSocket"] {
+        let source = format!(
+            "function main(): void {{ const ws: {annotation} = new WebSocket(\"ws://127.0.0.1:1/chat\"); }}"
+        );
+        let program = lower_module(&thaw_parser::parse_typescript(&source).expect("parse error"))
+            .unwrap_or_else(|error| panic!("`{annotation}` WebSocket failed to lower: {error}"));
+        assert!(format!("{program:?}").contains("constructDynamicValue"), "`{annotation}` WebSocket not realm-constructed");
+    }
 }
 
 #[test]

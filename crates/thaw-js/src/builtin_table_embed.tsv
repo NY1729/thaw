@@ -2873,6 +2873,35 @@ WebAssembly.instantiate	length	data	--c	number	1	-	-	-	-
 WebAssembly.instantiate	name	data	--c	string	-	instantiate	-	-	-
 WebAssembly.validate	length	data	--c	number	1	-	-	-	-
 WebAssembly.validate	name	data	--c	string	-	validate	-	-	-
+WebSocket	CLOSED	data	-e-	number	-	-	-	-	-
+WebSocket	CLOSING	data	-e-	number	-	-	-	-	-
+WebSocket	CONNECTING	data	-e-	number	-	-	-	-	-
+WebSocket	OPEN	data	-e-	number	-	-	-	-	-
+WebSocket	length	data	--c	number	1	-	-	-	-
+WebSocket	name	data	--c	string	-	WebSocket	-	-	-
+WebSocket	prototype	data	---	object	-	-	-	-	-
+WebSocket.prototype	@@toStringTag	data	--c	string	-	-	-	-	WebSocket
+WebSocket.prototype	CLOSED	data	-e-	number	-	-	-	-	-
+WebSocket.prototype	CLOSING	data	-e-	number	-	-	-	-	-
+WebSocket.prototype	CONNECTING	data	-e-	number	-	-	-	-	-
+WebSocket.prototype	OPEN	data	-e-	number	-	-	-	-	-
+WebSocket.prototype	binaryType	accessor	-ec	-	-	get binaryType|set binaryType	-	-	-
+WebSocket.prototype	bufferedAmount	accessor	-ec	-	-	get bufferedAmount|-	-	-	-
+WebSocket.prototype	close	data	wec	function	0	close	0	-	-
+WebSocket.prototype	constructor	data	w-c	function	1	WebSocket	1	161	-
+WebSocket.prototype	extensions	accessor	-ec	-	-	get extensions|-	-	-	-
+WebSocket.prototype	onclose	accessor	-ec	-	-	get onclose|set onclose	-	-	-
+WebSocket.prototype	onerror	accessor	-ec	-	-	get onerror|set onerror	-	-	-
+WebSocket.prototype	onmessage	accessor	-ec	-	-	get onmessage|set onmessage	-	-	-
+WebSocket.prototype	onopen	accessor	-ec	-	-	get onopen|set onopen	-	-	-
+WebSocket.prototype	protocol	accessor	-ec	-	-	get protocol|-	-	-	-
+WebSocket.prototype	readyState	accessor	-ec	-	-	get readyState|-	-	-	-
+WebSocket.prototype	send	data	wec	function	1	send	0	-	-
+WebSocket.prototype	url	accessor	-ec	-	-	get url|-	-	-	-
+WebSocket.prototype.close	length	data	--c	number	0	-	-	-	-
+WebSocket.prototype.close	name	data	--c	string	-	close	-	-	-
+WebSocket.prototype.send	length	data	--c	number	1	-	-	-	-
+WebSocket.prototype.send	name	data	--c	string	-	send	-	-	-
 WritableStream	length	data	--c	number	0	-	-	-	-
 WritableStream	name	data	--c	string	-	WritableStream	-	-	-
 WritableStream	prototype	data	---	object	-	-	-	-	-
