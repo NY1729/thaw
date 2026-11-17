@@ -4264,6 +4264,24 @@ impl<'a> FnLowerer<'a> {
                                     Box::new(HirExpr::Lit(HirLit::Str("function".into()))),
                                     HirType::Str,
                                 )
+                            } else if matches!(payload, HirType::Json) {
+                                // A present Json payload (e.g. an `any[]` iteration element) is a
+                                // string/boolean/number/... at runtime; the constant "object" is wrong.
+                                let present = if nullable {
+                                    HirExpr::NullableValue(
+                                        Box::new(HirExpr::Var(parameter.clone())),
+                                        payload.clone(),
+                                    )
+                                } else {
+                                    HirExpr::OptionalValue(
+                                        Box::new(HirExpr::Var(parameter.clone())),
+                                        payload.clone(),
+                                    )
+                                };
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                                    vec![present],
+                                )
                             } else {
                                 HirExpr::Lit(HirLit::Str(type_name.into()))
                             };
