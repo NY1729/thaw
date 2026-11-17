@@ -1487,14 +1487,17 @@ impl Interp {
                     .filter(|k| !raw_set.contains(&**k))
                     .map(|k| Value::Str(k.into()))
                     .collect();
+                // an Array's `length` follows its indices and leads the named keys (V8 order)
+                if let Value::Object(o) = &t {
+                    if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                        names.push(Value::str("length"));
+                    }
+                }
                 names.extend(order_keys(raw).into_iter().map(|k| Value::Str(k.into())));
                 if matches!(t, Value::Str(_)) {
                     names.push(Value::str("length"));
                 }
                 if let Value::Object(o) = &t {
-                    if matches!(&*o.kind.borrow(), Kind::Array(_)) {
-                        names.push(Value::str("length"));
-                    }
                     // A closure lists `length` then `name` first, as in V8, whether each is synthesized or a
                     // real `Prop`. Natives are a ceiling: they get no synthesized `length`/`name`.
                     // A sloppy plain function adds `arguments` and `caller` to that head, as V8 does.
