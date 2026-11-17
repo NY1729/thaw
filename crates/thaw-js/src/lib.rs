@@ -39,6 +39,8 @@ mod co;
 mod co_thread;
 mod collections;
 mod compile;
+#[allow(dead_code)] // not wired into co.rs yet (PR 3 of plan-q9-coroutines)
+mod costack;
 mod date;
 mod dns;
 mod esm;
