@@ -12,7 +12,7 @@ Plan: `designs/plan-q9-aot-parity-harness.md` (PR 1). Scope is in its section 5.
 - `gen_probes.py`: writes the programs, a `lib.ts`/`lib.mts` module fixture, and `manifest.json` (probes, findings, counts).
 - `aot_run.py`: Node reference, thaw build/isolation/run per engine, classification, diff, summary.
 - `run.sh`: the entry point (gen, aot_run, coverage). `selftest.sh`: determinism, Node run of every program, classifier and coverage checks.
-- `coverage.py`: API coverage of `manifest.json` and the shrink-only ratchet. `coverage-baseline.json`: the untouched `id#mode` pairs. `modules.txt`: the 55 thaw-js builtin modules (copied from `THAW_JS_BUILTIN_MODULES` in `crates/thaw-cli/src/registry_integration/thaw_js_routing.rs`; selftest checks they match).
+- `coverage.py`: API coverage of `manifest.json` and the shrink-only ratchet. `coverage-baseline.json`: the untouched `id#mode` pairs. `modules.txt`: the 58 thaw-js builtin modules (copied from `THAW_JS_BUILTIN_MODULES` in `crates/thaw-cli/src/registry_integration/thaw_js_routing.rs`; selftest checks they match).
 - `gen_modules.py`, `modules_report.py`, `modules-shards.txt`: the module suite (see "Module surface").
 - `known-gaps.json`, `waivers.json`: same schema as `tools/parity`. `skip.txt`: probe-name regexes with a reason
 line each. gen_probes.py drops them at generation (manifest `skipped` counts them) and diff.py drops them from both sides.
@@ -117,7 +117,7 @@ d.ts (`parity-aot-dts`). Job `shards` (matrix s1 to s4, split by family) runs bo
 
 ## Module surface
 
-`modules.txt` (the 57 thaw-js builtin modules) is inventoried by `module_inv.js` under Node 22 into
+`modules.txt` (the 58 thaw-js builtin modules) is inventoried by `module_inv.js` under Node 22 into
 `module_table.tsv` (module, export, kind, arity, vtype, alias; kinds function, class, constant, primitive, object,
 accessor). `check_module_table.sh` regenerates it and fails on a format error or a drifted row; rows that exist
 in only one of the two (version-dependent exports) print WARN. Regenerate with

@@ -671,6 +671,7 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:cluster",
     "node:sys",
     "node:sea",
+    "node:sqlite",
 ];
 
 

@@ -1185,7 +1185,9 @@ fn build_with_native_mode_routed(
     let thaw_js_intl = compiler.uses_thaw_js() && runtime_features.contains("intl");
     // `wasm` programs (WebAssembly, node:wasi) get thaw-js's `wasi` feature, which implies `wasm`.
     let thaw_js_wasm = compiler.uses_thaw_js() && runtime_features.contains("wasm");
-    let thaw_js_features: Vec<&str> = [(thaw_js_intl, "intl"), (thaw_js_wasm, "wasi")]
+    // `node:sqlite` programs get thaw-js's `sqlite` feature (bundled SQLite); other programs link none of it.
+    let thaw_js_sqlite = compiler.uses_thaw_js() && runtime_features.contains("sqlite");
+    let thaw_js_features: Vec<&str> = [(thaw_js_intl, "intl"), (thaw_js_wasm, "wasi"), (thaw_js_sqlite, "sqlite")]
         .into_iter()
         .filter_map(|(on, feature)| on.then_some(feature))
         .collect();

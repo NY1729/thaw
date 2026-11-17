@@ -28,6 +28,8 @@ mod http;
 mod network;
 #[path = "builtins/streams.rs"]
 mod streams;
+#[path = "builtins/sqlite.rs"]
+mod sqlite;
 #[path = "builtins/system.rs"]
 mod system;
 #[path = "builtins/testing.rs"]
@@ -45,4 +47,5 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         .or_else(|| diagnostics::source(name))
         .or_else(|| network::source(name))
         .or_else(|| system::source(name))
+        .or_else(|| sqlite::source(name))
 }

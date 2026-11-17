@@ -611,6 +611,28 @@ pub(crate) const MODULE_LOADER_GLOBALS: [&str; 2] = [
     "__thaw_bundle_create_require",
 ];
 
+/// The `node:sqlite` natives (sqlite/mod.rs NATIVES). They are installed only under the `sqlite` cargo feature, so
+/// the scanner (which builds an Interp without features) names them itself, as it does the loader globals above.
+pub(crate) const SQLITE_NATIVE_GLOBALS: [&str; 17] = [
+    "__thaw_sqlite_open",
+    "__thaw_sqlite_close",
+    "__thaw_sqlite_is_open",
+    "__thaw_sqlite_is_transaction",
+    "__thaw_sqlite_location",
+    "__thaw_sqlite_exec",
+    "__thaw_sqlite_prepare",
+    "__thaw_sqlite_stmt_start",
+    "__thaw_sqlite_stmt_step",
+    "__thaw_sqlite_stmt_reset",
+    "__thaw_sqlite_stmt_run",
+    "__thaw_sqlite_stmt_get",
+    "__thaw_sqlite_stmt_all",
+    "__thaw_sqlite_stmt_columns",
+    "__thaw_sqlite_stmt_source_sql",
+    "__thaw_sqlite_stmt_expanded_sql",
+    "__thaw_sqlite_stmt_set_flag",
+];
+
 /// Findings a native-addon package bundle carries on thaw-js by design. Its `.node` is loaded through thaw-js
 /// `require` (host.rs `addon_of`; any `*.node` name returns the addon). `__non_webpack_require__` is the node-gyp-build
 /// probe, used only when `__webpack_require__` is a function (never on thaw-js). A dynamic `require` is that loader
@@ -650,6 +672,7 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
         .into_iter()
         .filter(|n| n != "File")
         .collect();
+    globals.extend(SQLITE_NATIVE_GLOBALS.iter().map(|g| g.to_string()));
     // the loader globals host.rs installs for node:module (see install_module_loader)
     let module_loader = parts.entry == "node:module";
     if module_loader {

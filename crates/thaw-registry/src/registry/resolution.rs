@@ -268,6 +268,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "sea" => {
             "export declare function isSea(): boolean;\nexport declare function getAsset(key: string, encoding?: string): JsValue;\nexport declare function getRawAsset(key: string): JsValue;\nexport declare function getAssetAsBlob(key: string, options?: Json): JsValue;\nexport declare function getAssetKeys(): Json;\n"
         }
+        "sqlite" => {
+            "export declare class DatabaseSync { constructor(path: any, options?: any); open(): void; close(): void; exec(sql: string): void; prepare(sql: string): StatementSync; function(name: string, ...rest: JsValue[]): void; aggregate(name: string, options: any): void; location(dbName?: string): string | null; readonly isOpen: boolean; readonly isTransaction: boolean; enableLoadExtension(allow: boolean): void; loadExtension(path: string, entryPoint?: string): void; createSession(options?: any): any; applyChangeset(changeset: JsValue, options?: any): boolean; }\nexport declare class StatementSync { run(...params: JsValue[]): JsValue; get(...params: JsValue[]): JsValue; all(...params: JsValue[]): JsValue; iterate(...params: JsValue[]): JsValue; columns(): JsValue; setReadBigInts(on: boolean): void; setReturnArrays(on: boolean): void; setAllowBareNamedParameters(on: boolean): void; setAllowUnknownNamedParameters(on: boolean): void; readonly sourceSQL: string; readonly expandedSQL: string; }\nexport declare const constants: Json;\nexport declare function backup(source: DatabaseSync, path: any, options?: any): Promise<number>;\n"
+        }
         "wasi" => {
             "export declare class WASI { constructor(options: any); wasiImport: JsValue; getImportObject(): JsValue; start(instance: JsValue): number | undefined; initialize(instance: JsValue): void; }\n"
         }
