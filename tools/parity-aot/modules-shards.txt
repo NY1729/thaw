@@ -59,3 +59,4 @@ m3 node:trace_events
 m3 node:test
 m3 node:test/reporters
 m3 node:sea
+m3 node:sqlite

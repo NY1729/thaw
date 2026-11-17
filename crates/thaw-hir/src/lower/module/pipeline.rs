@@ -1136,7 +1136,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
     let (mut interfaces, generic_interfaces) = resolve_interfaces(module)?;
     let specialized = specialize_generic_classes(module, &interfaces, &generic_interfaces)
         .map_err(|error| {
-            if error.contains("generics are not supported yet") {
+            if error.contains("generics are not supported yet")
+                || error.contains("unsupported type reference `")
+            {
                 format!(
                     "recursive or unresolved generic class type cannot use Thaw's fixed-size native layout: {error}"
                 )
@@ -1146,7 +1148,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         })?;
     if let Some(specialized) = specialized {
         return lower_normalized_module(&specialized).map_err(|error| {
-            if error.contains("generics are not supported yet") {
+            if error.contains("generics are not supported yet")
+                || error.contains("unsupported type reference `")
+            {
                 format!(
                     "recursive or unresolved generic class type cannot use Thaw's fixed-size native layout: {error}"
                 )

@@ -220,7 +220,7 @@ console.log([rd.enumerable, rd.writable].join(','));
 console.log(process.version === 'v' + v.node);"
         ),
         "node,acorn,ada,amaro,ares,brotli,cjs_module_lexer,cldr,icu,llhttp,modules,napi,nbytes,ncrypto,nghttp2,openssl,simdjson,simdutf,sqlite,tz,undici,unicode,uv,uvwasi,v8,zlib,zstd\
-|{\"node\":\"22.23.1\",\"acorn\":\"8.16.0\",\"ada\":\"2.9.2\",\"amaro\":\"1.1.8\",\"ares\":\"1.34.6\",\"brotli\":\"1.2.0\",\"cjs_module_lexer\":\"2.2.0\",\"cldr\":\"48.0\",\"icu\":\"78.2\",\"llhttp\":\"9.4.2\",\"modules\":\"127\",\"napi\":\"10\",\"nbytes\":\"0.1.3\",\"ncrypto\":\"0.0.1\",\"nghttp2\":\"1.69.0\",\"openssl\":\"3.5.9\",\"simdjson\":\"4.5.0\",\"simdutf\":\"6.4.2\",\"sqlite\":\"3.51.2\",\"tz\":\"2025c\",\"undici\":\"6.27.0\",\"unicode\":\"17.0\",\"uv\":\"1.52.1\",\"uvwasi\":\"0.0.23\",\"zlib\":\"1.3.1.zlib-ng\",\"zstd\":\"1.5.7\"}\
+|{\"node\":\"22.23.1\",\"acorn\":\"8.16.0\",\"ada\":\"2.9.2\",\"amaro\":\"1.1.8\",\"ares\":\"1.34.6\",\"brotli\":\"1.2.0\",\"cjs_module_lexer\":\"2.2.0\",\"cldr\":\"48.0\",\"icu\":\"78.2\",\"llhttp\":\"9.4.2\",\"modules\":\"127\",\"napi\":\"10\",\"nbytes\":\"0.1.3\",\"ncrypto\":\"0.0.1\",\"nghttp2\":\"1.69.0\",\"openssl\":\"3.5.9\",\"simdjson\":\"4.5.0\",\"simdutf\":\"6.4.2\",\"sqlite\":\"3.51.3\",\"tz\":\"2025c\",\"undici\":\"6.27.0\",\"unicode\":\"17.0\",\"uv\":\"1.52.1\",\"uvwasi\":\"0.0.23\",\"zlib\":\"1.3.1.zlib-ng\",\"zstd\":\"1.5.7\"}\
 |v8 ok|strings|true,false,true\
 |name,lts,sourceUrl,headersUrl\
 |{\"name\":\"node\",\"lts\":\"Jod\",\"sourceUrl\":\"https://nodejs.org/download/release/v22.23.1/node-v22.23.1.tar.gz\",\"headersUrl\":\"https://nodejs.org/download/release/v22.23.1/node-v22.23.1-headers.tar.gz\"}\

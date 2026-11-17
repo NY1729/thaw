@@ -4953,6 +4953,76 @@
       "name": "http.get chunks -> Buffer.concat -> zlib.gunzipSync round trip",
       "expect": "matched",
       "source": "import * as http from 'node:http';\nimport * as zlib from 'node:zlib';\nfunction main(): void {\n  const original = 'chunked gzip body line\\n'.repeat(50);\n  const gz: Buffer = zlib.gzipSync(Buffer.from(original));\n  const srv = http.createServer((req: any, res: any) => {\n    res.writeHead(200, { 'content-type': 'application/gzip' });\n    const step = Math.ceil(gz.length / 4);\n    for (let i = 0; i < gz.length; i += step) res.write(gz.subarray(i, i + step));\n    res.end();\n  });\n  srv.listen(0, '127.0.0.1', (): void => {\n    const port = (srv.address() as any).port;\n    http.get({ host: '127.0.0.1', port, path: '/' }, (res: any): void => {\n      const chunks: Buffer[] = [];\n      res.on('data', (chunk: Buffer): void => { chunks.push(chunk); });\n      res.on('end', (): void => {\n        const text = zlib.gunzipSync(Buffer.concat(chunks)).toString('utf8');\n        console.log(res.statusCode, text.split('\\n').length, text.slice(0, 22), text === original);\n        srv.close();\n      });\n    });\n  });\n}\n"
+    },
+    {
+      "name": "node:sqlite in-memory exec insert and select",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, score REAL)');\n  const insert = db.prepare('INSERT INTO users (name, score) VALUES (?, ?)');\n  insert.run('ada', 9.5);\n  insert.run('grace', 7);\n  const rows: any[] = db.prepare('SELECT id, name, score FROM users ORDER BY id').all();\n  for (const row of rows) console.log(row.id, row.name, row.score, typeof row.score);\n  console.log(rows.length, Object.getPrototypeOf(rows[0]) === null);\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite parameter styles ?, ?N, $n, :n, @n",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  console.log(JSON.stringify(db.prepare('SELECT ?1 AS a, ?2 AS b').get(1, 'two')));\n  console.log(JSON.stringify(db.prepare('SELECT $n AS n').get({ n: 3 })));\n  console.log(JSON.stringify(db.prepare('SELECT :x AS x, @y AS y').get({ x: 'p', y: 'q' })));\n  console.log(JSON.stringify(db.prepare('SELECT ? AS a, ? AS b').get(1, null)));\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite unknown named parameter is rejected unless allowed",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  try { db.prepare('SELECT :a AS a').get({ b: 1 }); } catch (e: any) { console.log(e.code, e.message); }\n  const s = db.prepare('SELECT :a AS a');\n  s.setAllowUnknownNamedParameters(true);\n  console.log(JSON.stringify(s.get({ b: 1 })));\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite run() result shape and lastInsertRowid",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE t (v TEXT)');\n  const ins = db.prepare('INSERT INTO t (v) VALUES (?)');\n  console.log(JSON.stringify(ins.run('a')));\n  console.log(JSON.stringify(ins.run('b')));\n  const r = ins.run('c');\n  console.log(r.lastInsertRowid, r.changes, Object.keys(r).join(','));\n  console.log(db.prepare('UPDATE t SET v = v || ?').run('!').changes);\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite get() without a row, all() and iterate() with early return",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE n (i INTEGER); INSERT INTO n VALUES (1), (2), (3), (4)');\n  const stmt = db.prepare('SELECT i FROM n WHERE i > ? ORDER BY i');\n  console.log(stmt.get(10) === undefined, stmt.all(2).length);\n  const seen: number[] = [];\n  for (const row of stmt.iterate(0) as any) { seen.push(row.i); if (seen.length === 2) break; }\n  console.log(seen.join(','));\n  const it: any = stmt.iterate(3);\n  console.log(JSON.stringify(it.next()), JSON.stringify(it.next()), JSON.stringify(it.return()));\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite setReadBigInts keeps integers above 2^53 exact",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  const stmt = db.prepare('SELECT 9007199254740993 AS big, 42 AS small');\n  try { stmt.get(); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  stmt.setReadBigInts(true);\n  console.log(String(stmt.get().big), typeof stmt.get().big, String(stmt.get().small), typeof stmt.get().small);\n  const echo = db.prepare('SELECT ? AS v');\n  echo.setReadBigInts(true);\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite blobs round trip as Uint8Array and empty blobs",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE b (data BLOB)');\n  const put = db.prepare('INSERT INTO b VALUES (?)');\n  put.run(new Uint8Array([0, 1, 254, 255]));\n  put.run(new Uint8Array(0));\n  const rows: any[] = db.prepare('SELECT data, typeof(data) AS t FROM b ORDER BY rowid').all();\n  console.log(Array.from(rows[0].data).join(','), rows[0].t);\n  console.log(rows[1].data.length, rows[1].t);\n  console.log(db.prepare(\"SELECT typeof(x'') AS t\").get().t);\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite NULL, real, text and infinite values",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  const row: any = db.prepare('SELECT ? AS n, ? AS r, ? AS t, ? AS i, ? AS inf').get(null, 1.5, 'hello', 7, Infinity);\n  console.log(row.n, row.r, row.t, row.i, row.inf);\n  console.log(JSON.stringify(db.prepare('SELECT typeof(?) AS a, typeof(?) AS b').get(2, 'x')));\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite transactions and isTransaction",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE t (v INTEGER)');\n  console.log(db.isTransaction);\n  db.exec('BEGIN');\n  console.log(db.isTransaction);\n  db.prepare('INSERT INTO t VALUES (?)').run(1);\n  db.exec('ROLLBACK');\n  console.log(db.isTransaction, db.prepare('SELECT count(*) AS n FROM t').get().n);\n  db.exec('BEGIN');\n  db.prepare('INSERT INTO t VALUES (?)').run(2);\n  db.exec('COMMIT');\n  console.log(db.isTransaction, db.prepare('SELECT v FROM t').all().map((r: any) => r.v).join(','));\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite constraint and syntax errors carry errcode and errstr",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE u (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE)');\n  db.exec(\"INSERT INTO u (email) VALUES ('a@x')\");\n  try { db.exec(\"INSERT INTO u (email) VALUES ('a@x')\"); } catch (e: any) { console.log(e.code, e.errcode, e.errstr, e.message); }\n  try { db.exec('INSERT INTO u (email) VALUES (NULL)'); } catch (e: any) { console.log(e.code, e.errcode, e.errstr, e.message); }\n  try { db.prepare('SELEC 1'); } catch (e: any) { console.log(e.code, e.errcode, e.errstr, e.message); }\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite closed database and finalized statement errors",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  const stmt = db.prepare('SELECT 1 AS one');\n  console.log(db.isOpen, JSON.stringify(stmt.get()));\n  db.close();\n  console.log(db.isOpen);\n  try { db.close(); } catch (e: any) { console.log(e.code, e.message); }\n  try { stmt.get(); } catch (e: any) { console.log(e.code, e.message); }\n  try { db.exec('SELECT 1'); } catch (e: any) { console.log(e.code, e.message); }\n  db.open();\n  console.log(db.isOpen);\n  try { db.open(); } catch (e: any) { console.log(e.code, e.message); }\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite columns(), sourceSQL, expandedSQL and constants",
+      "expect": "matched",
+      "source": "import { DatabaseSync, constants } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE p (id INTEGER, label TEXT, weight REAL, body BLOB)');\n  const stmt = db.prepare('SELECT id, label AS shown, weight, body FROM p WHERE id = ?');\n  console.log(stmt.sourceSQL);\n  console.log(stmt.expandedSQL);\n  stmt.get(7);\n  console.log(stmt.expandedSQL);\n  console.log(JSON.stringify(stmt.columns()));\n  console.log(constants.SQLITE_CHANGESET_CONFLICT, constants.SQLITE_CHANGESET_FOREIGN_KEY, Object.keys(constants).length);\n  db.close();\n}"
+    },
+    {
+      "name": "node:sqlite constructor and call argument errors",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  try { new (DatabaseSync as any)(); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  try { new (DatabaseSync as any)(':memory:', 5); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  try { new DatabaseSync(':memory:', { readOnly: 'yes' } as any); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  try { new DatabaseSync(':memory:').exec(42 as any); } catch (e: any) { console.log(e.name, e.code, e.message); }\n}"
+    },
+    {
+      "name": "node:sqlite file database reopened read-only",
+      "expect": "matched",
+      "source": "import { DatabaseSync } from 'node:sqlite';\nimport * as fs from 'node:fs';\nimport * as os from 'node:os';\nimport * as path from 'node:path';\nfunction main(): void {\n  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlite-compat-'));\n  const file = path.join(dir, 'data.db');\n  const db = new DatabaseSync(file);\n  db.exec(\"CREATE TABLE k (v TEXT); INSERT INTO k VALUES ('one')\");\n  console.log(String(db.location()) === file, db.isOpen);\n  db.close();\n  const ro = new DatabaseSync(file, { readOnly: true });\n  console.log((ro.prepare('SELECT v FROM k').get() as any).v);\n  try { ro.exec(\"INSERT INTO k VALUES ('two')\"); } catch (e: any) { console.log(e.code, e.errcode, e.errstr); }\n  ro.close();\n  fs.rmSync(dir, { recursive: true, force: true });\n}"
     }
   ]
 }
