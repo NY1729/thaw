@@ -670,8 +670,7 @@ const NODE22_BUILTIN_MODULES: &[&str] = &[
 #[test]
 fn thaw_js_builtin_allowlist_matches_node22_builtin_modules() {
     // Prefix-only builtins Node 22 loads but does not list in builtinModules.
-    // `node:sqlite` is deliberately absent from both sides: a new module, out of scope here.
-    const PREFIX_ONLY: &[&str] = &["node:test", "node:test/reporters", "node:sea"];
+    const PREFIX_ONLY: &[&str] = &["node:test", "node:test/reporters", "node:sea", "node:sqlite"];
     for name in NODE22_BUILTIN_MODULES {
         let module = format!("node:{name}");
         assert!(THAW_JS_BUILTIN_MODULES.contains(&module.as_str()), "{module}");
@@ -683,7 +682,7 @@ fn thaw_js_builtin_allowlist_matches_node22_builtin_modules() {
             "{module} is allowlisted but is not a Node 22 builtin"
         );
     }
-    assert!(!THAW_JS_BUILTIN_MODULES.contains(&"node:sqlite"));
+    assert!(THAW_JS_BUILTIN_MODULES.contains(&"node:sqlite"));
 }
 
 #[test]
@@ -1744,5 +1743,57 @@ fn nested_namespace_alias_class_routes_to_thaw_js_without_linking_quickjs() {
         !bytes.windows(8).any(|window| window == b"rquickjs"),
         "QuickJS was linked"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn node_sqlite_bundle_scans_clean() {
+    let bundle = thaw_registry::builtin_bundle_with("node:sqlite", &[]).unwrap();
+    let report = thaw_js::scan::scan_bundle(&bundle).unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    assert_eq!(report.entry, "node:sqlite");
+}
+
+#[test]
+fn node_sqlite_program_builds_and_runs() {
+    // Expected stdout is what Node 22.23.1 prints for the same program (its warning goes to stderr).
+    const EXPECTED: &str = "1 1\n2\n2 ann 1,2,3 null\ntwo\n9007199254740993\nundefined\nfalse\n";
+    let dir = std::env::temp_dir().join(format!("thaw-cli-node-sqlite-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { DatabaseSync } from 'node:sqlite';
+function main(): void {
+  const db = new DatabaseSync(':memory:');
+  db.exec('create table t(id integer primary key, name text, data blob)');
+  const insert = db.prepare('insert into t (name, data) values (?, ?)');
+  const first = insert.run('ann', new Uint8Array([1, 2, 3]));
+  console.log(first.changes, first.lastInsertRowid);
+  console.log(insert.run('bob', null).lastInsertRowid);
+  const rows: any[] = db.prepare('select id, name, data from t order by id').all();
+  console.log(rows.length, rows[0].name, Array.from(rows[0].data).join(','), rows[1].data);
+  console.log(db.prepare('select :x as x, $y as y').get({ x: 1, y: 'two' }).y);
+  const big = db.prepare('select 9007199254740993 as n');
+  big.setReadBigInts(true);
+  console.log(String(big.get().n));
+  console.log(db.prepare('select 1 as a where 0').get());
+  db.close();
+  console.log(db.isOpen);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &dir.join("registry"), true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    // SQLite is linked because the program imports node:sqlite (its file-header string is in the archive)
+    let bytes = std::fs::read(&output).unwrap();
+    assert!(bytes.windows(15).any(|window| window == b"SQLite format 3"), "SQLite not linked");
+    let result = Command::new(&output).output().unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), EXPECTED);
+    assert_eq!(stderr.matches("ExperimentalWarning: SQLite is an experimental feature").count(), 1, "{stderr}");
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -1021,6 +1021,10 @@ node:sea	getAssetAsBlob	function	2	function	-
 node:sea	getAssetKeys	function	0	function	-
 node:sea	getRawAsset	function	1	function	-
 node:sea	isSea	function	0	function	-
+node:sqlite	DatabaseSync	class	0	function	-
+node:sqlite	StatementSync	class	0	function	-
+node:sqlite	backup	function	2	function	-
+node:sqlite	constants	object	-	object	-
 node:stream	Duplex	class	1	function	-
 node:stream	PassThrough	class	1	function	-
 node:stream	Readable	class	1	function	-

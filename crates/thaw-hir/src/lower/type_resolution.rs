@@ -213,6 +213,16 @@ fn dictionary_hir_type(value: HirType) -> HirType {
     HirType::Dictionary(Box::new(if matches!(value, HirType::Array(_) | HirType::Union(_) | HirType::Dictionary(_)) { HirType::Json } else { value }))
 }
 
+/// Dotted spelling of a type name for diagnostics (`M.URL`).
+fn entity_name_text(name: &swc_ecma_ast::TsEntityName) -> String {
+    match name {
+        swc_ecma_ast::TsEntityName::Ident(id) => id.sym.to_string(),
+        swc_ecma_ast::TsEntityName::TsQualifiedName(qualified) => {
+            format!("{}.{}", entity_name_text(&qualified.left), qualified.right.sym)
+        }
+    }
+}
+
 fn lower_ts_type(
     ty: &TsType,
     interfaces: &HashMap<Symbol, HirType>,
@@ -918,6 +928,10 @@ fn lower_ts_type(
                     interfaces,
                     generic_interfaces,
                 )?),
+                _ if ref_name.is_none() => Err(format!(
+                    "unsupported type reference `{}`",
+                    entity_name_text(&ty_ref.type_name)
+                )),
                 _ => Err("unsupported type reference (generics are not supported yet)".into()),
             }
         }
