@@ -27,11 +27,13 @@ and listed in the report. Without --waivers every gap is real.
 import argparse, glob, json, os, re, sys
 
 NORMALISERS = [
+    (re.compile(r"[^\s'\"]*/pa-tmp/[^\s'\"]*"), '<tmp>'),   # tools/parity-aot PA_TMP scratch dir (per side)
     (re.compile(r'^THROW (\S+?)(: .*)?$'), r'THROW \1'),   # messages differ by engine; keep the error name
     (re.compile(r'/home/[^\s\'"]*'), '<path>'),
     (re.compile(r'\b0x[0-9a-fA-F]+\b'), '<addr>'),
     (re.compile(r'\b\d+(\.\d+)?ms\b'), '<ms>'),
     (re.compile(r'_idleStart"?: ?-?\d+'), '_idleStart: <ms>'),   # Timeout inspect: wall-clock ms since start
+    (re.compile(r"\b(pid|ppid)(['\"]?\s*[:=]\s*)\d+"), r'\1\2<pid>'),   # process ids (module probes)
 ]
 
 def normalise(value):

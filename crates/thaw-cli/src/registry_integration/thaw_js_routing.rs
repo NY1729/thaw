@@ -167,31 +167,16 @@ fn thaw_js_user_dynamic_from(value: Option<&str>) -> bool {
     value != Some("0")
 }
 
-/// `THAW_JS_ROUTE_ALL=1` routes every program through thaw-js, not only packages and dynamic-code
-/// programs (a diagnostic opt-in: a build that still needs QuickJS falls back and says why).
+/// Route-all is on by default: every program is attempted on thaw-js, not only packages and dynamic-code
+/// programs. A build that still needs QuickJS falls back and records why. `THAW_JS_ROUTE_ALL=0` opts out
+/// (only the exact value `0` does, like `THAW_JS_USER_DYNAMIC`). Ignored when thaw-js itself is off.
 fn thaw_js_route_all_enabled() -> bool {
-    #[cfg(test)]
-    if ROUTE_ALL_OVERRIDE.with(|cell| cell.get()) {
-        return true;
-    }
     thaw_js_route_all_from(std::env::var("THAW_JS_ROUTE_ALL").ok().as_deref())
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Test-only per-thread `THAW_JS_ROUTE_ALL` override: parallel tests must not share the process env.
-    static ROUTE_ALL_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Sets the calling thread's route-all override (tests only; the build reads it on the same thread).
-#[cfg(test)]
-fn set_thaw_js_route_all_override(on: bool) {
-    ROUTE_ALL_OVERRIDE.with(|cell| cell.set(on));
-}
-
-/// Only `1` routes every program; unset or any other value keeps the routing rules as they are.
+/// Only an explicit `0` turns route-all off; unset or any other value routes every program.
 fn thaw_js_route_all_from(value: Option<&str>) -> bool {
-    value == Some("1")
+    value != Some("0")
 }
 
 /// A routed program whose own source needs the dynamic host, built without `THAW_JS_USER_DYNAMIC=1`,

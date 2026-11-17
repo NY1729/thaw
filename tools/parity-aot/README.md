@@ -13,6 +13,7 @@ Plan: `designs/plan-q9-aot-parity-harness.md` (PR 1). Scope is in its section 5.
 - `aot_run.py`: Node reference, thaw build/isolation/run per engine, classification, diff, summary.
 - `run.sh`: the entry point (gen, aot_run, coverage). `selftest.sh`: determinism, Node run of every program, classifier and coverage checks.
 - `coverage.py`: API coverage of `manifest.json` and the shrink-only ratchet. `coverage-baseline.json`: the untouched `id#mode` pairs. `modules.txt`: the 55 thaw-js builtin modules (copied from `THAW_JS_BUILTIN_MODULES` in `crates/thaw-cli/src/registry_integration/thaw_js_routing.rs`; selftest checks they match).
+- `gen_modules.py`, `modules_report.py`, `modules-shards.txt`: the module suite (see "Module surface").
 - `known-gaps.json`, `waivers.json`: same schema as `tools/parity`. `skip.txt`: probe-name regexes with a reason
 line each. gen_probes.py drops them at generation (manifest `skipped` counts them) and diff.py drops them from both sides.
 
@@ -45,7 +46,10 @@ different THROW name); `WRONG-VALUE`; `LEAK` (thaw output has `__thaw_js_handle_
 (no output block); `CRASH` / `HANG` (a probe that kills or hangs its binary when rerun alone); `REJECT` (compile
 diagnostic naming the probe, or no location after bisect); `REJECT-EXPECTED` (a `REJECT` where Node also throws a
 TypeError for a non-function callback: `(1 as any)` to an array or promise method, documented in `aot_run.py`);
-`REJECT?` (build budget exhausted); `UNVERIFIED` (rerun budget exhausted).
+`REJECT?` (build budget exhausted); `UNVERIFIED` (rerun budget exhausted). A `REJECT` entry in `classes.json` also
+carries `sub`: `missing-export`, `type` or `other`, from the diagnostic text (`aot_run.reject_kind`, a heuristic:
+`has no exported member` or `does not exist on type` is missing-export; `not assignable`, `Argument of type`, `No overload`
+is type; anything else is other).
 
 MSG is gated by error name only (`diff.py`). The summary lists the text differences in a separate non-gating
 section, grouped by thrown name.
@@ -101,10 +105,15 @@ missing thaw binary, diff.py harness error). `diff.py` exit 1 means gaps not in 
 
 ## CI
 
-`.github/workflows/parity-aot.yml` runs on `workflow_dispatch` or when the `parity-aot` label is added to a PR.
-Job `build` builds the release thaw CLI, runs `selftest.sh`, writes the API coverage (full manifest, no thaw),
-and uploads the binary as `thaw-release-bin`. Job `shards` (matrix s1 to s4, split by family) downloads the binary and
-runs both engines per shard, writing `parity-aot-results-<shard>` artifacts. Both jobs are `continue-on-error`.
+`.github/workflows/parity-aot.yml` runs on `workflow_dispatch` or when a label is added to a PR. Label `parity-aot` runs
+the ECMAScript suite; label `parity-aot-modules` runs the module suite. The dispatch input `suite` is `ecmascript`
+(default, unchanged), `modules` or `all`. Job `build` builds the release thaw CLI, runs `selftest.sh`, writes the API
+coverage (full manifest, no thaw), uploads the binary as `thaw-release-bin`, and for the module suite dumps the module
+d.ts (`parity-aot-dts`). Job `shards` (matrix s1 to s4, split by family) runs both engines per shard, writing
+`parity-aot-results-<shard>`. Job `module-shards` (matrix m1 to m3, `modules-shards.txt`) runs thaw-js only and writes
+`parity-aot-modules-<shard>` (manifest, skips, classes, summary). Job `modules-report` merges them into `modules.md`
+(job summary and artifact `parity-aot-modules-report`, plus the merged manifest and coverage). All jobs are
+`continue-on-error` in this first run.
 
 ## Module surface
 
@@ -138,9 +147,24 @@ The categories are in `CATEGORIES` in the script. The stdout summary is a per-mo
 by kind. Probe ids are `mod:<module without node:>.<export>`, the coverage.py universe (`Object.keys` of the module);
 a table row outside that list is NOT-EXPORT, a listed export without a table row is NOT-IN-TABLE.
 
-Not yet wired into run.sh or gen_probes.py. aot_run.py renders each thaw program with gen_probes.render, which has no
-`import * as M` line, so a module program needs aot_run to render `prog["imports"]` before PRELUDE. Until then the
-thaw build of every module program fails, and the programs are for node runs and coverage only.
+Run (PR3): `run.sh` with `PARITY_AOT_SUITE=modules` runs gen_modules.py instead of gen_probes.py, then aot_run.py on
+the result (no coverage run; CI merges the shards). `PARITY_AOT_DTS_DIR` is the d.ts dump, `PARITY_AOT_MODULES` the
+module list (a shard's subset; default modules.txt). Engine: `PARITY_AOT_ENGINES=thaw-js` (QuickJS is being removed).
+aot_run.py renders each program's `imports` lines after the header (`render_program`), so the thaw build sees the same
+`import * as M from "node:x"` line as Node. Every run gets `PA_TMP=<out>/<side>/pa-tmp/<program>` for fixtures; diff.py
+masks that directory to `<tmp>`, and `pid`/`ppid` numbers to `<pid>`. Module programs run under TZ=UTC LANG=C on the
+Node side too. Note: gen_modules.py does not yet use PA_TMP in its argument pool (no fixture path); PR2 follow-up.
+
+Shards: `modules-shards.txt` maps each module to `m1`, `m2` or `m3` (about 470, 500 and 520 exports). selftest.sh P1
+fails unless every module of modules.txt is in exactly one shard.
+
+Report: `modules_report.py SHARD_DIR... --engine thaw-js --out modules.md --json-out F --merge-manifest M --coverage C`.
+A shard directory has `programs/manifest.json`, `programs/skips.json` and `<engine>/classes.json`. The table has one row
+per module: `exports`, `probed`, `hand` (exports with a probe whose api id starts `hand:`; none yet), `skipped` (exports with a skip
+category, NOT-EXPORT / NOT-IN-TABLE excluded), then probe counts MATCH, WRONG-VALUE, REJECT split
+missing-export / type / other, CRASH+HANG, REJECT? and `other` (WRONG-TYPE, LEAK, MISSING, MSG, UNVERIFIED,
+REJECT-EXPECTED). It also lists the top 10 diagnostic families and the skipped exports by reason. `selftest.sh` P3
+checks the report on a synthetic shard.
 
 `testdata/dts/` holds seven d.ts (node:path, events, os, querystring, string_decoder, buffer, url) for selftest only,
 copied from a dump. Other modules are NO-DTS-FILE skips in that run. `selftest_gen.sh` checks determinism, the
