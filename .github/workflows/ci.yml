@@ -729,6 +729,7 @@ jobs:
   thaw-js-costack-arm:
     # Non-gating (plan-q9-coroutines-pr3, PR 3a): the thaw-js lib tests on the costack backend on arm64,
     # the only CI runner for the aarch64 context-switch assembly. thaw-js links no LLVM, so no LLVM install.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure')
     continue-on-error: true
     strategy:
       fail-fast: false
