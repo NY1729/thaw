@@ -26,7 +26,7 @@ import json, os, re, sys
 d = sys.argv[1]
 m = json.load(open(os.path.join(d, "manifest.json")))
 MODES = {"typed", "any", "union", "unknown", "generic", "callback", "json", "module"}
-shape = re.compile(r'^p\("([^"]+)", \(\) => \{ .* \}\);$')
+shape = re.compile(r'^pt?\("([^"]+)", \(\) => \{ .* \}\);$')
 assert m["probes"] <= 6000, m["probes"]
 seen = set()
 for prog in m["programs"]:
@@ -39,7 +39,7 @@ for prog in m["programs"]:
         seen.add(p["name"])
     ts = open(os.path.join(d, prog["name"] + ".ts")).read()
     mts = open(os.path.join(d, prog["name"] + ".mts")).read()
-    assert ts.count("\n  p(\"") == len(prog["probes"]), prog["name"]
+    assert len(re.findall(r'\n  pt?\("', ts)) == len(prog["probes"]), prog["name"]
     assert not re.search(r"^main\(\);", ts, re.M) and mts.rstrip().endswith("main();"), prog["name"]
     assert [p["api"][0] for p in prog["probes"]] == sorted(p["api"][0] for p in prog["probes"]), prog["name"]
 print(f"ok   {m['probes']} probes in {len(m['programs'])} programs, <= 6000 total, api/mode on every row")
@@ -96,7 +96,13 @@ for prog in m["programs"]:
         if any(rx.search(p["name"]) for rx in g.SKIP_RE) or extra.search(p["line"]):
             bad.append(p["name"])
 assert not bad, sorted(set(bad))[:10]
-print("ok   no skipped api id, probe name or body")
+skip_txt = [re.compile(l.strip()) for l in open(os.path.join(here, "skip.txt"), encoding="utf-8")
+            if l.strip() and not l.lstrip().startswith("#")]
+names = [p["name"] for prog in m["programs"] for p in prog["probes"]]
+dropped = [n for n in names if any(rx.search(n) for rx in skip_txt)]
+assert not dropped, dropped[:5]
+assert m["skipped"] > 0, "skip.txt drops nothing: the documented skips are not applied"
+print(f"ok   no skipped api id, probe name or body; skip.txt drops {m['skipped']} probe(s) at generation")
 PY
 check "skip list honoured" 0 $?
 

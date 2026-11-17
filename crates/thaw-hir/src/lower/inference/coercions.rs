@@ -2417,6 +2417,28 @@ impl<'a> FnLowerer<'a> {
             };
         }
         if let HirType::Nullable(payload) = declared {
+            // `c ? new Uint8Array(..) : null` is a `Nullable(JsValue)` (a live handle); a byte
+            // payload converts the present value only, keeping the absence.
+            if let HirType::Nullable(source) = self.infer_expr_type(&value)? {
+                if **payload == HirType::Bytes && matches!(*source, HirType::JsValue | HirType::Json) {
+                    let name = format!("__thaw_nullable_bytes_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let actual = HirType::Nullable(source.clone());
+                    self.scope.insert(name.clone(), actual.clone());
+                    let var = HirExpr::Var(name.clone());
+                    let present = self.coerce_to_declared(
+                        payload.as_ref(),
+                        HirExpr::NullableValue(Box::new(var.clone()), source.as_ref().clone()),
+                    )?;
+                    let result = HirExpr::Conditional(
+                        Box::new(HirExpr::NullableIsNone(Box::new(var), source.as_ref().clone())),
+                        Box::new(HirExpr::NullableNone(payload.as_ref().clone())),
+                        Box::new(HirExpr::NullableSome(Box::new(present), payload.as_ref().clone())),
+                        declared.clone(),
+                    );
+                    return self.wrap_call_argument_bindings(result, &[(name, actual, value)]);
+                }
+            }
             return match self.infer_expr_type(&value)? {
                 HirType::Null => Ok(absent_after(
                     value, HirExpr::NullableNone(payload.as_ref().clone()),

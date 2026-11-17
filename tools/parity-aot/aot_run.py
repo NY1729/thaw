@@ -4,9 +4,10 @@
 Driven by run.sh (which runs gen_probes.py first). For each program in the manifest:
   1. Node runs <program>.mts once (the oracle; a Node failure or a missing header is a harness error, exit 2).
   2. For each engine (THAW_JS_ENGINE value), thaw builds the program with `thaw build <file.ts> -o <bin>`.
-     - Compile diagnostic: if it names a probe line, that probe is dropped and the rest rebuilt (REJECT, the
-       diagnostic text is the reason). Otherwise the probe list is bisected by halves. At most EXTRA_CAP builds
-       beyond the first per program; the rest is REJECT? (unisolated).
+     - Compile diagnostic: every probe line named at an error site is dropped in one pass and the rest rebuilt
+       (REJECT, the diagnostic text is the reason; REJECT-EXPECTED when Node also throws, see expected_reject).
+       A diagnostic with no named site bisects the probe list by halves. At most EXTRA_CAP builds per program;
+       the rest is REJECT? (unisolated).
      - Run: `timeout RUN_TIMEOUT`. A nonzero exit or a timeout means the probes after the last printed header
        are unverified; the header-less tail is rerun one probe per binary (RERUN_CAP builds). The probe that
        still fails alone is CRASH or HANG.
@@ -33,16 +34,21 @@ sys.path.insert(0, PARITY)
 import diff as pdiff  # noqa: E402  (tools/parity/diff.py: block loader, normaliser, gate)
 import gen_probes  # noqa: E402
 
-EXTRA_CAP = 25
+# Builds per program (the first build included). One build per error site plus one clean build when the diagnostics
+# name their sites, so 120 covers about 100 rejected probes in one 40-probe program. Budget = CI wall clock, see README.
+EXTRA_CAP = 120
 RERUN_CAP = 40
 BUILD_TIMEOUT = int(os.environ.get("PARITY_AOT_BUILD_TIMEOUT", "900"))
 RUN_TIMEOUT = int(os.environ.get("PARITY_AOT_RUN_TIMEOUT", "20"))
 MARKER = "__thaw_js_handle_id__"
 DIAG_RE = re.compile(r"([\w./\-]+\.ts):(\d+):\d+")
-PROBE_RE = re.compile(r'^\s*p\("([^"]+)", ')
+PROBE_RE = re.compile(r'^\s*pt?\("([^"]+)", ')
 GAP_CLASSES = ("WRONG-TYPE", "WRONG-VALUE", "LEAK", "MISSING")
 CLASS_ORDER = ("MATCH", "MSG", "WRONG-TYPE", "WRONG-VALUE", "LEAK", "MISSING", "CRASH", "HANG",
-               "REJECT", "REJECT?", "UNVERIFIED")
+               "REJECT", "REJECT-EXPECTED", "REJECT?", "UNVERIFIED")
+# Compile rejects that Node reproduces as a runtime TypeError: a non-function callback (`(1 as any)`) to an array or
+# promise method. The AOT cannot express that call, so the reject is the expected answer, classed apart from REJECT.
+EXPECTED_REJECT_RE = re.compile(r"must be an arrow or function value|is not a function value")
 
 
 class HarnessError(Exception):
@@ -98,13 +104,18 @@ def classify_ran(name, node_raw, thaw_raw):
         n1 = node_raw.split("\n", 1)[0]
         t1 = thaw_raw.split("\n", 1)[0]
         if n1.startswith("THROW") and t1.startswith("THROW") and n1 != t1:
-            return "MSG", t1[:160]
+            return "MSG", f"node {n1[:80]} | thaw {t1[:80]}"
         return "MATCH", ""
     if MARKER in thaw_raw and MARKER not in node_raw:
         return "LEAK", thaw_raw.split("\n", 1)[0][:160]
     if node_raw.startswith("THROW") or thaw_raw.startswith("THROW"):
         return "WRONG-TYPE", thaw_raw.split("\n", 1)[0][:160]
     return "WRONG-VALUE", thaw_raw.split("\n", 1)[0][:160]
+
+
+def expected_reject(node_raw, detail):
+    """True when Node throws and the compile reject is the documented non-function callback reject."""
+    return node_raw.startswith("THROW") and EXPECTED_REJECT_RE.search(detail) is not None
 
 
 def diag_detail(diag):
@@ -149,6 +160,30 @@ class Program:
             diag, ok = "error: build timed out", False
         return ok, diag, stem, texts
 
+    def sites_from_diag(self, diag, stem, texts, names):
+        """Probe names at the error sites of one diagnostic, in order. Only `error` blocks count: a note or warning may
+        point at another line. With no error block, the first located probe of any block counts (old behaviour)."""
+        error_lines, in_error = [], False
+        for line in diag.splitlines():
+            if line and not line[0].isspace():
+                in_error = line.lower().startswith("error")
+            if in_error:
+                error_lines.append(line)
+        found = []
+        for line in error_lines:
+            for m in DIAG_RE.finditer(line):
+                if os.path.basename(m.group(1)) != stem + ".ts":
+                    continue
+                ln = int(m.group(2))
+                if 1 <= ln <= len(texts):
+                    pm = PROBE_RE.match(texts[ln - 1])
+                    if pm and pm.group(1) in names and pm.group(1) not in found:
+                        found.append(pm.group(1))
+        if found:
+            return found
+        first = self.name_from_diag(diag, stem, texts, names)
+        return [first] if first else []
+
     def name_from_diag(self, diag, stem, texts, names):
         for m in DIAG_RE.finditer(diag):
             if os.path.basename(m.group(1)) != stem + ".ts":
@@ -170,10 +205,11 @@ class Program:
         ok, diag, stem, texts = self.build(names)
         if ok:
             return [(names, stem)]
-        bad = self.name_from_diag(diag, stem, texts, names)
-        if bad is not None:
-            self.rejects[bad] = diag_detail(diag)
-            return self.solve([n for n in names if n != bad])
+        bad = self.sites_from_diag(diag, stem, texts, names)
+        if bad:
+            for name in bad:
+                self.rejects[name] = diag_detail(diag)
+            return self.solve([n for n in names if n not in bad])
         if len(names) == 1:
             self.rejects[names[0]] = diag_detail(diag)
             return []
@@ -228,7 +264,8 @@ def run_program(cfg, engine, prog, node_blocks):
             else:
                 classes[name] = ("CRASH", f"exit {rc1}")
     for name, detail in st.rejects.items():
-        classes[name] = ("REJECT", detail)
+        cls = "REJECT-EXPECTED" if expected_reject(node_blocks[name], detail) else "REJECT"
+        classes[name] = (cls, detail)
     for name in st.unisolated:
         classes[name] = ("REJECT?", "unisolated: build budget exhausted")
     order = {n: i for i, n in enumerate(names_all)}
@@ -324,6 +361,17 @@ def summarise(cfg, engines, out):
             lines += ["Top compile rejects (grouped by normalised diagnostic):", ""]
             for detail, k in sorted(reject_groups.items(), key=lambda kv: -kv[1])[:15]:
                 lines.append(f"- {k}x `{detail}`")
+            lines.append("")
+        # MSG probes are gated by error name only (diff.py); the text differences are listed here, not gated.
+        by_name = {}
+        for n, c in res["classes"].items():
+            if c["class"] == "MSG":
+                thrown = c["detail"].split(" | thaw ", 1)[-1].replace("THROW ", "").split(":", 1)[0]
+                by_name.setdefault(thrown, []).append((n, c["detail"]))
+        if by_name:
+            lines += ["Error text differences (non-gating, same error name on both sides):", ""]
+            for thrown, rows in sorted(by_name.items(), key=lambda kv: -len(kv[1])):
+                lines.append(f"- {thrown}: {len(rows)} probe(s), e.g. `{rows[0][0]}` {rows[0][1]}")
             lines.append("")
         findings = sorted((n, c) for n, c in res["classes"].items() if c["class"] in GAP_CLASSES + ("CRASH", "HANG"))
         if findings:

@@ -672,6 +672,58 @@ impl<'a> FnLowerer<'a> {
         self.lower_call_with_class_guard_and_target(call, None, None)
     }
 
+    /// `(b as T).m(...)` / `b!.m(...)` on a `T | null` value: the cast or assertion makes the
+    /// receiver the payload. Lower the operand without the assertion, unwrap it once (a runtime
+    /// null throws Node's `Cannot read properties of null`), bind it to a plain name and
+    /// dispatch the call on that name. Returns `None` when the receiver is not a cast/assertion.
+    fn lower_nullable_receiver_call(
+        &mut self,
+        member: &MemberExpr,
+        call: &CallExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let MemberProp::Ident(property) = &member.prop else {
+            return Ok(None);
+        };
+        let mut operand = member.obj.as_ref();
+        let mut asserted = false;
+        loop {
+            match operand {
+                Expr::Paren(paren) => operand = paren.expr.as_ref(),
+                Expr::TsNonNull(assertion) => {
+                    asserted = true;
+                    operand = assertion.expr.as_ref();
+                }
+                Expr::TsAs(assertion) => {
+                    asserted = true;
+                    operand = assertion.expr.as_ref();
+                }
+                _ => break,
+            }
+        }
+        if !asserted {
+            return Ok(None);
+        }
+        let raw = self.lower_member_receiver(operand)?;
+        // `_inner` keeps `Bytes` in a `Nullable`/`Optional` payload; the plain form erases it.
+        let raw_type = self.infer_expr_type_inner(&raw)?;
+        let (value, payload) =
+            self.unwrap_required_optional_member(raw, raw_type, property.sym.as_ref(), false)?;
+        let name = format!("__thaw_nullable_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), payload.clone());
+        let mut routed = call.clone();
+        if let Callee::Expr(callee) = &mut routed.callee {
+            if let Expr::Member(routed_member) = callee.as_mut() {
+                *routed_member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    name.clone().into(),
+                    member.span,
+                ));
+            }
+        }
+        let result = self.lower_call(&routed)?;
+        self.wrap_call_argument_bindings(result, &[(name, payload, value)]).map(Some)
+    }
+
     /// `res.writeHead(code, { "Name": value, .. })` on a native `ServerResponse` (a response
     /// object exposing `statusCode` + `setHeader`) is `res.statusCode = code` followed by one
     /// `res.setHeader(name, String(value))` per header of the (literal) headers object.
@@ -2944,6 +2996,9 @@ impl<'a> FnLowerer<'a> {
             // synthetic names such as "console.log" and codegen special-cases them.
             Expr::Member(member) => {
                 let Expr::Ident(obj) = member.obj.as_ref() else {
+                    if let Some(lowered) = self.lower_nullable_receiver_call(member, call)? {
+                        return Ok(lowered);
+                    }
                     return Err(format!(
                         "unsupported member call target at source bytes {}..{}",
                         member.span.lo.0, member.span.hi.0
