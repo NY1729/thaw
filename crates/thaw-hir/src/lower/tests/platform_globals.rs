@@ -153,3 +153,31 @@ fn global_object_timer_values_lower_to_the_realm_property() {
         assert!(!debug.contains("TypedClosure"), "{object}.setTimeout lowered to a typed wrapper: {debug}");
     }
 }
+
+// `Date(...)` without `new` and the bare `Date` value are the realm's Date (a mocked clock must
+// reach them, like timers); `new Date`, `Date.now|UTC|parse` and `instanceof Date` keep their lowering.
+
+#[test]
+fn date_call_without_new_lowers_through_the_realm_date_as_a_string() {
+    let call = lowered_debug(
+        "function main(): void { const stamp: string = Date(); const width: number = Date().length; const kind: string = typeof Date(); const args: string = (Date as any)(0); }",
+    );
+    assert!(call.contains("getDynamicValue"), "Date() not read through the realm: {call}");
+    assert!(call.contains("Str(\"Date\")"), "Date() not read through the realm: {call}");
+}
+
+#[test]
+fn bare_date_value_is_the_realm_global_and_identity_compares() {
+    let value = lowered_debug(
+        "function main(): void { const realDate: any = Date; const same: boolean = Date === realDate; }",
+    );
+    assert!(value.contains("Str(\"Date\")"), "bare Date not read through the realm: {value}");
+}
+
+#[test]
+fn native_date_forms_keep_their_lowering() {
+    let native = lowered_debug(
+        "function main(): void { const d: Date = new Date(0); const now: number = Date.now(); const utc: number = Date.UTC(2020, 0, 1); const parsed: number = Date.parse(\"2020-01-01\"); const is: boolean = d instanceof Date; }",
+    );
+    assert!(!native.contains("Str(\"Date\")"), "native Date form read through the realm: {native}");
+}

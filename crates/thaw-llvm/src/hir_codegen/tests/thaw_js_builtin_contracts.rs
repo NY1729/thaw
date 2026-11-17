@@ -136,3 +136,27 @@ fn thaw_js_graph_callback_types_accept_live_parameters_and_nested_callables() {
         Box::new(Void)
     )));
 }
+
+// `Date()` without `new` and the bare `Date` value read the realm's Date. Expected output recorded
+// from node v22.23: `typeof Date()` is "string", a bare `Date` is identical to itself, and `Date(0)`
+// ignores its argument and returns the current date string.
+#[test]
+fn date_call_and_bare_date_value_read_the_realm_date() {
+    let source = r#"function main(): void {
+  const realDate: any = Date;
+  console.log(typeof Date(), Date().length > 20, Date === realDate);
+  console.log(typeof (Date as any)(0), (Date as any)(0).length > 20);
+}"#;
+    assert_eq!(
+        compile_and_run(source, "date_call_realm"),
+        "string true true\nstring true\n"
+    );
+    // The routed thaw-js lane compiles the same realm reads (run-level thaw-js is covered by thaw-cli).
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "date_call_realm_routed");
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
+    assert!(compiler.uses_thaw_js());
+}
