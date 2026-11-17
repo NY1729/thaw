@@ -307,6 +307,34 @@ fn lowers_promise_constructor_then_and_catch_with_contextual_callbacks() {
 }
 
 #[test]
+fn void_and_async_callbacks_are_accepted_for_unknown_and_any_return_slots() {
+    for source in [
+        "declare function __thaw_typed_js_63616c6c(callback: () => unknown): void; function main(): void { __thaw_typed_js_63616c6c((): void => {}); }",
+        "declare function __thaw_typed_js_63616c6c(callback: () => any): void; function main(): void { __thaw_typed_js_63616c6c((): void => {}); }",
+        "declare function __thaw_typed_js_63616c6c(callback: () => unknown): void; function main(): void { __thaw_typed_js_63616c6c((): number => 1); }",
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        lower_module(&module).unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+
+    let void_callback = lower(
+        "declare function __thaw_typed_js_63616c6c(callback: () => unknown): void; function main(): void { __thaw_typed_js_63616c6c((): void => {}); }",
+    );
+    let body = format!(
+        "{:?}",
+        void_callback.functions.iter().find(|function| function.name == "main").unwrap().body
+    );
+    assert!(body.contains("Function([], Json)"), "void callback is adapted to a Json slot: {body}");
+
+    let invalid = thaw_parser::parse_typescript(
+        "declare function __thaw_typed_js_63616c6c(callback: () => string): void; function main(): void { __thaw_typed_js_63616c6c((): void => {}); }",
+    )
+    .unwrap();
+    let error = lower_module(&invalid).unwrap_err();
+    assert!(error.contains("contextual callback declares return type"), "{error}");
+}
+
+#[test]
 fn callback_validation_uses_source_returns_but_retains_physical_storage_types() {
     let invalid = thaw_parser::parse_typescript(
         r#"

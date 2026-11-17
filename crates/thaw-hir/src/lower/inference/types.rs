@@ -122,6 +122,13 @@ fn callable_return_compatible(expected_ret: &HirType, ret: &HirType) -> bool {
     expected_ret == ret || *expected_ret == HirType::Void || *expected_ret == HirType::JsValue
 }
 
+/// Whether a callback return slot takes any returned value: a dynamic
+/// (`unknown`/`any`/JS) slot boxes whatever the callback returns, including
+/// `void`, so a `void`-annotated or `async` callback is acceptable there.
+pub(in crate::lower) fn callback_return_accepts_any(slot: &HirType) -> bool {
+    matches!(slot, HirType::Dynamic | HirType::Void | HirType::Json | HirType::JsValue)
+}
+
 /// Whether a `Function` value of type `actual` can stand in where `declared`
 /// is expected *without an adapter*: same parameter count and per-parameter
 /// physical layout (identical types, or a narrower `Object` whose fields are

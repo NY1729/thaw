@@ -2765,7 +2765,11 @@ impl FnLowerer<'_> {
                         actual = HirType::Promise(Box::new(actual));
                     }
                 }
-                if !callable_return_compatible(&expected, &actual) {
+                let slot = match &expected {
+                    HirType::Promise(inner) => inner.as_ref(),
+                    other => other,
+                };
+                if !callback_return_accepts_any(slot) && !callable_return_compatible(&expected, &actual) {
                     return Err(format!(
                         "contextual callback declares return type {actual:?}, expected {expected:?}"
                     ));
