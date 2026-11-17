@@ -104,6 +104,8 @@ mod web_navigator;
 mod web_performance;
 #[path = "web/streams.rs"]
 mod web_streams;
+#[path = "web/test_mock_timers.rs"]
+mod web_test_mock_timers;
 #[path = "web/text_codec.rs"]
 mod web_text_codec;
 #[path = "web/wasm.rs"]
@@ -1575,6 +1577,7 @@ impl Interp {
             web_event_target::install(&mut it);
             web_messaging::install(&mut it);
             web_performance::install(&mut it);
+            web_test_mock_timers::install(&mut it);
             web_worker_stream::install(&mut it);
             web_worker_wire::install(&mut it);
             web_worker_threads::install(&mut it);

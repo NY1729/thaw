@@ -603,8 +603,6 @@ fn tolerated(feature: &str, key: &str) -> bool {
         || (feature == "method:onSocket" && key.ends_with("agent-base/dist/src/index.js"))
         // node:domain writes `process.domain` on enter/exit; thaw-js has no such property, the write is inert
         || (feature == "builtin:process.domain" && key == "node:domain")
-        // node:test mock timers are host globals reached only through `mock.timers` (blocked on thaw-js by the router)
-        || (feature.starts_with("global:__thaw_test_mock_timers_") && key == "node:test")
 }
 
 /// Globals host.rs installs for the `node:module` entry (`globalThis.<name>` assignments in its prelude).

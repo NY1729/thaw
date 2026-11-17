@@ -272,6 +272,14 @@ fn thaw_js_newly_allowlisted_builtins_route_to_thaw_js() {
 }
 
 #[test]
+fn node_test_mock_timers_route_to_thaw_js() {
+    // mock.timers is served by the thaw-js prelude now (no router blocker): the program stays on thaw-js
+    let bundle = thaw_registry::builtin_bundle_with("node:test", &[]).unwrap();
+    let user = "import { mock } from 'node:test';\nmock.timers.enable({ now: 1000 });\nmock.timers.tick(10);\n";
+    assert!(thaw_js_package_eligible(&builtin_routing_package("node:test"), &bundle, user, &Default::default(), ""));
+}
+
+#[test]
 fn thaw_js_wasi_bundle_routes_without_a_wasm_mention_in_the_program() {
     // the wasi bundle uses WebAssembly: it routes whatever the program says (the build selects the `wasm` feature from the routed bundle)
     let bundle = thaw_registry::builtin_bundle_with("node:wasi", &[]).unwrap();

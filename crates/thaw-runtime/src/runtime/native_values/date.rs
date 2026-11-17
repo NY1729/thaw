@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 /// Converts a day count relative to the Unix epoch (1970-01-01) into a
 /// proleptic-Gregorian `(year, month, day)` triple, `month` and `day` both
 /// 1-based. Howard Hinnant's `civil_from_days` algorithm (public domain),
@@ -234,10 +236,32 @@ fn timestamp_from_local_fields(
     time_clip(seconds as f64 * 1000.0 + fields.milliseconds as f64)
 }
 
+/// Process-wide mock clock (node:test `mock.timers` with the `Date` API). `MOCK_CLOCK_ACTIVE` gates
+/// `MOCK_CLOCK_MS`, which holds the `f64` bits of the mocked epoch milliseconds. Set and cleared by thaw-js
+/// through `thaw_mock_clock_set` / `thaw_mock_clock_clear`; `thaw_date_now` consults it before the wall clock.
+static MOCK_CLOCK_ACTIVE: AtomicBool = AtomicBool::new(false);
+static MOCK_CLOCK_MS: AtomicU64 = AtomicU64::new(0);
+
+#[no_mangle]
+/// Mocks the clock read by `Date.now()` and `new Date()` to `ms` (epoch milliseconds).
+pub extern "C" fn thaw_mock_clock_set(ms: f64) {
+    MOCK_CLOCK_MS.store(ms.to_bits(), Ordering::Relaxed);
+    MOCK_CLOCK_ACTIVE.store(true, Ordering::Release);
+}
+
+#[no_mangle]
+/// Restores the real wall clock for `Date.now()` and `new Date()`.
+pub extern "C" fn thaw_mock_clock_clear() {
+    MOCK_CLOCK_ACTIVE.store(false, Ordering::Release);
+}
+
 #[no_mangle]
 /// The current time as a JavaScript timestamp (milliseconds since the Unix
-/// epoch), matching `Date.now()`.
+/// epoch), matching `Date.now()`. Returns the mocked time while a mock clock is set.
 pub extern "C" fn thaw_date_now() -> f64 {
+    if MOCK_CLOCK_ACTIVE.load(Ordering::Acquire) {
+        return f64::from_bits(MOCK_CLOCK_MS.load(Ordering::Relaxed));
+    }
     time_clip(
         std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1127,6 +1151,18 @@ pub extern "C" fn thaw_date_set_local_milliseconds(timestamp: f64, milliseconds:
 #[cfg(test)]
 mod date_native_tests {
     use super::*;
+
+    // Only this test touches the process-wide mock cell; it always clears it before returning.
+    #[test]
+    fn mock_clock_set_overrides_date_now_then_clear_restores_wall_clock() {
+        thaw_mock_clock_set(1000.0);
+        assert_eq!(thaw_date_now(), 1000.0);
+        thaw_mock_clock_set(-5.5);
+        assert_eq!(thaw_date_now(), -5.5);
+        thaw_mock_clock_clear();
+        let real = thaw_date_now();
+        assert!(real > 1.6e12, "real clock after clear, got {real}");
+    }
 
     #[test]
     fn epoch_is_1970_01_01_thursday() {
