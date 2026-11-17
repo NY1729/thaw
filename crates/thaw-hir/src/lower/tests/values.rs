@@ -4121,3 +4121,22 @@ fn typeof_of_optional_json_ternary_and_holey_parameter_uses_json_runtime_type() 
         );
     }
 }
+
+/// `Object.prototype.toString.call(x)` on an `any` value reads the value's runtime brand
+/// (`__thaw_json_object_tag`); the static `[object Object]` literal is only for a statically typed value.
+#[test]
+fn object_prototype_to_string_of_json_value_reads_runtime_tag() {
+    let program = lower(
+        r#"
+            function main(): void {
+                const v: any = new Map();
+                console.log(Object.prototype.toString.call(v));
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    assert!(
+        source.contains("__thaw_json_object_tag"),
+        "an any-typed operand must be tagged through the runtime brand:\n{source}"
+    );
+}

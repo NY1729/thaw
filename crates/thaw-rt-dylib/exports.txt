@@ -361,6 +361,7 @@ thaw_json_object_set_json
 thaw_json_object_set_json_owned
 thaw_json_object_set_number
 thaw_json_object_set_string
+thaw_json_object_tag
 thaw_json_own_keys
 thaw_json_parse
 thaw_json_parse_error_property

@@ -258,6 +258,54 @@ pub(crate) const PRELUDE: &str = r#"
 })();
 "#;
 
+/// `Object.prototype.toString` for `this`: an own or inherited string `Symbol.toStringTag` names
+/// the object, else the internal class tag. Shared with the host query that asks for a live
+/// handle's tag (thaw-js host.rs, operation 32).
+pub(crate) fn object_prototype_to_string(it: &mut Interp, this: &Value) -> R<Value> {
+    // an own or inherited string `Symbol.toStringTag` names the object
+    if matches!(this, Value::Object(_)) {
+        let symbol = it
+            .lookup(&it.global.clone(), "Symbol")
+            .unwrap_or(Value::Undefined);
+        let tag = it.get(&symbol, "toStringTag")?;
+        let key = it.key_of(&tag);
+        if let Value::Str(tag) = it.get(this, &key)? {
+            return Ok(Value::str(&format!("[object {tag}]")));
+        }
+    }
+    Ok(Value::str(match this {
+        Value::Undefined | Value::Hole => "[object Undefined]",
+        Value::Null => "[object Null]",
+        Value::Number(_) => "[object Number]",
+        Value::Bool(_) => "[object Boolean]",
+        Value::Str(_) => "[object String]",
+        Value::BigInt(_) => "[object BigInt]",
+        Value::Object(o) => match &*o.kind.borrow() {
+            Kind::Array(_) => "[object Array]",
+            Kind::Closure { .. } | Kind::Native(_) => "[object Function]",
+            Kind::RegExp(_) => "[object RegExp]",
+            Kind::Map(_) => "[object Map]",
+            Kind::Set(_) => "[object Set]",
+            Kind::Symbol { .. } => "[object Symbol]",
+            Kind::Promise(_) => "[object Promise]",
+            Kind::ArrayBuffer(_) => "[object ArrayBuffer]",
+            Kind::Typed(t) => t.ty.tag(),
+            Kind::Wrapper(Value::Number(_)) => "[object Number]",
+            Kind::Wrapper(Value::Str(_)) => "[object String]",
+            Kind::Wrapper(Value::BigInt(_)) => "[object BigInt]",
+            Kind::Wrapper(_) => "[object Boolean]",
+            Kind::Plain if find_in_chain(o, "__time").is_some() => "[object Date]",
+            Kind::Plain if is_error_instance(it, o) => "[object Error]",
+            Kind::Plain
+            | Kind::Global
+            | Kind::Generator(_)
+            | Kind::CollIter(_)
+            | Kind::Proxy(_)
+            | Kind::RawJson(_) => "[object Object]",
+        },
+    }))
+}
+
 pub(crate) fn now_ms() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -1706,48 +1754,7 @@ impl Interp {
         });
         self.set_native(&op, "valueOf", |_, this, _| Ok(this.clone()));
         self.set_native(&op, "toString", |it, this, _| {
-            // an own or inherited string `Symbol.toStringTag` names the object
-            if matches!(this, Value::Object(_)) {
-                let symbol = it
-                    .lookup(&it.global.clone(), "Symbol")
-                    .unwrap_or(Value::Undefined);
-                let tag = it.get(&symbol, "toStringTag")?;
-                let key = it.key_of(&tag);
-                if let Value::Str(tag) = it.get(this, &key)? {
-                    return Ok(Value::str(&format!("[object {tag}]")));
-                }
-            }
-            Ok(Value::str(match this {
-                Value::Undefined | Value::Hole => "[object Undefined]",
-                Value::Null => "[object Null]",
-                Value::Number(_) => "[object Number]",
-                Value::Bool(_) => "[object Boolean]",
-                Value::Str(_) => "[object String]",
-                Value::BigInt(_) => "[object BigInt]",
-                Value::Object(o) => match &*o.kind.borrow() {
-                    Kind::Array(_) => "[object Array]",
-                    Kind::Closure { .. } | Kind::Native(_) => "[object Function]",
-                    Kind::RegExp(_) => "[object RegExp]",
-                    Kind::Map(_) => "[object Map]",
-                    Kind::Set(_) => "[object Set]",
-                    Kind::Symbol { .. } => "[object Symbol]",
-                    Kind::Promise(_) => "[object Promise]",
-                    Kind::ArrayBuffer(_) => "[object ArrayBuffer]",
-                    Kind::Typed(t) => t.ty.tag(),
-                    Kind::Wrapper(Value::Number(_)) => "[object Number]",
-                    Kind::Wrapper(Value::Str(_)) => "[object String]",
-                    Kind::Wrapper(Value::BigInt(_)) => "[object BigInt]",
-                    Kind::Wrapper(_) => "[object Boolean]",
-                    Kind::Plain if find_in_chain(o, "__time").is_some() => "[object Date]",
-                    Kind::Plain if is_error_instance(it, o) => "[object Error]",
-                    Kind::Plain
-                    | Kind::Global
-                    | Kind::Generator(_)
-                    | Kind::CollIter(_)
-                    | Kind::Proxy(_)
-                    | Kind::RawJson(_) => "[object Object]",
-                },
-            }))
+            object_prototype_to_string(it, this)
         });
 
         // ----- Function.prototype -----

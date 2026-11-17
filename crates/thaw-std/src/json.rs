@@ -8117,6 +8117,71 @@ pub unsafe extern "C" fn thaw_json_typeof(value: *const Value) -> *const c_char 
     }
 }
 
+/// `Object.prototype.toString.call(value)` for a `Json` (`any`) value. Static types cannot tell
+/// a Map from a plain object once it is `any`, so the tag comes from the value's brand: a Map,
+/// Set, RegExp or Buffer wrapper crossed into `any` (`__thaw_json_brand_wrapper`). A live host
+/// handle asks the engine (host query 32: its own `Object.prototype.toString`).
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_object_tag(value: *const Value) -> *const c_char {
+    let value = unsafe { &*value };
+    thaw_arena::owned_string(json_object_tag(value))
+}
+
+fn json_object_tag(value: &Value) -> String {
+    if is_napi_undefined(value) {
+        return "[object Undefined]".into();
+    }
+    if non_finite_number(value).is_some() {
+        return "[object Number]".into();
+    }
+    let name = match value {
+        Value::Null => "Null",
+        Value::Bool(_) => "Boolean",
+        Value::Number(_) => "Number",
+        Value::BigInt(_) => "BigInt",
+        Value::String(_) if error_ref(value).is_some() => "Error",
+        Value::String(_) | Value::Wtf8(_) => "String",
+        Value::Array(_) => "Array",
+        Value::Object(_) => {
+            if branded_buffer_bytes_shape(value) {
+                "Uint8Array"
+            } else if thaw_json_is_date_shape(value as *const Value) == 1 {
+                "Date"
+            } else {
+                branded_collection_tag(value).unwrap_or("Object")
+            }
+        }
+        Value::Host(lease) => {
+            return host_query(lease, 32).unwrap_or_else(|| "[object Object]".into());
+        }
+    };
+    format!("[object {name}]")
+}
+
+/// `Map`/`Set`/`RegExp` for a branded one-field wrapper with that sentinel key, else `None`.
+fn branded_collection_tag(value: &Value) -> Option<&'static str> {
+    if !is_branded_wrapper(value) {
+        return None;
+    }
+    let fields = value.as_object()?;
+    if fields.len() != 1 {
+        return None;
+    }
+    [
+        (b"__thaw_map_entries__".as_slice(), "Map"),
+        (b"__thaw_set_values__".as_slice(), "Set"),
+        (b"__thaw_regexp__".as_slice(), "RegExp"),
+    ]
+    .into_iter()
+    .find(|(key, _)| fields.contains_key(*key))
+    .map(|(_, tag)| tag)
+}
+
+/// A branded `{"type":"Buffer","data":[..]}` wrapper (see `branded_buffer_bytes`).
+fn branded_buffer_bytes_shape(value: &Value) -> bool {
+    is_branded_wrapper(value) && thaw_json_is_buffer_shape(value as *const Value) == 1
+}
+
 /// Returns `0` or `1` rather than a Rust `bool` -- deliberately avoids
 /// relying on `bool`'s C ABI representation across the FFI boundary; the
 /// LLVM caller compares this against zero itself (see `compile_expr`'s
@@ -15134,6 +15199,82 @@ mod tests {
         assert_eq!(
             read_c_string(thaw_json_as_string(branded_buffer("[255,65]"))),
             "\u{FFFD}A"
+        );
+    }
+
+    // Expected strings are from `node v22.23.1` (`Object.prototype.toString.call(x)`), for the
+    // Json form each value takes when it crosses into `any`.
+    fn object_tag(value: *mut Value) -> String {
+        read_c_string(unsafe { thaw_json_object_tag(value) })
+    }
+
+    #[test]
+    fn object_tag_reads_the_brand_of_a_wrapper_crossed_into_any() {
+        assert_eq!(object_tag(parse("{}")), "[object Object]");
+        assert_eq!(object_tag(parse("[]")), "[object Array]");
+        assert_eq!(
+            object_tag(thaw_json_brand_wrapper(parse(
+                r#"{"__thaw_map_entries__":[]}"#
+            ))),
+            "[object Map]"
+        );
+        assert_eq!(
+            object_tag(thaw_json_brand_wrapper(parse(
+                r#"{"__thaw_set_values__":[]}"#
+            ))),
+            "[object Set]"
+        );
+        assert_eq!(
+            object_tag(thaw_json_brand_wrapper(parse(
+                r#"{"__thaw_regexp__":{"source":"x","flags":"","lastIndex":0}}"#
+            ))),
+            "[object RegExp]"
+        );
+        assert_eq!(object_tag(branded_buffer("[1]")), "[object Uint8Array]");
+    }
+
+    #[test]
+    fn object_tag_reads_a_branded_date_wrapper() {
+        assert_eq!(
+            object_tag(thaw_json_brand_wrapper(parse(r#"{"timestamp":0}"#))),
+            "[object Date]"
+        );
+        assert_eq!(object_tag(parse(r#"{"timestamp":0}"#)), "[object Object]");
+    }
+
+    #[test]
+    fn object_tag_ignores_unbranded_look_alikes() {
+        assert_eq!(
+            object_tag(parse(r#"{"__thaw_map_entries__":[]}"#)),
+            "[object Object]"
+        );
+        assert_eq!(
+            object_tag(parse(r#"{"__thaw_set_values__":[]}"#)),
+            "[object Object]"
+        );
+        assert_eq!(
+            object_tag(parse(r#"{"type":"Buffer","data":[97]}"#)),
+            "[object Object]"
+        );
+        let mixed = thaw_json_brand_wrapper(parse(r#"{"__thaw_map_entries__":[],"x":1}"#));
+        assert_eq!(object_tag(mixed), "[object Object]");
+    }
+
+    #[test]
+    fn object_tag_covers_primitives_and_arrays() {
+        assert_eq!(object_tag(parse("null")), "[object Null]");
+        assert_eq!(object_tag(parse("1")), "[object Number]");
+        assert_eq!(object_tag(parse(r#""a""#)), "[object String]");
+        assert_eq!(object_tag(parse("true")), "[object Boolean]");
+        assert_eq!(
+            object_tag(leak(Value::BigInt("1".into()))),
+            "[object BigInt]"
+        );
+        assert_eq!(
+            object_tag(thaw_json_brand_wrapper(parse(
+                r#"{"$__thaw_napi_undefined$":true}"#
+            ))),
+            "[object Undefined]"
         );
     }
 

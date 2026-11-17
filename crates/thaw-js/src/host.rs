@@ -2143,6 +2143,11 @@ fn array_buffer_bytes_json(v: &Value) -> String {
 /// `__thaw_json_host_query`'s). Kinds thaw-js has no value for (Date, Buffer, Map, Set, native
 /// wrappers) answer "no" to the copy queries; operation 29 says whether the value must stay a live handle,
 /// and operation 30 whether a plain object or array must (a call argument keeps its identity).
+/// Operations: 0 typeof, 1 truthy, 2 String(), 3 JSON-quoted string, 4 IsArray, 5-7 undefined/nullish/null,
+/// 8 Json copy, 9 is object, 10 number text, 11 is Buffer, 12-13 Date check/time, 14 callable, 15 UTF-16 units,
+/// 16 number coercion, 17-20 and 22-24 engine-prelude queries, 21 native owner pointer, 25-26 origin/prototype,
+/// 27 typed-array text, 28 Error properties, 29 must stay live, 30 call-argument identity, 31 ArrayBuffer bytes,
+/// 32 Object.prototype.toString tag.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> ThawResult {
     if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
@@ -2234,6 +2239,13 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             // 31: the bytes of an ArrayBuffer (a resizable or SharedArrayBuffer answers its current bytes) as a
             // JSON number array, so a Json number[] request can read a digest result; `null` for any other value
             31 => array_buffer_bytes_json(&v),
+            // 32: the value's Object.prototype.toString tag (`[object Map]`, ...), by the interpreter's own implementation
+            32 => match crate::builtins::object_prototype_to_string(it, &v)
+                .map_err(|c| classify(it, c))?
+            {
+                Value::Str(tag) => tag.to_string(),
+                _ => "[object Object]".to_string(),
+            },
             _ => {
                 return Err(HostError::Thrown(format!(
                     "TypeError: thaw-js does not support the host query {operation}"
@@ -7259,6 +7271,36 @@ mod host_query_live_tests {
         let mut it = Interp::new();
         let view = it.run("new Uint8Array([1, 2]).buffer").unwrap();
         assert_eq!(array_buffer_bytes_json(&view), "[1,2]");
+    }
+
+    /// A value evaluated in the default realm, leased as a live handle (what compiled code holds).
+    fn live(src: &str) -> u64 {
+        let realm = default_realm();
+        let value = with_package(realm, |p| {
+            p.interp.run(src).map_err(|c| classify(&mut p.interp, c))
+        })
+        .unwrap();
+        store_handle(realm, value) as u64
+    }
+
+    /// Node 22 `Object.prototype.toString.call(x)` for each live value (`node -e`, v22.23.1).
+    #[test]
+    fn host_query_object_tag_matches_node_for_live_values() {
+        let cases = [
+            ("new Date(0)", "[object Date]"),
+            ("Promise.resolve()", "[object Promise]"),
+            ("Math", "[object Math]"),
+            ("Symbol()", "[object Symbol]"),
+            ("new Map().entries()", "[object Map Iterator]"),
+            ("new Float64Array(1)", "[object Float64Array]"),
+            ("new ArrayBuffer(1)", "[object ArrayBuffer]"),
+            ("new DataView(new ArrayBuffer(1))", "[object DataView]"),
+            ("new WeakMap()", "[object WeakMap]"),
+            ("(function*(){})()", "[object Generator]"),
+        ];
+        for (src, tag) in cases {
+            assert_eq!(query(live(src), 32), tag, "{src}");
+        }
     }
 
     #[test]
