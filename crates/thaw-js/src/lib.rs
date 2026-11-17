@@ -110,6 +110,8 @@ mod web_wasm_natives;
 #[cfg(all(test, feature = "wasm"))]
 #[path = "web/wasm_tests.rs"]
 mod web_wasm_tests;
+#[path = "web/websocket.rs"]
+mod web_websocket;
 #[path = "web/worker_stream.rs"]
 mod web_worker_stream;
 #[path = "web/worker_threads.rs"]
@@ -1459,6 +1461,7 @@ impl Interp {
             web_wasm::install(&mut it);
             web_crypto::install(&mut it);
             web_navigator::install(&mut it);
+            web_websocket::install(&mut it);
             node_crypto::install(&mut it);
             it.install_url();
             // host realm only: a vm context's global keeps the plain `Object` tag, as in Node
@@ -5250,6 +5253,8 @@ mod sysio_stdin_tests;
 mod tests;
 #[cfg(test)]
 mod timers_shape_tests;
+#[cfg(test)]
+mod websocket_tests;
 
 #[cfg(test)]
 mod coroutine_teardown_tests;
