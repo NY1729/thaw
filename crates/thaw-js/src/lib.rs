@@ -2536,6 +2536,9 @@ impl Interp {
                 TypedKey::Ordinary => {}
             }
         }
+        if is_legacy_fn_key(o, key) {
+            return self.refuse_write(strict, o, key, Refusal::ReadOnly);
+        }
         match find_in_chain(o, key) {
             Some(Slot::Accessor { set, .. }) => {
                 let Some(s) = set else {
@@ -4892,9 +4895,22 @@ fn closure_name_or_length(def: &FuncDef, key: &str) -> Value {
     }
 }
 
+/// `arguments`/`caller` as V8 gives a sloppy plain function: an own read-only, non-configurable data prop.
+/// True only while no real own prop shadows it.
+// ponytail: `caller` always reads null. Node answers the calling sloppy function, and thaw has no
+// function-object call stack (`call_frames` holds FuncDefs only, PR #684); add the callee `Obj` to the frame.
+pub(crate) fn is_legacy_fn_key(o: &Obj, key: &str) -> bool {
+    matches!(key, "arguments" | "caller")
+        && find_own(o, key).is_none()
+        && builtins::sloppy_ordinary_obj(o)
+}
+
 /// The synthesized own `name`/`length` of closure `o` (`None` for any other key or object).
 /// Natives get theirs from the builtin table (`builtin_table.rs`), so only closures synthesize.
 pub(crate) fn synth_fn_own(o: &Obj, key: &str) -> Option<Value> {
+    if is_legacy_fn_key(o, key) {
+        return Some(Value::Null);
+    }
     match &*o.kind.borrow() {
         Kind::Closure { def, .. }
             if (key == "name" || key == "length") && find_own(o, key).is_none() =>
@@ -5337,6 +5353,8 @@ mod errors_stack_tests;
 mod fetch_tests;
 #[cfg(all(test, unix))]
 mod fs_tests;
+#[cfg(test)]
+mod function_legacy_props_tests;
 #[cfg(test)]
 mod generator_function_tests;
 #[cfg(test)]

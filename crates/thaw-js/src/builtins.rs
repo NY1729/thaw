@@ -980,6 +980,7 @@ impl Interp {
         // first, or a nonextensible closure refuses to redefine it as if it were a new key.
         if o.position(key).is_none() {
             if let Some(v) = synth_fn_own(o, key) {
+                let legacy = is_legacy_fn_key(o, key);
                 let mut props = o.raw_props.borrow_mut();
                 crate::push_prop(
                     o,
@@ -989,7 +990,7 @@ impl Interp {
                         slot: Slot::Data(v),
                         enumerable: false,
                         writable: false,
-                        configurable: true,
+                        configurable: !legacy,
                     },
                 );
             }
@@ -1496,17 +1497,23 @@ impl Interp {
                     }
                     // A closure lists `length` then `name` first, as in V8, whether each is synthesized or a
                     // real `Prop`. Natives are a ceiling: they get no synthesized `length`/`name`.
+                    // A sloppy plain function adds `arguments` and `caller` to that head, as V8 does.
                     if matches!(&*o.kind.borrow(), Kind::Closure { .. }) {
                         let is_fn_key =
                             |v: &Value, k: &str| matches!(v, Value::Str(s) if &**s == k);
+                        let head_keys: &[&str] = if sloppy_ordinary_obj(o) {
+                            &["length", "name", "arguments", "caller"]
+                        } else {
+                            &["length", "name"]
+                        };
                         let mut head = Vec::new();
-                        for k in ["length", "name"] {
+                        for &k in head_keys {
                             if synth_fn_own(o, k).is_some() || names.iter().any(|v| is_fn_key(v, k))
                             {
                                 head.push(Value::str(k));
                             }
                         }
-                        names.retain(|v| !is_fn_key(v, "length") && !is_fn_key(v, "name"));
+                        names.retain(|v| !head_keys.iter().any(|k| is_fn_key(v, k)));
                         names.splice(0..0, head);
                     }
                 }
@@ -1584,7 +1591,7 @@ impl Interp {
                         put(&d, "value", v);
                         put(&d, "writable", Value::Bool(false));
                         put(&d, "enumerable", Value::Bool(false));
-                        put(&d, "configurable", Value::Bool(true));
+                        put(&d, "configurable", Value::Bool(!is_legacy_fn_key(&o, &key)));
                         return Ok(Value::Object(d));
                     }
                     // only array index / length are virtual own props (served from the items); any other
@@ -3526,9 +3533,14 @@ const LEGACY_CALLER_MSG: &str = "'caller', 'callee', and 'arguments' properties 
 
 /// True for a sloppy ordinary function: not strict, not an arrow, class, method, generator or async function.
 fn sloppy_ordinary_fn(v: &Value) -> bool {
-    matches!(v, Value::Object(o) if matches!(
+    matches!(v, Value::Object(o) if sloppy_ordinary_obj(o))
+}
+
+/// `sloppy_ordinary_fn` for an object: the only closures that V8 gives own `arguments`/`caller`.
+pub(crate) fn sloppy_ordinary_obj(o: &Obj) -> bool {
+    matches!(
         &*o.kind.borrow(),
         Kind::Closure { def, scope }
             if !def.strict && !scope.strict.get() && !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype && def.class.is_none()
-    ))
+    )
 }

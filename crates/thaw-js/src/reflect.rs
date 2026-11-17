@@ -261,6 +261,9 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
     if let Some(valid) = crate::typed::typed_own_key(o, key) {
         return Ok(!valid);
     }
+    if crate::is_legacy_fn_key(o, key) {
+        return Ok(false);
+    }
     if own_prop(it, o, key).is_none() {
         return Ok(true);
     }
