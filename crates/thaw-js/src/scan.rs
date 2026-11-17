@@ -554,8 +554,6 @@ impl Visit for Walker {
                         self.called.insert(p.sym.to_string());
                     }
                 }
-                // direct eval sees the caller's local scope, which the global-scope `eval` cannot
-                a::Expr::Ident(i) if &*i.sym == "eval" => self.feature("direct-eval"),
                 a::Expr::Ident(i) if &*i.sym == "require" => {
                     let lit = match n.args.first().map(|x| &*x.expr) {
                         Some(a::Expr::Lit(a::Lit::Str(s))) => s.value.as_str().map(str::to_string),
