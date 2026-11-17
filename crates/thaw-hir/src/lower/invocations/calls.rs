@@ -464,6 +464,41 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// Whether `expr` is a byte buffer (`Buffer`/`Uint8Array`) by its source type, even when the value
+    /// is held dynamically. A local/parameter keeps its declared source type in `source_scope`; a
+    /// `subarray`/`slice` of a byte buffer is one too.
+    fn is_bytes_expression(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren(paren) => return self.is_bytes_expression(&paren.expr),
+            Expr::Ident(ident) => {
+                let resolved = self.resolve_binding(ident.sym.as_ref());
+                if self.source_scope.get(&resolved) == Some(&HirType::Bytes) {
+                    return true;
+                }
+            }
+            Expr::New(new) => {
+                if let Expr::Ident(class) = new.callee.as_ref() {
+                    if matches!(class.sym.as_ref(), "Uint8Array" | "Buffer") && !self.scope.contains_key(class.sym.as_ref()) {
+                        return true;
+                    }
+                }
+            }
+            Expr::Call(call) => {
+                if let Callee::Expr(callee) = &call.callee {
+                    if let Expr::Member(member) = callee.as_ref() {
+                        if let MemberProp::Ident(method) = &member.prop {
+                            if matches!(method.sym.as_ref(), "subarray" | "slice") && self.is_bytes_expression(&member.obj) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        matches!(self.peek_type_without_lowering(expr), Some(HirType::Bytes))
+    }
+
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         if let Some(timer) = self.try_lower_native_timer(call)? {
             return Ok(timer);
@@ -529,6 +564,10 @@ impl<'a> FnLowerer<'a> {
                             },
                             None => None,
                         };
+                        // A byte-buffer chunk routes even when its storage is dynamic: an `any`-typed
+                        // receiver makes the chunk dynamic, so its peeked type is `JsValue`/`Json`.
+                        let first_is_bytes = first_type == Some(HirType::Bytes)
+                            || call.args.first().is_some_and(|argument| self.is_bytes_expression(&argument.expr));
                         let routed = match (method_name, call.args.len(), first_type) {
                             ("end", 0, _) => {
                                 let mut routed = call.clone();
@@ -542,8 +581,8 @@ impl<'a> FnLowerer<'a> {
                                 });
                                 Some(routed)
                             }
-                            ("end", 1, Some(HirType::Bytes)) => Some(rename("endBytes")),
-                            ("write", 1, Some(HirType::Bytes)) => Some(rename("writeBytes")),
+                            ("end", 1, _) if first_is_bytes => Some(rename("endBytes")),
+                            ("write", 1, _) if first_is_bytes => Some(rename("writeBytes")),
                             ("end", 1, Some(HirType::Array(element))) if *element == HirType::F64 => Some(rename("endBytes")),
                             ("write", 1, Some(HirType::Array(element))) if *element == HirType::F64 => Some(rename("writeBytes")),
                             ("end", 2, Some(HirType::Str)) if self.peek_type_without_lowering(&call.args[1].expr) == Some(HirType::Str) => {
@@ -553,6 +592,12 @@ impl<'a> FnLowerer<'a> {
                         };
                         if let Some(routed) = routed {
                             return self.lower_call(&routed);
+                        }
+                        // A string-only write must not swallow bytes: `write(string)` would convert them lossily.
+                        if call.args.iter().any(|argument| self.is_bytes_expression(&argument.expr)) {
+                            return Err(format!(
+                                "`{method_name}` on http.ServerResponse takes a string chunk; pass a Buffer/Uint8Array as the only argument (`{method_name}(bytes)`), not with an encoding or callback"
+                            ));
                         }
                     }
                 }
