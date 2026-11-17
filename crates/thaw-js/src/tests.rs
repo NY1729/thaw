@@ -9786,6 +9786,30 @@ fn mock_timers_date_mocking_setime_reset_and_apis_filter() {
     );
 }
 
+// The compiled lane's mock cell (`thaw_mock_clock_set`/`clear`) follows the mocked Date: enable, tick, setTime and
+// reset all sync it, and a clock that does not mock Date leaves the wall clock in place.
+#[test]
+fn mock_timers_date_clock_cell_follows_enable_tick_set_time_reset() {
+    use crate::web_test_mock_timers::recorded_native_clock;
+    let mut it = Interp::new();
+    let steps = [
+        (
+            "mock.timers.enable({ apis: ['Date'], now: 1000 });",
+            Some(Some(1000.0)),
+        ),
+        ("mock.timers.tick(5);", Some(Some(1005.0))),
+        ("mock.timers.setTime(7000);", Some(Some(7000.0))),
+        ("mock.timers.reset();", Some(None)),
+        ("mock.timers.enable({ apis: ['setTimeout'] });", Some(None)),
+        ("mock.timers.reset();", Some(None)),
+    ];
+    assert!(it.run(MOCK_TIMERS_THAW_HEADER).is_ok());
+    for (step, expected) in steps {
+        assert!(it.run(step).is_ok(), "step failed: {step}");
+        assert_eq!(recorded_native_clock(), expected, "after {step}");
+    }
+}
+
 #[test]
 fn mock_timers_host_errors_carry_node_codes_and_messages() {
     assert_eq!(

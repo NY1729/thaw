@@ -9,6 +9,7 @@ const realClearInterval = globalThis.clearInterval;
 const realSetImmediate = globalThis.setImmediate;
 const realClearImmediate = globalThis.clearImmediate;
 const realDate = globalThis.Date;
+const nativeDateClock = globalThis.__thaw_test_mock_clock;
 const TIMEOUT_MAX = 2147483647;
 const SUPPORTED = ['setTimeout', 'setInterval', 'setImmediate', 'Date'];
 const SCHEDULERS = ['setTimeout', 'setInterval', 'setImmediate'];
@@ -117,6 +118,11 @@ const scheduled = {
   setInterval: (callback, delay, ...args) => schedule('setInterval', callback, delay, args, true),
   setImmediate: (callback, ...args) => schedule('setImmediate', callback, 0, args, false),
 };
+// The compiled lane reads the clock from the runtime's mock cell, so it follows the mocked Date.
+function syncNativeDateClock() {
+  const clock = activeClock('Date');
+  nativeDateClock(clock === null ? undefined : clock.now);
+}
 function refreshGlobals() {
   for (const api of SCHEDULERS) {
     const mocked = activeClock(api) !== null;
@@ -125,6 +131,7 @@ function refreshGlobals() {
     globalThis[clear] = mocked ? mockClear(NATIVE[clear]) : NATIVE[clear];
   }
   globalThis.Date = activeClock('Date') !== null ? MockDate : realDate;
+  syncNativeDateClock();
 }
 
 // Runs every virtual timer due by `through` in (due, creation) order, with the clock held at `through` (Node
@@ -144,6 +151,7 @@ function fireDue(clock, through) {
 }
 function advance(clock, amount) {
   clock.now += amount;
+  syncNativeDateClock();
   fireDue(clock, clock.now);
 }
 
@@ -196,6 +204,7 @@ globalThis.__thaw_test_mock_timers_set_time = (clock, milliseconds) => {
   const now = milliseconds === undefined ? 0 : milliseconds;
   if (now < 0) throw negativeTime(now);
   clock.now = now;
+  syncNativeDateClock();
 };
 globalThis.__thaw_test_mock_timers_reset = clock => {
   if (!clock || !clock.enabled) return;
