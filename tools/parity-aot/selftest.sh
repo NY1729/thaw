@@ -250,5 +250,10 @@ check "shard matrix covers every generated family exactly once" 0 $?
 # D. generator-side checks (volume, skip list, api resolution, --families and --max-probes): selftest_gen.sh
 bash "$HERE/selftest_gen.sh"; check "generator self-test (selftest_gen.sh)" 0 $?
 
+# M. module surface (PR1): the d.ts parser (21 inline fixtures; plus all builtin d.ts when a dump dir is given)
+#    and the committed module_table.tsv against a regenerated one (format errors and drift fail, version rows warn)
+bash "$HERE/selftest_parse.sh"; check "module surface: d.ts parser fixtures (selftest_parse.sh)" 0 $?
+bash "$HERE/check_module_table.sh"; check "module surface: module_table.tsv is up to date (check_module_table.sh)" 0 $?
+
 [ "$fail" = 0 ] && echo "selftest: all checks passed" || echo "selftest: FAILED"
 exit "$fail"

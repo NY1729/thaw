@@ -105,3 +105,16 @@ missing thaw binary, diff.py harness error). `diff.py` exit 1 means gaps not in 
 Job `build` builds the release thaw CLI, runs `selftest.sh`, writes the API coverage (full manifest, no thaw),
 and uploads the binary as `thaw-release-bin`. Job `shards` (matrix s1 to s4, split by family) downloads the binary and
 runs both engines per shard, writing `parity-aot-results-<shard>` artifacts. Both jobs are `continue-on-error`.
+
+## Module surface
+
+`modules.txt` (the 57 thaw-js builtin modules) is inventoried by `module_inv.js` under Node 22 into
+`module_table.tsv` (module, export, kind, arity, vtype, alias; kinds function, class, constant, primitive, object,
+accessor). `check_module_table.sh` regenerates it and fails on a format error or a drifted row; rows that exist
+in only one of the two (version-dependent exports) print WARN. Regenerate with
+`node tools/parity-aot/module_inv.js tools/parity-aot/module_table.tsv`.
+
+`dts_parse.py` parses the ambient d.ts of each module (dumped by `crates/thaw-registry/tests/dump_builtin_dts.rs`,
+run with `THAW_DUMP_DTS_DIR=<dir> cargo test -p thaw-registry --test dump_builtin_dts -- --ignored`) into export
+signatures: names, kind, overloads, parameter and return types. Fragments it cannot parse are counted and listed,
+never dropped. `selftest_parse.sh [DUMP_DIR]` runs its inline fixtures and, given a dump directory, parses all of it.
