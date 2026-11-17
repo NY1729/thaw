@@ -3420,6 +3420,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "thaw-sqlite"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "thaw-std"
 version = "0.1.0"
 dependencies = [

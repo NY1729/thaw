@@ -636,6 +636,8 @@
       case 28: return globalThis.__thaw_error_properties_json(value);
       // 29: a typed array / DataView / ArrayBuffer / RegExp, which structuredClone must keep whole.
       case 29: return (thawGraphIsView(value) || thawGraphArrayBuffer(value) || thawGraphKind(thawGraphRegExpSource, value)) ? '1' : '0';
+      // 32: the value's Object.prototype.toString tag (`[object Map]`, ...), from the captured realm intrinsic.
+      case 32: return thawGraphApply(thawGraphObjectToString, value, []);
       case 22:
         return thawDateApply(thawHostIsPrototypeOf, thawHostErrorPrototype, [value]) ? '1' : '0';
       default: throw new thawGraphTypeError('Invalid native host query');
@@ -741,6 +743,7 @@
   // replacer route. Allocate every node first so back edges and sibling aliases
   // recover exactly one JS object; user keys live in pairs, outside metadata.
   const thawGraphApply = Reflect.apply;
+  const thawGraphObjectToString = Object.prototype.toString;
   const thawGraphStringCodeUnit = String.prototype.charCodeAt;
   const thawHostStringUnits = value => {
     if (typeof value !== 'string') throw new thawGraphTypeError('Expected string');

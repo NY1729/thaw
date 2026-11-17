@@ -84,3 +84,31 @@ function main(): void {
     let output = compile_and_run(source, "bufu8_element_semantics_generic_ops");
     assert_eq!(output, "2cff010000000000 undefined undefined undefined\n[ 255, 1, 0, 0, 0 ] 254,2,0,0,0 2 256\n256 256 1 {\"type\":\"Buffer\",\"data\":[255,1,0,0,0]} true 1 255-1-0-0-0\n010201020304\n010201020304\n0906070805 060101 0906010105\ntrue abcbc abc true\n<Buffer 61 62 63> [ <Buffer 61 62 63>, <Buffer 61 62 63> ] { v: <Buffer 61 62 63> }\n0\n");
 }
+
+/// `(b as Buffer).m()` / `(u as Uint8Array).m()` / `b!.m()` on a `Buffer | null` or
+/// `Uint8Array | null` keep the byte receiver (Bytes), and a null at run time throws Node's TypeError.
+#[test]
+fn member_calls_through_nullable_casts_and_assertions_on_byte_buffers() {
+    let source = r#"function flip(): boolean { return true; }
+function nothing(): boolean { return false; }
+function main(): void {
+  const b: Buffer | null = flip() ? Buffer.from([1, 2, 3, 250]) : null;
+  console.log((b as Buffer).length, (b as Buffer).includes(2), (b as Buffer).indexOf(250));
+  console.log(b!.toString("hex"), (b as Buffer).join("-"));
+  (b as Buffer).reverse();
+  console.log(b!.toString("hex"));
+  (b as Buffer).fill(7, 1, 2);
+  console.log(b!.toString("hex"), (b as Buffer).readUInt8(1));
+  const u: Uint8Array | null = flip() ? new Uint8Array([1, 2, 3, 250]) : null;
+  console.log((u as Uint8Array).length, u!.includes(250), (u as Uint8Array).join(","));
+  const absent: Buffer | null = nothing() ? Buffer.from([1]) : null;
+  try { (absent as Buffer).includes(1); console.log("no throw"); } catch (e: any) { console.log(e.name, e.message); }
+  const none: Uint8Array | null = nothing() ? new Uint8Array([1]) : null;
+  try { (none as Uint8Array).sort(); console.log("no throw"); } catch (e: any) { console.log(e.name, e.message); }
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "nullable_cast_byte_calls"),
+        "4 true 3\n010203fa 1-2-3-250\nfa030201\nfa070201 7\n4 true 1,2,3,250\nTypeError Cannot read properties of null (reading 'includes')\nTypeError Cannot read properties of null (reading 'sort')\n"
+    );
+}

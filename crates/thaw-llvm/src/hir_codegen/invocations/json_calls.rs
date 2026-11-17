@@ -104,6 +104,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 let value = self.compile_single_arg_call("thaw_json_typeof", args, "JSON typeof")?;
                 return self.compile_check_json_host_error(value, None);
             }
+            "__thaw_json_object_tag" => {
+                let value = self.compile_single_arg_call("thaw_json_object_tag", args, "JSON object tag")?;
+                return self.compile_check_json_host_error(value, None);
+            }
             "__thaw_json_as_bigint_i64" => {
                 let [json] = args else {
                     return Err("checked Json BigInt assertion expects one operand".into());

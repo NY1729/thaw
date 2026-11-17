@@ -3040,3 +3040,61 @@ fn json_to_f64_array_decode_reads_arraybuffer_leases_through_op_31_ir() {
     let loop_index = ir.find("call ptr @thaw_json_index(").expect("per-element loop missing");
     assert!(predicate < bytes && bytes < loop_index, "predicate, byte conversion and loop must be ordered");
 }
+
+/// `Object.prototype.toString.call(v)` on an `any` value prints the tag of the value's own kind:
+/// a Map/Set/RegExp/Buffer crossed into `any` keeps its brand, plain data keeps `Object`/`Array`.
+#[test]
+fn compiles_dynamic_object_prototype_to_string_tags() {
+    let source = r#"
+        function main(): void {
+            const sm = new Map<string, number>();
+            const v1: any = sm;
+            const ss = new Set<number>();
+            const v2: any = ss;
+            const v3: any = Buffer.from("a");
+            const v4: any = { a: 1 };
+            const v5: any = [1];
+            const v6: any = null;
+            const v7: any = 1;
+            const v8: any = /x/;
+            console.log(Object.prototype.toString.call(v1));
+            console.log(Object.prototype.toString.call(v2));
+            console.log(Object.prototype.toString.call(v3));
+            console.log(Object.prototype.toString.call(v4));
+            console.log(Object.prototype.toString.call(v5));
+            console.log(Object.prototype.toString.call(v6));
+            console.log(Object.prototype.toString.call(v7));
+            console.log(Object.prototype.toString.call(v8));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_object_prototype_to_string_tags"),
+        concat!(
+            "[object Map]\n",
+            "[object Set]\n",
+            "[object Uint8Array]\n",
+            "[object Object]\n",
+            "[object Array]\n",
+            "[object Null]\n",
+            "[object Number]\n",
+            "[object RegExp]\n",
+        )
+    );
+}
+
+/// Live realm values held as `any` (host handles) print their own engine tag, as Node does.
+/// Promise into `any` is still rejected at compile time (`value has type Promise, expected Json`).
+/// `Math` into `any` is a plain copy with no brand, so it still prints `[object Object]` (known gap).
+#[test]
+fn compiles_dynamic_live_handle_object_prototype_to_string_tags() {
+    let source = r#"
+        function main(): void {
+            const d: any = new Date(0);
+            console.log(Object.prototype.toString.call(d));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_live_handle_object_prototype_to_string_tags"),
+        "[object Date]\n"
+    );
+}

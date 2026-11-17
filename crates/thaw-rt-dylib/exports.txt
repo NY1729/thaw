@@ -361,6 +361,7 @@ thaw_json_object_set_json
 thaw_json_object_set_json_owned
 thaw_json_object_set_number
 thaw_json_object_set_string
+thaw_json_object_tag
 thaw_json_own_keys
 thaw_json_parse
 thaw_json_parse_error_property
@@ -574,6 +575,7 @@ thaw_promise_set_unhandled_reporter_result
 thaw_promise_set_unhandled_reporter_text_result
 thaw_promise_state
 thaw_promise_subscribe
+thaw_promise_subscribe_await
 thaw_promise_take_report_activity
 thaw_promise_take_unhandled_failure
 thaw_recursive_lookup

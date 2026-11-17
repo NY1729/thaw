@@ -12678,6 +12678,27 @@ fn live_host_buffer_query_uses_native_buffer_identity() {
     assert_eq!(call("inspectLiveHostBuffer", "[]"), r#"["1","0"]"#);
 }
 
+// Node 22: `Object.prototype.toString.call(x)` for each live value (host query 32 is the realm's own tag).
+#[test]
+fn live_host_object_tag_query_matches_node() {
+    assert_eq!(
+        load(
+            r#"
+      function inspectLiveHostObjectTags() {
+        return [new Date(0), Promise.resolve(), Math, Symbol(), new Map().entries(),
+                new Float64Array(1), new ArrayBuffer(1), new DataView(new ArrayBuffer(1)),
+                new WeakMap(), (function*() {})(), {}, []].map((v) => __thaw_json_host_query(v, 32));
+      }
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectLiveHostObjectTags", "[]"),
+        r#"["[object Date]","[object Promise]","[object Math]","[object Symbol]","[object Map Iterator]","[object Float64Array]","[object ArrayBuffer]","[object DataView]","[object WeakMap]","[object Generator]","[object Object]","[object Array]"]"#
+    );
+}
+
 #[test]
 fn live_host_date_query_uses_internal_slot_and_preserves_invalid_date() {
     assert_eq!(

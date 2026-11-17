@@ -12,7 +12,7 @@
 //! is suspended (`Package` boxes it; `co_step` asserts it).
 
 use crate::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -99,6 +99,11 @@ pub(crate) struct CoCtx {
     pub(crate) inside: co::Inside,
     /// The body of an async generator: `yield` awaits its operand first.
     pub(crate) agen: bool,
+    /// The coroutine's own call frames while it is suspended (`frames_suspend`); back on the shared
+    /// stack at its next resume (`frames_resume`).
+    pub(crate) frames: RefCell<Vec<(Rc<FuncDef>, bool)>>,
+    /// `Interp::frame_base` of the host that last resumed this coroutine, restored at `frames_return`.
+    pub(crate) host_base: Cell<usize>,
 }
 
 pub(crate) struct Co {
@@ -843,6 +848,8 @@ impl Interp {
         let ctx = Rc::new(CoCtx {
             inside,
             agen: gen.is_some(),
+            frames: RefCell::new(Vec::new()),
+            host_base: Cell::new(0),
         });
         let co = Rc::new(Co {
             link,
@@ -851,6 +858,20 @@ impl Interp {
             promise,
             gen,
         });
+        // The coroutine's segment starts at its own frame. An async call's frame was pushed by the
+        // caller just before (`call_as`), so the segment starts one slot below; a generator's frame is
+        // pushed here, since its first `next` is no call.
+        let before = self.call_frames.len();
+        let own_pushed = !def.is_gen
+            && self
+                .call_frames
+                .last()
+                .is_some_and(|(d, _)| Rc::ptr_eq(d, def));
+        ctx.host_base.set(self.frame_base);
+        self.frame_base = before - usize::from(own_pushed);
+        if def.is_gen {
+            self.call_frames.push((def.clone(), false));
+        }
         let ip = self as *mut Interp;
         let (f, def, scope, this, args) = (
             f.clone(),
@@ -863,17 +884,42 @@ impl Interp {
             // SAFETY: the host thread is blocked in `co_wait` until we send a message.
             let it = unsafe { &mut *ip };
             it.configure_stack(co::STACK_BYTES);
-            it.call_closure_sync(&f, &def, &scope, &this, &args)
+            let r = it.call_closure_sync(&f, &def, &scope, &this, &args);
+            // the coroutine's frames end with its body (see `new_co` for the segment base)
+            it.frame_truncate(0);
+            r
             // every Rc captured above is dropped when this call returns, before the hand-back
         });
         // the context is current before the body can run: it may await at once
         self.rt.cur_co.push(ctx);
         let snap = self.snapshot();
-        if !co::start(&co.ctx.inside, ip as usize, body) {
+        if !co::start(&co.link, &co.ctx.inside, ip as usize, body) {
             self.rt.cur_co.pop();
+            self.call_frames.truncate(before);
+            self.frame_base = co.ctx.host_base.get();
             return self.throw_error("RangeError", "cannot start coroutine (thread limit)");
         }
         Ok((co, snap))
+    }
+
+    /// Host side, before control passes to a coroutine: its own frames go back on top of this stack as
+    /// its segment, and the host's segment base is kept for `frames_return`.
+    pub(crate) fn frames_resume(&mut self, ctx: &CoCtx) {
+        ctx.host_base.set(self.frame_base);
+        self.frame_base = self.call_frames.len();
+        let saved = std::mem::take(&mut *ctx.frames.borrow_mut());
+        self.call_frames.extend(saved);
+    }
+
+    /// Host side, once the coroutine hands control back: the host's own segment is current again.
+    pub(crate) fn frames_return(&mut self, ctx: &CoCtx) {
+        self.frame_base = ctx.host_base.get();
+    }
+
+    /// Coroutine side, before it suspends: its segment leaves the shared stack until its next resume.
+    pub(crate) fn frames_suspend(&mut self, ctx: &CoCtx) {
+        let base = self.frame_base.min(self.call_frames.len());
+        *ctx.frames.borrow_mut() = self.call_frames.split_off(base);
     }
 
     /// Per-thread evaluator state that must follow the thread across coroutine switches.
@@ -888,6 +934,7 @@ impl Interp {
     /// Block until the coroutine yields or finishes, then act on what it did.
     pub(crate) fn co_wait(&mut self, co: &Rc<Co>, snap: CoSnapshot) -> R<()> {
         let y = co.link.recv(self as *mut Interp as usize);
+        self.frames_return(&co.ctx);
         self.restore(snap);
         self.rt.cur_co.pop();
         match y {
@@ -939,6 +986,7 @@ impl Interp {
         );
         self.rt.cur_co.push(co.ctx.clone());
         let snap = self.snapshot();
+        self.frames_resume(&co.ctx);
         co.link.send(self as *mut Interp as usize, resume);
         self.co_wait(co, snap)
     }
@@ -950,6 +998,7 @@ impl Interp {
         };
         let snap = self.snapshot();
         // the host runs from here until it resumes us
+        self.frames_suspend(&ctx);
         let msg = ctx
             .inside
             .suspend(self as *mut Interp as usize, Yield::Await(v));

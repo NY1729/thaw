@@ -24,14 +24,14 @@ python3 - "$W/a" <<'PY'
 import json, os, re, sys
 d = sys.argv[1]
 m = json.load(open(os.path.join(d, "manifest.json")))
-shape = re.compile(r'^p\("([^"]+)", \(\) => \{ .* \}\);$')
+shape = re.compile(r'^pt?\("([^"]+)", \(\) => \{ .* \}\);$')
 for prog in m["programs"]:
     assert len(prog["probes"]) <= m["per_program"], prog["name"]
     for p in prog["probes"]:
         assert shape.match(p["line"]), p["line"]
     ts = open(os.path.join(d, prog["name"] + ".ts")).read()
     mts = open(os.path.join(d, prog["name"] + ".mts")).read()
-    assert ts.count("\n  p(\"") == len(prog["probes"]), prog["name"]
+    assert len(re.findall(r'\n  pt?\("', ts)) == len(prog["probes"]), prog["name"]
     assert "main();" not in ts and mts.rstrip().endswith("main();"), prog["name"]
 print(f"ok   {len(m['programs'])} programs, {m['probes']} probes, shape and line mapping")
 PY
@@ -64,6 +64,10 @@ assert a.classify_ran("x", "THROW TypeError: a", "THROW RangeError: a")[0] == "W
 assert a.classify_ran("x", "number 1", "number 2")[0] == "WRONG-VALUE"
 assert a.classify_ran("x", "object {}", "object {__thaw_js_handle_id__:3}")[0] == "LEAK"
 assert a.classify_ran("x", "number 1", None)[0] == "MISSING"
+assert a.classify_ran("x", "THROW TypeError: a", "THROW TypeError: b")[1] == "node THROW TypeError: a | thaw THROW TypeError: b"
+assert a.expected_reject("THROW TypeError: 1 is not a function", "error: array predicate/reducer must be an arrow or function value")
+assert not a.expected_reject("number 1", "error: array predicate/reducer must be an arrow or function value")
+assert not a.expected_reject("THROW TypeError: a", "error: unsupported type annotation TsTypeQuery")
 class P(a.Program):
     def __init__(self):
         self.prog = {"module": False}
@@ -72,9 +76,43 @@ p = P()
 assert p.name_from_diag("error: x\n  --> g1.ts:2:5", "g1", texts, ["a.b", "c.d"]) == "c.d"
 assert p.name_from_diag("error: x\n  --> other.ts:2:5", "g1", texts, ["a.b", "c.d"]) is None
 assert p.name_from_diag("error: no location", "g1", texts, ["a.b", "c.d"]) is None
+two = "error: x\n  --> g1.ts:1:5\nerror: y\n  --> g1.ts:2:5\nnote: see\n  --> g1.ts:1:5"
+assert p.sites_from_diag(two, "g1", texts, ["a.b", "c.d"]) == ["a.b", "c.d"]  # error blocks only; the note is ignored
+assert p.sites_from_diag("warning: w\n  --> g1.ts:2:5", "g1", texts, ["a.b", "c.d"]) == ["c.d"]  # no error block: first match
+assert p.sites_from_diag("error: x\n  --> g1.ts:2:5", "g1", texts, ["a.b"]) == []  # named probe not in the group
 print("ok   classify, diagnostic-to-probe mapping")
 PY
 check "classification and diagnostic mapping" 0 $?
+
+# 5b. isolation on a fake compiler (no thaw): every error site of one failing build is dropped in one pass, so
+#     the build count is one per failing build plus the clean rebuild, and a 150-reject program stays inside EXTRA_CAP
+python3 - "$HERE" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import aot_run as a
+class Fake(a.Program):
+    def __init__(self, bad):
+        self.prog = {"module": False}
+        self.bad, self.builds, self.n, self.rejects, self.unisolated = set(bad), 0, 0, {}, []
+    def build(self, names):
+        self.builds += 1
+        texts = [f'p("{n}", () => {{ return 1; }});' for n in names]
+        hit = [n for n in names if n in self.bad]
+        if not hit:
+            return True, "", "g", texts
+        diag = "".join(f"error: bad probe\n  --> g.ts:{names.index(n) + 1}:3\n" for n in hit)
+        return False, diag, "g", texts
+names = [f"p{i:03d}" for i in range(160)]
+f = Fake(names[:150])                 # 150 bad probes, 10 good
+groups = f.solve(names)
+assert [n for g, _ in groups for n in g] == names[150:], "good probes not compiled"
+assert len(f.rejects) == 150 and f.builds == 2, (len(f.rejects), f.builds)
+assert f.unisolated == []
+g = Fake(["p001"])
+assert g.solve(["p000", "p001", "p002"]) and g.builds == 2 and list(g.rejects) == ["p001"]
+print("ok   isolation: 150 rejects dropped in 2 builds (one pass), 10 probes compiled, nothing unisolated")
+PY
+check "isolation drops all named error sites in one pass" 0 $?
 
 # C0. modules.txt is the THAW_JS_BUILTIN_MODULES allowlist, copied exactly (source present in CI and the repo)
 python3 - "$HERE" <<'PY'
@@ -211,6 +249,11 @@ check "shard matrix covers every generated family exactly once" 0 $?
 
 # D. generator-side checks (volume, skip list, api resolution, --families and --max-probes): selftest_gen.sh
 bash "$HERE/selftest_gen.sh"; check "generator self-test (selftest_gen.sh)" 0 $?
+
+# M. module surface (PR1): the d.ts parser (21 inline fixtures; plus all builtin d.ts when a dump dir is given)
+#    and the committed module_table.tsv against a regenerated one (format errors and drift fail, version rows warn)
+bash "$HERE/selftest_parse.sh"; check "module surface: d.ts parser fixtures (selftest_parse.sh)" 0 $?
+bash "$HERE/check_module_table.sh"; check "module surface: module_table.tsv is up to date (check_module_table.sh)" 0 $?
 
 [ "$fail" = 0 ] && echo "selftest: all checks passed" || echo "selftest: FAILED"
 exit "$fail"

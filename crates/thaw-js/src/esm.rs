@@ -140,11 +140,12 @@ fn export_name(n: &a::ModuleExportName) -> String {
 
 const ORIGIN_SPEC: &str = "__thaw_private_origin_spec/";
 
+// The getter is non-configurable, so a second define of the same name throws; the first definition wins.
 fn getter(name: &str, expr: &str) -> String {
     let mut quoted = String::new();
     json_quote(name, &mut quoted);
     format!(
-        "Object.defineProperty(exports, {quoted}, {{ enumerable: true, get: function () {{ return {expr}; }} }});\n"
+        "if (!Object.prototype.hasOwnProperty.call(exports, {quoted})) Object.defineProperty(exports, {quoted}, {{ enumerable: true, get: function () {{ return {expr}; }} }});\n"
     )
 }
 
@@ -198,6 +199,8 @@ fn convert(
     );
     let mut body = String::new();
     let mut specs: Vec<String> = Vec::new();
+    // names this source re-exports itself (`export { X } from`); the export graph repeats them as indirect entries
+    let mut reexported: BTreeSet<String> = BTreeSet::new();
     let mut problems: Vec<&'static str> = Vec::new();
     let mut counter = 0usize;
     let mut uses_origin = false;
@@ -357,6 +360,9 @@ fn convert(
                                     }
                                     None => local,
                                 };
+                                if from.is_some() {
+                                    reexported.insert(exported.clone());
+                                }
                                 head.push_str(&getter(&exported, &expr));
                             }
                             a::ExportSpecifier::Namespace(n) => {
@@ -387,6 +393,9 @@ fn convert(
     }
     // Indirect getters go in the head so an `export *` in the body skips their names.
     for (name, spec, remote) in indirect {
+        if reexported.contains(name) {
+            continue;
+        }
         let (mut qs, mut qr) = (String::new(), String::new());
         json_quote(spec, &mut qs);
         json_quote(remote, &mut qr);
@@ -592,5 +601,122 @@ var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal
         );
         let mut p = Package::load(&bundle).expect("loads");
         assert_eq!(p.call("tag", &[]).unwrap(), Native::Str("ok".into()));
+    }
+}
+
+#[cfg(test)]
+mod export_getter_tests {
+    use crate::builtins::json_quote;
+    use crate::host::{Native, Package};
+
+    // One native ESM module `m/e.mjs` with `source` (its `./e.js` import served by `m/c.js`, built from
+    // `dep_factory`) and the export graph `indirect`; `m/index.js` probes `e.<name>` through `require`.
+    fn load_entry(source: &str, indirect: &str, dep_factory: &str, name: &str) -> Package {
+        let payload = serde_json::json!({
+            "main": "m/e.mjs",
+            "modules": [{ "key": "m/e.mjs", "source": source, "imports": { "./e.js": "m/c.js" } }],
+            "opaqueEdges": [],
+        })
+        .to_string();
+        let graph = format!(r#"{{"m/e.mjs":{{"local":{{}},"indirect":{indirect},"stars":[]}}}}"#);
+        let (mut literal, mut graph_literal) = (String::new(), String::new());
+        json_quote(&payload, &mut literal);
+        json_quote(&graph, &mut graph_literal);
+        let bundle = format!(
+            r#"module.exports = (function(require) {{
+var __thaw_bundle_factories = {{
+"m/index.js": function(module, exports, require) {{ var e = require("./e.mjs"); exports.probe = function () {{ return typeof e.{name}; }}; }},
+"m/c.js": function(module, exports) {{ {dep_factory} }},
+"m/e.mjs": function() {{ throw new TypeError('Native ESM must be loaded by its registered entry'); }},
+}};
+var __thaw_bundle_require_maps = {{ "m/index.js": {{"./e.mjs": "m/e.mjs"}}, "m/c.js": {{}}, "m/e.mjs": {{}}, }};
+var __thaw_bundle_export_graphs = JSON.parse({graph_literal});
+var __thaw_bundle_entry_key = "m/index.js";
+var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal});
+}})(globalThis.require);"#
+        );
+        Package::load(&bundle).expect("loads")
+    }
+
+    const DEP: &str = "module.exports = { KyError: function KyError() {}, HTTPError: function HTTPError() {}, TimeoutError: function TimeoutError() {} };";
+
+    // (a) `export { X } from` in the source plus an indirect entry for the same X (the shape the registry
+    // leaves behind for a re-export barrel such as ky's `export { KyError } from './errors/KyError.js'`).
+    #[test]
+    fn re_export_with_matching_indirect_entry_defines_once() {
+        let mut p = load_entry(
+            "export { KyError } from \"./e.js\";\n",
+            r#"{"KyError":["./e.js","KyError",false]}"#,
+            DEP,
+            "KyError",
+        );
+        assert_eq!(
+            p.call("probe", &[]).unwrap(),
+            Native::Str("function".into())
+        );
+    }
+
+    // (b) a local `export class X {}` in the source plus an indirect entry for the same X.
+    #[test]
+    fn local_class_with_matching_indirect_entry_defines_once() {
+        let mut p = load_entry(
+            "export class KyError {}\n",
+            r#"{"KyError":["./e.js","KyError",false]}"#,
+            DEP,
+            "KyError",
+        );
+        assert_eq!(
+            p.call("probe", &[]).unwrap(),
+            Native::Str("function".into())
+        );
+    }
+
+    // (c) ky 2.1.0's distribution/index.js export list (the real re-exports, each also an indirect entry);
+    // the module paths are collapsed to the one import this test serves.
+    #[test]
+    fn ky_shaped_barrel_defines_each_name_once() {
+        let source = "const ky = {};\nexport default ky;\n\
+export { KyError } from './e.js';\n\
+export { HTTPError } from './e.js';\n\
+export { SchemaValidationError } from './e.js';\n\
+export { NetworkError } from './e.js';\n\
+export { TimeoutError } from './e.js';\n\
+export { ForceRetryError } from './e.js';\n\
+export { isKyError, isHTTPError, isNetworkError, isTimeoutError, isForceRetryError, } from './e.js';\n\
+export { replaceOption } from './e.js';\n";
+        let names = [
+            "KyError",
+            "HTTPError",
+            "SchemaValidationError",
+            "NetworkError",
+            "TimeoutError",
+            "ForceRetryError",
+            "isKyError",
+            "isHTTPError",
+            "isNetworkError",
+            "isTimeoutError",
+            "isForceRetryError",
+            "replaceOption",
+        ];
+        let indirect = names
+            .iter()
+            .map(|n| format!("\"{n}\":[\"./e.js\",\"{n}\",false]"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let dep = names
+            .iter()
+            .map(|n| format!("{n}: function () {{}}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut p = load_entry(
+            source,
+            &format!("{{{indirect}}}"),
+            &format!("module.exports = {{ {dep} }};"),
+            "KyError",
+        );
+        assert_eq!(
+            p.call("probe", &[]).unwrap(),
+            Native::Str("function".into())
+        );
     }
 }

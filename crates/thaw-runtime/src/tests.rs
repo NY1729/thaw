@@ -5389,3 +5389,135 @@ fn native_promise_hooks_sink_reentry_creates_untracked_promises() {
     assert_eq!(NESTED_HOOK_KEYS.with(|keys| keys.borrow().clone()), vec![0]);
     unsafe { thaw_promise_destroy(promise) };
 }
+
+extern "C" fn resolve_chain_output(
+    _context: *mut u8,
+    output: *mut ThawPromise,
+    _input: *mut ThawPromise,
+    result: *const u8,
+) {
+    thaw_promise_resolve(output, result);
+}
+
+#[test]
+fn native_promise_hooks_link_a_then_output_to_its_source() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    take_hook_events();
+    thaw_runtime_async_hooks_set(1, Some(record_hook_event));
+    let source = thaw_promise_new();
+    let chained =
+        unsafe { thaw_promise_chain(source, resolve_chain_output, std::ptr::null_mut(), 0) };
+    let (k1, k2) = unsafe { ((*source).hook_key, (*chained).hook_key) };
+    assert_eq!(
+        take_hook_events(),
+        vec![(0, k1, 0), (0, k2, k1)],
+        "the then output's trigger is its source"
+    );
+    assert_eq!(thaw_promise_resolve(source, &HOOK_RESULT), 1);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(
+        take_hook_events(),
+        vec![(3, k1, 0), (1, k2, 0), (3, k2, 0), (2, k2, 0)]
+    );
+    thaw_runtime_async_hooks_set(0, None);
+    unsafe { thaw_promise_destroy(chained) };
+}
+
+#[test]
+fn native_promise_hooks_adoption_resolves_one_tick_later_through_a_derived_reaction() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    take_hook_events();
+    thaw_runtime_async_hooks_set(1, Some(record_hook_event));
+    let outer = thaw_promise_new();
+    let inner = thaw_promise_new();
+    let (ko, ki) = unsafe { ((*outer).hook_key, (*inner).hook_key) };
+    assert_eq!(thaw_promise_resolve(inner, &HOOK_RESULT), 1);
+    assert_eq!(unsafe { thaw_promise_adopt(outer, inner) }, 1);
+    take_hook_events();
+    // The adoption job runs in the adopting promise's scope and creates the reaction promise there.
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    let job_events = take_hook_events();
+    let kd = match job_events.as_slice() {
+        [(1, before_outer, 0), (0, kd, trigger), (2, after_outer, 0)]
+            if *before_outer == ko && *after_outer == ko && *trigger == ki =>
+        {
+            *kd
+        }
+        other => panic!("adoption job events: {other:?}"),
+    };
+    // The reaction forwards to the outer promise, then resolves its own promise.
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(
+        take_hook_events(),
+        vec![(1, kd, 0), (3, ko, 0), (3, kd, 0), (2, kd, 0)]
+    );
+    thaw_runtime_async_hooks_set(0, None);
+    unsafe { thaw_promise_destroy(outer) };
+}
+
+#[test]
+fn native_promise_hooks_await_runs_as_a_throwaway_promise_resolved_after_the_continuation() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    take_hook_events();
+    thaw_runtime_async_hooks_set(1, Some(record_hook_event));
+    let awaited = thaw_promise_new();
+    let kp = unsafe { (*awaited).hook_key };
+    take_hook_events();
+    let mut frame = 0u8;
+    unsafe { thaw_promise_subscribe_await(awaited, resume_noop, &mut frame as *mut u8) };
+    let kt = match take_hook_events().as_slice() {
+        [(0, kt, parent)] if *parent == kp => *kt,
+        other => panic!("await must init its throwaway from the awaited promise: {other:?}"),
+    };
+    assert_eq!(thaw_promise_resolve(awaited, &HOOK_RESULT), 1);
+    assert_eq!(take_hook_events(), vec![(3, kp, 0)]);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(take_hook_events(), vec![(1, kt, 0), (3, kt, 0), (2, kt, 0)]);
+    thaw_runtime_async_hooks_set(0, None);
+    unsafe { thaw_promise_destroy(awaited) };
+}
+
+#[test]
+fn native_promise_hooks_stay_silent_for_linked_promises_while_off() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    take_hook_events();
+    thaw_runtime_async_hooks_set(0, None);
+    let source = thaw_promise_new();
+    let chained =
+        unsafe { thaw_promise_chain(source, resolve_chain_output, std::ptr::null_mut(), 0) };
+    assert_eq!(unsafe { (*chained).hook_key }, 0);
+    assert_eq!(thaw_promise_resolve(source, &HOOK_RESULT), 1);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert!(take_hook_events().is_empty());
+    unsafe { thaw_promise_destroy(chained) };
+}
+
+#[test]
+fn unhandled_failure_peek_keeps_the_latch_until_take() {
+    extern "C" fn failed_listener(_: *const u8) -> PromiseReportResult {
+        PromiseReportResult {
+            value: 1,
+            error: CString::new("listener failed").unwrap().into_raw(),
+        }
+    }
+    thaw_promise_set_unhandled_reporter_result(Some(failed_listener));
+    let promise = thaw_promise_new();
+    thaw_promise_reject(promise, c"boom".as_ptr().cast());
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    // the hook the JS engines use peeks: repeated peeks still see the latch
+    assert_eq!(peek_unhandled_failure(), 1);
+    assert_eq!(peek_unhandled_failure(), 1);
+    assert_eq!(thaw_promise_take_unhandled_failure(), 1);
+    assert_eq!(peek_unhandled_failure(), 0);
+    thaw_promise_set_unhandled_reporter_result(None);
+    assert_eq!(unsafe { thaw_promise_mark_handled(promise) }, 1);
+    unsafe { thaw_promise_destroy(promise) };
+}

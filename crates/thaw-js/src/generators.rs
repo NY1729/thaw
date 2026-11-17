@@ -250,11 +250,13 @@ impl Interp {
                 Req::Throw => Resume::Throw(v),
                 Req::Return => Resume::Return(v),
             };
+            self.frames_resume(&co.ctx);
             co.link.send(self as *mut Interp as usize, resume);
             (co, snap)
         };
         g.status.set(GStatus::Running);
         let y = co.link.recv(self as *mut Interp as usize);
+        self.frames_return(&co.ctx);
         self.restore(snap);
         self.rt.cur_co.pop();
         match y {
@@ -389,6 +391,7 @@ impl Interp {
             return unsupported("yield");
         };
         let snap = self.snapshot();
+        self.frames_suspend(&ctx);
         let msg = ctx
             .inside
             .suspend(self as *mut Interp as usize, Yield::Yielded(v));

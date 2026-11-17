@@ -2758,6 +2758,11 @@ impl<'ctx> HirCompiler<'ctx> {
             json_as_string_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_json_object_tag",
+            json_as_string_type,
+            Some(Linkage::External),
+        );
 
         // Returns i8 (0/1), not i1 -- see thaw-std's `thaw_json_as_bool`
         // doc comment on why it avoids relying on `bool`'s C ABI shape.
@@ -4332,6 +4337,13 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_promise_subscribe",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_subscribe_await",
             self.context
                 .i8_type()
                 .fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),

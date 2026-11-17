@@ -25,10 +25,32 @@
 //! stack segment; the cross-stack hop is the `resume`/`suspend` pair. Frame pointers are zeroed at
 //! the stack start for the same reason.
 //!
-//! Design note for `thaw-arena`'s `stack_guard`: `thread_stack_limit()` reads the bounds with
-//! `pthread_getattr_np`, which report the HOST thread's stack while a coroutine runs. Before any
-//! compiled code runs on a costack (PR 3), a per-stack `CUR_STACK` must be set on every switch and
-//! read first by `thread_stack_limit`. Not changed in this module.
+//! Stack bounds: `pthread_getattr_np` reports the HOST thread's stack, which is wrong while a costack
+//! runs. `current_bounds()` gives the running costack's `(lo, hi)`, and a resumer holds a
+//! `StackBoundsScope` around `resume` so that thaw-arena's stack guard uses the same bounds.
+
+/// While alive, the thaw-arena stack guard treats the given costack bounds as this thread's stack
+/// (`thaw_arena::stack_guard::set_stack_bounds_override`). Hold one around each `Costack::resume` on
+/// the resumer's side; dropping it restores what was set before, so nested resumes unwind cleanly.
+#[allow(dead_code)] // held by the coroutine seam (co3a) around each resume
+pub(crate) struct StackBoundsScope {
+    prev: Option<(usize, usize)>,
+}
+
+impl StackBoundsScope {
+    #[allow(dead_code)]
+    pub(crate) fn enter(bounds: (usize, usize)) -> StackBoundsScope {
+        StackBoundsScope {
+            prev: thaw_arena::stack_guard::set_stack_bounds_override(Some(bounds)),
+        }
+    }
+}
+
+impl Drop for StackBoundsScope {
+    fn drop(&mut self) {
+        thaw_arena::stack_guard::set_stack_bounds_override(self.prev);
+    }
+}
 
 #[cfg(all(
     unix,
@@ -202,6 +224,8 @@ mod imp {
     struct Inner {
         /// Owned while the coroutine holds it; taken back by `release`.
         stack: Cell<Option<Stack>>,
+        /// Lowest usable address (just above the guard page) and the top of the stack.
+        lo: usize,
         top: usize,
         body: Cell<Option<Box<dyn FnOnce()>>>,
         state: Cell<State>,
@@ -412,6 +436,7 @@ mod imp {
             let top = stack.top() & !15;
             let inner = Box::new(Inner {
                 stack: Cell::new(None),
+                lo: stack.base as usize + GUARD_BYTES,
                 top,
                 body: Cell::new(Some(body)),
                 state: Cell::new(State::Fresh),
@@ -460,10 +485,33 @@ mod imp {
             }
         }
 
+        /// `(lo, hi)` of the usable stack: what a `StackBoundsScope` around `resume` must advertise.
+        #[allow(dead_code)]
+        pub(crate) fn bounds(&self) -> (usize, usize) {
+            (self.inner.lo, self.inner.top)
+        }
+
         #[cfg(test)]
         fn stack_top(&self) -> usize {
             self.inner.top
         }
+    }
+
+    /// Bounds of the costack running on this thread, `None` on the host stack.
+    pub(crate) fn current_bounds() -> Option<(usize, usize)> {
+        let inner = CURRENT.with(|c| c.get());
+        if inner.is_null() {
+            return None;
+        }
+        // SAFETY: CURRENT is set only while the `resume` that owns this Inner is running its body.
+        let inner = unsafe { &*inner };
+        Some((inner.lo, inner.top))
+    }
+
+    /// True while a costack body runs on this thread (co3a's `Inside::suspend` debug check).
+    #[allow(dead_code)]
+    pub(crate) fn in_coroutine() -> bool {
+        !CURRENT.with(|c| c.get()).is_null()
     }
 
     impl Drop for Costack {
@@ -496,7 +544,9 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::costack::StackBoundsScope;
         use std::rc::Rc;
+        use std::sync::Arc;
         use std::time::Instant;
 
         fn rss_bytes() -> Option<usize> {
@@ -709,7 +759,10 @@ mod imp {
             assert_eq!(DROPS.with(|d| d.get()), 2);
         }
 
+        // the live counter is process-global: with other tests running costacks concurrently (the whole lib
+        // suite under THAW_JS_CO=stack) the 30,000 fill hits the cap early, so this one runs alone (CI step).
         #[test]
+        #[ignore = "global live counter: run alone with --ignored --test-threads=1"]
         fn costack_live_limit_is_a_clear_error() {
             let mut held = Vec::with_capacity(MAX_LIVE);
             for _ in 0..MAX_LIVE {
@@ -854,6 +907,161 @@ mod imp {
                 assert!(ns < 60.0, "round trip {ns:.1} ns");
             }
         }
+
+        #[test]
+        fn current_bounds_is_the_running_costack_and_none_on_the_host() {
+            assert_eq!(current_bounds(), None);
+            assert!(!in_coroutine());
+            let seen = Rc::new(Cell::new(None));
+            let s = seen.clone();
+            let c = Costack::new(Box::new(move || {
+                let marker = 0u8;
+                let sp = &marker as *const u8 as usize;
+                s.set(Some((current_bounds(), in_coroutine(), sp)));
+                suspend();
+                s.set(Some((current_bounds(), in_coroutine(), 0)));
+            }))
+            .unwrap();
+            let want = c.bounds();
+            assert_eq!(want.1 - want.0, STACK_BYTES - GUARD_BYTES);
+            assert_eq!(c.resume(), Status::Suspended);
+            let (got, inside, sp) = seen.get().unwrap();
+            assert_eq!(got, Some(want));
+            assert!(inside);
+            assert!(want.0 < sp && sp < want.1, "sp {sp:#x} outside {want:x?}");
+            assert_eq!(c.resume(), Status::Finished);
+            assert_eq!(seen.get().unwrap().0, Some(want));
+            assert_eq!(current_bounds(), None, "back on the host after the run");
+            assert!(!in_coroutine());
+        }
+
+        #[test]
+        fn current_bounds_follows_nested_resumes_and_returns_to_the_outer_costack() {
+            type Log = Vec<(&'static str, Option<(usize, usize)>)>;
+            let log: Rc<RefCell<Log>> = Rc::new(RefCell::new(Vec::new()));
+            let l = log.clone();
+            let outer = Costack::new(Box::new(move || {
+                l.borrow_mut().push(("outer", current_bounds()));
+                let l2 = l.clone();
+                let inner = Costack::new(Box::new(move || {
+                    l2.borrow_mut().push(("inner", current_bounds()));
+                    suspend();
+                    l2.borrow_mut().push(("inner-again", current_bounds()));
+                }))
+                .unwrap();
+                let _scope = StackBoundsScope::enter(inner.bounds());
+                assert_eq!(inner.resume(), Status::Suspended);
+                drop(_scope);
+                // back in the outer body: its own bounds again, not the inner's
+                l.borrow_mut().push(("outer-after", current_bounds()));
+                suspend();
+                l.borrow_mut().push(("outer-end", current_bounds()));
+            }))
+            .unwrap();
+            let outer_bounds = outer.bounds();
+            assert_eq!(outer.resume(), Status::Suspended);
+            assert_eq!(outer.resume(), Status::Finished);
+            let log = log.borrow();
+            let names: Vec<&str> = log.iter().map(|(n, _)| *n).collect();
+            assert_eq!(names, ["outer", "inner", "outer-after", "outer-end"]);
+            assert_eq!(log[0].1, Some(outer_bounds));
+            assert_ne!(
+                log[1].1,
+                Some(outer_bounds),
+                "the inner body sees its own stack"
+            );
+            assert_eq!(log[2].1, Some(outer_bounds));
+            assert_eq!(log[3].1, Some(outer_bounds));
+        }
+
+        #[test]
+        fn stack_bounds_scope_sets_the_guard_override_and_restores_it_on_drop() {
+            let c = Costack::new(Box::new(|| {})).unwrap();
+            let bounds = c.bounds();
+            assert_eq!(
+                thaw_arena::stack_guard::set_stack_bounds_override(None),
+                None
+            );
+            {
+                let _scope = StackBoundsScope::enter(bounds);
+                // the scope installed `bounds`: setting it again returns exactly that
+                let seen = thaw_arena::stack_guard::set_stack_bounds_override(Some((1, 2)));
+                assert_eq!(seen, Some(bounds));
+                thaw_arena::stack_guard::set_stack_bounds_override(Some(bounds));
+            }
+            assert_eq!(
+                thaw_arena::stack_guard::set_stack_bounds_override(None),
+                None
+            );
+            assert_eq!(
+                c.resume(),
+                Status::Finished,
+                "a body that never ran finishes at once"
+            );
+        }
+
+        /// `thread_stack_has_room` judges a costack by its own bounds, whatever the host thread's stack is:
+        /// the threshold is `lo + min(size / 8 + 4 MiB, size / 2)`, i.e. 12 MiB above the bottom of the
+        /// 64 MiB costack. Layout-independent, unlike the JS-level test below.
+        #[test]
+        fn has_room_on_a_costack_uses_the_costack_bounds() {
+            let c = Costack::new(Box::new(|| {
+                let (lo, _hi) = current_bounds().unwrap();
+                let mib = 1usize << 20;
+                assert!(
+                    !crate::thread_stack_has_room(lo + mib),
+                    "1 MiB above the bottom: no room"
+                );
+                assert!(
+                    !crate::thread_stack_has_room(lo + 11 * mib),
+                    "11 MiB above: no room"
+                );
+                assert!(
+                    crate::thread_stack_has_room(lo + 13 * mib),
+                    "13 MiB above: room"
+                );
+                let here = 0u8;
+                assert!(crate::thread_stack_has_room(&here as *const u8 as usize));
+            }))
+            .unwrap();
+            assert_eq!(c.resume(), Status::Finished);
+        }
+
+        /// Deep JS recursion inside a costack body must be a `RangeError`, not a fault on the guard page.
+        /// The costack is mapped first and the resumer thread spawned after it, so the thread's own stack
+        /// lies BELOW the costack: the host thread's bounds then say "room" for a sp on the costack, which
+        /// is exactly what `thread_stack_has_room` must not believe. Ignored until co3a's stackful backend
+        /// runs coroutines on costacks by default (then the same check runs through `THAW_JS_CO=stack`).
+        #[test]
+        #[ignore = "co3a: run with --ignored until the stackful backend is wired"]
+        fn js_deep_recursion_on_a_costack_is_a_range_error() {
+            let realm = Arc::new(AtomicUsize::new(0));
+            let r2 = realm.clone();
+            let c = Costack::new(Box::new(move || {
+                let ip = r2.load(Ordering::SeqCst) as *mut crate::Interp;
+                // SAFETY: the spawned thread stores its live Interp before it resumes this costack.
+                let it = unsafe { &mut *ip };
+                it.configure_stack(STACK_BYTES);
+                let _ = it.run("function r(n) { return r(n + 1) + 1; } try { r(0); } catch (e) { console.log(e.name); }");
+            }))
+            .unwrap();
+            let c_addr = &c as *const Costack as usize;
+            let out = std::thread::Builder::new()
+                .stack_size(8 << 20)
+                .spawn(move || {
+                    let mut it = Box::new(crate::Interp::new());
+                    realm.store(&mut *it as *mut crate::Interp as usize, Ordering::SeqCst);
+                    // SAFETY: `c` lives in the test frame, which joins this thread before it is dropped.
+                    let c = unsafe { &*(c_addr as *const Costack) };
+                    let _scope = StackBoundsScope::enter(c.bounds());
+                    assert_eq!(c.resume(), Status::Finished);
+                    it.out.clone()
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            assert_eq!(out, ["RangeError"]);
+        }
     }
 }
 
@@ -863,7 +1071,9 @@ mod imp {
     target_os = "linux"
 ))]
 #[allow(unused_imports)]
-pub(crate) use imp::{suspend, Costack, CostackError, Status, STACK_BYTES};
+pub(crate) use imp::{
+    current_bounds, in_coroutine, suspend, Costack, CostackError, Status, STACK_BYTES,
+};
 
 /// Stub for targets without the assembly backend: construction always fails.
 #[cfg(not(all(
@@ -914,10 +1124,24 @@ mod stub {
         }
 
         pub(crate) fn cancel(self) {}
+
+        #[allow(dead_code)]
+        pub(crate) fn bounds(&self) -> (usize, usize) {
+            (0, 0)
+        }
     }
 
     pub(crate) fn suspend() {
         unreachable!("suspend outside a stackful coroutine")
+    }
+
+    pub(crate) fn current_bounds() -> Option<(usize, usize)> {
+        None
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn in_coroutine() -> bool {
+        false
     }
 }
 
@@ -927,4 +1151,6 @@ mod stub {
     target_os = "linux"
 )))]
 #[allow(unused_imports)]
-pub(crate) use stub::{suspend, Costack, CostackError, Status, STACK_BYTES};
+pub(crate) use stub::{
+    current_bounds, in_coroutine, suspend, Costack, CostackError, Status, STACK_BYTES,
+};

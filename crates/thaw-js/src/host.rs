@@ -2143,6 +2143,11 @@ fn array_buffer_bytes_json(v: &Value) -> String {
 /// `__thaw_json_host_query`'s). Kinds thaw-js has no value for (Date, Buffer, Map, Set, native
 /// wrappers) answer "no" to the copy queries; operation 29 says whether the value must stay a live handle,
 /// and operation 30 whether a plain object or array must (a call argument keeps its identity).
+/// Operations: 0 typeof, 1 truthy, 2 String(), 3 JSON-quoted string, 4 IsArray, 5-7 undefined/nullish/null,
+/// 8 Json copy, 9 is object, 10 number text, 11 is Buffer, 12-13 Date check/time, 14 callable, 15 UTF-16 units,
+/// 16 number coercion, 17-20 and 22-24 engine-prelude queries, 21 native owner pointer, 25-26 origin/prototype,
+/// 27 typed-array text, 28 Error properties, 29 must stay live, 30 call-argument identity, 31 ArrayBuffer bytes,
+/// 32 Object.prototype.toString tag.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> ThawResult {
     if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
@@ -2234,6 +2239,13 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             // 31: the bytes of an ArrayBuffer (a resizable or SharedArrayBuffer answers its current bytes) as a
             // JSON number array, so a Json number[] request can read a digest result; `null` for any other value
             31 => array_buffer_bytes_json(&v),
+            // 32: the value's Object.prototype.toString tag (`[object Map]`, ...), by the interpreter's own implementation
+            32 => match crate::builtins::object_prototype_to_string(it, &v)
+                .map_err(|c| classify(it, c))?
+            {
+                Value::Str(tag) => tag.to_string(),
+                _ => "[object Object]".to_string(),
+            },
             _ => {
                 return Err(HostError::Thrown(format!(
                     "TypeError: thaw-js does not support the host query {operation}"
@@ -4839,6 +4851,51 @@ fn poll_native_servers_symbol() -> u8 {
     0
 }
 
+/// Test stand-in for the runtime's `UNHANDLED_FAILURE` peek (process-wide, like `TEST_SERVER_POLL`).
+#[cfg(test)]
+pub(crate) static TEST_UNHANDLED_FAILURE: std::sync::Mutex<Option<extern "C" fn() -> u8>> =
+    std::sync::Mutex::new(None);
+
+/// Whether the compiled runtime latched an unhandled rejection (`peek`: does not clear it, so the
+/// process-exit path still reports it). False without a compiled runtime.
+#[cfg(unix)]
+fn native_unhandled_failure() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(peek) = *TEST_UNHANDLED_FAILURE.lock().unwrap() {
+            return peek() != 0;
+        }
+    }
+    RUNTIME_HOOKS
+        .with(Cell::get)
+        .unhandled_failure
+        .is_some_and(|peek| peek() != 0)
+}
+
+#[cfg(not(unix))]
+fn native_unhandled_failure() -> bool {
+    false
+}
+
+/// `thaw_runtime_abort_pending_work` (exported by thaw-rt-dylib): drops pending timers and fd watchers so a
+/// fatal exit does not keep a listening server serving. No-op without a compiled runtime.
+#[cfg(unix)]
+fn abort_native_pending_work() {
+    // SAFETY: the symbol is the compiled runtime's `extern "C" fn()`, looked up like the other natives.
+    unsafe {
+        let sym = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            c"thaw_runtime_abort_pending_work".as_ptr(),
+        );
+        if !sym.is_null() {
+            std::mem::transmute::<*mut c_void, extern "C" fn()>(sym)();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn abort_native_pending_work() {}
+
 /// `drain_native` as a loop turn hook. A listen callback may queue continuations, so servers are polled first.
 pub(crate) fn drain_native_continuations(_: &mut Interp) -> bool {
     let http = poll_native_servers();
@@ -4914,10 +4971,26 @@ fn ensure_js_job_hooks() {
     register_js_job_hooks();
 }
 
+/// Same layout as thaw-runtime's `#[repr(C)] RuntimeHooks` (lib.rs); filled in by `thaw_runtime_set_js_job_hooks`.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct RuntimeHooks {
+    #[allow(dead_code)]
+    server_poll: Option<extern "C" fn() -> u8>,
+    unhandled_failure: Option<extern "C" fn() -> u8>,
+}
+
+thread_local! {
+    /// This thread's runtime hook table (the runtime's registry is per thread).
+    static RUNTIME_HOOKS: Cell<RuntimeHooks> = const {
+        Cell::new(RuntimeHooks { server_poll: None, unhandled_failure: None })
+    };
+}
+
 #[cfg(unix)]
 fn register_js_job_hooks() {
-    // SAFETY: the symbol, when present, is the compiled runtime's `thaw_runtime_set_js_job_hooks`; a null
-    // hooks pointer leaves its own hook table alone.
+    // SAFETY: the symbol, when present, is the compiled runtime's `thaw_runtime_set_js_job_hooks`; it writes
+    // the thread-local table we pass (valid for the thread's lifetime) and only during this call.
     unsafe {
         let sym = libc::dlsym(
             libc::RTLD_DEFAULT,
@@ -4926,10 +4999,11 @@ fn register_js_job_hooks() {
         if sym.is_null() {
             return;
         }
+        let hooks = RUNTIME_HOOKS.with(|h| h.as_ptr());
         std::mem::transmute::<
             *mut c_void,
-            extern "C" fn(extern "C" fn() -> u64, extern "C" fn(u64), *mut c_void),
-        >(sym)(queue_js_job_barrier, drain_js_job_barrier, ptr::null_mut());
+            extern "C" fn(extern "C" fn() -> u64, extern "C" fn(u64), *mut RuntimeHooks),
+        >(sym)(queue_js_job_barrier, drain_js_job_barrier, hooks);
     }
 }
 
@@ -6019,6 +6093,9 @@ pub(crate) fn other_packages_have_work() -> bool {
 pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
     let mut status = 0;
     let mut exited = false;
+    // the runtime hook table is per thread: make sure this thread has it before the first check
+    ensure_js_job_hooks();
+    let mut fatal = false;
     loop {
         // the compiled http server (if any) is serviced here too, so a routed build with no JS timers still answers
         let http = poll_native_servers();
@@ -6085,14 +6162,31 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
         if exited {
             break;
         }
+        // a realm error, or a rejection the runtime reported with no handler (Node exits 1): end the loop
+        // now, even with a live server, so the fatal exit runs (the reporter's flag is peeked, not cleared)
+        fatal = status != 0 || native_unhandled_failure();
+        if fatal {
+            break;
+        }
         if servers_live && !ran_any && !yielded_any && settled == 0 && !drained {
             // ponytail: 1 ms poll like QuickJS api.rs:1821; upgrade = block in the runtime fd poll
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let watching = WATCHES.with(|w| !w.borrow().is_empty());
-        if settled == 0 && !drained && !(ran_any && watching) && !yielded_any && !servers_live {
+        if !(settled != 0 || drained || yielded_any || servers_live || (ran_any && watching)) {
             break;
         }
+    }
+    if fatal {
+        // as Node does on an uncaught error: pending work is dropped and `exit` fires once with 1 (no
+        // `beforeExit`); the abort also drops native fd sources, so `thaw_http_run_servers` returns
+        abort_native_pending_work();
+        thaw_tjs_fatal_exit();
+        // the runtime's own exit-1 path runs only after this loop and the native server runner return, and a live
+        // server never returns: end the process here, as QuickJS's `fail_process` does
+        #[cfg(not(test))]
+        end_process_after_fatal();
+        return 1;
     }
     // Idle for real (no thaw-js work, no native watch, no live server, no process.exit): each realm runs its
     // `beforeExit` re-arm loop and then `exit`, once. A realm with listeners but no work still gets them.
@@ -6168,6 +6262,23 @@ pub extern "C" fn thaw_tjs_fatal_exit() {
             Ok::<(), HostError>(())
         });
     }
+}
+
+/// Ends the process with status 1 after a fatal error (`exit` listeners already ran in `thaw_tjs_fatal_exit`).
+#[cfg(not(test))]
+fn end_process_after_fatal() {
+    let count = PACKAGES.with(|ps| ps.borrow().len());
+    for handle in 0..count {
+        let _ = with_package(handle, |p| {
+            terminate_process(&mut p.interp, 1);
+            Ok::<(), HostError>(())
+        });
+    }
+    // no package (or a worker realm that declined): flush and leave without running TLS destructors
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    // SAFETY: `_exit` takes no pointers.
+    unsafe { libc::_exit(1) }
 }
 
 /// 1 while any loaded package still has referenced timers/immediates or queued jobs.
@@ -7259,6 +7370,36 @@ mod host_query_live_tests {
         let mut it = Interp::new();
         let view = it.run("new Uint8Array([1, 2]).buffer").unwrap();
         assert_eq!(array_buffer_bytes_json(&view), "[1,2]");
+    }
+
+    /// A value evaluated in the default realm, leased as a live handle (what compiled code holds).
+    fn live(src: &str) -> u64 {
+        let realm = default_realm();
+        let value = with_package(realm, |p| {
+            p.interp.run(src).map_err(|c| classify(&mut p.interp, c))
+        })
+        .unwrap();
+        store_handle(realm, value) as u64
+    }
+
+    /// Node 22 `Object.prototype.toString.call(x)` for each live value (`node -e`, v22.23.1).
+    #[test]
+    fn host_query_object_tag_matches_node_for_live_values() {
+        let cases = [
+            ("new Date(0)", "[object Date]"),
+            ("Promise.resolve()", "[object Promise]"),
+            ("Math", "[object Math]"),
+            ("Symbol()", "[object Symbol]"),
+            ("new Map().entries()", "[object Map Iterator]"),
+            ("new Float64Array(1)", "[object Float64Array]"),
+            ("new ArrayBuffer(1)", "[object ArrayBuffer]"),
+            ("new DataView(new ArrayBuffer(1))", "[object DataView]"),
+            ("new WeakMap()", "[object WeakMap]"),
+            ("(function*(){})()", "[object Generator]"),
+        ];
+        for (src, tag) in cases {
+            assert_eq!(query(live(src), 32), tag, "{src}");
+        }
     }
 
     #[test]

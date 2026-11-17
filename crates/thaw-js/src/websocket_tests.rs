@@ -208,7 +208,9 @@ fn websocket_constructor_and_close_validation_errors() {
 
 const SCENARIO_D: &str = r##"var srv = ws.serve(function () {}, function (port) {
   srv.stop();
-  var w = new WebSocket('ws://127.0.0.1:' + port + '/');
+  // a reserved port nothing listens on: reusing the just-freed `port` raced other tests binding it (the connect then
+  // succeeded and no error event ever fired)
+  var w = new WebSocket('ws://127.0.0.1:1/');
   w.onerror = function (e) {
     console.log('error', e.type, e.constructor.name, e.message, e.error.constructor.name, e.error.message);
     // the "no close event follows" check starts from the error itself: a fixed delay from the connect
