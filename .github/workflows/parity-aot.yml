@@ -152,14 +152,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Family names as gen_probes.py emits them; selftest.sh (C6) fails if a family is missing or repeated.
+          # Balanced by probe count (about 1000 each).
           - shard: s1
-            families: "array,string,typedarray"
+            families: "bigint,map,math,proxy,static,string"
           - shard: s2
-            families: "map-set-weak,promise,json,object-reflect-proxy"
+            families: "json,reflect,regexp,set,typedarray"
           - shard: s3
-            families: "date,regexp,math,number-bigint-symbol-error"
+            families: "array,globals,object,weak"
           - shard: s4
-            families: "buffer,u8,static,globals"
+            families: "buffer,date,error,number,promise,symbol,u8"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

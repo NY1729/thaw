@@ -172,6 +172,43 @@ print("ok   no probe calls Math.random, Date.now or new Date()")
 PY
 check "skip list: no clock or random probes" 0 $?
 
+# C5. PRELUDE (compiled into every program) calls no probe-target API except the declared HELPER_DEPS: a reject of
+#     an undeclared one masks every probe.
+python3 - "$W/a/manifest.json" "$HERE" <<'PY'
+import json, re, sys
+manifest, here = sys.argv[1], sys.argv[2]
+sys.path.insert(0, here)
+import gen_probes as g
+DOTTED = re.compile(r"\b[A-Z]\w*(?:\.prototype)?\.\w+")
+assert DOTTED.findall("x = ArrayBuffer.isView(y); z = Buffer.isBuffer(w);") == ["ArrayBuffer.isView", "Buffer.isBuffer"]
+m = json.load(open(manifest))
+targets = {api for prog in m["programs"] for p in prog["probes"] for api in p["api"] if "." in api and ":" not in api}
+assert "ArrayBuffer.isView" in targets, "ArrayBuffer.isView probe missing"
+mentions = set(DOTTED.findall(g.PRELUDE))
+bad = sorted((mentions & targets) - set(g.HELPER_DEPS))
+stale = sorted(set(g.HELPER_DEPS) - mentions)
+assert not bad, f"PRELUDE calls undeclared probe-target APIs (add to HELPER_DEPS or replace): {bad}"
+assert not stale, f"HELPER_DEPS lists APIs PRELUDE no longer mentions: {stale}"
+print(f"ok   PRELUDE probe-target dependencies are exactly HELPER_DEPS {sorted(mentions & targets)}")
+PY
+check "PRELUDE has no undeclared probe-target API" 0 $?
+
+# C6. the workflow shard matrix (regex, no PyYAML needed on the runner): each generated family in exactly one shard
+python3 - "$HERE/../../.github/workflows/parity-aot.yml" "$W/a/manifest.json" <<'PY'
+import json, re, sys
+wf, manifest = sys.argv[1], sys.argv[2]
+text = open(wf, encoding="utf-8").read()
+shards = re.findall(r'- shard: (\w+)\s*\n\s*families: "([^"]*)"', text)
+assert [s for s, _ in shards] == ["s1", "s2", "s3", "s4"], shards
+listed = [f for _, fams in shards for f in fams.split(",")]
+dup = sorted({f for f in listed if listed.count(f) > 1})
+assert not dup, f"family in more than one shard: {dup}"
+gen = {p["family"] for p in json.load(open(manifest))["programs"]}
+assert set(listed) == gen, (sorted(set(listed) - gen), sorted(gen - set(listed)))
+print(f"ok   shard matrix: 4 shards, {len(listed)} families, each generated family in exactly one shard")
+PY
+check "shard matrix covers every generated family exactly once" 0 $?
+
 # D. generator-side checks (volume, skip list, api resolution, --families and --max-probes): selftest_gen.sh
 bash "$HERE/selftest_gen.sh"; check "generator self-test (selftest_gen.sh)" 0 $?
 
