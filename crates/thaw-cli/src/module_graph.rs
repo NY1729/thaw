@@ -213,10 +213,8 @@ pub(crate) fn rewrite_node_timers_value_reads(module: &mut Module) {
                         if self.namespaces.contains(namespace.sym.as_ref())
                             && NODE_TIMERS_GLOBALS.contains(&property.sym.as_ref())
                         {
-                            *expr = Expr::Ident(Ident::new_no_ctxt(
-                                property.sym.clone().into(),
-                                member.span,
-                            ));
+                            *expr =
+                                Expr::Ident(Ident::new_no_ctxt(property.sym.clone(), member.span));
                             return;
                         }
                     }
