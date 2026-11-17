@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::scan::{parse_bundle, BundleParts};
 use crate::{array_index, Ctl, Interp, Kind, Obj, Slot, Value, R};
@@ -1438,10 +1438,64 @@ pub(crate) fn decode_wire(wire: &str) -> Result<(usize, Value), String> {
     let owner = wire_owner(nodes);
     with_package(owner, |p| {
         let mut cx = GraphCx::new(nodes.len(), false, true, owner);
-        graph_token(&mut p.interp, root, nodes, &mut cx).map_err(HostError::Bundle)
+        let value = graph_token(&mut p.interp, root, nodes, &mut cx).map_err(HostError::Bundle)?;
+        record_origin_serials(&top, nodes, &cx.memo);
+        Ok(value)
     })
     .map(|v| (owner, v))
     .map_err(|e| e.to_string())
+}
+
+thread_local! {
+    /// Origin serial of each graph-decoded array/object, keyed by its address. The `Weak` keeps the
+    /// allocation alive, so an address is never reused while its entry exists (QuickJS's `thawOriginSerials`).
+    static ORIGIN_SERIALS: RefCell<HashMap<usize, (u64, Weak<crate::ObjData>)>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Records the `origins` of a graph wire (one native serial per node, 0 for none) against the decoded
+/// container of each array/object node, as QuickJS's `graph.origins` does.
+fn record_origin_serials(top: &[(String, Native)], nodes: &[Native], memo: &[Option<Value>]) {
+    let Some(Native::Array(origins)) = graph_field(top, "origins") else {
+        return;
+    };
+    ORIGIN_SERIALS.with(|table| {
+        let mut table = table.borrow_mut();
+        for (index, origin) in origins.iter().enumerate() {
+            let (Native::Number(serial), Some(Native::Object(node))) = (origin, nodes.get(index))
+            else {
+                continue;
+            };
+            let container = graph_field(node, "a").is_some() || graph_field(node, "o").is_some();
+            if !container || serial.fract() != 0.0 || *serial < 1.0 {
+                continue;
+            }
+            if let Some(Some(Value::Object(obj))) = memo.get(index) {
+                // ponytail: dead entries are swept only when the table reaches a power of two; upgrade if memory shows
+                if table.len() >= 4096 && table.len().is_power_of_two() {
+                    table.retain(|_, (_, weak)| weak.strong_count() > 0);
+                }
+                table.insert(
+                    Rc::as_ptr(obj) as usize,
+                    (*serial as u64, Rc::downgrade(obj)),
+                );
+            }
+        }
+    });
+}
+
+/// The origin serial of a graph-decoded JS shadow (the native container it stands for), or 0.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_origin_serial(handle: u64) -> u64 {
+    let Some((_, Value::Object(obj))) = slot(handle) else {
+        return 0;
+    };
+    ORIGIN_SERIALS.with(
+        |table| match table.borrow().get(&(Rc::as_ptr(&obj) as usize)) {
+            Some((serial, weak)) if weak.strong_count() > 0 => *serial,
+            _ => 0,
+        },
+    )
 }
 
 /// The package that owns a handle a graph wire's nodes reference, else the package last entered.

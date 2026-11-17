@@ -10486,3 +10486,22 @@ var __thaw_bundle_entry_key = "nestcls/index.js";
     // a missing intermediate namespace is an error, as in Node (`undefined.X`)
     assert!(class_call("$new$nestcls::kdf.Missing.X$arity0", "[]", 0, false).is_err());
 }
+
+#[test]
+fn graph_wire_origin_serials_name_the_decoded_root_container() {
+    use crate::host::*;
+    use std::ffi::CString;
+    // `origins[i]` is node i's native serial; the root array decoded from node 0 reports serial 7,
+    // a plain value reports 0, and an unknown handle reports 0 (QuickJS `__thaw_origin_serial`).
+    let with_origin = CString::new(
+        r#"{"root":{"r":0},"nodes":[{"a":[{"v":1}]}],"leases":[],"napiLeases":[],"origins":[7]}"#,
+    )
+    .unwrap();
+    let handle = thaw_tjs_retain_graph_result(with_origin.as_ptr());
+    assert!(handle.error.is_null());
+    assert_eq!(thaw_tjs_origin_serial(handle.value), 7);
+    let plain = CString::new(r#"{"root":{"v":3},"nodes":[],"leases":[],"napiLeases":[]}"#).unwrap();
+    let handle = thaw_tjs_retain_graph_result(plain.as_ptr());
+    assert_eq!(thaw_tjs_origin_serial(handle.value), 0);
+    assert_eq!(thaw_tjs_origin_serial(u64::MAX), 0);
+}
