@@ -131,6 +131,7 @@ pub unsafe extern "C" fn thaw_intl_compare(
                 flag(&options, "ignorePunctuation"),
                 flag(&options, "numeric"),
                 options.get("caseFirst").map_or("false", String::as_str),
+                false,
             );
             *cell = Some((key, collator));
         }
@@ -583,6 +584,7 @@ pub fn js_native(name: &str, a: &[String]) -> Option<String> {
             s(4),
             s(5).as_bytes(),
             s(6).as_bytes(),
+            s(7),
         )
         .to_string(),
         "plural_category" => intl_plural_category(s(0), s(1), s(2)),
@@ -602,4 +604,46 @@ pub fn keep_c_exports() -> [usize; 3] {
         thaw_intl_number as *const () as usize,
         thaw_intl_date as *const () as usize,
     ]
+}
+
+#[cfg(test)]
+mod collator_search_tests {
+    use super::intl_collator_compare;
+
+    fn cmp(locale: &str, usage: &str, sensitivity: &str, a: &str, b: &str) -> i32 {
+        intl_collator_compare(
+            locale,
+            sensitivity,
+            false,
+            false,
+            "false",
+            a.as_bytes(),
+            b.as_bytes(),
+            usage,
+        )
+    }
+
+    // Node 22 reference values (ICU 78.2).
+    #[test]
+    fn collator_search_usage_differs_from_sort_in_de() {
+        assert_eq!(cmp("de", "search", "base", "a", "ä"), -1);
+        assert_eq!(cmp("de", "sort", "base", "a", "ä"), 0);
+        assert_eq!(cmp("de", "search", "base", "ä", "ae"), 0);
+        assert_eq!(cmp("de", "sort", "base", "ä", "ae"), -1);
+        assert_eq!(cmp("de", "search", "variant", "ä", "ae"), 1);
+        assert_eq!(cmp("de", "sort", "variant", "ä", "ae"), -1);
+    }
+
+    #[test]
+    fn collator_search_matches_node_for_other_locales() {
+        assert_eq!(cmp("ja", "search", "variant", "か", "が"), -1);
+        assert_eq!(cmp("ja", "search", "base", "か", "が"), 0);
+        assert_eq!(cmp("en", "search", "base", "a", "A"), 0);
+        assert_eq!(cmp("en", "search", "variant", "a", "A"), -1);
+        assert_eq!(cmp("ko", "search", "variant", "ㄱ", "가"), -1);
+        assert_eq!(cmp("th", "search", "variant", "ก", "ข"), -1);
+        // A locale without its own search tailoring uses the root search data.
+        assert_eq!(cmp("fr", "search", "variant", "a", "ä"), -1);
+        assert_eq!(cmp("fr", "search", "base", "a", "ä"), 0);
+    }
 }

@@ -3609,6 +3609,112 @@ fn intl_formats_numbers_dates_and_lists_through_the_native_icu_data() {
     assert_eq!(out.join("|"), "1.234.567,5|one|a, b, and c|1/1/1970|-1");
 }
 
+/// Node 22 `Intl.Collator({usage:'search'})` reference (ICU 78.2, CLDR 48.0; run
+/// with LANG=en_US.UTF-8). One line per locale: 4 sensitivities (base, accent,
+/// case, variant) x 17 pairs (see the JS below), each cell `L` = -1, `E` = 0,
+/// `G` = 1. The `de-sort` line is the same cells under `usage:'sort'`.
+/// Locales without their own search tailoring (fr, it, ...) must equal the
+/// root search data (`und`). `ja` kana/prolonged-sound and `th`/`ko`
+/// Hangul rows are not independently verified against a second ICU build.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_collator_search_usage_matches_node_22() {
+    let out = run(r#"
+        const sens = ['base','accent','case','variant'];
+        const pairs = [['a','ä'],['ä','a'],['a','ae'],['ä','ae'],['a','A'],['a','á'],['n','ñ'],['v','w'],['ㄱ','가'],['ก','ข'],['あ','ア'],['か','が'],['ー','あ'],['z','Å'],['ä','z'],['o','ö'],['å','z']];
+        const sym = x => x < 0 ? 'L' : x > 0 ? 'G' : 'E';
+        const row = (loc, usage) => {
+          let s = '';
+          for (const se of sens) for (const [a, b] of pairs)
+            s += sym(new Intl.Collator(loc, {usage, sensitivity: se}).compare(a, b));
+          return s;
+        };
+        for (const loc of ['de','sv','es','da','fi','ko','nb','tr','ja','zh','th','en','fr','it','pt','nl','pl','ru','und'])
+          console.log(loc + ' ' + row(loc, 'search'));
+        console.log('de-sort ' + row('de', 'sort'));
+    "#);
+    assert_eq!(
+        out,
+        [
+            "de LGLEEEELLLEELGLLLLGLGELLLLLELLGLLLLGLELEELLLEELGLLLLGLGLLLLLLLLLGLLL",
+            "sv LGLGEEELLLEELLGLGLGLGELLLLLELLLGLGLGLGLEELLLEELLGLGLGLGLLLLLLLLLLGLG",
+            "es EELLEELLLLEELGLELLGLLELLLLLELLGLLLEELLLELLLLEELGLELLGLLLLLLLLLLLGLLL",
+            "da LGLGEEELLLEELLGLGLGLGELLLLLELLLGLGLGLGLEELLLEELLGLGLGLGLLLLLLLLLLGLG",
+            "fi LGLGEEELLLEELLGLGLGLGELLLLLELLLGLGLGLGLEELLLEELLGLGLGLGLLLLLLLLLLGLG",
+            "ko EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "nb LGLGEEELLLEELLGLGLGLGELLLLLELLLGLGLGLGLEELLLEELLGLGLGLGLLLLLLLLLLGLG",
+            "tr EELLEEELLLEELGLLLLGLLELLLLLELLGLLLEELLLEELLLEELGLLLLGLLLLLLLLLLLGLLL",
+            "ja EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "zh EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "th EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "en EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "fr EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "it EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "pt EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "nl EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "pl EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "ru EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "und EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "de-sort EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+        ]
+    );
+}
+
+/// Node 22 reference for the non-matrix `usage:'search'` surface: option
+/// handling, `resolvedOptions`, `supportedLocalesOf`, sorting, and the
+/// `root` / bad-usage RangeErrors.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_collator_search_options_match_node_22() {
+    let out = run(r#"
+        const r = f => { try { return String(f()); } catch (e) { return 'ERR ' + e.name; } };
+        const c = (loc, o) => new Intl.Collator(loc, o);
+        console.log(r(() => c('de-u-co-search', {usage:'search'}).compare('a', 'ä')));
+        console.log(r(() => c('de-u-co-search', {usage:'search'}).resolvedOptions().locale));
+        console.log(r(() => c('de-u-co-search', {usage:'search'}).resolvedOptions().collation));
+        console.log(r(() => Intl.Collator.supportedLocalesOf(['de','en','xx-zz','fr-u-co-search']).join(',')));
+        console.log(r(() => c('root', {usage:'search'}).compare('a','b')));
+        console.log(r(() => c('de', {usage:'bogus'}).resolvedOptions().usage));
+        console.log(r(() => c('de').resolvedOptions().usage));
+        console.log(r(() => c('de', {usage:'search', ignorePunctuation:true}).compare('a-b', 'ab')));
+        console.log(r(() => c('de', {usage:'search', numeric:true}).compare('a2', 'a10')));
+        console.log(r(() => c('de', {usage:'search', numeric:true}).compare('ä2', 'a10')));
+        console.log(r(() => c('de', {usage:'search', caseFirst:'upper'}).compare('a', 'A')));
+        console.log(r(() => c('de', {usage:'search', caseFirst:'lower'}).compare('a', 'A')));
+        console.log(r(() => c('de', {usage:'sort', caseFirst:'upper'}).compare('a', 'A')));
+        console.log(r(() => c('de', {usage:'search', sensitivity:'case'}).compare('a', 'A')));
+        console.log(r(() => c('de', {usage:'search', sensitivity:'case'}).compare('ä', 'a')));
+        console.log(r(() => [...['ä','a','z','ae','Å']].sort(c('sv', {usage:'search'}).compare).join(' ')));
+        console.log(r(() => [...['ä','a','z','ae','Å']].sort(c('de', {usage:'search'}).compare).join(' ')));
+        console.log(r(() => [...['ä','a','z','ae','Å']].sort(c('de').compare).join(' ')));
+        console.log(r(() => JSON.stringify(c('de', {usage:'search'}).resolvedOptions())));
+    "#);
+    assert_eq!(
+        out,
+        [
+            "-1",
+            "de",
+            "default",
+            "de,en,fr-u-co-search",
+            "ERR RangeError",
+            "ERR RangeError",
+            "sort",
+            "0",
+            "-1",
+            "1",
+            "1",
+            "-1",
+            "1",
+            "-1",
+            "1",
+            "a ae z Å ä",
+            "a Å ae ä z",
+            "a Å ä ae z",
+            "{\"locale\":\"de\",\"usage\":\"search\",\"sensitivity\":\"variant\",\"ignorePunctuation\":false,\"collation\":\"default\",\"numeric\":false,\"caseFirst\":\"false\"}",
+        ]
+    );
+}
+
 #[cfg(feature = "intl")]
 #[test]
 fn intl_date_time_format_reports_parts_range_and_resolved_options() {

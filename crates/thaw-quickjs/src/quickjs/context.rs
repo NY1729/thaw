@@ -2674,7 +2674,7 @@ fn ensure_context() {
                      case_first: String,
                      a: crate::Wtf8String,
                      b: crate::Wtf8String| {
-                        intl_collator_compare(&locale, &sensitivity, ignore_punctuation, numeric, &case_first, &a.0, &b.0)
+                        intl_collator_compare(&locale, &sensitivity, ignore_punctuation, numeric, &case_first, &a.0, &b.0, "sort")
                     },
                 )
                 .expect("failed to create JavaScript Intl collator");
