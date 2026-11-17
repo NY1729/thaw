@@ -4720,6 +4720,65 @@ fn drain_native() -> bool {
     false
 }
 
+/// `thaw_runtime_async_hooks_set`'s sink: a native promise event (0 init, 1 before, 2 after, 3 promiseResolve).
+type NativeHookSink = extern "C" fn(u8, u64, u64);
+
+thread_local! {
+    /// The realm whose createHook is enabled on this thread: the native sink reports to it.
+    static NATIVE_HOOK_REALM: Cell<*mut Interp> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test stand-in for the compiled runtime's `thaw_runtime_async_hooks_set`: `(on, sink address)` per call.
+    pub(crate) static TEST_ASYNC_HOOK_SET: RefCell<Vec<(u8, usize)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Registers the native promise sink with the compiled runtime when `on`, and clears it otherwise. `it` is the
+/// realm whose createHook changed. Called from `__thaw_async_hook_timers`, so it is the only writer.
+pub(crate) fn native_async_hooks_set(it: *mut Interp, on: bool) {
+    NATIVE_HOOK_REALM.with(|realm| realm.set(if on { it } else { std::ptr::null_mut() }));
+    let sink = on.then_some(native_hook_event as NativeHookSink);
+    #[cfg(test)]
+    TEST_ASYNC_HOOK_SET.with(|sets| {
+        sets.borrow_mut()
+            .push((u8::from(on), sink.map_or(0, |f| f as usize)));
+    });
+    #[cfg(all(unix, not(test)))]
+    native_async_hooks_set_symbol(on, sink);
+}
+
+/// Realm teardown: a dropped realm must not stay the sink's target while the runtime flag is on.
+pub(crate) fn native_async_hooks_release(it: *mut Interp) {
+    if NATIVE_HOOK_REALM.with(Cell::get) == it {
+        native_async_hooks_set(it, false);
+    }
+}
+
+/// The sink the compiled runtime calls synchronously on this thread (see `NATIVE_HOOK_REALM`).
+extern "C" fn native_hook_event(kind: u8, key: u64, parent: u64) {
+    let it = NATIVE_HOOK_REALM.with(Cell::get);
+    // SAFETY: `it` is the realm that enabled the hook on this thread; `native_async_hooks_release` clears it
+    // when that realm drops, and the runtime only calls the sink from this thread while the flag is on.
+    if let Some(it) = unsafe { it.as_mut() } {
+        it.hook_native_raw(kind, key, parent);
+    }
+}
+
+/// `thaw_runtime_async_hooks_set` (compiled thaw-runtime), looked up like `drain_native`. Missing symbol: no-op.
+#[cfg(all(unix, not(test)))]
+fn native_async_hooks_set_symbol(on: bool, sink: Option<NativeHookSink>) {
+    type Set = extern "C" fn(u8, Option<NativeHookSink>);
+    // SAFETY: the symbol is the compiled runtime's `Set`, exported by `thaw_js_extra_export_args`.
+    unsafe {
+        let sym = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_async_hooks_set".as_ptr());
+        if sym.is_null() {
+            return;
+        }
+        std::mem::transmute::<*mut c_void, Set>(sym)(u8::from(on), sink);
+    }
+}
+
 thread_local! {
     /// Whether the last `thaw_http_poll_servers` pass saw a live server (bit 0). Host thread only.
     static NATIVE_SERVERS_LIVE: Cell<bool> = const { Cell::new(false) };

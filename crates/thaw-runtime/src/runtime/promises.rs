@@ -146,6 +146,7 @@ pub unsafe extern "C" fn thaw_exception_native_tag(
 /// `thaw_promise_destroy` after no coroutine can reference the handle.
 #[no_mangle]
 pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
+    let hook_key = async_hook_new_key();
     let promise = Box::into_raw(Box::new(ThawPromise {
         result: None,
         fulfilled_provenance: std::ptr::null(),
@@ -164,11 +165,13 @@ pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
         internal_references: 0,
         references: 1,
         external_root: None,
+        hook_key,
     }));
     if thaw_arena::is_tracing() {
         unsafe { (*promise).external_root = Some(thaw_arena::ArenaRoot::new(promise as usize)); }
     }
     ACTIVE_PROMISES.with(|active| active.borrow_mut().push(promise));
+    async_hook_emit(0, hook_key, 0);
     promise
 }
 
@@ -253,6 +256,7 @@ unsafe fn subscribe_with_roots(
     let subscription = PromiseSubscription {
         resume,
         frame,
+        hook_key: 0,
         _frame_root: thaw_arena::ArenaRoot::new(frame as usize),
         _payload_roots: payload_roots,
     };
@@ -1983,10 +1987,13 @@ fn settle_promise(
         promise.fulfilled_provenance = provenance;
     }
     promise.rejected = rejected;
+    let hook_key = promise.hook_key;
     let subscribers = std::mem::take(&mut promise.subscribers);
     for subscriber in subscribers {
         enqueue_continuation(subscriber, result);
     }
+    // Only the first settlement reaches here (`result` was empty before).
+    async_hook_emit(3, hook_key, 0);
     1
 }
 
