@@ -1,0 +1,55 @@
+read-let 3
+write-let 5
+const-assign THROW TypeError: Assignment to constant variable.
+var-leak "number7"
+var-leak-strictfn "undefined"
+strict-eval-src "undefined"
+let-no-leak "undefined"
+fn-leak 3
+class-no-leak "undefined"
+var-redecl-let THROW SyntaxError: Identifier 'q' has already been declared
+block-var 2
+block-let-conflict THROW SyntaxError: Identifier 'm' has already been declared
+completion [2,3,null,null,2,null,{}]
+this true
+arguments 2
+arrow-this true
+newtarget true
+newtarget2 true
+super "AB"
+typeof "function"
+shadow "local:1+1"
+shadow-param "p1+1"
+indirect-comma "global"
+indirect-alias "undefined"
+globalThis.eval "undefined"
+optchain "undefined"
+paren "number"
+nonstring [5,{"a":1},null,null]
+closure-capture 2
+closure-var 3
+generator [1,2]
+async "ok"
+yield-in-eval THROW SyntaxError: Unexpected number
+await-in-eval 1
+fieldinit 2
+field-arguments THROW SyntaxError: 'arguments' is not allowed in class field initializer or static initialization block
+with [2,2]
+with-var [9,null]
+loop-let [0,1,2]
+tdz THROW ReferenceError: Cannot access 'tz' before initialization
+eval-in-eval 3
+nested-var [1,2]
+param-var-conflict "number"
+param-scope 5
+delete [true,"undefined"]
+delete-param [false]
+fn-name-binding "function"
+labels THROW SyntaxError: Undefined label 'a'
+return-in-eval THROW SyntaxError: Illegal return statement
+call-this true
+eval-this-global false
+strict-arguments-assign THROW SyntaxError: Unexpected eval or arguments in strict mode
+strict-eval-name THROW SyntaxError: Unexpected eval or arguments in strict mode
+lexical-leak-fn-in-block "function"
+async-rej SyntaxError

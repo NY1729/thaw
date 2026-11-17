@@ -6,7 +6,7 @@ use swc_common::errors::Handler;
 use swc_common::sync::Lrc;
 use swc_common::{FileName, SourceMap};
 use swc_ecma_ast::{Module, ModuleItem};
-use swc_ecma_parser::{lexer::Lexer, EsSyntax, Parser, StringInput, Syntax, TsSyntax};
+use swc_ecma_parser::{lexer::Lexer, Context, EsSyntax, Parser, StringInput, Syntax, TsSyntax};
 
 pub use swc_common as common;
 pub use swc_ecma_ast as ast;
@@ -241,9 +241,27 @@ pub fn parse_javascript_with_source_map_named(
     Ok((module, cm))
 }
 
+/// What the code around a direct `eval` call allows inside the eval'd text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EvalContext {
+    /// The caller is strict: the text is parsed as strict code.
+    pub strict: bool,
+    /// `new.target` is allowed (the caller has a non-arrow function or class field frame).
+    pub new_target: bool,
+    /// `super.prop` is allowed (the caller is inside a method).
+    pub super_prop: bool,
+    /// The caller is a class field initializer: `arguments` is an early error.
+    pub class_field: bool,
+}
+
 /// Parse JavaScript as a sloppy-mode *script* (`with`, legacy octals, ... allowed unless the
 /// text opts into `"use strict"`), for `eval` / `new Function` source.
 pub fn parse_javascript_script(source: &str) -> Result<Module, String> {
+    parse_javascript_eval(source, EvalContext::default())
+}
+
+/// [`parse_javascript_script`] for a direct `eval` in a scope described by `cx`.
+pub fn parse_javascript_eval(source: &str, cx: EvalContext) -> Result<Module, String> {
     let cm: Lrc<SourceMap> = Default::default();
     let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
     let fm = cm.new_source_file(
@@ -257,6 +275,20 @@ pub fn parse_javascript_script(source: &str) -> Result<Module, String> {
         None,
     );
     let mut parser = Parser::new_from(lexer);
+    let mut ctx = parser.ctx();
+    if cx.strict {
+        ctx |= Context::Strict;
+    }
+    if cx.new_target {
+        ctx |= Context::InsideNonArrowFunctionScope;
+    }
+    if cx.super_prop {
+        ctx |= Context::AllowDirectSuper;
+    }
+    if cx.class_field {
+        ctx |= Context::InClassField;
+    }
+    parser.set_ctx(ctx);
     // Errors carry the parser's own message so callers can throw it as a `SyntaxError`.
     let script = parser.parse_script().map_err(|err| {
         let msg = err.kind().msg().into_owned();
@@ -278,6 +310,37 @@ mod tests {
     use super::*;
     use swc_common::Spanned;
     use swc_ecma_ast::{Decl, ModuleItem, Stmt};
+
+    #[test]
+    fn eval_context_gates_new_target_super_and_class_field_arguments() {
+        let plain = EvalContext::default();
+        let new_target = EvalContext {
+            new_target: true,
+            ..plain
+        };
+        let super_prop = EvalContext {
+            super_prop: true,
+            ..plain
+        };
+        let field = EvalContext {
+            class_field: true,
+            ..plain
+        };
+        assert!(parse_javascript_eval("new.target", plain).is_err());
+        assert!(parse_javascript_eval("new.target", new_target).is_ok());
+        assert!(parse_javascript_eval("super.m()", plain).is_err());
+        assert!(parse_javascript_eval("super.m()", super_prop).is_ok());
+        assert!(parse_javascript_eval("arguments", plain).is_ok());
+        assert!(parse_javascript_eval("arguments", field).is_err());
+        // strict callers parse strictly; `return` is never allowed in eval text
+        let strict = EvalContext {
+            strict: true,
+            ..plain
+        };
+        assert!(parse_javascript_eval("with ({}) {}", strict).is_err());
+        assert!(parse_javascript_eval("with ({}) {}", plain).is_ok());
+        assert!(parse_javascript_eval("return 1", plain).is_err());
+    }
 
     #[test]
     fn declaration_parse_cache_returns_independent_equal_modules() {
