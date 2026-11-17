@@ -695,7 +695,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string())?;
             self.builder
                 .build_call(
-                    self.module.get_function("thaw_promise_subscribe").unwrap(),
+                    self.module.get_function("thaw_promise_subscribe_await").unwrap(),
                     &[
                         waiting.into(),
                         resume.as_global_value().as_pointer_value().into(),
