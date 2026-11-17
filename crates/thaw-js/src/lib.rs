@@ -924,7 +924,17 @@ pub struct Scope {
     in_with: bool,
     /// The `this` bound by a non-arrow call frame, the global scope, or a class scope.
     this_val: RefCell<Option<Value>>,
+    /// `SK_*` bits: what kind of frame this scope is, for direct eval.
+    kind: Cell<u8>,
 }
+
+/// A scope that receives the `var`s and functions of sloppy direct eval code: a call frame, the global
+/// scope, or a strict eval's own scope.
+const SK_VAR: u8 = 1;
+/// A non-arrow call frame (`new.target` is bound in it).
+const SK_FUNC: u8 = 2;
+/// A class field initializer frame (`this` is bound, `arguments` is not).
+const SK_FIELD: u8 = 4;
 
 impl Scope {
     fn new(parent: Option<Rc<Scope>>) -> Rc<Scope> {
@@ -938,6 +948,7 @@ impl Scope {
             with: None,
             in_with,
             this_val: RefCell::new(None),
+            kind: Cell::new(0),
         })
     }
     fn new_with(parent: Rc<Scope>, obj: Obj) -> Rc<Scope> {
@@ -949,6 +960,7 @@ impl Scope {
             with: Some(obj),
             in_with: true,
             this_val: RefCell::new(None),
+            kind: Cell::new(0),
         })
     }
     /// A builtin or host binding: an own property of `globalThis` when it is global.
@@ -1041,6 +1053,7 @@ impl Scope {
             strict: Cell::new(self.strict.get()),
             with: self.with.clone(),
             this_val: RefCell::new(self.this_val.borrow().clone()),
+            kind: Cell::new(self.kind.get()),
         })
     }
 }
@@ -1347,6 +1360,10 @@ pub struct Interp {
     pub(crate) symbol_ctor: Option<Obj>,
     pub(crate) symbol_registry: Option<Obj>,
     pub(crate) well_known: Vec<Obj>,
+    /// The intrinsic global `eval`: a call through an identifier `eval` that resolves to it is direct.
+    pub(crate) intrinsic_eval: Option<Obj>,
+    /// Completion value of the direct eval running at the given call depth (see `note_completion`).
+    eval_completion: Option<(usize, Value)>,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -1365,6 +1382,17 @@ impl Visit for ArgumentsFinder {
         }
     }
     fn visit_function(&mut self, _: &a::Function) {}
+    fn visit_call_expr(&mut self, n: &a::CallExpr) {
+        // a direct eval may name `arguments`, `new.target` or `this`: the frame must bind them
+        if let a::Callee::Expr(callee) = &n.callee {
+            if is_direct_eval(callee) {
+                self.found = true;
+                self.new_target = true;
+                self.uses_this = true;
+            }
+        }
+        n.visit_children_with(self);
+    }
     fn visit_this_expr(&mut self, _: &a::ThisExpr) {
         self.uses_this = true;
     }
@@ -1479,7 +1507,10 @@ impl Interp {
             symbol_ctor: None,
             symbol_registry: None,
             well_known: Vec::new(),
+            intrinsic_eval: None,
+            eval_completion: None,
         };
+        it.global.kind.set(SK_VAR);
         it.global_accessors = it.node_accessor_slots();
         it.install_builtins();
         it.install_call_frames();
@@ -2809,6 +2840,9 @@ impl Interp {
         new_target: Option<Value>,
     ) -> R<Value> {
         let frame = Scope::new(Some(scope.clone()));
+        frame
+            .kind
+            .set(if def.arrow { SK_VAR } else { SK_VAR | SK_FUNC });
         // the parameters are the bulk of a frame's bindings: size the list once and seed the filter
         frame.mask.set(def.param_mask);
         let n = def.params.len() + def.hoisted.len();
@@ -2969,14 +3003,34 @@ impl Interp {
                     Body::Expr(e) => e.visit_with(&mut finder),
                 }
                 params.visit_with(&mut finder);
-                let strict = matches!(&body, Body::Block(s) if matches!(s.first(), Some(a::Stmt::Expr(e)) if matches!(&*e.expr, a::Expr::Lit(a::Lit::Str(x)) if x.value.as_str() == Some("use strict"))));
+                let strict = matches!(&body, Body::Block(s) if starts_with_use_strict(s));
                 let hoisted = match &body {
                     Body::Block(s) => hoisted_names(s),
                     Body::Expr(_) => Vec::new(),
                 };
                 let param_names = simple_param_names(&params);
                 let param_mask = param_mask(&param_names);
-                Rc::new(FuncDef { name, params, body, arrow, is_async, is_gen, bind_self, no_prototype: !is_gen && (method || is_async), uses_arguments: finder.found && !arrow, uses_new_target: finder.new_target && !arrow, uses_this: finder.uses_this, src: (self_run_id, lo, hi), hoisted, param_names, param_mask, strict, class: None, cstate: Default::default(), no_compile: self.no_compile_define })
+                Rc::new(FuncDef {
+                    name,
+                    params,
+                    body,
+                    arrow,
+                    is_async,
+                    is_gen,
+                    bind_self,
+                    no_prototype: !is_gen && (method || is_async),
+                    uses_arguments: finder.found && !arrow,
+                    uses_new_target: finder.new_target && !arrow,
+                    uses_this: finder.uses_this,
+                    src: (self_run_id, lo, hi),
+                    hoisted,
+                    param_names,
+                    param_mask,
+                    strict,
+                    class: None,
+                    cstate: Default::default(),
+                    no_compile: self.no_compile_define,
+                })
             })
             .clone();
         self.closure_from_def(def, scope)
@@ -3142,7 +3196,13 @@ impl Interp {
             }
             if s.mask.get() & bit != 0 && s.vars.borrow().contains_key(name) {
                 if !std::ptr::eq(s, &*self.global) {
-                    return true;
+                    // only an eval-declared `var` is configurable; other declarations refuse
+                    let mut vars = s.vars.borrow_mut();
+                    if vars.get(name).is_some_and(|b| b.origin == Origin::Prop) {
+                        vars.remove(name);
+                        return true;
+                    }
+                    return false;
                 }
                 return self.delete_global_binding(name).unwrap_or(true);
             }
@@ -3498,6 +3558,112 @@ impl Interp {
         self.run_sloppy(&format!("({source})"))
     }
 
+    fn is_intrinsic_eval(&self, f: &Value) -> bool {
+        matches!((f, &self.intrinsic_eval), (Value::Object(o), Some(e)) if Rc::ptr_eq(o, e))
+    }
+
+    /// Records `v` as the completion value of the direct eval running at this call depth. Nested calls
+    /// run at a deeper depth and never reach the slot.
+    fn note_completion(&mut self, v: Value) {
+        let depth = self.depth;
+        if let Some((d, slot)) = self.eval_completion.as_mut() {
+            if *d == depth {
+                *slot = v;
+            }
+        }
+    }
+
+    /// An `if` or loop statement's completion starts `undefined` (ECMA-262 UpdateEmpty).
+    fn reset_completion(&mut self) {
+        let depth = self.depth;
+        if let Some((d, slot)) = self.eval_completion.as_mut() {
+            if *d == depth {
+                *slot = Value::Undefined;
+            }
+        }
+    }
+
+    /// A direct `eval(src)` from `scope` (PerformEval with a direct call). The code runs in a child scope
+    /// of the caller: `let`/`const`/`class` stay in it, a sloppy `var` or function goes to the caller's
+    /// variable scope, a strict caller or `"use strict"` text gets its own. Its `this`, `arguments` and
+    /// `new.target` are the caller's. Returns the completion value.
+    fn direct_eval(&mut self, src: &str, scope: &Rc<Scope>) -> R<Value> {
+        if too_nested(src) {
+            return self.throw_error("RangeError", STACK_OVERFLOW);
+        }
+        let (new_target, class_field) = eval_frame_flags(scope);
+        let cx = thaw_parser::EvalContext {
+            strict: scope.strict.get(),
+            new_target,
+            super_prop: self.lookup(scope, "%home").is_some(),
+            class_field,
+        };
+        let mut module = match thaw_parser::parse_javascript_eval(src, cx) {
+            Ok(m) => m,
+            Err(msg) => return self.throw_error("SyntaxError", &msg),
+        };
+        hints::annotate(&mut module, &mut self.ident_hints);
+        let stmts = module_stmts(module)?;
+        let strict = scope.strict.get() || starts_with_use_strict(&stmts);
+        let lex = Scope::new(Some(scope.clone()));
+        if strict {
+            lex.strict.set(true);
+            lex.kind.set(SK_VAR);
+        }
+        let var_scope = if strict {
+            lex.clone()
+        } else {
+            var_target(scope)
+        };
+        let names = hoisted_names(&stmts);
+        if !strict {
+            if let Some(name) = names.iter().find(|n| lexical_between(scope, &var_scope, n)) {
+                let msg = format!("Identifier '{name}' has already been declared");
+                return self.throw_error("SyntaxError", &msg);
+            }
+        }
+        let saved_run = self.run_id;
+        self.run_id = next_run_id();
+        self.sources.insert(self.run_id, Rc::from(src));
+        let saved_completion = self.eval_completion.replace((self.depth, Value::Undefined));
+        let outcome = self.run_direct_eval(&stmts, &names, &lex, &var_scope, strict);
+        let completion = self
+            .eval_completion
+            .take()
+            .map_or(Value::Undefined, |(_, v)| v);
+        self.eval_completion = saved_completion;
+        self.run_id = saved_run;
+        outcome.map(|()| completion)
+    }
+
+    /// The declaration instantiation and the statements of a direct eval (see `direct_eval`).
+    fn run_direct_eval(
+        &mut self,
+        stmts: &[a::Stmt],
+        names: &[Rc<str>],
+        lex: &Rc<Scope>,
+        var_scope: &Rc<Scope>,
+        strict: bool,
+    ) -> R<()> {
+        let origin = if strict { Origin::Decl } else { Origin::Prop };
+        for name in names {
+            if !var_scope.vars.borrow().contains_key(name) {
+                var_scope.declare_with(name.clone(), Value::Undefined, true, origin);
+            }
+        }
+        for s in stmts {
+            if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
+                let name = self.intern(&f.ident.sym);
+                let func = self.function_value(Some(name.clone()), &f.function, lex)?;
+                var_scope.declare_with(name, func, true, origin);
+            }
+        }
+        for s in stmts {
+            self.exec(s, lex)?;
+        }
+        Ok(())
+    }
+
     /// Run a CommonJS-style script and return `module.exports`.
     pub fn run_commonjs(&mut self, source: &str) -> R<Value> {
         let module = Value::Object(self.plain());
@@ -3676,7 +3842,8 @@ impl Interp {
     fn exec(&mut self, s: &a::Stmt, scope: &Rc<Scope>) -> R<()> {
         match s {
             a::Stmt::Expr(e) => {
-                self.eval(&e.expr, scope)?;
+                let v = self.eval(&e.expr, scope)?;
+                self.note_completion(v);
                 Ok(())
             }
             a::Stmt::Empty(_) | a::Stmt::Debugger(_) => Ok(()),
@@ -3698,6 +3865,7 @@ impl Interp {
                 Err(Ctl::Return(v))
             }
             a::Stmt::If(i) => {
+                self.reset_completion();
                 if self.eval(&i.test, scope)?.truthy() {
                     self.exec(&i.cons, scope)
                 } else if let Some(alt) = &i.alt {
@@ -3722,7 +3890,10 @@ impl Interp {
             | a::Stmt::DoWhile(_)
             | a::Stmt::For(_)
             | a::Stmt::ForIn(_)
-            | a::Stmt::ForOf(_) => self.exec_loop_labeled(s, scope, None),
+            | a::Stmt::ForOf(_) => {
+                self.reset_completion();
+                self.exec_loop_labeled(s, scope, None)
+            }
             a::Stmt::Switch(sw) => {
                 let d = self.eval(&sw.discriminant, scope)?;
                 let inner = Scope::new(Some(scope.clone()));
@@ -3847,6 +4018,13 @@ impl Interp {
                             }
                             fn visit_class(&mut self, _: &a::Class) {
                                 self.0 = true;
+                            }
+                            // a direct eval can create a closure over the loop's bindings
+                            fn visit_call_expr(&mut self, n: &a::CallExpr) {
+                                if let a::Callee::Expr(callee) = &n.callee {
+                                    self.0 |= is_direct_eval(callee);
+                                }
+                                n.visit_children_with(self);
                             }
                         }
                         let mut finder = Closures::default();
@@ -4210,6 +4388,16 @@ impl Interp {
                         "TypeError",
                         &format!("{} is not a function", expr_text(callee)),
                     );
+                }
+                if is_direct_eval(callee) && self.is_intrinsic_eval(&f) {
+                    return match args.first() {
+                        None => Ok(Value::Undefined),
+                        Some(Value::Str(_)) => {
+                            let src = self.to_str(&args[0]);
+                            self.direct_eval(&src, scope)
+                        }
+                        Some(other) => Ok(other.clone()),
+                    };
                 }
                 self.call(&f, &this, &args)
             }
@@ -5359,6 +5547,74 @@ fn param_mask(names: &[Option<Rc<str>>]) -> u64 {
     names.iter().flatten().fold(0, |m, n| m | name_bit(n))
 }
 
+/// Whether `stmts` open with a `"use strict"` directive.
+fn starts_with_use_strict(stmts: &[a::Stmt]) -> bool {
+    matches!(stmts.first(), Some(a::Stmt::Expr(e)) if matches!(&*e.expr, a::Expr::Lit(a::Lit::Str(x)) if x.value.as_str() == Some("use strict")))
+}
+
+/// Whether a call's callee is the plain identifier `eval` (parenthesized or not): a direct eval when
+/// the identifier resolves to the intrinsic `eval`.
+fn is_direct_eval(callee: &a::Expr) -> bool {
+    match callee {
+        a::Expr::Ident(i) => &*i.sym == "eval",
+        a::Expr::Paren(p) => is_direct_eval(&p.expr),
+        _ => false,
+    }
+}
+
+/// `(new.target allowed, inside a class field initializer)` for a direct eval in `scope`: the nearest
+/// non-arrow frame decides.
+fn eval_frame_flags(scope: &Scope) -> (bool, bool) {
+    let mut cur = Some(scope);
+    while let Some(s) = cur {
+        let kind = s.kind.get();
+        if kind & SK_FIELD != 0 {
+            return (true, true);
+        }
+        if kind & SK_FUNC != 0 {
+            return (true, false);
+        }
+        cur = s.parent.as_deref();
+    }
+    (false, false)
+}
+
+/// The scope a sloppy `var` or function of eval code lands in: the nearest function frame or global scope.
+fn var_target(scope: &Rc<Scope>) -> Rc<Scope> {
+    let mut cur = scope.clone();
+    while cur.kind.get() & SK_VAR == 0 {
+        match cur.parent.clone() {
+            Some(p) => cur = p,
+            None => break,
+        }
+    }
+    cur
+}
+
+/// Whether a lexical binding `name` is visible from `scope` up to and including `target`: a sloppy eval
+/// `var` of that name is then an early error.
+fn lexical_between(scope: &Rc<Scope>, target: &Rc<Scope>, name: &str) -> bool {
+    let mut cur: &Scope = scope;
+    loop {
+        if cur.with.is_none()
+            && cur
+                .vars
+                .borrow()
+                .get(name)
+                .is_some_and(|b| b.origin == Origin::Lexical)
+        {
+            return true;
+        }
+        if std::ptr::eq(cur, &**target) {
+            return false;
+        }
+        match cur.parent.as_deref() {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
+}
+
 fn hoisted_names(stmts: &[a::Stmt]) -> Vec<Rc<str>> {
     struct Hoister(Vec<Rc<str>>);
     impl Visit for Hoister {
@@ -5429,6 +5685,8 @@ mod builtin_table_tests;
 mod callsite_tests;
 #[cfg(test)]
 mod console_instance_tests;
+#[cfg(test)]
+mod direct_eval_tests;
 #[cfg(test)]
 mod dynamic_helper_contract_tests;
 #[cfg(test)]

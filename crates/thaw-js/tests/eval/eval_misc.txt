@@ -1,0 +1,11 @@
+["L","G","G","L","G","G","G","G","G"]
+number number
+1
+number
+1
+object
+undefined
+undefined
+5
+2 g
+1 undefined
