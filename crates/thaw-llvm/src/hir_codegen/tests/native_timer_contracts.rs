@@ -151,6 +151,53 @@ fn timers_combined_with_a_js_engine_conflict_and_keep_the_quickjs_path() {
     assert!(compiler.native_timers_conflict(), "the CLI must rebuild this on QuickJS timers");
 }
 
+// A self-referencing `any` timer handle: the callback captures the handle while its storage is still being
+// decided (thaw-hir pre-binds it with the final JsValue storage type). Expected output recorded from Node 22.23.
+
+#[test]
+fn any_set_interval_self_clear_prints_once() {
+    let source = r#"function main(): void {
+  const iv: any = setInterval((): void => { clearInterval(iv); console.log("once"); }, 5);
+}"#;
+    assert_eq!(compile_and_run(source, "any_interval_self_clear"), "once\n");
+}
+
+#[test]
+fn any_set_timeout_self_clear_prints_once() {
+    let source = r#"function main(): void {
+  const t: any = setTimeout((): void => { clearTimeout(t); console.log("once"); }, 5);
+}"#;
+    assert_eq!(compile_and_run(source, "any_timeout_self_clear"), "once\n");
+}
+
+#[test]
+fn any_interval_counter_clears_itself_after_three_ticks() {
+    let source = r#"function main(): void {
+  let n = 0;
+  const iv: any = setInterval((): void => { n++; if (n === 3) clearInterval(iv); }, 5);
+  setTimeout((): void => console.log("n", n), 150);
+}"#;
+    assert_eq!(compile_and_run(source, "any_interval_counter"), "n 3\n");
+}
+
+#[test]
+fn any_timer_handle_cleared_from_outside_its_callback() {
+    let source = r#"function main(): void {
+  let ticks = 0;
+  const iv: any = setInterval((): void => { ticks++; }, 5);
+  let at = 0;
+  setTimeout((): void => { clearInterval(iv); at = ticks; }, 50);
+  setTimeout((): void => console.log("stopped", ticks === at && at > 0), 120);
+}"#;
+    assert_eq!(compile_and_run(source, "any_timer_outside_clear"), "stopped true\n");
+    let cleared = r#"function main(): void {
+  const t: any = setTimeout((): void => console.log("never"), 50);
+  clearTimeout(t);
+  console.log("cleared");
+}"#;
+    assert_eq!(compile_and_run(cleared, "any_timeout_outside_clear"), "cleared\n");
+}
+
 // A timer global read as a value is the realm's function (Node 22: `setTimeout === globalThis.setTimeout`).
 #[test]
 fn timer_global_values_are_the_realm_functions() {

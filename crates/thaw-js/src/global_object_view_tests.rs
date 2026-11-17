@@ -125,3 +125,12 @@ fn value_globals_refuse_delete() {
         "false false false NaN false"
     );
 }
+
+#[test]
+fn timeout_handle_exposes_to_primitive_as_a_function() {
+    // Node 22: `typeof setTimeout(...)[Symbol.toPrimitive]` is "function" (Timeout.prototype has it).
+    assert_eq!(
+        script("console.log(typeof setTimeout(() => {}, 1)[Symbol.toPrimitive]);"),
+        "function"
+    );
+}
