@@ -35,7 +35,8 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "timers" => Some(
-            "module.exports = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval, setImmediate: globalThis.setImmediate, clearImmediate: globalThis.clearImmediate };\n\
+            "var timers = {}; ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate'].forEach(function (name) { Object.defineProperty(timers, name, { enumerable: true, get: function () { return globalThis[name]; } }); });\n\
+             module.exports = timers;\n\
              module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "timers/promises" => Some(
