@@ -296,7 +296,9 @@ function pump(st) {
 // Connect, then send the upgrade request; reads and frames are pumped by `pump`.
 function connectSocket(st) {
   const op = __thaw_net_connect_start(st.host, st.port);
-  (function waitConnect() {
+  // the first poll runs on a later tick: a refusal that is already known would otherwise dispatch `error` from inside
+  // the constructor, before the caller can attach `onerror` (Node always reports connect failures asynchronously)
+  setTimeout(function waitConnect() {
     const r = __thaw_async_poll(op);
     if (r === 'pending') return setTimeout(waitConnect, 1);
     if (r.indexOf('ok:') !== 0) { if (!st.failed) failConnecting(st, reportFailure); return; }
@@ -308,7 +310,7 @@ function connectSocket(st) {
       (st.protocols.length ? 'Sec-WebSocket-Protocol: ' + st.protocols.join(', ') + '\r\n' : '') + '\r\n';
     writeBytes(st, utf8(request));
     pump(st);
-  })();
+  }, 0);
 }
 
 function parseProtocols(protocols) {
