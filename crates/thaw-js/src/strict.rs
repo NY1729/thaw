@@ -1,6 +1,6 @@
 //! Strict-mode write and delete failures: the V8 texts for a write or `delete` that sloppy code silently drops.
 //!
-//! `StrictMode` is the rollout switch, read from `THAW_JS_STRICT` (`off` | `audit` | `on`, default `off`).
+//! `StrictMode` is the rollout switch, read from `THAW_JS_STRICT` (`off` | `audit` | `on`, default `on`).
 //! Only code whose lexical strictness is on (a `'use strict'` directive, a class body, an ES module) can
 //! fail. The public `Interp::set` is always sloppy, so natives, the host and the preludes keep their
 //! behaviour; prelude runs (`run_builtin`) never throw even when the switch is on.
@@ -9,20 +9,22 @@ use crate::{array_index, class_instance_name, number_to_string, Interp, Kind, Ob
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum StrictMode {
-    #[default]
+    /// Strict code keeps the sloppy silent failure (the rollback switch, `THAW_JS_STRICT=off`).
     Off,
     /// Behaves sloppy, logs every would-throw to stderr as `thaw-strict-audit: ...`.
     Audit,
+    #[default]
     On,
 }
 
 impl StrictMode {
-    /// `THAW_JS_STRICT`: `on` or `audit` (trimmed, lower case, like the compile switch); anything else is `Off`.
+    /// `THAW_JS_STRICT`: `off` or `audit` (trimmed, lower case, like the compile switch); anything else,
+    /// including unset, is `On`.
     pub(crate) fn parse(v: Option<&str>) -> StrictMode {
         match v.map(str::trim) {
-            Some("on") => StrictMode::On,
+            Some("off") => StrictMode::Off,
             Some("audit") => StrictMode::Audit,
-            _ => StrictMode::Off,
+            _ => StrictMode::On,
         }
     }
 }
