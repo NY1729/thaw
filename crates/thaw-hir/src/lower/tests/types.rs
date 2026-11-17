@@ -5934,3 +5934,50 @@ fn byte_receivers_through_nullable_casts_keep_bytes_identity() {
         }
     }
 }
+
+/// `ArrayBuffer.isView(x)` used to fail to compile on the AOT typed lane ("call to unknown
+/// function `ArrayBuffer.isView`") because `static_builtins` never routed it. Every operand
+/// type must now lower: static byte values and static non-view values fold to a constant
+/// (after evaluating the operand), while `any` / `JsValue` operands ask the live engine.
+#[test]
+fn lowers_array_buffer_is_view_for_every_operand_type() {
+    let program = lower(
+        r#"
+        declare function raw(): Buffer;
+        declare function wrap(): any;
+        declare function live(): JsValue;
+        declare function either(): any | number;
+        function main(): void {
+            console.log(ArrayBuffer.isView(either()));
+            const buffer = raw();
+            const array = new ArrayBuffer(8);
+            console.log(ArrayBuffer.isView(buffer), ArrayBuffer.isView(array));
+            console.log(ArrayBuffer.isView(42), ArrayBuffer.isView("text"), ArrayBuffer.isView([1, 2]));
+            console.log(ArrayBuffer.isView(null), ArrayBuffer.isView(undefined), ArrayBuffer.isView({ a: 1 }));
+            console.log(ArrayBuffer.isView(wrap()), ArrayBuffer.isView(live()));
+            console.log(ArrayBuffer.isView());
+        }
+        "#,
+    );
+    let body = format!("{:?}", program.functions[0].body);
+    assert!(!body.contains("unknown function"), "{body}");
+    assert!(body.contains("__thaw_is_view_dynamic_value"), "a dynamic operand must ask the live engine");
+}
+
+/// A `Json`-typed `any` operand may be a Buffer wrapper (`{type:'Buffer',data:[...]}`) or a
+/// live handle placeholder; both must be routed through the existing Json helpers, not
+/// folded to a constant `false`.
+#[test]
+fn array_buffer_is_view_json_operand_checks_buffer_shape_and_live_handles() {
+    let program = lower(
+        r#"
+        declare function wrap(): any;
+        function main(): void {
+            console.log(ArrayBuffer.isView(wrap()));
+        }
+        "#,
+    );
+    let body = format!("{:?}", program.functions[0].body);
+    assert!(body.contains("__thaw_json_is_buffer"), "{body}");
+    assert!(body.contains("__thaw_js_handle_id__"), "{body}");
+}
