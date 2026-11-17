@@ -4397,6 +4397,60 @@ fn node_builtin_script_is_scanned_and_run_as_a_one_module_bundle() {
     assert_eq!(crate::scan::script_as_bundle(registry), registry);
 }
 
+/// The JS string literal of a native bundle payload (`{main, modules}` JSON), as registry renders it.
+fn native_payload_literal(main: &str, modules: serde_json::Value) -> String {
+    let payload = serde_json::json!({ "main": main, "modules": modules }).to_string();
+    let mut literal = String::new();
+    crate::builtins::json_quote(&payload, &mut literal);
+    literal
+}
+
+// The pure native bundle an ESM-only package renders (thaw-registry registry/bundle/render.rs,
+// `render_native_esm_bundle`): no `__thaw_bundle_factories`, the loader reads it through `native_payload`.
+#[test]
+fn pure_native_bundle_scans_clean_through_script_as_bundle() {
+    let literal = native_payload_literal(
+        "m/index.mjs",
+        serde_json::json!([{
+            "key": "m/index.mjs",
+            "source": "export const x = 1;\nexport function f() { return x; }\n",
+            "imports": {}
+        }]),
+    );
+    let src = format!(
+        "module.exports = (function() {{\nvar entry = globalThis.__thaw_register_native_bundle({literal});\n\
+         var exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {{}});\n\
+         globalThis.__thaw_module_ready = entry().then(function(namespace) {{ module.exports = namespace; exports[\"m/index.mjs\"] = namespace; return namespace; }});\n\
+         return {{}};\n}})();\n"
+    );
+    assert!(matches!(crate::esm::native_payload(&src), Some((_, true))));
+    let report = crate::scan::scan_bundle(&crate::scan::script_as_bundle(&src)).expect("scans");
+    assert!(report.is_clean(), "blockers: {:?}", report.blockers);
+    assert_eq!(&*crate::scan::script_as_bundle(&src), src.as_str());
+}
+
+// A script that merely contains a native registration next to other user code is not the loader's pure
+// shape: it stays a plain script, and the scan keeps refusing the registration call.
+#[test]
+fn mixed_native_registration_beside_user_code_still_blocks_the_scan() {
+    let literal = native_payload_literal(
+        "m/index.mjs",
+        serde_json::json!([{ "key": "m/index.mjs", "source": "export const x = 1;\n", "imports": {} }]),
+    );
+    let src = format!(
+        "var userCode = 1;\nmodule.exports = (function() {{ var entry = globalThis.__thaw_register_native_bundle({literal}); return {{}}; }})();\n"
+    );
+    let report = crate::scan::scan_bundle(&crate::scan::script_as_bundle(&src)).expect("scans");
+    assert!(!report.is_clean());
+    assert!(
+        report
+            .blockers
+            .contains_key("builtin:globalThis.__thaw_register_native_bundle"),
+        "blockers: {:?}",
+        report.blockers
+    );
+}
+
 #[test]
 fn error_subclasses_inherit_from_error_and_native_error_tokens_keep_their_message() {
     let src =
