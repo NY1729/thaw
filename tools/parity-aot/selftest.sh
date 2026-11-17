@@ -255,5 +255,112 @@ bash "$HERE/selftest_gen.sh"; check "generator self-test (selftest_gen.sh)" 0 $?
 bash "$HERE/selftest_parse.sh"; check "module surface: d.ts parser fixtures (selftest_parse.sh)" 0 $?
 bash "$HERE/check_module_table.sh"; check "module surface: module_table.tsv is up to date (check_module_table.sh)" 0 $?
 
+# P. module suite (PR3): shard map, runner helpers, module report on a synthetic shard (no thaw, no d.ts dump)
+# P1. modules-shards.txt puts every module of modules.txt in exactly one shard, and the workflow is wired to it
+python3 - "$HERE" <<'PYEOF'
+import os, sys
+here = sys.argv[1]
+mods = [m.strip() for m in open(os.path.join(here, "modules.txt"), encoding="utf-8") if m.strip()]
+rows = [l.split() for l in open(os.path.join(here, "modules-shards.txt"), encoding="utf-8")
+        if l.strip() and not l.startswith("#")]
+assert all(len(r) == 2 for r in rows), rows
+shards = sorted({r[0] for r in rows})
+assert shards == ["m1", "m2", "m3"], shards
+got = sorted(r[1] for r in rows)
+assert got == sorted(mods), (sorted(set(mods) - set(got)), sorted(set(got) - set(mods)))
+assert len(got) == len(set(got)), "module in more than one shard"
+wf = open(os.path.join(here, "..", "..", ".github", "workflows", "parity-aot.yml"), encoding="utf-8").read()
+for needle in ("suite:", "parity-aot-modules", "modules-shards.txt", "modules_report.py", "shard: [m1, m2, m3]"):
+    assert needle in wf, needle
+print(f"ok   module shards: {len(mods)} modules, each in exactly one of {shards}; workflow wired")
+PYEOF
+check "module shard map covers modules.txt exactly once" 0 $?
+
+# P2. runner helpers: REJECT sub-kind by diagnostic text, module program rendering (import line after the header),
+#     and the diff masks for the PA_TMP directory and process ids
+python3 - "$HERE" <<'PYEOF'
+import os, sys
+here = sys.argv[1]
+sys.path.insert(0, here)
+sys.path.insert(0, os.path.join(here, "..", "parity"))
+import aot_run as a
+import diff as d
+assert a.reject_kind("error: 'x' has no exported member 'y'") == "missing-export"
+assert a.reject_kind("error: Argument of type 'string' is not assignable to parameter of type 'number'") == "type"
+assert a.reject_kind("error: unsupported type annotation TsTypeQuery") == "other"
+prog = {"name": "mod_path.typed.c00", "module": False, "imports": ['import * as M from "node:path";']}
+lines = a.render_program(prog, ['p("a", () => { return 1; });'], node=True).split("\n")
+assert lines[0].startswith("// Generated") and lines[1] == 'import * as M from "node:path";', lines[:2]
+assert "function main(): void {" in "\n".join(lines) and "main();" in lines[-3:][0] + "".join(lines[-3:])
+plain = a.render_program({"name": "x", "module": False}, [], node=False)
+assert 'from "node:' not in plain
+assert d.normalise("out/node/pa-tmp/mod_fs.typed.c00/f.txt") == "<tmp>", d.normalise("out/node/pa-tmp/x/f.txt")
+assert d.block_normalise("x /h/w/thaw-js/pa-tmp/p\ny") == "x <tmp>\ny"
+assert d.normalise("{ pid: 4242, ppid: 7 }") == "{ pid: <pid>, ppid: <pid> }"
+assert d.normalise('"pid":77') == '"pid":<pid>'
+assert d.normalise('pidfile: 3') == 'pidfile: 3'
+print("ok   reject_kind, module render, PA_TMP and pid masks")
+PYEOF
+check "runner helpers: reject kinds, module render, masks" 0 $?
+
+# P3. modules_report on a synthetic shard: exact cells, REJECT split, unclassified, totals, diagnostic families
+MR="$HERE/modules_report.py"; MS="$W/mods"; rm -rf "$MS"; mkdir -p "$MS/shard-m1/programs" "$MS/shard-m1/thaw-js"
+python3 - "$MS/shard-m1" <<'PYEOF'
+import json, os, sys
+d = sys.argv[1]
+def probe(name, api, mode="typed"):
+    return {"name": name, "api": [api], "mode": mode, "line": "", "arg_types": [], "shape": False}
+fs = {"name": "mod_fs.typed.c00", "corpus": "mod_fs.typed", "family": "mod_fs", "mode": "typed", "module": False,
+      "imports": ['import * as M from "node:fs";'],
+      "probes": [probe("fs.a", "mod:fs.readFileSync"), probe("fs.b", "mod:fs.existsSync"),
+                 probe("fs.c", "mod:fs.writeFile"), probe("fs.d", "mod:fs.statSync")]}
+path = {"name": "mod_path.typed.c00", "corpus": "mod_path.typed", "family": "mod_path", "mode": "typed",
+        "module": False, "imports": ['import * as M from "node:path";'],
+        "probes": [probe("path.a", "mod:path.join"), probe("path.b", "mod:path.resolve"),
+                   probe("path.c", "mod:path.sep", "any")]}
+man = {"per_program": 40, "probes": 7, "skipped": 2, "counts": {"mod_fs.typed": 4, "mod_path.typed": 3},
+       "findings": [], "programs": [fs, path]}
+json.dump(man, open(os.path.join(d, "programs", "manifest.json"), "w"))
+skips = {"exports": [
+    {"id": "mod:fs.openSync", "module": "node:fs", "export": "openSync", "category": "NEEDS-FILE", "reason": "fd"},
+    {"id": "mod:fs.Stats", "module": "node:fs", "export": "Stats", "category": "NEEDS-FILE", "reason": "fd"},
+    {"id": "mod:path.gone", "module": "node:path", "export": "gone", "category": "NOT-EXPORT", "reason": "x"}],
+    "members": [], "dts_status": {}, "unused_rules": []}
+json.dump(skips, open(os.path.join(d, "programs", "skips.json"), "w"))
+classes = {
+    "fs.a": {"corpus": "mod_fs.typed", "class": "MATCH", "detail": ""},
+    "fs.b": {"corpus": "mod_fs.typed", "class": "REJECT", "detail": "error: 'x' has no exported member 'y'",
+             "sub": "missing-export"},
+    "fs.c": {"corpus": "mod_fs.typed", "class": "CRASH", "detail": "exit N"},
+    "path.a": {"corpus": "mod_path.typed", "class": "WRONG-VALUE", "detail": "string a/b"},
+    "path.b": {"corpus": "mod_path.typed", "class": "REJECT", "detail": "error: Argument of type 'x' is not assignable",
+               "sub": "type"},
+}
+json.dump(classes, open(os.path.join(d, "thaw-js", "classes.json"), "w"))
+PYEOF
+python3 "$MR" "$MS" --engine thaw-js --out "$W/mods.md" --json-out "$W/mods.json" --merge-manifest "$W/merged.json" > "$W/mods.log" 2>&1
+check "modules_report runs on a synthetic shard" 0 $?
+python3 - "$W/mods.json" "$W/mods.md" "$W/merged.json" <<'PYEOF'
+import json, sys
+j = json.load(open(sys.argv[1])); md = open(sys.argv[2]).read(); merged = json.load(open(sys.argv[3]))
+fs, path = j["modules"]["node:fs"], j["modules"]["node:path"]
+assert (fs["exports"], fs["probed"], fs["skipped"], fs["hand"]) == (6, 4, 2, 0), fs
+assert fs["MATCH"] == 1 and fs["CRASH+HANG"] == 1 and fs["REJECT"] == {"missing-export": 1, "type": 0, "other": 0}, fs
+assert fs["unclassified"] == 1 and fs["other"] == 0, fs
+assert (path["exports"], path["probed"], path["skipped"]) == (3, 3, 0), path
+assert path["WRONG-VALUE"] == 1 and path["REJECT"] == {"missing-export": 0, "type": 1, "other": 0}, path
+assert j["unclassified"] == 2, j["unclassified"]
+row = [l for l in md.split("\n") if l.startswith("| node:fs |")][0]
+assert row == "| node:fs | 6 | 4 | 0 | 2 | 1 | 0 | 1 (1 / 0 / 0) | 1 | 0 | 0 |", row
+tot = [l for l in md.split("\n") if l.startswith("| **total** |")][0]
+assert tot == "| **total** | 9 | 7 | 0 | 2 | 1 | 1 | 2 (1 / 1 / 0) | 1 | 0 | 0 |", tot
+assert "## Top diagnostic families" in md and "CRASH" in md and "NEEDS-FILE" in md
+assert merged["probes"] == 7 and len(merged["programs"]) == 2
+print("ok   modules_report cells, totals, unclassified count, merged manifest")
+PYEOF
+check "modules_report exact cells, totals and merged manifest" 0 $?
+python3 "$C" --manifest "$W/merged.json" --out "$W/mods-cov" --no-ratchet --summary "$W/mods-cov.md" > /dev/null 2>&1
+check "merged module manifest accepted by coverage.py (no ratchet)" 0 $?
+
 [ "$fail" = 0 ] && echo "selftest: all checks passed" || echo "selftest: FAILED"
 exit "$fail"

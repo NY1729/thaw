@@ -9,6 +9,9 @@
 #   PARITY_AOT_BUILD_WRAP  optional command prefix for each build, e.g. a systemd-run slice with MemoryMax
 #   PARITY_AOT_RUN_TIMEOUT / PARITY_AOT_BUILD_TIMEOUT  seconds (defaults 20 / 900)
 #   PARITY_AOT_FAMILIES  optional comma list: generate only these families (CI shards); coverage then skips its ratchet
+#   PARITY_AOT_SUITE     ecmascript (default: gen_probes.py) or modules (gen_modules.py: node:* exports, no coverage run)
+#   PARITY_AOT_DTS_DIR   modules only: dump of the module d.ts files (THAW_DUMP_DTS_DIR, see README "Module surface")
+#   PARITY_AOT_MODULES   modules only: module list file (default tools/parity-aot/modules.txt; a CI shard passes its subset)
 # Exit 0: harness ran (gaps and rejects are reported, not gated). Exit 2: harness error.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -25,6 +28,22 @@ JOBS=${PARITY_AOT_JOBS:-$(n=$(nproc 2>/dev/null || echo 2); n=$((n / 2)); [ "$n"
 mkdir -p "$OUT" || exit 2
 # Only the directories this harness writes are cleared; anything else under OUT is left alone.
 rm -rf "$OUT/programs" "$OUT/node" "$OUT/thaw-js" "$OUT/quickjs" "$OUT/coverage.json"
+SUITE=${PARITY_AOT_SUITE:-ecmascript}
+
+if [ "$SUITE" = modules ]; then
+  # Module surface: the d.ts dump is required. Coverage is not run here (CI computes it over the merged shards).
+  [ -n "${PARITY_AOT_DTS_DIR:-}" ] || { echo "harness error: PARITY_AOT_DTS_DIR not set (module d.ts dump)" >&2; exit 2; }
+  python3 "$HERE/gen_modules.py" "$OUT/programs" --dts "$PARITY_AOT_DTS_DIR" \
+    --modules "${PARITY_AOT_MODULES:-$HERE/modules.txt}" > "$OUT/gen_modules.log" 2>&1 \
+    || { echo "harness error: gen_modules.py failed (see $OUT/gen_modules.log)" >&2; exit 2; }
+  python3 "$HERE/aot_run.py" --programs "$OUT/programs" --out "$OUT" --thaw "$THAW" --node "$NODE" \
+    --engines "$ENGINES" --jobs "$JOBS" "${WRITE[@]}"
+  rc=$?
+  echo "summary: $OUT/summary.md"
+  exit "$rc"
+elif [ "$SUITE" != ecmascript ]; then
+  echo "harness error: PARITY_AOT_SUITE must be ecmascript or modules" >&2; exit 2
+fi
 
 python3 "$HERE/gen_probes.py" "$OUT/programs" ${PARITY_AOT_FAMILIES:+--families "$PARITY_AOT_FAMILIES"} || { echo "harness error: gen_probes.py failed" >&2; exit 2; }
 python3 "$HERE/aot_run.py" --programs "$OUT/programs" --out "$OUT" --thaw "$THAW" --node "$NODE" \

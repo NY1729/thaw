@@ -2,14 +2,23 @@ name: parity-aot
 
 # Non-gating AOT-vs-Node probe harness (tools/parity-aot). Node 22 is the oracle. The release thaw CLI builds each
 # generated probe program and both engines (thaw-js, quickjs) run. Results go to the job summary and an artifact.
-# Runs on demand (workflow_dispatch) or on a pull request when the `parity-aot` label is added.
+# Runs on demand (workflow_dispatch) or on a pull request when a label is added: `parity-aot` runs the ECMAScript
+# (builtin) suite, `parity-aot-modules` the node:* module suite. The dispatch input `suite` picks one or both; the
+# default `ecmascript` is the original behaviour.
 #
 # Jobs: `build` builds the release thaw CLI once, runs the self-test and the API coverage report (neither needs
-# thaw), and uploads the binary. `shards` runs the probes in four family shards; each downloads that binary, so
-# the cargo build is paid once.
+# thaw), uploads the binary, and for the module suite dumps the module d.ts files. `shards` runs the ECMAScript probes
+# in four family shards; `module-shards` runs the module probes in three module shards (modules-shards.txt). Each
+# downloads the same binary, so the cargo build is paid once. `modules-report` merges the module shards (non-gating).
 
 on:
   workflow_dispatch:
+    inputs:
+      suite:
+        description: "ecmascript (builtins, default), modules (node:* exports) or all"
+        type: choice
+        options: [ecmascript, modules, all]
+        default: ecmascript
   pull_request:
     types: [labeled]
 
@@ -22,7 +31,7 @@ concurrency:
 
 jobs:
   build:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'parity-aot'
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'parity-aot' || github.event.label.name == 'parity-aot-modules' }}
     name: AOT probes build, self-test and coverage (non-gating)
     continue-on-error: true
     runs-on: ubuntu-24.04
@@ -125,6 +134,21 @@ jobs:
           name: thaw-release-bin
           path: ${{ runner.temp }}/thaw-stage
           retention-days: 2
+      - name: Dump module d.ts files (module suite only)
+        # The dump test is pure Rust (resolve_builtin per module), built with the release profile so the dependency
+        # artifacts of `cargo build --release` are reused. continue-on-error: the module shards then fail on their own.
+        id: dts
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.suite != 'ecmascript') || github.event.label.name == 'parity-aot-modules' }}
+        continue-on-error: true
+        env:
+          THAW_DUMP_DTS_DIR: ${{ runner.temp }}/parity-aot-dts
+        run: cargo test --release -p thaw-registry --test dump_builtin_dts -- --ignored
+      - uses: actions/upload-artifact@v4
+        if: ${{ steps.dts.outcome == 'success' }}
+        with:
+          name: parity-aot-dts
+          path: ${{ runner.temp }}/parity-aot-dts
+          retention-days: 2
       - name: Job summary (coverage)
         if: always()
         run: |
@@ -142,7 +166,7 @@ jobs:
           if-no-files-found: ignore
 
   shards:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'parity-aot'
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.suite != 'modules') || github.event.label.name == 'parity-aot' }}
     needs: build
     name: AOT vs Node probes, shard ${{ matrix.shard }} (non-gating)
     continue-on-error: true
@@ -252,4 +276,161 @@ jobs:
         with:
           name: parity-aot-results-${{ matrix.shard }}
           path: ${{ runner.temp }}/parity-aot-out-${{ matrix.shard }}
+          if-no-files-found: ignore
+
+  module-shards:
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.suite != 'ecmascript') || github.event.label.name == 'parity-aot-modules' }}
+    needs: build
+    name: AOT vs Node module probes, shard ${{ matrix.shard }} (non-gating)
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Module-to-shard map: tools/parity-aot/modules-shards.txt (selftest.sh P1: each module in exactly one shard).
+        shard: [m1, m2, m3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: thaw-release-bin
+          path: ${{ github.workspace }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: parity-aot-dts
+          path: ${{ runner.temp }}/parity-aot-dts
+      - name: Make the thaw binary executable
+        run: chmod +x target/release/thaw
+      - name: Run module probes for thaw-js, shard ${{ matrix.shard }} (non-gating)
+        # run.sh exits 2 only on a harness error; gaps, rejects and crashes are findings in the report.
+        env:
+          THAW: ${{ github.workspace }}/target/release/thaw
+          PARITY_AOT_SUITE: modules
+          PARITY_AOT_DTS_DIR: ${{ runner.temp }}/parity-aot-dts
+          PARITY_AOT_MODULES: ${{ runner.temp }}/parity-aot-modules-${{ matrix.shard }}.txt
+          PARITY_AOT_OUT: ${{ runner.temp }}/parity-aot-modules-out-${{ matrix.shard }}
+          PARITY_AOT_SCRATCH: ${{ runner.temp }}/parity-aot-modules-scratch-${{ matrix.shard }}
+          PARITY_AOT_ENGINES: thaw-js
+          PARITY_AOT_JOBS: "4"
+          PARITY_AOT_RUN_TIMEOUT: "20"
+          PARITY_AOT_BUILD_TIMEOUT: "600"
+        run: |
+          awk -v s="${{ matrix.shard }}" '$1 == s { print $2 }' tools/parity-aot/modules-shards.txt > "$PARITY_AOT_MODULES"
+          test -s "$PARITY_AOT_MODULES" || { echo "no modules assigned to shard ${{ matrix.shard }}" >&2; exit 1; }
+          rc=0
+          bash tools/parity-aot/run.sh > "$RUNNER_TEMP/parity-aot-modules-log-${{ matrix.shard }}.txt" 2>&1 || rc=$?
+          echo "$rc" > "$RUNNER_TEMP/parity-aot-modules-rc-${{ matrix.shard }}"
+          tail -n 40 "$RUNNER_TEMP/parity-aot-modules-log-${{ matrix.shard }}.txt" || true
+          test -s "$PARITY_AOT_OUT/summary.md" || { echo "no summary.md produced (rc=$rc)" >&2; exit 1; }
+      - name: Job summary
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/parity-aot-modules-out-${{ matrix.shard }}"
+          rc=$(cat "$RUNNER_TEMP/parity-aot-modules-rc-${{ matrix.shard }}" 2>/dev/null || echo unknown)
+          {
+            echo "## AOT vs Node module probes, shard ${{ matrix.shard }} (NON-GATING)"
+            echo
+            echo "modules: $(tr '\n' ' ' < "$RUNNER_TEMP/parity-aot-modules-${{ matrix.shard }}.txt" 2>/dev/null). run.sh exit code: \`$rc\` (0 = harness ran, 2 = harness error)."
+            echo "Findings are merged by the modules-report job; not enforced."
+            echo
+            if [ -s "$out/summary.md" ]; then
+              head -c 60000 "$out/summary.md"
+            else
+              echo "no summary.md produced"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-aot-modules-${{ matrix.shard }}
+          path: ${{ runner.temp }}/parity-aot-modules-out-${{ matrix.shard }}
+          if-no-files-found: ignore
+
+  modules-report:
+    if: ${{ always() && ((github.event_name == 'workflow_dispatch' && inputs.suite != 'ecmascript') || github.event.label.name == 'parity-aot-modules') }}
+    needs: [build, module-shards]
+    name: AOT module surface report, merged shards (non-gating)
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: parity-aot-modules-m*
+          path: ${{ runner.temp }}/modules-in
+      - name: Merge the module shards (modules.md, merged manifest, API coverage)
+        env:
+          OUT: ${{ runner.temp }}/modules-report
+        run: |
+          mkdir -p "$OUT"
+          # coverage over the merged manifest; no ratchet (the committed baseline is for the ECMAScript manifest).
+          python3 tools/parity-aot/modules_report.py "$RUNNER_TEMP/modules-in" --engine thaw-js \
+            --out "$OUT/modules.md" --json-out "$OUT/modules.json" --merge-manifest "$OUT/merged-manifest.json" \
+            > /dev/null || echo "modules_report: exit $? (non-gating)"
+          test -s "$OUT/merged-manifest.json" || { echo "no shard output to merge" >&2; exit 1; }
+          python3 tools/parity-aot/coverage.py --manifest "$OUT/merged-manifest.json" --out "$OUT" --no-ratchet \
+            > "$OUT/coverage.log" 2>&1 || echo "coverage: exit $? (non-gating)"
+          python3 tools/parity-aot/modules_report.py "$RUNNER_TEMP/modules-in" --engine thaw-js \
+            --coverage "$OUT/coverage.json" --out "$OUT/modules.md" --json-out "$OUT/modules.json" \
+            --merge-manifest "$OUT/merged-manifest.json" > /dev/null || echo "modules_report: exit $? (non-gating)"
+      - name: Job summary (modules.md)
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/modules-report"
+          {
+            if [ -s "$out/modules.md" ]; then head -c 60000 "$out/modules.md"; else echo "# Module surface: no report produced"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-aot-modules-report
+          path: ${{ runner.temp }}/modules-report
           if-no-files-found: ignore
