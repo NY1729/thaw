@@ -1175,7 +1175,7 @@ fn build_with_native_mode_routed(
     // define every host symbol twice.
     let quickjs_lib = (uses_quickjs && !uses_napi)
         .then(|| {
-            let features = runtime_features.iter().copied().collect::<Vec<_>>();
+            let features = quickjs_runtime_features(&runtime_features);
             build_staticlib_with_features("thaw-quickjs", &features)
         })
         .transpose()?;
@@ -1742,6 +1742,14 @@ fn native_addon_import_audit_rejects_missing_and_internal_symbols() {
 }
 
 #[test]
+fn quickjs_archive_never_gets_the_thaw_js_only_sqlite_feature() {
+    let features: std::collections::BTreeSet<&str> = ["intl", "sqlite", "tls"].into_iter().collect();
+    assert_eq!(quickjs_runtime_features(&features), vec!["intl", "tls"]);
+    // the N-API QuickJS features follow the same rule (no `quickjs-sqlite` feature exists)
+    assert_eq!(napi_runtime_features(&features), vec!["quickjs", "quickjs-intl", "quickjs-tls"]);
+}
+
+#[test]
 fn quickjs_callbacks_export_only_their_runtime_poll_symbols() {
     assert_eq!(
         quickjs_callback_export_args(),
@@ -2009,9 +2017,15 @@ fn source_uses_intl(source: &str) -> bool {
     thaw_bridge::required_runtime_features(source).contains("intl")
 }
 
+/// The runtime features `thaw-quickjs` has as cargo features: `node:sqlite` is served by thaw-js only (the QuickJS lane
+/// never had it), so a program that merely mentions it (undici's cache store) must not ask for a `sqlite` feature there.
+fn quickjs_runtime_features<'a>(features: &std::collections::BTreeSet<&'a str>) -> Vec<&'a str> {
+    features.iter().copied().filter(|feature| *feature != "sqlite").collect()
+}
+
 fn napi_runtime_features(features: &std::collections::BTreeSet<&str>) -> Vec<String> {
     std::iter::once("quickjs".to_string())
-        .chain(features.iter().map(|feature| format!("quickjs-{feature}")))
+        .chain(features.iter().filter(|feature| **feature != "sqlite").map(|feature| format!("quickjs-{feature}")))
         .collect()
 }
 
