@@ -516,26 +516,40 @@ fn thaw_js_async_overload_is_plain_when_its_resolved_type_is() {
 }
 
 #[test]
-fn thaw_js_path_flavours_are_registry_bundles_exporting_the_selected_flavour() {
+fn thaw_js_path_family_bundles_are_the_root_bundle_with_a_realm_marker() {
     let root = thaw_registry::resolve_builtin("node:path")
         .unwrap()
         .bundle_js
         .unwrap();
-    for (builtin, separator) in [
-        ("node:path", "/"),
-        ("node:path/posix", "/"),
-        ("node:path/win32", "\\"),
+    // (specifier the user writes, export path of the shared `node:path` realm it views)
+    for (specifier, member) in [
+        ("path", ""),
+        ("node:path", ""),
+        ("path/posix", "posix"),
+        ("node:path/posix", "posix"),
+        ("path/win32", "win32"),
+        ("node:path/win32", "win32"),
     ] {
+        let builtin = path_builtin_name(specifier).unwrap();
         let form = thaw_js_path_bundle(&root, builtin);
-        let report = thaw_js::scan::scan_bundle(&form).unwrap();
-        assert!(report.is_clean(), "{builtin}: {:?}", report.blockers);
-        assert_eq!(report.entry, builtin);
-        let mut package = thaw_js::host::Package::load(&form).unwrap();
-        assert_eq!(
-            package.get("sep").ok(),
-            Some(thaw_js::host::Native::Str(separator.into())),
-            "{builtin}"
+        let marker = format!(
+            "var __thaw_bundle_realm = {{\"key\":\"node:path\",\"member\":\"{member}\"}};"
         );
+        assert!(form.contains(&marker), "{specifier}: {marker} missing");
+        assert_eq!(form.matches("__thaw_bundle_realm").count(), 1, "{specifier}");
+        let report = thaw_js::scan::scan_bundle(&form).unwrap();
+        assert!(report.is_clean(), "{specifier}: {:?}", report.blockers);
+        assert_eq!(report.entry, "node:path", "{specifier}");
+        // the form is still the root bundle: nothing else is rewritten
+        assert_eq!(form.replace(&format!("\n{marker}"), ""), root, "{specifier}");
+    }
+}
+
+#[test]
+fn thaw_js_ordinary_bundles_do_not_carry_the_realm_marker() {
+    for module in ["node:url", "node:util", "node:events"] {
+        let bundle = thaw_registry::resolve_builtin(module).unwrap().bundle_js.unwrap();
+        assert!(!bundle.contains("__thaw_bundle_realm"), "{module}");
     }
 }
 
@@ -1563,35 +1577,12 @@ fn thaw_js_named_value_export_is_unchanged_by_default_import_bindings() {
 }
 
 #[test]
-fn path_family_value_realms_split_needs_two_value_specifiers() {
-    // the default of `path` and a value of `path/posix` are objects of two interpreters on thaw-js
-    assert!(path_family_value_realms_split("import path from 'path'; import { posix } from 'node:path/posix'; const s = [path === posix];"));
-    // a namespace import binds the module object, which is a value too
-    assert!(path_family_value_realms_split("import * as p from 'node:path'; import win32 from 'path/win32'; const s = [p, win32];"));
-    // `import p = require()` binds the whole module
-    assert!(path_family_value_realms_split("import p = require('node:path'); import q from 'path/posix';"));
-    // the imported name decides, not the local alias
-    assert!(path_family_value_realms_split("import { posix as a } from 'path'; import { win32 as b } from 'node:path/win32';"));
-    assert!(path_family_value_realms_split("import { default as p } from 'node:path/posix'; import path from 'path';"));
-    // one specifier, however many values: one interpreter, so identity holds
-    assert!(!path_family_value_realms_split("import path, { posix, win32 } from 'node:path';"));
-    assert!(!path_family_value_realms_split("import path from 'path'; import { posix } from 'path';"));
-    // a function-only import of the second specifier takes no value export
-    assert!(!path_family_value_realms_split("import path from 'path'; import { join } from 'path/posix'; const s = path.join('a');"));
-    // other modules do not count
-    assert!(!path_family_value_realms_split("import path from 'node:path'; import posix from 'node:url';"));
-    assert!(!path_family_value_realms_split("import path from 'node:path'; const x = 1;"));
-}
-
-#[test]
-fn path_family_packages_stay_on_quickjs_when_their_values_split() {
+fn path_family_two_specifiers_with_values_stay_on_thaw_js_with_one_realm() {
+    // the marker makes `path` and `path/posix` views of one realm, so their values are identical objects
     let bundle = "module.exports = (function(require){ var __thaw_bundle_factories = { \"node:path\": function(module, exports, require) { exports.sep = '/'; } }; var __thaw_bundle_require_maps = { \"node:path\": {} }; var __thaw_bundle_entry_key = \"node:path\"; })(globalThis.require);";
     let split = "import path from 'path'; import { posix } from 'path/posix'; const s = [path === posix];";
-    let one_specifier = "import path, { posix } from 'node:path'; const s = [path === posix];";
-    assert!(!thaw_js_package_eligible(&builtin_routing_package("path"), bundle, split, &Default::default(), ""));
-    assert!(thaw_js_package_eligible(&builtin_routing_package("node:path"), bundle, one_specifier, &Default::default(), ""));
-    // the guard is for the family only: another package with the same split source is unaffected
-    assert!(thaw_js_package_eligible(&builtin_routing_package("node:url"), bundle, split, &Default::default(), ""));
+    assert!(thaw_js_package_eligible(&builtin_routing_package("path"), bundle, split, &Default::default(), ""));
+    assert!(thaw_js_package_eligible(&builtin_routing_package("path/posix"), bundle, split, &Default::default(), ""));
 }
 
 #[test]
