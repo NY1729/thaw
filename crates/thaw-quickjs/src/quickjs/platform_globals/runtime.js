@@ -134,6 +134,7 @@
   globalThis.__thaw_is_null_dynamic_value = value => value === null;
   globalThis.__thaw_is_nullish_dynamic_value = value => value == null;
   globalThis.__thaw_is_array_dynamic_value = value => Array.isArray(value);
+  globalThis.__thaw_is_view_dynamic_value = value => ArrayBuffer.isView(value) || (typeof DataView === 'function' && value instanceof DataView);
   thawBootstrapDefineProperty(globalThis, '__thaw_to_iterator', {
     value: value => {
       if (value == null) return value;
