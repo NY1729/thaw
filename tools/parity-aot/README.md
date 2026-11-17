@@ -13,7 +13,8 @@ Plan: `designs/plan-q9-aot-parity-harness.md` (PR 1). Scope is in its section 5.
 - `aot_run.py`: Node reference, thaw build/isolation/run per engine, classification, diff, summary.
 - `run.sh`: the entry point (gen, aot_run, coverage). `selftest.sh`: determinism, Node run of every program, classifier and coverage checks.
 - `coverage.py`: API coverage of `manifest.json` and the shrink-only ratchet. `coverage-baseline.json`: the untouched `id#mode` pairs. `modules.txt`: the 55 thaw-js builtin modules (copied from `THAW_JS_BUILTIN_MODULES` in `crates/thaw-cli/src/registry_integration/thaw_js_routing.rs`; selftest checks they match).
-- `known-gaps.json`, `waivers.json`, `skip.txt`: same schema as `tools/parity`. Gaps and waivers are empty at slice 1.
+- `known-gaps.json`, `waivers.json`: same schema as `tools/parity`. `skip.txt`: probe-name regexes with a reason
+line each. gen_probes.py drops them at generation (manifest `skipped` counts them) and diff.py drops them from both sides.
 
 ## Probes
 
@@ -27,19 +28,32 @@ Families and modes (`<family>.<mode>.cNN` programs, at most 40 probes each):
   29 ops per mode: methods, index get/set/out-of-range/negative, spread, for..of, destructuring, `in`, `delete`,
   `typeof`, `instanceof`, `String()`, `JSON.stringify`, `Array.isArray`, loose equality.
 - `static`: `Buffer.concat`, `alloc`, `from`, `isBuffer`, `byteLength`, `compare`, ... in modes `typed`, `any`, `callback`.
-- `globals`: `new X(args)` (typed and any), `instanceof`, `typeof` for each `Ctor` in PLATFORM_GLOBALS.
+- `globals`: `new X(args)` (typed and any), `instanceof`, `typeof` for each `Ctor` in PLATFORM_GLOBALS. Constructor
+  arguments come from `CTOR_ARGS` in gen_probes.py. Names in `skip.txt` (Node's "Illegal constructor", DisposableStack,
+  BroadcastChannel and WebSocket) keep only their `typeof` probe.
+- builtin namespaces (`array.typed`, `math.any`, ...): a namespace is called directly in `typed` mode (`Math.abs(2)`),
+  with no `typeof Math` annotation and no `union` mode (both were probe artefacts). `typeofann`: one
+  `const b: typeof <ns> = <ns>` probe per namespace, the one family that keeps the annotation form, so that gap stays measured.
+- `tag`: `Object.prototype.toString` on each native kind (Map, Set, typed arrays, Buffer, Promise, ...), printed by the
+  tag printer (`pt` probes, `showTag` in the prelude). The value families print with `show()`, which prints the
+  constructor name and never calls `Object.prototype.toString`, so a tag gap cannot hide a value diff.
 
 ## Classes
 
 Per probe, per engine: `MATCH`; `MSG` (same THROW name, different message); `WRONG-TYPE` (THROW vs value, or a
 different THROW name); `WRONG-VALUE`; `LEAK` (thaw output has `__thaw_js_handle_id__`, Node does not); `MISSING`
 (no output block); `CRASH` / `HANG` (a probe that kills or hangs its binary when rerun alone); `REJECT` (compile
-diagnostic naming the probe, or no location after bisect); `REJECT?` (build budget exhausted); `UNVERIFIED`
-(rerun budget exhausted).
+diagnostic naming the probe, or no location after bisect); `REJECT-EXPECTED` (a `REJECT` where Node also throws a
+TypeError for a non-function callback: `(1 as any)` to an array or promise method, documented in `aot_run.py`);
+`REJECT?` (build budget exhausted); `UNVERIFIED` (rerun budget exhausted).
 
-Isolation: a build that fails on a named probe line drops that probe and rebuilds. Without a line the probe list
-is bisected. At most 25 extra builds per program. After a crash or hang, the probes after the last printed header
-are rerun one per binary (at most 40 per program).
+MSG is gated by error name only (`diff.py`). The summary lists the text differences in a separate non-gating
+section, grouped by thrown name.
+
+Isolation: a failing build names its error sites (`error` blocks of the diagnostic only). Every named probe is
+dropped in one pass and the rest rebuilt. A diagnostic with no named site bisects the probe list. At most 120 builds
+per program (`EXTRA_CAP`). After a crash or hang, the probes after the last printed header are rerun one per binary
+(at most 40 per program).
 
 List drift: the three lists in `platform_globals.rs` (PLATFORM_GLOBALS Ctors, DYNAMIC_NEW_CTORS, DYNAMIC_OPAQUE_CTORS)
 are compared. Differences are `LIST-DRIFT` findings. Method names used by ops must exist in

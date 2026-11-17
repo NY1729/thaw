@@ -53,3 +53,5 @@ node:stream/promises
 node:test
 node:test/reporters
 node:cluster
+node:sys
+node:sea

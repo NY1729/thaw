@@ -171,7 +171,8 @@ MODE_SETUP = {
     "module": "const b: {T} = {MOD};",
 }
 MODE_RECV = {"union": "(b as {T})", "unknown": "(u as {T})"}
-STATIC_T1 = {1: ["typed", "any", "union", "callback"]}
+# Namespaces take no union mode (`typeof X | null` is a probe artefact) and typed calls the namespace directly.
+STATIC_T1 = {1: ["typed", "any", "callback"]}
 STATIC_T2 = {2: ["typed", "any"]}
 RECV_T1 = {1: ["typed", "any", "union", "callback"], 3: ["unknown", "generic", "json", "module"]}
 RECV_T2 = {2: ["typed", "any"], 4: ["union", "callback", "unknown", "generic", "json", "module"]}
@@ -326,8 +327,12 @@ def body_for(fam, variant, mode, entry, args):
                   "DOC": json.dumps(variant["json"]) if variant["json"] else None,
                   "MOD": f"mod_{fam['family']}_{variant['vname']}()"}
         prefix = variant["prefix"]
-    setup = prefix + MODE_SETUP[mode].format(**fields)
-    recv = MODE_RECV.get(mode, "b").format(**fields)
+    if variant is None and mode == "typed":
+        # A namespace is called directly. The `typeof X` annotation form has its own family (typeofann).
+        setup, recv = "", fam["static"]
+    else:
+        setup = prefix + MODE_SETUP[mode].format(**fields)
+        recv = MODE_RECV.get(mode, "b").format(**fields)
     if entry["kind"] == "call":
         call = f"{recv}.{entry['key']}({', '.join(args)})"
     else:
@@ -392,6 +397,56 @@ def proxy_probes():
     return out
 
 
+def typeof_probes(rows):
+    """typeofann: one `const b: typeof <ns> = <ns>` probe per namespace, the only probes that keep the annotation form.
+    Its compile rejects measure the TsTypeQuery gap (unsupported `typeof <builtin>` annotation) on their own."""
+    out = []
+    for fam in FAMILIES:
+        ns = fam["static"]
+        if not ns:
+            continue
+        calls = sorted((e for e in owner_entries(rows, ns, True) if e["kind"] == "call"), key=lambda e: e["key"])
+        if not calls:
+            continue
+        e = calls[0]
+        args = arg_sets(fam["family"], e["key"], e["length"], ("1", "2"), True)[0][1]
+        body = f"const b: typeof {ns} = {ns}; return b.{e['key']}({', '.join(args)});"
+        out.append(("typeofann", "typed", f"typeofann.typed.{ns}.{e['key']}", body, [e["api"]]))
+    return out
+
+
+# Tag family: Object.prototype.toString on each native kind, through the tag printer (pt probes). Measures the tag
+# gap alone; the value families use show(), which prints the constructor name instead.
+TAG_RECV = [
+    ("Map", "Map<number, string>", 'new Map<number, string>([[1, "a"]])', ""),
+    ("Set", "Set<number>", "new Set<number>([1])", ""),
+    ("WeakMap", "WeakMap<object, number>", "new WeakMap<object, number>([[k, 1]])", KPRE),
+    ("WeakSet", "WeakSet<object>", "new WeakSet<object>([k])", KPRE),
+    ("Date", "Date", "new Date(0)", ""),
+    ("RegExp", "RegExp", "/a/g", ""),
+    ("Promise", "Promise<number>", "Promise.resolve(1)", ""),
+    ("Error", "Error", 'new Error("m")', ""),
+    ("ArrayBuffer", "ArrayBuffer", "new ArrayBuffer(2)", ""),
+    ("Float64Array", "Float64Array", "new Float64Array([1.5])", ""),
+    ("Int8Array", "Int8Array", "new Int8Array([1])", ""),
+    ("Uint8Array", "Uint8Array", "new Uint8Array([1, 2])", ""),
+    ("Buffer", "Buffer", "Buffer.from([1, 2])", ""),
+    ("Math", None, "Math", ""),
+    ("JSON", None, "JSON", ""),
+]
+
+
+def tag_probes():
+    out = []
+    for label, typ, value, prefix in TAG_RECV:
+        modes = (["typed"] if typ else []) + ["any"]
+        for mode in modes:
+            decl = f"const b: {typ} = {value};" if mode == "typed" else f"const b: any = {value};"
+            out.append(("tag", mode, f"tag.{mode}.{label}", f"{prefix}{decl} return b;",
+                        ["Object.prototype.toString"]))
+    return out
+
+
 def build(rows, quota=QUOTA):
     """All built-in probes: [(family, mode, name, body, api)]; each family emits at most `quota` generated probes."""
     out = []
@@ -399,7 +454,7 @@ def build(rows, quota=QUOTA):
         for cand in select(family_candidates(fam, rows), quota):
             name, body, api, mode = cand
             out.append((fam["family"], mode, name, body, api))
-    return out + proxy_probes()
+    return out + proxy_probes() + typeof_probes(rows) + tag_probes()
 
 
 def lib_text():

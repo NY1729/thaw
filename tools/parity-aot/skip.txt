@@ -1,3 +1,11 @@
-# Probe-name regexes dropped from BOTH sides before diffing (same contract as tools/parity/skip.txt).
-# Matched with search() against the bare probe name, e.g. buffer.typed.indexOf.
-# Empty at slice 1: no probe is skipped. Async, clock, random and process probes are excluded by construction.
+# Probe-name regexes dropped at generation (gen_probes.py) and from BOTH sides when diffing (diff.py --skip).
+# Matched with search() against the bare probe name, e.g. globals.typed.new.AbortSignal. One reason per regex.
+
+# Node 22 has no DisposableStack / AsyncDisposableStack: Node throws ReferenceError, nothing to compare.
+^globals\.(typed|any)\.(new|instanceof|typeof)\.(DisposableStack|AsyncDisposableStack)$
+
+# Node throws "Illegal constructor" (or "Constructor cannot be called") for new X(): the typeof probe stays.
+^globals\.(typed\.new|any\.new|any\.instanceof)\.(AbortSignal|Crypto|CryptoKey|Navigator|Performance|PerformanceEntry|PerformanceMeasure|PerformanceObserverEntryList|PerformanceResourceTiming|ReadableByteStreamController|ReadableStreamBYOBRequest|ReadableStreamDefaultController|SubtleCrypto|TransformStreamDefaultController|WritableStreamDefaultController|MessagePort)$
+
+# Constructing these holds an event loop open (BroadcastChannel) or opens a network connection (WebSocket): typeof stays.
+^globals\.(typed\.new|any\.new|any\.instanceof)\.(BroadcastChannel|WebSocket)$

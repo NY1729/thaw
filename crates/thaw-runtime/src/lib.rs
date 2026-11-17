@@ -173,6 +173,8 @@ struct PromiseSubscription {
     /// async_hooks key of the promise this reaction resolves (0 = untracked). Set by linked
     /// subscriptions only while the hook sink is on.
     hook_key: u64,
+    /// `hook_key` is an await's throwaway promise: its promiseResolve fires when `resume` returns.
+    hook_settles: bool,
     // Rust subscriber and ready queues are invisible to the arena scanner.
     // Pin a suspended arena frame and callback payloads until resume returns.
     _frame_root: thaw_arena::ArenaRoot,
@@ -541,6 +543,14 @@ fn async_hook_new_key() -> u64 {
     ASYNC_HOOK_KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
+/// The throwaway promise of an `await` on a promise with key `parent`: an id-only resource (no
+/// `ThawPromise`), 0 while the sink is off.
+fn async_hook_throwaway(parent: u64) -> u64 {
+    let key = async_hook_new_key();
+    async_hook_emit(0, key, parent);
+    key
+}
+
 /// Emits one native async_hooks event to the registered sink. Key 0 (untracked) and events raised
 /// while a hook callback runs are dropped.
 fn async_hook_emit(kind: u8, key: u64, parent: u64) {
@@ -580,6 +590,7 @@ struct ParkedContinuation {
     result: *const u8,
     js_barrier: u64,
     hook_key: u64,
+    hook_settles: bool,
 }
 
 // SAFETY: the pointers are opaque. Hand-offs are strict: the parking thread is blocked until the
@@ -613,6 +624,7 @@ pub extern "C" fn thaw_runtime_park_ready() {
             resume,
             frame,
             hook_key,
+            hook_settles,
             _frame_root: frame_root,
             _payload_roots: payload_roots,
         } = subscription;
@@ -626,6 +638,7 @@ pub extern "C" fn thaw_runtime_park_ready() {
             result,
             js_barrier,
             hook_key,
+            hook_settles,
         });
         drop((frame_root, result_root, payload_roots));
     }
@@ -649,6 +662,7 @@ pub extern "C" fn thaw_runtime_adopt_ready() {
                     resume: continuation.resume,
                     frame: continuation.frame,
                     hook_key: continuation.hook_key,
+                    hook_settles: continuation.hook_settles,
                     _frame_root: thaw_arena::ArenaRoot::new(continuation.frame as usize),
                     _payload_roots: continuation
                         .payload_roots
@@ -814,8 +828,12 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
         js_drain_to_job_barrier(continuation.js_barrier);
     }
     let hook_key = continuation.subscription.hook_key;
+    let settles = continuation.subscription.hook_settles;
     async_hook_emit(1, hook_key, 0);
     (continuation.subscription.resume)(continuation.subscription.frame, continuation.result);
+    if settles {
+        async_hook_emit(3, hook_key, 0);
+    }
     async_hook_emit(2, hook_key, 0);
     drop(continuation);
     1

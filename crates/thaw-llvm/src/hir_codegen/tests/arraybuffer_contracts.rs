@@ -78,3 +78,45 @@ function main(): void {
     let output = compile_and_run(source, "arraybuffer_transfer_detached_and_annotations_match_node");
     assert_eq!(output, "8 false false 8\n16 0 true false\n4 true\n3 7 0\n5 4\n3\n4 5\n");
 }
+
+// `ArrayBuffer.isView` on the AOT typed lane: static byte values, static non-view values, and
+// `any`/union/optional operands. Expected output from node 22.
+
+#[test]
+fn array_buffer_is_view_static_and_any_matrix_matches_node() {
+    let source = r#"
+function main(): void {
+  const buf: Buffer = Buffer.from([1, 2, 3]);
+  const ab = new ArrayBuffer(4);
+  const dv = new DataView(ab);
+  const u8 = new Uint8Array(4);
+  const f64 = new Float64Array(2);
+  const plain: number[] = [1, 2];
+  const anyBuf: any = Buffer.from([9]);
+  const anyDv: any = new DataView(new ArrayBuffer(2));
+  const anyF64: any = new Float64Array(1);
+  const anyArr: any = [1, 2];
+  const anyNum: any = 42;
+  const anyStr: any = "hi";
+  const anyNull: any = null;
+  const anyUndef: any = undefined;
+  const anyPlain: any = { a: 1 };
+  const uni: any | number = anyBuf;
+  const opt: Buffer | undefined = Buffer.from([2]);
+  const optNone: Buffer | undefined = undefined;
+  console.log(ArrayBuffer.isView(buf), ArrayBuffer.isView(ab), ArrayBuffer.isView(dv), ArrayBuffer.isView(u8));
+  console.log(ArrayBuffer.isView(f64), ArrayBuffer.isView(plain), ArrayBuffer.isView(42), ArrayBuffer.isView("s"));
+  console.log(ArrayBuffer.isView(true), ArrayBuffer.isView(null), ArrayBuffer.isView(undefined), ArrayBuffer.isView({ a: 1 }));
+  console.log(ArrayBuffer.isView(anyBuf), ArrayBuffer.isView(anyDv), ArrayBuffer.isView(anyF64), ArrayBuffer.isView(anyArr));
+  console.log(ArrayBuffer.isView(anyNum), ArrayBuffer.isView(anyStr), ArrayBuffer.isView(anyUndef), ArrayBuffer.isView(anyNull));
+  console.log(ArrayBuffer.isView(anyPlain), ArrayBuffer.isView(uni), ArrayBuffer.isView(opt), ArrayBuffer.isView(optNone));
+  console.log(ArrayBuffer.isView(), ArrayBuffer.isView(new ArrayBuffer(1)));
+}
+"#;
+    let output = compile_and_run(source, "array_buffer_is_view_static_and_any_matrix_matches_node");
+    assert_eq!(
+        output,
+        "true false true true\ntrue false false false\nfalse false false false\ntrue true true false\n\
+         false false false false\nfalse true true false\nfalse false\n"
+    );
+}

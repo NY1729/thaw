@@ -155,9 +155,9 @@ jobs:
           # Family names as gen_probes.py emits them; selftest.sh (C6) fails if a family is missing or repeated.
           # Balanced by probe count (about 1000 each).
           - shard: s1
-            families: "bigint,map,math,proxy,static,string"
+            families: "bigint,map,math,proxy,static,string,typeofann"
           - shard: s2
-            families: "json,reflect,regexp,set,typedarray"
+            families: "json,reflect,regexp,set,tag,typedarray"
           - shard: s3
             families: "array,globals,object,weak"
           - shard: s4

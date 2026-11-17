@@ -8,7 +8,7 @@
 #        CARGO_TARGET_DIR  honoured by the default build
 #
 # Output: TSV `benchmark  thaw_js_ms  quickjs_ms  ratio` (ratio = thaw_js_ms / quickjs_ms), then a `geomean` line.
-# Each script prints one checksum line; a thaw-js vs QuickJS output mismatch is reported on stderr.
+# Each script prints one checksum line (a row the reference engine cannot run keeps its quickjs column "-"); a thaw-js vs QuickJS output mismatch is reported on stderr.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,7 +46,7 @@ time_best() {
     s=${EPOCHREALTIME/[.,]/}
     if ! LAST_OUT=$("$bin" "$file"); then
       echo "run.sh: $bin failed on $file" >&2
-      exit 1
+      return 1
     fi
     e=${EPOCHREALTIME/[.,]/}
     ms=$(( (e - s) / 1000 ))
@@ -59,19 +59,25 @@ body="benchmark"$'\t'"thaw_js_ms"$'\t'"quickjs_ms"$'\t'"ratio"$'\n'
 ratios=()
 for f in "$HERE"/*.js; do
   name=$(basename "$f" .js)
-  time_best "$THAW_JS_RUN" "$f"
+  time_best "$THAW_JS_RUN" "$f" || exit 1
   t_ms=$BEST_MS
   t_out=$LAST_OUT
   q_ms="-"
   ratio="-"
   if [[ -n "${QJS:-}" ]]; then
-    time_best "$QJS" "$f"
-    q_ms=$BEST_MS
-    q_out=$LAST_OUT
+    # a reference engine that cannot run a row (an older QuickJS without resizable ArrayBuffer, say) leaves its
+    # column empty instead of dropping the whole TSV
+    if time_best "$QJS" "$f"; then
+      q_ms=$BEST_MS
+      q_out=$LAST_OUT
+    else
+      q_ms="-"
+      q_out=$t_out
+    fi
     if [[ "$q_out" != "$t_out" ]]; then
       echo "run.sh: checksum mismatch for $name: thaw-js=[$t_out] quickjs=[$q_out]" >&2
     fi
-    if (( q_ms > 0 )); then
+    if [[ $q_ms != "-" ]] && (( q_ms > 0 )); then
       ratio=$(awk -v a="$t_ms" -v b="$q_ms" 'BEGIN { printf "%.3f", a / b }')
       ratios+=("$ratio")
     fi
