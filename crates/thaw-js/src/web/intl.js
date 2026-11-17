@@ -2291,13 +2291,13 @@
     }
   }
 
-  // `Intl.Collator` (M9) -- entirely new. `usage: 'search'` isn't
-  // supported (falls back to plain `'sort'` behavior, see
-  // `intl_collator.rs`'s own doc comment).
+  // `Intl.Collator` (M9). `usage: 'search'` selects the search collation
+  // (`intl_collator.rs`); a `-u-co-search` locale extension is ignored, as
+  // in Node, so it is dropped from the resolved locale.
   class CollatorImpl {
     constructor(locale, options) {
       const opts = options || {};
-      this.locale = intlRequestedLocale(locale);
+      this.locale = intlRequestedLocale(locale).replace(/-u-co-search$/, '');
       this._sensitivity = intlEnumOption(opts.sensitivity, ['base', 'accent', 'case', 'variant'], 'variant', 'sensitivity');
       this._usage = intlEnumOption(opts.usage, ['sort', 'search'], 'sort', 'usage');
       this._ignorePunctuation = Boolean(opts.ignorePunctuation);
@@ -2310,20 +2310,6 @@
     }
 
     _compare(a, b) {
-      // `usage: 'search'` needs ICU4C's search collation (ICU4X has no
-      // search-collation concept); only present with the opt-in `icu4c`
-      // feature, otherwise `usage: 'search'` keeps sort behavior.
-      if (this._usage === 'search' && typeof __thaw_intl_collator_compare_search === 'function') {
-        return __thaw_intl_collator_compare_search(
-          this.locale,
-          this._sensitivity,
-          this._ignorePunctuation,
-          this._numeric,
-          this._caseFirst,
-          String(a),
-          String(b),
-        );
-      }
       return __thaw_intl_collator_compare(
         this.locale,
         this._sensitivity,
@@ -2332,6 +2318,7 @@
         this._caseFirst,
         String(a),
         String(b),
+        this._usage,
       );
     }
 
@@ -2341,9 +2328,9 @@
         usage: this._usage,
         sensitivity: this._sensitivity,
         ignorePunctuation: this._ignorePunctuation,
+        collation: 'default',
         numeric: this._numeric,
         caseFirst: this._caseFirst,
-        collation: 'default',
       };
     }
   }

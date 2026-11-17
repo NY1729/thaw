@@ -3006,3 +3006,37 @@ function main(): void {
     let output = compile_and_run(source, "any_buffer_from_number_array_keeps_its_length");
     assert_eq!(output, "4 01020304\n");
 }
+
+#[test]
+fn json_to_f64_array_decode_reads_arraybuffer_leases_through_op_31_ir() {
+    use thaw_hir::{HirExpr, HirFunction, HirParam, HirProgram, HirStmt, HirType};
+
+    // a Json -> number[] decode (what Buffer.from(d) and new Uint8Array(d) lower to): the ArrayBuffer
+    // predicate must be consulted before the per-element loop, and its true branch must convert the bytes
+    let decode = HirExpr::JsonAsNative(
+        Box::new(HirExpr::Var("value".into())),
+        HirType::Array(Box::new(HirType::F64)),
+    );
+    let program = HirProgram {
+        globals: Vec::new(),
+        initializers: Vec::new(),
+        functions: vec![HirFunction {
+            name: "decode_numbers".into(),
+            params: vec![HirParam { name: "value".into(), ty: HirType::Json }],
+            ret: HirType::Array(Box::new(HirType::F64)),
+            is_async: false,
+            body: vec![HirStmt::Return(Some(decode))],
+        }],
+        extern_functions: Vec::new(),
+        fn_locs: Default::default(),
+        class_layouts: Vec::new(),
+    };
+    let context = inkwell::context::Context::create();
+    let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "json_f64_array_arraybuffer_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string().to_string();
+    let predicate = ir.find("call i8 @thaw_json_is_host_arraybuffer(").expect("ArrayBuffer predicate not called");
+    let bytes = ir.find("call ptr @thaw_json_to_number_array(").expect("number[] byte conversion not called");
+    let loop_index = ir.find("call ptr @thaw_json_index(").expect("per-element loop missing");
+    assert!(predicate < bytes && bytes < loop_index, "predicate, byte conversion and loop must be ordered");
+}

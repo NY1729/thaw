@@ -985,6 +985,9 @@ impl<'a> FnLowerer<'a> {
         if let Some(adapted) = self.adapt_callback_to_more_parameters(declared, &value)? {
             return Ok(adapted);
         }
+        if let Some(adapted) = self.adapt_callback_result_to_json(declared, &value)? {
+            return Ok(adapted);
+        }
         // An observed read of a maybe-uninitialised class field arrives with
         // its raw `Optional`; a slot that wants the bare payload unwraps it
         // like `undefined` coerced to `T`.

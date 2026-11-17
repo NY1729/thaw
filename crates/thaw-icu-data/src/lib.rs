@@ -205,6 +205,18 @@
 //!     `DatetimeNamesDayperiodV1` again with 48.0.0 (see step 14).
 //!     `fa` defaults to the Persian calendar and `arabext` numbering, so
 //!     it also exercises the non-Gregorian path.
+//! 16. (2026-11-17) `CollationTailoringV1` and `CollationMetadataV1`
+//!     regenerated with `--include-collations search` (the `search`
+//!     collation type behind `Intl.Collator`'s `usage: 'search'`; the
+//!     vendored data had none of it). Same curated locale list, same
+//!     seven collation markers as step 3, `--cldr-tag 48.2.1`, and the
+//!     icuexport tag pinned to `release-78.1rc` (what `--icuexport-tag
+//!     latest` resolved to; pin it, not `latest`, when regenerating).
+//!     Only these two files changed: a no-search run reproduces the
+//!     other five collation `.rs.data` files byte-for-byte. Source
+//!     delta: tailoring +101,558 B (+4.1%), metadata +224 B. The
+//!     datagen embedded data grows +38,028 B before linker dedup; the
+//!     linked binary grows by about 35 KB.
 //!
 //! ## Regenerating (e.g. to extend the curated locale list)
 //!

@@ -1172,7 +1172,7 @@ impl<'a> FnLowerer<'a> {
                     HirType::Promise(inner) => inner.as_ref(),
                     other => other,
                 };
-                if !matches!(contextual_inner, HirType::Dynamic | HirType::Json | HirType::JsValue)
+                if !callback_return_accepts_any(contextual_inner)
                     && !callable_return_compatible(&contextual, &declared)
                 {
                     return Err(format!(
@@ -1360,10 +1360,7 @@ impl<'a> FnLowerer<'a> {
             None
         };
         if let (Some(annotated), Some(contextual)) = (&annotated_return, contextual_return) {
-            if contextual != &HirType::Dynamic
-                && contextual != &HirType::Void
-                && contextual != &HirType::Json
-                && contextual != &HirType::JsValue
+            if !callback_return_accepts_any(contextual)
                 && !callable_return_compatible(contextual, annotated)
             {
                 return Err(format!(

@@ -374,6 +374,25 @@ impl Interp {
         self.hook_promise_raw(kind, Value::Object(p.clone()), parent);
     }
 
+    /// `__thaw_async_hooks_native(kind, key, parent)`: the id-only entry for native promises (see `native_hook_event`).
+    pub(crate) fn hook_native_raw(&mut self, kind: u8, key: u64, parent: u64) {
+        let Ok(Value::Object(f)) = self.get(
+            &Value::Object(self.global_object.clone()),
+            "__thaw_async_hooks_native",
+        ) else {
+            return;
+        };
+        let _ = self.call(
+            &Value::Object(f),
+            &Value::Undefined,
+            &[
+                Value::Number(f64::from(kind)),
+                Value::Number(key as f64),
+                Value::Number(parent as f64),
+            ],
+        );
+    }
+
     fn hook_promise_raw(&mut self, kind: u8, p: Value, parent: Value) {
         let Ok(Value::Object(f)) = self.get(
             &Value::Object(self.global_object.clone()),
@@ -1862,7 +1881,9 @@ impl Interp {
         g.declare("__thaw_set_timeout_internal", f, true);
         // Set by async_hooks when a hook is enabled or the last one is disabled in this realm.
         let f = self.native(|it, _, a| {
-            it.rt.async_hooks_on = matches!(arg(a, 0), Value::Bool(true));
+            let on = matches!(arg(a, 0), Value::Bool(true));
+            it.rt.async_hooks_on = on;
+            crate::host::native_async_hooks_set(it as *mut Interp, on);
             Ok(Value::Undefined)
         });
         g.declare("__thaw_async_hook_timers", f, true);

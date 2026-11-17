@@ -170,6 +170,9 @@ pub unsafe extern "C" fn thaw_runtime_exception_report_text(
 struct PromiseSubscription {
     resume: PromiseResumeFn,
     frame: *mut u8,
+    /// async_hooks key of the promise this reaction resolves (0 = untracked). Set by linked
+    /// subscriptions only while the hook sink is on.
+    hook_key: u64,
     // Rust subscriber and ready queues are invisible to the arena scanner.
     // Pin a suspended arena frame and callback payloads until resume returns.
     _frame_root: thaw_arena::ArenaRoot,
@@ -505,6 +508,57 @@ pub extern "C" fn thaw_runtime_run_one_event() -> bool {
     }
 }
 
+/// Sink for native async_hooks events, registered by thaw-js: 0 init, 1 before, 2 after, 3 promiseResolve.
+pub type AsyncHookSinkFn = extern "C" fn(kind: u8, key: u64, parent: u64);
+
+static ASYNC_HOOK_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ASYNC_HOOK_SINK: Mutex<Option<AsyncHookSinkFn>> = Mutex::new(None);
+static ASYNC_HOOK_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+thread_local! {
+    /// Set while the sink runs: events and keys raised by the hook callback itself are dropped.
+    static ASYNC_HOOK_EMITTING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Registers (`on` != 0 with a sink) or clears the process-wide native async_hooks sink. While it is
+/// unregistered, native promises get no key and emit nothing. Only thaw-js's createHook calls this.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_async_hooks_set(on: u8, sink: Option<AsyncHookSinkFn>) {
+    let sink = if on != 0 { sink } else { None };
+    *ASYNC_HOOK_SINK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = sink;
+    ASYNC_HOOK_ON.store(sink.is_some(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A fresh async_hooks key for a promise being created, or 0 while the sink is off or a hook runs.
+fn async_hook_new_key() -> u64 {
+    if !ASYNC_HOOK_ON.load(std::sync::atomic::Ordering::Relaxed)
+        || ASYNC_HOOK_EMITTING.with(Cell::get)
+    {
+        return 0;
+    }
+    ASYNC_HOOK_KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// Emits one native async_hooks event to the registered sink. Key 0 (untracked) and events raised
+/// while a hook callback runs are dropped.
+fn async_hook_emit(kind: u8, key: u64, parent: u64) {
+    if key == 0
+        || !ASYNC_HOOK_ON.load(std::sync::atomic::Ordering::Relaxed)
+        || ASYNC_HOOK_EMITTING.with(Cell::get)
+    {
+        return;
+    }
+    let sink = *ASYNC_HOOK_SINK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let Some(sink) = sink else { return };
+    ASYNC_HOOK_EMITTING.with(|emitting| emitting.set(true));
+    sink(kind, key, parent);
+    ASYNC_HOOK_EMITTING.with(|emitting| emitting.set(false));
+}
+
 fn enqueue_continuation(subscription: PromiseSubscription, result: *const u8) {
     let js_barrier = js_queue_job_barrier();
     READY_CONTINUATIONS.with(|ready| {
@@ -525,6 +579,7 @@ struct ParkedContinuation {
     payload_roots: Vec<usize>,
     result: *const u8,
     js_barrier: u64,
+    hook_key: u64,
 }
 
 // SAFETY: the pointers are opaque. Hand-offs are strict: the parking thread is blocked until the
@@ -557,6 +612,7 @@ pub extern "C" fn thaw_runtime_park_ready() {
         let PromiseSubscription {
             resume,
             frame,
+            hook_key,
             _frame_root: frame_root,
             _payload_roots: payload_roots,
         } = subscription;
@@ -569,6 +625,7 @@ pub extern "C" fn thaw_runtime_park_ready() {
                 .collect(),
             result,
             js_barrier,
+            hook_key,
         });
         drop((frame_root, result_root, payload_roots));
     }
@@ -591,6 +648,7 @@ pub extern "C" fn thaw_runtime_adopt_ready() {
                 subscription: PromiseSubscription {
                     resume: continuation.resume,
                     frame: continuation.frame,
+                    hook_key: continuation.hook_key,
                     _frame_root: thaw_arena::ArenaRoot::new(continuation.frame as usize),
                     _payload_roots: continuation
                         .payload_roots
@@ -755,7 +813,10 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
     if continuation.js_barrier != 0 {
         js_drain_to_job_barrier(continuation.js_barrier);
     }
+    let hook_key = continuation.subscription.hook_key;
+    async_hook_emit(1, hook_key, 0);
     (continuation.subscription.resume)(continuation.subscription.frame, continuation.result);
+    async_hook_emit(2, hook_key, 0);
     drop(continuation);
     1
 }
@@ -1032,6 +1093,8 @@ pub struct ThawPromise {
     internal_references: usize,
     references: usize,
     external_root: Option<thaw_arena::ArenaRoot>,
+    /// async_hooks identity: 0 while no hook sink is registered (untracked), else a process-wide key.
+    hook_key: u64,
 }
 
 include!("runtime/promises.rs");

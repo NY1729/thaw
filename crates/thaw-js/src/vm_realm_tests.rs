@@ -19,15 +19,34 @@ fn run_lines(src: &str) -> Vec<String> {
     std::mem::take(&mut it.out)
 }
 
+/// Builds `n` contexts, each created and run once; returns the sum of i*i and the elapsed time.
+fn run_many_contexts(n: usize) -> (Vec<String>, Duration) {
+    let t = Instant::now();
+    let src = format!(
+        "let total = 0; for (let i = 0; i < {n}; i++) total += runInNewContext('n * n', {{ n: i }}); console.log(total);"
+    );
+    let out = run_lines(&format!("{VM_PRELUDE}\n{src}"));
+    (out, t.elapsed())
+}
+
+/// Creating contexts must stay linear: a context is lean (`new_vm_realm`), so 300 of them must not
+/// cost more than a small multiple of 30 (a leak or a per-context rebuild of shared work would be
+/// super-linear). A wall-clock threshold alone flaked on a loaded CI runner (20.2 s against 20 s);
+/// the absolute ceiling is only a hang guard.
 #[test]
 fn vm_300_contexts_run_once_each_finish_fast() {
-    let t = Instant::now();
-    let out = run_lines(&format!("{VM_PRELUDE}\n{MANY_CONTEXTS}"));
+    let (small_out, small) = run_many_contexts(30);
+    assert_eq!(small_out, vec!["8555".to_string()]);
+    let (out, large) = run_many_contexts(300);
     assert_eq!(out, vec!["8955050".to_string()]);
     assert!(
-        t.elapsed() < Duration::from_secs(20),
-        "300 contexts took {:?}",
-        t.elapsed()
+        large < Duration::from_secs(120),
+        "300 contexts took {large:?} (hang guard)"
+    );
+    // 10x the contexts, a fixed per-run setup cost on top: allow 15x the 30-context time
+    assert!(
+        large <= small * 15 + Duration::from_secs(1),
+        "300 contexts took {large:?}, more than 15x the 30-context time {small:?}: creation is no longer linear"
     );
 }
 

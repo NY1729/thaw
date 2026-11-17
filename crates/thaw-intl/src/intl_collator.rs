@@ -14,10 +14,11 @@
 // concern, a scoped collation-only sub-crate, etc.) rather than being
 // bundled into this milestone as a side effect.
 //
-// `usage: 'search'` isn't supported (falls back to `'sort'` behavior,
-// a documented gap) -- real search-collation tailoring needs the
-// `--include-collations search` marker data this crate doesn't vendor,
-// a real, separate capability from plain sort-order comparison.
+// `usage: 'search'` selects the `search` collation type (ICU's
+// fuzzy-matching tailoring, `-u-co-search`): `thaw-icu-data` vendors
+// that data (`--include-collations search`), and `search` is set as
+// the collation type explicitly, since `-u-co-search` in a curated
+// tag is dropped by `resolve_curated_locale`.
 
 /// Builds the collator for one resolved option set (None if the locale
 /// fails to resolve). Split out so a native host can cache it across the
@@ -28,13 +29,15 @@ fn intl_collator_build(
     ignore_punctuation: bool,
     numeric: bool,
     case_first: &str,
+    search: bool,
 ) -> Option<icu_collator::Collator> {
     use std::str::FromStr;
 
     let locale = icu_locale::Locale::from_str(locale_tag).ok()?;
     let curated_tag = resolve_curated_locale(&locale.id);
+    let tag = if search { format!("{curated_tag}-u-co-search") } else { curated_tag.to_owned() };
     let curated_locale: icu_locale::Locale =
-        curated_tag.parse().expect("resolve_curated_locale returns a valid tag");
+        tag.parse().expect("resolve_curated_locale returns a valid tag");
     let mut prefs = icu_collator::CollatorPreferences::from(&curated_locale);
     prefs.numeric_ordering = Some(if numeric {
         icu_collator::preferences::CollationNumericOrdering::True
@@ -65,11 +68,11 @@ fn intl_collator_build(
 }
 
 /// `__thaw_intl_collator_compare(locale, sensitivity, ignore_punctuation,
-/// numeric, case_first, a, b) -> i32` (negative/zero/positive, matching
+/// numeric, case_first, a, b, usage) -> i32` (negative/zero/positive, matching
 /// `Intl.Collator.prototype.compare`'s own contract -- real ECMA-402
 /// doesn't guarantee exactly `-1`/`0`/`1`). Falls back to plain UTF-16
 /// codepoint ordering (the same behavior `localeCompare` already has)
-/// if the locale fails to resolve.
+/// if the locale fails to resolve. `usage` is `"search"` or `"sort"`.
 #[allow(clippy::too_many_arguments)]
 fn intl_collator_compare(
     locale_tag: &str,
@@ -79,6 +82,7 @@ fn intl_collator_compare(
     case_first: &str,
     a: &[u8],
     b: &[u8],
+    usage: &str,
 ) -> i32 {
     // A lone surrogate is substituted with U+FFFD for icu4x; the
     // codepoint fallback compares the real UTF-16 units.
@@ -90,9 +94,14 @@ fn intl_collator_compare(
         std::cmp::Ordering::Greater => 1,
     };
 
-    let Some(collator) =
-        intl_collator_build(locale_tag, sensitivity, ignore_punctuation, numeric, case_first)
-    else {
+    let Some(collator) = intl_collator_build(
+        locale_tag,
+        sensitivity,
+        ignore_punctuation,
+        numeric,
+        case_first,
+        usage == "search",
+    ) else {
         return codepoint_fallback();
     };
     match collator.as_borrowed().compare(&a_text, &b_text) {

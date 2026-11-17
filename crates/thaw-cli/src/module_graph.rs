@@ -104,6 +104,132 @@ struct LoadedModule {
     created_require_helper: Option<String>,
 }
 
+/// The `node:timers` exports that are the realm's own globals (Node: `timers.setTimeout === globalThis.setTimeout`).
+const NODE_TIMERS_GLOBALS: &[&str] = &[
+    "setTimeout",
+    "clearTimeout",
+    "setInterval",
+    "clearInterval",
+    "setImmediate",
+    "clearImmediate",
+];
+
+/// Rewrites value reads of `node:timers` exports (`timers.setTimeout`, `import { setTimeout as t }` used
+/// as a value) to the realm global name, which thaw-hir reads through `getDynamicValue`. The shim binding
+/// is a typed wrapper, a different function object, so identity with `globalThis.setTimeout` and mocks of
+/// the realm global would not hold. Callees keep the shim, so timer calls keep their native lowering.
+/// A local that is bound again anywhere in the module is left alone.
+pub(crate) fn rewrite_node_timers_value_reads(module: &mut Module) {
+    let mut named: HashMap<String, String> = HashMap::new();
+    let mut namespaces: HashSet<String> = HashSet::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+            continue;
+        };
+        if !matches!(import.src.value.as_str(), Some("node:timers" | "timers")) {
+            continue;
+        }
+        for specifier in &import.specifiers {
+            match specifier {
+                ImportSpecifier::Named(binding) if !binding.is_type_only => {
+                    let local = binding.local.sym.to_string();
+                    let imported = binding
+                        .imported
+                        .as_ref()
+                        .map(export_name)
+                        .transpose()
+                        .ok()
+                        .flatten();
+                    let imported = imported.unwrap_or_else(|| local.clone());
+                    if NODE_TIMERS_GLOBALS.contains(&imported.as_str()) {
+                        named.insert(local, imported);
+                    }
+                }
+                ImportSpecifier::Namespace(binding) => {
+                    namespaces.insert(binding.local.sym.to_string());
+                }
+                ImportSpecifier::Default(binding) => {
+                    namespaces.insert(binding.local.sym.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    if named.is_empty() && namespaces.is_empty() {
+        return;
+    }
+    #[derive(Default)]
+    struct BoundNames(HashSet<String>);
+    impl Visit for BoundNames {
+        fn visit_binding_ident(&mut self, binding: &thaw_parser::ast::BindingIdent) {
+            self.0.insert(binding.id.sym.to_string());
+        }
+        fn visit_fn_decl(&mut self, declaration: &thaw_parser::ast::FnDecl) {
+            self.0.insert(declaration.ident.sym.to_string());
+            declaration.visit_children_with(self);
+        }
+        fn visit_class_decl(&mut self, declaration: &thaw_parser::ast::ClassDecl) {
+            self.0.insert(declaration.ident.sym.to_string());
+            declaration.visit_children_with(self);
+        }
+    }
+    let mut bound = BoundNames::default();
+    module.visit_with(&mut bound);
+    named.retain(|local, _| !bound.0.contains(local));
+    namespaces.retain(|local| !bound.0.contains(local));
+    if named.is_empty() && namespaces.is_empty() {
+        return;
+    }
+
+    struct TimerValueReads<'a> {
+        named: &'a HashMap<String, String>,
+        namespaces: &'a HashSet<String>,
+    }
+    impl VisitMut for TimerValueReads<'_> {
+        fn visit_mut_call_expr(&mut self, call: &mut thaw_parser::ast::CallExpr) {
+            // The callee keeps the shim binding; only a member callee's object can hold a value read.
+            match &mut call.callee {
+                Callee::Expr(callee) => match callee.as_mut() {
+                    Expr::Ident(_) => {}
+                    Expr::Member(member) => member.obj.visit_mut_with(self),
+                    other => other.visit_mut_with(self),
+                },
+                other => other.visit_mut_with(self),
+            }
+            call.args.visit_mut_with(self);
+        }
+        fn visit_mut_expr(&mut self, expr: &mut Expr) {
+            match expr {
+                Expr::Ident(ident) => {
+                    if let Some(global) = self.named.get(ident.sym.as_ref()) {
+                        *expr = Expr::Ident(Ident::new_no_ctxt(global.clone().into(), ident.span));
+                        return;
+                    }
+                }
+                Expr::Member(member) => {
+                    if let (Expr::Ident(namespace), MemberProp::Ident(property)) =
+                        (member.obj.as_ref(), &member.prop)
+                    {
+                        if self.namespaces.contains(namespace.sym.as_ref())
+                            && NODE_TIMERS_GLOBALS.contains(&property.sym.as_ref())
+                        {
+                            *expr =
+                                Expr::Ident(Ident::new_no_ctxt(property.sym.clone(), member.span));
+                            return;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            expr.visit_mut_children_with(self);
+        }
+    }
+    module.visit_mut_with(&mut TimerValueReads {
+        named: &named,
+        namespaces: &namespaces,
+    });
+}
+
 fn export_name(name: &ModuleExportName) -> Result<String, String> {
     match name {
         ModuleExportName::Ident(ident) => Ok(ident.sym.to_string()),
@@ -2265,6 +2391,9 @@ pub(crate) fn bundle_with_named_source_transform(
         &mut loaded,
         &mut HashSet::new(),
     )?;
+    for loaded_module in &mut modules {
+        rewrite_node_timers_value_reads(&mut loaded_module.module);
+    }
     let eager_reachable = reachable_modules(&modules, entry_index, true);
     let emission_order = module_emission_order(&modules)?;
     if modules.len() >= EXTERNAL_MODULE_OFFSET {
