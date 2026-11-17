@@ -9169,6 +9169,71 @@ extern "C" fn fake_server_poll_40() -> u8 {
     u8::from(n < 40)
 }
 
+/// Live for every call: a listening server that never goes idle.
+extern "C" fn fake_server_poll_forever() -> u8 {
+    SERVER_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    1
+}
+
+/// Reports a latched unhandled rejection once the loop has polled three times.
+extern "C" fn fake_unhandled_after_three_polls() -> u8 {
+    u8::from(SERVER_POLLS.load(std::sync::atomic::Ordering::SeqCst) >= 3)
+}
+
+/// Exit status of the loop run by `guarded` (set inside the spawned thread).
+static LOOP_STATUS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);
+
+#[test]
+fn terminal_loop_exits_when_native_unhandled_failure_latched_while_server_live() {
+    use crate::host::{thaw_tjs_run_event_loop, TEST_SERVER_POLL, TEST_UNHANDLED_FAILURE};
+    let _guard = SERVER_POLL_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    *TEST_SERVER_POLL.lock().unwrap() = Some(fake_server_poll_forever);
+    *TEST_UNHANDLED_FAILURE.lock().unwrap() = Some(fake_unhandled_after_three_polls);
+    SERVER_POLLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    guarded(|| {
+        LOOP_STATUS.store(
+            thaw_tjs_run_event_loop(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    });
+    *TEST_UNHANDLED_FAILURE.lock().unwrap() = None;
+    *TEST_SERVER_POLL.lock().unwrap() = None;
+    assert_eq!(LOOP_STATUS.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // the loop stops on the first check after the failure latches, not after a server-driven spin
+    assert!(SERVER_POLLS.load(std::sync::atomic::Ordering::SeqCst) <= 4);
+}
+
+#[test]
+fn terminal_loop_exits_when_a_realm_throws_while_server_live() {
+    use crate::host::{thaw_tjs_register, thaw_tjs_run_event_loop, TEST_SERVER_POLL};
+    let _guard = SERVER_POLL_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    *TEST_SERVER_POLL.lock().unwrap() = Some(fake_server_poll_forever);
+    SERVER_POLLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    guarded(|| {
+        let (name, source) = (
+            std::ffi::CString::new("thr").unwrap(),
+            std::ffi::CString::new(
+                r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "thr/index.js": function(module, exports, require) {
+  exports.t = function () { setTimeout(function () { throw new Error("t"); }, 5); };
+}, };
+var __thaw_bundle_require_maps = { "thr/index.js": {}, };
+var __thaw_bundle_entry_key = "thr/index.js";
+})(globalThis.require);"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+        typed_call("thr::t", "[]").expect("arm timer");
+        LOOP_STATUS.store(
+            thaw_tjs_run_event_loop(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    });
+    *TEST_SERVER_POLL.lock().unwrap() = None;
+    assert_eq!(LOOP_STATUS.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[test]
 fn fetch_await_services_a_live_native_server_in_the_same_process() {
     use crate::host::TEST_SERVER_POLL;
