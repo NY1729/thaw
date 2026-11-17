@@ -104,7 +104,7 @@ var srv = ws.serve(function (c, op, p) {
   w.onclose = function (e) {
     console.log('close', e.code, JSON.stringify(e.reason), e.wasClean, e.constructor.name, e.type, w.readyState);
     srv.stop();
-    setTimeout(function () { console.log('seen', JSON.stringify(seen)); }, 0);
+    (function done() { if (seen.some(function (s) { return s.indexOf('close:') === 0; })) console.log('seen', JSON.stringify(seen)); else setTimeout(done, 1); })(); // the server records the client's close frame after the client's own `close` event
   };
 });
 "##;
@@ -147,7 +147,7 @@ var srv = ws.serve(function (c, op, p) {
   w.onclose = function (e) {
     console.log('close', e.code, JSON.stringify(e.reason), e.wasClean, w.readyState);
     srv.stop();
-    setTimeout(function () { console.log('seen', JSON.stringify(seen)); }, 0);
+    (function done() { if (seen.some(function (s) { return s.indexOf('close:') === 0; })) console.log('seen', JSON.stringify(seen)); else setTimeout(done, 1); })(); // the server records the client's close frame after the client's own `close` event
   };
 });
 "##;

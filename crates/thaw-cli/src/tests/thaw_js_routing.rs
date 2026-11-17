@@ -861,6 +861,70 @@ fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
 }
 
 #[test]
+fn thaw_js_fallback_env_parses_the_three_modes() {
+    assert_eq!(thaw_js_fallback_mode_from(None), ThawJsFallbackMode::Silent);
+    assert_eq!(thaw_js_fallback_mode_from(Some("")), ThawJsFallbackMode::Silent);
+    assert_eq!(thaw_js_fallback_mode_from(Some("silent")), ThawJsFallbackMode::Silent);
+    assert_eq!(thaw_js_fallback_mode_from(Some("bogus")), ThawJsFallbackMode::Silent);
+    assert_eq!(thaw_js_fallback_mode_from(Some("warn")), ThawJsFallbackMode::Warn);
+    assert_eq!(thaw_js_fallback_mode_from(Some("error")), ThawJsFallbackMode::Error);
+}
+
+#[test]
+fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal_and_warn_mode_builds() {
+    let (dir, registry, entry) = thaw_js_class_fixture(
+        "fallback-modes",
+        "import { Counter } from 'tjs-ctr';\n\
+         import { isMainThread } from 'node:worker_threads';\n\
+         function main(): void {\n\
+           const c = new Counter(5);\n\
+           console.log(c.add(2), isMainThread, Object.keys({ SHARE_ENV: 1 }).length);\n\
+         }\n",
+    );
+    let build = |output: &Path| {
+        build_with_thaw_js_routing(
+            &entry, output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        )
+    };
+    // error: the refused package fails the build, named with its reason, and no QuickJS rebuild runs
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let error = build(&dir.join("app-error")).unwrap_err();
+    assert!(error.starts_with("unsupported on thaw-js: "), "{error}");
+    assert!(error.contains("package `node:worker_threads` refused"), "{error}");
+    // warn: the same program builds, falling back to QuickJS for the refused package
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Warn));
+    build(&dir.join("app-warn")).unwrap();
+    set_thaw_js_fallback_mode_override(None);
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(dir.join("app-warn")).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_fallback_error_mode_fails_only_when_the_build_links_quickjs() {
+    // node:crypto's typed `randomFillSync` declaration is refused per function, yet the program still ends up
+    // on thaw-js: an `error` build must succeed, since nothing links QuickJS.
+    let (dir, registry, entry) = thaw_js_class_fixture(
+        "fallback-final-pass",
+        "import { randomFillSync } from 'node:crypto';\n\
+         function main(): void {\n\
+           const b = Buffer.alloc(8);\n\
+           randomFillSync(b, 2, 3);\n\
+           console.log(b.length);\n\
+         }\n",
+    );
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &dir.join("app"), &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(dir.join("app")).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn node_perf_hooks_thaw_js_bundle_scans_clean() {
     let bundle = thaw_registry::builtin_bundle_with("node:perf_hooks", &[]).unwrap();
     let report = thaw_js::scan::scan_bundle(&bundle).unwrap();

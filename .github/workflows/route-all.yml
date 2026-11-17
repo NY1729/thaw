@@ -54,6 +54,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
+      THAW_JS_FALLBACK: warn
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -126,6 +127,7 @@ jobs:
           GROUP: ${{ matrix.group }}
           THAW_JS_ROUTE_ALL: "1"
           THAW_JS_ENGINE: thaw-js
+          THAW_JS_RUNTIME_DEBUG: "1"
           THAW_NODE_COMPAT_JOBS: "4"
         run: |
           reports="$RUNNER_TEMP/reports"
@@ -265,6 +267,7 @@ jobs:
     env:
       THAW_JS_RUNTIME: "1"
       THAW_JS_ROUTE_ALL: "1"
+      THAW_JS_FALLBACK: warn
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
     steps:
@@ -391,7 +394,6 @@ jobs:
     # Shards of ci.yml's engine-tests job (thaw-llvm and thaw-cli), run with THAW_JS_ROUTE_ALL=1.
     # Reports pass/fail counts only.
     if: (github.event_name == 'workflow_dispatch' && inputs.engine_tests) || (github.event_name == 'pull_request' && false)
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -406,6 +408,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       THAW_JS_ROUTE_ALL: "1"
+      THAW_JS_FALLBACK: warn
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -487,15 +490,19 @@ jobs:
             fi
           done
           echo "Running ${#selected[@]} of ${#tests[@]} $CRATE tests" | tee "$log"
+          rc=0
           if (( ${#selected[@]} > 0 )); then
-            cargo test -p "$CRATE" -- --exact --test-threads="$TEST_THREADS" "${selected[@]}" 2>&1 | tee -a "$log" || true
+            cargo test -p "$CRATE" -- --exact --test-threads="$TEST_THREADS" "${selected[@]}" 2>&1 | tee -a "$log" || rc=$?
           fi
+          echo "$rc" > "$RUNNER_TEMP/routeall/rc"
+          exit "$rc"
       - name: Summarize engine-tests pass/fail (${{ matrix.crate }}, shard ${{ matrix.shard }})
         if: always()
         run: |
           log="$RUNNER_TEMP/routeall/test-output.log"
           {
             echo "### route-all engine-tests ${{ matrix.crate }} shard ${{ matrix.shard }} (THAW_JS_ROUTE_ALL=1)"
+            echo "engine-tests rc=$(cat "$RUNNER_TEMP/routeall/rc" 2>/dev/null || echo not-run)"
             if [ -s "$log" ] && grep -q '^test result:' "$log"; then
               awk '/^test result:/ { p += $4; f += $6; n++ } END { printf "test result lines %d: passed %d, failed %d\n", n, p, f }' "$log"
             else
@@ -530,6 +537,7 @@ jobs:
       THAW_RUN_NPM_INTEGRATION: "1"
       THAW_SOAK_SECONDS: "30"
       THAW_JS_ROUTE_ALL: "1"
+      THAW_JS_FALLBACK: warn
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -630,7 +638,8 @@ jobs:
             echo "Shard $SHARD has no tests" | tee "$RUNNER_TEMP/routeall/test-output.log"
             exit 0
           fi
-          cargo test -p thaw-cli --no-run || true
+          rc=0
+          cargo test -p thaw-cli --no-run || rc=$?
           run_one() {
             local t="$1" log rc
             log="$RUNNER_TEMP/routeall/test-$$-${t//::/_}.log"
@@ -642,7 +651,9 @@ jobs:
             return "$rc"
           }
           export -f run_one
-          printf '%s\n' "${mine[@]}" | xargs -P2 -I{} bash -c 'run_one "$1"' _ {} || true
+          printf '%s\n' "${mine[@]}" | xargs -P2 -I{} bash -c 'run_one "$1"' _ {} || rc=$?
+          echo "$rc" > "$RUNNER_TEMP/routeall/rc"
+          exit "$rc"
       - name: Summarize npm-integration pass/fail (shard ${{ matrix.shard }})
         if: always()
         run: |
