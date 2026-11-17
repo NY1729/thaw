@@ -1,0 +1,135 @@
+name: parity-aot
+
+# Non-gating AOT-vs-Node probe harness (tools/parity-aot). Node 22 is the oracle. The release thaw CLI builds each
+# generated probe program and both engines (thaw-js, quickjs) run. Results go to the job summary and an artifact.
+# Runs on demand (workflow_dispatch) or on a pull request when the `parity-aot` label is added.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parity-aot-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parity-aot:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'parity-aot'
+    name: AOT vs Node probes (non-gating)
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Build thaw CLI (release)
+        run: cargo build --release -p thaw-cli
+      - name: Harness self-test
+        env:
+          PARITY_AOT_SCRATCH: ${{ runner.temp }}/parity-aot-scratch
+        run: bash tools/parity-aot/selftest.sh
+      - name: Run AOT probes for thaw-js and quickjs (non-gating)
+        # run.sh exits 2 only on a harness error; gaps, rejects and crashes are findings in the summary.
+        env:
+          THAW: ${{ github.workspace }}/target/release/thaw
+          PARITY_AOT_OUT: ${{ runner.temp }}/parity-aot-out
+          PARITY_AOT_ENGINES: thaw-js,quickjs
+          PARITY_AOT_JOBS: "4"
+          PARITY_AOT_RUN_TIMEOUT: "20"
+          PARITY_AOT_BUILD_TIMEOUT: "600"
+        run: |
+          rc=0
+          bash tools/parity-aot/run.sh > "$RUNNER_TEMP/parity-aot-log.txt" 2>&1 || rc=$?
+          echo "$rc" > "$RUNNER_TEMP/parity-aot-rc"
+          tail -n 40 "$RUNNER_TEMP/parity-aot-log.txt" || true
+          test -s "$PARITY_AOT_OUT/summary.md" || { echo "no summary.md produced (rc=$rc)" >&2; exit 1; }
+      - name: Job summary
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/parity-aot-out"
+          rc=$(cat "$RUNNER_TEMP/parity-aot-rc" 2>/dev/null || echo unknown)
+          {
+            echo "## AOT vs Node probes (NON-GATING)"
+            echo
+            echo "run.sh exit code: \`$rc\` (0 = harness ran, 2 = harness error). Findings below are not enforced."
+            echo
+            if [ -s "$out/summary.md" ]; then
+              head -c 60000 "$out/summary.md"
+            else
+              echo "no summary.md produced"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-aot-results
+          path: ${{ runner.temp }}/parity-aot-out
+          if-no-files-found: ignore

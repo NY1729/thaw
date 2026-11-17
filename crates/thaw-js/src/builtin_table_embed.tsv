@@ -210,6 +210,7 @@ Array.prototype	indexOf	data	w-c	function	1	indexOf	0	-	-
 Array.prototype	join	data	w-c	function	1	join	0	-	-
 Array.prototype	keys	data	w-c	function	0	keys	0	-	-
 Array.prototype	lastIndexOf	data	w-c	function	1	lastIndexOf	0	-	-
+Array.prototype	length	data	w--	number	0	-	-	-	-
 Array.prototype	map	data	w-c	function	1	map	0	-	-
 Array.prototype	pop	data	w-c	function	0	pop	0	-	-
 Array.prototype	push	data	w-c	function	1	push	0	-	-
