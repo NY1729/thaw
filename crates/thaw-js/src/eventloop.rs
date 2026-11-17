@@ -14,10 +14,11 @@
 use crate::*;
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use crate::host::{adopt_host_tls, park_host_tls};
+use crate::co::{self, Resume, Yield};
+#[cfg(test)]
+pub(crate) use crate::co_thread::{DISCONNECT_PARKS, TEST_READY_HOOKS};
 
 /// Timer/immediate ids are unique across every realm and thread (async bodies run on coroutine threads).
 static NEXT_TIMER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -27,7 +28,6 @@ fn next_timer_id() -> u64 {
 }
 
 const TIMEOUT_MAX: f64 = 2147483647.0;
-const CO_STACK: usize = 64 << 20;
 const MAIN_FILE_LOADER: &str = include_str!("web/main_file.js");
 const PROCESS_STDIN: &str = include_str!("web/process_stdin.js");
 /// Per-thread evaluator state (depth, stack_limit, max_depth, run_id) carried across coroutine switches.
@@ -94,115 +94,16 @@ struct Imm {
     async_id: Option<f64>,
 }
 
-// ----- coroutines -----
-
-pub(crate) enum Resume {
-    Value(Value),
-    Throw(Value),
-    /// `generator.return(v)`: unwinds the generator body (running `finally` blocks).
-    Return(Value),
-}
-
-pub(crate) enum Yield {
-    Await(Value),
-    /// `yield v` inside a generator body.
-    Yielded(Value),
-    Done(R<Value>),
-}
-
-/// Moves `Rc`-bearing data across the hand-off; sound only because of the strict alternation.
-pub(crate) struct SendBox<T>(pub(crate) T);
-// SAFETY: see the module docs; only one side touches the payload at a time.
-unsafe impl<T> Send for SendBox<T> {}
-impl<T> SendBox<T> {
-    pub(crate) fn into_inner(self) -> T {
-        self.0
-    }
-}
-
-type ReadyHook = extern "C" fn();
-
-/// The native runtime's ready-continuation hand-off (`thaw_runtime_park_ready` / `thaw_runtime_adopt_ready`),
-/// resolved through RTLD_DEFAULT like `drain_native_continuations`. Missing symbols make both no-ops.
-static NATIVE_READY_HOOKS: std::sync::OnceLock<Option<(ReadyHook, ReadyHook)>> =
-    std::sync::OnceLock::new();
-
-/// Test override for the hand-off hooks (process-wide: coroutine threads must see it too).
-#[cfg(test)]
-pub(crate) static TEST_READY_HOOKS: std::sync::Mutex<Option<(ReadyHook, ReadyHook)>> =
-    std::sync::Mutex::new(None);
-
-/// Test-only count of coroutines that parked because their host dropped its channel ends.
-#[cfg(test)]
-pub(crate) static DISCONNECT_PARKS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// A suspended coroutine whose host dropped its channel ends: park forever. Callers must not
-/// touch the Interp, TLS hand-offs or native-ready state before reaching this.
-pub(crate) fn park_disconnected() -> ! {
-    #[cfg(test)]
-    DISCONNECT_PARKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    loop {
-        std::thread::park();
-    }
-}
-
-fn ready_hooks() -> Option<(ReadyHook, ReadyHook)> {
-    #[cfg(test)]
-    if let Some(hooks) = *TEST_READY_HOOKS
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-    {
-        return Some(hooks);
-    }
-    *NATIVE_READY_HOOKS.get_or_init(resolve_native_ready_hooks)
-}
-
-#[cfg(unix)]
-fn resolve_native_ready_hooks() -> Option<(ReadyHook, ReadyHook)> {
-    // SAFETY: the symbols are the compiled runtime's `extern "C" fn()`s, looked up like the other natives.
-    unsafe {
-        let park = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_park_ready".as_ptr());
-        let adopt = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_adopt_ready".as_ptr());
-        if park.is_null() || adopt.is_null() {
-            return None;
-        }
-        Some((
-            std::mem::transmute::<*mut std::ffi::c_void, ReadyHook>(park),
-            std::mem::transmute::<*mut std::ffi::c_void, ReadyHook>(adopt),
-        ))
-    }
-}
-
-#[cfg(not(unix))]
-fn resolve_native_ready_hooks() -> Option<(ReadyHook, ReadyHook)> {
-    None
-}
-
-/// Coroutine side, just before every hand-back: the continuations it settled move to the parked queue.
-pub(crate) fn park_native_ready() {
-    if let Some((park, _)) = ready_hooks() {
-        park();
-    }
-}
-
-/// Host side, right after a coroutine hands back: the parked continuations join this thread's queue.
-pub(crate) fn adopt_native_ready() {
-    if let Some((_, adopt)) = ready_hooks() {
-        adopt();
-    }
-}
-
+/// The coroutine side of a coroutine, as the interpreter sees it (`Rt::cur_co` holds these).
 pub(crate) struct CoCtx {
-    pub(crate) to_host: Sender<SendBox<Yield>>,
-    pub(crate) from_host: Receiver<SendBox<Resume>>,
+    pub(crate) inside: co::Inside,
     /// The body of an async generator: `yield` awaits its operand first.
     pub(crate) agen: bool,
 }
 
 pub(crate) struct Co {
-    pub(crate) to_co: Sender<SendBox<Resume>>,
-    pub(crate) from_co: Receiver<SendBox<Yield>>,
+    /// The host side of the coroutine's transport (`co.rs`).
+    pub(crate) link: co::Link,
     pub(crate) ctx: Rc<CoCtx>,
     interp: *mut Interp,
     promise: Obj,
@@ -860,55 +761,37 @@ impl Interp {
         promise: Obj,
         gen: Option<Obj>,
     ) -> R<(Rc<Co>, CoSnapshot)> {
-        let (to_co, from_host) = channel();
-        let (to_host, from_co) = channel();
-        let done_tx = to_host.clone();
+        let (link, inside) = co::new_pair();
         let ctx = Rc::new(CoCtx {
-            to_host,
-            from_host,
+            inside,
             agen: gen.is_some(),
         });
         let co = Rc::new(Co {
-            to_co,
-            from_co,
+            link,
             ctx: ctx.clone(),
             interp: self as *mut Interp,
             promise,
             gen,
         });
-        let payload = SendBox((
-            self as *mut Interp,
+        let ip = self as *mut Interp;
+        let (f, def, scope, this, args) = (
             f.clone(),
             def.clone(),
             scope.clone(),
             this.clone(),
             args.to_vec(),
-        ));
+        );
+        let body: co::Body = Box::new(move || {
+            // SAFETY: the host thread is blocked in `co_wait` until we send a message.
+            let it = unsafe { &mut *ip };
+            it.configure_stack(co::STACK_BYTES);
+            it.call_closure_sync(&f, &def, &scope, &this, &args)
+            // every Rc captured above is dropped when this call returns, before the hand-back
+        });
+        // the context is current before the body can run: it may await at once
         self.rt.cur_co.push(ctx);
         let snap = self.snapshot();
-        let key = self as *mut Interp as usize;
-        park_host_tls(key);
-        let spawned = std::thread::Builder::new()
-            .stack_size(CO_STACK)
-            .spawn(move || {
-                adopt_host_tls(key);
-                let r = {
-                    let (ip, f, def, scope, this, args) = payload.into_inner();
-                    // SAFETY: the host thread is blocked in `co_wait` until we send a message.
-                    let it = unsafe { &mut *ip };
-                    it.configure_stack(CO_STACK);
-                    it.call_closure_sync(&f, &def, &scope, &this, &args)
-                    // every Rc captured above is dropped here, before the hand-back
-                };
-                park_native_ready();
-                // ponytail: each finished coroutine thread leaks its bump chunks (see
-                // thaw_arena_detach_thread). Upgrade path: adopt the arena into the host thread.
-                thaw_arena::thaw_arena_detach_thread();
-                park_host_tls(key);
-                let _ = done_tx.send(SendBox(Yield::Done(r)));
-            });
-        if spawned.is_err() {
-            adopt_host_tls(key);
+        if !co::start(&co.ctx.inside, ip as usize, body) {
             self.rt.cur_co.pop();
             return self.throw_error("RangeError", "cannot start coroutine (thread limit)");
         }
@@ -926,13 +809,11 @@ impl Interp {
 
     /// Block until the coroutine yields or finishes, then act on what it did.
     pub(crate) fn co_wait(&mut self, co: &Rc<Co>, snap: CoSnapshot) -> R<()> {
-        let y = co.from_co.recv();
-        adopt_native_ready();
-        adopt_host_tls(self as *mut Interp as usize);
+        let y = co.link.recv(self as *mut Interp as usize);
         self.restore(snap);
         self.rt.cur_co.pop();
-        match y.map(SendBox::into_inner) {
-            Ok(Yield::Await(v)) => {
+        match y {
+            Some(Yield::Await(v)) => {
                 let p = self.promise_resolve_value(v)?;
                 let (c1, c2) = (co.clone(), co.clone());
                 let on_ful = self.native(move |it, _, a| {
@@ -946,15 +827,15 @@ impl Interp {
                 self.promise_then(&p, on_ful, on_rej, None);
                 Ok(())
             }
-            Ok(Yield::Yielded(v)) => self.agen_yielded(co, v),
-            Ok(Yield::Done(r)) if co.gen.is_some() => self.agen_done(co, r),
-            Ok(Yield::Done(Ok(v))) => self.resolve_promise(&co.promise, v),
-            Ok(Yield::Done(Err(Ctl::Throw(e)))) => {
+            Some(Yield::Yielded(v)) => self.agen_yielded(co, v),
+            Some(Yield::Done(r)) if co.gen.is_some() => self.agen_done(co, r),
+            Some(Yield::Done(Ok(v))) => self.resolve_promise(&co.promise, v),
+            Some(Yield::Done(Err(Ctl::Throw(e)))) => {
                 self.reject_promise(&co.promise, e);
                 Ok(())
             }
-            Ok(Yield::Done(Err(other))) => Err(other),
-            Err(_) => panic!("async function thread terminated unexpectedly"),
+            Some(Yield::Done(Err(other))) => Err(other),
+            None => panic!("async function thread terminated unexpectedly"),
         }
     }
 
@@ -965,8 +846,7 @@ impl Interp {
         );
         self.rt.cur_co.push(co.ctx.clone());
         let snap = self.snapshot();
-        park_host_tls(self as *mut Interp as usize);
-        let _ = co.to_co.send(SendBox(resume));
+        co.link.send(self as *mut Interp as usize, resume);
         self.co_wait(co, snap)
     }
 
@@ -976,18 +856,12 @@ impl Interp {
             return Err(Ctl::Unsupported("await".into()));
         };
         let snap = self.snapshot();
-        park_native_ready();
-        park_host_tls(self as *mut Interp as usize);
-        let _ = ctx.to_host.send(SendBox(Yield::Await(v)));
         // the host runs from here until it resumes us
-        // check the disconnect before touching `self` (the Interp may be torn down by the host)
-        let Ok(msg) = ctx.from_host.recv() else {
-            // the host dropped this coroutine (promise never settled): never touch shared state again
-            park_disconnected()
-        };
-        adopt_host_tls(self as *mut Interp as usize);
+        let msg = ctx
+            .inside
+            .suspend(self as *mut Interp as usize, Yield::Await(v));
         self.restore(snap);
-        match msg.into_inner() {
+        match msg {
             Resume::Value(v) => Ok(v),
             Resume::Throw(e) => Err(Ctl::Throw(e)),
             Resume::Return(v) => Err(Ctl::Return(v)),
