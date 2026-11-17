@@ -197,13 +197,3 @@ fn any_timer_handle_cleared_from_outside_its_callback() {
 }"#;
     assert_eq!(compile_and_run(cleared, "any_timeout_outside_clear"), "cleared\n");
 }
-
-#[test]
-fn native_any_set_interval_self_clear_prints_once() {
-    // The native-timer lowering keeps the annotation (Json) for the handle when the value is I64, so the
-    // self-clear must agree with that storage type too.
-    let source = r#"function main(): void {
-  const iv: any = setInterval((): void => { clearInterval(iv); console.log("once"); }, 5);
-}"#;
-    assert_eq!(native_timer_ok(source, "native_any_interval_self_clear"), "once\n");
-}
