@@ -1721,6 +1721,15 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_error_set_prop_value" => {
+                        let [error, key, value] = args.as_slice() else {
+                            return Err(format!("{name} expects an error, a key and a JSON value"));
+                        };
+                        self.expect_type(&HirType::Str, error, "error")?;
+                        self.expect_type(&HirType::Str, key, "property name")?;
+                        self.expect_type(&HirType::Json, value, "property value")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_error_has_prop" | "__thaw_error_delete_prop" => {
                         let [error, key] = args.as_slice() else {
                             return Err(format!("{name} expects an error and a property name"));

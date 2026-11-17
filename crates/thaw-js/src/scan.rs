@@ -37,6 +37,9 @@ pub struct BundleParts {
     pub entry: String,
     pub factories: Vec<(String, a::Function)>,
     pub require_maps: HashMap<String, HashMap<String, String>>,
+    /// `__thaw_bundle_realm = {key, member}`: this bundle is a view of the realm `key` (a `node:path`
+    /// family spec); `member` is the export path of the view (`posix`, `win32`, or empty for the root).
+    pub realm: Option<(String, String)>,
 }
 
 fn prop_key(p: &a::PropName) -> Option<String> {
@@ -102,6 +105,7 @@ fn stub_cheerio_undici(parts: &mut BundleParts) -> Result<(), String> {
     let mut combined = parse_factories(&format!("{}\n{stub}", parts.source))?;
     combined.esm_problems = std::mem::take(&mut parts.esm_problems);
     combined.require_maps = std::mem::take(&mut parts.require_maps);
+    combined.realm = parts.realm.take();
     *parts = combined;
     Ok(())
 }
@@ -134,6 +138,7 @@ fn parse_bundle_raw(source: &str) -> Result<BundleParts, String> {
 fn parse_factories(source: &str) -> Result<BundleParts, String> {
     let module = thaw_parser::parse_javascript(source)?;
     let (mut entry, mut factories, mut require_maps) = (String::new(), Vec::new(), HashMap::new());
+    let mut realm = None;
     // The wrapper is `module.exports = (function(require){ ... })(globalThis.require);`.
     let mut stmts: Vec<&a::Stmt> = Vec::new();
     fn collect<'a>(e: &'a a::Expr, out: &mut Vec<&'a a::Stmt>) {
@@ -169,6 +174,29 @@ fn parse_factories(source: &str) -> Result<BundleParts, String> {
             match (&*id.id.sym, &**init) {
                 ("__thaw_bundle_entry_key", a::Expr::Lit(a::Lit::Str(s))) => {
                     entry = s.value.as_str().unwrap_or("").to_string()
+                }
+                ("__thaw_bundle_realm", a::Expr::Object(o)) => {
+                    let str_prop = |name: &str| {
+                        o.props.iter().find_map(|p| match p {
+                            a::PropOrSpread::Prop(p) => match &**p {
+                                a::Prop::KeyValue(kv)
+                                    if prop_key(&kv.key).as_deref() == Some(name) =>
+                                {
+                                    match &*kv.value {
+                                        a::Expr::Lit(a::Lit::Str(s)) => {
+                                            Some(s.value.as_str().unwrap_or("").to_string())
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                    };
+                    if let (Some(key), Some(member)) = (str_prop("key"), str_prop("member")) {
+                        realm = Some((key, member));
+                    }
                 }
                 ("__thaw_bundle_factories", a::Expr::Object(o)) => {
                     for p in &o.props {
@@ -229,6 +257,7 @@ fn parse_factories(source: &str) -> Result<BundleParts, String> {
         entry,
         factories,
         require_maps,
+        realm,
     })
 }
 

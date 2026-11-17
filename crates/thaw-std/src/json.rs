@@ -1894,13 +1894,10 @@ fn native_error_for_marker(value: &Value) -> Option<*const c_char> {
     native_error_for_lease(&lease)
 }
 
-fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
-    let Ok(key) = CString::new(key) else {
-        return;
-    };
-    // thaw-js only: a live host object, or its one-key handle marker (an unadopted object literal),
-    // is stored as its marker; the error takes one reference to it.
-    let marker = engine_is_thaw_js()
+/// thaw-js only: a live host object, or its one-key handle marker (an unadopted object literal),
+/// is stored as its marker text; the error takes one reference to it. `None` otherwise.
+fn error_prop_handle_marker(error: *const c_char, value: &Value) -> Option<String> {
+    engine_is_thaw_js()
         .then(|| json_handle_ref(value))
         .flatten()
         .and_then(|handle| {
@@ -1910,11 +1907,38 @@ fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
                     format!(r#"{{"__thaw_tjs_handle__":{handle}}}"#)
                 })
             })
-        });
-    let Ok(json) = CString::new(marker.unwrap_or_else(|| value.to_string())) else {
+        })
+}
+
+fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
+    let Ok(key) = CString::new(key) else {
+        return;
+    };
+    let Ok(json) =
+        CString::new(error_prop_handle_marker(error, value).unwrap_or_else(|| value.to_string()))
+    else {
         return;
     };
     unsafe { thaw_error_set_prop(error, key.as_ptr(), json.as_ptr()) };
+}
+
+/// The value entry of the Error side table (`__thaw_error_set_prop_value`: `err.key = value` and the
+/// constructor's `cause`). Stores `value` as `thaw_json_encode_public` does, except that thaw-js keeps
+/// a live handle alive for the error (`error_prop_handle_marker`).
+#[no_mangle]
+pub extern "C" fn thaw_error_set_prop_value(
+    error: *const c_char,
+    key: *const c_char,
+    value: *mut Value,
+) -> bool {
+    // SAFETY: the caller passes a live Json value (compiled code's Json operand).
+    if let Some(marker) = error_prop_handle_marker(error, unsafe { &*value }) {
+        let Ok(json) = CString::new(marker) else {
+            return false;
+        };
+        return unsafe { thaw_error_set_prop(error, key, json.as_ptr()) };
+    }
+    unsafe { thaw_error_set_prop(error, key, thaw_json_encode_public(value)) }
 }
 
 thread_local! {
@@ -3598,7 +3622,8 @@ pub extern "C" fn thaw_json_parse_error_property(text: *const c_char) -> *mut Va
     let bytes = unsafe { CStr::from_ptr(text) }.to_bytes();
     let value = JsonParser::new(bytes).parse();
     PARSE_ERROR.with(|error| error.set(value.is_none()));
-    let value = value.unwrap_or(Value::Null);
+    // A stored thaw-js handle marker (`error_prop_handle_marker`) reads back as its live object.
+    let value = live_handle_prop(value.unwrap_or(Value::Null));
     // A stored Error that is still alive stays that Error, so `err.cause.stack = x` edits it.
     if error_ref(&value).is_some() {
         return leak(value);
@@ -12095,6 +12120,63 @@ mod tests {
             );
             assert_eq!(RETAIN_CALLS.with(Cell::get), 2);
             thaw_json_set_js_engine(0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    // The constructor's `cause` option stores a live handle through the value entry: the error
+    // retains it, and the read-back parses the stored marker into the same live handle.
+    #[test]
+    fn a_host_cause_set_through_the_value_entry_reads_back_as_a_live_handle() {
+        std::thread::spawn(|| {
+            unsafe extern "C" {
+                fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char;
+            }
+            install_counting_host_operations();
+            thaw_json_set_js_engine(1);
+            let error = unsafe { thaw_error_frame(c"Error".as_ptr(), c"outer".as_ptr()) };
+            let mut cause = Value::Host(Rc::new(HostLease {
+                handle: 3,
+                release: factory_test_release,
+            }));
+            assert!(thaw_error_set_prop_value(
+                error,
+                c"\u{2}cause".as_ptr(),
+                &mut cause
+            ));
+            assert_eq!(RETAIN_CALLS.with(Cell::get), 1);
+            let read = unsafe {
+                &*thaw_json_parse_error_property(thaw_error_get_prop_json(error, c"cause".as_ptr()))
+            };
+            assert!(matches!(read, Value::Host(lease) if lease.handle == 3));
+            thaw_json_set_js_engine(0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    // Gate pin: under QuickJS (engine 0) the value entry stores the encoded text and takes no reference.
+    #[test]
+    fn error_prop_value_under_the_default_engine_stores_the_encoded_text() {
+        std::thread::spawn(|| {
+            install_marker_host_operations();
+            thaw_json_set_js_engine(0);
+            let error = cause_test_error("outer", CAUSE_TEST_OUTER);
+            let mut marker = marker_cause_value();
+            let expected = unsafe { CStr::from_ptr(thaw_json_encode_public(&mut marker)) }
+                .to_bytes()
+                .to_vec();
+            assert!(thaw_error_set_prop_value(
+                error,
+                c"\u{2}cause".as_ptr(),
+                &mut marker
+            ));
+            assert_eq!(MARKER_RETAIN_CALLS.with(Cell::get), 0);
+            let stored =
+                unsafe { CStr::from_ptr(thaw_error_get_prop_json(error, c"cause".as_ptr())) };
+            assert_eq!(stored.to_bytes(), expected.as_slice());
+            reset_error_prop_retains(false);
         })
         .join()
         .unwrap();
