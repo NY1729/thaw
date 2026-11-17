@@ -209,9 +209,13 @@ fn websocket_constructor_and_close_validation_errors() {
 const SCENARIO_D: &str = r##"var srv = ws.serve(function () {}, function (port) {
   srv.stop();
   var w = new WebSocket('ws://127.0.0.1:' + port + '/');
-  w.onerror = function (e) { console.log('error', e.type, e.constructor.name, e.message, e.error.constructor.name, e.error.message); };
+  w.onerror = function (e) {
+    console.log('error', e.type, e.constructor.name, e.message, e.error.constructor.name, e.error.message);
+    // the "no close event follows" check starts from the error itself: a fixed delay from the connect
+    // raced the refusal on a saturated CI runner (the error arrived after the timer)
+    setTimeout(function () { console.log('later', w.readyState); }, 100);
+  };
   w.onclose = function (e) { console.log('close', e.code, e.wasClean); };
-  setTimeout(function () { console.log('later', w.readyState); }, 100);
 });
 "##;
 const EXPECTED_D: &str = r##"error error ErrorEvent Received network error or non-101 status code. Error Received network error or non-101 status code.
