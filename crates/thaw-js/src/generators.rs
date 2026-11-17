@@ -6,10 +6,8 @@
 //! ponytail: one OS thread per started generator that is not run to completion (parked until exit).
 
 use crate::builtin_table::set_fn_head;
-use crate::eventloop::{
-    adopt_native_ready, park_disconnected, park_native_ready, Co, Resume, SendBox, Yield,
-};
-use crate::host::{adopt_host_tls, park_host_tls};
+use crate::co::{Resume, Yield};
+use crate::eventloop::Co;
 use crate::*;
 use std::collections::VecDeque;
 
@@ -252,31 +250,28 @@ impl Interp {
                 Req::Throw => Resume::Throw(v),
                 Req::Return => Resume::Return(v),
             };
-            park_host_tls(self as *mut Interp as usize);
-            let _ = co.to_co.send(SendBox(resume));
+            co.link.send(self as *mut Interp as usize, resume);
             (co, snap)
         };
         g.status.set(GStatus::Running);
-        let y = co.from_co.recv();
-        adopt_native_ready();
-        adopt_host_tls(self as *mut Interp as usize);
+        let y = co.link.recv(self as *mut Interp as usize);
         self.restore(snap);
         self.rt.cur_co.pop();
-        match y.map(SendBox::into_inner) {
-            Ok(Yield::Yielded(v)) => {
+        match y {
+            Some(Yield::Yielded(v)) => {
                 g.status.set(GStatus::Suspended);
                 Ok(self.iter_result(v, false))
             }
-            Ok(Yield::Done(r)) => {
+            Some(Yield::Done(r)) => {
                 g.status.set(GStatus::Done);
                 *g.co.borrow_mut() = None;
                 Ok(self.iter_result(r?, true))
             }
-            Ok(Yield::Await(_)) => {
+            Some(Yield::Await(_)) => {
                 g.status.set(GStatus::Done);
                 unsupported("await")
             }
-            Err(_) => panic!("generator thread terminated unexpectedly"),
+            None => panic!("generator thread terminated unexpectedly"),
         }
     }
 
@@ -394,17 +389,11 @@ impl Interp {
             return unsupported("yield");
         };
         let snap = self.snapshot();
-        park_native_ready();
-        park_host_tls(self as *mut Interp as usize);
-        let _ = ctx.to_host.send(SendBox(Yield::Yielded(v)));
-        // check the disconnect before touching `self` (the Interp may be torn down by the host)
-        let Ok(msg) = ctx.from_host.recv() else {
-            // the generator was dropped while suspended: never touch shared state again
-            park_disconnected()
-        };
-        adopt_host_tls(self as *mut Interp as usize);
+        let msg = ctx
+            .inside
+            .suspend(self as *mut Interp as usize, Yield::Yielded(v));
         self.restore(snap);
-        Ok(msg.into_inner())
+        Ok(msg)
     }
 
     pub(crate) fn yield_value(&mut self, v: Value) -> R<Value> {
