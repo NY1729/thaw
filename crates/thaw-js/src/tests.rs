@@ -3137,6 +3137,184 @@ fn sloppy_with_statement_via_new_function() {
     );
 }
 
+// ----- sloppy `with` against Node 22 (scratch-r0 probes c_*.js; expected = real Node stdout) -----
+
+#[test]
+fn with_null_or_undefined_subject_throws_type_error() {
+    assert_eq!(
+        one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' ')); try{ with(null){} }catch(e){ log(e.constructor.name, e.message) } try{ with(undefined){} }catch(e){ log(e.constructor.name, e.message) } console.log(out.join('\\n'));"),
+        "TypeError Cannot convert undefined or null to object|TypeError Cannot convert undefined or null to object"
+    );
+}
+
+#[test]
+fn with_primitive_subject_is_boxed() {
+    assert_eq!(
+        one_sloppy("with(5){ console.log(typeof toFixed, valueOf()) }"),
+        "function 5"
+    );
+}
+
+#[test]
+fn with_delete_of_non_configurable_property_returns_false() {
+    assert_eq!(
+        one_sloppy("var o={}; Object.defineProperty(o,'k',{value:1,configurable:false}); with(o){ console.log(delete k); } console.log(o.k);"),
+        "false|1"
+    );
+}
+
+#[test]
+fn with_array_subject_sees_array_prototype_methods() {
+    assert_eq!(
+        one_sloppy("var arr=[1,2,3]; with(arr){ console.log(typeof push, length); }"),
+        "function 3"
+    );
+}
+
+#[test]
+fn with_proxy_without_set_trap_writes_the_target() {
+    assert_eq!(
+        one_sloppy("var p=new Proxy({a:1},{has(t,k){ return k==='a' }, get(t,k){ return k==='a'?7:undefined }}); with(p){ a=9; console.log(a) }"),
+        "7"
+    );
+}
+
+#[test]
+fn with_probe_accessor() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar g={get a(){return 'G'}, set b(v){log('set b',v)}}; with(g){ log(a); b=5; }\nconsole.log(out.join('\\n'));"), "G|set b 5");
+}
+
+#[test]
+fn with_probe_arguments() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nfunction f(){ with({}){ return arguments.length } } log(f(1,2,3));\nconsole.log(out.join('\\n'));"), "3");
+}
+
+#[test]
+fn with_probe_arrunsc() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar arr=[1,2]; var keys='K'; with(arr){ log(typeof keys, length); }\nconsole.log(out.join('\\n'));"), "string 2");
+}
+
+#[test]
+fn with_probe_closures() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar fns=[]; with({v:1}){ fns.push(()=>v); fns.push(function(){return v}); } log(fns.map(f=>f()).join());\nconsole.log(out.join('\\n'));"), "1,1");
+}
+
+#[test]
+fn with_probe_conf() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar obj={x:1}; with(obj){ x=2; var x=3; } log(obj.x, typeof x);\nconsole.log(out.join('\\n'));"), "3 undefined");
+}
+
+#[test]
+#[ignore = "direct eval scope capture is not implemented in thaw-js (no direct eval at all)"]
+fn with_probe_evalin() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar o8={e:5}; with(o8){ log(eval('e+1')); }\nconsole.log(out.join('\\n'));"), "6");
+}
+
+#[test]
+fn with_probe_exc() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\ntry{ with({e1:1}){ throw new Error('x') } }catch(e){ log(typeof e1) }\nconsole.log(out.join('\\n'));"), "undefined");
+}
+
+#[test]
+fn with_probe_fin() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nfunction rf(){ with({k:9}){ try{ return k }finally{ log('fin') } } } log(rf());\nconsole.log(out.join('\\n'));"), "fin|9");
+}
+
+#[test]
+fn with_probe_fndecl() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar o3={f:'of'}; with(o3){ function f(){return 'fn'} } log(typeof f, o3.f);\nconsole.log(out.join('\\n'));"), "function of");
+}
+
+#[test]
+fn with_probe_fnname() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nwith({h:1}){ var f=function(){return h}; } log(f());\nconsole.log(out.join('\\n'));"), "1");
+}
+
+#[test]
+fn with_probe_frozen() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar o7=Object.freeze({r:1}); with(o7){ r=2; log(r);}\nconsole.log(out.join('\\n'));"), "1");
+}
+
+#[test]
+fn with_probe_funcexpr() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar o={}; with(o){ o.v=function(){return typeof v} } log(o.v());\nconsole.log(out.join('\\n'));"), "function");
+}
+
+#[test]
+fn with_probe_implicit() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar o6={}; with(o6){ q=7; } log(o6.q, typeof q, globalThis.q);\nconsole.log(out.join('\\n'));"), " number 7");
+}
+
+#[test]
+fn with_probe_loopctl() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nfor(var i=0;i<3;i++){ with({i2:i}){ if(i2==1) continue; log('i',i2);} }\nconsole.log(out.join('\\n'));"), "i 0|i 2");
+}
+
+#[test]
+fn with_probe_nested() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar a1={a:1}, b1={b:2}; with(a1) with(b1) log(a+b);\nconsole.log(out.join('\\n'));"), "3");
+}
+
+#[test]
+fn with_probe_nonwritable() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar o={}; Object.defineProperty(o,'r',{value:1,writable:false}); with(o){ r=2; log(r); }\nconsole.log(out.join('\\n'));"), "1");
+}
+
+#[test]
+fn with_probe_prim() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nwith('abc'){ log(length, toUpperCase()); }\nconsole.log(out.join('\\n'));"), "3 ABC");
+}
+
+#[test]
+fn with_probe_proxyhas() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar seen=[]; var p=new Proxy({x:1},{has(t,k){seen.push(String(k));return k in t}, get(t,k){ if(k===Symbol.unscopables) return undefined; return t[k]}}); with(p){ log(x); log(typeof nope); } log(seen.join());\nconsole.log(out.join('\\n'));"), "1|undefined|log,x,log,nope");
+}
+
+#[test]
+fn with_probe_proxyorder() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar order=[]; var o10=new Proxy({},{has(t,k){order.push('has:'+String(k)); return k==='p'}, get(t,k){order.push('get:'+String(k)); return 3}, set(t,k,v){order.push('set:'+String(k)+v); return true}}); with(o10){ p=p+1; } log(order.join('|'));\nconsole.log(out.join('\\n'));"), "has:p|get:Symbol(Symbol.unscopables)|get:p|has:p|get:Symbol(Symbol.unscopables)|set:p4");
+}
+
+#[test]
+fn with_probe_setterproto() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nfunction C(){} Object.defineProperty(C.prototype,'s',{set(v){log('setter',v)},get(){return 1}}); with(new C){ s=3; }\nconsole.log(out.join('\\n'));"), "setter 3");
+}
+
+#[test]
+fn with_probe_strictinner() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nwith({s:1}){ log((function(){'use strict'; return typeof s})()); }\nconsole.log(out.join('\\n'));"), "number");
+}
+
+#[test]
+fn with_probe_tdz() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nwith({}){ let a=1; const b=2; class K{}; log(a,b,typeof K); }\nconsole.log(out.join('\\n'));"), "1 2 function");
+}
+
+#[test]
+fn with_probe_thiscall() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar o5={m(){return this===o5}}; with(o5){ log(m()); }\nconsole.log(out.join('\\n'));"), "true");
+}
+
+#[test]
+fn with_probe_typeofundecl() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nwith({}){ log(typeof zzz); }\nconsole.log(out.join('\\n'));"), "undefined");
+}
+
+#[test]
+fn with_probe_unscacc() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar o9={w:1, get [Symbol.unscopables](){ return {w:true}}}; var w='outer'; with(o9){ log(w); }\nconsole.log(out.join('\\n'));"), "outer");
+}
+
+#[test]
+fn with_probe_update() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar o4={n:1}; with(o4){ n++; n+=2; log(n); log(delete n); } log('n' in o4);\nconsole.log(out.join('\\n'));"), "4|true|false");
+}
+
+#[test]
+fn with_probe_varhoist() {
+    assert_eq!(one_sloppy("const out=[];const log=(...a)=>out.push(a.join(' '));\nvar o2={y:1}; with(o2){ var y=2; var z=3; } log(o2.y, typeof z, z, typeof y);\nconsole.log(out.join('\\n'));"), "2 number 3 undefined");
+}
+
 #[test]
 fn dynamic_code_parse_errors_are_syntax_errors() {
     assert_eq!(
