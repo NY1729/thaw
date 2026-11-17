@@ -118,3 +118,31 @@ in only one of the two (version-dependent exports) print WARN. Regenerate with
 run with `THAW_DUMP_DTS_DIR=<dir> cargo test -p thaw-registry --test dump_builtin_dts -- --ignored`) into export
 signatures: names, kind, overloads, parameter and return types. Fragments it cannot parse are counted and listed,
 never dropped. `selftest_parse.sh [DUMP_DIR]` runs its inline fixtures and, given a dump directory, parses all of it.
+
+`gen_modules.py` generates the module probes (shapes 1-3: sync functions, constants/primitives/objects/accessors,
+classes with construct, methods, static methods and properties). It needs the d.ts dump:
+
+    THAW_DUMP_DTS_DIR=<dir> cargo test -p thaw-registry --test dump_builtin_dts -- --ignored
+    PARITY_AOT_DTS_DIR=<dir> python3 tools/parity-aot/gen_modules.py <OUT_DIR>      # or --dts <dir>
+
+Types come only from the d.ts. Arguments come from the fixed POOL in the script (one expression per TS type; an
+unpoolable type is a skip, never a guess). Functions with a callback parameter or a Promise return are deferred
+to shapes 4-6 (gen_async.py) and console output to the inspect family. Non-deterministic exports (host state,
+clock, randomness, stream handles with uninitialised memory) still run, but print only `[typeof, length or key
+count]` (the `shape` rule table in the script, with a reason per rule). Modes: `typed` and `any`.
+
+Output: `mod_<module>.<mode>.cNN.ts` / `.mts` (one module per program, at most 40 probes, the gen_probes `@@` format),
+`manifest.json` (gen_probes schema, plus `imports` per program and `arg_types` per probe), `skips.json`
+(`exports`: id, module, export, category, reason; `members`: member-level skips; `dts_status`; `unused_rules`).
+The categories are in `CATEGORIES` in the script. The stdout summary is a per-module table of exports probed/skipped
+by kind. Probe ids are `mod:<module without node:>.<export>`, the coverage.py universe (`Object.keys` of the module);
+a table row outside that list is NOT-EXPORT, a listed export without a table row is NOT-IN-TABLE.
+
+Not yet wired into run.sh or gen_probes.py. aot_run.py renders each thaw program with gen_probes.render, which has no
+`import * as M` line, so a module program needs aot_run to render `prog["imports"]` before PRELUDE. Until then the
+thaw build of every module program fails, and the programs are for node runs and coverage only.
+
+`testdata/dts/` holds seven d.ts (node:path, events, os, querystring, string_decoder, buffer, url) for selftest only,
+copied from a dump. Other modules are NO-DTS-FILE skips in that run. `selftest_gen.sh` checks determinism, the
+universe accounting (every Object.keys id probed or skipped), the argument pool, valid TypeScript and node runs of
+the programs, and the coverage of module ids.
