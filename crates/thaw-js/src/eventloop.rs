@@ -343,15 +343,50 @@ impl Interp {
 
     // ----- promises -----
 
-    pub(crate) fn new_promise(&self) -> Obj {
-        new_obj(
+    pub(crate) fn new_promise(&mut self) -> Obj {
+        self.new_promise_with(None)
+    }
+
+    /// A promise whose async_hooks trigger is `parent` (the result of `then`, or an await's derived promise).
+    fn new_promise_child(&mut self, parent: &Obj) -> Obj {
+        self.new_promise_with(Some(parent))
+    }
+
+    fn new_promise_with(&mut self, parent: Option<&Obj>) -> Obj {
+        let p = new_obj(
             self.rt.promise_proto.clone(),
             Kind::Promise(PromiseData {
                 state: PState::Pending,
                 reactions: Vec::new(),
                 handled: false,
             }),
-        )
+        );
+        if self.rt.async_hooks_on {
+            self.hook_promise(0, &p, parent);
+        }
+        p
+    }
+
+    /// `__thaw_async_hooks_promise(kind, promise, parent)`: 0 init, 1 before and 2 after a reaction or
+    /// thenable job, 3 resolve. Only called while `rt.async_hooks_on`; the JS side owns the ids.
+    fn hook_promise(&mut self, kind: u8, p: &Obj, parent: Option<&Obj>) {
+        let parent = parent.map_or(Value::Undefined, |o| Value::Object(o.clone()));
+        self.hook_promise_raw(kind, Value::Object(p.clone()), parent);
+    }
+
+    fn hook_promise_raw(&mut self, kind: u8, p: Value, parent: Value) {
+        let Ok(Value::Object(f)) = self.get(
+            &Value::Object(self.global_object.clone()),
+            "__thaw_async_hooks_promise",
+        ) else {
+            return;
+        };
+        // a hook callback's error is reported by the JS dispatcher; nothing here can throw
+        let _ = self.call(
+            &Value::Object(f),
+            &Value::Undefined,
+            &[Value::Number(f64::from(kind)), p, parent],
+        );
     }
 
     fn need_callback(&mut self, cb: &Value) -> R<()> {
@@ -408,6 +443,10 @@ impl Interp {
                     result: r.result,
                 },
             ));
+        }
+        // once per promise: `settle` returns early for a promise that already settled
+        if self.rt.async_hooks_on {
+            self.hook_promise(3, p, None);
         }
     }
 
@@ -524,7 +563,27 @@ impl Interp {
         r
     }
 
+    /// Runs one job. With a hook enabled, a reaction job runs as `before`/`after` of its derived promise
+    /// and a thenable job as `before`/`after` of the promise it resolves (Node's shape).
     fn run_job(&mut self, job: Job) -> R<()> {
+        if !self.rt.async_hooks_on {
+            return self.run_job_inner(job);
+        }
+        let scope = match &job {
+            Job::React { result, .. } => result.clone(),
+            Job::Thenable { promise, .. } => Some(promise.clone()),
+            Job::Call(..) | Job::Barrier(_) => None,
+        };
+        let Some(p) = scope else {
+            return self.run_job_inner(job);
+        };
+        self.hook_promise(1, &p, None);
+        let r = self.run_job_inner(job);
+        self.hook_promise(2, &p, None);
+        r
+    }
+
+    fn run_job_inner(&mut self, job: Job) -> R<()> {
         match job {
             Job::React {
                 handler,
@@ -814,7 +873,22 @@ impl Interp {
         self.rt.cur_co.pop();
         match y {
             Some(Yield::Await(v)) => {
-                let p = self.promise_resolve_value(v)?;
+                // With a hook enabled, a non-promise operand gets a throwaway promise whose trigger is the
+                // async function's promise, and the continuation runs as a derived promise (as in Node).
+                let (p, derived) = if self.rt.async_hooks_on {
+                    let p = match v {
+                        Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Promise(_)) => o,
+                        other => {
+                            let t = self.new_promise_child(&co.promise);
+                            self.resolve_promise(&t, other)?;
+                            t
+                        }
+                    };
+                    let derived = self.new_promise_child(&p);
+                    (p, Some(derived))
+                } else {
+                    (self.promise_resolve_value(v)?, None)
+                };
                 let (c1, c2) = (co.clone(), co.clone());
                 let on_ful = self.native(move |it, _, a| {
                     it.co_step(&c1, Resume::Value(arg(a, 0)))?;
@@ -824,7 +898,7 @@ impl Interp {
                     it.co_step(&c2, Resume::Throw(arg(a, 0)))?;
                     Ok(Value::Undefined)
                 });
-                self.promise_then(&p, on_ful, on_rej, None);
+                self.promise_then(&p, on_ful, on_rej, derived);
                 Ok(())
             }
             Some(Yield::Yielded(v)) => self.agen_yielded(co, v),
@@ -1484,6 +1558,9 @@ impl Interp {
         if std::mem::replace(&mut self.rt.exit_emitted, true) {
             return Ok(());
         }
+        if self.rt.async_hooks_on {
+            self.hook_promise_raw(4, Value::Undefined, Value::Undefined);
+        }
         self.rt.exiting = true;
         let exit = crate::process_members::run_finalizers(self, "exit")
             .and_then(|()| self.emit("exit", &[Value::Number(code as f64)]));
@@ -1674,7 +1751,7 @@ impl Interp {
                     "Method Promise.prototype.then called on incompatible receiver",
                 );
             }
-            let result = it.new_promise();
+            let result = it.new_promise_child(p);
             let pick = |v: Value| if v.is_callable() { v } else { Value::Undefined };
             it.promise_then(p, pick(arg(a, 0)), pick(arg(a, 1)), Some(result.clone()));
             Ok(Value::Object(result))

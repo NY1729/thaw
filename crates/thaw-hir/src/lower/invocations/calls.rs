@@ -3013,6 +3013,30 @@ impl<'a> FnLowerer<'a> {
             );
         }
 
+        // `Date(...)` without `new` is the realm's Date called as a function (a string of the
+        // current time), read through the realm global so a mocked clock reaches it. `new Date`
+        // and `Date.now|UTC|parse` never reach here (they are not a call of the bare identifier).
+        if callee_name == "Date"
+            && !self.scope.contains_key(&callee_name)
+            && !self.signatures.contains_key(&callee_name)
+        {
+            let binding = format!("__thaw_global_date_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(binding.clone(), HirType::JsValue);
+            let result = self.lower_dynamic_value_call(&binding, &call.args, Some(&HirType::Str), None)?;
+            return self.wrap_call_argument_bindings(
+                HirExpr::JsonAsString(Box::new(result)),
+                &[(
+                    binding,
+                    HirType::JsValue,
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str(callee_name))],
+                    ),
+                )],
+            );
+        }
+
         // Native callbacks crossing into QuickJS need a live projection for
         // accessor-bearing results. Keep the original native function ABI
         // behind the wrapper; the graph callback marshaller sees its owned

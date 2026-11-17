@@ -454,6 +454,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_object_stack_visible"
                         | "__thaw_object_stack_has"
                         | "__thaw_error_set_prop"
+                        | "__thaw_error_set_prop_value"
                         | "__thaw_error_has_prop"
                         | "__thaw_error_delete_prop"
                         | "__thaw_error_assign_json"

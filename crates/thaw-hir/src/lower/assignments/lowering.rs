@@ -654,14 +654,14 @@ impl<'a> FnLowerer<'a> {
         self.merge_union_array_method_branches(array_name, members, branches)
     }
 
-    /// `__thaw_error_set_prop(error, "key", <encoded text>)` for an already-bound error name.
-    pub(crate) fn error_set_prop_call(&self, error: &str, key: &str, encoded: HirExpr) -> HirExpr {
+    /// `__thaw_error_set_prop_value(error, "key", <Json value>)` for an already-bound error name.
+    pub(crate) fn error_set_prop_call(&self, error: &str, key: &str, value: HirExpr) -> HirExpr {
         HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_error_set_prop".into())),
+            Box::new(HirExpr::Var("__thaw_error_set_prop_value".into())),
             vec![
                 HirExpr::Var(error.to_string()),
                 HirExpr::Lit(HirLit::Str(key.to_string())),
-                HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".into())), vec![encoded]),
+                value,
             ],
         )
     }
@@ -704,14 +704,13 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(object_name.clone(), HirType::Str);
         self.scope.insert(key_name.clone(), HirType::Str);
         self.scope.insert(value_name.clone(), value_type.clone());
-        let encoded = self.coerce_to_declared(&HirType::Json, HirExpr::Var(value_name.clone()))?;
-        let json_text = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".into())), vec![encoded]);
+        let json_value = self.coerce_to_declared(&HirType::Json, HirExpr::Var(value_name.clone()))?;
         let stored = HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_error_set_prop".into())),
+            Box::new(HirExpr::Var("__thaw_error_set_prop_value".into())),
             vec![
                 HirExpr::Var(object_name.clone()),
                 HirExpr::Var(key_name.clone()),
-                json_text,
+                json_value,
             ],
         );
         let refused = HirStmt::If(
