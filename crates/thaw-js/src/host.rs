@@ -826,6 +826,8 @@ fn class_call(
         (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
     let (kind, package, class_path, member) = parse_class_symbol(symbol)
         .ok_or_else(|| HostError::Bundle(format!("malformed class symbol `{symbol}`")))?;
+    let class_path = export_path(package, class_path);
+    let class_path = class_path.as_str();
     let op = match kind {
         "new" => ClassOp::New { class: class_path },
         "value" => ClassOp::Value { path: class_path },
@@ -2883,10 +2885,10 @@ pub extern "C" fn thaw_tjs_get_global(name: *const c_char) -> i64 {
     }
     let found = (|| -> Result<Option<(usize, Value)>, HostError> {
         if let Some((package, path)) = name.split_once("::") {
-            let Some(handle) = BY_NAME.with(|m| m.borrow().get(package).copied()) else {
+            let Some((handle, path)) = resolve_export(package, path) else {
                 return Ok(None);
             };
-            return with_package(handle, |p| p.exports_member(path)).map(|v| Some((handle, v)));
+            return with_package(handle, |p| p.exports_member(&path)).map(|v| Some((handle, v)));
         }
         let handle = default_realm();
         with_package(handle, |p| {
@@ -5574,6 +5576,7 @@ struct HostTls {
     packages: Vec<Option<Package>>,
     running: HashMap<usize, *mut Package>,
     by_name: HashMap<String, usize>,
+    by_prefix: HashMap<String, String>,
     last_package: usize,
     fetch_package: Option<usize>,
     handles: Vec<(usize, Value)>,
@@ -5601,6 +5604,7 @@ pub(crate) fn park_host_tls(key: usize) {
         packages: PACKAGES.with(|c| std::mem::take(&mut *c.borrow_mut())),
         running: RUNNING.with(|c| std::mem::take(&mut *c.borrow_mut())),
         by_name: BY_NAME.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        by_prefix: BY_PREFIX.with(|c| std::mem::take(&mut *c.borrow_mut())),
         last_package: LAST_PACKAGE.with(|c| c.take()),
         fetch_package: FETCH_PACKAGE.with(|c| c.take()),
         handles: HANDLES.with(|c| std::mem::take(&mut *c.borrow_mut())),
@@ -5633,6 +5637,7 @@ pub(crate) fn adopt_host_tls(key: usize) {
         packages,
         running,
         by_name,
+        by_prefix,
         last_package,
         fetch_package,
         handles,
@@ -5649,6 +5654,7 @@ pub(crate) fn adopt_host_tls(key: usize) {
     drop(PACKAGES.with(|c| c.replace(packages)));
     drop(RUNNING.with(|c| c.replace(running)));
     drop(BY_NAME.with(|c| c.replace(by_name)));
+    drop(BY_PREFIX.with(|c| c.replace(by_prefix)));
     LAST_PACKAGE.with(|c| c.set(last_package));
     FETCH_PACKAGE.with(|c| c.set(fetch_package));
     drop(HANDLES.with(|c| c.replace(handles)));
@@ -6123,6 +6129,40 @@ pub struct ThawResult {
 
 thread_local! {
     static BY_NAME: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+    /// The export-path prefix of a name whose bundle is a view of a shared realm (`__thaw_bundle_realm`):
+    /// `path/posix` reads `posix.<path>` of the realm loaded as `node:path`. Names without a marker have none.
+    static BY_PREFIX: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+/// The export path `path` of loaded name `name`, with the name's realm-view prefix (`posix` for `path/posix`).
+fn export_path(name: &str, path: &str) -> String {
+    let member = BY_PREFIX.with(|m| m.borrow().get(name).cloned().unwrap_or_default());
+    match (member.is_empty(), path) {
+        (true, _) => path.to_string(),
+        (false, "" | "default") => member,
+        (false, _) => format!("{member}.{path}"),
+    }
+}
+
+/// The realm handle of loaded name `name` and the export path to read from it (see [`export_path`]).
+fn resolve_export(name: &str, path: &str) -> Option<(usize, String)> {
+    let handle = BY_NAME.with(|m| m.borrow().get(name).copied())?;
+    Some((handle, export_path(name, path)))
+}
+
+/// The `(realm key, member)` of a bundle that carries the `__thaw_bundle_realm` marker. Only a bundle
+/// that names the marker is parsed for it, so an ordinary bundle is loaded exactly as before.
+fn bundle_realm(source: &str) -> Option<(String, String)> {
+    if !source.contains("__thaw_bundle_realm") {
+        return None;
+    }
+    parse_bundle(source).ok()?.realm
+}
+
+/// Name `name` as a view of the realm at `handle`, reading `member` of it.
+fn alias_name(name: String, handle: usize, member: &str) {
+    BY_NAME.with(|m| m.borrow_mut().insert(name.clone(), handle));
+    BY_PREFIX.with(|m| m.borrow_mut().insert(name, member.to_string()));
 }
 
 fn text_result(r: Result<String, String>) -> ThawResult {
@@ -6147,13 +6187,32 @@ pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) 
     if std::env::var_os("THAW_JS_TRACE").is_some() {
         eprintln!("thaw-js: loading package `{name}`");
     }
-    match Package::load_named(&name, &src, process_stack_bytes()) {
+    let realm = bundle_realm(&src);
+    if let Some((key, member)) = &realm {
+        if let Some(handle) = BY_NAME.with(|m| m.borrow().get(key).copied()) {
+            alias_name(name, handle, member);
+            return 1;
+        }
+    }
+    // a realm's root bundle loads once, under its key; every spec of the family then aliases it
+    let load_name = realm.as_ref().map_or(name.clone(), |(key, _)| key.clone());
+    match Package::load_named(&load_name, &src, process_stack_bytes()) {
         Ok(p) => {
             PACKAGES.with(|ps| {
                 let mut ps = ps.borrow_mut();
                 note_fetch_package(&p, ps.len());
                 ps.push(Some(p));
-                BY_NAME.with(|m| m.borrow_mut().insert(name, ps.len() - 1));
+                let handle = ps.len() - 1;
+                match realm {
+                    Some((key, member)) => {
+                        alias_name(key, handle, "");
+                        alias_name(name, handle, &member);
+                    }
+                    None => {
+                        BY_NAME.with(|m| m.borrow_mut().insert(name.clone(), handle));
+                        BY_PREFIX.with(|m| m.borrow_mut().remove(&name));
+                    }
+                }
             });
             1
         }
@@ -6349,14 +6408,13 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             eprintln!("thaw-js call: {symbol} {args}");
         }
         let (package, export) = symbol.split_once("::").ok_or("malformed thaw-js symbol")?;
-        let handle = BY_NAME
-            .with(|m| m.borrow().get(package).copied())
-            .ok_or_else(|| not_loaded(package))?;
+        let (handle, export) =
+            resolve_export(package, export).ok_or_else(|| not_loaded(package))?;
         let Native::Array(args) = Native::from_json(&args).map_err(|e| e.to_string())? else {
             return Err("arguments must be a JSON array".into());
         };
         let out = with_package(handle, |p| {
-            let r = p.call_or_get_value(export, Some(&args), true, want_pending)?;
+            let r = p.call_or_get_value(&export, Some(&args), true, want_pending)?;
             if want_pending && p.interp.is_promise(&r) && p.interp.promise_state(&r).is_none() {
                 return Ok(pending_marker_json(store_handle(handle, r)));
             }
@@ -7685,5 +7743,113 @@ mod result_date_id_tests {
             text,
             r#"[{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":1},{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":1},{"__thaw_tjs_date__":1234,"__thaw_tjs_id__":2}]"#
         );
+    }
+}
+
+#[cfg(test)]
+mod family_realm_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    const ROOT_MARK: &str = r#"var __thaw_bundle_realm = {"key":"node:path","member":""};"#;
+    const POSIX_MARK: &str = r#"var __thaw_bundle_realm = {"key":"node:path","member":"posix"};"#;
+
+    /// A path-like registry bundle (`exports.posix`, `exports.win32`) with `marker` appended to its wrapper.
+    fn family_bundle(marker: &str) -> String {
+        format!(
+            r#"module.exports = (function(require){{
+var __thaw_bundle_factories = {{
+"a/index.js": function(module, exports) {{ exports.posix = {{ id: 'posix' }}; exports.win32 = {{ id: 'win32' }}; exports.sep = '/'; }}
+}};
+var __thaw_bundle_require_maps = {{ "a/index.js": {{}} }};
+var __thaw_bundle_entry_key = "a/index.js";
+{marker}
+}})(globalThis.require);"#
+        )
+    }
+
+    fn register(name: &str, source: &str) -> usize {
+        let (name_c, source_c) = (CString::new(name).unwrap(), CString::new(source).unwrap());
+        assert_eq!(
+            thaw_tjs_register(name_c.as_ptr(), source_c.as_ptr()),
+            1,
+            "register {name}"
+        );
+        BY_NAME.with(|m| m.borrow()[name])
+    }
+
+    /// The wire handle of the global `spec` (`pkg::member`), 0 when it does not exist.
+    fn wire(spec: &str) -> i64 {
+        let spec = CString::new(spec).unwrap();
+        thaw_tjs_get_global(spec.as_ptr())
+    }
+
+    #[test]
+    fn family_specifiers_share_one_realm_identity() {
+        let path = register("path", &family_bundle(ROOT_MARK));
+        let node_path = register("node:path", &family_bundle(ROOT_MARK));
+        let posix = register("path/posix", &family_bundle(POSIX_MARK));
+        let node_posix = register("node:path/posix", &family_bundle(POSIX_MARK));
+        assert_eq!(path, node_path);
+        assert_eq!(path, posix);
+        assert_eq!(path, node_posix);
+        assert_ne!(wire("path::posix"), 0);
+        assert_eq!(wire("path::posix"), wire("node:path/posix::"));
+        assert_eq!(wire("node:path::posix"), wire("path/posix::"));
+        assert_eq!(wire("path::"), wire("node:path::"));
+    }
+
+    #[test]
+    fn bundle_without_realm_marker_keeps_its_own_realm() {
+        let marked = register("node:path", &family_bundle(ROOT_MARK));
+        let plain = register("plain-path", &family_bundle(""));
+        assert_ne!(marked, plain);
+        assert_ne!(wire("plain-path::posix"), wire("path::posix"));
+        assert_ne!(wire("plain-path::posix"), 0);
+    }
+
+    #[test]
+    fn worker_thread_registers_its_own_single_path_realm() {
+        // a realm on the test thread first, so the family realm below is not handle 0 here
+        register("dummy-main", &family_bundle(""));
+        let main_path = register("path", &family_bundle(ROOT_MARK));
+        let worker = std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                let path = register("path", &family_bundle(ROOT_MARK));
+                let posix = register("node:path/posix", &family_bundle(POSIX_MARK));
+                (path, posix)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        // the worker loaded its own realm into its own (empty) tables, and both specifiers share it
+        assert_eq!(worker.0, 0);
+        assert_eq!(worker.0, worker.1);
+        assert_ne!(worker.0, main_path);
+    }
+
+    #[test]
+    fn parked_host_tables_carry_the_family_prefixes() {
+        register("dummy-park", &family_bundle(""));
+        register("path", &family_bundle(ROOT_MARK));
+        register("node:path/posix", &family_bundle(POSIX_MARK));
+        let expected = wire("path::posix");
+        assert_ne!(expected, 0);
+        const KEY: usize = 0xB1;
+        park_host_tls(KEY);
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                adopt_host_tls(KEY);
+                // only the prefix map says `node:path/posix::` is the `posix` member of the shared realm
+                assert_eq!(wire("node:path/posix::"), expected);
+                park_host_tls(KEY);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        adopt_host_tls(KEY);
+        assert_eq!(wire("path::posix"), expected);
     }
 }
