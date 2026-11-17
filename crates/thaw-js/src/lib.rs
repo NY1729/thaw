@@ -76,6 +76,8 @@ mod sysio;
 mod tls;
 mod typed;
 pub(crate) use typed::TypedKey;
+#[cfg(feature = "sqlite")]
+mod sqlite;
 mod udp;
 mod url;
 mod vm;
@@ -1571,6 +1573,8 @@ impl Interp {
             dns::install(&mut it);
             vm::install(&mut it);
             zlib::install(&mut it);
+            #[cfg(feature = "sqlite")]
+            sqlite::install(&mut it);
             tls::install(&mut it);
             it.install_fs_host();
             web_dom_exception::install(&mut it);
