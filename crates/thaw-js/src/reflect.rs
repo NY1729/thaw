@@ -37,7 +37,7 @@ fn list_from(it: &mut Interp, v: &Value) -> R<Vec<Value>> {
 fn own_prop(it: &Interp, o: &Obj, key: &str) -> Option<(Slot, bool)> {
     if matches!(&*o.kind.borrow(), Kind::Global) {
         if let Some(p) = it.global_prop(key) {
-            return Some((Slot::Data(p.value), p.writable));
+            return Some((p.slot, p.writable));
         }
     }
     let writable = !o.frozen.get();
