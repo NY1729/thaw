@@ -13,7 +13,9 @@ Ratchet: coverage-baseline.json lists the untouched `id#mode` pairs. Shrink-only
 in the baseline (a new table row, or a removed probe) exits 1. Pairs that became touched are printed.
 --write-baseline rewrites the list. The ratchet is skipped (with a warning) when node is not major 22.
 
-Usage: coverage.py --manifest MANIFEST.json [--out DIR] [--summary SUMMARY.md] [--write-baseline] [--no-ratchet]
+Several manifests (gen_probes.py and gen_modules.py output) are scored together: repeat --manifest.
+Usage: coverage.py --manifest MANIFEST.json [--manifest M2.json ...] [--out DIR] [--summary SUMMARY.md]
+                   [--write-baseline] [--no-ratchet]
 Exit: 0 ok, 1 ratchet violation, 2 harness error (bad manifest, unknown api id, node failure).
 """
 import argparse
@@ -138,7 +140,8 @@ def universe(args):
 
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--manifest", required=True)
+    ap.add_argument("--manifest", required=True, action="append",
+                    help="manifest.json of a generator; repeat to score several together")
     ap.add_argument("--out", help="directory for coverage.json (default: the manifest's directory)")
     ap.add_argument("--summary", help="append the markdown table to this summary.md")
     ap.add_argument("--table", default=TABLE)
@@ -154,8 +157,10 @@ def main(argv):
     args = ap.parse_args(argv)
 
     try:
-        with open(args.manifest, encoding="utf-8") as fh:
-            manifest = json.load(fh)
+        manifests = []
+        for path in args.manifest:
+            with open(path, encoding="utf-8") as fh:
+                manifests.append(json.load(fh))
         uni, node_major = universe(args)
     except (OSError, ValueError, ImportError) as exc:
         print(f"coverage: harness error: {exc}", file=sys.stderr)
@@ -166,7 +171,8 @@ def main(argv):
     touched = set()
     unknown = set()
     with_api = 0
-    for prog in manifest["programs"]:
+    programs = [prog for manifest in manifests for prog in manifest["programs"]]
+    for prog in programs:
         for probe in prog["probes"]:
             mode = probe.get("mode", prog.get("mode"))
             if mode not in MODES:
@@ -212,7 +218,8 @@ def main(argv):
     result = {
         "universe": {"u1": len(uni["u1"]), "u2": len(uni["u2"]), "u3": len(uni["u3"]), "u4": len(uni["u4"]),
                      "total": len(all_ids), "node_major": node_major, "pairs": len(pairs)},
-        "probes": manifest.get("probes"), "probes_with_api": with_api, "unknown_api_ids": sorted(unknown),
+        "probes": sum(m.get("probes", 0) for m in manifests), "probes_with_api": with_api,
+        "unknown_api_ids": sorted(unknown),
         "overall": overall, "per_mode": per_mode, "per_family": per_family,
         "untouched_any_mode": untouched_any, "untouched_by_mode": untouched_by_mode,
     }
@@ -255,14 +262,14 @@ def main(argv):
                 print(f"coverage: {len(stale)} baseline pair(s) name ids no longer in the universe")
     result["ratchet"] = {"violations": violations, "became_touched": became_touched, "rc": rc}
 
-    out_dir = args.out or os.path.dirname(os.path.abspath(args.manifest))
+    out_dir = args.out or os.path.dirname(os.path.abspath(args.manifest[0]))
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "coverage.json"), "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=1, sort_keys=True)
         fh.write("\n")
 
     lines = [f"## API coverage (universe {len(all_ids)} ids: table {len(uni['u1'])}, globals {len(uni['u2'])}, "
-             f"modules {len(uni['u3'])}, hand {len(uni['u4'])}; probes {manifest.get('probes')}, with api "
+             f"modules {len(uni['u3'])}, hand {len(uni['u4'])}; probes {result['probes']}, with api "
              f"{with_api})", "",
              "Cells: touched/applicable. `all` = touched in any mode.", "",
              "| family | " + " | ".join(MODES) + " | all |",
