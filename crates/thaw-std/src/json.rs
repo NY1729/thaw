@@ -1915,16 +1915,19 @@ fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
     let Ok(key) = CString::new(key) else {
         return;
     };
-    // A live host object is stored as its handle marker; the error takes one reference to it.
-    let marker = match value {
-        Value::Host(lease) if engine_is_thaw_js() && lease.handle != 0 => {
+    // thaw-js only: a live host object, or its one-key handle marker (an unadopted object literal),
+    // is stored as its marker; the error takes one reference to it.
+    let marker = engine_is_thaw_js()
+        .then(|| json_handle_ref(value))
+        .flatten()
+        .and_then(|handle| {
             HOST_OPERATIONS.with(|slot| slot.get()).and_then(|ops| {
-                (without_typed_decode_scope(|| (ops.retain)(lease.handle)) != 0)
-                    .then(|| format!(r#"{{"__thaw_tjs_handle__":{}}}"#, lease.handle))
+                (without_typed_decode_scope(|| (ops.retain)(handle)) != 0).then(|| {
+                    retain_for_error(error, handle);
+                    format!(r#"{{"__thaw_tjs_handle__":{handle}}}"#)
+                })
             })
-        }
-        _ => None,
-    };
+        });
     let via_handle = marker.is_some();
     let Ok(json) = CString::new(marker.unwrap_or_else(|| value.to_string())) else {
         return;
@@ -1933,6 +1936,36 @@ fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
         eprintln!("TRACE13 set_error_prop key={key:?} via_handle={via_handle} value_kind={} stored={json:?}", trace13_kind(value));
     }
     unsafe { thaw_error_set_prop(error, key.as_ptr(), json.as_ptr()) };
+}
+
+thread_local! {
+    // thaw-js only: the host handles that framed errors' props keep alive, as (canonical error
+    // pointer, handle). Released once that error is reclaimed.
+    // ponytail: an overwritten prop keeps its old reference until the error is reclaimed.
+    static ERROR_PROP_RETAINS: RefCell<Vec<(usize, u64)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn retain_for_error(error: *const c_char, handle: u64) {
+    thaw_arena::register_reset_hook(reset_error_prop_retains);
+    let error = thaw_error_canonical_pointer(error.cast());
+    ERROR_PROP_RETAINS.with(|retains| retains.borrow_mut().push((error, handle)));
+}
+
+/// Releases the handles of reclaimed errors. A non-tracing reset is terminal, so it releases all.
+fn reset_error_prop_retains(tracing: bool) {
+    let dead = ERROR_PROP_RETAINS.with(|retains| {
+        let mut retains = retains.borrow_mut();
+        let (dead, live): (Vec<_>, Vec<_>) = std::mem::take(&mut *retains)
+            .into_iter()
+            .partition(|(error, _)| !tracing || thaw_arena::was_reclaimed(*error));
+        *retains = live;
+        dead
+    });
+    for (_, handle) in dead {
+        if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
+            without_typed_decode_scope(|| (ops.release)(handle));
+        }
+    }
 }
 
 fn error_has_prop(error: *const c_char, key: &[u8]) -> bool {
@@ -12156,6 +12189,90 @@ mod tests {
             assert_eq!(read.to_string(), napi_undefined_value().to_string());
             assert_eq!(RETAIN_CALLS.with(Cell::get), 0);
             thaw_json_set_js_engine(0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    thread_local! {
+        static MARKER_RETAIN_CALLS: Cell<u64> = const { Cell::new(0) };
+        static MARKER_RELEASE_CALLS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    extern "C" fn marker_retain(_: u64) -> u8 {
+        MARKER_RETAIN_CALLS.with(|calls| calls.set(calls.get() + 1));
+        1
+    }
+
+    extern "C" fn marker_release(_: u64) -> u8 {
+        MARKER_RELEASE_CALLS.with(|calls| calls.set(calls.get() + 1));
+        1
+    }
+
+    fn install_marker_host_operations() {
+        HOST_OPERATIONS.with(|slot| {
+            slot.set(Some(HostOperations {
+                retain: marker_retain,
+                release: marker_release,
+                get: cause_test_get,
+                query: cause_test_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            }))
+        });
+    }
+
+    fn marker_cause_value() -> Value {
+        JsonParser::new(br#"{"__thaw_tjs_handle__":3}"#)
+            .parse()
+            .unwrap()
+    }
+
+    // thaw-js: a one-key marker object stored as an error prop keeps its handle alive until the
+    // error's allocation is reclaimed (only the terminal non-tracing reset releases it here).
+    #[test]
+    fn a_thaw_js_marker_prop_is_retained_until_its_error_is_reclaimed() {
+        std::thread::spawn(|| {
+            install_marker_host_operations();
+            thaw_json_set_js_engine(1);
+            let error = cause_test_error("outer", CAUSE_TEST_OUTER);
+            set_error_prop(error, "\u{2}cause".as_bytes(), &marker_cause_value());
+            assert_eq!(MARKER_RETAIN_CALLS.with(Cell::get), 1);
+            assert_eq!(MARKER_RELEASE_CALLS.with(Cell::get), 0);
+
+            let read = error_prop_value(error, b"cause");
+            assert!(matches!(&read, Value::Host(lease) if lease.handle == 3));
+            drop(read);
+            let released = MARKER_RELEASE_CALLS.with(Cell::get);
+
+            reset_error_prop_retains(true);
+            assert_eq!(MARKER_RELEASE_CALLS.with(Cell::get), released);
+            reset_error_prop_retains(false);
+            assert_eq!(MARKER_RELEASE_CALLS.with(Cell::get), released + 1);
+            thaw_json_set_js_engine(0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    // Gate pin: under QuickJS (engine 0) a marker prop takes no reference and reads back as text.
+    #[test]
+    fn a_marker_prop_under_the_default_engine_takes_no_reference() {
+        std::thread::spawn(|| {
+            install_marker_host_operations();
+            thaw_json_set_js_engine(0);
+            let error = cause_test_error("outer", CAUSE_TEST_OUTER);
+            let marker = marker_cause_value();
+            set_error_prop(error, "\u{2}cause".as_bytes(), &marker);
+            assert_eq!(MARKER_RETAIN_CALLS.with(Cell::get), 0);
+            assert_eq!(
+                error_prop_value(error, b"cause").to_string(),
+                marker.to_string()
+            );
+            reset_error_prop_retains(false);
+            assert_eq!(MARKER_RELEASE_CALLS.with(Cell::get), 0);
         })
         .join()
         .unwrap();
