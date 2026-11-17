@@ -750,6 +750,24 @@
       "source": "import posix from 'node:path/posix'; function main(): void { console.log(posix.join('/a', 'b', '..', 'c'), posix.basename('/a/file.txt', '.txt')); }"
     },
     {
+      "name": "path family one value across path, node:path/posix and path/win32",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import path from 'path'; import { posix } from 'node:path/posix'; import win from 'path/win32'; function main(): void { console.log(JSON.stringify([path === posix, path.posix === posix, path.win32 === win, posix.win32 === win, win.posix === posix, win.win32 === win])); }"
+    },
+    {
+      "name": "path family default, named and subpath values across specifiers",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import path, { win32 } from 'node:path'; import posix from 'node:path/posix'; import w from 'path/win32'; function main(): void { console.log(JSON.stringify([win32 === w, posix === path.posix, path.win32 === w, w.win32 === win32, posix.join('/a', 'b', '..', 'c'), w.join('C:\\\\a', '..', 'b')])); }"
+    },
+    {
+      "name": "path family named values from path/posix, node:path and node:path/win32",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { posix as a } from 'path/posix'; import { posix as b, win32 as c } from 'node:path'; import { win32 as d } from 'node:path/win32'; function main(): void { console.log(JSON.stringify([a === b, c === d, a.sep === b.sep, c.sep, d.join('x', 'y'), a.basename('/q/r.txt')])); }"
+    },
+    {
       "name": "cluster primary metadata",
       "expect": "matched",
       "source": "import { isPrimary, isMaster, isWorker, SCHED_NONE, SCHED_RR } from 'node:cluster'; function main(): void { console.log(isPrimary, isMaster, isWorker, SCHED_NONE, SCHED_RR); }"
