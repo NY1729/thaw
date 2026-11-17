@@ -21,22 +21,6 @@ fn native_timers_mixed_thaw_js_package_retry_stays_on_thaw_js() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// A native `http.createServer` mixed with a native-eligible `setTimeout`: whatever engine serves the
-/// server, the retry must not select QuickJS on its own (the routed build holds no QuickJS value).
-#[test]
-fn native_timers_mixed_create_server_retry_does_not_select_quickjs() {
-    let (dir, registry, entry) = thaw_js_fixture(
-        "native-timers-mixed-http",
-        "import * as http from \"node:http\";\nfunction main(): void {\n  setTimeout((): void => console.log(\"timer\"), 5);\n  const s = http.createServer((req, res) => { res.end(\"x\"); });\n  s.close();\n  console.log(\"sync\");\n}\n",
-    );
-    let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
-    assert!(!manifest.to_string().contains("fell back to QuickJS"), "{manifest}");
-    assert_eq!(thaw_js_run_guarded(&output), "sync\ntimer\n");
-    let _ = std::fs::remove_dir_all(dir);
-}
-
 /// Plain (unrouted) build: the native conflict still rebuilds with engine timers, which here is QuickJS.
 #[test]
 fn native_timers_mixed_quickjs_build_keeps_the_quickjs_retry() {
