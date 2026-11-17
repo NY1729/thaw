@@ -1,5 +1,18 @@
 #[test]
 fn pure_numeric_registry_export_uses_jit_without_quickjs() {
+    // The lowering recurses once per left-nested `+` in main (28 here), and a debug lowering frame is
+    // ~550 KB, so the build needs the CLI's 512 MB main-thread stack (main.rs), not a 2 MB test thread.
+    // Both engine paths share that lowering. The body runs on such a thread; panics are re-raised.
+    let body = std::thread::Builder::new()
+        .stack_size(512 << 20)
+        .spawn(pure_numeric_registry_export_body)
+        .expect("spawn build-sized thread");
+    if let Err(panic) = body.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn pure_numeric_registry_export_body() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-{}",
         std::process::id()
@@ -130,7 +143,7 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
 
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -259,7 +272,7 @@ fn boolean_primitive_unions_use_tagged_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -342,7 +355,7 @@ fn dynamic_primitive_numeric_operators_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -385,7 +398,7 @@ fn aggregate_unions_round_trip_through_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -428,7 +441,7 @@ fn array_predicate_narrows_dynamic_union_in_jit() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -471,7 +484,7 @@ fn typeof_object_narrows_dynamic_dictionary_union_in_jit() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -514,7 +527,7 @@ fn aggregate_union_narrows_array_then_dictionary_in_jit() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -560,7 +573,7 @@ fn mixed_array_default_sort_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -606,7 +619,7 @@ fn mixed_array_range_updates_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -652,7 +665,7 @@ fn mixed_array_truthy_scans_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -741,7 +754,7 @@ fn mixed_array_conversion_maps_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -823,7 +836,7 @@ fn numeric_predicates_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -866,7 +879,7 @@ fn mixed_hypot_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -906,7 +919,7 @@ fn arithmetic_array_callbacks_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -992,7 +1005,7 @@ fn composed_numeric_maps_use_jit_callbacks_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -1032,7 +1045,7 @@ fn composed_numeric_predicates_use_jit_callbacks_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -1161,7 +1174,7 @@ fn composed_numeric_reducers_use_jit_callbacks_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -1247,7 +1260,7 @@ fn primitive_array_comparisons_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -1290,7 +1303,7 @@ fn typed_typeof_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -1415,7 +1428,7 @@ fn unicode_normalization_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -1487,7 +1500,7 @@ fn primitive_array_copies_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -1526,7 +1539,7 @@ fn numeric_comparator_sorts_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -1569,7 +1582,7 @@ fn string_comparator_sorts_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -1612,7 +1625,7 @@ fn primitive_array_constructors_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -1651,7 +1664,7 @@ fn primitive_array_mutation_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -1733,7 +1746,7 @@ fn primitive_array_removal_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -1772,7 +1785,7 @@ fn primitive_array_splice_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -1815,7 +1828,7 @@ fn string_truthiness_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -1930,7 +1943,7 @@ fn set_operations_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -2057,7 +2070,7 @@ fn set_size_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -2093,7 +2106,7 @@ fn set_for_of_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -2337,7 +2350,7 @@ fn deeply_nested_pure_arithmetic_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));

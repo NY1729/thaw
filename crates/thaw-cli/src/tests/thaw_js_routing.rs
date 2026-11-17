@@ -981,7 +981,7 @@ fn thaw_js_routed_node_http_server_only_links_no_quickjs() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "listening number\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1165,7 +1165,6 @@ fn routed_uncaught_and_rejection_reports_reach_thaw_js_process_listeners() {
         ),
     ];
     for (name, body, expected) in cases {
-        let _env = RouteAllEnv::set();
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-report-{name}"), body);
         let output = entry.with_file_name("app");
         thaw_js_build(&entry, &output, &registry, true);
@@ -1186,7 +1185,6 @@ fn routed_process_ids_and_kill_match_node() {
         ),
     ];
     for (name, body, expected) in cases {
-        let _env = RouteAllEnv::set();
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-w4-{}", name.len()), body);
         let output = entry.with_file_name("app");
         thaw_js_build(&entry, &output, &registry, true);
@@ -1194,48 +1192,20 @@ fn routed_process_ids_and_kill_match_node() {
     }
 }
 
-/// Turns route-all on for the calling thread only (the same effect as `THAW_JS_ROUTE_ALL=1`, without
-/// touching the process env that parallel tests share). Off again on drop, even when the test panics.
-struct RouteAllEnv;
-
-impl RouteAllEnv {
-    fn set() -> Self {
-        set_thaw_js_route_all_override(true);
-        RouteAllEnv
-    }
-}
-
-impl Drop for RouteAllEnv {
-    fn drop(&mut self) {
-        set_thaw_js_route_all_override(false);
-    }
-}
-
 #[test]
-fn thaw_js_route_all_is_opt_in_on_exactly_one() {
+fn thaw_js_route_all_is_on_unless_exactly_zero() {
+    assert!(thaw_js_route_all_from(None));
     assert!(thaw_js_route_all_from(Some("1")));
-    assert!(!thaw_js_route_all_from(None));
+    assert!(thaw_js_route_all_from(Some("")));
+    assert!(thaw_js_route_all_from(Some("true")));
     assert!(!thaw_js_route_all_from(Some("0")));
-    assert!(!thaw_js_route_all_from(Some("")));
-    assert!(!thaw_js_route_all_from(Some("true")));
-}
-
-#[test]
-fn thaw_js_route_all_override_is_thread_local() {
-    if std::env::var("THAW_JS_ROUTE_ALL").is_ok() {
-        return; // the isolation check needs the env unset by the outer shell
-    }
-    let _env = RouteAllEnv::set();
-    assert!(thaw_js_route_all_enabled());
-    let other_thread = std::thread::spawn(thaw_js_route_all_enabled).join().unwrap();
-    assert!(!other_thread, "a route-all override must not leak to another thread");
 }
 
 #[test]
 fn thaw_js_route_all_attempts_thaw_js_for_a_plain_any_program_and_names_the_fallback() {
-    // Without THAW_JS_ROUTE_ALL this program has no routed package and no dynamic-code marker, so it
-    // is never attempted on thaw-js. With it, the route is attempted, and a build that still needs
-    // QuickJS says which lowering demanded it in the manifest's blockers.
+    // Route-all is the default: this program has no routed package and no dynamic-code marker, yet
+    // thaw-js is still attempted. A build that still needs QuickJS says which lowering demanded it in
+    // the manifest's blockers.
     let dir = std::env::temp_dir().join(format!("thaw-cli-route-all-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -1248,7 +1218,6 @@ fn thaw_js_route_all_attempts_thaw_js_for_a_plain_any_program_and_names_the_fall
     .unwrap();
     let output = dir.join("app");
     let manifest = {
-        let _env = RouteAllEnv::set();
         thaw_js_build(&entry, &output, &registry, true)
     };
     eprintln!("route-all manifest: {manifest}");
@@ -1308,7 +1277,6 @@ fn routed_tick_timer_and_lifecycle_order_matches_node() {
         ),
     ];
     for (name, body, expected, code) in cases {
-        let _env = RouteAllEnv::set();
         let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-tick-{slug}"), body);
         let output = entry.with_file_name("app");
@@ -1320,7 +1288,7 @@ fn routed_tick_timer_and_lifecycle_order_matches_node() {
 }
 
 /// node-compat `filesystem read and write streams`, `audit2e fs readdir ...` and `nd8 readline/promises ...` with
-/// default routing (no THAW_JS_ROUTE_ALL): each program must exit on its own within the 20 s guard.
+/// default routing: each program must exit on its own within the 20 s guard.
 #[test]
 fn routed_fs_and_readline_programs_exit_on_their_own() {
     let cases = [
@@ -1357,7 +1325,7 @@ fn routed_audit2e_fs_program_exits_on_its_own() {
 }
 
 /// node-compat `process nextTick ordering` and `es module runs promises before nextTick` (ES module entries:
-/// their promise jobs run before the module's ticks, as in Node), routed through thaw-js with RouteAllEnv.
+/// their promise jobs run before the module's ticks, as in Node), routed through thaw-js.
 #[test]
 fn routed_esm_next_tick_orders_match_node() {
     let cases = [
@@ -1373,7 +1341,6 @@ fn routed_esm_next_tick_orders_match_node() {
         ),
     ];
     for (name, body, expected) in cases {
-        let _env = RouteAllEnv::set();
         let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-esm-{slug}"), body);
         let output = entry.with_file_name("app");
@@ -1384,7 +1351,7 @@ fn routed_esm_next_tick_orders_match_node() {
 }
 
 /// Q9 cluster C1: the node-compat/builtins/ts-runtime case sources for Iterator, iterator helpers and
-/// JSON.rawJSON, routed through thaw-js with RouteAllEnv. The manifests carry no expected output, so the
+/// JSON.rawJSON, routed through thaw-js. The manifests carry no expected output, so the
 /// expected text is what Node 22 prints for the same program (checked with `node`).
 #[test]
 fn routed_iterator_and_raw_json_cases_match_node() {
@@ -1406,7 +1373,6 @@ fn routed_iterator_and_raw_json_cases_match_node() {
         ),
     ];
     for (name, body, expected) in cases {
-        let _env = RouteAllEnv::set();
         let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-c1-{slug}"), body);
         let output = entry.with_file_name("app");
@@ -1440,7 +1406,6 @@ fn routed_error_factory_runs_in_a_program_with_no_package() {
         ),
     ];
     for (name, body, expected) in cases {
-        let _env = RouteAllEnv::set();
         let (_dir, registry, entry) = thaw_js_fixture(&format!("error-factory-{}", name.len()), body);
         let output = entry.with_file_name("app");
         thaw_js_build(&entry, &output, &registry, true);
@@ -1512,7 +1477,6 @@ fn routed_shared_array_buffer_and_atomics_match_node() {
         ),
     ];
     for (name, body, expected) in cases {
-        let _env = RouteAllEnv::set();
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-sab-{name}"), body);
         let output = entry.with_file_name("app");
         thaw_js_build(&entry, &output, &registry, true);
@@ -1594,7 +1558,6 @@ fn routed_worker_resource_limits_stop_a_runaway_worker() {
           const result: string = await new Promise<string>((resolve) => { worker.on('error', (e: any) => { resolve('error ' + e.code); }); worker.on('exit', () => { resolve('exit'); }); });\n\
           console.log(result);\n\
         }";
-    let _env = RouteAllEnv::set();
     let (_dir, registry, entry) = thaw_js_fixture("route-worker-limits", body);
     let output = entry.with_file_name("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
