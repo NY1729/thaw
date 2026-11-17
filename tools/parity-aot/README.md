@@ -11,7 +11,8 @@ Plan: `designs/plan-q9-aot-parity-harness.md` (PR 1). Scope is in its section 5.
 
 - `gen_probes.py`: writes the programs, a `lib.ts`/`lib.mts` module fixture, and `manifest.json` (probes, findings, counts).
 - `aot_run.py`: Node reference, thaw build/isolation/run per engine, classification, diff, summary.
-- `run.sh`: the entry point (gen, then aot_run). `selftest.sh`: determinism, Node run of every program, classifier checks.
+- `run.sh`: the entry point (gen, aot_run, coverage). `selftest.sh`: determinism, Node run of every program, classifier and coverage checks.
+- `coverage.py`: API coverage of `manifest.json` and the shrink-only ratchet. `coverage-baseline.json`: the untouched `id#mode` pairs. `modules.txt`: the 55 thaw-js builtin modules (copied from `THAW_JS_BUILTIN_MODULES` in `crates/thaw-cli/src/registry_integration/thaw_js_routing.rs`; selftest checks they match).
 - `known-gaps.json`, `waivers.json`, `skip.txt`: same schema as `tools/parity`. Gaps and waivers are empty at slice 1.
 
 ## Probes
@@ -44,6 +45,25 @@ List drift: the three lists in `platform_globals.rs` (PLATFORM_GLOBALS Ctors, DY
 are compared. Differences are `LIST-DRIFT` findings. Method names used by ops must exist in
 `crates/thaw-js/src/builtin_table.tsv` (`OP-DRIFT`).
 
+## Coverage
+
+`coverage.py` reads only `manifest.json` (no thaw). Each probe lists its API ids in `api` (`<owner>.<key>` as in
+`crates/thaw-js/src/builtin_table.tsv`, e.g. `Array.prototype.map`, `Map.prototype.size`; `global:<name>` for
+`tools/parity/node_globals.json`; `mod:<name>.<export>` for the modules in `modules.txt`) and a `mode`.
+
+Universe, computed at run time: table function and accessor rows (except `length`, `name`, `constructor`,
+`@@toStringTag` and nested `%X%` owners other than `%TypedArray%`), the 172 globals, and the `Object.keys` of each
+module under node. A pair `id#mode` is applicable unless it is `json` mode on a non-JSON receiver owner.
+Touched means a probe exists for the pair; it does not mean the probe passes.
+
+Ratchet: every untouched applicable pair must be in `coverage-baseline.json`. A new table row, a removed probe
+or a new module export adds an untouched pair and exits 1. Pairs that became touched are listed and can be
+dropped with `coverage.py --manifest M --write-baseline` (only when the baseline should shrink or a change knowingly
+adds surface). The ratchet is skipped with a warning when node is not major 22.
+
+Output: `coverage.json` (universe sizes, per-mode and per-family cells, untouched lists) in the OUT directory, and a
+markdown table (families by modes) appended to `summary.md`. `run.sh` runs it after the probes and never fails on it.
+
 ## Run
 
     tools/parity-aot/selftest.sh                 # no thaw build; determinism, node run, classifier checks
@@ -56,7 +76,7 @@ Build command per program and engine (`THAW_JS_ENGINE` is `thaw-js` or `quickjs`
 
 Env: `THAW` (default `<repo>/target/release/thaw`), `NODE`, `PARITY_AOT_ENGINES` (default `thaw-js,quickjs`),
 `PARITY_AOT_JOBS`, `PARITY_AOT_BUILD_WRAP` (command prefix for each build, e.g. a systemd-run memory cap),
-`PARITY_AOT_RUN_TIMEOUT` (20 s), `PARITY_AOT_BUILD_TIMEOUT` (900 s), `PARITY_AOT_SCRATCH` (default
+`PARITY_AOT_FAMILIES` (comma list; generate only those families, skips the coverage ratchet), `PARITY_AOT_RUN_TIMEOUT` (20 s), `PARITY_AOT_BUILD_TIMEOUT` (900 s), `PARITY_AOT_SCRATCH` (default
 `/home/fedora/work/thaw-tmp/parity-aot-scratch`), `PARITY_AOT_OUT`.
 
 Output (OUT_DIR): `summary.md` / `summary.json` (counts per corpus and class, top findings, engine delta),
@@ -68,5 +88,6 @@ missing thaw binary, diff.py harness error). `diff.py` exit 1 means gaps not in 
 ## CI
 
 `.github/workflows/parity-aot.yml` runs on `workflow_dispatch` or when the `parity-aot` label is added to a PR.
-It builds the release thaw CLI, runs `selftest.sh`, runs both engines, and writes the summary and the
-`parity-aot-results` artifact. The job is `continue-on-error`.
+Job `build` builds the release thaw CLI, runs `selftest.sh`, writes the API coverage (full manifest, no thaw),
+and uploads the binary as `thaw-release-bin`. Job `shards` (matrix s1 to s4, split by family) downloads the binary and
+runs both engines per shard, writing `parity-aot-results-<shard>` artifacts. Both jobs are `continue-on-error`.
