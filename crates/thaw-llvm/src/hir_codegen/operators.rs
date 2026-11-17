@@ -253,6 +253,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_object_assign"
                         | "__thaw_json_array_slice"
                         | "__thaw_json_array_assign"
+                        | "__thaw_json_buffer_sync"
                         | "__thaw_json_clone"
                         | "__thaw_json_get_mut"
                         | "__thaw_json_index_get_mut"

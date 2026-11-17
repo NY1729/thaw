@@ -1065,10 +1065,33 @@ impl<'a> FnLowerer<'a> {
         };
         let offset = self.coerce_primitive_to_number(offset)?;
         // A live typed array from the JS realm (`new Uint8Array([9])`) is read as a `number[]`.
-        let source = if self.infer_expr_type(&source)? == HirType::JsValue {
-            self.coerce_to_declared(&HirType::Array(Box::new(HirType::F64)), source)?
-        } else {
-            source
+        let source = match self.infer_expr_type(&source)? {
+            HirType::JsValue => self.coerce_to_declared(&HirType::Array(Box::new(HirType::F64)), source)?,
+            // A `Json` source (an array literal under a dynamic receiver) reads as bytes too:
+            // a Buffer-shaped wrapper through its `data`, a plain array as itself.
+            HirType::Json => {
+                let name = format!("__thaw_bytes_set_json_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), HirType::Json);
+                let bytes_type = HirType::Array(Box::new(HirType::F64));
+                let data = self.coerce_to_declared(
+                    &bytes_type,
+                    HirExpr::JsonGet(Box::new(HirExpr::Var(name.clone())), "data".to_string()),
+                )?;
+                let plain = self.coerce_to_declared(&bytes_type, HirExpr::Var(name.clone()))?;
+                let selected = HirExpr::Conditional(
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_is_buffer_shape".into())),
+                        vec![HirExpr::Var(name.clone())],
+                    )),
+                    Box::new(data),
+                    Box::new(plain),
+                    bytes_type,
+                );
+                let json = self.coerce_to_declared(&HirType::Json, source)?;
+                self.wrap_call_argument_bindings(selected, &[(name, HirType::Json, json)])?
+            }
+            _ => source,
         };
         let source = self.as_bytes_value(source)?;
         // Source and offset are read twice (range check, then copy): bind both once.

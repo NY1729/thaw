@@ -249,6 +249,7 @@ thaw_jit_dictionary_query
 thaw_jit_format_number
 thaw_json_adopt_native_date
 thaw_json_array_assign
+thaw_json_buffer_sync
 thaw_json_array_extend
 thaw_json_array_join
 thaw_json_array_length

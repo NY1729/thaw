@@ -931,6 +931,28 @@ impl<'a> FnLowerer<'a> {
                     let receiver_is_bytes =
                         self.infer_expr_type_inner(&receiver)? == HirType::Bytes;
                     let mut receiver_type = self.infer_expr_type(&receiver)?;
+                    if receiver_type == HirType::Json && property.sym == *"slice" {
+                        // String branch on the run-time string value; a Buffer-shaped value
+                        // takes the typed Buffer `slice` (a Buffer, not the string's text).
+                        let json_name = format!("__thaw_json_slice_recv_{}", self.next_binding);
+                        let text_name = format!("__thaw_json_slice_text_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(json_name.clone(), HirType::Json);
+                        self.scope.insert(text_name.clone(), HirType::Str);
+                        let mut text_member = member.clone();
+                        *text_member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                            text_name.clone().into(),
+                            member.span,
+                        ));
+                        let mut text_call = call.clone();
+                        text_call.callee = Callee::Expr(Box::new(Expr::Member(text_member.clone())));
+                        let text = self.lower_native_instance_builtin_unchecked(&text_member, property, &text_call)?;
+                        let text = self.coerce_to_declared(&HirType::Json, text)?;
+                        let text_value = self.coerce_primitive_to_string(HirExpr::Var(json_name.clone()))?;
+                        let fallback = self.wrap_call_argument_bindings(text, &[(text_name, HirType::Str, text_value)])?;
+                        let selected = self.buffer_aware_select(&json_name, "slice", &call.args, call.span, false, fallback)?;
+                        return self.wrap_call_argument_bindings(selected, &[(json_name, HirType::Json, receiver)]);
+                    }
                     if matches!(receiver_type, HirType::Json | HirType::JsValue) {
                         receiver = self.coerce_primitive_to_string(receiver)?;
                         receiver_type = HirType::Str;
@@ -1838,6 +1860,12 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Lit(HirLit::Str("string".into()))));
                         let result = HirExpr::Conditional(
                             Box::new(is_string), Box::new(string_result), Box::new(array_result), result_type);
+                        // A Buffer-shaped receiver searches its bytes (`indexOf('\r\n\r\n')` is a subsequence search).
+                        let result = if matches!(method.as_str(), "indexOf" | "lastIndexOf") {
+                            self.buffer_aware_select(json, &method, &call.args, call.span, false, result)?
+                        } else {
+                            result
+                        };
                         let mut bindings = vec![(json.clone(), HirType::Json, receiver)];
                         bindings.extend(spread_bindings);
                         bindings.push((needle.clone(), needle_type, arguments[0].clone()));
