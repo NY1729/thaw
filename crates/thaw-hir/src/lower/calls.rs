@@ -859,6 +859,18 @@ impl<'a> FnLowerer<'a> {
             );
             return self.wrap_call_argument_bindings(result, &[(name, ty.clone(), value)]);
         }
+        // An `any` value has no static kind (a Map, a Buffer and a plain object are all Json): the
+        // runtime reads its brand, or the engine's own tag for a live handle.
+        if *ty == HirType::Json {
+            let name = format!("__thaw_object_tag_json_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            let result = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_object_tag".into())),
+                vec![HirExpr::Var(name.clone())],
+            );
+            return self.wrap_call_argument_bindings(result, &[(name, ty.clone(), value)]);
+        }
         let static_tag = match ty {
             _ if object_type_is_error_family(ty) => "Error",
             HirType::Undefined => "Undefined",

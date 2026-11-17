@@ -2738,6 +2738,7 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Bool);
                     }
                     "__thaw_json_typeof" => return Ok(HirType::Str),
+                    "__thaw_json_object_tag" => return Ok(HirType::Str),
                     "__thaw_json_stringify_scope" => {
                         let [value] = args.as_slice() else {
                             return Err(format!("{name} expects one operand"));

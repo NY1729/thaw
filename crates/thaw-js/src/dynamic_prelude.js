@@ -4,6 +4,7 @@
 // captured intrinsics re-bound here.
 (function () {
   const thawGraphApply = Reflect.apply;
+  const thawGraphObjectToString = Object.prototype.toString;
   const thawDateApply = Reflect.apply;
   const thawGraphDefineProperty = Object.defineProperty;
   const thawGraphObjectCreate = Object.create;
@@ -683,6 +684,8 @@
         try { Set.prototype.has.call(value, undefined); return 'set'; } catch (_) {}
         return '';
       }
+      // 32: the value's Object.prototype.toString tag (`[object Map]`, ...), from the captured realm intrinsic.
+      case 32: return thawGraphApply(thawGraphObjectToString, value, []);
       default: throw new TypeError('Invalid native host query');
     }
   };
