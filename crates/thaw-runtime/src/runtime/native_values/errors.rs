@@ -855,6 +855,14 @@ pub unsafe extern "C" fn thaw_error_set_prop(
     }
     let key = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
     let json = unsafe { CStr::from_ptr(json) }.to_string_lossy().into_owned();
+    // TRACE13 scratch diagnostics (never merged).
+    static TRACE13_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *TRACE13_ON.get_or_init(|| std::env::var_os("THAW_TRACE13").is_some()) {
+        eprintln!(
+            "TRACE13 thaw_error_set_prop entry key={key:?} json_head={:?}",
+            json.chars().take(120).collect::<String>()
+        );
+    }
     thaw_arena::register_metadata_reset_hook(prune_error_extras);
     let table_key = extras_key(error);
     ERROR_EXTRAS.with(|table| {

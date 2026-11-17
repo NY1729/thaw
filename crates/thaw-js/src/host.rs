@@ -2154,6 +2154,32 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
     text_result(on_handle(handle, |p, _, v| {
         let it = &mut p.interp;
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
+        if operation == 8 && trace13() {
+            // TRACE13 scratch diagnostics (never merged): what op 8 answers for this lease.
+            let live = is_live_value(it, &v);
+            let kind = match &v {
+                Value::Object(o) => match &*o.kind.borrow() {
+                    Kind::ArrayBuffer(_) => "ArrayBuffer",
+                    Kind::Typed(_) => "Typed",
+                    Kind::Array(_) => "Array",
+                    Kind::Plain => "Plain",
+                    _ => "OtherObject",
+                }
+                .to_string(),
+                _ => "primitive".to_string(),
+            };
+            let answer = if live {
+                "live-handle-marker".to_string()
+            } else {
+                from_value(it, &v, 0)
+                    .map(|n| n.to_json())
+                    .unwrap_or_else(|e| format!("ERR {e:?}"))
+            };
+            eprintln!(
+                "TRACE13 host_query op=8 handle={handle} kind={kind} live={live} answer_head={:?}",
+                answer.chars().take(120).collect::<String>()
+            );
+        }
         // a proxy over an array is an array (IsArray looks through the proxy; a revoked one answers "no")
         let is_array = matches!(
             &it.proxy_unwrap(&v, "isArray").unwrap_or(Value::Undefined),

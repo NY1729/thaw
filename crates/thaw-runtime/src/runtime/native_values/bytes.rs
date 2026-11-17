@@ -411,10 +411,19 @@ pub unsafe extern "C" fn thaw_bytes_set_from_string(
 ///
 /// `array` must point to a Thaw array of `f64` element slots.
 pub unsafe extern "C" fn thaw_bytes_from_array(array: *const u8) -> *mut u8 {
+    // TRACE13 scratch diagnostics (never merged).
+    static TRACE13_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let t13 = *TRACE13_ON.get_or_init(|| std::env::var_os("THAW_TRACE13").is_some());
     if unsafe { is_byte_view(array) } {
+        if t13 {
+            eprintln!("TRACE13 bytes_from_array arg=byte_view ptr={array:?}");
+        }
         return array.cast_mut();
     }
     let Some(length) = (unsafe { native_array_length(array) }) else {
+        if t13 {
+            eprintln!("TRACE13 bytes_from_array arg=null_or_unreadable ptr={array:?} result=null");
+        }
         return std::ptr::null_mut();
     };
     let output = unsafe { alloc_byte_owner(length, BYTE_VIEW_BUFFER) };
@@ -423,6 +432,10 @@ pub unsafe extern "C" fn thaw_bytes_from_array(array: *const u8) -> *mut u8 {
             let slot = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
             *byte = slot as i64 as u8;
         }
+    }
+    if t13 {
+        let shown = unsafe { view_bytes(output) }.map_or(usize::MAX, <[u8]>::len);
+        eprintln!("TRACE13 bytes_from_array arg=f64_slot_array array_len={length} result_len={shown}");
     }
     output
 }

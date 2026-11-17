@@ -1879,9 +1879,25 @@ fn live_handle_prop(value: Value) -> Value {
     }
     match json_handle_ref(&value) {
         Some(handle) if matches!(value, Value::Object(_)) => {
-            host_value_from_borrowed_handle(handle).unwrap_or(value)
+            let revived = host_value_from_borrowed_handle(handle);
+            if trace13() {
+                eprintln!(
+                    "TRACE13 live_handle_prop marker_handle={handle} revived_alive={} revived_kind={}",
+                    revived.is_some(),
+                    revived.as_ref().map_or("none".into(), trace13_kind)
+                );
+            }
+            revived.unwrap_or(value)
         }
-        _ => value,
+        _ => {
+            if trace13() {
+                eprintln!(
+                    "TRACE13 live_handle_prop not_marker kind={}",
+                    trace13_kind(&value)
+                );
+            }
+            value
+        }
     }
 }
 
@@ -1917,17 +1933,31 @@ fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
     };
     // thaw-js only: a live host object, or its one-key handle marker (an unadopted object literal),
     // is stored as its marker; the error takes one reference to it.
-    let marker = engine_is_thaw_js()
+    let t13 = trace13();
+    let handle = engine_is_thaw_js()
         .then(|| json_handle_ref(value))
-        .flatten()
-        .and_then(|handle| {
-            HOST_OPERATIONS.with(|slot| slot.get()).and_then(|ops| {
-                (without_typed_decode_scope(|| (ops.retain)(handle)) != 0).then(|| {
-                    retain_for_error(error, handle);
-                    format!(r#"{{"__thaw_tjs_handle__":{handle}}}"#)
-                })
-            })
-        });
+        .flatten();
+    if t13 {
+        eprintln!(
+            "TRACE13 set_error_prop key={key:?} engine_thaw_js={} kind={} handle_found={handle:?}",
+            engine_is_thaw_js(),
+            trace13_kind(value)
+        );
+    }
+    let marker = handle.and_then(|handle| {
+        let ops = HOST_OPERATIONS.with(|slot| slot.get());
+        let retained = ops.map(|ops| without_typed_decode_scope(|| (ops.retain)(handle)));
+        if t13 {
+            eprintln!(
+                "TRACE13 set_error_prop retain handle={handle} host_ops={} result={retained:?}",
+                ops.is_some()
+            );
+        }
+        (retained.unwrap_or(0) != 0).then(|| {
+            retain_for_error(error, handle);
+            format!(r#"{{"__thaw_tjs_handle__":{handle}}}"#)
+        })
+    });
     let via_handle = marker.is_some();
     let Ok(json) = CString::new(marker.unwrap_or_else(|| value.to_string())) else {
         return;
@@ -1961,7 +1991,13 @@ fn reset_error_prop_retains(tracing: bool) {
         *retains = live;
         dead
     });
-    for (_, handle) in dead {
+    for (error, handle) in dead {
+        if trace13() {
+            eprintln!(
+                "TRACE13 reset_error_prop_retains release error={error:#x} handle={handle} tracing={tracing} was_reclaimed={}",
+                thaw_arena::was_reclaimed(error)
+            );
+        }
         if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
             without_typed_decode_scope(|| (ops.release)(handle));
         }
