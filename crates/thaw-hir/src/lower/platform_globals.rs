@@ -180,6 +180,7 @@ pub const TYPE_ONLY_NAMES: &[&str] = &[
 /// here (and a test) when it needs the opaque `new` path.
 pub const DYNAMIC_NEW_CTORS: &[&str] = &[
     "FinalizationRegistry",
+    "WebSocket",
     "Proxy",
     "DisposableStack",
     "AsyncDisposableStack",
