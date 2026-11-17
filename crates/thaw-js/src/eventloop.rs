@@ -869,7 +869,7 @@ impl Interp {
         // the context is current before the body can run: it may await at once
         self.rt.cur_co.push(ctx);
         let snap = self.snapshot();
-        if !co::start(&co.ctx.inside, ip as usize, body) {
+        if !co::start(&co.link, &co.ctx.inside, ip as usize, body) {
             self.rt.cur_co.pop();
             return self.throw_error("RangeError", "cannot start coroutine (thread limit)");
         }

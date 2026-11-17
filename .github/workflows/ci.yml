@@ -267,6 +267,10 @@ jobs:
           - mode: runtime-only-compile-on
             dynamic: "0"
             compile: "on"
+          # Coroutine backend leg (plan-q9-coroutines-pr3, PR 3a): same run with THAW_JS_CO=stack.
+          - mode: runtime-only-costack
+            dynamic: "0"
+            co: "stack"
     name: node-compat thaw-js (${{ matrix.mode }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -348,6 +352,7 @@ jobs:
           THAW_JS_ENGINE: thaw-js
           THAW_JS_USER_DYNAMIC: ${{ matrix.dynamic }}
           THAW_JS_COMPILE: ${{ matrix.compile || 'off' }}
+          THAW_JS_CO: ${{ matrix.co || 'thread' }}
           THAW_NODE_COMPAT_JOBS: "4"
         run: |
           set +e
@@ -662,6 +667,28 @@ jobs:
           THAW_JS_COMPILE: "check"
           THAW_JS_COMPILE_AFTER: "1"
         run: cargo test -p thaw-js
+      # Non-gating (plan-q9-coroutines-pr3, PR 3a): the thaw-js lib tests on the costack coroutine backend,
+      # in each compile mode. The default backend stays the thread one (THAW_JS_CO unset).
+      - name: thaw-js lib tests on the costack backend, compile off (non-gating)
+        continue-on-error: true
+        env:
+          THAW_JS_CO: stack
+          THAW_JS_COMPILE: "off"
+        run: cargo test -p thaw-js --lib
+      - name: thaw-js lib tests on the costack backend, compile on (non-gating)
+        continue-on-error: true
+        env:
+          THAW_JS_CO: stack
+          THAW_JS_COMPILE: "on"
+          THAW_JS_COMPILE_AFTER: "1"
+        run: cargo test -p thaw-js --lib
+      - name: thaw-js lib tests on the costack backend, compile check (non-gating)
+        continue-on-error: true
+        env:
+          THAW_JS_CO: stack
+          THAW_JS_COMPILE: "check"
+          THAW_JS_COMPILE_AFTER: "1"
+        run: cargo test -p thaw-js --lib
       - name: Install Prisma example
         run: npm ci --prefix examples/hono-react-prisma-board
       - name: Test Hono, Prisma, and PostgreSQL
@@ -698,6 +725,34 @@ jobs:
           name: diagnostics-${{ github.job }}-${{ strategy.job-index }}
           path: ${{ runner.temp }}/diagnostics
           if-no-files-found: ignore
+
+  thaw-js-costack-arm:
+    # Non-gating (plan-q9-coroutines-pr3, PR 3a): the thaw-js lib tests on the costack backend on arm64,
+    # the only CI runner for the aarch64 context-switch assembly. thaw-js links no LLVM, so no LLVM install.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        compile: ["off", "on", "check"]
+    name: thaw-js costack arm64 (compile ${{ matrix.compile }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      THAW_JS_CO: stack
+      THAW_JS_COMPILE: ${{ matrix.compile }}
+      THAW_JS_COMPILE_AFTER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: thaw-js lib tests on the costack backend (non-gating)
+        run: cargo test -p thaw-js --lib
 
   engine-tests:
     strategy:
