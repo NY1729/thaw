@@ -12115,9 +12115,11 @@ mod tests {
                 handle: 3,
                 release: factory_test_release,
             }));
-            assert!(unsafe {
-                thaw_error_set_prop_value(error, c"\u{2}cause".as_ptr(), &mut cause)
-            });
+            assert!(thaw_error_set_prop_value(
+                error,
+                c"\u{2}cause".as_ptr(),
+                &mut cause
+            ));
             assert_eq!(RETAIN_CALLS.with(Cell::get), 1);
             let read = unsafe {
                 &*thaw_json_parse_error_property(thaw_error_get_prop_json(error, c"cause".as_ptr()))
@@ -12140,9 +12142,11 @@ mod tests {
             let expected = unsafe { CStr::from_ptr(thaw_json_encode_public(&mut marker)) }
                 .to_bytes()
                 .to_vec();
-            assert!(unsafe {
-                thaw_error_set_prop_value(error, c"\u{2}cause".as_ptr(), &mut marker)
-            });
+            assert!(thaw_error_set_prop_value(
+                error,
+                c"\u{2}cause".as_ptr(),
+                &mut marker
+            ));
             assert_eq!(MARKER_RETAIN_CALLS.with(Cell::get), 0);
             let stored =
                 unsafe { CStr::from_ptr(thaw_error_get_prop_json(error, c"cause".as_ptr())) };
