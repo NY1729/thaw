@@ -55,3 +55,16 @@ function main(): void {
     let output = compile_and_run(source, "fx18_callbacks_that_mutate_params_keep_aliases_in_sync");
     assert_eq!(output, "1,2,3 1\n30 10\n6 5 1\n3,2,1 true true 2 3,1\n");
 }
+
+#[test]
+fn void_callback_into_unknown_return_slot_yields_undefined() {
+    let source = r#"
+function show(label: string, f: () => unknown): void { console.log(label, f()); }
+function main(): void {
+  show('x', (): void => {});
+  show('y', () => 1);
+}
+"#;
+    let output = compile_and_run(source, "void_callback_into_unknown_return_slot_yields_undefined");
+    assert_eq!(output, "x undefined\ny 1\n");
+}
