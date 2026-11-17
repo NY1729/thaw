@@ -231,6 +231,36 @@
     },
     configurable: false, enumerable: false, writable: false,
   });
+  // Native (compiled) promises: the runtime reports by key, `kind` as above (0 init, 1 before, 2 after,
+  // 3 promiseResolve). Ids come from the same counter and scope stack as the promise entry; a stand-in
+  // object is the resource. Key 0 means no parent: the trigger is the current execution id.
+  // ponytail: native keys are kept until exit (no destroy event yet); add when native destroy lands.
+  const thawNativeIds = new Map();
+  Object.defineProperty(globalThis, '__thaw_async_hooks_native', {
+    value: function(kind, key, parent) {
+      if (kind === 0) {
+        const known = parent === 0 ? undefined : thawNativeIds.get(parent);
+        const id = thawNextAsyncId++;
+        const trigger = known ? known.id : thawCurrentAsyncId;
+        const resource = {};
+        thawNativeIds.set(key, { id, trigger, resource });
+        thawEmit('init', id, 'PROMISE', trigger, resource);
+        return;
+      }
+      const known = thawNativeIds.get(key);
+      if (!known) return;
+      if (kind === 1) {
+        thawEnterScope(known.id, known.trigger, known.resource);
+        thawEmit('before', known.id);
+      } else if (kind === 2) {
+        thawEmit('after', known.id);
+        thawLeaveScope();
+      } else if (kind === 3) {
+        thawEmit('promiseResolve', known.id);
+      }
+    },
+    configurable: false, enumerable: false, writable: false,
+  });
   const thawRefreshBus = () => {
     const enabled = thawEnabledHooks.size > 0;
     if (enabled === thawBus.enabled) return;

@@ -1233,6 +1233,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 newline,
                 descriptor,
             )?,
+            HirType::Optional(inner) => self.compile_console_tagged(
+                value.into_struct_value(),
+                inner,
+                "undefined",
+                newline,
+                descriptor,
+            )?,
             other => return Err(format!("console.log cannot print union member {other:?}")),
         }
         Ok(())

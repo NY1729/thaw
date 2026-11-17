@@ -1840,11 +1840,14 @@ impl Interp {
             put_hidden(&fp, "constructor", function.clone());
         }
         g.declare("Function", function, true);
-        // Only the indirect (global-scope) form: the scan rejects a direct `eval(...)` call.
+        // The indirect (global-scope) form; a direct call is recognised by the interpreter's Call arm.
         let eval = self.native(|it, _, args| match arg(args, 0) {
             Value::Str(src) => it.run_sloppy(&src),
             other => Ok(other),
         });
+        if let Value::Object(o) = &eval {
+            self.intrinsic_eval = Some(o.clone());
+        }
         g.declare("eval", eval, true);
 
         // ----- Array -----

@@ -5296,3 +5296,96 @@ fn coroutine_ready_continuation_parks_and_adopts_on_the_host() {
 }
 
 include!("tests_timers.rs");
+
+thread_local! {
+    static HOOK_EVENTS: RefCell<Vec<(u8, u64, u64)>> = const { RefCell::new(Vec::new()) };
+}
+
+extern "C" fn record_hook_event(kind: u8, key: u64, parent: u64) {
+    HOOK_EVENTS.with(|events| events.borrow_mut().push((kind, key, parent)));
+}
+
+fn take_hook_events() -> Vec<(u8, u64, u64)> {
+    HOOK_EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+}
+
+/// The hook flag is process-wide: tests that switch it serialize on this lock.
+static HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+extern "C" fn resume_noop(_frame: *mut u8, _result: *const u8) {}
+
+static HOOK_RESULT: u8 = 7;
+
+#[test]
+fn native_promise_hooks_are_silent_while_the_flag_is_off() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    thaw_runtime_async_hooks_set(0, None);
+    let promise = thaw_promise_new();
+    assert_eq!(unsafe { (*promise).hook_key }, 0);
+    let mut frame = 0u8;
+    unsafe { thaw_promise_subscribe(promise, resume_noop, &mut frame as *mut u8) };
+    assert_eq!(thaw_promise_resolve(promise, &HOOK_RESULT), 1);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert!(take_hook_events().is_empty());
+    unsafe { thaw_promise_destroy(promise) };
+}
+
+#[test]
+fn native_promise_hooks_emit_init_resolve_once_and_before_after_around_resume() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    thaw_runtime_async_hooks_set(1, Some(record_hook_event));
+    let promise = thaw_promise_new();
+    let derived = thaw_promise_new();
+    let (key, derived_key) = unsafe { ((*promise).hook_key, (*derived).hook_key) };
+    assert_ne!(key, 0);
+    assert_ne!(derived_key, 0);
+    assert_ne!(key, derived_key);
+    let mut frame = 0u8;
+    unsafe { thaw_promise_subscribe(promise, resume_noop, &mut frame as *mut u8) };
+    // The reaction belongs to `derived`; PR3 links it from the then/await frame sites.
+    unsafe { (*promise).subscribers.last_mut().unwrap().hook_key = derived_key };
+    assert_eq!(take_hook_events(), vec![(0, key, 0), (0, derived_key, 0)]);
+
+    assert_eq!(thaw_promise_resolve(promise, &HOOK_RESULT), 1);
+    assert_eq!(thaw_promise_resolve(promise, &HOOK_RESULT), 0);
+    assert_eq!(take_hook_events(), vec![(3, key, 0)]);
+
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(
+        take_hook_events(),
+        vec![(1, derived_key, 0), (2, derived_key, 0)]
+    );
+    thaw_runtime_async_hooks_set(0, None);
+    unsafe {
+        thaw_promise_destroy(promise);
+        thaw_promise_destroy(derived);
+    }
+}
+
+thread_local! {
+    static NESTED_HOOK_KEYS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A sink that creates promises while the runtime is emitting: they must stay untracked.
+extern "C" fn reentrant_hook_event(_kind: u8, _key: u64, _parent: u64) {
+    let nested = thaw_promise_new();
+    NESTED_HOOK_KEYS.with(|keys| keys.borrow_mut().push(unsafe { (*nested).hook_key }));
+    unsafe { thaw_promise_destroy(nested) };
+}
+
+#[test]
+fn native_promise_hooks_sink_reentry_creates_untracked_promises() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    thaw_runtime_async_hooks_set(1, Some(reentrant_hook_event));
+    let promise = thaw_promise_new();
+    thaw_runtime_async_hooks_set(0, None);
+    assert_ne!(unsafe { (*promise).hook_key }, 0);
+    assert_eq!(NESTED_HOOK_KEYS.with(|keys| keys.borrow().clone()), vec![0]);
+    unsafe { thaw_promise_destroy(promise) };
+}

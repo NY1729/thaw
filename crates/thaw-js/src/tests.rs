@@ -3609,6 +3609,112 @@ fn intl_formats_numbers_dates_and_lists_through_the_native_icu_data() {
     assert_eq!(out.join("|"), "1.234.567,5|one|a, b, and c|1/1/1970|-1");
 }
 
+/// Node 22 `Intl.Collator({usage:'search'})` reference (ICU 78.2, CLDR 48.0; run
+/// with LANG=en_US.UTF-8). One line per locale: 4 sensitivities (base, accent,
+/// case, variant) x 17 pairs (see the JS below), each cell `L` = -1, `E` = 0,
+/// `G` = 1. The `de-sort` line is the same cells under `usage:'sort'`.
+/// Locales without their own search tailoring (fr, it, ...) must equal the
+/// root search data (`und`). `ja` kana/prolonged-sound and `th`/`ko`
+/// Hangul rows are not independently verified against a second ICU build.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_collator_search_usage_matches_node_22() {
+    let out = run(r#"
+        const sens = ['base','accent','case','variant'];
+        const pairs = [['a','ä'],['ä','a'],['a','ae'],['ä','ae'],['a','A'],['a','á'],['n','ñ'],['v','w'],['ㄱ','가'],['ก','ข'],['あ','ア'],['か','が'],['ー','あ'],['z','Å'],['ä','z'],['o','ö'],['å','z']];
+        const sym = x => x < 0 ? 'L' : x > 0 ? 'G' : 'E';
+        const row = (loc, usage) => {
+          let s = '';
+          for (const se of sens) for (const [a, b] of pairs)
+            s += sym(new Intl.Collator(loc, {usage, sensitivity: se}).compare(a, b));
+          return s;
+        };
+        for (const loc of ['de','sv','es','da','fi','ko','nb','tr','ja','zh','th','en','fr','it','pt','nl','pl','ru','und'])
+          console.log(loc + ' ' + row(loc, 'search'));
+        console.log('de-sort ' + row('de', 'sort'));
+    "#);
+    assert_eq!(
+        out,
+        [
+            "de LGLEEEELLLEELGLLLLGLGELLLLLELLGLLLLGLELEELLLEELGLLLLGLGLLLLLLLLLGLLL",
+            "sv LGLGEEELLLEELLGLGLGLGELLLLLELLLGLGLGLGLEELLLEELLGLGLGLGLLLLLLLLLLGLG",
+            "es EELLEELLLLEELGLELLGLLELLLLLELLGLLLEELLLELLLLEELGLELLGLLLLLLLLLLLGLLL",
+            "da LGLGEEELLLEELLGLGLGLGELLLLLELLLGLGLGLGLEELLLEELLGLGLGLGLLLLLLLLLLGLG",
+            "fi LGLGEEELLLEELLGLGLGLGELLLLLELLLGLGLGLGLEELLLEELLGLGLGLGLLLLLLLLLLGLG",
+            "ko EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "nb LGLGEEELLLEELLGLGLGLGELLLLLELLLGLGLGLGLEELLLEELLGLGLGLGLLLLLLLLLLGLG",
+            "tr EELLEEELLLEELGLLLLGLLELLLLLELLGLLLEELLLEELLLEELGLLLLGLLLLLLLLLLLGLLL",
+            "ja EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "zh EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "th EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "en EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "fr EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "it EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "pt EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "nl EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "pl EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "ru EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "und EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+            "de-sort EELLEEELLLEELGLELLGLLELLLLLELLGLLLEELLLEELLLEELGLELLGLLLLLLLLLLLGLLL",
+        ]
+    );
+}
+
+/// Node 22 reference for the non-matrix `usage:'search'` surface: option
+/// handling, `resolvedOptions`, `supportedLocalesOf`, sorting, and the
+/// `root` / bad-usage RangeErrors.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_collator_search_options_match_node_22() {
+    let out = run(r#"
+        const r = f => { try { return String(f()); } catch (e) { return 'ERR ' + e.name; } };
+        const c = (loc, o) => new Intl.Collator(loc, o);
+        console.log(r(() => c('de-u-co-search', {usage:'search'}).compare('a', 'ä')));
+        console.log(r(() => c('de-u-co-search', {usage:'search'}).resolvedOptions().locale));
+        console.log(r(() => c('de-u-co-search', {usage:'search'}).resolvedOptions().collation));
+        console.log(r(() => Intl.Collator.supportedLocalesOf(['de','en','xx-zz','fr-u-co-search']).join(',')));
+        console.log(r(() => c('root', {usage:'search'}).compare('a','b')));
+        console.log(r(() => c('de', {usage:'bogus'}).resolvedOptions().usage));
+        console.log(r(() => c('de').resolvedOptions().usage));
+        console.log(r(() => c('de', {usage:'search', ignorePunctuation:true}).compare('a-b', 'ab')));
+        console.log(r(() => c('de', {usage:'search', numeric:true}).compare('a2', 'a10')));
+        console.log(r(() => c('de', {usage:'search', numeric:true}).compare('ä2', 'a10')));
+        console.log(r(() => c('de', {usage:'search', caseFirst:'upper'}).compare('a', 'A')));
+        console.log(r(() => c('de', {usage:'search', caseFirst:'lower'}).compare('a', 'A')));
+        console.log(r(() => c('de', {usage:'sort', caseFirst:'upper'}).compare('a', 'A')));
+        console.log(r(() => c('de', {usage:'search', sensitivity:'case'}).compare('a', 'A')));
+        console.log(r(() => c('de', {usage:'search', sensitivity:'case'}).compare('ä', 'a')));
+        console.log(r(() => [...['ä','a','z','ae','Å']].sort(c('sv', {usage:'search'}).compare).join(' ')));
+        console.log(r(() => [...['ä','a','z','ae','Å']].sort(c('de', {usage:'search'}).compare).join(' ')));
+        console.log(r(() => [...['ä','a','z','ae','Å']].sort(c('de').compare).join(' ')));
+        console.log(r(() => JSON.stringify(c('de', {usage:'search'}).resolvedOptions())));
+    "#);
+    assert_eq!(
+        out,
+        [
+            "-1",
+            "de",
+            "default",
+            "de,en,fr-u-co-search",
+            "ERR RangeError",
+            "ERR RangeError",
+            "sort",
+            "0",
+            "-1",
+            "1",
+            "1",
+            "-1",
+            "1",
+            "-1",
+            "1",
+            "a ae z Å ä",
+            "a Å ae ä z",
+            "a Å ä ae z",
+            "{\"locale\":\"de\",\"usage\":\"search\",\"sensitivity\":\"variant\",\"ignorePunctuation\":false,\"collation\":\"default\",\"numeric\":false,\"caseFirst\":\"false\"}",
+        ]
+    );
+}
+
 #[cfg(feature = "intl")]
 #[test]
 fn intl_date_time_format_reports_parts_range_and_resolved_options() {
@@ -10060,4 +10166,92 @@ fn array_index_and_length_descriptors_are_unchanged() {
             r#"{"value":5,"writable":true,"enumerable":true,"configurable":true}"#,
         ]
     );
+}
+
+/// createHook enable/disable registers the native promise sink with the runtime, and disable clears it.
+#[test]
+fn async_hooks_enable_registers_the_native_promise_sink() {
+    let src = "var A = __thaw_async_hooks_exports; var h = A.createHook({ init: function () {} }); h.enable(); h.disable();";
+    run_loop(src);
+    let sets = crate::host::TEST_ASYNC_HOOK_SET.with(|sets| sets.borrow().clone());
+    assert_eq!(sets.len(), 2, "enable then disable: {sets:?}");
+    assert_eq!(sets[0].0, 1);
+    assert_ne!(sets[0].1, 0, "enable passes the sink");
+    assert_eq!(sets[1], (0, 0));
+}
+
+/// The id-only native entry shares the realm's id counter and scope stack with realm promises.
+#[test]
+fn async_hooks_native_entry_maps_keys_to_ids_and_scopes() {
+    let src = r#"var A = __thaw_async_hooks_exports; var out = [];
+A.createHook({
+  init: function (id, type, trig) { out.push('init ' + id + ' ' + type + ' ' + trig); },
+  before: function (id) { out.push('before ' + id); },
+  after: function (id) { out.push('after ' + id); },
+  promiseResolve: function (id) { out.push('resolve ' + id); },
+}).enable();
+__thaw_async_hooks_native(0, 77, 0);
+__thaw_async_hooks_native(0, 78, 77);
+__thaw_async_hooks_native(1, 78, 0);
+__thaw_async_hooks_native(2, 78, 0);
+__thaw_async_hooks_native(3, 77, 0);
+__thaw_async_hooks_native(1, 99, 0);
+console.log(out.join('|'));"#;
+    assert_eq!(
+        run_loop(src),
+        "init 2 PROMISE 1|init 3 PROMISE 2|before 3|after 3|resolve 2"
+    );
+}
+
+#[test]
+fn class_op_constructs_and_calls_dotted_nested_namespace_classes() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    // `export declare namespace kdf { class OpenSSL }` and a depth-3 `deep.a.B`: class paths resolve through exports
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "nestcls/index.js": function(module, exports, require) {
+  function OpenSSL(pw) { this.pw = pw; }
+  OpenSSL.prototype.derive = function (n) { return this.pw + n; };
+  function B(v) { this.v = v; }
+  B.prototype.get = function () { return this.v; };
+  module.exports = { kdf: { OpenSSL: OpenSSL }, deep: { a: { B: B } } };
+}, };
+var __thaw_bundle_require_maps = { "nestcls/index.js": {}, };
+var __thaw_bundle_entry_key = "nestcls/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (
+        CString::new("nestcls").unwrap(),
+        CString::new(bundle).unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let handle: i64 = class_call("$new$nestcls::kdf.OpenSSL$arity1", r#"["x"]"#, 0, true)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        class_call(
+            "$method$nestcls::kdf.OpenSSL$derive$overload0$arity1",
+            "[3]",
+            handle,
+            false
+        )
+        .unwrap(),
+        r#""x3""#
+    );
+    let handle: i64 = class_call("$new$nestcls::deep.a.B$arity1", "[7]", 0, true)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        class_call(
+            "$method$nestcls::deep.a.B$get$overload0$arity0",
+            "[]",
+            handle,
+            false
+        )
+        .unwrap(),
+        "7"
+    );
+    // a missing intermediate namespace is an error, as in Node (`undefined.X`)
+    assert!(class_call("$new$nestcls::kdf.Missing.X$arity0", "[]", 0, false).is_err());
 }

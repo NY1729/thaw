@@ -483,12 +483,33 @@ fn build_with_thaw_js_routing(
 }
 
 /// Marker error: a program that lowered timers to the native queue also needs a JS engine (or another
-/// event-loop owner), so it is rebuilt with the ordinary QuickJS timers.
-const NATIVE_TIMERS_MIXED: &str = "native timers need a JS engine";
+/// event-loop owner), so it is rebuilt with timers served by the build's engine (thaw-js or QuickJS).
+const NATIVE_TIMERS_NEED_ENGINE: &str = "native timers need engine-served timers";
+
+/// Whether a routed build's failure falls back to the QuickJS build. A native-timers conflict is not a
+/// routing failure: the caller rebuilds the same routing with engine-served timers instead.
+fn routed_failure_falls_back(error: &str) -> bool {
+    error != NATIVE_TIMERS_NEED_ENGINE
+}
 
 /// Native timers are on unless `THAW_NATIVE_TIMERS=0`.
 fn native_timers_enabled() -> bool {
     std::env::var("THAW_NATIVE_TIMERS").as_deref() != Ok("0")
+}
+
+#[cfg(test)]
+mod native_timers_retry_tests {
+    use super::*;
+
+    #[test]
+    fn native_timers_conflict_retries_without_the_quickjs_fallback() {
+        // the conflict is not a routed failure: the retry keeps the routing (thaw-js or QuickJS by
+        // the program's own needs) instead of recording a "fell back to QuickJS" blocker
+        assert!(!routed_failure_falls_back(NATIVE_TIMERS_NEED_ENGINE));
+        assert!(routed_failure_falls_back(THAW_JS_MIXED));
+        assert!(routed_failure_falls_back("thaw-js routing needs QuickJS: unported:x"));
+        assert!(routed_failure_falls_back("some other build error"));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -511,7 +532,8 @@ fn build_with_thaw_js_routing_shared(
 ) -> Result<(), String> {
     clear_thaw_js_blockers();
     // Timers lower to thaw-runtime's queue first (no JS context for timer-only programs); any
-    // failure, or a program that also needs a JS engine, is rebuilt with the QuickJS timers.
+    // failure, or a program that also needs a JS engine, is rebuilt with engine-served timers (the
+    // build's routing decides whether that engine is thaw-js or QuickJS).
     if lib_mode.is_none() && native_timers_enabled() {
         thaw_hir::set_native_timers(true);
         let native = build_with_thaw_js_routing_inner(
@@ -558,7 +580,7 @@ fn build_with_thaw_js_routing_inner(
         // Whatever a routed build could not express (it needed QuickJS as well, or the compiler
         // rejected a construct) is built the ordinary way: never a build failure or a wrong result
         // that the unrouted path would not have had.
-        Err(error) if routing => {
+        Err(error) if routing && routed_failure_falls_back(&error) => {
             if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
                 eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
             }
@@ -1067,7 +1089,7 @@ fn build_with_native_mode_routed(
     }
     compiler.compile_program(&program)?;
     if compiler.native_timers_conflict() {
-        return Err(NATIVE_TIMERS_MIXED.to_string());
+        return Err(NATIVE_TIMERS_NEED_ENGINE.to_string());
     }
     let uses_quickjs = compiler.uses_quickjs();
     let uses_napi = compiler.uses_napi();
@@ -1629,7 +1651,7 @@ fn quickjs_callback_export_args() -> [&'static str; 4] {
 
 /// The thaw-js loop's native-continuation drain (`drain_native_continuations`, host.rs) looks this symbol up via
 /// RTLD_DEFAULT; it is not in `quickjs_callback_export_args` and must be exported from a thaw-js routed build.
-fn thaw_js_extra_export_args() -> [&'static str; 6] {
+fn thaw_js_extra_export_args() -> [&'static str; 7] {
     [
         "-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle",
         // the thaw-js loop polls a compiled http server through RTLD_DEFAULT (host.rs poll_native_servers)
@@ -1640,6 +1662,8 @@ fn thaw_js_extra_export_args() -> [&'static str; 6] {
         "-Wl,--export-dynamic-symbol=thaw_json_borrowed_tracked_handle_id",
         // compiled closure labels, looked up via RTLD_DEFAULT (host.rs function_label_symbol)
         "-Wl,--export-dynamic-symbol=thaw_function_label_for",
+        // the realm's createHook registers its native promise sink through RTLD_DEFAULT (host.rs native_async_hooks_set)
+        "-Wl,--export-dynamic-symbol=thaw_runtime_async_hooks_set",
     ]
 }
 
@@ -1741,6 +1765,7 @@ fn thaw_js_builds_export_the_native_continuation_drain() {
             "-Wl,--export-dynamic-symbol=thaw_error_delete_prop",
             "-Wl,--export-dynamic-symbol=thaw_json_borrowed_tracked_handle_id",
             "-Wl,--export-dynamic-symbol=thaw_function_label_for",
+            "-Wl,--export-dynamic-symbol=thaw_runtime_async_hooks_set",
         ]
     );
     assert!(thaw_js_drain_export_needed(true));

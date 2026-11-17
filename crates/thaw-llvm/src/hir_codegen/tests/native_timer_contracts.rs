@@ -150,3 +150,14 @@ fn timers_combined_with_a_js_engine_conflict_and_keep_the_quickjs_path() {
     assert!(compiler.uses_quickjs());
     assert!(compiler.native_timers_conflict(), "the CLI must rebuild this on QuickJS timers");
 }
+
+// A timer global read as a value is the realm's function (Node 22: `setTimeout === globalThis.setTimeout`).
+#[test]
+fn timer_global_values_are_the_realm_functions() {
+    let source = r#"function main(): void {
+  const same: boolean = setTimeout === globalThis.setTimeout && clearTimeout === globalThis.clearTimeout;
+  const kind: string = typeof setTimeout;
+  console.log(same, kind, setImmediate === globalThis.setImmediate);
+}"#;
+    assert_eq!(compile_and_run(source, "timer_global_values_are_the_realm_functions").trim(), "true function true");
+}

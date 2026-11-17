@@ -8,6 +8,7 @@
 #   PARITY_AOT_JOBS      programs built in parallel (default min(4, cores/2))
 #   PARITY_AOT_BUILD_WRAP  optional command prefix for each build, e.g. a systemd-run slice with MemoryMax
 #   PARITY_AOT_RUN_TIMEOUT / PARITY_AOT_BUILD_TIMEOUT  seconds (defaults 20 / 900)
+#   PARITY_AOT_FAMILIES  optional comma list: generate only these families (CI shards); coverage then skips its ratchet
 # Exit 0: harness ran (gaps and rejects are reported, not gated). Exit 2: harness error.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -23,11 +24,16 @@ JOBS=${PARITY_AOT_JOBS:-$(n=$(nproc 2>/dev/null || echo 2); n=$((n / 2)); [ "$n"
 
 mkdir -p "$OUT" || exit 2
 # Only the directories this harness writes are cleared; anything else under OUT is left alone.
-rm -rf "$OUT/programs" "$OUT/node" "$OUT/thaw-js" "$OUT/quickjs"
+rm -rf "$OUT/programs" "$OUT/node" "$OUT/thaw-js" "$OUT/quickjs" "$OUT/coverage.json"
 
-python3 "$HERE/gen_probes.py" "$OUT/programs" || { echo "harness error: gen_probes.py failed" >&2; exit 2; }
+python3 "$HERE/gen_probes.py" "$OUT/programs" ${PARITY_AOT_FAMILIES:+--families "$PARITY_AOT_FAMILIES"} || { echo "harness error: gen_probes.py failed" >&2; exit 2; }
 python3 "$HERE/aot_run.py" --programs "$OUT/programs" --out "$OUT" --thaw "$THAW" --node "$NODE" \
   --engines "$ENGINES" --jobs "$JOBS" "${WRITE[@]}"
 rc=$?
+# API coverage of the manifest (no thaw). Appends its table to summary.md; never changes the exit code. A subset
+# run (PARITY_AOT_FAMILIES) skips the ratchet, since untouched ids outside the subset are expected.
+COV=(--manifest "$OUT/programs/manifest.json" --out "$OUT" --summary "$OUT/summary.md")
+if [ -n "${PARITY_AOT_FAMILIES:-}" ]; then COV+=(--no-ratchet); fi
+python3 "$HERE/coverage.py" "${COV[@]}" || echo "coverage: exit $? (non-gating, see log)" >&2
 echo "summary: $OUT/summary.md"
 exit "$rc"

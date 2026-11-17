@@ -316,6 +316,7 @@ thaw_json_is_buffer
 thaw_json_is_buffer_shape
 thaw_json_is_date_shape
 thaw_json_is_error_instance
+thaw_json_is_host_arraybuffer
 thaw_json_is_host_error_family
 thaw_json_is_live_iterable
 thaw_json_is_native_iterator
@@ -592,6 +593,7 @@ thaw_regex_split
 thaw_regex_test
 thaw_runtime_abort_pending_work
 thaw_runtime_adopt_ready
+thaw_runtime_async_hooks_set
 thaw_runtime_async_work_pending
 thaw_runtime_await_blocking
 thaw_runtime_drain_detached
