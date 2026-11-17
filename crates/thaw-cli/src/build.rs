@@ -542,8 +542,14 @@ fn build_with_thaw_js_routing_shared(
             routing,
         );
         thaw_hir::set_native_timers(false);
-        if native.is_ok() {
-            return native;
+        match native {
+            Ok(()) => return Ok(()),
+            // Logged, never failed: the engine-timer rebuild below is the designed retry, and a
+            // lowering gap here is only a missing native fast path (see the plan's R2 risks).
+            Err(error) if error != NATIVE_TIMERS_NEED_ENGINE && thaw_js_fallback_mode() != ThawJsFallbackMode::Silent => {
+                eprintln!("FALLBACK: native timers retried on engine-served timers: {error}");
+            }
+            Err(_) => {}
         }
     }
     build_with_thaw_js_routing_inner(
@@ -581,8 +587,18 @@ fn build_with_thaw_js_routing_inner(
         // rejected a construct) is built the ordinary way: never a build failure or a wrong result
         // that the unrouted path would not have had.
         Err(error) if routing && routed_failure_falls_back(&error) => {
-            if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
-                eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
+            match thaw_js_fallback_mode() {
+                ThawJsFallbackMode::Error => {
+                    let refused = thaw_js_recorded_refusals_text();
+                    let sep = if refused.is_empty() { "" } else { "; " };
+                    return Err(format!("unsupported on thaw-js: {error}{sep}{refused}"));
+                }
+                ThawJsFallbackMode::Warn => eprintln!("FALLBACK: {error}"),
+                ThawJsFallbackMode::Silent => {
+                    if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
+                        eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
+                    }
+                }
             }
             record_thaw_js_fallback_blocker(&error);
             build_with_native_mode_routed(
@@ -1106,6 +1122,21 @@ fn build_with_native_mode_routed(
             let blockers: String = blockers.chars().take(600).collect();
             return Err(format!("{THAW_JS_MIXED}: {blockers}"));
         }
+    }
+    // `THAW_JS_FALLBACK`: a routed build that still links QuickJS (a package thaw-js refused, with no thaw-js code in
+    // the program to trigger the mixed-build retry above). A refused package alone is not a fallback: built-ins such as
+    // node:crypto are refused per function and still end up on thaw-js, so only the link decides.
+    if thaw_js_routing && uses_quickjs && thaw_js_fallback_mode() != ThawJsFallbackMode::Silent {
+        let refusals = take_thaw_js_refusals();
+        let why = if refusals.is_empty() {
+            "the program links QuickJS".to_string()
+        } else {
+            refusals.join("; ")
+        };
+        if thaw_js_fallback_mode() == ThawJsFallbackMode::Error {
+            return Err(format!("unsupported on thaw-js: {why}"));
+        }
+        eprintln!("FALLBACK: {why}");
     }
     if let Some(object) = manifest.as_object_mut() {
         // The flag must name the archive this build links. The pre-compile guess above misses
