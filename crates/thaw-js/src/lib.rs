@@ -5233,6 +5233,8 @@ mod regexp_proto_tests;
 #[cfg(test)]
 mod regexp_statics_tests;
 #[cfg(test)]
+mod resizable_buffer_tests;
+#[cfg(test)]
 mod sab_tests;
 #[cfg(test)]
 mod stack_overflow_tests;

@@ -144,6 +144,7 @@ pub(crate) fn sab_store(block: Arc<SabBlock>) -> Bytes {
         detached: Cell::new(false),
         sab: Some(block),
         charged: Cell::new(0),
+        max: None,
     })
 }
 
@@ -160,6 +161,8 @@ pub(crate) struct Store {
     sab: Option<Arc<SabBlock>>,
     /// Bytes this storage charged to the heap limit (`heap_limit`); 0 once detached.
     charged: Cell<usize>,
+    /// `maxByteLength` of a resizable ArrayBuffer (`resize_bytes` moves its length within it); None when fixed.
+    max: Option<usize>,
 }
 
 impl Drop for Store {
@@ -186,6 +189,11 @@ pub(crate) type Bytes = Rc<Store>;
 
 /// A fresh, attached storage owning `v`.
 pub(crate) fn new_bytes(v: Vec<u8>) -> Bytes {
+    new_bytes_max(v, None)
+}
+
+/// A fresh, attached storage owning `v`, resizable up to `max` when given (a resizable ArrayBuffer).
+pub(crate) fn new_bytes_max(v: Vec<u8>, max: Option<usize>) -> Bytes {
     let charged = heap_limit::charge(v.len());
     Rc::new(Store {
         cell: RefCell::new(v),
@@ -193,7 +201,32 @@ pub(crate) fn new_bytes(v: Vec<u8>) -> Bytes {
         detached: Cell::new(false),
         sab: None,
         charged: Cell::new(charged),
+        max,
     })
+}
+
+/// Sets a resizable storage's length to `n` (the caller has checked `n <= max`): new bytes are zero, a shrink drops
+/// the tail. The heap-limit charge follows the length. False, with the length unchanged, when the memory cannot be
+/// had (the caller throws a RangeError).
+pub(crate) fn resize_bytes(b: &Bytes, n: usize) -> bool {
+    debug_assert!(
+        b.sab.is_none() && b.max.is_some(),
+        "resize_bytes on a fixed or shared storage"
+    );
+    let mut v = b.cell.borrow_mut();
+    let cur = v.len();
+    if n > cur {
+        if v.try_reserve_exact(n - cur).is_err() {
+            return false;
+        }
+        b.charged.set(b.charged.get() + heap_limit::charge(n - cur));
+    } else {
+        let credit = (cur - n).min(b.charged.get());
+        heap_limit::credit(credit);
+        b.charged.set(b.charged.get() - credit);
+    }
+    v.resize(n, 0);
+    true
 }
 
 #[cfg(feature = "wasm")]
@@ -205,6 +238,7 @@ pub(crate) fn shared_bytes(shared: Rc<RefCell<Vec<u8>>>) -> Bytes {
         detached: Cell::new(false),
         sab: None,
         charged: Cell::new(0),
+        max: None,
     })
 }
 
@@ -240,7 +274,12 @@ pub(crate) struct TypedArr {
     pub(crate) data: Bytes,
     pub(crate) ty: Ty,
     pub(crate) off: usize,
-    pub(crate) len: usize,
+    /// The element count of a fixed-length view (meaningless for a length-tracking one: use `view_len`).
+    pub(crate) fixed_len: usize,
+    /// Length-tracking (`new Uint8Array(rab)`): the view runs from `off` to the buffer's current end.
+    pub(crate) track: bool,
+    /// The buffer is resizable, so the length is re-derived on each access (`view_len`); false keeps the fixed path.
+    pub(crate) rz: bool,
 }
 
 /// What an integer-indexed exotic object does with a property key (see `TypedArr::key`).
@@ -265,19 +304,46 @@ pub(crate) fn typed_own_key(o: &Obj, key: &str) -> Option<bool> {
 }
 
 impl TypedArr {
-    /// The view's window still lies inside its buffer (false once the buffer is detached).
+    /// The element count right now, or None when the view is out of bounds: its buffer is detached or shrank below
+    /// the window (a fixed view), or below its offset (a length-tracking one). Whole elements only.
     #[inline]
-    pub(crate) fn live(&self) -> bool {
-        self.off + self.len * self.ty.size() <= self.data.borrow().len()
+    pub(crate) fn view_len(&self) -> Option<usize> {
+        let bytes = self.data.borrow().len();
+        if self.track {
+            bytes.checked_sub(self.off).map(|t| t / self.ty.size())
+        } else if self.off + self.fixed_len * self.ty.size() <= bytes {
+            Some(self.fixed_len)
+        } else {
+            None
+        }
     }
 
-    /// The length a script sees: 0 for a detached buffer, `len` otherwise.
-    pub(crate) fn cur_len(&self) -> usize {
-        if self.live() {
-            self.len
+    /// The view is in bounds (false once the buffer is detached or the window no longer fits).
+    #[inline]
+    pub(crate) fn live(&self) -> bool {
+        self.view_len().is_some()
+    }
+
+    /// Detached or out of bounds: the methods that throw a TypeError on it.
+    pub(crate) fn gone(&self) -> bool {
+        is_detached(&self.data) || !self.live()
+    }
+
+    /// Element `i` is inside the view now. A fixed view over a fixed buffer is just the index check: the one branch
+    /// the hot path pays (the buffer cannot shrink without detaching, and the byte access is bounds-checked anyway).
+    #[inline]
+    fn has(&self, i: usize) -> bool {
+        if self.rz {
+            self.view_len().is_some_and(|n| i < n)
         } else {
-            0
+            i < self.fixed_len
         }
+    }
+
+    /// The length a script sees: 0 when out of bounds (detached, or a window that no longer fits), the live length
+    /// otherwise.
+    pub(crate) fn cur_len(&self) -> usize {
+        self.view_len().unwrap_or(0)
     }
 
     /// The offset a script sees: 0 for a detached buffer, `off` otherwise.
@@ -291,16 +357,16 @@ impl TypedArr {
 
     /// A copy of the bytes the view covers (empty when detached).
     pub(crate) fn window(&self) -> Vec<u8> {
-        if !self.live() {
+        let Some(n) = self.view_len() else {
             return Vec::new();
-        }
+        };
         let d = self.data.borrow();
-        d[self.off..self.off + self.len * self.ty.size()].to_vec()
+        d[self.off..self.off + n * self.ty.size()].to_vec()
     }
 
     #[inline]
     pub(crate) fn get(&self, i: usize) -> Option<f64> {
-        if i >= self.len {
+        if !self.has(i) {
             return None;
         }
         let d = self.data.borrow();
@@ -325,7 +391,7 @@ impl TypedArr {
         if !self.ty.is_big() {
             return self.get(i).map(Value::Number);
         }
-        if i >= self.len {
+        if !self.has(i) {
             return None;
         }
         let d = self.data.borrow();
@@ -366,7 +432,7 @@ impl TypedArr {
 
     /// Wraps modulo 2^64 like the spec's BigInt64 / BigUint64 stores.
     fn set_big(&self, i: usize, x: &BigInt) {
-        if i >= self.len || !self.live() {
+        if !self.has(i) || !self.live() {
             return;
         }
         let low = (x & BigInt::from(u64::MAX)).to_u64().unwrap_or(0);
@@ -376,7 +442,7 @@ impl TypedArr {
 
     /// Numeric store. The 64-bit types never reach it: `set_value` takes the BigInt path.
     pub(crate) fn set(&self, i: usize, v: f64) {
-        if i >= self.len || !self.live() {
+        if !self.has(i) || !self.live() {
             return;
         }
         if self.ty.is_big() {
@@ -420,12 +486,14 @@ impl TypedArr {
     /// The numeric elements. Numeric types only: a 64-bit array has no f64 form, use `to_values`.
     pub(crate) fn to_vec(&self) -> Vec<f64> {
         debug_assert!(!self.ty.is_big(), "to_vec on a BigInt typed array");
-        (0..self.len).filter_map(|i| self.get(i)).collect()
+        (0..self.cur_len()).filter_map(|i| self.get(i)).collect()
     }
 
     /// Every element as a JS value.
     pub(crate) fn to_values(&self) -> Vec<Value> {
-        (0..self.len).filter_map(|i| self.get_value(i)).collect()
+        (0..self.cur_len())
+            .filter_map(|i| self.get_value(i))
+            .collect()
     }
 }
 
@@ -492,9 +560,71 @@ impl Interp {
         }
     }
 
+    /// `new ArrayBuffer(len, options)`'s `maxByteLength`: None (a fixed buffer) unless options is an object whose
+    /// member is not undefined. `len` must not exceed it.
+    fn ab_max_option(&mut self, options: &Value, len: usize) -> R<Option<usize>> {
+        if !matches!(options, Value::Object(_)) {
+            return Ok(None);
+        }
+        let m = self.get(options, "maxByteLength")?;
+        if matches!(m, Value::Undefined) {
+            return Ok(None);
+        }
+        let m = self.num(&m);
+        let m = if m.is_nan() { 0.0 } else { m.trunc() };
+        if !(0.0..=9007199254740991.0).contains(&m) || len as f64 > m {
+            return self.throw_error("RangeError", "Invalid array buffer max length");
+        }
+        Ok(Some(m as usize))
+    }
+
+    /// `ArrayBuffer.prototype.resize(newLength)`: a resizable buffer's length moves within its max. The order is the
+    /// spec's: receiver, then ToIndex (which may run user code), then detached, then the max.
+    fn ab_resize(&mut self, this: &Value, a: &[Value]) -> R<Value> {
+        let data = self.ab_receiver(this, "ArrayBuffer.prototype.resize")?;
+        let Some(max) = data.max else {
+            return self.throw_error(
+                "TypeError",
+                "Method ArrayBuffer.prototype.resize called on incompatible receiver #<ArrayBuffer>",
+            );
+        };
+        let n = self.num(&arg(a, 0));
+        let n = if n.is_nan() { 0.0 } else { n.trunc() };
+        if !(0.0..=9007199254740991.0).contains(&n) {
+            return self.throw_error(
+                "RangeError",
+                "ArrayBuffer.prototype.resize: Invalid length parameter",
+            );
+        }
+        if is_detached(&data) {
+            return self.throw_error(
+                "TypeError",
+                "Cannot perform ArrayBuffer.prototype.resize on a detached ArrayBuffer",
+            );
+        }
+        if n > max as f64 {
+            return self.throw_error(
+                "RangeError",
+                "ArrayBuffer.prototype.resize: Invalid length parameter",
+            );
+        }
+        if n > 2f64.powi(32) || !resize_bytes(&data, n as usize) {
+            return self.throw_error("RangeError", "Array buffer allocation failed");
+        }
+        self.check_interrupt()?;
+        Ok(Value::Undefined)
+    }
+
     /// `transfer(newLength?)` / `transferToFixedLength(newLength?)`: a new buffer with the same bytes
-    /// (zero-extended or truncated) and the source detached. Resizable buffers are not modelled.
-    fn ab_transfer(&mut self, this: &Value, a: &[Value], method: &str) -> R<Value> {
+    /// (zero-extended or truncated) and the source detached. `keep_resizable` (transfer, not
+    /// transferToFixedLength) keeps a resizable buffer's max, and the new length must fit it.
+    fn ab_transfer(
+        &mut self,
+        this: &Value,
+        a: &[Value],
+        method: &str,
+        keep_resizable: bool,
+    ) -> R<Value> {
         let data = self.ab_receiver(this, method)?;
         if is_detached(&data) {
             return self.throw_error(
@@ -503,6 +633,7 @@ impl Interp {
             );
         }
         let cur = data.borrow().len();
+        let max = if keep_resizable { data.max } else { None };
         let new_len = match arg(a, 0) {
             Value::Undefined => cur,
             v => {
@@ -521,10 +652,18 @@ impl Interp {
                 n as usize
             }
         };
+        if max.is_some_and(|m| new_len > m) {
+            return self.throw_error("RangeError", "Invalid array buffer length");
+        }
         let mut out = data.borrow().clone();
+        if out.try_reserve(new_len.saturating_sub(cur)).is_err() {
+            return self.throw_error("RangeError", "Array buffer allocation failed");
+        }
         out.resize(new_len, 0);
         detach_bytes(&data);
-        Ok(Value::Object(self.new_array_buffer(new_bytes(out))))
+        Ok(Value::Object(
+            self.new_array_buffer(new_bytes_max(out, max)),
+        ))
     }
 
     /// `new ArrayBuffer(n)` / `new SharedArrayBuffer(n)`: zero-filled, `n` truncated, NaN = 0.
@@ -537,7 +676,8 @@ impl Interp {
         let obj = if shared {
             self.new_shared_buffer(new_sab_bytes(n as usize))
         } else {
-            self.new_array_buffer(new_bytes(vec![0; n as usize]))
+            let max = self.ab_max_option(&arg(args, 1), n as usize)?;
+            self.new_array_buffer(new_bytes_max(vec![0; n as usize], max))
         };
         // the bytes are charged above: stop here if that tripped the worker's heap limit
         self.check_interrupt()?;
@@ -567,6 +707,8 @@ impl Interp {
         }
     }
 
+    /// A view over `data` from `off`: `len` elements, or length-tracking when `track` (a tracking view covers the
+    /// buffer to its current end, so `len` is then only a placeholder).
     pub(crate) fn new_typed(
         &self,
         ty: Ty,
@@ -574,8 +716,10 @@ impl Interp {
         data: Bytes,
         off: usize,
         len: usize,
+        track: bool,
     ) -> Value {
         let proto = self.rt.typed_protos.get(ty as usize).cloned();
+        let rz = data.max.is_some();
         Value::Object(new_obj(
             proto,
             Kind::Typed(TypedArr {
@@ -583,7 +727,9 @@ impl Interp {
                 data,
                 ty,
                 off,
-                len,
+                fixed_len: len,
+                track,
+                rz,
             }),
         ))
     }
@@ -592,7 +738,7 @@ impl Interp {
     pub(crate) fn typed_with_len(&self, ty: Ty, len: usize) -> Value {
         let data: Bytes = new_bytes(vec![0; len * ty.size()]);
         let abuf = self.new_array_buffer(data.clone());
-        self.new_typed(ty, abuf, data, 0, len)
+        self.new_typed(ty, abuf, data, 0, len, false)
     }
 
     /// The bytes a typed array views (its window, not the whole buffer) or an `ArrayBuffer` holds; None for anything else.
@@ -613,7 +759,7 @@ impl Interp {
         let len = bytes.len();
         let data: Bytes = new_bytes(bytes);
         let abuf = self.new_array_buffer(data.clone());
-        self.new_typed(Ty::U8, abuf, data, 0, len)
+        self.new_typed(Ty::U8, abuf, data, 0, len, false)
     }
 
     /// A typed array source copies element-wise only between two BigInt types or two numeric ones (spec).
@@ -669,7 +815,10 @@ impl Interp {
                             &format!("Start offset {off} is outside the bounds of the buffer"),
                         );
                     }
+                    // a resizable buffer with no length gives a length-tracking view (spec: IsFixedLength false)
+                    let track = data.max.is_some() && matches!(arg(args, 2), Value::Undefined);
                     let len = match arg(args, 2) {
+                        Value::Undefined if track => 0,
                         Value::Undefined => {
                             if (total - off) % ty.size() != 0 {
                                 return self.throw_error(
@@ -685,13 +834,13 @@ impl Interp {
                         }
                         v => self.num(&v) as usize,
                     };
-                    if off + len * ty.size() > total {
+                    if !track && off + len * ty.size() > total {
                         return self.throw_error(
                             "RangeError",
                             &format!("Invalid typed array length: {len}"),
                         );
                     }
-                    return Ok(self.new_typed(ty, o.clone(), data, off, len));
+                    return Ok(self.new_typed(ty, o.clone(), data, off, len, track));
                 }
                 let items: Vec<Value> = if let Some(t) = Self::typed_of(&a0) {
                     self.check_mix(t.ty, ty)?;
@@ -746,16 +895,38 @@ impl Interp {
             Ok(Value::Object(it.new_array_buffer(new_bytes(out))))
         });
         self.set_native(&ab_proto, "transfer", |it, this, a| {
-            it.ab_transfer(this, a, "ArrayBuffer.prototype.transfer")
+            it.ab_transfer(this, a, "ArrayBuffer.prototype.transfer", true)
         });
         self.set_native(&ab_proto, "transferToFixedLength", |it, this, a| {
-            it.ab_transfer(this, a, "ArrayBuffer.prototype.transferToFixedLength")
+            it.ab_transfer(
+                this,
+                a,
+                "ArrayBuffer.prototype.transferToFixedLength",
+                false,
+            )
         });
+        self.set_native(&ab_proto, "resize", |it, this, a| it.ab_resize(this, a));
         let detached_get = self.native(|it, this, _| {
             let data = it.ab_receiver(this, "get ArrayBuffer.prototype.detached")?;
             Ok(Value::Bool(is_detached(&data)))
         });
         define_accessor(&ab_proto, "detached", Some(detached_get), None, false);
+        let resizable_get = self.native(|it, this, _| {
+            let data = it.ab_receiver(this, "get ArrayBuffer.prototype.resizable")?;
+            Ok(Value::Bool(data.max.is_some()))
+        });
+        define_accessor(&ab_proto, "resizable", Some(resizable_get), None, false);
+        // a detached buffer reports 0 (its max is kept for `resizable`); a fixed one reports its length
+        let max_get = self.native(|it, this, _| {
+            let data = it.ab_receiver(this, "get ArrayBuffer.prototype.maxByteLength")?;
+            let n = match data.max {
+                _ if is_detached(&data) => 0,
+                Some(m) => m,
+                None => data.borrow().len(),
+            };
+            Ok(Value::Number(n as f64))
+        });
+        define_accessor(&ab_proto, "maxByteLength", Some(max_get), None, false);
         g.declare("ArrayBuffer", ab, true);
 
         // ----- SharedArrayBuffer: same storage, own prototype (not an ArrayBuffer); byteLength is served by
@@ -777,6 +948,19 @@ impl Interp {
             Ok(Value::Object(it.new_shared_buffer(copy)))
         });
         g.declare("SharedArrayBuffer", sab, true);
+        // length-tracking and out-of-bounds views (the prelude's brand checks and DataView / structuredClone use them)
+        let oob = self.native(|_, _, a| {
+            Ok(Value::Bool(
+                Self::typed_of(&arg(a, 0)).is_some_and(|t| !t.live()),
+            ))
+        });
+        g.declare("__thaw_ta_oob", oob, true);
+        let track = self.native(|_, _, a| {
+            Ok(Value::Bool(
+                Self::typed_of(&arg(a, 0)).is_some_and(|t| t.track),
+            ))
+        });
+        g.declare("__thaw_ta_track", track, true);
         // the wire and structuredClone move a block between Interps as an id (the table is in worker.rs)
         let export = self.native(|it, _, a| {
             let Some(block) = Self::bytes_of_buffer(&arg(a, 0)).and_then(|b| b.sab.clone()) else {
@@ -848,7 +1032,7 @@ impl Interp {
             let Some(t) = Self::typed_of(this) else {
                 return it.throw_error("TypeError", "this is not a typed array.");
             };
-            if is_detached(&t.data) {
+            if t.gone() {
                 return it.throw_error(
                     "TypeError",
                     "Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer",
@@ -858,6 +1042,9 @@ impl Interp {
                 Value::Undefined => 0,
                 v => it.num(&v) as usize,
             };
+            // spec: a typed array source is copied after its checks; an array-like's length is checked before any element
+            // is read, and a resize made by a getter in between just drops the writes past the new end
+            let mut array_like = false;
             let src: Vec<Value> = if let Some(s) = Self::typed_of(&arg(a, 0)) {
                 it.check_mix(s.ty, t.ty)?;
                 s.to_values()
@@ -867,6 +1054,10 @@ impl Interp {
                     None => {
                         let n = it.get(&arg(a, 0), "length")?;
                         let n = it.num(&n) as usize;
+                        if off + n > t.cur_len() {
+                            return it.throw_error("RangeError", "offset is out of bounds");
+                        }
+                        array_like = true;
                         let mut v = Vec::new();
                         for i in 0..n {
                             v.push(it.get(&arg(a, 0), &i.to_string())?);
@@ -875,7 +1066,7 @@ impl Interp {
                     }
                 }
             };
-            if off + src.len() > t.len {
+            if !array_like && off + src.len() > t.cur_len() {
                 return it.throw_error("RangeError", "offset is out of bounds");
             }
             for (i, v) in src.iter().enumerate() {
@@ -893,7 +1084,7 @@ impl Interp {
                     "Cannot perform Construct on a detached ArrayBuffer",
                 );
             }
-            let n = t.len as f64;
+            let n = t.cur_len() as f64;
             let rel = |it: &mut Interp, v: Value, d: f64| {
                 let x = if matches!(v, Value::Undefined) {
                     d
@@ -908,12 +1099,15 @@ impl Interp {
             };
             let (s, e) = (rel(it, arg(a, 0), 0.0), rel(it, arg(a, 1), n));
             let len = if e > s { (e - s) as usize } else { 0 };
+            // a length-tracking view with no end stays tracking (spec: the result's length is auto too)
+            let track = t.track && matches!(arg(a, 1), Value::Undefined);
             let view = it.new_typed(
                 t.ty,
                 t.abuf.clone(),
                 t.data.clone(),
                 t.off + s as usize * t.ty.size(),
                 len,
+                track,
             );
             // keep the receiver's prototype (Buffer subclasses)
             if let (Value::Object(v), Value::Object(r)) = (&view, this) {
@@ -925,13 +1119,13 @@ impl Interp {
             let Some(t) = Self::typed_of(this) else {
                 return it.throw_error("TypeError", "this is not a typed array.");
             };
-            if is_detached(&t.data) {
+            if t.gone() {
                 return it.throw_error(
                     "TypeError",
                     "Cannot perform %TypedArray%.prototype.slice on a detached ArrayBuffer",
                 );
             }
-            let n = t.len as f64;
+            let n = t.cur_len() as f64;
             let rel = |it: &mut Interp, v: Value, d: f64| {
                 let x = if matches!(v, Value::Undefined) {
                     d
@@ -991,11 +1185,10 @@ const TYPED_PRELUDE: &str = r#"
     if (!(this instanceof SharedArrayBuffer)) throw new TypeError('Receiver is not a SharedArrayBuffer');
     return this.byteLength;
   });
-  // The native getter, captured before any script can replace it; views over a detached buffer
-  // clamp to length 0 and the methods below throw V8's messages (recorded from Node 22).
+  // The native getter, captured before any script can replace it; views over a detached (or shrunk, see
+  // `__thaw_ta_oob`) buffer clamp to length 0 and the methods below throw V8's messages (recorded from Node 22).
   var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
-  function gone(t) { return isTA(t) && detGet.call(t.buffer); }
-  acc(ArrayBuffer.prototype, 'resizable', function () { return false; });
+  function gone(t) { return isTA(t) && (detGet.call(t.buffer) || __thaw_ta_oob(t)); }
   acc(SharedArrayBuffer.prototype, 'growable', function () { return false; });
   acc(SharedArrayBuffer.prototype, 'maxByteLength', function () {
     if (!(this instanceof SharedArrayBuffer)) throw new TypeError('Receiver is not a SharedArrayBuffer');

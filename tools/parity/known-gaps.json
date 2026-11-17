@@ -196,14 +196,6 @@
   {
    "id": "surface::Array.prototype.length",
    "kind": "MISSING"
-  },
-  {
-   "id": "surface::ArrayBuffer.prototype.maxByteLength",
-   "kind": "MISSING"
-  },
-  {
-   "id": "surface::ArrayBuffer.prototype.resize",
-   "kind": "MISSING"
   }
  ]
 }
