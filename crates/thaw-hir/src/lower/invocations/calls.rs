@@ -5884,6 +5884,8 @@ impl<'a> FnLowerer<'a> {
             args,
             expected,
         )?;
+        // A Buffer-shaped receiver searches its bytes (`includes('yy')` is a subsequence search).
+        let result = self.buffer_aware_select(&json_name, "includes", args, member.span, false, result)?;
         self.wrap_call_argument_bindings(
             result,
             &[
