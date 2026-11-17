@@ -377,7 +377,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 let [source] = args else {
                     return Err("`__thaw_bytes_from_array` expects one operand".into());
                 };
-                let handle = self.compile_expr(source)?.into_pointer_value();
+                let BasicValueEnum::PointerValue(handle) = self.compile_expr(source)? else {
+                    return Err("`__thaw_bytes_from_array` expects an array handle".into());
+                };
                 let data = self.compile_array_data(handle)?;
                 let result = self
                     .builder

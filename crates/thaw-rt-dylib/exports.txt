@@ -273,6 +273,7 @@ thaw_json_brand_handle_placeholder
 thaw_json_brand_wrapper
 thaw_json_brand_wrapper_if
 thaw_json_buffer_inspect
+thaw_json_buffer_sync
 thaw_json_callback_error
 thaw_json_callback_error_tuple
 thaw_json_callback_origin_acquire
