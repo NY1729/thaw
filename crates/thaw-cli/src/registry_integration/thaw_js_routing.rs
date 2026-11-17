@@ -43,9 +43,26 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    /// Packages the LAST shim-generation pass left on QuickJS (`THAW_JS_FALLBACK` warn/error). A pass can refuse a
+    /// package that the next pass (with forced fallbacks) accepts, so only the final pass's list counts.
+    static THAW_JS_REFUSALS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Replaces the refusal list with the current pass's.
+fn set_thaw_js_refusals(refusals: Vec<String>) {
+    THAW_JS_REFUSALS.with(|r| *r.borrow_mut() = refusals);
+}
+
+/// The final pass's refusals (cleared).
+fn take_thaw_js_refusals() -> Vec<String> {
+    THAW_JS_REFUSALS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+}
+
 /// Starts a fresh blocker list for a build (a build's routing attempts all record into it).
 fn clear_thaw_js_blockers() {
     THAW_JS_BLOCKERS.with(|blockers| blockers.borrow_mut().clear());
+    set_thaw_js_refusals(Vec::new());
 }
 
 /// Records a blocker; returns whether it was new to this build.
@@ -70,6 +87,19 @@ fn thaw_js_package_refusal(package: &str) -> String {
             .iter()
             .filter(|(name, _)| name == package)
             .map(|(_, why)| why.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
+/// Every package refusal recorded in this build as `package `X`: why`, joined (appended to a fallback error).
+fn thaw_js_recorded_refusals_text() -> String {
+    THAW_JS_BLOCKERS.with(|blockers| {
+        blockers
+            .borrow()
+            .iter()
+            .filter(|(name, _)| name != "<build>")
+            .map(|(name, why)| format!("package `{name}` refused: {why}"))
             .collect::<Vec<_>>()
             .join("; ")
     })
@@ -834,12 +864,9 @@ fn thaw_js_package_eligible(
     let mentions = |name: &str| thaw_js_mentions(user_source, name);
     let bytes_result_ok = thaw_js_bytes_result_allowed(user_source);
     let debug = std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1");
-    let mode = thaw_js_fallback_mode();
     let reject = |why: String| {
-        let fresh = record_thaw_js_blocker(&pkg.name, &why);
-        if fresh && mode != ThawJsFallbackMode::Silent {
-            eprintln!("FALLBACK: package `{}` stays on QuickJS: {why}", pkg.name);
-        } else if debug {
+        record_thaw_js_blocker(&pkg.name, &why);
+        if debug {
             eprintln!(
                 "thaw-js routing: package `{}` stays on QuickJS: {why}",
                 pkg.name

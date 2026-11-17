@@ -890,13 +890,37 @@ fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal_and_warn_mode_
     set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let error = build(&dir.join("app-error")).unwrap_err();
     assert!(error.starts_with("unsupported on thaw-js: "), "{error}");
-    assert!(error.contains("package `node:worker_threads` stays on QuickJS"), "{error}");
+    assert!(error.contains("package `node:worker_threads` refused"), "{error}");
     // warn: the same program builds, falling back to QuickJS for the refused package
     set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Warn));
     build(&dir.join("app-warn")).unwrap();
     set_thaw_js_fallback_mode_override(None);
     let manifest = artifact_manifest_from_bytes(&std::fs::read(dir.join("app-warn")).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], true, "{manifest}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_fallback_error_mode_fails_only_when_the_build_links_quickjs() {
+    // node:crypto's typed `randomFillSync` declaration is refused per function, yet the program still ends up
+    // on thaw-js: an `error` build must succeed, since nothing links QuickJS.
+    let (dir, registry, entry) = thaw_js_class_fixture(
+        "fallback-final-pass",
+        "import { randomFillSync } from 'node:crypto';\n\
+         function main(): void {\n\
+           const b = Buffer.alloc(8);\n\
+           randomFillSync(b, 2, 3);\n\
+           console.log(b.length);\n\
+         }\n",
+    );
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &dir.join("app"), &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(dir.join("app")).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     let _ = std::fs::remove_dir_all(dir);
 }
 

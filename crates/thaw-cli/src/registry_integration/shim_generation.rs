@@ -344,7 +344,7 @@ fn generate_registry_shims_pass(
     thaw_js_routed: &ThawJsPackages,
 ) -> Result<(RegistryShims, ThawJsPackages), String> {
     let mut thaw_js_eligible = ThawJsPackages::new();
-    // `THAW_JS_FALLBACK=error`: every package thaw-js refuses, failing the build with all of them.
+    // `THAW_JS_FALLBACK=warn|error`: every package thaw-js refuses in this pass (reported by `build` after the last pass).
     let mut thaw_js_refusals: Vec<String> = Vec::new();
     let observed_arities = observed_member_call_arities_named(user_source, user_source_name)?;
     let observed_constructor_arities =
@@ -2209,7 +2209,7 @@ fn generate_registry_shims_pass(
                         &shim[segment_start..segment_end],
                     ) {
                         thaw_js_eligible.insert(pkg.name.clone());
-                    } else if thaw_js_fallback_mode() == ThawJsFallbackMode::Error {
+                    } else if thaw_js_fallback_mode() != ThawJsFallbackMode::Silent {
                         thaw_js_refusals.push(format!(
                             "package `{}` stays on QuickJS: {}",
                             pkg.name,
@@ -2233,9 +2233,8 @@ fn generate_registry_shims_pass(
             }
         }
     }
-    if !thaw_js_refusals.is_empty() {
-        return Err(thaw_js_refusals.join("; "));
-    }
+    // judged by `build` after its last pass: an earlier pass can refuse what a forced-fallback pass accepts
+    set_thaw_js_refusals(thaw_js_refusals);
 
     let module_bundles: Vec<thaw_bridge::ModuleBundle> = bundles
         .iter()
