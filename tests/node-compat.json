@@ -971,6 +971,66 @@
       "source": "import { createHook, AsyncResource } from 'node:async_hooks'; function main(): void { try { createHook({ init: 1 } as any); } catch (error: any) { console.log(error.code, error.message); } let count = 0; const hook = createHook({ init(id: number, type: string) { if (type !== 'PROMISE') count++; } }); new AsyncResource('Before'); hook.enable(); new AsyncResource('During'); hook.disable(); new AsyncResource('After'); console.log(count, hook.enable() === hook, hook.disable() === hook); }"
     },
     {
+      "name": "async_hooks promise ctor resolve then",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { const hook = trace(); new Promise<number>((resolve: (v: number) => void): void => { resolve(1); }).then((v: number): void => { console.log('then', v); }); setTimeout((): void => { hook.disable(); }, 5); }"
+    },
+    {
+      "name": "async_hooks promise then chain",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { const hook = trace(); Promise.resolve(1).then((a: number): number => a + 1).then((b: number): void => { console.log('chain', b); }); setTimeout((): void => { hook.disable(); }, 5); }"
+    },
+    {
+      "name": "async_hooks promise resolved with a thenable",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { const hook = trace(); new Promise<number>((resolve: (v: number) => void): void => { resolve(Promise.resolve(2)); }).then((v: number): void => { console.log('thenable', v); }); setTimeout((): void => { hook.disable(); }, 5); }"
+    },
+    {
+      "name": "async_hooks promise then returning a promise",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { const hook = trace(); Promise.resolve(1).then((): Promise<number> => Promise.resolve(2)).then((v: number): void => { console.log('returned', v); }); setTimeout((): void => { hook.disable(); }, 5); }"
+    },
+    {
+      "name": "async_hooks promise rejection caught",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { const hook = trace(); Promise.reject(new Error('boom')).catch((e: Error): void => { console.log('caught', e.message); }); setTimeout((): void => { hook.disable(); }, 5); }"
+    },
+    {
+      "name": "async_hooks promise settles once",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { const hook = trace(); new Promise<number>((resolve: (v: number) => void, reject: (e: unknown) => void): void => { resolve(1); resolve(2); reject(new Error('late')); }); setTimeout((): void => { hook.disable(); }, 5); }"
+    },
+    {
+      "name": "async_hooks promise async function awaits with a timer",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nasync function work(): Promise<void> { console.log('a'); await 1; console.log('b'); await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 1); }); console.log('c'); }\nfunction main(): void { const hook = trace(); work(); setTimeout((): void => { console.log('timer'); }, 0); setTimeout((): void => { hook.disable(); }, 30); }"
+    },
+    {
+      "name": "async_hooks promise all",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { const hook = trace(); Promise.all([1, Promise.resolve(2)]).then((values: number[]): void => { console.log('all', values.join(',')); }); setTimeout((): void => { hook.disable(); }, 5); }"
+    },
+    {
+      "name": "async_hooks promise execution ids inside then",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { const hook = trace(); Promise.resolve(1).then((): void => { console.log('exec', label(executionAsyncId()), 'trig', label(triggerAsyncId())); }); setTimeout((): void => { hook.disable(); }, 5); }"
+    },
+    {
+      "name": "async_hooks promise AsyncLocalStorage store survives then",
+      "expect": "matched",
+      "expectQuickjsLink": false,
+      "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { const hook = trace(); const als = new AsyncLocalStorage<number>(); als.run(5, (): void => { Promise.resolve().then((): void => { console.log('store', als.getStore()); }); }); setTimeout((): void => { hook.disable(); }, 5); }"
+    },
+    {
       "name": "cluster workers are real processes with an IPC channel",
       "expect": "matched",
       "expectQuickjsLink": false,

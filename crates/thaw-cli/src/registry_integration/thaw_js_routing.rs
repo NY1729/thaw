@@ -784,17 +784,6 @@ fn thaw_js_path_bundle(root_bundle: &str, builtin: &str) -> String {
         )
 }
 
-/// A `createHook` program whose promises would become async resources: thaw-js does not report promise
-/// resources to hooks yet, so the module stays on QuickJS. Timers do report, and a plain `createHook` keeps
-/// `node:async_hooks` on thaw-js.
-fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    const PROMISE_RESOURCES: &[&str] = &["Promise", "then", "await", "async"];
-    (pkg_name == "node:async_hooks"
-        && thaw_js_mentions(user_source, "createHook")
-        && PROMISE_RESOURCES.iter().any(|name| thaw_js_mentions(user_source, name)))
-    .then_some("createHook with promise resources is not supported on thaw-js yet")
-}
-
 /// The six specifiers of the `node:path` family. Each is its own thaw-js package with its own interpreter
 /// (`pkg.name` is the user's specifier), so one value taken through two of them is two objects of two realms.
 const PATH_FAMILY_SPECIFIERS: [&str; 6] = [
@@ -881,9 +870,6 @@ fn thaw_js_package_eligible(
         return reject("builtin module not validated on thaw-js".into());
     }
     if let Some(why) = thaw_js_unready_addon_blocker(&pkg.name) {
-        return reject(why.into());
-    }
-    if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     if let Some(why) = thaw_js_test_blocker(&pkg.name, user_source) {
@@ -1072,22 +1058,6 @@ fn realm_fetch_transport_bundles_load_even_when_the_program_imports_node_http() 
     force_realm_fetch_bundles(&mut runtime, &mut resolved, &mut forced);
     assert!(!forced.contains("node:http"));
     assert!(fetch.contains("node:http"));
-}
-
-#[cfg(test)]
-#[test]
-fn thaw_js_async_hooks_create_hook_with_promises_keeps_the_module_on_quickjs() {
-    let timers = "import { createHook } from 'node:async_hooks';\nsetTimeout(() => {}, 1);";
-    let resource =
-        "import { createHook, AsyncResource } from 'node:async_hooks';\nnew AsyncResource('x');";
-    let promises = "import { createHook } from 'node:async_hooks';\nawait Promise.resolve();";
-    let hooks = "import { createHook } from 'node:async_hooks';\ncreateHook({ init() {} }).enable();";
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", timers).is_none());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", resource).is_none());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", promises).is_some());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", hooks).is_none());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", "new AsyncLocalStorage();").is_none());
-    assert!(thaw_js_async_hooks_blocker("node:path", promises).is_none());
 }
 
 #[cfg(test)]
