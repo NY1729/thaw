@@ -8203,7 +8203,7 @@ fn lazy_prototype_generators_arrows_methods_and_bound_functions() {
     );
     assert_eq!(
         one("function f(a,b){}; console.log(f.call(null), f.apply(null, []), f.name, f.length, JSON.stringify(Object.getOwnPropertyNames(f)));"),
-        r#"undefined undefined f 2 ["length","name","prototype"]"#
+        r#"undefined undefined f 2 ["length","name","arguments","caller","prototype"]"#
     );
     assert_eq!(
         one("function F(){}; F.prototype.m = function(){}; var inst = new F(); console.log(inst.m === F.prototype.m, JSON.stringify(Object.getOwnPropertyNames(F.prototype)), Object.getOwnPropertyDescriptor(F,'prototype').writable);"),
