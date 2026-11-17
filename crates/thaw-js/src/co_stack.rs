@@ -96,10 +96,12 @@ impl Link {
     }
 
     pub(crate) fn recv(&self) -> Option<Yield> {
-        // TODO(co3b): enter the coroutine's stack bounds (`StackBoundsScope`) around the resume below.
-        let status = match self.cs.borrow().as_ref() {
-            Some(cs) => cs.resume(),
-            None => return None,
+        let status = {
+            let cs = self.cs.borrow();
+            let cs = cs.as_ref()?;
+            // the coroutine runs on its own stack: `too_deep` must measure against these bounds, not the host thread's
+            let _bounds = crate::costack::StackBoundsScope::enter(cs.bounds());
+            cs.resume()
         };
         if status == Status::Finished {
             // the body is done and its stack already released by `resume`

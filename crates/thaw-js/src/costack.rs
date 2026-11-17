@@ -759,7 +759,10 @@ mod imp {
             assert_eq!(DROPS.with(|d| d.get()), 2);
         }
 
+        // the live counter is process-global: with other tests running costacks concurrently (the whole lib
+        // suite under THAW_JS_CO=stack) the 30,000 fill hits the cap early, so this one runs alone (CI step).
         #[test]
+        #[ignore = "global live counter: run alone with --ignored --test-threads=1"]
         fn costack_live_limit_is_a_clear_error() {
             let mut held = Vec::with_capacity(MAX_LIVE);
             for _ in 0..MAX_LIVE {

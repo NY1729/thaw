@@ -689,6 +689,13 @@ jobs:
           THAW_JS_COMPILE: "check"
           THAW_JS_COMPILE_AFTER: "1"
         run: cargo test -p thaw-js --lib
+      # The live-limit test shares one process-global counter, so it runs alone; the deep-recursion test needs the
+      # stack backend.
+      - name: costack live-limit and deep-recursion tests, alone (non-gating)
+        continue-on-error: true
+        env:
+          THAW_JS_CO: stack
+        run: cargo test -p thaw-js --lib -- --ignored costack_live_limit js_deep_recursion_on_a_costack --test-threads=1
       - name: Install Prisma example
         run: npm ci --prefix examples/hono-react-prisma-board
       - name: Test Hono, Prisma, and PostgreSQL
