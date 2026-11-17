@@ -13,7 +13,7 @@ mod tests;
 pub use backup::backup;
 pub use db::{Db, OpenOptions, OPEN_CREATE, OPEN_READONLY, OPEN_READWRITE};
 pub use session::Session;
-pub use stmt::Stmt;
+pub use stmt::{ColumnMeta, Stmt};
 
 use std::ffi::{c_char, CStr};
 use std::fmt;

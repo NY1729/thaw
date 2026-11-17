@@ -13,10 +13,13 @@ intl = ["dep:thaw-intl"]
 # WebAssembly natives (web/wasm.rs); `wasi` adds node:wasi preview1 support on top.
 wasm = ["dep:thaw-wasm"]
 wasi = ["wasm", "thaw-wasm/wasi"]
+# node:sqlite natives (sqlite/); off by default, so programs without it link no SQLite.
+sqlite = ["dep:thaw-sqlite"]
 
 [dependencies]
 thaw-intl = { path = "../thaw-intl", optional = true }
 thaw-wasm = { path = "../thaw-wasm", optional = true }
+thaw-sqlite = { path = "../thaw-sqlite", optional = true }
 thaw-parser = { path = "../thaw-parser" }
 thaw-arena = { path = "../thaw-arena" }
 swc_ecma_visit = "29.0.0"
