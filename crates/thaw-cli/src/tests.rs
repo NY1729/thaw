@@ -117,6 +117,7 @@ include!("tests/thaw_js_worker_threads.rs");
 include!("tests/thaw_js_worker_threads_w3.rs");
 include!("tests/thaw_js_worker_threads_w5.rs");
 include!("tests/thaw_js_stream_web.rs");
+include!("tests/native_timers_mixed.rs");
 
 include!("tests/ffi_metadata.rs");
 
