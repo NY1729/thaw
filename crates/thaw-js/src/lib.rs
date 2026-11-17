@@ -435,6 +435,9 @@ struct Binding {
     value: Value,
     mutable: bool,
     origin: Origin,
+    /// Redefined as a data property by `Object.defineProperty` on `globalThis` (see `try_define`): a Node
+    /// accessor global is an accessor only until then.
+    redefined: bool,
 }
 
 /// How a global-scope binding relates to the `globalThis` object, for `delete`.
@@ -586,9 +589,64 @@ const NODE_GLOBAL_FLAGS: &[(&str, &str)] = &[
     ("CustomEvent", "-wc"),
 ];
 
-/// A global binding as an own property of `globalThis`, with Node's attributes.
+/// A Node 22 accessor global: `globalThis` shows it as an accessor property, not data, until
+/// `Object.defineProperty` redefines it as data. The scope binding keeps the value, so a free identifier
+/// reads it directly and the compiled paths are unchanged. `set` names the setter (None: getter only);
+/// `checks_receiver` makes the getter throw for a receiver that is neither nullish nor the global object,
+/// as V8's `crypto` getter does. Getter and setter lengths are 0 and 1.
+struct NodeAccessorGlobal {
+    name: &'static str,
+    get: &'static str,
+    set: Option<&'static str>,
+    checks_receiver: bool,
+}
+
+const NODE_ACCESSOR_GLOBALS: &[NodeAccessorGlobal] = &[
+    NodeAccessorGlobal {
+        name: "process",
+        get: "get",
+        set: Some("set"),
+        checks_receiver: false,
+    },
+    NodeAccessorGlobal {
+        name: "Buffer",
+        get: "get",
+        set: Some("set"),
+        checks_receiver: false,
+    },
+    NodeAccessorGlobal {
+        name: "performance",
+        get: "get performance",
+        set: Some("set performance"),
+        checks_receiver: false,
+    },
+    NodeAccessorGlobal {
+        name: "navigator",
+        get: "get navigator",
+        set: None,
+        checks_receiver: false,
+    },
+    NodeAccessorGlobal {
+        name: "crypto",
+        get: "get crypto",
+        set: None,
+        checks_receiver: true,
+    },
+];
+
+/// The `NODE_ACCESSOR_GLOBALS` entry of binding `name`, when the binding is still in accessor form (a
+/// lexical binding, or one redefined as data, is not).
+fn node_accessor(name: &str, b: &Binding) -> Option<&'static NodeAccessorGlobal> {
+    if b.origin == Origin::Lexical || b.redefined {
+        return None;
+    }
+    NODE_ACCESSOR_GLOBALS.iter().find(|a| a.name == name)
+}
+
+/// A global binding as an own property of `globalThis`: its slot (data, or the accessor pair of a
+/// `NODE_ACCESSOR_GLOBALS` name) and Node's attributes.
 pub(crate) struct GlobalProp {
-    pub value: Value,
+    pub slot: Slot,
     pub enumerable: bool,
     pub writable: bool,
     pub configurable: bool,
@@ -596,15 +654,16 @@ pub(crate) struct GlobalProp {
 
 /// `(enumerable, writable, configurable)` of global binding `name` as `globalThis` shows it, or None
 /// when it is not an own property: lexical bindings, and `__thaw_*` internals, which scope lookup and
-/// property reads still resolve. A name in `NODE_GLOBAL_FLAGS` takes Node's flags; the rest follow the
-/// binding's origin.
+/// property reads still resolve. A name in `NODE_GLOBAL_FLAGS` takes Node's flags (its writable bit is
+/// the binding's mutability once it was redefined); the rest follow the binding's origin.
 fn global_view_flags(name: &str, b: &Binding) -> Option<(bool, bool, bool)> {
     if hidden_global_name(name) || b.origin == Origin::Lexical {
         return None;
     }
     if let Some((_, f)) = NODE_GLOBAL_FLAGS.iter().find(|(n, _)| *n == name) {
         let f = f.as_bytes();
-        return Some((f[0] == b'e', f[1] == b'w', f[2] == b'c'));
+        let writable = if b.redefined { b.mutable } else { f[1] == b'w' };
+        return Some((f[0] == b'e', writable, f[2] == b'c'));
     }
     match b.origin {
         Origin::Lexical => None,
@@ -907,6 +966,7 @@ impl Scope {
             value,
             mutable,
             origin,
+            redefined: false,
         };
         let mut vars = self.vars.borrow_mut();
         if maybe_present {
@@ -928,6 +988,7 @@ impl Scope {
                 value: Value::Undefined,
                 mutable: true,
                 origin: Origin::Decl,
+                redefined: false,
             },
         );
     }
@@ -945,6 +1006,16 @@ impl Scope {
             b.origin = origin;
         }
     }
+    fn set_redefined(&self, name: &str) {
+        if let Some(b) = self.vars.borrow_mut().get_mut(name) {
+            b.redefined = true;
+        }
+    }
+    fn clear_redefined(&self) {
+        for (_, b) in self.vars.borrow_mut().list.iter_mut() {
+            b.redefined = false;
+        }
+    }
     fn copy_of(&self, parent: Rc<Scope>) -> Rc<Scope> {
         let mut vars = Vars::default();
         for (k, b) in self.vars.borrow().iter() {
@@ -954,6 +1025,7 @@ impl Scope {
                     value: b.value.clone(),
                     mutable: b.mutable,
                     origin: b.origin,
+                    redefined: b.redefined,
                 },
             );
         }
@@ -1167,6 +1239,8 @@ pub struct Interp {
     number_proto: Obj,
     bool_proto: Obj,
     global_object: Obj,
+    /// The accessor pair of each `NODE_ACCESSOR_GLOBALS` name, built once (`node_accessor_slots`).
+    global_accessors: Vec<(&'static str, Slot)>,
     next_symbol: u64,
     regex_cache: HashMap<(String, String), Rc<regress::Regex>>,
     /// The realm's last successful match (legacy `RegExp.$1`-style statics).
@@ -1339,6 +1413,7 @@ impl Interp {
             string_proto,
             regexp_proto,
             global_object: new_obj(Some(object_proto.clone()), Kind::Global),
+            global_accessors: Vec::new(),
             next_symbol: 0,
             regex_cache: HashMap::new(),
             last_match: Default::default(),
@@ -1401,6 +1476,7 @@ impl Interp {
             symbol_registry: None,
             well_known: Vec::new(),
         };
+        it.global_accessors = it.node_accessor_slots();
         it.install_builtins();
         it.install_call_frames();
         it.install_collections();
@@ -1473,6 +1549,9 @@ impl Interp {
         web_console::install(&mut it);
         it.apply_builtin_table();
         it.order_array_proto();
+        // the preludes redefine `navigator`, `crypto` and `performance` as data; their Node form is an
+        // accessor, so only a redefinition by user code counts (`node_accessor`)
+        it.global.clear_redefined();
         // user code only: the env turns the compiler on after the preludes ran (`Interp::with_compile_mode` overrides)
         it.compile_mode =
             compile::CompileMode::parse(std::env::var("THAW_JS_COMPILE").ok().as_deref());
@@ -1589,12 +1668,79 @@ impl Interp {
         let vars = self.global.vars.borrow();
         let b = vars.get(name)?;
         let (enumerable, writable, configurable) = global_view_flags(name, b)?;
+        let accessor = node_accessor(name, b).and_then(|_| {
+            self.global_accessors
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, s)| s.clone())
+        });
         Some(GlobalProp {
-            value: b.value.clone(),
+            slot: accessor.unwrap_or_else(|| Slot::Data(b.value.clone())),
             enumerable,
             writable,
             configurable,
         })
+    }
+
+    /// The accessor pair of each `NODE_ACCESSOR_GLOBALS` name. The functions are created once, so every
+    /// descriptor of a name carries the same `get`/`set`.
+    fn node_accessor_slots(&self) -> Vec<(&'static str, Slot)> {
+        NODE_ACCESSOR_GLOBALS
+            .iter()
+            .map(|a| {
+                let name = a.name;
+                let checks_receiver = a.checks_receiver;
+                let get = self.accessor_fn(a.get, 0.0, move |it, this, _| {
+                    let global_receiver = matches!(this, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Global));
+                    if checks_receiver && !matches!(this, Value::Undefined | Value::Null) && !global_receiver {
+                        return it.throw_error(
+                            "TypeError",
+                            "Value of \"this\" must be of type nullish or must be the global object",
+                        );
+                    }
+                    Ok(it.global.vars.borrow().get(name).map_or(Value::Undefined, |b| b.value.clone()))
+                });
+                let set = a.set.map(|s| {
+                    self.accessor_fn(s, 1.0, move |it, _, args| {
+                        let v = args.first().cloned().unwrap_or(Value::Undefined);
+                        if let Some(b) = it.global.vars.borrow_mut().get_mut(name) {
+                            b.value = v;
+                        }
+                        Ok(Value::Undefined)
+                    })
+                });
+                (name, Slot::Accessor { get: Some(get), set })
+            })
+            .collect()
+    }
+
+    /// A native accessor function named `name` with `length` (V8's descriptor names and lengths).
+    fn accessor_fn(
+        &self,
+        name: &str,
+        length: f64,
+        f: impl Fn(&mut Interp, &Value, &[Value]) -> R<Value> + 'static,
+    ) -> Value {
+        let v = self.native(f);
+        if let Value::Object(o) = &v {
+            put_with(o, "length", Value::Number(length), false, false, true);
+            put_with(o, "name", Value::str(name), false, false, true);
+        }
+        v
+    }
+
+    /// Whether global `name` is a getter-only accessor global still in accessor form: a write to it is
+    /// refused (`strict.rs`), as Node's `navigator` and `crypto` refuse one.
+    fn global_refuses_writes(&self, name: &str) -> bool {
+        NODE_ACCESSOR_GLOBALS
+            .iter()
+            .any(|a| a.name == name && a.set.is_none())
+            && self
+                .global
+                .vars
+                .borrow()
+                .get(name)
+                .is_some_and(|b| node_accessor(name, b).is_some())
     }
 
     /// The names `globalThis` shows as own properties, in binding order; `enumerable_only` keeps the
@@ -2381,6 +2527,10 @@ impl Interp {
                     return Ok(());
                 }
             }
+            // a getter-only accessor global refuses the write here too, with the writer's strictness
+            if self.global_refuses_writes(key) {
+                return self.refuse_write(strict, o, key, Refusal::GetterOnly);
+            }
             // a property write on the global object, not an identifier: never a ReferenceError
             return self.assign_var(&self.global.clone(), key, value, false);
         }
@@ -2691,6 +2841,7 @@ impl Interp {
                         value,
                         mutable: true,
                         origin: Origin::Decl,
+                        redefined: false,
                     },
                 );
             } else if let a::Pat::Rest(r) = p {
@@ -2960,6 +3111,11 @@ impl Interp {
         let g = self.global.clone();
         let origin = g.vars.borrow().get(name)?.origin;
         match origin {
+            // Node's accessor globals are configurable, so `delete` removes them even as builtins
+            Origin::Decl if NODE_ACCESSOR_GLOBALS.iter().any(|a| a.name == name) => {
+                g.vars.borrow_mut().remove(name);
+                Some(true)
+            }
             Origin::Decl | Origin::Lexical => None,
             Origin::Var => Some(false),
             Origin::Prop => {
@@ -3005,6 +3161,11 @@ impl Interp {
                 }
                 cur = s.parent.as_deref();
                 continue;
+            }
+            // a getter-only accessor global (`navigator`, `crypto`) refuses the write, as in Node
+            if std::ptr::eq(s, &*self.global) && self.global_refuses_writes(name) {
+                let g = self.global_object.clone();
+                return self.refuse_write(strict, &g, name, Refusal::GetterOnly);
             }
             let outcome = s.vars.borrow_mut().get_mut(name).map(|b| {
                 if b.mutable {
@@ -5259,6 +5420,8 @@ mod fs_tests;
 #[cfg(test)]
 mod generator_function_tests;
 #[cfg(test)]
+mod global_accessor_view_tests;
+#[cfg(test)]
 mod global_object_view_tests;
 #[cfg(test)]
 mod handle_json_argument_tests;
@@ -5312,6 +5475,8 @@ mod proxy_trap_tests;
 mod regexp_proto_tests;
 #[cfg(test)]
 mod regexp_statics_tests;
+#[cfg(test)]
+mod resizable_buffer_tests;
 #[cfg(test)]
 mod sab_tests;
 #[cfg(test)]

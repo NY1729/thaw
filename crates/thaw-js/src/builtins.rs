@@ -1023,6 +1023,9 @@ impl Interp {
                 v.clone(),
                 d.writable.as_ref().is_some_and(Value::truthy),
             );
+            // a data descriptor ends a Node accessor global's accessor form (`node_accessor`).
+            // ponytail: only a descriptor with a value redefines; a writable-only one keeps the accessor form.
+            self.global.set_redefined(key);
         }
         let existing = o.position(key);
         let flag = |v: &Option<Value>, default: bool| v.as_ref().map_or(default, |v| v.truthy());
@@ -1554,8 +1557,19 @@ impl Interp {
                 if matches!(&*o.kind.borrow(), Kind::Global) {
                     if let Some(g) = it.global_prop(&key) {
                         let d = it.plain();
-                        put(&d, "value", g.value);
-                        put(&d, "writable", Value::Bool(g.writable));
+                        match g.slot {
+                            Slot::Data(v) => {
+                                put(&d, "value", v);
+                                put(&d, "writable", Value::Bool(g.writable));
+                            }
+                            Slot::Accessor { get, set } => {
+                                put(&d, "get", get.unwrap_or(Value::Undefined));
+                                put(&d, "set", set.unwrap_or(Value::Undefined));
+                            }
+                            Slot::LazyProto { .. } => {
+                                unreachable!("a global binding is never a lazy prototype")
+                            }
+                        }
                         put(&d, "enumerable", Value::Bool(g.enumerable));
                         put(&d, "configurable", Value::Bool(g.configurable));
                         return Ok(Value::Object(d));
@@ -1625,7 +1639,7 @@ impl Interp {
             });
             self.set_native(o, "freeze", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
-                    if matches!(&*o.kind.borrow(), Kind::Typed(t) if t.len > 0) {
+                    if matches!(&*o.kind.borrow(), Kind::Typed(t) if t.cur_len() > 0) {
                         return it.throw_error(
                             "TypeError",
                             "Cannot freeze array buffer views with elements",

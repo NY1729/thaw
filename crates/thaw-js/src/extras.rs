@@ -450,19 +450,29 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     var len = byteLength === undefined ? total - off : (Math.trunc(byteLength) || 0);
     if (len < 0 || off + len > total) throw new RangeError('Invalid DataView length ' + len);
     if (buffer instanceof ArrayBuffer && detGet.call(buffer)) throw new TypeError('Cannot perform DataView constructor on a detached ArrayBuffer');
+    // no length on a resizable buffer: the view tracks the buffer's end (spec: length-tracking)
+    var track = byteLength === undefined && buffer instanceof ArrayBuffer && resizableGet.call(buffer);
     def(this, '__buf', buffer);
     def(this, '__off', off);
     def(this, '__len', len);
-    def(this, '__bytes', new Uint8Array(buffer, off, len));
+    def(this, '__track', track);
+    def(this, '__bytes', track ? new Uint8Array(buffer, off) : new Uint8Array(buffer, off, len));
   }
-  // byteOffset / byteLength are accessors (a detached buffer makes them throw, as in V8).
-  function dvLive(dv, what) {
-    if (dv.__buf instanceof ArrayBuffer && detGet.call(dv.__buf)) throw new TypeError('Cannot perform ' + what + ' on a detached ArrayBuffer');
+  // The current length: the buffer's tail for a length-tracking view, else the fixed one.
+  function dvLen(dv) { return dv.__track ? dv.__buf.byteLength - dv.__off : dv.__len; }
+  // Detached or out of bounds (a fixed window that no longer fits, or an offset past a shrunk end): TypeError.
+  // `oobWhat` is the name V8 gives an out-of-bounds (not detached) view: a setter reports its getter's name there.
+  function dvLive(dv, what, oobWhat) {
+    var b = dv.__buf;
+    if (!(b instanceof ArrayBuffer)) return;
+    if (detGet.call(b)) throw new TypeError('Cannot perform ' + what + ' on a detached ArrayBuffer');
+    if (dv.__off > b.byteLength || (!dv.__track && dv.__off + dv.__len > b.byteLength)) throw new TypeError('Cannot perform ' + (oobWhat || what) + ' on a detached ArrayBuffer');
   }
   Object.defineProperty(DataView.prototype, 'buffer', { enumerable: false, configurable: true, get: function () { if (!Object.prototype.hasOwnProperty.call(this, '__buf')) throw new TypeError('Method get DataView.prototype.buffer called on incompatible receiver'); return this.__buf; } });
-  Object.defineProperty(DataView.prototype, 'byteLength', { enumerable: false, configurable: true, get: function () { dvLive(this, 'get DataView.prototype.byteLength'); return this.__len; } });
+  Object.defineProperty(DataView.prototype, 'byteLength', { enumerable: false, configurable: true, get: function () { dvLive(this, 'get DataView.prototype.byteLength'); return dvLen(this); } });
   Object.defineProperty(DataView.prototype, 'byteOffset', { enumerable: false, configurable: true, get: function () { dvLive(this, 'get DataView.prototype.byteOffset'); return this.__off; } });
   var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
+  var resizableGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'resizable').get;
   var scratch = new Uint8Array(8);
   var kinds = {
     Int8: [1, Int8Array], Uint8: [1, Uint8Array], Int16: [2, Int16Array], Uint16: [2, Uint16Array],
@@ -470,7 +480,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   };
   function check(dv, index, size) {
     index = Math.trunc(index) || 0;
-    if (index < 0 || index + size > dv.__len) throw new RangeError('Offset is outside the bounds of the DataView');
+    if (index < 0 || index + size > dvLen(dv)) throw new RangeError('Offset is outside the bounds of the DataView');
     return index;
   }
   Object.keys(kinds).forEach(function (name) {
@@ -482,7 +492,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       return view[0];
     });
     def(DataView.prototype, 'set' + name, function (index, value, little) {
-      dvLive(this, 'DataView.prototype.set' + name);
+      dvLive(this, 'DataView.prototype.set' + name, 'DataView.prototype.get' + name);
       index = check(this, index, size);
       view[0] = value;
       for (var i = 0; i < size; i++) this.__bytes[index + i] = scratch[little ? i : size - 1 - i];
@@ -497,7 +507,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       return k[1] ? BigInt.asIntN(64, v) : v;
     });
     def(DataView.prototype, 'set' + k[0], function (index, value, little) {
-      dvLive(this, 'DataView.prototype.set' + k[0]);
+      dvLive(this, 'DataView.prototype.set' + k[0], 'DataView.prototype.get' + k[0]);
       index = check(this, index, 8);
       var v = BigInt.asUintN(64, BigInt(value));
       for (var i = 7; i >= 0; i--) { this.__bytes[index + (little ? 7 - i : i)] = Number(v & 255n); v >>= 8n; }
@@ -556,9 +566,15 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       }
       // a SharedArrayBuffer clones to the same block (not a copy); a view over one keeps its window on that block
       if (v instanceof SharedArrayBuffer) { out = __thaw_sab_import(__thaw_sab_export(v)); seen.set(v, out); return out; }
-      if (v instanceof ArrayBuffer) { out = v.slice(0); seen.set(v, out); return out; }
-      if (v instanceof DataView) { var cb = clone(v.buffer); out = new DataView(cb, v.byteOffset, v.byteLength); seen.set(v, out); return out; }
+      if (v instanceof ArrayBuffer) {
+        if (v.resizable) { out = new ArrayBuffer(v.byteLength, { maxByteLength: v.maxByteLength }); new Uint8Array(out).set(new Uint8Array(v)); }
+        else out = v.slice(0);
+        seen.set(v, out); return out;
+      }
+      if (v instanceof DataView) { var cb = clone(v.buffer); out = new DataView(cb, v.byteOffset, v.__track ? undefined : v.byteLength); seen.set(v, out); return out; }
       if (ArrayBuffer.isView(v) && v.buffer instanceof SharedArrayBuffer) { out = new v.constructor(clone(v.buffer), v.byteOffset, v.length); seen.set(v, out); return out; }
+      // a view over a resizable buffer keeps its length tracking (the clone's buffer is resizable too)
+      if (ArrayBuffer.isView(v) && v.buffer instanceof ArrayBuffer && v.buffer.resizable) { out = new v.constructor(clone(v.buffer), v.byteOffset, __thaw_ta_track(v) ? undefined : v.length); seen.set(v, out); return out; }
       if (ArrayBuffer.isView(v)) { out = new v.constructor(v); seen.set(v, out); return out; }
       if (v instanceof Error) {
         out = Object.create(Object.getPrototypeOf(v)); seen.set(v, out);

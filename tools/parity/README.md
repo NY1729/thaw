@@ -68,7 +68,7 @@ A waiver classifies a gap as waived, so the report can separate gaps Thaw is not
 
 Current waivers (user-approved; `waivers.json` is the source of truth):
 - W1: Node-internal symbols and `k*` private fields. `kCapture` and `nodejs.event_target` are excluded (real since 2026-11-16).
-- W3: resizable ArrayBuffer / SharedArrayBuffer members only. The `Atomics.waitAsync` waiver is withdrawn.
+- W3: SharedArrayBuffer `maxByteLength` and `grow` only (the resizable ArrayBuffer members are implemented; PR2 removes this waiver). The `Atomics.waitAsync` waiver is withdrawn.
 - W5: value differences only (ppid, groups, setuid family, usage counters). The key set and value types of `process.versions` and `process.release` must match Node, so those probes are real gaps.
 - W2 (WebAssembly Tag/JSTag/Exception and streaming entry points) and W4 (all of Intl) are withdrawn. Those gaps are real.
 - W6, W7, W8, W9: unchanged.
