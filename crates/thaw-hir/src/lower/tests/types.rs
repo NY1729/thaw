@@ -5882,3 +5882,55 @@ fn error_argument_staging_retains_existing_spread_admission() {
         assert_eq!(error_only, expected, "baseline diagnostic for {source}");
     }
 }
+
+/// `(b as T).m()` and `b!.m()` on a `T | null` receiver lower the method call natively
+/// (the cast/assertion removes the null from the static type), for every native
+/// collection receiver.
+#[test]
+fn member_calls_through_nullable_casts_and_assertions_stay_native() {
+    for (ty, value, call) in [
+        ("Map<number, string>", "new Map<number, string>([[1, \"a\"]])", "clear()"),
+        ("Map<number, string>", "new Map<number, string>([[1, \"a\"]])", "get(1)"),
+        ("Set<number>", "new Set<number>([1, 2])", "has(1)"),
+        ("WeakMap<object, number>", "new WeakMap<object, number>()", "has({})"),
+        ("WeakSet<object>", "new WeakSet<object>()", "has({})"),
+    ] {
+        for receiver in [format!("(b as {ty})"), "b!".to_string()] {
+            let source = format!(
+                "function flip(): boolean {{ return true; }}
+                function main(): void {{
+                    const b: {ty} | null = flip() ? {value} : null;
+                    console.log({receiver}.{call});
+                }}"
+            );
+            let text = format!("{:?}", lower(&source).functions);
+            assert!(!text.contains("unsupported"), "{receiver}.{call}:\n{text}");
+        }
+    }
+}
+
+/// A `Buffer | null` / `Uint8Array | null` union keeps its Bytes payload: the cast reads the
+/// bytes, so the method call is typed against `Bytes`, not `Array(F64)`.
+#[test]
+fn byte_receivers_through_nullable_casts_keep_bytes_identity() {
+    for (ty, value) in [
+        ("Buffer", "Buffer.from([1, 2, 3, 250])"),
+        ("Uint8Array", "new Uint8Array([1, 2, 3, 250])"),
+    ] {
+        for receiver in [format!("(b as {ty})"), "b!".to_string()] {
+            let source = format!(
+                "function flip(): boolean {{ return true; }}
+                function main(): void {{
+                    const b: {ty} | null = flip() ? {value} : null;
+                    console.log({receiver}.length);
+                    console.log({receiver}.includes(2));
+                    console.log({receiver}.join(\"-\"));
+                }}"
+            );
+            // Lowering must succeed (the Bytes payload is not lost to `Array(F64)` in the union);
+            // `includes` on a byte receiver dispatches to the byte runtime, not the number-array one.
+            let text = format!("{:?}", lower(&source).functions);
+            assert!(text.contains("__thaw_bytes_index_of"), "{receiver}:\n{text}");
+        }
+    }
+}

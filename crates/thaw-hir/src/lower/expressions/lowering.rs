@@ -4465,11 +4465,13 @@ impl<'a> FnLowerer<'a> {
                         alternate = self.coerce_to_declared(&HirType::Json, alternate)?;
                     }
                 }
-                // `Bytes` survives only when both arms are the same buffer type; a mix keeps the
-                // top-level erased types as before.
+                // `Bytes` survives only when both arms are the same buffer type, or when the other
+                // arm is an absent value (`c ? buffer : null` is `Nullable(Bytes)`); a mix with a
+                // real payload keeps the top-level erased types as before.
                 let (consequent_type, alternate_type) = {
                     let (c, a) = (self.infer_expr_type_inner(&consequent)?, self.infer_expr_type_inner(&alternate)?);
-                    if c == a {
+                    let absent = |ty: &HirType| matches!(ty, HirType::Null | HirType::Undefined);
+                    if c == a || absent(&c) || absent(&a) {
                         (c, a)
                     } else {
                         let erase_top = |ty: HirType| if ty == HirType::Bytes { HirType::Array(Box::new(HirType::F64)) } else { ty };

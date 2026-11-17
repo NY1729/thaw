@@ -220,7 +220,22 @@ impl<'a> FnLowerer<'a> {
     fn expr_is_bytes_syntax(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Paren(paren) => self.expr_is_bytes_syntax(&paren.expr),
-            Expr::TsNonNull(assertion) => self.expr_is_bytes_syntax(&assertion.expr),
+            // `(x as Buffer)` is a byte buffer by its annotation; `b!` on a `Buffer | null`
+            // is one by the nullable payload.
+            Expr::TsAs(assertion) => {
+                matches!(
+                    lower_ts_type(&assertion.type_ann, self.interfaces, self.generic_interfaces),
+                    Ok(HirType::Bytes)
+                )
+            }
+            Expr::TsNonNull(assertion) => {
+                self.expr_is_bytes_syntax(&assertion.expr)
+                    || matches!(
+                        self.peek_type_without_lowering(&assertion.expr),
+                        Some(HirType::Nullable(payload) | HirType::Optional(payload) | HirType::Nullish(payload))
+                            if *payload == HirType::Bytes
+                    )
+            }
             Expr::Call(call) => {
                 let Callee::Expr(callee) = &call.callee else { return false };
                 let Expr::Member(member) = callee.as_ref() else { return false };
