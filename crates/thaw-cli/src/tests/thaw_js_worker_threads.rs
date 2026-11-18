@@ -21,6 +21,14 @@ fn thaw_js_worker_threads_blocker_keeps_unsupported_worker_use_on_quickjs() {
         "const { SHARE_ENV } = require(\"node:worker_threads\");"
     )
     .is_some());
+    // the clone marks are served on thaw-js (W-A): they route, while names still in the list keep blocking
+    let marks = "import { markAsUntransferable, markAsUncloneable, isMarkedAsUntransferable } from \"node:worker_threads\";";
+    assert!(thaw_js_worker_threads_blocker("node:worker_threads", marks).is_none());
+    assert!(thaw_js_worker_threads_blocker(
+        "node:worker_threads",
+        "import { moveMessagePortToContext } from \"node:worker_threads\";"
+    )
+    .is_some());
     // the W1 subset (message channels and environment data) routes to thaw-js
     let subset = "import { MessageChannel, setEnvironmentData, getEnvironmentData } from \"node:worker_threads\";";
     assert!(thaw_js_worker_threads_blocker("node:worker_threads", subset).is_none());

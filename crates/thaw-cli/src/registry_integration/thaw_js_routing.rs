@@ -777,9 +777,6 @@ const THAW_JS_WORKER_THREADS_UNSUPPORTED: &[&str] = &[
     "postMessageToThread",
     "SHARE_ENV",
     "moveMessagePortToContext",
-    "markAsUntransferable",
-    "markAsUncloneable",
-    "isMarkedAsUntransferable",
     "transferList",
 ];
 
