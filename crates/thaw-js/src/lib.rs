@@ -5944,6 +5944,8 @@ mod websocket_tests;
 #[cfg(test)]
 mod coroutine_teardown_tests;
 #[cfg(test)]
+mod costack_cap_tests;
+#[cfg(test)]
 mod ipc_tests;
 #[cfg(test)]
 mod url_tests;
