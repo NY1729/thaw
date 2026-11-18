@@ -883,19 +883,6 @@ fn thaw_js_bundle_form<'a>(
 const THAW_JS_WORKER_THREADS_FORM: &str =
     "module.exports = globalThis.__thaw_worker_threads_exports;\n";
 
-/// `node:worker_threads` names thaw-js does not serve yet (`Worker` runs on thaw-js; its options and the rest of the
-/// module do not). A program that names one keeps the module on QuickJS.
-const THAW_JS_WORKER_THREADS_UNSUPPORTED: &[&str] = &["moveMessagePortToContext"];
-
-/// See `THAW_JS_WORKER_THREADS_UNSUPPORTED`: worker threads stay on QuickJS until thaw-js can run them.
-fn thaw_js_worker_threads_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    (pkg_name == "node:worker_threads"
-        && THAW_JS_WORKER_THREADS_UNSUPPORTED
-            .iter()
-            .any(|name| thaw_js_mentions(user_source, name)))
-    .then_some("worker threads option moveMessagePortToContext is not supported on thaw-js yet")
-}
-
 /// The thaw-js form of a `node:path` family specifier: the unmodified `node:path` bundle plus the realm marker
 /// `thaw_tjs_register` reads (`member` is the export path of the shared realm: `posix`, `win32`, or empty for
 /// the root). Every family specifier is then a view of one interpreter, so their values are identical objects.
@@ -956,9 +943,6 @@ fn thaw_js_package_eligible(
         return reject("builtin module not validated on thaw-js".into());
     }
     if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
-        return reject(why.into());
-    }
-    if let Some(why) = thaw_js_worker_threads_blocker(&pkg.name, user_source) {
         return reject(why.into());
     }
     // A class the program names is served through thaw-js handles (`new`, instance and static
