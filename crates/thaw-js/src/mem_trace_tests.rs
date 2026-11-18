@@ -58,6 +58,8 @@ fn residue_of(before: (isize, isize, isize), run: Option<&str>) -> (isize, isize
 
 #[test]
 fn script_without_cycles_balances_the_live_counts() {
+    // Exact residue: the automatic trigger would free the realm's own garbage first.
+    crate::gc::no_auto();
     // Teardown does not free every realm's own cycles today (see the note below), so the balance is
     // checked against an empty realm: a script without cycles must leave exactly the residue an
     // empty realm leaves, no more. Warm-up drop first so one-time per-thread state is not counted.

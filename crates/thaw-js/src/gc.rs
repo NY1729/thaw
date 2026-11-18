@@ -1,5 +1,5 @@
-//! Cycle collector: "subtract the internal references" (CPython's gc). PR-1 only adds the collector; nothing calls
-//! `collect_cycles` outside the tests (PR-2 adds the trigger).
+//! Cycle collector: "subtract the internal references" (CPython's gc). `collect_cycles` is the collection; the trigger
+//! (`gc_safe_point`, PR-2) runs it when a registry list's live count reaches its threshold.
 //!
 //! Every registered node (`gc_registry`: each `ObjData`, each captured `Scope`) is walked once with `obj_edges` /
 //! `scope_edges`, which report each `Rc` clone the node owns. An edge whose target is a registered node in this
@@ -15,7 +15,6 @@
 //! Opaque nodes are never cleared and always count as roots: a node whose cell is borrowed, a `with` scope, and
 //! every kind whose edges are not enumerated (`Global`, `Map`, `Set`, `CollIter`, `Promise`, `Generator`, `Proxy`,
 //! `Typed`). Their own edges are not subtracted, so anything they hold stays externally referenced.
-#![allow(dead_code)] // PR-1: `collect_cycles` has no caller outside the tests
 
 use crate::gc_registry;
 use crate::{account, FxMap, Interp, Kind, Obj, ObjData, Prop, Scope, Slot, Value, Vars};
@@ -136,6 +135,7 @@ fn node_edges(n: Node, f: &mut dyn FnMut(Edge)) -> bool {
 }
 
 /// Contents taken out of a garbage node. Dropped only after every cell borrow is released.
+#[allow(dead_code)] // the fields are never read: they are only dropped, after every borrow is released
 enum Taken {
     Props(Vec<Prop>),
     Index(Option<FxMap<Rc<str>, usize>>),
@@ -321,6 +321,7 @@ fn collect() -> usize {
     if IN_GC.try_with(|c| c.replace(true)).unwrap_or(true) {
         return 0;
     }
+    COLLECTIONS.with(|c| c.set(c.get() + 1));
     let _guard = InGc;
     let cleared = collect_nodes();
     drop(_guard);
@@ -352,6 +353,129 @@ fn forced() -> bool {
 pub(crate) fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     forced() || *ON.get_or_init(crate::co::stack_default)
+}
+
+/// The automatic trigger's floor: a collection is due once a registry list holds this many live nodes (then at
+/// `max(floor, 2 x live)` after each attempt, so a growing live set collects O(log n) times).
+const AUTO_FLOOR: usize = 50_000;
+
+/// `THAW_JS_GC` and `THAW_JS_GC_STRESS`, read once per process.
+fn env_policy() -> (bool, Option<u32>) {
+    static ENV: std::sync::OnceLock<(bool, Option<u32>)> = std::sync::OnceLock::new();
+    *ENV.get_or_init(|| {
+        parse_env(
+            std::env::var("THAW_JS_GC").ok().as_deref(),
+            std::env::var("THAW_JS_GC_STRESS").ok().as_deref(),
+        )
+    })
+}
+
+/// The environment rule, pure for the table test. Returns `(trigger on, stress every n)`. `THAW_JS_GC=0` turns the
+/// trigger off. `THAW_JS_GC_STRESS=n` (n >= 1; anything else is ignored) turns it on regardless, and collects at
+/// every n-th safe point that follows a registration.
+pub(crate) fn parse_env(gc: Option<&str>, stress: Option<&str>) -> (bool, Option<u32>) {
+    let stress = stress
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&n| n >= 1);
+    (stress.is_some() || gc != Some("0"), stress)
+}
+
+/// Whether the trigger arms on new realms: the collector is enabled and the environment does not turn it off.
+pub(crate) fn trigger_on() -> bool {
+    enabled() && env_policy().0
+}
+
+/// The stress interval, if `THAW_JS_GC_STRESS` set one. Tests override it in-process (`stress_for_test`).
+fn stress_every() -> Option<u32> {
+    #[cfg(test)]
+    {
+        if let Some(n) = STRESS_OVERRIDE.with(Cell::get) {
+            return n;
+        }
+    }
+    env_policy().1
+}
+
+/// Arms this thread's trigger. Called at the end of `Interp::build` on every thread (workers and vm realms included).
+pub(crate) fn arm_for_thread() {
+    if trigger_on() {
+        let floor = if stress_every().is_some() {
+            0
+        } else {
+            AUTO_FLOOR
+        };
+        crate::gc_registry::arm_default(floor);
+    }
+}
+
+thread_local! {
+    /// Set by `no_auto`: the safe points on this thread do not collect (explicit `collect_cycles` still does).
+    static NO_AUTO: Cell<bool> = const { Cell::new(false) };
+    /// Safe points reached since the last stress collection.
+    static STRESS_TICK: Cell<u32> = const { Cell::new(0) };
+    /// Collections that ran on this thread.
+    static COLLECTIONS: Cell<usize> = const { Cell::new(0) };
+    /// Largest registry live count (objects + scopes) seen at a safe point on this thread.
+    static PEAK_LIVE: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test override of the stress interval (`Some(None)` = off); `None` reads the environment.
+    static STRESS_OVERRIDE: Cell<Option<Option<u32>>> = const { Cell::new(None) };
+}
+
+/// Opts this thread out of automatic collections. For tests that assert exact node counts; the explicit
+/// `collect_cycles` (and `__gc`) still runs.
+#[cfg(test)]
+pub(crate) fn no_auto() {
+    NO_AUTO.with(|c| c.set(true));
+}
+
+/// Undoes `no_auto` and sets the stress interval for this thread, then re-arms it (tests of the trigger itself).
+#[cfg(test)]
+pub(crate) fn stress_for_test(every: Option<u32>) {
+    NO_AUTO.with(|c| c.set(false));
+    STRESS_OVERRIDE.with(|c| c.set(Some(every)));
+    crate::gc_registry::arm(if every.is_some() { 0 } else { AUTO_FLOOR });
+}
+
+/// Collections that ran on this thread.
+#[cfg(test)]
+pub(crate) fn collections() -> usize {
+    COLLECTIONS.with(Cell::get)
+}
+
+/// The largest registry live count seen at a safe point on this thread.
+#[cfg(test)]
+pub(crate) fn peak_live() -> usize {
+    PEAK_LIVE.with(Cell::get)
+}
+
+impl Interp {
+    /// The trigger's safe point. Runs only when `gc_registry::due()` (a registration crossed the threshold); the
+    /// caller is `check_deadline` (every call and loop back-edge) and the event loop, both at the interpreter's
+    /// statement level (see `collect_cycles`). Re-arms the thresholds after every attempt. The collection itself
+    /// is `collect_cycles`, which is a no-op when the collector is disabled.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn gc_safe_point(&mut self) {
+        crate::gc_registry::clear_due();
+        let (objs, scopes) = crate::gc_registry::counts();
+        PEAK_LIVE.with(|p| p.set(p.get().max(objs + scopes)));
+        let collect = match stress_every() {
+            Some(n) => STRESS_TICK.with(|c| {
+                let tick = c.get().wrapping_add(1);
+                c.set(tick);
+                tick % n == 0
+            }),
+            None => true,
+        };
+        if collect && !NO_AUTO.with(Cell::get) {
+            self.collect_cycles();
+        }
+        crate::gc_registry::rearm();
+    }
 }
 
 impl Interp {

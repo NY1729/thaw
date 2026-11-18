@@ -102,6 +102,7 @@ fn captured_scopes_register_and_release_with_their_closures() {
 
 #[test]
 fn cycle_free_script_leaves_the_empty_realm_residue_in_the_registry() {
+    crate::gc::no_auto(); // exact residue: the automatic trigger would free the realm's own garbage first
     drop(Interp::new()); // warm-up
     let before = counts();
     let empty = registry_residue(before, None);
@@ -117,6 +118,7 @@ fn cycle_free_script_leaves_the_empty_realm_residue_in_the_registry() {
 
 #[test]
 fn cyclic_script_leaves_the_registry_equal_to_the_live_counts() {
+    crate::gc::no_auto(); // the leaked cycles must stay visible to the counts: no automatic collection
     drop(Interp::new()); // warm-up
     let before_live = live_counts();
     let before = counts();
