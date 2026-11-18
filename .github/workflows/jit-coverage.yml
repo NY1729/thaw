@@ -1,0 +1,144 @@
+name: jit-coverage
+
+# Non-gating stage-0 measurement of the JIT and JS->HIR question (designs/jsinfer-and-jit-plan.md): per corpus
+# program, the interpreter share of wall time and the AOT clones, for the shipped build (default) and for
+# THAW_JS_INFER=1. Nothing here fails a build or belongs in a required-checks list: read the step summary.
+# Runs on demand, or on a PR that carries the `jit-coverage-measure` label (never on push or by default).
+# The job skeleton, toolchain and cache steps are those of the corpus-ratio job in jsengine-bench.yml.
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: timed rounds per binary (the profiled run is one extra run per variant)
+        default: "5"
+      only:
+        description: one corpus program name (empty = all 24)
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jit-coverage-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  jit-coverage:
+    name: JIT coverage per corpus program (default vs THAW_JS_INFER=1)
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'jit-coverage-measure')
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # collect.sh runs the Node reference with --experimental-strip-types (Node 22.6+).
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev time; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-${{ runner.arch }}-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Cache cargo registry and release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: jsengine-corpus-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            jsengine-corpus-${{ runner.os }}-
+      - name: Build thaw CLI (release)
+        run: |
+          cargo build --release -p thaw-cli
+      - name: Check for corpus programs
+        id: corpus
+        run: |
+          # The 24 committed programs and their pinned versions live under tools/quickjs-removal/corpus.
+          # Missing corpus is a failure (no silent skip).
+          corpus="$GITHUB_WORKSPACE/tools/quickjs-removal/corpus"
+          for need in "$corpus/pk" "$corpus/versions.txt"; do
+            if [ ! -e "$need" ]; then
+              echo "corpus input not found: $need" >&2
+              echo "corpus input not found: $need" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
+          echo "present=1" >> "$GITHUB_OUTPUT"
+      - name: Build and profile each corpus program (default and THAW_JS_INFER=1)
+        if: steps.corpus.outputs.present == '1'
+        env:
+          THAW: ${{ github.workspace }}/target/release/thaw
+          SCRATCH: ${{ runner.temp }}/jit-coverage-scratch
+          PK_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/pk
+          VERSIONS: ${{ github.workspace }}/tools/quickjs-removal/corpus/versions.txt
+          ONLY: ${{ inputs.only }}
+          MEASURE_RUNS: ${{ inputs.runs || '5' }}
+        run: |
+          bash tools/jit-coverage/collect.sh "$RUNNER_TEMP/jit-coverage-logs"
+      - name: Print JIT coverage summary
+        if: always() && steps.corpus.outputs.present == '1'
+        run: |
+          # Writes jit-coverage.tsv and jit-coverage.md; the Markdown goes to the step summary.
+          python3 -I tools/jit-coverage/run.py "$RUNNER_TEMP/jit-coverage-logs" --out-dir "$RUNNER_TEMP/jit-coverage-out" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jit-coverage-tsv
+          path: ${{ runner.temp }}/jit-coverage-out
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          # Per program and variant: build log, inspect output, typed shim, profiled stderr, timing meta.
+          name: jit-coverage-logs
+          path: ${{ runner.temp }}/jit-coverage-logs
+          if-no-files-found: ignore

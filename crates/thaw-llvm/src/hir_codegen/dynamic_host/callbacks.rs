@@ -929,9 +929,11 @@ impl<'ctx> HirCompiler<'ctx> {
         if functions.is_empty() {
             return Ok(ptr_type.const_null());
         }
+        // Must match `ThawNativeFunctionArgument` in thaw-napi module_host.rs.
         let descriptor_type = self.context.struct_type(
             &[
                 self.context.i64_type().into(),
+                ptr_type.into(),
                 ptr_type.into(),
                 ptr_type.into(),
             ],
@@ -997,6 +999,14 @@ impl<'ctx> HirCompiler<'ctx> {
             let descriptor = self
                 .builder
                 .build_insert_value(descriptor, context, 2, "napi_function_argument_context")
+                .map_err(|error| error.to_string())?
+                .into_struct_value();
+            // The original closure behind the signature adapter: a fresh adapter is
+            // allocated per call, so the runtime keys its callback cache on this.
+            let identity = self.resolve_closure_alias(context)?;
+            let descriptor = self
+                .builder
+                .build_insert_value(descriptor, identity, 3, "napi_function_argument_identity")
                 .map_err(|error| error.to_string())?;
             let target = unsafe {
                 self.builder
