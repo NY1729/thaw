@@ -1339,6 +1339,8 @@ jobs:
     timeout-minutes: 75
     env:
       THAW_JS_FALLBACK: warn
+      # PROBE (draft, do not merge): print why each package stays on QuickJS (`thaw-js-blocker: package=... why=...`)
+      THAW_JS_RUNTIME_DEBUG: "1"
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
