@@ -5874,6 +5874,8 @@ mod fs_tests;
 #[cfg(test)]
 mod function_legacy_props_tests;
 #[cfg(test)]
+mod gc_yup_tests;
+#[cfg(test)]
 mod generator_function_tests;
 #[cfg(test)]
 mod global_accessor_view_tests;
