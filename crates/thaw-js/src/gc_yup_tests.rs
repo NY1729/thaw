@@ -12,8 +12,10 @@
 //! - `gc_yup_freed_fraction`: live object/scope/closure counts before and after one collection at N=1000.
 //! - `gc_yup_collect_cost` (ignored): time and peak-RSS delta of one collection on 1e5 and 1e6 live nodes.
 use super::*;
+use crate::eventloop::PState;
 use crate::gc::force_enabled;
 use crate::gc_registry::{check_invariants, counts};
+use crate::generators::GStatus;
 use crate::host::Package;
 use crate::mem_trace::{census_for_tests, census_snapshot, live_counts};
 use crate::{Kind, Obj, Scope, Slot};
@@ -22,6 +24,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 const WORKLOAD: &str = include_str!("gc_yup_workload.js");
+const ASYNC_WORKLOAD: &str = include_str!("gc_yup_async_workload.js");
 const SCHEMA: &str = "const yup = require('yup'); \
     globalThis.__s = yup.object({ name: yup.string().required().min(2), \
     age: yup.number().integer().min(0).required(), tags: yup.array(yup.string()).default([]) });";
@@ -124,6 +127,61 @@ fn obj_shape(o: &Obj, stack: &mut Vec<N>) -> String {
             }
             Kind::Wrapper(v) => s += &format!("W{}", vrepr(v, stack)),
             Kind::Native(_) => s += "native",
+            Kind::Promise(d) => {
+                s += "P";
+                match &d.state {
+                    PState::Pending => s += "pend",
+                    PState::Fulfilled(v) => s += &format!("ful{}", vrepr(v, stack)),
+                    PState::Rejected(v) => s += &format!("rej{}", vrepr(v, stack)),
+                }
+                for r in &d.reactions {
+                    s += &format!("R{},{}", vrepr(&r.on_ful, stack), vrepr(&r.on_rej, stack));
+                    if let Some(o) = &r.result {
+                        stack.push(N::Obj(o.clone()));
+                        s += &format!("r{:x}", ptr_of(o));
+                    }
+                    if let Some(f) = &r.frame {
+                        s += &format!("f{}", vrepr(f, stack));
+                    }
+                }
+            }
+            Kind::Generator(g) => {
+                s += "G";
+                s += match g.status.get() {
+                    GStatus::Start => "start",
+                    GStatus::Suspended => "susp",
+                    GStatus::Running => "run",
+                    GStatus::Done => "done",
+                };
+                match g.co.try_borrow() {
+                    Ok(co) => s += if co.is_some() { "co" } else { "noco" },
+                    Err(_) => s += "coBORROWED",
+                }
+                match g.start.try_borrow() {
+                    Ok(st) => {
+                        if let Some(st) = st.as_ref() {
+                            s += &format!("f{}", vrepr(&st.f, stack));
+                            stack.push(N::Scope(st.scope.clone()));
+                            s += &format!("sc{:x}", ptr_of(&st.scope));
+                            s += &format!("this{}", vrepr(&st.this, stack));
+                            for a in &st.args {
+                                s += &vrepr(a, stack);
+                            }
+                        }
+                    }
+                    Err(_) => s += "startBORROWED",
+                }
+                match g.queue.try_borrow() {
+                    Ok(q) => {
+                        for (_, v, p) in q.iter() {
+                            s += &vrepr(v, stack);
+                            stack.push(N::Obj(p.clone()));
+                            s += &format!("q{:x}", ptr_of(p));
+                        }
+                    }
+                    Err(_) => s += "queueBORROWED",
+                }
+            }
             other => s += &format!("K{:?}", std::mem::discriminant(other)),
         },
         Err(_) => s += "KBORROWED",
@@ -318,6 +376,124 @@ fn gc_yup_transcript_equal() {
         panic!("transcripts differ at line {i}:\n  nogc: {a}\n  gc:   {b}");
     }
     assert_eq!(plain.len(), collected.len());
+    check_invariants().unwrap_or_else(|e| panic!("registry invariants: {e}"));
+}
+
+/// The async validation transcript with `__gc()` a no-op, or running `collect_cycles` (the workload calls `__gc` every
+/// 100 iterations, at random points, and inside its async custom tests). The event loop drives the run to completion.
+fn run_async_workload(collect: bool) -> String {
+    reset_bookkeeping();
+    let mut pkg = load_yup();
+    let it = pkg.interp();
+    install_gc(it, collect);
+    if it.run(ASYNC_WORKLOAD).is_err() {
+        panic!("async workload threw");
+    }
+    if it.run_event_loop().is_err() {
+        panic!("async workload: the event loop reported an error");
+    }
+    let global = Value::Object(it.global_object.clone());
+    let v = match it.get(&global, "__transcript") {
+        Ok(v) => v,
+        Err(_) => panic!("async workload left no transcript"),
+    };
+    let text = it.to_str(&v).to_string();
+    drop(pkg);
+    text
+}
+
+#[test]
+#[ignore = "manual safety gate (async, N=3000): needs GC_YUP_BUNDLE; with GC_YUP_ASYNC_ORACLE set, also compares with the Node 22 transcript"]
+fn gc_yup_async_transcript_equal() {
+    force_enabled();
+    let plain = run_async_workload(false);
+    let plain_collections = crate::gc::collections();
+    let plain_peak = crate::gc::peak_live();
+    let collected = run_async_workload(true);
+    let calls = CALLS.with(|c| c.get());
+    let cleared = CLEARED.with(|c| c.get());
+    let max_reach = MAX_REACHABLE.with(|c| c.get());
+    let violations = VIOLATIONS.with(|v| v.borrow().clone());
+    if let Some(dir) = out_dir() {
+        std::fs::write(format!("{dir}/async-transcript-nogc.txt"), &plain).ok();
+        std::fs::write(format!("{dir}/async-transcript-gc.txt"), &collected).ok();
+    }
+    eprintln!(
+        "gc_yup async: transcript lines {}, automatic collections in the no-op run {plain_collections}, peak live at a safe point {plain_peak}; __gc calls {calls}, nodes cleared {cleared}, reachable nodes (max) {max_reach}, poison violations {}",
+        plain.lines().count(),
+        violations.len()
+    );
+    assert!(
+        violations.is_empty(),
+        "poison check failed: {}",
+        violations[0]
+    );
+    assert!(
+        calls >= 60 && cleared > 0,
+        "the collector did not run (calls {calls}, cleared {cleared})"
+    );
+    assert!(
+        plain == collected,
+        "async transcripts differ (first differing line {:?})",
+        plain
+            .lines()
+            .zip(collected.lines())
+            .position(|(a, b)| a != b)
+    );
+    if let Ok(oracle) = std::env::var("GC_YUP_ASYNC_ORACLE") {
+        let node = std::fs::read_to_string(&oracle).unwrap_or_else(|_| panic!("read {oracle}"));
+        assert!(
+            node.trim_end() == collected.trim_end(),
+            "the thaw-js transcript differs from the Node 22 transcript in {oracle} (first differing line {:?})",
+            node.lines()
+                .zip(collected.lines())
+                .position(|(a, b)| a != b)
+        );
+    }
+    check_invariants().unwrap_or_else(|e| panic!("registry invariants: {e}"));
+}
+
+/// Live counts before and after one collection of 1000 async validations (`await validate`), driven by the event loop.
+#[test]
+#[ignore = "manual safety gate: needs GC_YUP_BUNDLE (the gunzipped yup registry bundle)"]
+fn gc_yup_async_freed_fraction() {
+    force_enabled();
+    let mut pkg = load_yup();
+    let it = pkg.interp();
+    install_gc(it, false);
+    let defs = |it: &mut Interp, src: &str| match it.run(src) {
+        Ok(v) => v,
+        Err(_) => panic!("script threw: {src}"),
+    };
+    defs(it, SCHEMA);
+    // A realm runs its event loop once (a later call returns at once), so the loop is driven by a single call.
+    it.collect_cycles();
+    let base = live_counts();
+    let loop_src = "globalThis.done=false; (async function(){ for (let i = 0; i < 1000; i++) { \
+        await __s.validate({ name: 'n'.repeat(i % 5), age: (i % 9) - 2 }, { abortEarly: false }).catch(() => 0); } \
+        globalThis.done=true; })();";
+    defs(it, loop_src);
+    assert!(it.run_event_loop().is_ok(), "run_event_loop");
+    let grown = live_counts();
+    let done = defs(it, "globalThis.done");
+    let cleared = it.collect_cycles();
+    let after = live_counts();
+    let f = (grown.0 - after.0, grown.1 - after.1, grown.2 - after.2);
+    eprintln!(
+        "gc_yup async N=1000 (done={}): base {base:?}, growth obj/scope/closure {} / {} / {}, freed {} / {} / {} (cleared nodes {cleared}), fraction obj {:.1}%",
+        matches!(done, Value::Bool(true)),
+        grown.0 - base.0,
+        grown.1 - base.1,
+        grown.2 - base.2,
+        f.0,
+        f.1,
+        f.2,
+        if grown.0 > base.0 {
+            100.0 * f.0 as f64 / (grown.0 - base.0) as f64
+        } else {
+            0.0
+        }
+    );
     check_invariants().unwrap_or_else(|e| panic!("registry invariants: {e}"));
 }
 

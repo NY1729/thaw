@@ -26,19 +26,21 @@ pub(crate) enum Req {
     Return,
 }
 
-struct GenStart {
-    f: Value,
-    def: Rc<FuncDef>,
-    scope: Rc<Scope>,
-    this: Value,
-    args: Vec<Value>,
+/// The arguments of a generator that has not started. Each field is one `Rc` clone (`def` is not a node: it is
+/// read by `gc::obj_edges` only through its sole-owner rule, and a clone held here makes that rule fail).
+pub(crate) struct GenStart {
+    pub(crate) f: Value,
+    pub(crate) def: Rc<FuncDef>,
+    pub(crate) scope: Rc<Scope>,
+    pub(crate) this: Value,
+    pub(crate) args: Vec<Value>,
 }
 
 pub(crate) struct GenData {
-    status: Cell<GStatus>,
-    start: RefCell<Option<GenStart>>,
-    co: RefCell<Option<Rc<Co>>>,
-    queue: RefCell<VecDeque<(Req, Value, Obj)>>,
+    pub(crate) status: Cell<GStatus>,
+    pub(crate) start: RefCell<Option<GenStart>>,
+    pub(crate) co: RefCell<Option<Rc<Co>>>,
+    pub(crate) queue: RefCell<VecDeque<(Req, Value, Obj)>>,
 }
 
 fn gen_data(this: &Value) -> Option<Rc<GenData>> {
