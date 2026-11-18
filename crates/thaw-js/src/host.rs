@@ -4840,6 +4840,8 @@ thread_local! {
 thread_local! {
     /// Test stand-in for the compiled runtime's `thaw_runtime_async_hooks_set`: `(on, sink address)` per call.
     pub(crate) static TEST_ASYNC_HOOK_SET: RefCell<Vec<(u8, usize)>> = const { RefCell::new(Vec::new()) };
+    /// Test stand-in for `thaw_runtime_async_frames_set`: each requested flag value.
+    pub(crate) static TEST_ASYNC_FRAMES_SET: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Registers the native promise sink with the compiled runtime when `on`, and clears it otherwise. `it` is the
@@ -4871,6 +4873,29 @@ extern "C" fn native_hook_event(kind: u8, key: u64, parent: u64) {
     if let Some(it) = unsafe { it.as_mut() } {
         it.hook_native_raw(kind, key, parent);
     }
+}
+
+/// `thaw_runtime_async_frames_set` (compiled thaw-runtime): asks the native sink for reaction-context events.
+/// Called once by an AsyncLocalStorage's constructor (`__thaw_async_frames_native`). Missing symbol: no-op.
+pub(crate) fn native_async_frames_set(on: bool) {
+    #[cfg(test)]
+    TEST_ASYNC_FRAMES_SET.with(|sets| sets.borrow_mut().push(u8::from(on)));
+    #[cfg(all(unix, not(test)))]
+    {
+        type Set = extern "C" fn(u8);
+        // SAFETY: the symbol is the compiled runtime's `Set`, exported by the link's `--export-dynamic-symbol` list.
+        unsafe {
+            let sym = libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"thaw_runtime_async_frames_set".as_ptr(),
+            );
+            if !sym.is_null() {
+                std::mem::transmute::<*mut c_void, Set>(sym)(u8::from(on));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = on;
 }
 
 /// `thaw_runtime_async_hooks_set` (compiled thaw-runtime), looked up like `drain_native`. Missing symbol: no-op.

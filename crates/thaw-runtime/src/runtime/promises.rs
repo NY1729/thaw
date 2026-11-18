@@ -301,6 +301,11 @@ unsafe fn subscribe_with_roots(
         return 0;
     };
     unsafe { thaw_promise_mark_handled(promise) };
+    // The reaction runs later in its subscriber's context (AsyncLocalStorage): thaw-js captures it now, under
+    // the reaction's key, and restores it around `resume` (kinds 1 and 2 in `thaw_runtime_poll_one`).
+    if hook_key != 0 && crate::ASYNC_FRAMES_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        async_hook_emit(4, hook_key, 0);
+    }
     let subscription = PromiseSubscription {
         resume,
         frame,

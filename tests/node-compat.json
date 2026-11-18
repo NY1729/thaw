@@ -5316,6 +5316,42 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "import * as net from 'node:net';\nfunction main(): void {\n  let got = '';\n  const server: any = net.createServer((sock: any): void => {\n    sock.on('data', (d: any): void => { got += d.toString(); });\n    sock.on('close', (): void => { server.close(); });\n  });\n  server.on('close', (): void => { console.log('server got', JSON.stringify(got)); });\n  server.listen(0, '127.0.0.1', (): void => {\n    const port = server.address().port;\n    const c: any = net.connect(port, '127.0.0.1', (): void => { c.write('ping'); c.destroy(); });\n  });\n}"
+  },
+  {
+    "name": "async local storage survives await literal, timer and resolved promise in run",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function awaitLit(): Promise<void> { await 1; rec('await-lit'); }\nasync function awaitTimer(): Promise<void> { await sleep(2); rec('await-timer'); await Promise.resolve(); rec('await-resolved'); }\nasync function main(): Promise<void> {\n  await als.run('A', async (): Promise<void> => { rec('sync'); await awaitLit(); await awaitTimer(); rec('end'); });\n  rec('after-run');\n}\n"
+  },
+  {
+    "name": "async local storage survives then, catch, finally and queueMicrotask after an await",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function main(): Promise<void> {\n  await als.run('B', async (): Promise<void> => {\n    await sleep(1);\n    queueMicrotask((): void => { rec('microtask-after-await'); });\n    await sleep(1);\n    await Promise.resolve(1).then((): void => { rec('then-after-await'); });\n    await Promise.reject(new Error('x')).catch((): void => { rec('catch-after-await'); });\n    await Promise.resolve(1).finally((): void => { rec('finally-after-await'); });\n    await Promise.resolve(1).then((): void => { rec('then-after-await2'); });\n    rec('end');\n  });\n  rec('outside');\n}\n"
+  },
+  {
+    "name": "async local storage survives Promise.all, race, allSettled and any continuations",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function main(): Promise<void> {\n  await als.run('C', async (): Promise<void> => {\n    await Promise.all([sleep(1), sleep(2)]);\n    rec('after-all');\n    await Promise.race([sleep(1), sleep(3)]);\n    rec('after-race');\n    await Promise.allSettled([sleep(1)]);\n    rec('after-allSettled');\n    await Promise.any([sleep(1)]);\n    rec('after-any');\n  });\n  rec('outside');\n}\n"
+  },
+  {
+    "name": "async local storage keeps two concurrent runs apart through an awaited run promise and enterWith",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function main(): Promise<void> {\n  const first = als.run('P1', async (): Promise<number> => { await sleep(1); rec('p1'); return 1; });\n  const second = als.run('P2', async (): Promise<number> => { const v = await first; rec('p2-after-p1'); return v + 1; });\n  const results = await Promise.all([first, second]);\n  console.log('results ' + results.join(','));\n  const outer = sleep(1);\n  await als.run('C', async (): Promise<void> => { await outer.then((): void => { rec('then-on-outer'); }); });\n  als.enterWith('E');\n  await sleep(1);\n  console.log('enterWith=' + String(als.getStore()));\n}\n"
+  },
+  {
+    "name": "async local storage survives for await, an emitter after an await and promisify",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nimport { EventEmitter } from 'node:events';\nimport { promisify } from 'node:util';\nimport { setTimeout as delay } from 'node:timers/promises';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function* gen(): AsyncGenerator<number> { await sleep(1); rec('gen'); yield 1; }\nfunction cbApi(v: number, cb: (err: any, v?: number) => void): void { setTimeout((): void => { cb(null, v * 2); }, 1); }\nconst promisedApi = promisify(cbApi);\nasync function main(): Promise<void> {\n  await als.run('E', async (): Promise<void> => {\n    for await (const _x of gen()) { rec('for-await'); }\n    const em = new EventEmitter();\n    em.on('e', (): void => { rec('emitter-sync'); });\n    await delay(1);\n    em.emit('e');\n    const doubled = await promisedApi(21);\n    rec('promisify-' + doubled);\n  });\n  rec('outside');\n}\n"
+  },
+  {
+    "name": "async local storage in two concurrent http handlers keeps each request store",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nimport * as http from 'node:http';\nconst als = new AsyncLocalStorage<string>();\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nfunction main(): void {\n  const srv = http.createServer((req: any, res: any): void => {\n    const id = String(req.url).slice(1);\n    als.run('req-' + id, async (): Promise<void> => {\n      await sleep(id === 'a' ? 4 : 1);\n      await sleep(1);\n      res.setHeader('x-store', String(als.getStore()));\n      res.end('ok');\n    });\n  });\n  srv.listen(0, '127.0.0.1', (): void => {\n    const port = (srv.address() as any).port;\n    const out: string[] = [];\n    for (const p of ['a', 'b']) {\n      http.get({ host: '127.0.0.1', port, path: '/' + p }, (res: any): void => {\n        res.on('data', (): void => {});\n        res.on('end', (): void => {\n          out.push(p + ':' + String(res.headers['x-store']));\n          if (out.length === 2) { console.log(out.sort().join(',')); srv.close(); }\n        });\n      });\n    }\n  });\n}\n"
   }
 ]
 }

@@ -5377,6 +5377,46 @@ fn native_promise_hooks_emit_init_resolve_once_and_before_after_around_resume() 
     }
 }
 
+/// The reaction context (kind 4) follows the frames flag: an await reports it under its throwaway key at subscribe
+/// time, and nothing extra is sent while the flag is off.
+#[test]
+fn native_reaction_context_is_reported_at_subscribe_only_while_frames_are_on() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    thaw_runtime_async_hooks_set(1, Some(record_hook_event));
+    thaw_runtime_async_frames_set(0);
+    let first = thaw_promise_new();
+    let mut frame = 0u8;
+    unsafe { thaw_promise_subscribe_await(first, resume_noop, &mut frame as *mut u8) };
+    assert!(
+        take_hook_events().iter().all(|event| event.0 != 4),
+        "no reaction context while the flag is off"
+    );
+
+    thaw_runtime_async_frames_set(1);
+    let second = thaw_promise_new();
+    let second_key = unsafe { (*second).hook_key };
+    take_hook_events();
+    let mut frame = 0u8;
+    unsafe { thaw_promise_subscribe_await(second, resume_noop, &mut frame as *mut u8) };
+    let events = take_hook_events();
+    // The await's throwaway promise is the only reaction: init (triggered by `second`), then its context.
+    let reaction = events[0].1;
+    assert_eq!(events, vec![(0, reaction, second_key), (4, reaction, 0)]);
+
+    assert_eq!(thaw_promise_resolve(first, &HOOK_RESULT), 1);
+    assert_eq!(thaw_promise_resolve(second, &HOOK_RESULT), 1);
+    while thaw_runtime_poll_one() == 1 {}
+    take_hook_events();
+    thaw_runtime_async_frames_set(0);
+    thaw_runtime_async_hooks_set(0, None);
+    unsafe {
+        thaw_promise_destroy(first);
+        thaw_promise_destroy(second);
+    }
+}
+
 thread_local! {
     static NESTED_HOOK_KEYS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }

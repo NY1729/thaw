@@ -897,26 +897,21 @@ fn thaw_js_path_bundle(root_bundle: &str, builtin: &str) -> String {
 }
 
 /// A `createHook` program that uses promise forms whose hook trace is not yet Node-identical on thaw-js
-/// (`finally` trigger ids, Promise combinators, AsyncLocalStorage stores through native reactions):
-/// the module stays on QuickJS for those. `then`, `new Promise` and resolve/reject are served by thaw-js.
+/// (`finally` trigger ids, Promise combinators): the module stays on QuickJS for those. `then`, `new Promise`
+/// and resolve/reject are served by thaw-js, and so is AsyncLocalStorage (reaction contexts reach native awaits).
 /// A plain `createHook` keeps `node:async_hooks` on thaw-js.
 fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
     const UNVALIDATED_NAMES: &[&str] = &["finally"];
     const UNVALIDATED_PREFIXES: &[&str] = &["Promise.all", "Promise.race", "Promise.any"];
-    // An imported but unused AsyncLocalStorage is harmless: only a use outside the import line counts.
-    let uses_als = user_source
-        .lines()
-        .any(|line| !line.trim_start().starts_with("import") && thaw_js_mentions(line, "AsyncLocalStorage"));
     (pkg_name == "node:async_hooks"
         && thaw_js_mentions(user_source, "createHook")
-        && (uses_als
-            || UNVALIDATED_NAMES
-                .iter()
-                .any(|name| thaw_js_mentions(user_source, name))
+        && (UNVALIDATED_NAMES
+            .iter()
+            .any(|name| thaw_js_mentions(user_source, name))
             || UNVALIDATED_PREFIXES
                 .iter()
                 .any(|prefix| user_source.contains(prefix))))
-    .then_some("createHook with finally, Promise combinators or AsyncLocalStorage is not supported on thaw-js yet")
+    .then_some("createHook with finally or Promise combinators is not supported on thaw-js yet")
 }
 
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
@@ -1146,7 +1141,8 @@ fn thaw_js_async_hooks_create_hook_with_promises_keeps_the_module_on_quickjs() {
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", finally).is_some());
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", then).is_none());
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", all).is_some());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", als).is_some());
+    // AsyncLocalStorage is served by thaw-js now (its stores reach native awaits): not a blocker any more.
+    assert!(thaw_js_async_hooks_blocker("node:async_hooks", als).is_none());
     let als_import_only = "import { createHook, AsyncLocalStorage } from 'node:async_hooks';\ncreateHook({ init() {} }).enable();";
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", als_import_only).is_none());
     assert!(thaw_js_async_hooks_blocker("node:async_hooks", hooks).is_none());
