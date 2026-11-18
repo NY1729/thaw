@@ -67,6 +67,33 @@ fn thaw_js_declaration_scan_accepts_plain_data_and_rejects_everything_else() {
 }
 
 #[test]
+fn thaw_js_declaration_callable_result_is_plain_and_callable_parameter_is_not() {
+    // a callable RESULT is a live handle (ejs.compile, nanoid.customAlphabet): plain when its
+    // parameters and return are plain, including a union of such callables (sync | Promise return)
+    let compile = "declare function __thaw_typed_js_6d73(template: string): ((arg0?: Json | undefined) => string) | ((arg0?: Json | undefined) => Promise<string>);";
+    assert!(thaw_js_declaration_plain(compile));
+    let factory = "declare function __thaw_typed_js_6d73(prefix: string): (x: string) => string;";
+    assert!(thaw_js_declaration_plain(factory));
+    // a callable PARAMETER (shape S1) stays rejected, also next to a callable result
+    assert!(!thaw_js_declaration_plain(
+        "declare function __thaw_typed_js_6d73(f: (x: number) => number): number;"
+    ));
+    assert!(!thaw_js_declaration_plain(
+        "declare function __thaw_typed_js_6d73(f: (x: number) => number): (y: string) => string;"
+    ));
+    // a callable result whose parameter or return is not plain data stays rejected
+    assert!(!thaw_js_declaration_plain(
+        "declare function __thaw_typed_js_6d73(prefix: string): (x: string) => Buffer;"
+    ));
+    assert!(!thaw_js_declaration_plain(
+        "declare function __thaw_typed_js_6d73(prefix: string): (x: Buffer) => string;"
+    ));
+    assert!(!thaw_js_declaration_plain(
+        "declare function __thaw_typed_js_6d73(prefix: string): ((x: string) => string) | number;"
+    ));
+}
+
+#[test]
 fn thaw_js_symbols_decode_to_their_package_function() {
     let line = "declare function __thaw_typed_js_6d733a3a6d73__overload_0__arity_2(value: number): string;";
     assert_eq!(thaw_js_declared_function(line, "ms").as_deref(), Some("ms"));
@@ -912,6 +939,123 @@ fn thaw_js_fallback_error_mode_fails_only_when_the_build_links_quickjs() {
     result.unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(dir.join("app")).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], false, "{manifest}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `tjs-factory` (a function returning a callable, like nanoid's `customAlphabet`) and `tjs-template`
+/// (a function returning a union of two callables, like ejs's `compile`), both kept off the JIT by `Map`.
+fn thaw_js_callable_result_fixture(name: &str, main: &str) -> (PathBuf, PathBuf, PathBuf) {
+    thaw_js_package_fixture(
+        name,
+        main,
+        &[
+            (
+                "tjs-factory",
+                "export declare function make(prefix: string): (x: string) => string;\n",
+                "exports.make = function (prefix) { var m = new Map(); m.set('p', prefix); return function (x) { return m.get('p') + x; }; };\n",
+            ),
+            (
+                "tjs-template",
+                "export declare function compile(template: string): ((arg0?: any) => string) | ((arg0?: any) => Promise<string>);\n",
+                "exports.compile = function (template) { var m = new Map(); m.set('t', template); return function (data) { return m.get('t').replace('NAME', data.name); }; };\n",
+            ),
+        ],
+    )
+}
+
+/// The registry fixture of `thaw_js_callable_result_fixture` for any `(package, d.ts, module body)` list.
+fn thaw_js_package_fixture(
+    name: &str,
+    main: &str,
+    packages: &[(&str, &str, &str)],
+) -> (PathBuf, PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-{name}-{}", std::process::id()));
+    let registry = dir.join("modules");
+    for &(package, declarations, module) in packages {
+        let dir_pkg = registry.join(package);
+        std::fs::create_dir_all(&dir_pkg).unwrap();
+        std::fs::write(dir_pkg.join("package.d.ts"), declarations).unwrap();
+        std::fs::write(
+            dir_pkg.join("bundle.js"),
+            format!(
+                "module.exports = (function(require){{\n\
+                 var __thaw_bundle_factories = {{\n\
+                 \"{package}/index.js\": function(module, exports, require) {{\n{module}}},\n\
+                 }};\n\
+                 var __thaw_bundle_require_maps = {{ \"{package}/index.js\": {{}}, }};\n\
+                 var __thaw_bundle_entry_key = \"{package}/index.js\";\n\
+                 var __thaw_entry = {{ exports: {{}} }};\n\
+                 __thaw_bundle_factories[__thaw_bundle_entry_key](__thaw_entry, __thaw_entry.exports, require);\n\
+                 return __thaw_entry.exports;\n\
+                 }})(globalThis.require);\n"
+            ),
+        )
+        .unwrap();
+    }
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, main).unwrap();
+    (dir.clone(), registry, entry)
+}
+
+/// The ejs `compile` shape: a union of two callables over `any` parameters, plus an object-typed `opts`.
+#[test]
+fn thaw_js_union_callable_result_ejs_shape_builds_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "ejs-union",
+        "import * as ejs from 'tjs-ejs';\n\
+         function main(): void {\n\
+           const fn = ejs.compile('hello NAME!', { async: false });\n\
+           console.log(`${fn({ name: 'ada' })}`);\n\
+         }\n",
+        &[(
+            "tjs-ejs",
+            "export declare function compile(template: string, opts?: { async?: boolean; delimiter?: string }): ((arg0?: any) => string) | ((arg0?: any) => Promise<string>);\n",
+            "exports.compile = function (template, opts) { var m = new Map(); m.set('t', template); return function (data) { return m.get('t').replace('NAME', data.name); }; };\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run(&output), "hello ada!\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_callable_results_are_live_handles_and_build_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_callable_result_fixture(
+        "callable-results",
+        "import { make } from 'tjs-factory';\n\
+         import { compile } from 'tjs-template';\n\
+         function main(): void {\n\
+           const shout = make('>> ');\n\
+           console.log(shout('hi'));\n\
+           const fn = compile('hello NAME!');\n\
+           console.log(fn({ name: 'ada' }));\n\
+         }\n",
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    // Same text real Node prints for the equivalent JavaScript.
+    assert_eq!(thaw_js_run(&output), ">> hi\nhello ada!\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

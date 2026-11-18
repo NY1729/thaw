@@ -416,9 +416,7 @@ fn thaw_js_declaration_plain_with(line: &str, callback_options: bool) -> bool {
     // can already pass such a parameter to thaw-js, see `thaw_js_callback_type`; accepting it here is
     // a one-line change that flips `thaw_js_routing_falls_back_to_quickjs_when_a_callback_...`.)
     // A callback coerced into a `Json` parameter (lodash's `iteratee: Json`) is routed.
-    if !callback_options && rest.contains("=>") {
-        return false;
-    }
+    // A callable RESULT (`ejs.compile`, `nanoid.customAlphabet`) is accepted below, see `callable_result_plain`.
     let name_end = rest.find(['<', '(']).unwrap_or(rest.len());
     let mut generics = Vec::new();
     let mut after_name = &rest[name_end..];
@@ -469,9 +467,16 @@ fn thaw_js_declaration_plain_with(line: &str, callback_options: bool) -> bool {
         return false;
     };
     let (params, result) = (&after_name[..result_start], &after_name[result_start + 3..]);
+    // A callback in the name or generics or in a parameter stays rejected (a constructor's option
+    // object is the exception, see `callback_options`).
+    let header = &rest[..rest.len() - after_name.len()];
+    if !callback_options && (header.contains("=>") || params.contains("=>")) {
+        return false;
+    }
     // A bare `Uint8Array` result (`readFileSync(path): Uint8Array`) crosses as bytes; in params,
     // unions and nested positions it stays rejected.
-    let bytes_result = result.trim().trim_end_matches(';').trim() == "Uint8Array";
+    let result_text = result.trim().trim_end_matches(';').trim();
+    let bytes_result = result_text == "Uint8Array";
     let identifiers_plain = |text: &str| {
         let chars = text.chars().collect::<Vec<_>>();
         let mut index = 0;
@@ -516,7 +521,83 @@ fn thaw_js_declaration_plain_with(line: &str, callback_options: bool) -> bool {
         }
         true
     };
-    identifiers_plain(params) && (bytes_result || identifiers_plain(result))
+    let result_plain = if result.contains("=>") && !callback_options {
+        callable_result_plain(result_text, &identifiers_plain)
+    } else {
+        identifiers_plain(result)
+    };
+    identifiers_plain(params) && (bytes_result || result_plain)
+}
+
+/// A callable result (`(arg0?: Json) => string`, or a `|` union of such members as `ejs.compile`
+/// declares) is a live handle on thaw-js, so it is plain when each member's parameters and return
+/// are plain data (`Promise<T>` is plain when `T` is). A callable parameter is never this shape.
+fn callable_result_plain(text: &str, plain: &impl Fn(&str) -> bool) -> bool {
+    let members = thaw_js_top_level_members(text, '|');
+    !members.is_empty()
+        && members.into_iter().all(|member| {
+            let mut member = member.trim();
+            // a parenthesised member `((x) => string)`
+            if member.len() >= 2
+                && member.starts_with('(')
+                && thaw_js_matching_paren(&member[1..]) == Some(member.len() - 2)
+            {
+                member = member[1..member.len() - 1].trim();
+            }
+            let Some(after_open) = member.strip_prefix('(') else {
+                return false;
+            };
+            let Some(close) = thaw_js_matching_paren(after_open) else {
+                return false;
+            };
+            let (params, after) = (&after_open[..close], after_open[close + 1..].trim_start());
+            let Some(ret) = after.strip_prefix("=>").map(str::trim) else {
+                return false;
+            };
+            let ret = ret
+                .strip_prefix("Promise<")
+                .and_then(|inner| inner.strip_suffix('>'))
+                .unwrap_or(ret);
+            plain(params) && plain(ret) && !params.contains("=>") && !ret.contains("=>")
+        })
+}
+
+/// The index of the `)` closing an already-open `(` (`text` starts just after it), if any.
+fn thaw_js_matching_paren(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(index),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The members of a top-level `separator`-joined type (`a | (b) => c` splits at the `|` outside parens and `<>`).
+fn thaw_js_top_level_members(text: &str, separator: char) -> Vec<&str> {
+    let mut members = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut previous = '\0';
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' | '<' | '{' | '[' => depth += 1,
+            // the `>` of an arrow `=>` closes nothing
+            '>' if previous == '=' => {}
+            ')' | '>' | '}' | ']' => depth = depth.saturating_sub(1),
+            ch if ch == separator && depth == 0 => {
+                members.push(&text[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+        previous = ch;
+    }
+    members.push(&text[start..]);
+    members
 }
 
 /// An async overload (`...): Promise<string>;` or `string | Promise<string>`, ejs `render`): the typed

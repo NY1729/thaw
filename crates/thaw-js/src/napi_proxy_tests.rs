@@ -891,6 +891,39 @@ fn plain_decode_maps_error_undefined_reference_symbol_and_origin_markers() {
 }
 
 #[test]
+fn native_returned_buffer_wire_value_decodes_to_a_real_buffer() {
+    let mut it = plain_realm();
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const v = api.decode({ type: 'Buffer', data: [97, 98] }); return [Buffer.isBuffer(v), v.toString('hex')].join('|'); })()"
+        ),
+        "true|6162"
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const v = api.decode({ type: 'Buffer', data: [97, 98] }, [[[], 'plain']]); return [Buffer.isBuffer(v), typeof v.type].join('|'); })()"
+        ),
+        "false|string"
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const v = api.decode({ type: 'Other', data: [1] }); return [Buffer.isBuffer(v), JSON.stringify(v)].join('|'); })()"
+        ),
+        r#"false|{"type":"Other","data":[1]}"#
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const a = api.decode([{ type: 'Buffer', data: [1] }]); const o = api.decode({ k: { type: 'Buffer', data: [2] } }); return [Buffer.isBuffer(a[0]), Buffer.isBuffer(o.k), o.k[0]].join('|'); })()"
+        ),
+        "true|true|2"
+    );
+}
+
+#[test]
 fn plain_handle_marker_of_an_unowned_native_object_is_refused() {
     let _bridge = table_bridge();
     reply("array_kind_graph", "", r#"{"value":false}"#);

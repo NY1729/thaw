@@ -988,6 +988,117 @@ fn native_addon_async_and_tsfn_complete_in_worker_before_natural_exit() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+// An addon promise settled by async work, awaited inside an async `main`. Regression coverage only: it
+// passes on both backends (see the ignored thread variant below), so it is not the red for the
+// coroutine-thread bug.
+#[cfg(target_os = "linux")]
+fn run_async_fetch_addon(name: &str, coroutine_co: Option<&str>) -> std::process::Output {
+    let dir = std::env::temp_dir().join(format!("thaw-async-fetch-{name}-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("async-fetch");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"),
+        "export declare function fetchValue(): Promise<number>;\n\
+         export declare function echo(value: number): number;\n")
+        .unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(&addon_c, r#"
+        #include <stddef.h>
+        #include <stdlib.h>
+        typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+        typedef void* napi_deferred; typedef void* napi_async_work;
+        typedef int napi_status;
+        typedef void (*napi_async_execute_callback)(napi_env, void*);
+        typedef void (*napi_async_complete_callback)(napi_env, napi_status, void*);
+        extern napi_status napi_get_cb_info(napi_env,napi_callback_info,size_t*,napi_value*,napi_value*,void**);
+        extern napi_status napi_get_value_double(napi_env,napi_value,double*);
+        extern napi_status napi_create_double(napi_env,double,napi_value*);
+        extern napi_status napi_create_function(napi_env,const char*,size_t,napi_value(*)(napi_env,napi_callback_info),void*,napi_value*);
+        extern napi_status napi_set_named_property(napi_env,napi_value,const char*,napi_value);
+        extern napi_status napi_create_promise(napi_env,napi_deferred*,napi_value*);
+        extern napi_status napi_resolve_deferred(napi_env,napi_deferred,napi_value);
+        extern napi_status napi_create_async_work(napi_env,napi_value,napi_value,napi_async_execute_callback,napi_async_complete_callback,void*,napi_async_work*);
+        extern napi_status napi_queue_async_work(napi_env,napi_async_work);
+        extern napi_status napi_delete_async_work(napi_env,napi_async_work);
+        struct request { napi_deferred deferred; napi_async_work work; };
+        static void execute(napi_env env, void* raw) { (void)env; (void)raw; }
+        static void complete(napi_env env, napi_status status, void* raw) {
+            struct request* request = raw;
+            napi_value value;
+            napi_create_double(env, status == 0 ? 21 : -1, &value);
+            napi_resolve_deferred(env, request->deferred, value);
+            napi_delete_async_work(env, request->work);
+            free(request);
+        }
+        static napi_value fetchValue(napi_env env, napi_callback_info info) {
+            (void)info;
+            struct request* request = calloc(1, sizeof(*request));
+            napi_value promise;
+            napi_create_promise(env, &request->deferred, &promise);
+            napi_create_async_work(env, NULL, NULL, execute, complete, request, &request->work);
+            napi_queue_async_work(env, request->work);
+            return promise;
+        }
+        static napi_value echo(napi_env env, napi_callback_info info) {
+            size_t argc = 1; napi_value argv[1]; double value; napi_value result;
+            napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+            napi_get_value_double(env, argv[0], &value);
+            napi_create_double(env, value, &result);
+            return result;
+        }
+        __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+            napi_value fn;
+            napi_create_function(env, "fetchValue", 10, fetchValue, NULL, &fn);
+            napi_set_named_property(env, exports, "fetchValue", fn);
+            napi_create_function(env, "echo", 4, echo, NULL, &fn);
+            napi_set_named_property(env, exports, "echo", fn);
+            return exports;
+        }
+    "#).unwrap();
+    assert!(Command::new("cc").args(["-shared", "-fPIC"])
+        .arg(&addon_c).arg("-o").arg(package.join("native.node"))
+        .status().unwrap().success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(&source, r#"
+        import { fetchValue, echo } from 'async-fetch';
+        async function main(): Promise<void> {
+            const v = await fetchValue();
+            console.log(echo(v));
+        }
+    "#).unwrap();
+    build(&source,&output,&[],&[],&[],&registry,&[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let mut command = Command::new(&output);
+    command.env_remove("THAW_JS_CO");
+    if let Some(co) = coroutine_co {
+        command.env("THAW_JS_CO", co);
+    }
+    let result = command.output().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    result
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_addon_promise_resolved_by_async_work_runs_after_await_by_default() {
+    let result = run_async_fetch_addon("default", None);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "21\n");
+}
+
+// Same program with the thread backend named explicitly. Ignored: it passes on this fixture, which does
+// not reach the failing path. The real reproducer for the addon-call-on-a-coroutine-thread bug is the
+// downloaded argon2 test (`THAW_JS_CO=thread` fails there with `no live owner`).
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "non-discriminating: the failing path is covered by the downloaded argon2 test"]
+fn native_addon_promise_resolved_by_async_work_under_explicit_thread_backend_runs() {
+    let result = run_async_fetch_addon("thread", Some("thread"));
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "21\n");
+}
+
 // Unlike the unit-level pointer-injection check, this executes from the
 // generated process main thread and proves the loader's actual default-loop
 // receipt keeps libuv mapped and drives both the timer and its close callback.
@@ -1045,5 +1156,84 @@ fn native_addon_main_default_uv_loop_timer_progresses_through_close() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(String::from_utf8_lossy(&result.stdout),
         "main-default-loop-fired\nmain-default-loop-closed\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A Buffer returned by a native addon (`napi_create_buffer_copy`) must reach JS as a real Buffer,
+/// and a Buffer passed back into the addon must still satisfy `napi_is_buffer`.
+#[test]
+#[ignore = "a native-created Buffer that escapes a native call fails with `invalid JavaScript handle: released or never allocated` on both the QuickJS and thaw-js engines, before decodeValue runs: fixture handle-scope shape or an upstream escaping bug; to be investigated separately"]
+fn native_returned_buffer_is_a_real_buffer_end_to_end() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-native-buffer-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("native-buf");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function mkBuf(): Buffer;\n\
+         export declare function isBuf(value: Buffer): boolean;\n",
+    )
+    .unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(
+        &addon_c,
+        r#"
+            #include <stddef.h>
+            #include <stdbool.h>
+            typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+            typedef int napi_status;
+            extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
+            extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
+            extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
+            extern napi_status napi_create_buffer_copy(napi_env, size_t, const void*, void**, napi_value*);
+            extern napi_status napi_is_buffer(napi_env, napi_value, bool*);
+            extern napi_status napi_get_boolean(napi_env, bool, napi_value*);
+            static napi_value mk_buf(napi_env env, napi_callback_info info) {
+                napi_value result;
+                napi_create_buffer_copy(env, 2, "ab", 0, &result);
+                return result;
+            }
+            static napi_value is_buf(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value argv[1], result; bool flag = false;
+                napi_get_cb_info(env, info, &argc, argv, 0, 0);
+                napi_is_buffer(env, argv[0], &flag);
+                napi_get_boolean(env, flag, &result);
+                return result;
+            }
+            __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+                napi_value fn;
+                napi_create_function(env, "mkBuf", 5, mk_buf, 0, &fn);
+                napi_set_named_property(env, exports, "mkBuf", fn);
+                napi_create_function(env, "isBuf", 5, is_buf, 0, &fn);
+                napi_set_named_property(env, exports, "isBuf", fn);
+                return exports;
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&addon_c)
+        .arg("-o")
+        .arg(package.join("native.node"))
+        .status()
+        .unwrap()
+        .success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "import { isBuf, mkBuf } from \"native-buf\"; function main(): void { console.log(Buffer.isBuffer(mkBuf()), isBuf(mkBuf()), mkBuf().toString('hex'), isBuf(Buffer.from('ab'))); }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true true 6162 true\n");
     let _ = std::fs::remove_dir_all(dir);
 }

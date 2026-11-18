@@ -1331,8 +1331,18 @@ fn generate_registry_shims_pass(
         for function in &pkg.functions {
             // The bare-alias wrappers below forward to thaw-js's own declaration, so they must
             // see the same `Promise<Json>` return `typed_dynamic_declaration` gives it.
+            // A callable-union result is a `JsValue` handle on thaw-js: its aliases keep that type (no retarget).
+            let alias_union_handle = thaw_js_package
+                && !thaw_js_keeps_js_value(&pkg.name)
+                && matches!(
+                    thaw_js_callable_union_as_handle(&pkg.name, function),
+                    std::borrow::Cow::Owned(_)
+                );
             let alias_function = if thaw_js_package && !thaw_js_keeps_js_value(&pkg.name) {
-                thaw_js_promise_ret(function).into_owned()
+                match thaw_js_callable_union_as_handle(&pkg.name, function) {
+                    handle @ std::borrow::Cow::Owned(_) => handle.into_owned(),
+                    std::borrow::Cow::Borrowed(_) => thaw_js_promise_ret(function).into_owned(),
+                }
             } else {
                 function.clone()
             };
@@ -1455,7 +1465,7 @@ fn generate_registry_shims_pass(
                         ) {
                             shim.push_str(&thaw_js_retarget_alias(
                                 alias,
-                                thaw_js_package && !thaw_js_keeps_js_value(&pkg.name),
+                                thaw_js_package && !thaw_js_keeps_js_value(&pkg.name) && !alias_union_handle,
                             ));
                             bare_aliased.insert(function.name.clone());
                         }
@@ -1491,7 +1501,7 @@ fn generate_registry_shims_pass(
                         ) {
                             shim.push_str(&thaw_js_retarget_alias(
                                 alias,
-                                thaw_js_package && !thaw_js_keeps_js_value(&pkg.name),
+                                thaw_js_package && !thaw_js_keeps_js_value(&pkg.name) && !alias_union_handle,
                             ));
                             bare_aliased.insert(function.name.clone());
                         }

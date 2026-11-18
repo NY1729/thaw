@@ -148,3 +148,79 @@ fn thaw_js_free_function_promise_payload_return_is_not_a_bare_handle() {
     assert!(declaration.contains("Promise<"), "{declaration}");
     assert!(!declaration.contains("): JsValue"), "{declaration}");
 }
+
+/// The ejs `compile` result: a union of two callables over an optional `Json` argument, one returning
+/// `string`, the other `Promise<string>`.
+fn tjs_ejs_compile() -> thaw_bridge::DtsFunction {
+    use thaw_hir::{HirOptionalMask, HirType};
+    let callable = |ret: HirType| {
+        HirType::CallableFunction(
+            vec![HirType::Optional(Box::new(HirType::Json))],
+            HirOptionalMask::Inline(1),
+            None,
+            Box::new(ret),
+        )
+    };
+    let mut function = tjs_free_function(
+        "compile",
+        thaw_bridge::DtsType::Native(HirType::Union(vec![
+            callable(HirType::Str),
+            callable(HirType::Promise(Box::new(HirType::Str))),
+        ])),
+    );
+    function.params = vec![(
+        "template".into(),
+        thaw_bridge::DtsType::Native(HirType::Str),
+    )];
+    function.required_params = 1;
+    function
+}
+
+#[test]
+fn thaw_js_callable_union_result_is_a_handle_declared_once_for_every_wrapper() {
+    let function = tjs_ejs_compile();
+    // ejs.compile's union of plain callables crosses as a live JsValue handle, like a single callable
+    let (symbol, declaration) = typed_dynamic_declaration(
+        "tjs!tjs-ejs",
+        &function,
+        false,
+        &std::collections::BTreeSet::new(),
+        None,
+    )
+    .unwrap();
+    assert!(symbol.starts_with("__thaw_typed_tjs_"), "{symbol}");
+    assert!(declaration.contains("): JsValue"), "{declaration}");
+    assert!(!declaration.contains("=>"), "{declaration}");
+    // the bare and qualified aliases agree on the handle type (no `JsValue` -> `Json` retarget)
+    let rewritten = thaw_js_callable_union_as_handle("tjs-ejs", &function);
+    assert!(matches!(rewritten, std::borrow::Cow::Owned(_)));
+    assert!(matches!(
+        rewritten.ret,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue)
+    ));
+    // node: builtins keep their own return
+    assert!(matches!(
+        thaw_js_callable_union_as_handle("node:child_process", &function),
+        std::borrow::Cow::Borrowed(_)
+    ));
+    // a union with a non-plain member (a `JsValue` return) is not a handle: it keeps its callable text
+    let mut opaque = tjs_ejs_compile();
+    opaque.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(vec![
+        thaw_hir::HirType::CallableFunction(
+            vec![thaw_hir::HirType::Json],
+            thaw_hir::HirOptionalMask::Inline(0),
+            None,
+            Box::new(thaw_hir::HirType::JsValue),
+        ),
+        thaw_hir::HirType::Str,
+    ]));
+    let (_, declaration) = typed_dynamic_declaration(
+        "tjs!tjs-ejs",
+        &opaque,
+        false,
+        &std::collections::BTreeSet::new(),
+        None,
+    )
+    .unwrap();
+    assert!(!declaration.contains("): JsValue"), "{declaration}");
+}
