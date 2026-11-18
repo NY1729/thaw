@@ -457,12 +457,13 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
     Ok(ResolvedPackage {
         name: format!("node:{name}"),
         dts_source: format!(
-            "{dts_source}{}",
+            "{dts_source}{}{}",
             match name {
                 "fs" => "export declare function accessSync(path: string, mode?: number): void;\nexport declare function opendirSync(path: string, options?: any): any;\nexport declare function utimesSync(path: string, atime: any, mtime: any): any;\nexport declare function chownSync(path: string, uid: number, gid: number): any;\nexport declare function lchownSync(path: string, uid: number, gid: number): any;\nexport declare function watchFile(path: string, options: any, listener?: any): any;\nexport declare function unwatchFile(path: string, listener?: any): void;\nexport declare function globSync(pattern: string | string[], options?: any): any[];\nexport declare function glob(pattern: string | string[], options: any, callback?: any): void;\nexport declare function openSync(path: string, flags: string, mode?: number): number;\nexport declare function closeSync(fd: number): void;\nexport declare function fsyncSync(fd: number): void;\nexport declare function fdatasyncSync(fd: number): void;\nexport declare function readSync(fd: number, buffer: any, offset: number, length: number, position: number | null): number;\nexport declare function __thawTakeReadSync(): Buffer;\nexport declare function writeSync(fd: number, data: any, offset?: any, length?: any, position?: any): number;\nexport declare function fstatSync(fd: number): any;\nexport declare function ftruncateSync(fd: number, length?: number): void;\nexport declare function readvSync(fd: number, buffers: any[], position?: number | null): number;\nexport declare function writevSync(fd: number, buffers: any[], position?: number | null): number;\nexport declare function statfsSync(path: string, options?: any): any;\nexport declare function lutimesSync(path: string, atime: any, mtime: any): void;\nexport declare function truncateSync(path: string, length?: number): void;\n",
                 "fs/promises" => "export declare function opendir(argsArray: any): any;\nexport declare function cp(source: string, destination: string, options?: any): Promise<void>;\nexport declare function utimes(argsArray: any): any;\nexport declare function lutimes(argsArray: any): any;\nexport declare function chown(argsArray: any): any;\nexport declare function lchown(argsArray: any): any;\nexport declare function glob(pattern: string | string[], options?: any): AsyncIterable<any>;\nexport declare function watch(path: string, options?: any): AsyncIterable<any>;\nexport declare function statfs(path: string, options?: any): Promise<any>;\nexport declare function truncate(path: string, length?: number): Promise<void>;\n",
                 _ => "",
-            }
+            },
+            generated_builtin_declarations(name),
         ),
         dts_path: None,
         native_lib: None,
@@ -474,6 +475,108 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         version: None,
         dependency_versions: None,
     })
+}
+
+/// Node 22 exports of one builtin that its hand-written typings above leave out, by the kind
+/// Node has (tools/parity-aot/module_table.tsv); each whitespace-separated name is declared once.
+#[derive(Default)]
+struct ExportKinds {
+    functions: &'static str,
+    classes: &'static str,
+    numbers: &'static str,
+    strings: &'static str,
+    booleans: &'static str,
+    values: &'static str,
+}
+
+/// The declarations of `ExportKinds` for `module`. Every name must also exist at run time with
+/// the same `typeof` (the bundle), so the run-time check is what keeps a name in this list.
+fn generated_builtin_declarations(module: &str) -> String {
+    let kinds = match module {
+        "constants" => ExportKinds {
+            numbers: "COPYFILE_EXCL COPYFILE_FICLONE COPYFILE_FICLONE_FORCE DH_CHECK_P_NOT_PRIME DH_CHECK_P_NOT_SAFE_PRIME DH_NOT_SUITABLE_GENERATOR DH_UNABLE_TO_CHECK_GENERATOR E2BIG EACCES EADDRINUSE EADDRNOTAVAIL EAFNOSUPPORT EAGAIN EALREADY EBADF EBADMSG EBUSY ECANCELED ECHILD ECONNABORTED ECONNREFUSED ECONNRESET EDEADLK EDESTADDRREQ EDOM EDQUOT EEXIST EFAULT EFBIG EHOSTUNREACH EIDRM EILSEQ EINPROGRESS EINTR EINVAL EIO EISCONN EISDIR ELOOP EMFILE EMLINK EMSGSIZE EMULTIHOP ENAMETOOLONG ENETDOWN ENETRESET ENETUNREACH ENFILE ENOBUFS ENODATA ENODEV ENOENT ENOEXEC ENOLCK ENOLINK ENOMEM ENOMSG ENOPROTOOPT ENOSPC ENOSR ENOSTR ENOSYS ENOTCONN ENOTDIR ENOTEMPTY ENOTSOCK ENOTSUP ENOTTY ENXIO EOPNOTSUPP EOVERFLOW EPERM EPIPE EPROTO EPROTONOSUPPORT EPROTOTYPE ERANGE EROFS ESPIPE ESRCH ESTALE ETIME ETIMEDOUT ETXTBSY EWOULDBLOCK EXDEV OPENSSL_VERSION_NUMBER O_APPEND O_CREAT O_DIRECT O_DIRECTORY O_DSYNC O_EXCL O_NOATIME O_NOCTTY O_NOFOLLOW O_NONBLOCK O_SYNC O_TRUNC POINT_CONVERSION_COMPRESSED POINT_CONVERSION_HYBRID POINT_CONVERSION_UNCOMPRESSED PRIORITY_ABOVE_NORMAL PRIORITY_BELOW_NORMAL PRIORITY_HIGH PRIORITY_HIGHEST PRIORITY_LOW PRIORITY_NORMAL RSA_NO_PADDING RSA_PKCS1_OAEP_PADDING RSA_PKCS1_PADDING RSA_PKCS1_PSS_PADDING RSA_PSS_SALTLEN_AUTO RSA_PSS_SALTLEN_DIGEST RSA_PSS_SALTLEN_MAX_SIGN RSA_X931_PADDING RTLD_DEEPBIND RTLD_GLOBAL RTLD_LAZY RTLD_LOCAL RTLD_NOW SIGABRT SIGALRM SIGBUS SIGCHLD SIGCONT SIGFPE SIGHUP SIGILL SIGINT SIGIO SIGIOT SIGKILL SIGPIPE SIGPOLL SIGPROF SIGPWR SIGQUIT SIGSEGV SIGSTKFLT SIGSTOP SIGSYS SIGTERM SIGTRAP SIGTSTP SIGTTIN SIGTTOU SIGURG SIGUSR1 SIGUSR2 SIGVTALRM SIGWINCH SIGXCPU SIGXFSZ SSL_OP_ALL SSL_OP_ALLOW_NO_DHE_KEX SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION SSL_OP_CIPHER_SERVER_PREFERENCE SSL_OP_CISCO_ANYCONNECT SSL_OP_COOKIE_EXCHANGE SSL_OP_CRYPTOPRO_TLSEXT_BUG SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS SSL_OP_LEGACY_SERVER_CONNECT SSL_OP_NO_COMPRESSION SSL_OP_NO_ENCRYPT_THEN_MAC SSL_OP_NO_QUERY_MTU SSL_OP_NO_RENEGOTIATION SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION SSL_OP_NO_SSLv2 SSL_OP_NO_SSLv3 SSL_OP_NO_TICKET SSL_OP_NO_TLSv1 SSL_OP_NO_TLSv1_1 SSL_OP_NO_TLSv1_2 SSL_OP_NO_TLSv1_3 SSL_OP_PRIORITIZE_CHACHA SSL_OP_TLS_ROLLBACK_BUG S_IFBLK S_IFCHR S_IFDIR S_IFIFO S_IFLNK S_IFMT S_IFREG S_IFSOCK S_IRGRP S_IROTH S_IRUSR S_IRWXG S_IRWXO S_IRWXU S_IWGRP S_IWOTH S_IWUSR S_IXGRP S_IXOTH S_IXUSR TLS1_1_VERSION TLS1_2_VERSION TLS1_3_VERSION TLS1_VERSION UV_DIRENT_BLOCK UV_DIRENT_CHAR UV_DIRENT_DIR UV_DIRENT_FIFO UV_DIRENT_FILE UV_DIRENT_LINK UV_DIRENT_SOCKET UV_DIRENT_UNKNOWN UV_FS_COPYFILE_EXCL UV_FS_COPYFILE_FICLONE UV_FS_COPYFILE_FICLONE_FORCE UV_FS_O_FILEMAP UV_FS_SYMLINK_DIR UV_FS_SYMLINK_JUNCTION",
+            strings: "defaultCoreCipherList",
+            ..Default::default()
+        },
+        "dns" => ExportKinds {
+            classes: "Resolver",
+            functions: "getServers lookupService resolve4 resolve6 resolveAny resolveCaa resolveCname resolveMx resolveNaptr resolveNs resolvePtr resolveSoa resolveSrv resolveTlsa resolveTxt setServers",
+            numbers: "ADDRCONFIG ALL V4MAPPED",
+            strings: "ADDRGETNETWORKPARAMS BADFAMILY BADFLAGS BADHINTS BADNAME BADQUERY BADRESP BADSTR CANCELLED CONNREFUSED DESTRUCTION EOF FILE FORMERR LOADIPHLPAPI NODATA NOMEM NONAME NOTFOUND NOTIMP NOTINITIALIZED REFUSED SERVFAIL TIMEOUT",
+            ..Default::default()
+        },
+        "tls" => ExportKinds {
+            functions: "SecureContext convertALPNProtocols createSecurePair getCACertificates setDefaultCACertificates",
+            numbers: "CLIENT_RENEG_LIMIT CLIENT_RENEG_WINDOW",
+            strings: "DEFAULT_CIPHERS DEFAULT_ECDH_CURVE",
+            ..Default::default()
+        },
+        "process" => ExportKinds {
+            functions: "_debugEnd _debugProcess _fatalException _getActiveHandles _getActiveRequests _kill _linkedBinding _rawDebug _startProfilerIdleNotifier _stopProfilerIdleNotifier _tickCallback abort assert availableMemory binding constrainedMemory dlopen execve getActiveResourcesInfo getBuiltinModule getegid geteuid getgid getgroups getuid hasUncaughtExceptionCaptureCallback initgroups kill loadEnvFile nextTick openStdin reallyExit ref resourceUsage setSourceMapsEnabled setUncaughtExceptionCaptureCallback setegid seteuid setgid setgroups setuid threadCpuUsage umask unref",
+            numbers: "_eventsCount debugPort pid ppid",
+            strings: "arch argv0 execPath platform title version",
+            booleans: "_exiting sourceMapsEnabled",
+            values: "_events _maxListeners _preload_modules allowedNodeEnvironmentFlags config domain env execArgv exitCode features finalization moduleLoadList release report stderr stdin stdout versions",
+            ..Default::default()
+        },
+        "punycode" => ExportKinds { strings: "version", values: "ucs2", ..Default::default() },
+        "worker_threads" => ExportKinds {
+            classes: "BroadcastChannel",
+            functions: "moveMessagePortToContext",
+            values: "resourceLimits",
+            ..Default::default()
+        },
+        "http" => ExportKinds {
+            classes: "Agent ClientRequest",
+            functions: "CloseEvent MessageEvent WebSocket _connectionListener setMaxIdleHTTPParsers validateHeaderName validateHeaderValue",
+            numbers: "maxHeaderSize",
+            values: "METHODS STATUS_CODES globalAgent",
+            ..Default::default()
+        },
+        "https" => ExportKinds { classes: "Agent", ..Default::default() },
+        "net" => ExportKinds {
+            classes: "Stream",
+            functions: "_createServerHandle _normalizeArgs _setSimultaneousAccepts getDefaultAutoSelectFamily getDefaultAutoSelectFamilyAttemptTimeout setDefaultAutoSelectFamily setDefaultAutoSelectFamilyAttemptTimeout",
+            ..Default::default()
+        },
+        "os" => ExportKinds { functions: "type", ..Default::default() },
+        "path" | "path/posix" | "path/win32" => ExportKinds { functions: "_makeLong matchesGlob", ..Default::default() },
+        "util" => ExportKinds {
+            functions: "_errnoException _exceptionWithHostPort _extend aborted debug diff getCallSite getCallSites getSystemErrorMessage isBoolean isBuffer isDate isError isFunction isNull isNullOrUndefined isNumber isObject isPrimitive isRegExp isString isSymbol isUndefined log parseEnv setTraceSigInt transferableAbortController transferableAbortSignal",
+            ..Default::default()
+        },
+        "child_process" => ExportKinds { functions: "_forkChild", ..Default::default() },
+        "crypto" => ExportKinds {
+            classes: "Certificate Decipheriv DiffieHellman DiffieHellmanGroup X509Certificate",
+            functions: "checkPrime checkPrimeSync createDiffieHellman createDiffieHellmanGroup generateKey generateKeySync generatePrime generatePrimeSync getCipherInfo getCurves getDiffieHellman getFips privateEncrypt prng pseudoRandomBytes publicDecrypt rng secureHeapUsed setEngine setFips",
+            numbers: "fips",
+            values: "Cipher Decipher",
+            ..Default::default()
+        },
+        "stream" => ExportKinds { numbers: "length", strings: "name", values: "prototype", ..Default::default() },
+        "readline" => ExportKinds { functions: "emitKeypressEvents", ..Default::default() },
+        "url" => ExportKinds { functions: "fileURLToPathBuffer resolveObject", ..Default::default() },
+        "vm" => ExportKinds { functions: "createScript", values: "constants", ..Default::default() },
+        _ => return String::new(),
+    };
+    let mut out = String::new();
+    for name in kinds.classes.split_whitespace() {
+        out.push_str(&format!("export declare class {name} {{ constructor(...args: any[]); [key: string]: any; }}\n"));
+    }
+    for name in kinds.functions.split_whitespace() {
+        out.push_str(&format!("export declare function {name}(...args: any[]): any;\n"));
+    }
+    for (ty, names) in [
+        ("number", kinds.numbers),
+        ("string", kinds.strings),
+        ("boolean", kinds.booleans),
+        ("any", kinds.values),
+    ] {
+        for name in names.split_whitespace() {
+            out.push_str(&format!("export declare const {name}: {ty};\n"));
+        }
+    }
+    out
 }
 
 #[cfg(test)]

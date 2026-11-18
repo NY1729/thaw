@@ -1346,12 +1346,31 @@ fn thaw_js_ctor_option_callback_declaration_is_plain_only_for_constructors() {
 }
 
 #[test]
-fn thaw_js_unready_addon_blocker_keeps_live_owner_and_subscription_addons_on_quickjs() {
-    assert!(thaw_js_unready_addon_blocker("argon2").is_some());
+fn thaw_js_unready_addon_blocker_keeps_subscription_addons_on_quickjs() {
+    // old: `argon2` was `is_some()` (live-owner blocker); new: `is_none()` (routes to thaw-js)
+    assert!(thaw_js_unready_addon_blocker("argon2").is_none());
     assert!(thaw_js_unready_addon_blocker("@parcel/watcher").is_some());
     assert!(thaw_js_unready_addon_blocker("bcrypt").is_none());
     assert!(thaw_js_unready_addon_blocker("sqlite3").is_none());
     assert!(thaw_js_unready_addon_blocker("some-unrelated-package").is_none());
+}
+
+#[test]
+fn argon2_native_addon_program_routes_to_thaw_js_with_no_blocker() {
+    let mut pkg = builtin_routing_package("argon2");
+    pkg.native_addon = Some(std::path::PathBuf::from("native.node"));
+    let bundle = "module.exports = (function(require){ var __thaw_bundle_factories = { \"argon2/index.js\": function(module, exports, require) { exports.verify = function (h, p) { return h === p; }; } }; var __thaw_bundle_require_maps = { \"argon2/index.js\": {} }; var __thaw_bundle_entry_key = \"argon2/index.js\"; })(globalThis.require);";
+    let user = "import { verify } from 'argon2';\nfunction main(): void { console.log(verify('a', 'a')); }\n";
+    assert!(thaw_js_package_eligible(&pkg, bundle, user, &Default::default(), ""));
+    let blockers = thaw_js_blockers_manifest();
+    assert!(
+        !blockers
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["package"] == "argon2"),
+        "{blockers}"
+    );
 }
 
 /// node-compat `queueMicrotask uncaught exception` and `unhandled promise rejection` (sources from
