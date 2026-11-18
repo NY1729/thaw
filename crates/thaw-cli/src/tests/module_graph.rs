@@ -1914,6 +1914,23 @@ fn qualified_namespace_type_annotation_builds_and_runs() {
 /// Bundles `source` with `node:path` exporting `join` and `basename` and returns every
 /// expression-position identifier left in the bundled module, in source order.
 fn namespace_value_idents(source: &str) -> Vec<String> {
+    namespace_value_idents_with(
+        source,
+        std::collections::HashMap::from([(
+            "node:path".to_string(),
+            std::collections::HashMap::from([
+                ("join".to_string(), "__thaw_path_join".to_string()),
+                ("basename".to_string(), "__thaw_path_basename".to_string()),
+            ]),
+        )]),
+    )
+}
+
+/// `namespace_value_idents` over the given external export map.
+fn namespace_value_idents_with(
+    source: &str,
+    external_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+) -> Vec<String> {
     use swc_ecma_visit::{Visit, VisitWith};
 
     #[derive(Default)]
@@ -1931,13 +1948,6 @@ fn namespace_value_idents(source: &str) -> Vec<String> {
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(&entry, source).unwrap();
-    let external_exports = std::collections::HashMap::from([(
-        "node:path".to_string(),
-        std::collections::HashMap::from([
-            ("join".to_string(), "__thaw_path_join".to_string()),
-            ("basename".to_string(), "__thaw_path_basename".to_string()),
-        ]),
-    )]);
     let module = module_graph::bundle(
         &entry,
         source,
@@ -1963,6 +1973,32 @@ fn bare_namespace_value_rewrites_to_a_namespace_object() {
     // The synthesized object names the namespace's exports.
     assert!(idents.contains(&"__thaw_path_join".to_string()), "{idents:?}");
     assert!(idents.contains(&"__thaw_path_basename".to_string()), "{idents:?}");
+}
+
+#[test]
+fn thaw_js_builtin_bare_namespace_is_the_module_handle_not_a_member_list() {
+    // The shim binds a thaw-js builtin's own module value under BARE_NAMESPACE_EXPORT.
+    let exports = std::collections::HashMap::from([(
+        "node:path".to_string(),
+        std::collections::HashMap::from([
+            ("join".to_string(), "__thaw_path_join".to_string()),
+            ("basename".to_string(), "__thaw_path_basename".to_string()),
+            (
+                module_graph::BARE_NAMESPACE_EXPORT.to_string(),
+                "__thaw_value_node_path_default".to_string(),
+            ),
+        ]),
+    )]);
+    let idents = namespace_value_idents_with(
+        "import * as M from 'node:path';\n\
+         function main(): void { const m: any = M; console.log(typeof m.join, m.join('a', 'b')); }",
+        exports,
+    );
+    assert!(!idents.contains(&"M".to_string()), "{idents:?}");
+    assert!(idents.contains(&"__thaw_value_node_path_default".to_string()), "{idents:?}");
+    // No per-function references: the handle stands for every export, so none is linked as a value.
+    assert!(!idents.contains(&"__thaw_path_join".to_string()), "{idents:?}");
+    assert!(!idents.contains(&"__thaw_path_basename".to_string()), "{idents:?}");
 }
 
 #[test]

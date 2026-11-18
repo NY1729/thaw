@@ -10,6 +10,10 @@ use thaw_parser::ast::{
 
 type SourceTransform<'a> = dyn Fn(&str, &Path, bool) -> Result<String, String> + 'a;
 pub(crate) const EXTERNAL_MODULE_OFFSET: usize = 1_000_000;
+/// The `external_exports` key under which the shim binds a thaw-js builtin's own module value. A bare
+/// `import * as X from 'node:..'` used as a value becomes that handle instead of a per-export object.
+/// The NUL byte keeps it out of every real export name.
+pub(crate) const BARE_NAMESPACE_EXPORT: &str = "\u{0}bare-namespace";
 
 /// `import fs from "node:fs"; const { existsSync, join: j } = fs;` becomes
 /// `const existsSync = fs.existsSync, j = fs.join;` (source text, before the registry
@@ -3185,7 +3189,10 @@ pub(crate) fn bundle_with_named_source_transform(
                         .or_else(|| external_exports.get(specifier))
                         .ok_or_else(|| format!("unresolved export-all `{specifier}`"))?;
                     for (name, target) in dependency_exports {
-                        if name == "default" || explicit_exports.contains(name) {
+                        if name == "default"
+                            || name == BARE_NAMESPACE_EXPORT
+                            || explicit_exports.contains(name)
+                        {
                             continue;
                         }
                         if let Some(existing) = public.get(name) {
@@ -3266,6 +3273,14 @@ pub(crate) fn bundle_with_named_source_transform(
             let Some(exports) = namespaces.get(local) else {
                 continue;
             };
+            // A thaw-js builtin's own module value is the namespace: one handle, no per-export list.
+            if let Some(handle) = exports.get(BARE_NAMESPACE_EXPORT) {
+                bare_declarations.push_str(&format!(
+                    "const {} = {handle};\n",
+                    bare_namespaces.targets[local]
+                ));
+                continue;
+            }
             // Type-only exports (`__thaw_type_*`) name no value, as in the namespace getters.
             let mut fields: Vec<(&String, &String)> = exports
                 .iter()
@@ -3446,7 +3461,9 @@ pub(crate) fn bundle_with_named_source_transform(
         };
         let mut getters = export_map
             .iter()
-            .filter(|(_, target)| !target.starts_with("__thaw_type_"))
+            .filter(|(name, target)| {
+                name.as_str() != BARE_NAMESPACE_EXPORT && !target.starts_with("__thaw_type_")
+            })
             .map(|(name, target)| {
                 let key = serde_json::to_string(name).map_err(|error| error.to_string())?;
                 Ok(format!("get {key}() {{ return {target}; }}"))
