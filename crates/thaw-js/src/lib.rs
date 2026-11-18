@@ -48,6 +48,7 @@ mod dns;
 mod esm;
 mod eventloop;
 mod extras;
+mod gc_registry;
 mod generators;
 mod heap_limit;
 mod hints;
@@ -207,12 +208,15 @@ pub struct ObjData {
     charged: Cell<usize>,
     /// Created as a closure (`Kind::Closure`), so `mem_trace` counts it as one (kind may change later).
     closure_counted: bool,
+    /// Index in the `gc_registry` object list, or `gc_registry::NONE`.
+    reg_idx: Cell<usize>,
 }
 
 impl Drop for ObjData {
     fn drop(&mut self) {
         heap_limit::credit(self.charged.get());
         crate::mem_trace::obj_dropped(self.closure_counted);
+        gc_registry::unregister_obj(self);
     }
 }
 
@@ -934,6 +938,7 @@ fn compound_binop(op: a::AssignOp) -> Option<a::BinaryOp> {
 impl Drop for Scope {
     fn drop(&mut self) {
         crate::mem_trace::scope_dropped();
+        gc_registry::unregister_scope(self);
     }
 }
 
@@ -951,6 +956,8 @@ pub struct Scope {
     this_val: RefCell<Option<Value>>,
     /// `SK_*` bits: what kind of frame this scope is, for direct eval.
     kind: Cell<u8>,
+    /// Index in the `gc_registry` scope list, or `gc_registry::NONE` (set only once a closure captures it).
+    reg_idx: Cell<usize>,
 }
 
 /// A scope that receives the `var`s and functions of sloppy direct eval code: a call frame, the global
@@ -975,6 +982,7 @@ impl Scope {
             in_with,
             this_val: RefCell::new(None),
             kind: Cell::new(0),
+            reg_idx: Cell::new(gc_registry::NONE),
         })
     }
     fn new_with(parent: Rc<Scope>, obj: Obj) -> Rc<Scope> {
@@ -988,6 +996,7 @@ impl Scope {
             in_with: true,
             this_val: RefCell::new(None),
             kind: Cell::new(0),
+            reg_idx: Cell::new(gc_registry::NONE),
         })
     }
     /// A builtin or host binding: an own property of `globalThis` when it is global.
@@ -1082,6 +1091,7 @@ impl Scope {
             with: self.with.clone(),
             this_val: RefCell::new(self.this_val.borrow().clone()),
             kind: Cell::new(self.kind.get()),
+            reg_idx: Cell::new(gc_registry::NONE),
         })
     }
 }
@@ -1195,7 +1205,9 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         index: RefCell::new(None),
         charged: Cell::new(0),
         closure_counted,
+        reg_idx: Cell::new(gc_registry::NONE),
     });
+    gc_registry::register_obj(&obj);
     account(&obj);
     obj
 }
@@ -3117,6 +3129,8 @@ impl Interp {
             (false, true) => self.rt.async_function_proto.clone(),
             (false, false) => None,
         };
+        gc_registry::capture_scope(scope);
+        crate::mem_trace::census_closure(&def, scope);
         let f = new_obj(
             Some(kind_proto.unwrap_or_else(|| self.function_proto.clone())),
             Kind::Closure {
@@ -5919,6 +5933,8 @@ mod regexp_proto_tests;
 #[cfg(test)]
 mod regexp_statics_tests;
 #[cfg(test)]
+mod registry_tests;
+#[cfg(test)]
 mod resizable_buffer_tests;
 #[cfg(test)]
 mod sab_tests;
@@ -5962,6 +5978,7 @@ impl Interp {
     /// Values still referenced from outside keep their memory but read as empty objects.
     pub(crate) fn teardown(&mut self) {
         crate::mem_trace::mem_trace_report("teardown-before");
+        crate::mem_trace::mem_trace_census_report("census");
         // Contexts this realm made die with it; their script scopes are cleared, the sandboxes are the host's.
         for slot in std::mem::take(&mut self.vm).values_mut() {
             if let Some(r) = slot.realm_mut() {
@@ -6101,6 +6118,7 @@ impl Interp {
 
         crate::napi_graph::forget_objects(&cleared);
         crate::napi_symbols::forget_objects(&cleared);
+        gc_registry::sweep_stale();
         crate::mem_trace::mem_trace_report("teardown-after");
     }
 }

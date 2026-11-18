@@ -114,6 +114,7 @@ impl Interp {
             class: Some(info),
             cstate: Default::default(),
         });
+        crate::gc_registry::capture_scope(&proto_scope);
         let ctor_obj = new_obj(
             Some(self.function_proto.clone()),
             Kind::Closure {
