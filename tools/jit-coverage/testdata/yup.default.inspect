@@ -1,0 +1,6 @@
+quickjs: false
+thaw-js: package=yup eligible=true
+quickjs-reason: registry-fallback package=yup operation=object reason=generic function specialization is not supported by the typed JIT
+quickjs-reason: registry-fallback package=yup operation=string reason=return value has unsupported JIT type Dyn
+thaw-js-blocker: package=yup why=none
+napi: false
