@@ -609,6 +609,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 .context
                 .append_basic_block(function, "await_operand_rejected");
             self.push_catch_target(sync_rejection);
+            if self.uses_async_hooks && is_plain_await_wrapper(awaited) {
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_promise_await_outer").unwrap(),
+                        &[completion.into()],
+                        "await_outer",
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
             let waiting = match awaited {
                 HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "fetch") => {
                     self.compile_single_arg_call("thaw_http_get_async", args, "async_fetch")
@@ -1353,4 +1362,19 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
+}
+
+/// The lowered `await <literal>`: an argument-binding call of a Promise-returning lambda whose body is a
+/// `PromiseNew` (`Promise.resolve(literal)`), the one awaited shape whose wrapper V8 triggers from the async function.
+fn is_plain_await_wrapper(awaited: &HirExpr) -> bool {
+    matches!(
+        awaited,
+        HirExpr::Call(callee, args)
+            if matches!(args.as_slice(), [HirExpr::Lit(_)])
+                && matches!(
+                    callee.as_ref(),
+                    HirExpr::Lambda(_, _, HirType::Promise(_), body)
+                        if matches!(body.as_ref(), HirExpr::PromiseNew(..))
+                )
+    )
 }
