@@ -696,20 +696,38 @@ fn thaw_js_declaration_key(line: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// The member (`$method$pkg::Class$member$overload0$arity3`, `$staticmethod$...`) a class operation line
-/// calls; `None` for a constructor or any other operation.
+/// The member (`$method$pkg::Class$member$overload0$arity3`, `$staticmethod$...`, `$getter$pkg::Class$prop`,
+/// `$setter$...`) a class operation line calls; `None` for a constructor or any other operation.
 fn thaw_js_class_member(line: &str) -> Option<String> {
     let key = thaw_js_declaration_key(line)?;
     let mut parts = key.strip_prefix('$')?.split('$');
     let kind = parts.next()?;
-    if !kind.starts_with("method") && !kind.starts_with("staticmethod") {
+    let member_kind = ["method", "staticmethod", "getter", "setter", "staticgetter", "staticsetter"]
+        .iter()
+        .any(|prefix| kind.starts_with(prefix));
+    if !member_kind {
         return None;
     }
     parts.nth(1).map(str::to_string)
 }
 
-/// Whether `name` (a function export) is used other than as `name.member` or in an import/re-export
-/// statement: those uses go through the package's value export, not through a call of `name` itself.
+/// Whether the occurrence of `name` at `start` in `code` is a type word rather than a value. `void` is
+/// reserved in JS, so a bare one is always an operator or a type (`: void`, `Promise<void>`); the other
+/// TS keyword types count only right after an annotation (`:`, `<`, `|`, `&`). `z.void()` is a member use.
+fn thaw_js_is_type_word(code: &str, start: usize, name: &str) -> bool {
+    const TYPE_KEYWORDS: &[&str] = &[
+        "string", "number", "boolean", "any", "unknown", "never", "object", "symbol", "bigint",
+    ];
+    let before = code[..start].trim_end();
+    if before.ends_with('.') {
+        return false;
+    }
+    name == "void" || (TYPE_KEYWORDS.contains(&name) && before.ends_with([':', '<', '|', '&']))
+}
+
+/// Whether `name` (a function export) is used other than as `name.member`, as a type word, or in an
+/// import/re-export statement: those uses go through the package's value export, not through a call of
+/// `name` itself.
 fn thaw_js_uses_function(user_source: &str, name: &str) -> bool {
     let name = name.rsplit('.').next().unwrap_or(name);
     let code = thaw_js_without_module_statements(user_source);
@@ -719,7 +737,89 @@ fn thaw_js_uses_function(user_source: &str, name: &str) -> bool {
         !code[..start].chars().next_back().is_some_and(is_word)
             && !code[end..].chars().next().is_some_and(is_word)
             && !code[end..].starts_with('.')
+            && !thaw_js_is_type_word(&code, start, name)
     })
+}
+
+/// The argument count of a call whose argument text starts just after its `(` (`args`), or `None` when the
+/// text is not a plain argument list: a spread, a template literal, a `/` (regex or division), or no closing
+/// `)`. Strings are skipped, so a `,` or `)` inside one does not count.
+fn thaw_js_argument_count(args: &str) -> Option<usize> {
+    let mut chars = args.char_indices();
+    let mut depth = 0usize;
+    let mut count = 0usize;
+    let mut segment_has_text = false;
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            c if c.is_whitespace() => {}
+            ',' if depth == 0 => {
+                count += usize::from(segment_has_text);
+                segment_has_text = false;
+            }
+            ')' if depth == 0 => return Some(count + usize::from(segment_has_text)),
+            ')' | ']' | '}' => depth = depth.checked_sub(1)?,
+            '(' | '[' | '{' => {
+                depth += 1;
+                segment_has_text = true;
+            }
+            '`' | '/' => return None,
+            '.' if args[index..].starts_with("...") => return None,
+            '\'' | '"' => {
+                segment_has_text = true;
+                loop {
+                    match chars.next()? {
+                        (_, '\\') => {
+                            chars.next()?;
+                        }
+                        (_, quote) if quote == ch => break,
+                        _ => {}
+                    }
+                }
+            }
+            _ => segment_has_text = true,
+        }
+    }
+    None
+}
+
+/// The largest argument count of the program's calls of `name` (its last dotted segment), or `None` when
+/// the program may reach it some other way (a bare value reference, a spread, an unparsed call, or no call
+/// at all), in which case every overload is checked. Member uses `name.x` and type words are not calls.
+fn thaw_js_call_arities(user_source: &str, name: &str) -> Option<usize> {
+    let name = name.rsplit('.').next().unwrap_or(name);
+    let code = thaw_js_without_module_statements(user_source);
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut max = None;
+    for (start, _) in code.match_indices(name) {
+        let end = start + name.len();
+        if code[..start].chars().next_back().is_some_and(is_word)
+            || code[end..].chars().next().is_some_and(is_word)
+            || thaw_js_is_type_word(&code, start, name)
+        {
+            continue;
+        }
+        if let Some(args) = code[end..].trim_start().strip_prefix('(') {
+            max = Some(max.unwrap_or(0).max(thaw_js_argument_count(args)?));
+        } else if !code[end..].starts_with('.') {
+            return None;
+        }
+    }
+    max
+}
+
+/// Whether an overload declaration line can be called by the program. A `__arity_N` overload above the
+/// largest call arity is never selected: a call passes at most that many arguments (an optional-parameter
+/// wrapper dispatches to a smaller arity only for trailing `undefined`s). Any other line always stays.
+fn thaw_js_overload_within_calls(line: &str, max_call_arity: Option<usize>) -> bool {
+    let arity = line
+        .split("__arity_")
+        .nth(1)
+        .map(|rest| rest.chars().take_while(char::is_ascii_digit).collect::<String>())
+        .and_then(|digits| digits.parse::<usize>().ok());
+    match (max_call_arity, arity) {
+        (Some(max), Some(arity)) => arity <= max,
+        _ => true,
+    }
 }
 
 /// The program text with every `import ... from '...'`, `import '...'` and `export ... from '...'`
@@ -1036,7 +1136,13 @@ fn thaw_js_package_eligible(
                 }
                 return reject(format!("`{}` has no declaration", function.name));
             }
-            lines.into_iter().all(|line| {
+            // Overloads the program cannot call (an arity above its calls) are not checked: only a call
+            // reaches a declaration, so one unused callback overload must not send the package to QuickJS.
+            let max_call_arity = thaw_js_call_arities(user_source, &function.name);
+            lines
+                .into_iter()
+                .filter(|line| thaw_js_overload_within_calls(line, max_call_arity))
+                .all(|line| {
                 thaw_js_declaration_plain_with(line, false)
                     || thaw_js_async_declaration_plain_with(line)
                     || reject(format!("`{}`: {line}", function.name))
@@ -1194,5 +1300,84 @@ fn thaw_js_class_member_names_the_method_of_a_class_operation() {
     let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
     let line = format!("declare function __thaw_typed_js_{hex}(): JsValue;");
     assert_eq!(thaw_js_class_member(&line), None);
+}
+
+#[cfg(test)]
+fn thaw_js_test_decl(key: &str, tail: &str) -> String {
+    let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("declare function __thaw_typed_js_{hex}{tail}")
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_call_arities_are_the_largest_argument_count_of_the_program_calls() {
+    // zod-shaped: the program calls `string()`; an overload taking `{ errorMap }` is never selected
+    assert_eq!(thaw_js_call_arities("const s = z.string().min(1);", "string"), Some(0));
+    assert_eq!(thaw_js_call_arities("const a: string = z.string();", "string"), Some(0));
+    assert_eq!(thaw_js_call_arities("z.string({ errorMap: () => 'x' });", "string"), Some(1));
+    // a `,` or `)` inside a string literal is not an argument separator
+    assert_eq!(thaw_js_call_arities("f(\"a,b\"); g(string(\"x)\"));", "string"), Some(1));
+    assert_eq!(thaw_js_call_arities("string(1, 2); string(3);", "string"), Some(2));
+    // a bare value reference, a spread, or no call at all: every overload stays checked
+    assert_eq!(thaw_js_call_arities("arr.map(string);", "string"), None);
+    assert_eq!(thaw_js_call_arities("string(...xs);", "string"), None);
+    assert_eq!(thaw_js_call_arities("const x = 1;", "string"), None);
+    assert_eq!(thaw_js_call_arities("const s = string;", "string"), None);
+    assert_eq!(thaw_js_call_arities("string(a / 2);", "string"), None);
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_void_is_a_type_word_not_a_use_of_an_export_named_void() {
+    // `: void` and `Promise<void>` are annotations, never a use of zod's `void` export
+    assert!(!thaw_js_uses_function("async function main(): Promise<void> { await run(); }", "void"));
+    assert!(!thaw_js_uses_function("const f = (): void => {};", "void"));
+    assert!(!thaw_js_uses_function("let x: string | void = undefined;", "void"));
+    // a member use is a use: `z.void()`
+    assert!(thaw_js_uses_function("const v = z.void();", "void"));
+    assert_eq!(thaw_js_call_arities("let x: void = 0; z.void();", "void"), Some(0));
+    // a keyword type after an annotation is no call of the export named `string`
+    assert!(!thaw_js_uses_function("const s: string = 'x';", "string"));
+    assert!(thaw_js_uses_function("const s = string('x');", "string"));
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_unused_overloads_above_the_program_calls_are_not_checked() {
+    let key = "pkg::string";
+    // the program only calls `string()`: the `{ errorMap }` overload (arity 1) is pruned, the nullary one stays
+    let nullary = thaw_js_test_decl(key, "__arity_0(): JsValue;");
+    let callback = thaw_js_test_decl(key, "__arity_1(params: {errorMap: (issue: Json) => string}): JsValue;");
+    assert!(!thaw_js_declaration_plain_with(&callback, false));
+    assert!(thaw_js_declaration_plain_with(&nullary, false));
+    let calls = thaw_js_call_arities("const s = z.string();", "string");
+    let kept: Vec<&str> = [nullary.as_str(), callback.as_str()]
+        .into_iter()
+        .filter(|line| thaw_js_overload_within_calls(line, calls))
+        .collect();
+    assert_eq!(kept, vec![nullary.as_str()]);
+    // a bare reference keeps every overload checked: the callback overload is still rejected
+    let calls = thaw_js_call_arities("arr.map(string);", "string");
+    assert!(thaw_js_overload_within_calls(&callback, calls));
+    // a call with two arguments reaches the arity-1 overload too
+    assert!(thaw_js_overload_within_calls(&callback, thaw_js_call_arities("string(a, b);", "string")));
+    // a line without an arity suffix always stays
+    let plain = thaw_js_test_decl(key, "(): JsValue;");
+    assert!(thaw_js_overload_within_calls(&plain, Some(0)));
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_class_accessor_lines_are_class_members_like_methods() {
+    // "$getter$p::C$size" and "$setter$p::C$size": the accessor is named like a method, so it passes the class check
+    let getter = thaw_js_test_decl("$getter$p::C$size", "(receiver: JsValue): number;");
+    let setter = thaw_js_test_decl("$setter$p::C$size", "(receiver: JsValue, value: number): number;");
+    let static_getter = thaw_js_test_decl("$staticgetter$p::C$count", "(): number;");
+    assert_eq!(thaw_js_class_member(&getter).as_deref(), Some("size"));
+    assert_eq!(thaw_js_class_member(&setter).as_deref(), Some("size"));
+    assert_eq!(thaw_js_class_member(&static_getter).as_deref(), Some("count"));
+    // a constructor is not a member
+    let ctor = thaw_js_test_decl("$new$p::C$arity0", "(): JsValue;");
+    assert_eq!(thaw_js_class_member(&ctor), None);
 }
 
