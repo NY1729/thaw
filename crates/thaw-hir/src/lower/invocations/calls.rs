@@ -365,17 +365,6 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
-    /// A callable, or a union of only callables (`ejs.compile`'s sync and async overloads).
-    fn thaw_js_callable_result(ty: &HirType) -> bool {
-        match ty {
-            HirType::Function(..) | HirType::CallableFunction(..) => true,
-            HirType::Union(members) => {
-                !members.is_empty() && members.iter().all(Self::thaw_js_callable_result)
-            }
-            _ => false,
-        }
-    }
-
     fn thaw_js_ctor_handle_param(ty: &HirType) -> HirType {
         match ty {
             HirType::Function(..) | HirType::CallableFunction(..) => HirType::JsValue,
@@ -4993,16 +4982,6 @@ impl<'a> FnLowerer<'a> {
                     && (generic_types.is_some() || matches!(&ret, HirType::Union(_)))
                 {
                     storage_type(call.span, ret)
-                } else {
-                    ret
-                };
-                // A callable result of a thaw-js function (`ejs.compile`, `nanoid.customAlphabet`) stays on
-                // thaw-js as a live handle: it is a `JsValue`, called later through `callDynamicValueHandle`.
-                let ret = if backend == DynamicBackend::ThawJs
-                    && !symbol.starts_with('$')
-                    && Self::thaw_js_callable_result(&ret)
-                {
-                    HirType::JsValue
                 } else {
                     ret
                 };

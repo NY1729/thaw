@@ -1245,8 +1245,9 @@ fn thaw_js_promise_ret(
     }
 }
 
-/// A callable whose parameters and return are plain JSON data (optional forms included), the same
-/// shape the routing scan accepts as a callable result. A `JsValue` or class inside it is not plain.
+/// A callable (or a union of callables) whose parameters and return are plain JSON data, optional forms
+/// and a `Promise<T>` return (`T` plain) included: the same shape the routing scan accepts as a callable
+/// result. A `JsValue` or class inside it is not plain.
 fn thaw_js_plain_callable(ty: &thaw_hir::HirType) -> bool {
     fn plain(ty: &thaw_hir::HirType) -> bool {
         match ty {
@@ -1266,9 +1267,39 @@ fn thaw_js_plain_callable(ty: &thaw_hir::HirType) -> bool {
     match ty {
         thaw_hir::HirType::Function(params, ret)
         | thaw_hir::HirType::CallableFunction(params, _, None, ret) => {
-            params.iter().all(plain) && plain(ret)
+            let ret_plain = match ret.as_ref() {
+                thaw_hir::HirType::Promise(inner) => plain(inner),
+                other => plain(other),
+            };
+            params.iter().all(plain) && ret_plain
+        }
+        thaw_hir::HirType::Union(members) => {
+            !members.is_empty() && members.iter().all(thaw_js_plain_callable)
         }
         _ => false,
+    }
+}
+
+/// A thaw-js callable result (one callable, or a union of callables, with plain parameters and return)
+/// returns as a live `JsValue` handle, so the declaration, its bare and qualified aliases and the
+/// `__thaw_typed_wrapper_js_` dispatchers all agree on that type. Not for node:* builtins, which keep
+/// their plain return, nor for `thaw_js_keeps_js_value` packages (already `JsValue`).
+fn thaw_js_callable_union_as_handle<'a>(
+    package: &str,
+    function: &'a thaw_bridge::DtsFunction,
+) -> std::borrow::Cow<'a, thaw_bridge::DtsFunction> {
+    if package.starts_with("node:") || thaw_js_keeps_js_value(package) {
+        return std::borrow::Cow::Borrowed(function);
+    }
+    match &function.ret {
+        thaw_bridge::DtsType::Native(ty @ thaw_hir::HirType::Union(_))
+            if thaw_js_plain_callable(ty) =>
+        {
+            let mut rewritten = function.clone();
+            rewritten.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue);
+            std::borrow::Cow::Owned(rewritten)
+        }
+        _ => std::borrow::Cow::Borrowed(function),
     }
 }
 
@@ -1291,7 +1322,8 @@ fn typed_dynamic_declaration(
                     // is a live handle the `__thaw_typed_callable_` adapter invokes (`callDynamicValueHandle`)
                     thaw_bridge::DtsType::Native(
                         ty @ (thaw_hir::HirType::Function(..)
-                        | thaw_hir::HirType::CallableFunction(..)),
+                        | thaw_hir::HirType::CallableFunction(..)
+                        | thaw_hir::HirType::Union(_)),
                     ) => thaw_js_plain_callable(ty),
                     thaw_bridge::DtsType::Unsupported(reason) => {
                         !(reason == "`any` is not supported"
@@ -1305,7 +1337,10 @@ fn typed_dynamic_declaration(
             let function = if thaw_js_keeps_js_value(real) {
                 std::borrow::Cow::Borrowed(function)
             } else {
-                thaw_js_promise_ret(function)
+                match thaw_js_callable_union_as_handle(real, function) {
+                    handle @ std::borrow::Cow::Owned(_) => handle,
+                    std::borrow::Cow::Borrowed(_) => thaw_js_promise_ret(function),
+                }
             };
             typed_dynamic_declaration_for_quickjs(
                 real, &function, napi, observed_call_arities, overload_suffix,
