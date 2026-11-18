@@ -1357,16 +1357,33 @@ fn native_callback_registered_in_one_package_runs_for_a_native_thread_event_afte
 // must print `matched=true` and then exit on its own.
 #[cfg(target_os = "linux")]
 fn run_tsfn_unsubscribe_repro(name: &str, coroutine_co: Option<&str>, main_source: &str) -> (String, bool, String) {
+    run_tsfn_unsubscribe_repro_with(name, coroutine_co, main_source, None)
+}
+
+// `wrapper`: Some((package.d.ts, bundle.js)) makes the package a JS wrapper around the addon (the parcel shape).
+#[cfg(target_os = "linux")]
+fn run_tsfn_unsubscribe_repro_with(
+    name: &str,
+    coroutine_co: Option<&str>,
+    main_source: &str,
+    wrapper: Option<(&str, &str)>,
+) -> (String, bool, String) {
     let dir = std::env::temp_dir().join(format!("thaw-tsfn-unsub-{name}-{}", std::process::id()));
     let registry = dir.join("modules");
     let package = registry.join("native-subscribe");
     std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(
-        package.join("package.d.ts"),
-        "export declare function subscribe(callback: (value: number) => void): void;\n\
-         export declare function unsubscribe(callback: (value: number) => void): boolean;\n",
-    )
-    .unwrap();
+    match wrapper {
+        None => std::fs::write(
+            package.join("package.d.ts"),
+            "export declare function subscribe(callback: (value: number) => void): void;\n\
+             export declare function unsubscribe(callback: (value: number) => void): boolean;\n",
+        )
+        .unwrap(),
+        Some((dts, bundle)) => {
+            std::fs::write(package.join("package.d.ts"), dts).unwrap();
+            std::fs::write(package.join("bundle.js"), bundle).unwrap();
+        }
+    }
     let addon_c = dir.join("addon.c");
     std::fs::write(&addon_c, r#"
         #include <stdbool.h>
@@ -1411,20 +1428,22 @@ fn run_tsfn_unsubscribe_repro(name: &str, coroutine_co: Option<&str>, main_sourc
             return NULL;
         }
         static napi_value subscribe(napi_env env,napi_callback_info info) {
-            napi_value args[1],result; size_t argc = 1; pthread_t thread;
+            napi_value args[3],result; size_t argc = 3; pthread_t thread;
             napi_get_cb_info(env,info,&argc,args,NULL,NULL);
-            napi_create_reference(env,args[0],1,&callback_ref);
-            napi_create_threadsafe_function(env,args[0],NULL,NULL,0,1,NULL,NULL,NULL,call_js,&tsfn);
+            if (argc < 2) args[1] = args[0];
+            napi_create_reference(env,args[1],1,&callback_ref);
+            napi_create_threadsafe_function(env,args[1],NULL,NULL,0,1,NULL,NULL,NULL,call_js,&tsfn);
             pthread_create(&thread,NULL,producer,NULL);
             pthread_detach(thread);
             napi_get_undefined(env,&result);
             return result;
         }
         static napi_value unsubscribe(napi_env env,napi_callback_info info) {
-            napi_value args[1],stored,result; size_t argc = 1; bool matched = false;
+            napi_value args[3],stored,result; size_t argc = 3; bool matched = false;
             napi_get_cb_info(env,info,&argc,args,NULL,NULL);
+            if (argc < 2) args[1] = args[0];
             napi_get_reference_value(env,callback_ref,&stored);
-            napi_strict_equals(env,stored,args[0],&matched);
+            napi_strict_equals(env,stored,args[1],&matched);
             if (matched) {
                 napi_release_threadsafe_function(tsfn,0);
                 unsigned int count;
@@ -1531,6 +1550,63 @@ fn native_addon_tsfn_unsubscribe_loop_closures_match_by_identity() {
     let main_source = "import { subscribe, unsubscribe } from \"native-subscribe\";\n\
          function main(): void { const seen: number[] = []; let kept: (value: number) => void = (value: number): void => { seen.push(value); }; let other: (value: number) => void = kept; for (let i = 0; i < 2; i++) { const cb = (value: number): void => { seen.push(value + i); }; if (i === 0) { kept = cb; } else { other = cb; } } subscribe(kept); const start: number = Date.now(); while (seen.length < 1 && Date.now() - start < 5000) { pollNativeAddonEvents(); } if (seen.length < 1) { throw new Error('tsfn event timed out'); } console.log('matched=' + unsubscribe(other)); console.log('matched=' + unsubscribe(kept)); }\n";
     let (stdout, exited, stderr) = run_tsfn_unsubscribe_repro("identity", None, main_source);
+    assert_eq!(stdout, "matched=false\nmatched=true\n", "stderr:\n{stderr}");
+    assert!(exited, "process still alive 8 s after unsubscribe; stderr:\n{stderr}");
+}
+
+// Parcel shape: the package JS (async subscribe, unsubscribe forwarding to the addon) wraps the addon, and the
+// callback is a Thaw AOT closure handed to the package's JS function. `subscribe` and `unsubscribe` run in different
+// realms (the package has run in between), so the closure must keep its identity across them.
+#[cfg(target_os = "linux")]
+const PARCEL_WRAPPER_DTS: &str = "export declare function subscribe(dir: string, fn: (value: number) => void, opts: Json): Promise<void>;\n\
+     export declare function unsubscribe(dir: string, fn: (value: number) => void, opts: Json): boolean;\n";
+#[cfg(target_os = "linux")]
+const PARCEL_WRAPPER_BUNDLE: &str = "const binding = require.addon(); module.exports.subscribe = async function(dir, fn, opts) { globalThis.__saved = fn; await binding.subscribe(dir, fn, opts); return { unsubscribe() { return binding.unsubscribe(dir, fn, opts); } }; }; module.exports.unsubscribe = function(dir, fn, opts) { return binding.unsubscribe(dir, fn, opts); };";
+
+#[cfg(target_os = "linux")]
+fn run_parcel_wrapper_unsubscribe(name: &str, coroutine_co: Option<&str>, main_source: &str) -> (String, bool, String) {
+    run_tsfn_unsubscribe_repro_with(name, coroutine_co, main_source, Some((PARCEL_WRAPPER_DTS, PARCEL_WRAPPER_BUNDLE)))
+}
+
+#[cfg(target_os = "linux")]
+const PARCEL_WRAPPER_SAME_MAIN: &str = "import { subscribe, unsubscribe } from \"native-subscribe\";\n\
+     async function main(): Promise<void> { const seen: number[] = []; const callback = (value: number): void => { seen.push(value); }; await subscribe('.', callback, { backend: 'inotify' }); const start: number = Date.now(); while (seen.length < 1 && Date.now() - start < 5000) { pollNativeAddonEvents(); } if (seen.length < 1) { throw new Error('tsfn event timed out'); } console.log('matched=' + unsubscribe('.', callback, { backend: 'inotify' })); }\n";
+
+// The negative control of the wrapper shape: `unsubscribe` with another closure first (Node: `matched=false`).
+#[cfg(target_os = "linux")]
+const PARCEL_WRAPPER_DISTINCT_MAIN: &str = "import { subscribe, unsubscribe } from \"native-subscribe\";\n\
+     async function main(): Promise<void> { const seen: number[] = []; const callback = (value: number): void => { seen.push(value); }; const other = (value: number): void => { seen.push(value); }; await subscribe('.', callback, { backend: 'inotify' }); const start: number = Date.now(); while (seen.length < 1 && Date.now() - start < 5000) { pollNativeAddonEvents(); } if (seen.length < 1) { throw new Error('tsfn event timed out'); } console.log('matched=' + unsubscribe('.', other, { backend: 'inotify' })); console.log('matched=' + unsubscribe('.', callback, { backend: 'inotify' })); }\n";
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_addon_tsfn_unsubscribe_through_js_wrapper() {
+    let (stdout, exited, stderr) = run_parcel_wrapper_unsubscribe("wrapper", None, PARCEL_WRAPPER_SAME_MAIN);
+    assert_eq!(stdout, "matched=true\n", "stderr:\n{stderr}");
+    assert!(exited, "process still alive 8 s after unsubscribe; stderr:\n{stderr}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "fails with `no live owner`: the JS proxy reads the thread-local addon host on a coroutine thread (separate bug)"]
+fn native_addon_tsfn_unsubscribe_through_js_wrapper_thread_backend() {
+    let (stdout, exited, stderr) = run_parcel_wrapper_unsubscribe("wrapper-thread", Some("thread"), PARCEL_WRAPPER_SAME_MAIN);
+    assert_eq!(stdout, "matched=true\n", "stderr:\n{stderr}");
+    assert!(exited, "process still alive 8 s after unsubscribe; stderr:\n{stderr}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_addon_tsfn_unsubscribe_through_js_wrapper_distinct_closure_does_not_match() {
+    let (stdout, exited, stderr) = run_parcel_wrapper_unsubscribe("wrapper-distinct", None, PARCEL_WRAPPER_DISTINCT_MAIN);
+    assert_eq!(stdout, "matched=false\nmatched=true\n", "stderr:\n{stderr}");
+    assert!(exited, "process still alive 8 s after unsubscribe; stderr:\n{stderr}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "fails with `no live owner`: the JS proxy reads the thread-local addon host on a coroutine thread (separate bug)"]
+fn native_addon_tsfn_unsubscribe_through_js_wrapper_distinct_closure_thread_backend() {
+    let (stdout, exited, stderr) = run_parcel_wrapper_unsubscribe("wrapper-distinct-thread", Some("thread"), PARCEL_WRAPPER_DISTINCT_MAIN);
     assert_eq!(stdout, "matched=false\nmatched=true\n", "stderr:\n{stderr}");
     assert!(exited, "process still alive 8 s after unsubscribe; stderr:\n{stderr}");
 }
