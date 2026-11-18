@@ -276,11 +276,16 @@ fn gc_yup_transcript_equal() {
     force_enabled();
     let plain = run_workload(false);
     let plain_calls = CALLS.with(|c| c.get());
+    let plain_collections = crate::gc::collections();
+    let plain_peak = crate::gc::peak_live();
     let collected = run_workload(true);
     let calls = CALLS.with(|c| c.get());
     let cleared = CLEARED.with(|c| c.get());
     let max_reach = MAX_REACHABLE.with(|c| c.get());
     let violations = VIOLATIONS.with(|v| v.borrow().clone());
+    eprintln!(
+        "gc_yup: no-explicit-__gc run: automatic collections {plain_collections}, peak registry live count at a safe point {plain_peak}"
+    );
     if let Some(dir) = out_dir() {
         std::fs::write(format!("{dir}/transcript-nogc.txt"), &plain).ok();
         std::fs::write(format!("{dir}/transcript-gc.txt"), &collected).ok();

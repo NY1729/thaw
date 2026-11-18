@@ -1495,6 +1495,9 @@ impl Interp {
         self.run_jobs()?;
         let mut first = true;
         while self.loop_alive() {
+            if crate::gc_registry::due() {
+                self.gc_safe_point();
+            }
             self.check_interrupt()?;
             // ponytail: wall-clock slice, taken only at an iteration boundary so timer/immediate order within this
             // realm is unchanged. Upgrade: yield on a blocking native call too.

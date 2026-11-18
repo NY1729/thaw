@@ -400,6 +400,8 @@ fn number(v: &Value) -> f64 {
 /// counts return to the base taken after `defs`, and the registry is consistent.
 fn assert_flat_after_cycles(name: &str, defs: &str, call: &str) {
     crate::gc::force_enabled();
+    // Counts the loop's garbage before the explicit collect: the automatic trigger must not run first.
+    crate::gc::no_auto();
     let mut it = Interp::new();
     run_script(&mut it, name, defs);
     // The realm's own start-up garbage (about 8 closures, 8 objects, 1 scope) is freed by the first collection; the
@@ -721,6 +723,7 @@ const MIXED_JS: &str = "globalThis.keep = []; \
 #[test]
 fn gc_mixed_heap_counts_stay_nonnegative() {
     crate::gc::force_enabled();
+    crate::gc::no_auto(); // the explicit collections below must find the garbage themselves
     let mut it = Interp::new();
     run_script(&mut it, "mixed", MIXED_JS);
     let first = it.collect_cycles();
