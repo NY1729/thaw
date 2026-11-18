@@ -12,9 +12,9 @@
 //! not a real `Rc` clone would subtract a reference that is not there and could free a live node, so every edge
 //! kind is audited against exactly one `Rc` clone (`obj_edges` documents each), and a negative count aborts the run.
 //!
-//! Opaque nodes are never cleared and always count as roots: a node whose cell is borrowed, a `with` scope, and
-//! every kind whose edges are not enumerated (`Global`, `Map`, `Set`, `CollIter`, `Promise`, `Generator`, `Proxy`,
-//! `Typed`). Their own edges are not subtracted, so anything they hold stays externally referenced.
+//! Opaque nodes are never cleared and always count as roots: a node whose cell is borrowed, a `Proxy` whose data is
+//! shared, and every kind whose edges are not enumerated yet (`Global`, `Promise`, `Generator`, the PR-3b kinds). Their
+//! own edges are not subtracted, so anything they hold stays externally referenced.
 
 use crate::gc_registry;
 use crate::{account, FxMap, Interp, Kind, Obj, ObjData, Prop, Scope, Slot, Value, Vars};
@@ -35,9 +35,11 @@ fn value_edge<'a>(buf: &mut Vec<Edge<'a>>, v: &'a Value) {
 }
 
 /// Calls `f` once per `Rc` clone that `o` owns: each property value (data, getter, setter, one per occurrence),
-/// the prototype, and the kind's objects (array items, wrapped value, closure scope). A `Slot::LazyProto` owner is a
-/// `Weak` and is not an edge; its parent is. Returns false for an opaque object (a cell is borrowed, or the kind's
-/// edges are not enumerated): then `f` was not called at all.
+/// the prototype, and the kind's objects: array items, wrapped value, closure scope (plus the class's field scope and
+/// parent when the constructor sole-owns its `FuncDef`), Map keys and values, Set items, a collection iterator's
+/// collection, a typed array's buffer, a proxy's target and handler (when its `ProxyData` is sole-owned). A
+/// `Slot::LazyProto` owner is a `Weak` and is not an edge; its parent is. Returns false for an opaque object (a cell
+/// is borrowed, a shared proxy, or a kind whose edges are not enumerated yet): then `f` was not called at all.
 pub(crate) fn obj_edges(o: &ObjData, f: &mut dyn FnMut(Edge)) -> bool {
     // Read `raw_props`, never `props()`: materialising a lazy `prototype` is a mutation.
     let (Ok(props), Ok(proto), Ok(kind)) = (
@@ -46,6 +48,14 @@ pub(crate) fn obj_edges(o: &ObjData, f: &mut dyn FnMut(Edge)) -> bool {
         o.kind.try_borrow(),
     ) else {
         return false;
+    };
+    // A proxy's handler sits in its own cell: borrow it here so the edges it yields live as long as `buf`.
+    let proxy_handler = match &*kind {
+        Kind::Proxy(p) => match p.handler.try_borrow() {
+            Ok(h) => Some(h),
+            Err(_) => return false,
+        },
+        _ => None,
     };
     let mut buf = Vec::new();
     for p in props.iter() {
@@ -76,17 +86,46 @@ pub(crate) fn obj_edges(o: &ObjData, f: &mut dyn FnMut(Edge)) -> bool {
                 value_edge(&mut buf, v);
             }
         }
-        // `def` (its class's parent value and field scope) is cached per process: an external count, not an edge.
-        Kind::Closure { scope, .. } => buf.push(Edge::Scope(scope)),
+        Kind::Closure { def, scope } => {
+            buf.push(Edge::Scope(scope));
+            // The class's field scope and parent live in `FuncDef.class`. Only the constructor holds that `FuncDef` when
+            // its count is 1; any other holder (a call in flight, `call_frames`, a generator's `def`) makes it 2 or more,
+            // and then these two edges are not counted, so their targets keep an external count (the safe direction).
+            if let Some(ci) = def.class.as_ref().filter(|_| Rc::strong_count(def) == 1) {
+                buf.push(Edge::Scope(&ci.field_scope));
+                if let Some(p) = &ci.parent {
+                    value_edge(&mut buf, p);
+                }
+            }
+        }
         Kind::Wrapper(v) => value_edge(&mut buf, v),
-        Kind::Global
-        | Kind::Map(_)
-        | Kind::Set(_)
-        | Kind::CollIter(_)
-        | Kind::Promise(_)
-        | Kind::Generator(_)
-        | Kind::Proxy(_)
-        | Kind::Typed(_) => return false,
+        // Entries are held by the `MapData`/`SetData` inline in the kind (no other clone): one edge per Object key and
+        // per Object value. The lookup index holds addresses only, and cursors are `Weak`.
+        Kind::Map(m) => {
+            for (k, v) in &m.entries {
+                value_edge(&mut buf, k);
+                value_edge(&mut buf, v);
+            }
+        }
+        Kind::Set(s) => {
+            for v in &s.items {
+                value_edge(&mut buf, v);
+            }
+        }
+        // A live iterator's collection (`cursor` is a bare `Rc<Cell>`, not a node).
+        Kind::CollIter(c) => buf.push(Edge::Obj(&c.src)),
+        Kind::Typed(t) => buf.push(Edge::Obj(&t.abuf)),
+        Kind::Proxy(p) => {
+            // A `ProxyData` with another owner (a trap in flight) is opaque: its target and handler keep their counts.
+            if Rc::strong_count(p) != 1 {
+                return false;
+            }
+            value_edge(&mut buf, &p.target);
+            if let Some(h) = proxy_handler.as_deref() {
+                value_edge(&mut buf, h);
+            }
+        }
+        Kind::Global | Kind::Promise(_) | Kind::Generator(_) => return false,
     }
     for e in buf {
         f(e);
@@ -94,19 +133,20 @@ pub(crate) fn obj_edges(o: &ObjData, f: &mut dyn FnMut(Edge)) -> bool {
     true
 }
 
-/// Calls `f` once per `Rc` clone that `s` owns: the parent, the `this` value, and each binding's value. A scope with
-/// a `with` record is opaque (its immutable field cannot be cleared). Returns false, calling `f` for nothing, when
-/// the scope cannot be read.
+/// Calls `f` once per `Rc` clone that `s` owns: the parent, the `with` object, the `this` value, and each binding's
+/// value. Returns false, calling `f` for nothing, when the scope cannot be read. The collector clears only `vars` and
+/// `this_val` (both mutable): a `with` scope is cleared like any other, because every cycle through one also runs
+/// through a mutable edge (the closure or property that holds the scope).
 pub(crate) fn scope_edges(s: &Scope, f: &mut dyn FnMut(Edge)) -> bool {
-    if s.with.is_some() {
-        return false;
-    }
     let (Ok(vars), Ok(this)) = (s.vars.try_borrow(), s.this_val.try_borrow()) else {
         return false;
     };
     let mut buf = Vec::new();
     if let Some(p) = &s.parent {
         buf.push(Edge::Scope(p));
+    }
+    if let Some(w) = &s.with {
+        buf.push(Edge::Obj(w));
     }
     if let Some(v) = this.as_ref() {
         value_edge(&mut buf, v);
