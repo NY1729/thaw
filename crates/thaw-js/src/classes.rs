@@ -85,10 +85,12 @@ impl Interp {
             ),
             None => (Vec::new(), Vec::new()),
         };
-        let ctor_uses_new_target = {
+        // the constructor's own `arguments` (body or parameter defaults), not the enclosing function's
+        let (ctor_uses_arguments, ctor_uses_new_target) = {
             let mut finder = ArgumentsFinder::default();
             body.visit_with(&mut finder);
-            finder.new_target
+            params.visit_with(&mut finder);
+            (finder.found, finder.new_target)
         };
         let hoisted = hoisted_names(&body);
         let param_names = simple_param_names(&params);
@@ -102,7 +104,7 @@ impl Interp {
             is_gen: false,
             bind_self: false,
             no_prototype: false,
-            uses_arguments: false,
+            uses_arguments: ctor_uses_arguments,
             uses_new_target: ctor_uses_new_target || parent.is_some(),
             uses_this: true,
             no_compile: self.no_compile_define,
