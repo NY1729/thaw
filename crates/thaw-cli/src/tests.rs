@@ -31,12 +31,21 @@ fn compatibility_commands_are_bounded_by_a_timeout() {
     let output = command_output_with_timeout(
         Command::new("sh").args(["-c", "printf ok"]),
         Duration::from_secs(1),
+        None,
     )
     .unwrap();
     assert_eq!(output.stdout, b"ok");
     let output = command_output_with_timeout(
+        &mut Command::new("cat"),
+        Duration::from_secs(5),
+        Some(b"piped"),
+    )
+    .unwrap();
+    assert_eq!(output.stdout, b"piped");
+    let output = command_output_with_timeout(
         Command::new("sh").args(["-c", "yes x | head -c 100000; yes y | head -c 100000 >&2"]),
         Duration::from_secs(5),
+        None,
     )
     .unwrap();
     assert!(output.status.success());
@@ -46,6 +55,7 @@ fn compatibility_commands_are_bounded_by_a_timeout() {
     assert!(command_output_with_timeout(
         Command::new("sh").args(["-c", "sleep 5 & exit 0"]),
         Duration::from_millis(50),
+        None,
     )
     .unwrap_err()
     .contains("timed out"));
@@ -56,6 +66,7 @@ fn compatibility_commands_are_bounded_by_a_timeout() {
             "printf 'partial-stdout-marker\\n'; printf 'partial-stderr-marker\\n' >&2; sleep 5",
         ]),
         Duration::from_secs(1),
+        None,
     )
     .unwrap_err();
     assert!(partial.contains("timed out"));
@@ -68,6 +79,7 @@ fn compatibility_commands_are_bounded_by_a_timeout() {
             "head -c 16384 /dev/zero | tr '\\000' x; printf 'stdout-tail-marker\\n'; head -c 16384 /dev/zero | tr '\\000' y >&2; printf 'stderr-tail-marker\\n' >&2; sleep 5",
         ]),
         Duration::from_secs(1),
+        None,
     )
     .unwrap_err();
     assert!(large_tail.contains("stdout (truncated to last 8192 bytes)"));
