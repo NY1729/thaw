@@ -13,6 +13,7 @@
   const thawSetHas = thawSet.prototype.has;
   const thawSetAdd = thawSet.prototype.add;
   const thawSetDelete = thawSet.prototype.delete;
+  let thawFramesRequested = false;
   let thawNextStorageId = 1;
   let thawNextAsyncId = 2;
   let thawCurrentAsyncId = 1;
@@ -64,6 +65,11 @@
   };
   function AsyncLocalStorage(options) {
     if (!(this instanceof AsyncLocalStorage)) return new AsyncLocalStorage(options);
+    // Reaction contexts (native awaits, then, finally) are carried only for programs that have a store.
+    if (!thawFramesRequested) {
+      thawFramesRequested = true;
+      __thaw_async_frames_native();
+    }
     thawApply(thawWeakSet, thawStorageStates,
       [this, { id: thawNextStorageId++, defaultValue: options && options.defaultValue,
         generation: thawGeneration(), enabled: true }]);
@@ -234,11 +240,26 @@
   // Native (compiled) promises: the runtime reports by key, `kind` as above (0 init, 1 before, 2 after,
   // 3 promiseResolve). Ids come from the same counter and scope stack as the promise entry; a stand-in
   // object is the resource. Key 0 means no parent: the trigger is the current execution id.
+  // Kind 4 (reaction context, sent once an AsyncLocalStorage exists) stores the subscriber's frame under the
+  // reaction's key; kind 1 swaps it in and kind 2 restores the frame that was current before (a stack, since
+  // `resume` runs to completion inside one poll). Frames work without any hook: no ids are kept then.
   // ponytail: native keys are kept until exit (no destroy event yet); add when native destroy lands.
   const thawNativeIds = new Map();
+  const thawMap = Map;
+  const thawMapGet = thawMap.prototype.get;
+  const thawMapSet = thawMap.prototype.set;
+  const thawMapDelete = thawMap.prototype.delete;
+  const thawNativeFrames = new thawMap();
+  const thawNativeSwaps = [];
   Object.defineProperty(globalThis, '__thaw_async_hooks_native', {
     value: function(kind, key, parent) {
+      if (kind === 4) {
+        const frame = thawFrameGet();
+        if (frame !== undefined) thawApply(thawMapSet, thawNativeFrames, [key, frame]);
+        return;
+      }
       if (kind === 0) {
+        if (thawEnabledHooks.size === 0) return;
         const known = parent === 0 ? undefined : thawNativeIds.get(parent);
         const id = thawNextAsyncId++;
         const trigger = known ? known.id : thawCurrentAsyncId;
@@ -248,15 +269,26 @@
         return;
       }
       const known = thawNativeIds.get(key);
-      if (!known) return;
       if (kind === 1) {
-        thawEnterScope(known.id, known.trigger, known.resource);
-        thawEmit('before', known.id);
+        const frame = thawApply(thawMapGet, thawNativeFrames, [key]);
+        thawApply(thawMapDelete, thawNativeFrames, [key]);
+        thawNativeSwaps.push([key, thawFrameSwap(frame)]);
+        if (known) {
+          thawEnterScope(known.id, known.trigger, known.resource);
+          thawEmit('before', known.id);
+        }
       } else if (kind === 2) {
-        thawEmit('after', known.id);
-        thawLeaveScope();
+        if (known) {
+          thawEmit('after', known.id);
+          thawLeaveScope();
+        }
+        const top = thawNativeSwaps[thawNativeSwaps.length - 1];
+        if (top && top[0] === key) {
+          thawNativeSwaps.pop();
+          thawFrameSwap(top[1]);
+        }
       } else if (kind === 3) {
-        thawEmit('promiseResolve', known.id);
+        if (known) thawEmit('promiseResolve', known.id);
       }
     },
     configurable: false, enumerable: false, writable: false,

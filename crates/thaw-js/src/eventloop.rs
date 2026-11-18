@@ -131,6 +131,8 @@ pub(crate) struct Rt {
     cleared: Vec<u64>,
     /// An async_hooks hook is enabled in this realm: timer operations then report to `__thaw_async_hook_bus`.
     async_hooks_on: bool,
+    /// An AsyncLocalStorage exists here: the native sink stays on so reactions keep their context (sticky).
+    async_frames_on: bool,
     pub(crate) arraybuffer_proto: Option<Obj>,
     /// SharedArrayBuffer.prototype; separate from ArrayBuffer.prototype (not an ArrayBuffer).
     pub(crate) sharedarraybuffer_proto: Option<Obj>,
@@ -1936,10 +1938,18 @@ impl Interp {
         let f = self.native(|it, _, a| {
             let on = matches!(arg(a, 0), Value::Bool(true));
             it.rt.async_hooks_on = on;
-            crate::host::native_async_hooks_set(it as *mut Interp, on);
+            crate::host::native_async_hooks_set(it as *mut Interp, on || it.rt.async_frames_on);
             Ok(Value::Undefined)
         });
         g.declare("__thaw_async_hook_timers", f, true);
+        // Set by AsyncLocalStorage's constructor: the native sink stays on (for reaction contexts) with no hook.
+        let f = self.native(|it, _, _| {
+            it.rt.async_frames_on = true;
+            crate::host::native_async_frames_set(true);
+            crate::host::native_async_hooks_set(it as *mut Interp, true);
+            Ok(Value::Undefined)
+        });
+        g.declare("__thaw_async_frames_native", f, true);
         let f = self.native(|it, _, a| {
             if let Some(id) = it.timer_id(&arg(a, 0)) {
                 it.clear_timer_anywhere(id, true);

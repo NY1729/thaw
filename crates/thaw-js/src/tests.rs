@@ -10440,6 +10440,73 @@ console.log(out.join('|'));"#;
     );
 }
 
+// Native reactions (compiled awaits, then, catch, finally) report their subscriber's frame under the reaction key
+// (kind 4); kinds 1 and 2 swap it in around the resume. The script plays the runtime's side of that protocol.
+// Red before: the frame was lost, so each resume read the store of whoever was current.
+#[test]
+fn async_frames_native_reactions_resume_in_their_subscriber_store() {
+    let src = r#"var A = __thaw_async_hooks_exports; var als = new A.AsyncLocalStorage(); var out = [];
+als.run('A', function () { __thaw_async_hooks_native(4, 501, 0); });
+als.run('B', function () { __thaw_async_hooks_native(4, 502, 0); });
+__thaw_async_hooks_native(1, 502, 0); out.push('502:' + als.getStore()); __thaw_async_hooks_native(2, 502, 0);
+__thaw_async_hooks_native(1, 501, 0); out.push('501:' + als.getStore()); __thaw_async_hooks_native(2, 501, 0);
+out.push('outside:' + als.getStore());
+console.log(out.join('|'));"#;
+    assert_eq!(run_loop(src), "502:B|501:A|outside:undefined");
+}
+
+// A reaction subscribed outside any store resumes outside, even when a store is current at resume; the resume
+// restores the store that was current before it.
+#[test]
+fn async_frames_native_resume_without_a_subscriber_store_restores_the_previous_frame() {
+    let src = r#"var A = __thaw_async_hooks_exports; var als = new A.AsyncLocalStorage(); var out = [];
+__thaw_async_hooks_native(4, 601, 0);
+als.run('C', function () {
+  __thaw_async_hooks_native(1, 601, 0); out.push('601:' + als.getStore()); __thaw_async_hooks_native(2, 601, 0);
+  out.push('after:' + als.getStore());
+});
+console.log(out.join('|'));"#;
+    assert_eq!(run_loop(src), "601:undefined|after:C");
+}
+
+// A nested resume (a reaction that resumes while another one is still running) restores its own predecessor.
+#[test]
+fn async_frames_native_nested_resumes_unwind_in_order() {
+    let src = r#"var A = __thaw_async_hooks_exports; var als = new A.AsyncLocalStorage(); var out = [];
+als.run('P', function () { __thaw_async_hooks_native(4, 701, 0); });
+als.run('Q', function () { __thaw_async_hooks_native(4, 702, 0); });
+__thaw_async_hooks_native(1, 701, 0);
+out.push('701:' + als.getStore());
+__thaw_async_hooks_native(1, 702, 0); out.push('702:' + als.getStore()); __thaw_async_hooks_native(2, 702, 0);
+out.push('back:' + als.getStore());
+__thaw_async_hooks_native(2, 701, 0);
+out.push('done:' + als.getStore());
+console.log(out.join('|'));"#;
+    assert_eq!(run_loop(src), "701:P|702:Q|back:P|done:undefined");
+}
+
+// The native sink is asked to report reaction contexts once an AsyncLocalStorage exists, never for a program
+// that only uses createHook or plain promises.
+#[test]
+fn async_frames_native_sink_is_requested_only_by_an_async_local_storage() {
+    crate::host::TEST_ASYNC_FRAMES_SET.with(|sets| sets.borrow_mut().clear());
+    run_loop("var A = __thaw_async_hooks_exports; A.createHook({ init: function () {} }).enable(); Promise.resolve(1).then(function () {});");
+    let requested = crate::host::TEST_ASYNC_FRAMES_SET.with(|sets| sets.borrow().clone());
+    assert!(
+        requested.is_empty(),
+        "createHook and promises ask for no frames: {requested:?}"
+    );
+    run_loop(
+        "var A = __thaw_async_hooks_exports; new A.AsyncLocalStorage(); new A.AsyncLocalStorage();",
+    );
+    let requested = crate::host::TEST_ASYNC_FRAMES_SET.with(|sets| sets.borrow().clone());
+    assert_eq!(
+        requested,
+        vec![1],
+        "one request per realm, however many stores it makes"
+    );
+}
+
 #[test]
 fn mock_timers_date_mocking_setime_reset_and_apis_filter() {
     assert_eq!(

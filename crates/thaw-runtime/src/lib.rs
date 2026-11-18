@@ -510,12 +510,16 @@ pub extern "C" fn thaw_runtime_run_one_event() -> bool {
     }
 }
 
-/// Sink for native async_hooks events, registered by thaw-js: 0 init, 1 before, 2 after, 3 promiseResolve.
+/// Sink for native async_hooks events, registered by thaw-js: 0 init, 1 before, 2 after, 3 promiseResolve,
+/// 4 reaction context (a reaction was subscribed under `key`; sent only while `ASYNC_FRAMES_ON`).
 pub type AsyncHookSinkFn = extern "C" fn(kind: u8, key: u64, parent: u64);
 
 static ASYNC_HOOK_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static ASYNC_HOOK_SINK: Mutex<Option<AsyncHookSinkFn>> = Mutex::new(None);
 static ASYNC_HOOK_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Set by `thaw_runtime_async_frames_set`: reactions also report kind 4 (see `subscribe_with_roots`).
+pub(crate) static ASYNC_FRAMES_ON: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 thread_local! {
     /// Set while the sink runs: events and keys raised by the hook callback itself are dropped.
@@ -531,6 +535,13 @@ pub extern "C" fn thaw_runtime_async_hooks_set(on: u8, sink: Option<AsyncHookSin
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = sink;
     ASYNC_HOOK_ON.store(sink.is_some(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Turns on the reaction-context event (kind 4) for the sink: thaw-js sets it once an AsyncLocalStorage exists,
+/// so programs that never create one emit no extra events. Sticky for the process.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_async_frames_set(on: u8) {
+    ASYNC_FRAMES_ON.store(on != 0, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// A fresh async_hooks key for a promise being created, or 0 while the sink is off or a hook runs.
