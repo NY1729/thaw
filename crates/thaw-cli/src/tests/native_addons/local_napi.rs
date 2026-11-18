@@ -1356,7 +1356,7 @@ fn native_callback_registered_in_one_package_runs_for_a_native_thread_event_afte
 // on a match, releases the threadsafe function and the reference, as parcel's Watcher::unwatch does. The program
 // must print `matched=true` and then exit on its own.
 #[cfg(target_os = "linux")]
-fn run_tsfn_unsubscribe_repro(name: &str, coroutine_co: Option<&str>) -> (String, bool, String) {
+fn run_tsfn_unsubscribe_repro(name: &str, coroutine_co: Option<&str>, main_source: &str) -> (String, bool, String) {
     let dir = std::env::temp_dir().join(format!("thaw-tsfn-unsub-{name}-{}", std::process::id()));
     let registry = dir.join("modules");
     let package = registry.join("native-subscribe");
@@ -1454,12 +1454,7 @@ fn run_tsfn_unsubscribe_repro(name: &str, coroutine_co: Option<&str>) -> (String
         .success());
     let source = dir.join("main.ts");
     let output = dir.join("app");
-    std::fs::write(
-        &source,
-        "import { subscribe, unsubscribe } from \"native-subscribe\";\n\
-         function main(): void { const seen: number[] = []; const callback = (value: number): void => { seen.push(value); }; subscribe(callback); const start: number = Date.now(); while (seen.length < 1 && Date.now() - start < 5000) { pollNativeAddonEvents(); } if (seen.length < 1) { throw new Error('tsfn event timed out'); } console.log('matched=' + unsubscribe(callback)); }\n",
-    )
-    .unwrap();
+    std::fs::write(&source, main_source).unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
     let stdout_path = dir.join("stdout.txt");
@@ -1494,20 +1489,48 @@ fn run_tsfn_unsubscribe_repro(name: &str, coroutine_co: Option<&str>) -> (String
     (stdout, exited, stderr)
 }
 
+// Same closure handed to subscribe and unsubscribe: Node prints `matched=true` and exits.
+const TSFN_SAME_CLOSURE_MAIN: &str = "import { subscribe, unsubscribe } from \"native-subscribe\";\n\
+     function main(): void { const seen: number[] = []; const callback = (value: number): void => { seen.push(value); }; subscribe(callback); const start: number = Date.now(); while (seen.length < 1 && Date.now() - start < 5000) { pollNativeAddonEvents(); } if (seen.length < 1) { throw new Error('tsfn event timed out'); } console.log('matched=' + unsubscribe(callback)); }\n";
+
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "repro of the @parcel/watcher unsubscribe hang (designs/addon-parcel-exit.md); un-ignore with the fix"]
 fn native_addon_tsfn_unsubscribe_releases_and_process_exits() {
-    let (stdout, exited, stderr) = run_tsfn_unsubscribe_repro("default", None);
+    let (stdout, exited, stderr) = run_tsfn_unsubscribe_repro("default", None, TSFN_SAME_CLOSURE_MAIN);
     assert_eq!(stdout, "matched=true\n", "stderr:\n{stderr}");
     assert!(exited, "process still alive 8 s after unsubscribe; stderr:\n{stderr}");
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "repro of the @parcel/watcher unsubscribe hang (designs/addon-parcel-exit.md); un-ignore with the fix"]
 fn native_addon_tsfn_unsubscribe_releases_and_process_exits_thread_backend() {
-    let (stdout, exited, stderr) = run_tsfn_unsubscribe_repro("thread", Some("thread"));
+    let (stdout, exited, stderr) = run_tsfn_unsubscribe_repro("thread", Some("thread"), TSFN_SAME_CLOSURE_MAIN);
     assert_eq!(stdout, "matched=true\n", "stderr:\n{stderr}");
+    assert!(exited, "process still alive 8 s after unsubscribe; stderr:\n{stderr}");
+}
+
+// Negative control: a different closure with an identical body is not the subscribed one (Node: `===` is false),
+// so it must not match or release; the subscribed closure still matches afterwards and the process exits.
+#[cfg(target_os = "linux")]
+#[test]
+fn native_addon_tsfn_unsubscribe_distinct_closure_does_not_match() {
+    let main_source = "import { subscribe, unsubscribe } from \"native-subscribe\";\n\
+         function main(): void { const seen: number[] = []; const callback = (value: number): void => { seen.push(value); }; const other = (value: number): void => { seen.push(value); }; subscribe(callback); const start: number = Date.now(); while (seen.length < 1 && Date.now() - start < 5000) { pollNativeAddonEvents(); } if (seen.length < 1) { throw new Error('tsfn event timed out'); } console.log('matched=' + unsubscribe(other)); console.log('matched=' + unsubscribe(callback)); }\n";
+    let (stdout, exited, stderr) = run_tsfn_unsubscribe_repro("distinct", None, main_source);
+    assert_eq!(stdout, "matched=false\nmatched=true\n", "stderr:\n{stderr}");
+    assert!(exited, "process still alive 8 s after unsubscribe; stderr:\n{stderr}");
+}
+
+// A closure created per loop iteration is distinct from the one kept from another iteration (Node: `matched=false`),
+// and the kept closure still matches itself (`matched=true`). Function-typed arrays and Map values are not used:
+// Thaw cannot yet restore a function from a JSON-backed array or Map ("cannot be restored as Function", a build
+// error, separate gap).
+#[cfg(target_os = "linux")]
+#[test]
+fn native_addon_tsfn_unsubscribe_loop_closures_match_by_identity() {
+    let main_source = "import { subscribe, unsubscribe } from \"native-subscribe\";\n\
+         function main(): void { const seen: number[] = []; let kept: (value: number) => void = (value: number): void => { seen.push(value); }; let other: (value: number) => void = kept; for (let i = 0; i < 2; i++) { const cb = (value: number): void => { seen.push(value + i); }; if (i === 0) { kept = cb; } else { other = cb; } } subscribe(kept); const start: number = Date.now(); while (seen.length < 1 && Date.now() - start < 5000) { pollNativeAddonEvents(); } if (seen.length < 1) { throw new Error('tsfn event timed out'); } console.log('matched=' + unsubscribe(other)); console.log('matched=' + unsubscribe(kept)); }\n";
+    let (stdout, exited, stderr) = run_tsfn_unsubscribe_repro("identity", None, main_source);
+    assert_eq!(stdout, "matched=false\nmatched=true\n", "stderr:\n{stderr}");
     assert!(exited, "process still alive 8 s after unsubscribe; stderr:\n{stderr}");
 }
