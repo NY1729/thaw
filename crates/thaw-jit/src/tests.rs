@@ -2353,4 +2353,35 @@ mod tests {
             "[object Object]"
         );
     }
+
+    /// `THAW_JIT_PROFILE` is read once per process, so the counted calls run in a child process
+    /// that has it set; the child prints its report at exit (`atexit`).
+    #[test]
+    fn profile_counts_stub_calls_per_symbol() {
+        if std::env::var_os("THAW_JIT_PROFILE_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::profile_counts_stub_calls_per_symbol",
+                    "--test-threads=1",
+                ])
+                .env("THAW_JIT_PROFILE", "1")
+                .env("THAW_JIT_PROFILE_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("thaw-jit-profile\texpr:x,y,+:profile-add\t2\n"),
+                "stderr: {stderr}"
+            );
+            return;
+        }
+        let symbol = CString::new("expr:x,y,+:profile-add").unwrap();
+        for _ in 0..2 {
+            let result = call(&symbol, &[1.0, 2.0]);
+            assert!(result.error.is_null());
+            assert_eq!(result.value, 3.0);
+        }
+    }
 }

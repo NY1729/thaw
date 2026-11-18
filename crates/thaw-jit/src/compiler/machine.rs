@@ -545,6 +545,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
             error: INVALID_SYMBOL.as_ptr().cast(),
         };
     };
+    crate::profile::record(symbol);
     let Some(program) = NumericProgram::parse(symbol) else {
         return ThawJitResult {
             value: 0.0,

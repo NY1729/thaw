@@ -5753,10 +5753,17 @@ thread_local! {
 /// callback may call other packages; a re-entrant call into the same package runs on the same
 /// instance (ponytail: the suspended outer call holds a `&mut` to it, formally aliasing; the outer
 /// evaluator is parked inside the callback and touches nothing until it returns).
+///
+/// `#[track_caller]`: `THAW_JS_PROFILE` keys an outermost entry by its call site (see `profile.rs`).
+#[track_caller]
 pub(crate) fn with_package<T>(
     handle: usize,
     f: impl FnOnce(&mut Package) -> Result<T, HostError>,
 ) -> Result<T, HostError> {
+    let site = std::panic::Location::caller();
+    let _profile = crate::profile::enter(|| {
+        crate::profile::entry_key(package_name(handle).as_deref(), site.file(), site.line())
+    });
     ensure_js_job_hooks();
     let taken = PACKAGES.with(|ps| ps.borrow_mut().get_mut(handle).map(Option::take));
     let mut package = match taken {
@@ -5777,6 +5784,16 @@ pub(crate) fn with_package<T>(
     RUNNING.with(|r| r.borrow_mut().remove(&handle));
     PACKAGES.with(|ps| ps.borrow_mut()[handle] = Some(package));
     result
+}
+
+/// The name a package was loaded under (profile keys only; `None` when the handle has no name).
+fn package_name(handle: usize) -> Option<String> {
+    BY_NAME.with(|m| {
+        let m = m.try_borrow().ok()?;
+        m.iter()
+            .find(|(_, h)| **h == handle)
+            .map(|(n, _)| n.clone())
+    })
 }
 
 /// The thread-local host tables of one realm. They are moved, not copied, between the host thread
@@ -5963,6 +5980,7 @@ fn terminate_process(it: &mut Interp, code: i32) {
         hook(status);
         return;
     }
+    crate::profile::flush();
     // SAFETY: `_exit` takes no pointers. Used instead of `std::process::exit` so TLS destructors do not tear down
     // the packages while up-stack frames still hold them (as the QuickJS bridge does).
     unsafe { libc::_exit(status) }
@@ -6337,6 +6355,7 @@ fn end_process_after_fatal() {
     // no package (or a worker realm that declined): flush and leave without running TLS destructors
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let _ = std::io::Write::flush(&mut std::io::stderr());
+    crate::profile::flush();
     // SAFETY: `_exit` takes no pointers.
     unsafe { libc::_exit(1) }
 }
@@ -6655,6 +6674,8 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             eprintln!("thaw-js call: {symbol} {args}");
         }
         let (package, export) = symbol.split_once("::").ok_or("malformed thaw-js symbol")?;
+        // the outermost entry of this typed call; the `with_package` inside is nested and not counted
+        let _profile = crate::profile::enter(|| crate::profile::typed_key(package, export));
         let (handle, export) =
             resolve_export(package, export).ok_or_else(|| not_loaded(package))?;
         let Native::Array(args) = Native::from_json(&args).map_err(|e| e.to_string())? else {
