@@ -5,12 +5,13 @@
 //! default unless a native addon is registered): those threads have their own registries, and a node dropped on
 //! a thread other than the one that created it cannot be removed from its registry.
 //!
-//! Entries are `Weak`, so the registry never keeps a node alive. A node's `Drop` removes its entry first
-//! (`swap_remove`, then the moved entry's index is fixed up), so on the creating thread the registry holds exactly
+//! Entries are `Weak`, so the registry never keeps a node alive. A node's `Drop` frees its slot first (the slot is
+//! `None` and goes on a free list; no other node is touched), so on the creating thread the registry holds exactly
 //! the live nodes. The one exception is a node dropped on another thread: its entry stays as a `Weak` to a dead
-//! node. That keeps the node's allocation (not its contents) until the next sweep, so the registry is bounded by
-//! a sweep (`List::sweep`: when the list reaches twice its live size, and at realm teardown). No `unsafe` is
-//! needed, which is why this is not a `*const` list: a stale `Weak` is harmless, a stale raw pointer would be UB.
+//! node. That keeps the node's allocation (not its contents) until a sweep. `STALE` counts those removals; a sweep
+//! runs only when `STALE` is non-zero (when the list must grow past its threshold, and at realm teardown), so a
+//! single-threaded run never scans the lists. No `unsafe` is needed, which is why this is not a `*const` list:
+//! a stale `Weak` is harmless, a stale raw pointer would be UB.
 //!
 //! Objects are registered eagerly (`new_obj`). Scopes are registered lazily: only the scopes a closure captures,
 //! and their ancestors up to the first one already registered (`capture_scope`). A frame or block scope that no
@@ -18,6 +19,10 @@
 use crate::{Obj, ObjData, Scope};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Removals that found their node's entry in another thread's list: those entries are stale until a sweep.
+static STALE: AtomicUsize = AtomicUsize::new(0);
 
 /// `reg_idx` of a node that is not in the registry.
 pub(crate) const NONE: usize = usize::MAX;
@@ -43,8 +48,11 @@ impl Node for Scope {
 }
 
 struct List<T: Node> {
-    entries: Vec<Weak<T>>,
-    /// The length at which the next `add` sweeps first.
+    /// Slot `i` holds the node whose `reg_idx` is `i`; a `None` slot is listed in `free`.
+    entries: Vec<Option<Weak<T>>>,
+    /// Empty slots, reused before the list grows.
+    free: Vec<usize>,
+    /// The length at which growing the list sweeps first.
     sweep_at: usize,
 }
 
@@ -52,48 +60,69 @@ impl<T: Node> List<T> {
     const fn new() -> Self {
         List {
             entries: Vec::new(),
+            free: Vec::new(),
             sweep_at: SWEEP_MIN,
         }
     }
 
-    fn add(&mut self, node: &Rc<T>) {
-        if self.entries.len() >= self.sweep_at {
-            self.sweep();
-        }
-        node.reg_idx().set(self.entries.len());
-        self.entries.push(Rc::downgrade(node));
+    fn live(&self) -> usize {
+        self.entries.len() - self.free.len()
     }
 
-    /// Removes `node` (its index is `reg_idx`), if this list holds it: a node dropped on another thread is not
-    /// here, and its stale entry is left for `sweep`.
+    /// Slots are stable: no other node is touched, so an add or a remove costs the node itself plus one slot.
+    /// Growing past `sweep_at` sweeps first, but only when some node died on another thread (`STALE`).
+    fn add(&mut self, node: &Rc<T>) {
+        let idx = match self.free.pop() {
+            Some(i) => i,
+            None => {
+                if self.entries.len() >= self.sweep_at && STALE.load(Ordering::Relaxed) > 0 {
+                    self.sweep();
+                }
+                match self.free.pop() {
+                    Some(i) => i,
+                    None => {
+                        self.entries.push(None);
+                        self.entries.len() - 1
+                    }
+                }
+            }
+        };
+        node.reg_idx().set(idx);
+        self.entries[idx] = Some(Rc::downgrade(node));
+    }
+
+    /// Frees `node`'s slot (its index is `reg_idx`), if this list holds it: a node dropped on another thread is
+    /// not here, and its stale entry is left for `sweep`.
     fn remove(&mut self, node: &T) {
         let idx = node.reg_idx().get();
         if idx == NONE {
             return;
         }
-        if self
-            .entries
-            .get(idx)
+        let Some(slot) = self.entries.get_mut(idx) else {
+            return;
+        };
+        if slot
+            .as_ref()
             .is_some_and(|w| std::ptr::eq(w.as_ptr(), node))
         {
-            self.entries.swap_remove(idx);
-            // The moved entry's node is alive (each node's `Drop` removed its entry before it dropped anything),
-            // so `upgrade` succeeds. The temporary `Rc` is dropped at once.
-            if let Some(moved) = self.entries.get(idx).and_then(Weak::upgrade) {
-                moved.reg_idx().set(idx);
-            }
+            // Dropping the `Weak` here touches only `node`, which is being dropped anyway.
+            *slot = None;
+            self.free.push(idx);
+        } else {
+            // Dropped on another thread: its entry is in the creating thread's list and goes stale there.
+            STALE.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// Drops the entries whose node is gone and renumbers the rest.
+    /// Frees the slots whose node is gone (dead on another thread) and sets the next growth threshold.
     fn sweep(&mut self) {
-        self.entries.retain(|w| w.strong_count() > 0);
-        for (i, w) in self.entries.iter().enumerate() {
-            if let Some(n) = w.upgrade() {
-                n.reg_idx().set(i);
+        for (i, slot) in self.entries.iter_mut().enumerate() {
+            if slot.as_ref().is_some_and(|w| w.strong_count() == 0) {
+                *slot = None;
+                self.free.push(i);
             }
         }
-        self.sweep_at = (2 * self.entries.len()).max(SWEEP_MIN);
+        self.sweep_at = (2 * self.live()).max(SWEEP_MIN);
     }
 }
 
@@ -103,11 +132,13 @@ thread_local! {
 }
 
 /// Adds a new object record. Called once, from `new_obj`.
+#[inline]
 pub(crate) fn register_obj(obj: &Obj) {
     let _ = OBJS.try_with(|r| r.borrow_mut().add(obj));
 }
 
 /// Removes `node` from the object list; called from its `Drop`, before its fields drop.
+#[inline]
 pub(crate) fn unregister_obj(node: &ObjData) {
     let _ = OBJS.try_with(|r| r.borrow_mut().remove(node));
 }
@@ -135,14 +166,17 @@ pub(crate) fn unregister_scope(node: &Scope) {
 
 /// Drops the stale entries of both lists (nodes that died on another thread). Called at realm teardown.
 pub(crate) fn sweep_stale() {
+    if STALE.load(Ordering::Relaxed) == 0 {
+        return;
+    }
     let _ = OBJS.try_with(|r| r.borrow_mut().sweep());
     let _ = SCOPES.try_with(|r| r.borrow_mut().sweep());
 }
 
 /// Registered `(objects, scopes)` on this thread, stale entries included.
 pub(crate) fn counts() -> (usize, usize) {
-    let o = OBJS.try_with(|r| r.borrow().entries.len()).unwrap_or(0);
-    let s = SCOPES.try_with(|r| r.borrow().entries.len()).unwrap_or(0);
+    let o = OBJS.try_with(|r| r.borrow().live()).unwrap_or(0);
+    let s = SCOPES.try_with(|r| r.borrow().live()).unwrap_or(0);
     (o, s)
 }
 
@@ -152,6 +186,7 @@ pub(crate) fn live_objs() -> Vec<Obj> {
         r.borrow()
             .entries
             .iter()
+            .flatten()
             .filter_map(Weak::upgrade)
             .collect()
     })
@@ -163,6 +198,7 @@ pub(crate) fn live_objs() -> Vec<Obj> {
 pub(crate) fn check_invariants() -> Result<(), String> {
     OBJS.with(|r| {
         for (i, w) in r.borrow().entries.iter().enumerate() {
+            let Some(w) = w else { continue };
             let o = w.upgrade().ok_or(format!("obj entry {i} is dead"))?;
             if o.reg_idx.get() != i {
                 return Err(format!("obj entry {i} has reg_idx {}", o.reg_idx.get()));
@@ -172,6 +208,7 @@ pub(crate) fn check_invariants() -> Result<(), String> {
     })?;
     SCOPES.with(|r| {
         for (i, w) in r.borrow().entries.iter().enumerate() {
+            let Some(w) = w else { continue };
             let s = w.upgrade().ok_or(format!("scope entry {i} is dead"))?;
             if s.reg_idx.get() != i {
                 return Err(format!("scope entry {i} has reg_idx {}", s.reg_idx.get()));
