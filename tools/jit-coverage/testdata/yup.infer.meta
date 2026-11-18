@@ -1,0 +1,8 @@
+build_ok=1
+build_ms=51002
+rounds=5
+wall_ms=640
+exit=0
+stdout_ok=1
+profile_exit=0
+profile_stdout_ok=1
