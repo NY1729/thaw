@@ -5102,6 +5102,24 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  console.log('isInternalThread main', wt.isInternalThread);\n  const worker = new wt.Worker(`\n    const wt = require('node:worker_threads');\n    const keep = setInterval(() => {}, 1000);\n    wt.parentPort.postMessage('isInternalThread in worker ' + wt.isInternalThread + ' threadId ' + wt.threadId);\n  `, { eval: true });\n  let message: any = undefined;\n  await new Promise<void>((resolve: () => void): void => { worker.once('message', (m: any) => { message = m; resolve(); }); });\n  console.log(message);\n  const attempt1 = async (): Promise<void> => { try { await wt.postMessageToThread(99, 1, [], 'soon'); console.log('timeout type', 'resolved', undefined); } catch (e: any) { console.log('timeout type', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt1();\n  const attempt2 = async (): Promise<void> => { try { await wt.postMessageToThread(99, 1, [], -1); console.log('timeout range', 'resolved', undefined); } catch (e: any) { console.log('timeout range', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt2();\n  const attempt3 = async (): Promise<void> => { try { await wt.postMessageToThread(99, 1, [], 0); console.log('timeout zero unknown', 'resolved', undefined); } catch (e: any) { console.log('timeout zero unknown', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt3();\n  await worker.terminate();\n  console.log('done');\n}"
+  },
+  {
+    "name": "events exports usingDomains symbols defaults and EventEmitterAsyncResource",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as ev from 'node:events';\nconst E: any = ev;\nfunction main(): void {\n  console.log('usingDomains', typeof E.usingDomains, E.usingDomains);\n  console.log('defaultMaxListeners', typeof E.defaultMaxListeners, E.defaultMaxListeners);\n  console.log('captureRejections', typeof E.captureRejections, E.captureRejections);\n  console.log('errorMonitor', typeof E.errorMonitor, String(E.errorMonitor));\n  const r: any = new E.EventEmitterAsyncResource({ name: 'probe' });\n  console.log('EventEmitterAsyncResource', typeof E.EventEmitterAsyncResource, typeof r, typeof r.asyncId, typeof r.triggerAsyncId, typeof r.emitDestroy, typeof r.on);\n  try { new E.EventEmitterAsyncResource({}); console.log('no error'); } catch (e: any) { console.log('nameError', e.name, e.code); }\n}\n"
+  },
+  {
+    "name": "zlib codes map both directions and is frozen",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as zlib from 'node:zlib';\nfunction main(): void {\n  const codes: any = (zlib as any).codes;\n  console.log('codes', typeof codes, Object.keys(codes).length, Object.isFrozen(codes));\n  console.log(Object.keys(codes).map((k: string): string => k + '=' + codes[k]).join(' '));\n  console.log(codes.Z_OK, codes[0], codes[-6], codes.Z_VERSION_ERROR, codes[-3]);\n}\n"
+  },
+  {
+    "name": "fs and fs/promises constants full object",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import { constants } from 'node:fs';\nimport { constants as promiseConstants } from 'node:fs/promises';\nfunction main(): void {\n  const c: any = promiseConstants;\n  console.log('fs/promises constants', typeof c, Object.keys(c).length, Object.getPrototypeOf(c) === null);\n  console.log(Object.keys(c).map((k: string): string => k + '=' + c[k]).join(' '));\n  const f: any = constants;\n  console.log('fs constants', typeof f, Object.keys(f).length, Object.getPrototypeOf(f) === null, f.O_NONBLOCK, f.S_IRWXU, f.UV_DIRENT_BLOCK);\n}\n"
   }
   ]
 }

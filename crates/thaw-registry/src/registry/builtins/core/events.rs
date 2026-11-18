@@ -107,6 +107,13 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              module.exports.once = once;\n\
              module.exports.addAbortListener = addAbortListener;\n\
              module.exports.on = on; module.exports.getEventListeners = getEventListeners; module.exports.getMaxListeners = getMaxListeners; module.exports.setMaxListeners = setMaxListeners; module.exports.errorMonitor = errorMonitor; module.exports.captureRejectionSymbol = Symbol.for('nodejs.rejection');\n\
+             EventEmitter.prototype._events = undefined; EventEmitter.prototype._eventsCount = 0; EventEmitter.prototype._maxListeners = undefined;\n\
+             function EventEmitterAsyncResource(options) { if (!(this instanceof EventEmitterAsyncResource)) throw new TypeError(\"Class constructor EventEmitterAsyncResource cannot be invoked without 'new'\"); if (!options || typeof options.name !== 'string') { var nameError = new TypeError('The \"options.name\" property must be of type string.'); nameError.code = 'ERR_INVALID_ARG_TYPE'; throw nameError; } EventEmitter.call(this, options); this._asyncId = ++asyncResourceCount; this._triggerAsyncId = options.triggerAsyncId === undefined ? 0 : options.triggerAsyncId; }\n\
+             var asyncResourceCount = 1;\n\
+             EventEmitterAsyncResource.prototype = Object.create(EventEmitter.prototype); EventEmitterAsyncResource.prototype.constructor = EventEmitterAsyncResource;\n\
+             Object.defineProperty(EventEmitterAsyncResource.prototype, 'asyncId', { get: function() { return this._asyncId; }, configurable: true }); Object.defineProperty(EventEmitterAsyncResource.prototype, 'triggerAsyncId', { get: function() { return this._triggerAsyncId; }, configurable: true }); EventEmitterAsyncResource.prototype.emitDestroy = function() { return this; };\n\
+             module.exports.EventEmitterAsyncResource = EventEmitterAsyncResource;\n\
+             module.exports.usingDomains = false; module.exports.kMaxEventTargetListeners = Symbol('events.maxEventTargetListeners'); module.exports.kMaxEventTargetListenersWarned = Symbol('events.maxEventTargetListenersWarned');\n\
              module.exports.default = EventEmitter;\n\
              module.exports.__esModule = true;\n",
         ),
