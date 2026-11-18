@@ -193,6 +193,37 @@ pub(crate) fn live_objs() -> Vec<Obj> {
     .unwrap_or_default()
 }
 
+/// Strong handles to every registered node, by slot (`reg_idx` is the index): `None` for a free slot or a node that
+/// died on another thread. The list is borrowed only while the handles are cloned, so the caller may drop them.
+/// Empty if the list is busy (`try_borrow`), which makes a collection a no-op.
+pub(crate) fn snapshot() -> (Vec<Option<Obj>>, Vec<Option<Rc<Scope>>>) {
+    let objs = OBJS
+        .try_with(|r| {
+            r.try_borrow()
+                .map(|l| {
+                    l.entries
+                        .iter()
+                        .map(|w| w.as_ref().and_then(Weak::upgrade))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    let scopes = SCOPES
+        .try_with(|r| {
+            r.try_borrow()
+                .map(|l| {
+                    l.entries
+                        .iter()
+                        .map(|w| w.as_ref().and_then(Weak::upgrade))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    (objs, scopes)
+}
+
 /// Checks that every entry is live, points back at its node, and that each node's index names its entry.
 #[cfg(test)]
 pub(crate) fn check_invariants() -> Result<(), String> {

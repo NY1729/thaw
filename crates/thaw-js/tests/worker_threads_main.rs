@@ -49,3 +49,61 @@ fn main_thread_identity_is_exposed_and_worker_runs() {
       worker.on('exit', (code) => console.log('exit ' + code));";
     assert_eq!(run_loop(src), "true 0 null null|function 1|exit 0");
 }
+
+#[test]
+fn in_thread_port_transfer_moves_the_port_and_its_queue() {
+    let src = "const { MessageChannel } = __thaw_worker_threads_exports;
+      const carrier = new MessageChannel(), inner = new MessageChannel();
+      inner.port2.postMessage('q1'); inner.port2.postMessage('q2');
+      carrier.port2.on('message', (m) => {
+        console.log('moved', m.p === inner.port1, typeof m.p.postMessage);
+        console.log('sender copy', inner.port1.postMessage('after'));
+        m.p.on('message', (v) => { console.log('moved got', v); if (v === 'q2') m.p.postMessage('back'); });
+        inner.port2.on('message', (v) => { console.log('peer got', v); inner.port2.close(); carrier.port1.close(); carrier.port2.close(); });
+      });
+      carrier.port1.postMessage({ tag: 'moved', p: inner.port1 }, [inner.port1]);";
+    assert_eq!(
+        run_loop(src),
+        "moved false function|sender copy undefined|moved got q1|moved got q2|peer got back"
+    );
+}
+
+#[test]
+fn port_transfer_list_errors_and_return_values_match_node() {
+    let src = "const { MessageChannel } = __thaw_worker_threads_exports;
+      const err = (f) => { try { const r = f(); return 'ok ' + String(r); } catch (e) { return `${e.constructor.name} code=${e.code} ${JSON.stringify(e.message)}`; } };
+      const c = new MessageChannel(), d = new MessageChannel();
+      console.log('live return', c.port1.postMessage('a'));
+      console.log('transfer', err(() => c.port1.postMessage(1, [d.port1])));
+      console.log('again', err(() => c.port1.postMessage(1, [d.port1])));
+      console.log('dup', err(() => c.port1.postMessage(1, [d.port2, d.port2])));
+      console.log('own', err(() => c.port1.postMessage(1, [c.port1])));
+      console.log('own options', err(() => c.port1.postMessage(1, { transfer: [c.port1] })));
+      console.log('unlisted', err(() => c.port1.postMessage({ p: d.port2 })));
+      const e = new MessageChannel(); e.port1.close();
+      console.log('closed', err(() => c.port1.postMessage(1, [e.port1])));
+      console.log('closed return', err(() => e.port1.postMessage(2)));
+      console.log('bad', err(() => c.port1.postMessage(1, [{}])));
+      console.log('non-iterable', err(() => c.port1.postMessage(1, 'x')));
+      console.log('transferred copy', err(() => d.port1.postMessage('x')));
+      console.log('clone unlisted', err(() => structuredClone(new MessageChannel().port1)));
+      c.port1.close(); c.port2.close(); d.port2.close();";
+    assert_eq!(
+        run_loop(src),
+        "live return true|transfer ok true|again DOMException code=25 \"MessagePort in transfer list is already detached\"|dup DOMException code=25 \"Transfer list contains duplicate MessagePort\"|own DOMException code=25 \"Transfer list contains source port\"|own options DOMException code=25 \"Transfer list contains source port\"|unlisted DOMException code=25 \"Object that needs transfer was found in message but not listed in transferList\"|closed DOMException code=25 \"MessagePort in transfer list is already detached\"|closed return ok undefined|bad DOMException code=25 \"Found invalid value in transferList.\"|non-iterable TypeError code=ERR_INVALID_ARG_TYPE \"Optional transferList argument must be an iterable\"|transferred copy ok undefined|clone unlisted DOMException code=25 \"Object that needs transfer was found in message but not listed in transferList\""
+    );
+}
+
+#[test]
+fn structured_clone_transfer_moves_a_port_to_a_new_port() {
+    let src = "const { MessageChannel } = __thaw_worker_threads_exports;
+      const s = new MessageChannel();
+      const sc = structuredClone({ q: s.port1 }, { transfer: [s.port1] });
+      console.log('clone is port', typeof sc.q.postMessage, sc.q === s.port1);
+      sc.q.on('message', (v) => { console.log('through clone', v); sc.q.close(); s.port2.close(); });
+      s.port2.postMessage('x');";
+    assert_eq!(
+        run_loop(src),
+        "clone is port function false|through clone x"
+    );
+}

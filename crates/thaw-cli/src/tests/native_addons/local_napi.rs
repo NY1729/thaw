@@ -1349,3 +1349,165 @@ fn native_callback_registered_in_one_package_runs_for_a_native_thread_event_afte
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// Repro shape of the @parcel/watcher unsubscribe hang (designs/addon-parcel-exit.md). `subscribe(fn)` keeps a napi
+// reference to fn and a threadsafe function (thread count 1) that calls fn; a native thread fires it once, and once
+// more after unsubscribe (a late event). `unsubscribe(fn)` strict-equals fn against the stored reference value and,
+// on a match, releases the threadsafe function and the reference, as parcel's Watcher::unwatch does. The program
+// must print `matched=true` and then exit on its own.
+#[cfg(target_os = "linux")]
+fn run_tsfn_unsubscribe_repro(name: &str, coroutine_co: Option<&str>) -> (String, bool, String) {
+    let dir = std::env::temp_dir().join(format!("thaw-tsfn-unsub-{name}-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("native-subscribe");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function subscribe(callback: (value: number) => void): void;\n\
+         export declare function unsubscribe(callback: (value: number) => void): boolean;\n",
+    )
+    .unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(&addon_c, r#"
+        #include <stdbool.h>
+        #include <stddef.h>
+        #include <unistd.h>
+        #include <pthread.h>
+        typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+        typedef void* napi_ref; typedef void* napi_threadsafe_function;
+        typedef int napi_status;
+        typedef void (*napi_threadsafe_function_call_js)(napi_env, napi_value, void*, void*);
+        extern napi_status napi_get_cb_info(napi_env,napi_callback_info,size_t*,napi_value*,napi_value*,void**);
+        extern napi_status napi_get_undefined(napi_env,napi_value*);
+        extern napi_status napi_get_boolean(napi_env,bool,napi_value*);
+        extern napi_status napi_create_double(napi_env,double,napi_value*);
+        extern napi_status napi_call_function(napi_env,napi_value,napi_value,size_t,const napi_value*,napi_value*);
+        extern napi_status napi_create_function(napi_env,const char*,size_t,napi_value(*)(napi_env,napi_callback_info),void*,napi_value*);
+        extern napi_status napi_set_named_property(napi_env,napi_value,const char*,napi_value);
+        extern napi_status napi_create_reference(napi_env,napi_value,unsigned int,napi_ref*);
+        extern napi_status napi_get_reference_value(napi_env,napi_ref,napi_value*);
+        extern napi_status napi_reference_unref(napi_env,napi_ref,unsigned int*);
+        extern napi_status napi_delete_reference(napi_env,napi_ref);
+        extern napi_status napi_strict_equals(napi_env,napi_value,napi_value,bool*);
+        extern napi_status napi_create_threadsafe_function(napi_env,napi_value,napi_value,napi_value,size_t,size_t,void*,void*,void*,napi_threadsafe_function_call_js,napi_threadsafe_function*);
+        extern napi_status napi_call_threadsafe_function(napi_threadsafe_function,void*,int);
+        extern napi_status napi_release_threadsafe_function(napi_threadsafe_function,int);
+        static napi_threadsafe_function tsfn;
+        static napi_ref callback_ref;
+        static volatile int unsubscribed;
+        static void call_js(napi_env env,napi_value callback,void* context,void* data) {
+            (void)context;
+            napi_value self,value,ignored;
+            napi_get_undefined(env,&self);
+            napi_create_double(env,(double)(long)data,&value);
+            napi_call_function(env,self,callback,1,&value,&ignored);
+        }
+        static void* producer(void* unused) {
+            (void)unused;
+            usleep(20000);
+            napi_call_threadsafe_function(tsfn,(void*)1,0);
+            for (int i = 0; i < 2000 && !unsubscribed; i++) usleep(1000);
+            napi_call_threadsafe_function(tsfn,(void*)2,0);
+            return NULL;
+        }
+        static napi_value subscribe(napi_env env,napi_callback_info info) {
+            napi_value args[1],result; size_t argc = 1; pthread_t thread;
+            napi_get_cb_info(env,info,&argc,args,NULL,NULL);
+            napi_create_reference(env,args[0],1,&callback_ref);
+            napi_create_threadsafe_function(env,args[0],NULL,NULL,0,1,NULL,NULL,NULL,call_js,&tsfn);
+            pthread_create(&thread,NULL,producer,NULL);
+            pthread_detach(thread);
+            napi_get_undefined(env,&result);
+            return result;
+        }
+        static napi_value unsubscribe(napi_env env,napi_callback_info info) {
+            napi_value args[1],stored,result; size_t argc = 1; bool matched = false;
+            napi_get_cb_info(env,info,&argc,args,NULL,NULL);
+            napi_get_reference_value(env,callback_ref,&stored);
+            napi_strict_equals(env,stored,args[0],&matched);
+            if (matched) {
+                napi_release_threadsafe_function(tsfn,0);
+                unsigned int count;
+                napi_reference_unref(env,callback_ref,&count);
+                napi_delete_reference(env,callback_ref);
+            }
+            __atomic_store_n(&unsubscribed,1,__ATOMIC_SEQ_CST);
+            napi_get_boolean(env,matched,&result);
+            return result;
+        }
+        __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env,napi_value exports) {
+            napi_value fn;
+            napi_create_function(env,"subscribe",9,subscribe,NULL,&fn);
+            napi_set_named_property(env,exports,"subscribe",fn);
+            napi_create_function(env,"unsubscribe",11,unsubscribe,NULL,&fn);
+            napi_set_named_property(env,exports,"unsubscribe",fn);
+            return exports;
+        }
+    "#).unwrap();
+    assert!(Command::new("cc")
+        .args(["-shared", "-fPIC", "-pthread"])
+        .arg(&addon_c)
+        .arg("-o")
+        .arg(package.join("native.node"))
+        .status()
+        .unwrap()
+        .success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "import { subscribe, unsubscribe } from \"native-subscribe\";\n\
+         function main(): void { const seen: number[] = []; const callback = (value: number): void => { seen.push(value); }; subscribe(callback); const start: number = Date.now(); while (seen.length < 1 && Date.now() - start < 5000) { pollNativeAddonEvents(); } if (seen.length < 1) { throw new Error('tsfn event timed out'); } console.log('matched=' + unsubscribe(callback)); }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let stdout_path = dir.join("stdout.txt");
+    let stderr_path = dir.join("stderr.txt");
+    let mut command = Command::new(&output);
+    command
+        .env_remove("THAW_JS_CO")
+        .stdout(std::fs::File::create(&stdout_path).unwrap())
+        .stderr(std::fs::File::create(&stderr_path).unwrap());
+    if let Some(co) = coroutine_co {
+        command.env("THAW_JS_CO", co);
+    }
+    let mut child = command.spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    let exited = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stdout = std::fs::read_to_string(&stdout_path).unwrap_or_default();
+    let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    if std::env::var_os("THAW_NAPI_TRACE").is_some() {
+        eprintln!("child stderr ({name}):\n{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    (stdout, exited, stderr)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "repro of the @parcel/watcher unsubscribe hang (designs/addon-parcel-exit.md); un-ignore with the fix"]
+fn native_addon_tsfn_unsubscribe_releases_and_process_exits() {
+    let (stdout, exited, stderr) = run_tsfn_unsubscribe_repro("default", None);
+    assert_eq!(stdout, "matched=true\n", "stderr:\n{stderr}");
+    assert!(exited, "process still alive 8 s after unsubscribe; stderr:\n{stderr}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "repro of the @parcel/watcher unsubscribe hang (designs/addon-parcel-exit.md); un-ignore with the fix"]
+fn native_addon_tsfn_unsubscribe_releases_and_process_exits_thread_backend() {
+    let (stdout, exited, stderr) = run_tsfn_unsubscribe_repro("thread", Some("thread"));
+    assert_eq!(stdout, "matched=true\n", "stderr:\n{stderr}");
+    assert!(exited, "process still alive 8 s after unsubscribe; stderr:\n{stderr}");
+}

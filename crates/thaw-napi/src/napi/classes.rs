@@ -946,6 +946,50 @@ pub unsafe extern "C" fn napi_strict_equals(
     right: NapiValue,
     result: *mut bool,
 ) -> NapiStatus {
+    let status = napi_strict_equals_decide(env, left, right, result);
+    if napi_trace_enabled() {
+        napi_trace_strict_equals(left, right, result, status);
+    }
+    status
+}
+
+/// Trace-only: the Function-to-Function comparisons, with how each side was
+/// represented (a QuickJS/thaw-js handle id, or a native value) and the raw
+/// value pointers, so a re-marshalled handle for the same JS function shows up.
+unsafe fn napi_trace_strict_equals(left: NapiValue, right: NapiValue, result: *const bool, status: NapiStatus) {
+    let (Some(left_kind), Some(right_kind)) = (napi_trace_function_kind(left), napi_trace_function_kind(right)) else {
+        return;
+    };
+    let equal = if result.is_null() { "unset".to_string() } else { (*result).to_string() };
+    eprintln!(
+        "[thaw-napi-trace] strict_equals left={left_kind} right={right_kind} result={equal} status={status} raw_ptr_equal={}",
+        left == right
+    );
+}
+
+#[cfg(feature = "js-engine")]
+unsafe fn napi_trace_function_kind(value: NapiValue) -> Option<String> {
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        return match qjs_query(handle, 0) {
+            Ok(kind) if kind == "function" => Some(format!("handle:{handle}")),
+            _ => None,
+        };
+    }
+    matches!(value_ref(value), Ok(Value::Function(_))).then(|| "native".to_string())
+}
+
+#[cfg(not(feature = "js-engine"))]
+unsafe fn napi_trace_function_kind(value: NapiValue) -> Option<String> {
+    matches!(value_ref(value), Ok(Value::Function(_))).then(|| "native".to_string())
+}
+
+unsafe fn napi_strict_equals_decide(
+    env: NapiEnv,
+    left: NapiValue,
+    right: NapiValue,
+    result: *mut bool,
+) -> NapiStatus {
     if result.is_null() {
         return record_status(env, NAPI_INVALID_ARG);
     }

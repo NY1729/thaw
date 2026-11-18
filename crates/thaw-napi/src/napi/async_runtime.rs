@@ -142,6 +142,12 @@ pub unsafe extern "C" fn napi_create_threadsafe_function(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(threadsafe);
+    if napi_trace_enabled() {
+        eprintln!(
+            "[thaw-napi-trace] create_tsfn tsfn={threadsafe_ptr:p} creator={:?} initial_thread_count={initial_thread_count} referenced=true",
+            std::thread::current().id()
+        );
+    }
     *result = threadsafe_ptr;
     NAPI_OK
 }
@@ -177,6 +183,13 @@ pub unsafe extern "C" fn napi_call_threadsafe_function(
         .state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if napi_trace_enabled() {
+        eprintln!(
+            "[thaw-napi-trace] call_tsfn tsfn={function:p} mode={mode} closing={} thread_count={} queue={} finalized={} thread={:?}",
+            state.closing, state.thread_count, state.queue.len(), state.finalized,
+            std::thread::current().id()
+        );
+    }
     loop {
         if state.closing {
             // A producer receiving napi_closing is done with its acquisition.
@@ -228,6 +241,13 @@ pub unsafe extern "C" fn napi_release_threadsafe_function(
         .state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if napi_trace_enabled() {
+        eprintln!(
+            "[thaw-napi-trace] release_tsfn tsfn={function:p} mode={mode} before: thread_count={} closing={} finalized={} queue={} thread={:?}",
+            state.thread_count, state.closing, state.finalized, state.queue.len(),
+            std::thread::current().id()
+        );
+    }
     if state.thread_count == 0 {
         return record_threadsafe_status(function_ref, NAPI_CLOSING);
     }
@@ -241,6 +261,13 @@ pub unsafe extern "C" fn napi_release_threadsafe_function(
     function_ref.space_available.notify_all();
     if state.closing && !state.finalized {
         schedule_threadsafe(function, &mut state);
+    }
+    if napi_trace_enabled() {
+        eprintln!(
+            "[thaw-napi-trace] release_tsfn tsfn={function:p} after: thread_count={} closing={} scheduled={} queue={} callbacks_in_flight={}",
+            state.thread_count, state.closing, state.scheduled, state.queue.len(),
+            state.callbacks_in_flight
+        );
     }
     let retire = retire_threadsafe_if_ready(&mut state);
     drop(state);
@@ -673,10 +700,19 @@ fn run_one_threadsafe_callback(address: usize) -> bool {
             state.finalized = true;
             true
         } else {
+            if napi_trace_enabled() && state.closing {
+                eprintln!(
+                    "[thaw-napi-trace] tsfn_not_finalized tsfn={function_ptr:p} queue={} callbacks_in_flight={} thread_count={} finalized={}",
+                    state.queue.len(), state.callbacks_in_flight, state.thread_count, state.finalized
+                );
+            }
             false
         }
     };
     if finalize {
+        if napi_trace_enabled() {
+            eprintln!("[thaw-napi-trace] tsfn_finalize tsfn={function_ptr:p} has_finalize_cb={}", function.finalize.is_some());
+        }
         if function.referenced.swap(false, Ordering::AcqRel) {
             ACTIVE_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
         }
@@ -877,9 +913,13 @@ pub extern "C" fn thaw_napi_async_work_pending() -> u8 {
     let owner = std::thread::current().id();
     let ready = ready_events().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
         .iter().any(|event| unsafe { event.owner() == owner });
-    u8::from(HOST.with(|host| host.borrow().has_active_async_work())
+    let pending = HOST.with(|host| host.borrow().has_active_async_work())
         || host_threadsafe_state(true) || ready
-        || unsafe { owner_uv_loops_referenced() })
+        || unsafe { owner_uv_loops_referenced() };
+    if pending && napi_trace_enabled() {
+        napi_trace_keepalive("pending_query", ready, unsafe { owner_uv_loops_referenced() });
+    }
+    u8::from(pending)
 }
 
 /// Runs queued completion callbacks on the calling thread and waits until all
@@ -903,6 +943,9 @@ pub extern "C" fn thaw_napi_run_async_work() -> usize {
             && !uv_alive
         {
             break;
+        }
+        if napi_trace_enabled() {
+            napi_trace_keepalive("run_async_work_idle", ready, uv_alive);
         }
         std::thread::sleep(Duration::from_millis(1));
     }
