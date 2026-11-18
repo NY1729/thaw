@@ -114,6 +114,7 @@ include!("tests/thaw_js_routing.rs");
 include!("tests/thaw_js_free_fn_return.rs");
 include!("tests/thaw_js_union_promise_return.rs");
 include!("tests/thaw_js_routing_callbacks.rs");
+include!("tests/thaw_js_union_object_param.rs");
 include!("tests/thaw_js_worker_threads.rs");
 include!("tests/thaw_js_worker_threads_w3.rs");
 include!("tests/thaw_js_worker_threads_w5.rs");
@@ -1875,6 +1876,34 @@ fn renders_namespace_scoped_options_for_quickjs_arity_dispatch() {
     .unwrap();
     assert!(
         declaration.contains("fn: Json, opts: { backend: string | undefined }"),
+        "{declaration}"
+    );
+}
+
+#[test]
+fn thaw_js_declares_an_object_bearing_union_parameter_as_json() {
+    // validator's `isIP(str, versionOrOptions?: string | number | { version: ... })`: on thaw-js the
+    // arity-2 declaration and its wrapper must both take `Json` for that parameter. A `Json` argument
+    // cannot coerce into the `Object` member of a declared union, so the call would fall back.
+    let functions = thaw_bridge::parse_dts(
+        "export declare function isIP(str: string, versionOrOptions?: string | number | { version: string | number | undefined }): boolean;",
+    )
+    .unwrap();
+    let function = functions
+        .iter()
+        .find(|function| function.name == "isIP")
+        .unwrap();
+    let (_, declaration) = typed_dynamic_declaration(
+        "tjs!validator",
+        function,
+        false,
+        &std::collections::BTreeSet::from([2usize]),
+        Some(37),
+    )
+    .unwrap();
+    assert!(!declaration.contains("{ version"), "{declaration}");
+    assert!(
+        declaration.contains("__arity_2(str: string, versionOrOptions: Json)"),
         "{declaration}"
     );
 }

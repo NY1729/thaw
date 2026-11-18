@@ -1228,6 +1228,35 @@ fn thaw_js_retarget(
 /// opaque `Promise<...>` payload (`Promise<any[]>`, `Promise<Buffer>`, ...) must stay a promise
 /// rather than erase to a bare `Json`. Only the thaw-js declarations are rewritten; QuickJS keeps
 /// its own `JsValue` text.
+/// A parameter whose declared union has an `Object` member (validator's `isIP`'s
+/// `versionOrOptions?: string | number | { version: ... }`) cannot take a `Json` argument on thaw-js:
+/// thaw-hir coerces `Json` only into a union of primitives. thaw-js marshals by value anyway, so such a
+/// parameter is declared `Json` (its `Optional` wrapper kept), and the arity declarations and their
+/// wrapper agree. QuickJS keeps the literal text; call-site overload scoring reads the original function.
+fn thaw_js_object_union_params_as_json(function: &thaw_bridge::DtsFunction) -> thaw_bridge::DtsFunction {
+    fn json_for_object_union(ty: &thaw_hir::HirType) -> Option<thaw_hir::HirType> {
+        match ty {
+            thaw_hir::HirType::Union(members)
+                if members.iter().any(|member| matches!(member, thaw_hir::HirType::Object(_))) =>
+            {
+                Some(thaw_hir::HirType::Json)
+            }
+            thaw_hir::HirType::Optional(payload) => json_for_object_union(payload)
+                .map(|json| thaw_hir::HirType::Optional(Box::new(json))),
+            _ => None,
+        }
+    }
+    let mut rewritten = function.clone();
+    for (_, ty) in &mut rewritten.params {
+        if let thaw_bridge::DtsType::Native(native) = ty {
+            if let Some(json) = json_for_object_union(native) {
+                *native = json;
+            }
+        }
+    }
+    rewritten
+}
+
 fn thaw_js_promise_ret(
     function: &thaw_bridge::DtsFunction,
 ) -> std::borrow::Cow<'_, thaw_bridge::DtsFunction> {
@@ -1334,12 +1363,13 @@ fn typed_dynamic_declaration(
                     }
                     _ => false,
                 };
+            let object_params = thaw_js_object_union_params_as_json(function);
             let function = if thaw_js_keeps_js_value(real) {
-                std::borrow::Cow::Borrowed(function)
+                std::borrow::Cow::Borrowed(&object_params)
             } else {
-                match thaw_js_callable_union_as_handle(real, function) {
+                match thaw_js_callable_union_as_handle(real, &object_params) {
                     handle @ std::borrow::Cow::Owned(_) => handle,
-                    std::borrow::Cow::Borrowed(_) => thaw_js_promise_ret(function),
+                    std::borrow::Cow::Borrowed(_) => thaw_js_promise_ret(&object_params),
                 }
             };
             typed_dynamic_declaration_for_quickjs(
