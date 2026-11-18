@@ -3337,7 +3337,7 @@ impl<'a> FnLowerer<'a> {
                 if let (Expr::Ident(obj), MemberProp::Ident(env_prop)) =
                     (inner.obj.as_ref(), &inner.prop)
                 {
-                    if obj.sym == *"process" && env_prop.sym == *"env" {
+                    if obj.sym == *"process" && env_prop.sym == *"env" && !crate::lower::shared_env_program() {
                         return Ok(HirExpr::EnvVar(name_prop.sym.to_string()));
                     }
                 }

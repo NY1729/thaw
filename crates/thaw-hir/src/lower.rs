@@ -41,6 +41,17 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 thread_local! {
     static THAW_JS_ROUTED: Cell<bool> = const { Cell::new(false) };
     static NATIVE_TIMERS: Cell<bool> = const { Cell::new(false) };
+    static SHARED_ENV_PROGRAM: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The program names `SHARE_ENV`: its `process.env.NAME` reads go through the `process.env` object (whose table a
+/// worker writes), not libc getenv, which never sees those writes. Set by the CLI before lowering.
+pub fn set_shared_env_program(shared: bool) {
+    SHARED_ENV_PROGRAM.with(|flag| flag.set(shared));
+}
+
+pub(crate) fn shared_env_program() -> bool {
+    SHARED_ENV_PROGRAM.with(Cell::get)
 }
 
 /// Lower eligible `setTimeout`/`setInterval`/`setImmediate` calls to thaw-runtime's native timer
