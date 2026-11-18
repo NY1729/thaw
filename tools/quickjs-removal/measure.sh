@@ -18,6 +18,7 @@
 #        VERSIONS    pinned specs           (default: $CORPUS/versions.txt; lines `name spec@ver ...`)
 #        PK_DIR      corpus programs        (default: $CORPUS/pk)
 #        JS_DIR      scan bundles           (default: $CORPUS/corpus; scan skipped if absent)
+#        MEASURE_EXTRA_ENV  space-separated NAME=VALUE for the thaw-js timed runs only (default empty; quickjs never sees it)
 #        Each program's run_ms is the median of 5 runs (date-based ms, %e kept for RSS). Engines alternate within each round (MEASURE_RUNS rounds, default 5);
 #        paired_ratio is the median over rounds of thaw-js/quickjs.
 set -uo pipefail
@@ -51,6 +52,8 @@ mapfile -t PROGRAMS < <(grep -vE '^[[:space:]]*(#|$)' "$VERSIONS")
 ENGINES=(quickjs thaw-js)
 RUNS="${MEASURE_RUNS:-5}"
 case "$RUNS" in ''|*[!0-9]*|0) RUNS=5 ;; esac
+EXTRA_ENV=()
+read -r -a EXTRA_ENV <<< "${MEASURE_EXTRA_ENV:-}"
 export TMPDIR="$SCRATCH/tmp"
 export RUST_MIN_STACK=16777216
 mkdir -p "$SCRATCH/proj" "$SCRATCH/bin" "$SCRATCH/out" "$TMPDIR" "$(dirname "$OUT")"
@@ -186,8 +189,10 @@ measure_program() {
     local qms="" tms=""
     for eng in "${order[@]}"; do
       local log2="${logof[$eng]}"
+      local -a wrap=()
+      [ "$eng" = thaw-js ] && [ "${#EXTRA_ENV[@]}" -gt 0 ] && wrap=(env "${EXTRA_ENV[@]}")
       s=$(date +%s%N)
-      /usr/bin/time -f "%e %M" -o "$log2.time" timeout 120 "${binof[$eng]}" > "$log2.stdout" 2> "$log2.stderr"
+      /usr/bin/time -f "%e %M" -o "$log2.time" timeout 120 "${wrap[@]}" "${binof[$eng]}" > "$log2.stdout" 2> "$log2.stderr"
       status=$?
       e=$(date +%s%N)
       rs0=$(( (e - s) / 1000000 ))
