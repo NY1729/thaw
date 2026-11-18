@@ -9,6 +9,8 @@ const cloneError = message => new DOMException(message, 'DataCloneError');
 globalThis.__thaw_worker_encode = (value, transfer = []) => {
   const seen = new Map(), nodes = [], taken = [];
   for (const buffer of transfer) {
+    // ponytail: a port moves between threads once the cross-thread port protocol exists (worker_threads PR3)
+    if (typeof MessagePort === 'function' && buffer instanceof MessagePort) throw cloneError('MessagePort transfer across threads is not supported yet');
     seen.set(buffer, nodes.length);
     taken.push([nodes.length, buffer]);
     nodes.push({ t: 'ABT', id: -1 });

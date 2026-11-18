@@ -533,11 +533,19 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     var e = new Error(msg); e.name = 'DataCloneError'; return e;
   };
   var argErr = function (msg) { var e = new TypeError(msg); e.code = 'ERR_INVALID_ARG_TYPE'; return e; };
-  // The validated ArrayBuffers of a list (candidates in list order). The first bad entry throws; nothing is
-  // detached here: the caller detaches once its clone has succeeded.
+  // A MessagePort (messaging.js) is a valid entry too: it moves with its queue and entanglement (transferClone below).
+  var isPort = function (v) { return typeof globalThis.__thaw_is_message_port === 'function' && globalThis.__thaw_is_message_port(v); };
+  // The validated entries of a list (ArrayBuffers and ports, in list order). The first bad entry throws; nothing is
+  // detached here: the caller moves them once its clone has succeeded.
   var transferCheck = function (items) {
     var list = [];
     items.forEach(function (b) {
+      if (isPort(b)) {
+        if (b.__thawClosed || !b.__thawPeer) throw cloneErr('MessagePort in transfer list is already detached');
+        if (list.indexOf(b) >= 0) throw cloneErr('Transfer list contains duplicate MessagePort');
+        list.push(b);
+        return;
+      }
       if (!(b instanceof ArrayBuffer)) throw cloneErr('Found invalid value in transferList.');
       if (untransferableMarks.has(b) || detGet.call(b)) throw cloneErr('Cannot transfer object of unsupported type.');
       if (list.indexOf(b) >= 0) throw cloneErr('Transfer list contains duplicate ArrayBuffer');
@@ -556,17 +564,17 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     return transferCheck(Array.from(arg.transfer));
   };
 
-  globalThis.structuredClone = function structuredClone(value, options) {
-    var seen = new Map();
+  // Clones `value` with the validated `moves` (transferCheck). Each buffer's copy is what the clone gets and each port
+  // is replaced by a new MessagePort; the sources move only after the whole clone succeeds, so a throwing value
+  // leaves them intact. A port in the value that is not in `moves` is refused. Returns { value, ports } (the new ports
+  // in list order).
+  var transferClone = function (value, moves) {
+    var seen = new Map(), handles = [];
     function dataCloneError(msg) { return cloneErr(msg); }
-    // transfer: each buffer's copy is what the clone gets; the sources are detached only after the
-    // whole clone succeeds, so a throwing value leaves them intact.
-    var moves = [];
-    if (options != null && options.transfer !== undefined) {
-      if (!iterableObject(options.transfer)) throw argErr("Failed to execute 'structuredClone': transfer in Options can not be converted to sequence.");
-      moves = transferCheck(Array.from(options.transfer));
-      moves.forEach(function (b) { seen.set(b, clone(b)); });
-    }
+    moves.forEach(function (b) {
+      if (isPort(b)) { var handle = new MessagePort(); handles.push(handle); seen.set(b, handle); }
+      else seen.set(b, clone(b));
+    });
     function clone(v) {
       if (typeof v === 'function' || typeof v === 'symbol') {
         var msg = (typeof v === 'function' ? String(v) : String(v.toString())) + ' could not be cloned.';
@@ -577,6 +585,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       }
       if (typeof v !== 'object' || v === null) return v;
       if (seen.has(v)) return seen.get(v);
+      if (isPort(v)) throw cloneErr('Object that needs transfer was found in message but not listed in transferList');
       var out;
       if (__thaw_is_proxy(v)) throw dataCloneError((Array.isArray(v) ? '[object Array]' : '#<Object>') + ' could not be cloned.');
       if (v instanceof WeakMap || v instanceof WeakSet || v instanceof WeakRef || v instanceof Promise) throw dataCloneError('#<' + v.constructor.name + '> could not be cloned.');
@@ -618,8 +627,18 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       return out;
     }
     var result = clone(value);
-    moves.forEach(function (b) { b.transfer(); });
-    return result;
+    moves.forEach(function (b) { if (isPort(b)) b.__thawTransferTo(seen.get(b)); else b.transfer(); });
+    return { value: result, ports: handles };
+  };
+  globalThis.__thaw_transfer_clone = transferClone;
+
+  globalThis.structuredClone = function structuredClone(value, options) {
+    var moves = [];
+    if (options != null && options.transfer !== undefined) {
+      if (!iterableObject(options.transfer)) throw argErr("Failed to execute 'structuredClone': transfer in Options can not be converted to sequence.");
+      moves = transferCheck(Array.from(options.transfer));
+    }
+    return transferClone(value, moves).value;
   };
 
   // ----- util.types (the registry's node:util polyfill reads globalThis.__thaw_util_types) -----

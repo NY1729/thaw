@@ -26,6 +26,7 @@
   // Messages to the parent are wire strings; transferring ports between threads is not supported yet.
   parentPort.postMessage = function postMessage(value, transferOrOptions) {
     __thaw_worker_send(__thaw_worker_encode(value, __thaw_transfer_of(transferOrOptions)));
+    return true;
   };
 
   // postMessageToThread (W-D), this realm's copy of worker_threads.js's: the parent is the only thread a worker reaches.

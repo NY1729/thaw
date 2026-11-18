@@ -51,7 +51,6 @@ if (typeof globalThis.MessageEvent !== 'function') {
     });
   };
   if (typeof globalThis.MessageChannel !== 'function') {
-    const __thawDefineProperty = Object.defineProperty;
     const __thawMessagePortBrand = new WeakSet();
     const __thawWeakSetHas = WeakSet.prototype.has;
     const __thawApply = Reflect.apply;
@@ -68,27 +67,24 @@ if (typeof globalThis.MessageEvent !== 'function') {
         this.__thawRefed = true;
         this.__thawNodeListeners = new Map();
       }
+      // Returns true when the message is posted, undefined on a closed or transferred port (Node). The list is
+      // checked (and the source-port rule applied) before anything is cloned or moved.
       postMessage(value, transferOrOptions = []) {
-        const transfer = transferOrOptions !== null && typeof transferOrOptions === 'object' && !(Symbol.iterator in transferOrOptions)
-          ? (transferOrOptions.transfer === undefined ? [] : transferOrOptions.transfer)
-          : transferOrOptions;
-        if (Array.prototype.includes.call(Array.from(transfer), this)) throw new DOMException('Transfer list contains source port', 'DataCloneError');
-        if (this.__thawClosed || !this.__thawPeer || this.__thawPeer.__thawClosed) return;
-        // the argument is checked as Node reads it (a list, or options with `transfer`) before the clone
+        if (this.__thawClosed || !this.__thawPeer) return undefined;
         const list = __thaw_transfer_of(transferOrOptions);
-        const copy = structuredClone(value, { transfer: list });
-        const ports = list.filter(item => item instanceof MessagePort)
-          .map(item => item.__thawTransferredPort || item);
-        this.__thawPeer.__thawQueue.push({ data: copy, ports });
-        this.__thawPeer.__thawSchedule();
-      }
-      __thawValidateTransfer() {
-        if (!__thawIsMessagePort(this)
-            || this.__thawClosed || !this.__thawPeer) {
-          throw new DOMException('MessagePort is already detached', 'DataCloneError');
+        if (list.includes(this)) throw new DOMException('Transfer list contains source port', 'DataCloneError');
+        const target = this.__thawPeer;
+        const { value: copy, ports } = __thaw_transfer_clone(value, list);
+        // a target moved by this same message is gone (Node: "target port was posted to itself"): the message is lost
+        if (!target.__thawClosed) {
+          target.__thawQueue.push({ data: copy, ports });
+          target.__thawSchedule();
         }
+        return true;
       }
-      __thawTransferToValidated(transferred, hasTransferReference) {
+      // A port in a transfer list: `transferred` (a new port, from transferClone) takes over this port's queue and
+      // its entangled peer, and this end is neutralised. Node emits 'close' on this end, asynchronously.
+      __thawTransferTo(transferred) {
         transferred.__thawPeer = this.__thawPeer;
         transferred.__thawChannelPair = this.__thawChannelPair;
         transferred.__thawQueue = this.__thawQueue;
@@ -96,19 +92,11 @@ if (typeof globalThis.MessageEvent !== 'function') {
         this.__thawQueue = [];
         this.__thawPeer = null;
         this.__thawClosed = true;
-        if (hasTransferReference) this.__thawTransferredPort = transferred;
-        else __thawDefineProperty(this, '__thawTransferredPort', {
-          value: transferred, writable: true, configurable: true
-        });
-        return transferred;
+        queueMicrotask(() => this.__thawEmitClose());
       }
-      __thawTransferTo(transferred) {
-        this.__thawValidateTransfer();
-        return this.__thawTransferToValidated(transferred, Object.prototype.hasOwnProperty.call(this, '__thawTransferredPort'));
-      }
-      __thawTransfer() {
-        this.__thawValidateTransfer();
-        return this.__thawTransferTo(new MessagePort());
+      __thawEmitClose() {
+        this.dispatchEvent(new Event('close'));
+        for (const listener of (this.__thawNodeListeners.get('close') || []).slice()) listener.call(this);
       }
       __thawSchedule() {
         if (!this.__thawStarted || this.__thawScheduled || this.__thawClosed) return;
@@ -140,8 +128,7 @@ if (typeof globalThis.MessageEvent !== 'function') {
         const peer = this.__thawPeer;
         this.__thawClosed = true;
         this.__thawQueue.length = 0;
-        this.dispatchEvent(new Event('close'));
-        for (const listener of (this.__thawNodeListeners.get('close') || []).slice()) listener.call(this);
+        this.__thawEmitClose();
         // Closing one end of a MessageChannel closes the entangled end too; host-owned worker ports manage their own peer.
         if (peer && this.__thawChannelPair && peer.__thawChannelPair && !peer.__thawClosed) peer.__thawCloseAfterDrain();
       }
