@@ -148,7 +148,8 @@ impl SetData {
 
 /// State of a live `Map`/`Set` iterator from `keys()`, `values()` or `entries()`.
 pub(crate) struct CollIterData {
-    src: Obj,
+    /// The collection being walked: one `Rc` clone, read by the collector's edge enumeration (gc.rs).
+    pub(crate) src: Obj,
     is_map: bool,
     /// 0 keys, 1 values, 2 entries.
     mode: u8,
