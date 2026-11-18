@@ -2,33 +2,25 @@
 // directly so the tests never touch the process environment.
 
 #[test]
-fn thaw_js_bytes_result_gate_switches_off_for_node_http_programs() {
+fn thaw_js_declaration_bytes_result_is_plain_for_any_program() {
     let bytes = "declare function __thaw_typed_js_6d73(path: string): Uint8Array;";
-    assert!(!thaw_js_declaration_plain_with(bytes, false, false));
-    assert!(thaw_js_declaration_plain_with(bytes, true, false));
+    assert!(thaw_js_declaration_plain_with(bytes, false));
     assert!(thaw_js_declaration_plain(bytes));
-    // a Uint8Array result under a Promise follows the same switch
+    // a Uint8Array result under a Promise is plain too
     let async_bytes = "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;";
-    assert!(!thaw_js_async_declaration_plain_with(async_bytes, false));
-    assert!(thaw_js_async_declaration_plain_with(async_bytes, true));
-    // the switch only relaxes the bare bytes result, never a rejected parameter
+    assert!(thaw_js_async_declaration_plain_with(async_bytes));
+    // the relaxation only covers the bare bytes result, never a rejected parameter
     let buffer_param = "declare function __thaw_typed_js_6d73(v: Buffer): Uint8Array;";
-    assert!(!thaw_js_declaration_plain_with(buffer_param, true, false));
-
-    assert!(thaw_js_bytes_result_allowed("import fs from 'node:fs';\nfs.readFileSync(p);"));
-    assert!(!thaw_js_bytes_result_allowed("import https from 'node:https';\nhttps.get(u);"));
-    assert!(!thaw_js_bytes_result_allowed("import http from 'node:http';"));
-    // old: `assert!(!thaw_js_bytes_result_allowed("import tls from 'node:tls';"))`; new: allowed (the guard is node:http only)
-    assert!(thaw_js_bytes_result_allowed("import tls from 'node:tls';"));
-    assert!(!thaw_js_bytes_result_allowed("import http2 from 'node:http2';"));
+    assert!(!thaw_js_declaration_plain_with(buffer_param, false));
 }
 
 #[test]
-fn thaw_js_bytes_result_gate_allows_tls_fs_child_process_but_not_node_https() {
-    // the r2c shape: node:tls + node:fs + node:child_process and no node:http substring routes bytes results
-    assert!(thaw_js_bytes_result_allowed("import tls from 'node:tls';\nimport fs from 'node:fs';\nimport { execFile } from 'node:child_process';\nfs.readFileSync(p);"));
-    // the ky shape: node:https contains the node:http substring, so it stays on QuickJS
-    assert!(!thaw_js_bytes_result_allowed("import https from 'node:https';\nhttps.get(u);"));
+fn thaw_js_tls_fs_https_bytes_result_is_plain_for_any_program() {
+    // the r2c shape (node:tls + node:fs + node:child_process) and the ky shape (node:https) get the same line
+    let bytes = "declare function __thaw_typed_js_6d73(path: string): Uint8Array;";
+    assert!(thaw_js_declaration_plain_with(bytes, false));
+    let async_bytes = "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;";
+    assert!(thaw_js_async_declaration_plain_with(async_bytes));
 }
 
 #[test]
@@ -1202,11 +1194,11 @@ fn thaw_js_ctor_option_callback_declaration_is_plain_only_for_constructors() {
     let ctor = "declare function __thaw_typed_tjs_246e6577246e6f64653a73747265616d3a3a5772697461626c6524617269747931(opts: { write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }): JsValue;";
     let method = "declare function __thaw_typed_tjs_246d6574686f64246e6f64653a73747265616d3a3a5772697461626c6524777269746524617269747931(opts: { write: ((arg0: JsValue, arg1: string, arg2: () => void) => void) | undefined }): JsValue;";
     // a constructor's option object may carry callbacks (`new Writable({ write })`)
-    assert!(thaw_js_declaration_plain_with(ctor, true, true));
+    assert!(thaw_js_declaration_plain_with(ctor, true));
     // the same signature is still rejected by default, and for a method operation
-    assert!(!thaw_js_declaration_plain_with(ctor, true, false));
+    assert!(!thaw_js_declaration_plain_with(ctor, false));
     assert!(!thaw_js_declaration_plain(ctor));
-    assert!(!thaw_js_declaration_plain_with(method, false, false));
+    assert!(!thaw_js_declaration_plain_with(method, false));
 }
 
 #[test]

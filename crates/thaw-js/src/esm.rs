@@ -17,7 +17,7 @@ use crate::host::Native;
 
 /// The JSON payload literal of `globalThis.__thaw_register_native_bundle("<json>")` and whether
 /// `source` is the pure native shape (otherwise a mixed bundle: CommonJS factories plus native modules).
-fn native_payload(source: &str) -> Option<(String, bool)> {
+pub(crate) fn native_payload(source: &str) -> Option<(String, bool)> {
     const HEAD: &str =
         "module.exports = (function() {\nvar entry = globalThis.__thaw_register_native_bundle(";
     const CALL: &str = "globalThis.__thaw_register_native_bundle(";

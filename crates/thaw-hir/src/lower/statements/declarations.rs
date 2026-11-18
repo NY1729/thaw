@@ -1211,7 +1211,13 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     self.bind_decl_local(&name, storage_type.clone(), var_decl.kind == VarDeclKind::Const)
                 };
-                if let Some(source) = source_annotation.or(source_hint) { self.source_scope.insert(hir_name.clone(), source); }
+                // `const b = new Uint8Array(..)` is a byte buffer even though its live handle is `JsValue`.
+                let source = if source_annotation.is_none() && self.is_bytes_expression(init) {
+                    Some(HirType::Bytes)
+                } else {
+                    source_annotation.or(source_hint)
+                };
+                if let Some(source) = source { self.source_scope.insert(hir_name.clone(), source); }
                 if binding.type_ann.is_none() && matches!(storage_type, HirType::Optional(_)) {
                     let mut read = init;
                     while let Expr::Paren(paren) = read { read = &paren.expr; }

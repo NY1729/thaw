@@ -110,9 +110,15 @@ fn console_emit(descriptor: i32, bytes: &[u8], newline: bool) {
     unsafe { libc::fflush(std::ptr::null_mut()) };
     let indent = CONSOLE_INDENT.load(Relaxed);
     if indent == 0 {
-        console_write_all(descriptor, bytes);
         if newline {
-            console_write_all(descriptor, b"\n");
+            // one write for the whole line: two writes let another thread's line (a worker's console.log) land
+            // between the text and its newline
+            let mut line = Vec::with_capacity(bytes.len() + 1);
+            line.extend_from_slice(bytes);
+            line.push(b'\n');
+            console_write_all(descriptor, &line);
+        } else {
+            console_write_all(descriptor, bytes);
         }
         CONSOLE_AT_LINE_START.store(newline, Relaxed);
         return;
@@ -1428,4 +1434,55 @@ pub unsafe extern "C" fn thaw_unescape(value: *const c_char) -> *const c_char {
         index += 1;
     }
     arena_wtf8(&wtf8_encode_utf16(&out)).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[cfg(test)]
+mod console_line_atomicity_tests {
+    use super::*;
+
+    /// Two threads writing whole lines to one pipe must never split a line (Node writes a console.log line in one go).
+    #[test]
+    fn concurrent_console_lines_are_never_split() {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+        const LINES: usize = 3000;
+        let reader = std::thread::spawn(move || {
+            let mut data = Vec::new();
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+                if n <= 0 {
+                    break;
+                }
+                data.extend_from_slice(&buf[..n as usize]);
+            }
+            data
+        });
+        let writers: Vec<_> = [b"aaaaaaaaaaaaaaaaaaaaaaaa".as_slice(), b"bbbbbbbbbbbbbbbbbbbbbbbb".as_slice()]
+            .into_iter()
+            .map(|text| {
+                std::thread::spawn(move || {
+                    for _ in 0..LINES {
+                        console_emit(write_fd, text, true);
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        unsafe { libc::close(write_fd) };
+        let data = reader.join().unwrap();
+        unsafe { libc::close(read_fd) };
+        let text = String::from_utf8(data).unwrap();
+        let lines: Vec<&str> = text.split('\n').filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 2 * LINES);
+        for line in lines {
+            assert!(
+                line == "aaaaaaaaaaaaaaaaaaaaaaaa" || line == "bbbbbbbbbbbbbbbbbbbbbbbb",
+                "split or merged line: {line:?}"
+            );
+        }
+    }
 }
