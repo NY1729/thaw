@@ -35,6 +35,8 @@ fn report_line_has_the_documented_format() {
         " closure live=",
         " rss_kb=",
         " heap_in_use=",
+        " reg_obj=",
+        " reg_scope=",
     ] {
         assert!(line.contains(key), "missing {key:?} in {line}");
     }
