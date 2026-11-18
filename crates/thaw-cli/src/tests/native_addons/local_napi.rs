@@ -1047,3 +1047,82 @@ fn native_addon_main_default_uv_loop_timer_progresses_through_close() {
         "main-default-loop-fired\nmain-default-loop-closed\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Buffer returned by a native addon (`napi_create_buffer_copy`) must reach JS as a real Buffer,
+/// and a Buffer passed back into the addon must still satisfy `napi_is_buffer`.
+#[test]
+#[ignore = "a native-created Buffer that escapes a native call fails with `invalid JavaScript handle: released or never allocated` on both the QuickJS and thaw-js engines, before decodeValue runs: fixture handle-scope shape or an upstream escaping bug; to be investigated separately"]
+fn native_returned_buffer_is_a_real_buffer_end_to_end() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-native-buffer-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("native-buf");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function mkBuf(): Buffer;\n\
+         export declare function isBuf(value: Buffer): boolean;\n",
+    )
+    .unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(
+        &addon_c,
+        r#"
+            #include <stddef.h>
+            #include <stdbool.h>
+            typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+            typedef int napi_status;
+            extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
+            extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
+            extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
+            extern napi_status napi_create_buffer_copy(napi_env, size_t, const void*, void**, napi_value*);
+            extern napi_status napi_is_buffer(napi_env, napi_value, bool*);
+            extern napi_status napi_get_boolean(napi_env, bool, napi_value*);
+            static napi_value mk_buf(napi_env env, napi_callback_info info) {
+                napi_value result;
+                napi_create_buffer_copy(env, 2, "ab", 0, &result);
+                return result;
+            }
+            static napi_value is_buf(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value argv[1], result; bool flag = false;
+                napi_get_cb_info(env, info, &argc, argv, 0, 0);
+                napi_is_buffer(env, argv[0], &flag);
+                napi_get_boolean(env, flag, &result);
+                return result;
+            }
+            __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+                napi_value fn;
+                napi_create_function(env, "mkBuf", 5, mk_buf, 0, &fn);
+                napi_set_named_property(env, exports, "mkBuf", fn);
+                napi_create_function(env, "isBuf", 5, is_buf, 0, &fn);
+                napi_set_named_property(env, exports, "isBuf", fn);
+                return exports;
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&addon_c)
+        .arg("-o")
+        .arg(package.join("native.node"))
+        .status()
+        .unwrap()
+        .success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "import { isBuf, mkBuf } from \"native-buf\"; function main(): void { console.log(Buffer.isBuffer(mkBuf()), isBuf(mkBuf()), mkBuf().toString('hex'), isBuf(Buffer.from('ab'))); }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true true 6162 true\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
