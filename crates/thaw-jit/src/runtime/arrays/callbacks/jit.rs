@@ -75,6 +75,8 @@ fn capture_arguments(value: f64, builtins: usize, required: usize) -> Option<Vec
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn call_jit_callback(callback: JitCallback, builtins: &[f64], captures: &[f64]) -> f64 {
+    // one call per array element; the fn pointer carries no symbol, so the key is the entry itself
+    crate::profile::record("array-callback");
     let mut arguments = [0.0; 16];
     arguments[..builtins.len()].copy_from_slice(builtins);
     arguments[builtins.len()..builtins.len() + captures.len()].copy_from_slice(captures);
