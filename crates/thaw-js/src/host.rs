@@ -537,6 +537,9 @@ struct CompiledCallback {
     /// An object-literal method (`thaw_tjs_register_native_method_callback_graph`): its receiver is
     /// declared parameter 0, so the mask bit `i` is wire item `i`; a plain callback's is `i + 1`.
     method: bool,
+    /// The realm the callback was first marshalled into, kept while that package is live so every later
+    /// marshalling of the same closure reuses its cached function object (`Interp::callback_values`).
+    owner: Option<usize>,
     /// Keeps the closure environment alive for as long as JS may call it.
     _root: thaw_arena::ArenaRoot,
 }
@@ -4050,6 +4053,7 @@ fn register_callback(
         has_rest,
         mask,
         method,
+        owner: None,
         _root: thaw_arena::ArenaRoot::new(context),
     });
     callbacks.len() as i64 - 1
@@ -4106,7 +4110,7 @@ fn register_graph_callback(
         jsvalue_param_mask,
         method,
     );
-    let owner = default_realm();
+    let owner = callback_owner(id as usize);
     handle_result(
         with_package(owner, |p| Ok(callback_value(&mut p.interp, id as usize)))
             .map(|f| store_handle(owner, f))
@@ -4135,6 +4139,21 @@ pub extern "C" fn thaw_tjs_register_native_method_callback_graph(
         has_rest,
         true,
     )
+}
+
+/// The realm a registered callback is marshalled into. Sticky per callback id: the first registration picks
+/// `default_realm()`, later ones reuse it while it is live, so a closure handed to `subscribe` and again to
+/// `unsubscribe` (after another package ran) resolves to the same cached function object.
+fn callback_owner(id: usize) -> usize {
+    let owner = CALLBACKS.lock().unwrap().get(id).and_then(|c| c.owner);
+    if let Some(owner) = owner.filter(|&o| package_is_live(o)) {
+        return owner;
+    }
+    let owner = default_realm();
+    if let Some(c) = CALLBACKS.lock().unwrap().get_mut(id) {
+        c.owner = Some(owner);
+    }
+    owner
 }
 
 /// Test stand-in for the compiled runtime's `thaw_function_label_for` (process-wide, like the symbol).
