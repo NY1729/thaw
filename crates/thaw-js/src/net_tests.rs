@@ -287,6 +287,67 @@ fn server_socket_with_unread_data_reads_eof_after_peer_destroy() {
 }
 
 #[test]
+fn destroy_right_after_write_still_delivers_the_written_bytes() {
+    // Node (libuv) hands a small write to the kernel inside write(), so destroy() right after it (ws `send()` then
+    // `terminate()`) still delivers the bytes. The writer thread's queue must not be lost to the close.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(move || {
+            let mut it = Interp::new();
+            it.run(r#"
+                var l = __thaw_net_listen('127.0.0.1', 0).split(':');
+                var op = __thaw_net_connect_start('127.0.0.1', Number(l[2]));
+                var conn = null, acc = null, sent = false, got = '';
+                (function wait() {
+                  if (!conn) { var r = __thaw_async_poll(op); if (r === 'pending') return setTimeout(wait, 1); conn = r.split(':'); }
+                  if (!acc) { var a = __thaw_net_poll_accept(Number(l[1])); if (a === 'err:pending') return setTimeout(wait, 1); acc = a.split(':'); }
+                  if (!sent) { sent = true; __thaw_net_write(Number(conn[1]), Buffer.from('hello').toString('hex')); }
+                  var d = __thaw_net_poll_read(Number(acc[1]));
+                  if (d === 'pending') return setTimeout(wait, 1);
+                  if (d.indexOf('ok:') !== 0) return;
+                  __thaw_net_write(Number(acc[1]), Buffer.from('echo').toString('hex'));
+                  __thaw_net_destroy(Number(acc[1]));
+                  (function read() {
+                    var e = __thaw_net_poll_read(Number(conn[1]));
+                    if (e === 'pending') return setTimeout(read, 1);
+                    if (e.indexOf('ok:') === 0) { got += Buffer.from(e.slice(3), 'hex').toString(); return setTimeout(read, 1); }
+                    console.log(got + '|' + e);
+                    __thaw_net_destroy(Number(conn[1]));
+                    __thaw_net_close_listener(Number(l[1]));
+                  })();
+                })();
+            "#).unwrap_or_else(|_| panic!("script must run"));
+            it.run_event_loop().unwrap_or_else(|_| panic!("event loop"));
+            let _ = sender.send(it.out.join("|"));
+        })
+        .expect("spawn");
+    let out = receiver
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("client never reached EOF (hang)");
+    assert_eq!(out, "echo|eof");
+}
+
+#[test]
+fn native_destroy_right_after_write_still_delivers_the_written_bytes() {
+    // The same sequence without the JS interpreter's delay between the two calls: write() then destroy() back to back.
+    use crate::net::{net_destroy, net_write, NET_STREAMS};
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let (server, _) = listener.accept().unwrap();
+    NET_STREAMS.lock().unwrap().1.insert(7777, server);
+    assert_eq!(net_write(7777, b"hello"), "ok");
+    net_destroy(7777);
+    let mut got = Vec::new();
+    client.read_to_end(&mut got).unwrap();
+    assert_eq!(got, b"hello");
+}
+
+#[test]
 fn tls_peer_closing_without_close_notify_reads_as_eof() {
     // Node (OpenSSL, IGNORE_UNEXPECTED_EOF) reads a peer that drops TCP without close_notify as a plain EOF.
     let hex = |s: &str| s.bytes().map(|b| format!("{b:02x}")).collect::<String>();
