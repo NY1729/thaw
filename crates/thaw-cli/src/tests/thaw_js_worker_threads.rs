@@ -17,11 +17,12 @@ fn thaw_js_worker_threads_blocker_keeps_unsupported_worker_use_on_quickjs() {
         "import { postMessageToThread, isInternalThread } from \"node:worker_threads\";"
     )
     .is_none());
+    // SHARE_ENV is served on thaw-js (a shared environment table): a Worker that shares the environment routes
     assert!(thaw_js_worker_threads_blocker(
         "node:worker_threads",
-        "const { SHARE_ENV } = require(\"node:worker_threads\");"
+        "const { SHARE_ENV, Worker } = require(\"node:worker_threads\"); new Worker(src, { eval: true, env: SHARE_ENV });"
     )
-    .is_some());
+    .is_none());
     // the clone marks are served on thaw-js (W-A): they route, while names still in the list keep blocking
     let marks = "import { markAsUntransferable, markAsUncloneable, isMarkedAsUntransferable } from \"node:worker_threads\";";
     assert!(thaw_js_worker_threads_blocker("node:worker_threads", marks).is_none());

@@ -14,6 +14,7 @@ use std::thread::JoinHandle;
 
 use crate::builtins::json_quote;
 use crate::heap_limit;
+use crate::process_env::{private_env_table, share_env_table, EnvTable};
 use crate::typed::SabBlock;
 use crate::*;
 
@@ -78,6 +79,9 @@ pub(crate) struct WorkerState {
     next: u32,
     workers: BTreeMap<u32, Worker>,
     side: Option<Side>,
+    /// The environment table this realm's `process.env` reads and writes (`process_env.rs`); None is the real
+    /// process environment (the main realm until a `SHARE_ENV` worker is spawned).
+    pub(crate) env_table: Option<EnvTable>,
 }
 
 /// SharedArrayBuffer blocks in flight between Interps: the wire carries only the id. An encode enters the block
@@ -137,17 +141,37 @@ pub(crate) fn stack_bytes(stack_mb: f64) -> usize {
     }
 }
 
-fn spawn(it: &mut Interp, source: String, opts: String, stack_mb: f64, heap_mb: f64) -> u32 {
+fn spawn(
+    it: &mut Interp,
+    source: String,
+    opts: String,
+    stack_mb: f64,
+    heap_mb: f64,
+    share_env: bool,
+) -> u32 {
     let (tx, cmd_rx) = mpsc::channel();
     let (evt_tx, rx) = mpsc::channel();
     let interrupt = Arc::new(AtomicBool::new(false));
-    let flag = interrupt.clone();
     let stack = stack_bytes(stack_mb);
     let heap = heap_bytes(heap_mb);
+    // a SHARE_ENV worker reads and writes the table of this realm; any other worker gets a table of its own
+    let env = if share_env {
+        share_env_table(it)
+    } else {
+        private_env_table()
+    };
+    let side = Side {
+        rx: cmd_rx,
+        tx: evt_tx,
+        interrupt: interrupt.clone(),
+        alive: Arc::new(AtomicBool::new(false)),
+        capture_out: false,
+        capture_err: false,
+    };
     let join = std::thread::Builder::new()
         .name("thaw-js-worker".into())
         .stack_size(stack)
-        .spawn(move || run_worker(&source, &opts, stack, heap, cmd_rx, evt_tx, flag))
+        .spawn(move || run_worker(&source, &opts, stack, heap, side, env))
         .expect("worker thread spawns");
     it.worker.next += 1;
     let id = it.worker.next;
@@ -198,11 +222,10 @@ fn run_worker(
     opts: &str,
     stack: usize,
     heap: Option<usize>,
-    rx: Receiver<Cmd>,
-    tx: Sender<Evt>,
-    interrupt: Arc<AtomicBool>,
+    side: Side,
+    env: EnvTable,
 ) {
-    let exit_tx = tx.clone();
+    let exit_tx = side.tx.clone();
     let code = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut it = Box::new(Interp::runtime());
         // the limit counts what the script allocates, not the runtime built above
@@ -211,15 +234,9 @@ fn run_worker(
         }
         it.configure_stack(stack);
         it.set_stream(true);
-        it.interrupt = Some(interrupt.clone());
-        it.worker.side = Some(Side {
-            rx,
-            tx,
-            interrupt,
-            alive: Arc::new(AtomicBool::new(false)),
-            capture_out: false,
-            capture_err: false,
-        });
+        it.interrupt = Some(side.interrupt.clone());
+        it.worker.side = Some(side);
+        it.worker.env_table = Some(env);
         let code = run_script(&mut it, source, opts);
         // messages the parent sent that this worker never read still carry their blocks
         if let Some(side) = &it.worker.side {
@@ -400,8 +417,10 @@ pub(crate) fn install(it: &mut Interp) {
         // positive = the default stack)
         let stack_mb = it.num(&arg(a, 3));
         let heap_mb = it.num(&arg(a, 2));
+        // arg 4 is `env: SHARE_ENV` (the worker shares this realm's environment table)
+        let share_env = arg(a, 4).truthy();
         Ok(Value::Number(f64::from(spawn(
-            it, source, opts, stack_mb, heap_mb,
+            it, source, opts, stack_mb, heap_mb, share_env,
         ))))
     });
     g.declare("__thaw_worker_spawn", f, true);

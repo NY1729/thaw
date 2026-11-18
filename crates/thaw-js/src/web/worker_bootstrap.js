@@ -9,6 +9,7 @@
   const workerData = opts.workerData === undefined ? null : decode(opts.workerData);
   if (opts.argv !== undefined) process.argv = opts.argv;
   if (opts.execArgv !== undefined) process.execArgv = opts.execArgv;
+  // a copy-mode worker's own table gets the copy; a SHARE_ENV worker sends no env and keeps the parent's table
   if (opts.env !== undefined) {
     for (const key of Object.keys(process.env)) delete process.env[key];
     Object.assign(process.env, opts.env);
@@ -136,6 +137,7 @@
     isInternalThread: false,
     threadId: opts.threadId === undefined ? 1 : opts.threadId,
     threadName: '',
+    SHARE_ENV: Symbol.for('nodejs.worker_threads.SHARE_ENV'),
     workerData,
     parentPort,
     postMessageToThread(target, value, transferList, timeout) {

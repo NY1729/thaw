@@ -856,15 +856,15 @@ fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
 
 #[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
-    // A `node:worker_threads` program that names `SHARE_ENV` (thaw-js does not serve it yet) keeps that module on
-    // QuickJS; the build falls back and the artifact reports the blocker.
+    // A `node:worker_threads` program that names `moveMessagePortToContext` (thaw-js does not serve it yet) keeps that
+    // module on QuickJS; the build falls back and the artifact reports the blocker.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "blockers-fallback",
         "import { Counter } from 'tjs-ctr';\n\
          import { isMainThread } from 'node:worker_threads';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
-           console.log(c.add(2), isMainThread, Object.keys({ SHARE_ENV: 1 }).length);\n\
+           console.log(c.add(2), isMainThread, Object.keys({ moveMessagePortToContext: 1 }).length);\n\
          }\n",
     );
     let output = dir.join("app");
@@ -896,10 +896,10 @@ fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal_and_warn_mode_
          import { isMainThread } from 'node:worker_threads';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
-           console.log(c.add(2), isMainThread, Object.keys({ SHARE_ENV: 1 }).length);\n\
+           console.log(c.add(2), isMainThread, Object.keys({ moveMessagePortToContext: 1 }).length);\n\
          }\n",
     );
-    let build = |output: &Path| {
+    let build =|output: &Path| {
         build_with_thaw_js_routing(
             &entry, output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
         )

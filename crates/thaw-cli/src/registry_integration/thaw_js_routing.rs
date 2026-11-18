@@ -855,7 +855,6 @@ const THAW_JS_WORKER_THREADS_FORM: &str =
 /// `node:worker_threads` names thaw-js does not serve yet (`Worker` runs on thaw-js; its options and the rest of the
 /// module do not). A program that names one keeps the module on QuickJS.
 const THAW_JS_WORKER_THREADS_UNSUPPORTED: &[&str] = &[
-    "SHARE_ENV",
     "moveMessagePortToContext",
     "transferList",
 ];
@@ -871,7 +870,7 @@ fn thaw_js_worker_threads_blocker(pkg_name: &str, user_source: &str) -> Option<&
             || THAW_JS_WORKER_THREADS_UNSUPPORTED
                 .iter()
                 .any(|name| thaw_js_mentions(user_source, name))))
-    .then_some("worker threads options (SHARE_ENV, transferList, ...) and main-thread process.stdin are not supported on thaw-js yet")
+    .then_some("worker threads options (transferList, moveMessagePortToContext) and main-thread process.stdin are not supported on thaw-js yet")
 }
 
 /// The thaw-js form of a `node:path` family specifier: the unmodified `node:path` bundle plus the realm marker
