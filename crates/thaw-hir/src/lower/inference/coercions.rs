@@ -944,6 +944,15 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn coerce_to_declared_expanded(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+        // A call that returns nothing, handed to a dynamic slot (`any`/`unknown` is `Json`):
+        // JS evaluates the call and the expression is `undefined`, so run it, then yield the
+        // dynamic `undefined` (`(call, undefined)`). Every slot that reaches here gets the same.
+        if matches!(declared, HirType::Json | HirType::JsValue)
+            && self.infer_expr_type(&value).ok() == Some(HirType::Void)
+        {
+            let undefined = self.coerce_to_declared_aliasing(declared, HirExpr::Lit(HirLit::Undefined))?;
+            return Ok(HirExpr::EvalThen(Box::new(value), Box::new(undefined)));
+        }
         // The function-name wrapper is transparent to a callable slot: coerce the closure and
         // keep its label (other slots wrap the labelled closure like any function value).
         if matches!(declared, HirType::Function(..) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..)) {
