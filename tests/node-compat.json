@@ -5304,6 +5304,18 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "function main(): void {\n  const P: any = Promise;\n  P.all([P.reject(3), P.resolve(4)]).catch((e: any): void => { console.log('all ' + e); });\n  P.race([P.reject(5), P.resolve(6)]).catch((e: any): void => { console.log('race ' + e); });\n  P.any([P.reject(7), P.reject(8)]).catch((e: any): void => { console.log('any ' + e.errors.join(',')); });\n  P.any([P.reject(9), P.resolve(10)]).then((v: any): void => { console.log('any-mixed ' + v); });\n}\n"
+  },
+  {
+    "name": "net server destroys right after write, client still receives the echo",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as net from 'node:net';\nfunction main(): void {\n  let got = '';\n  let left = 2;\n  const finish = (): void => { if (--left === 0) console.log('client got', JSON.stringify(got)); };\n  const server: any = net.createServer((sock: any): void => {\n    sock.on('data', (d: any): void => { sock.write(d); sock.destroy(); server.close(); });\n  });\n  server.on('close', finish);\n  server.listen(0, '127.0.0.1', (): void => {\n    const port = server.address().port;\n    const c: any = net.connect(port, '127.0.0.1', (): void => { c.write('hello'); });\n    c.on('data', (d: any): void => { got += d.toString(); });\n    c.on('close', finish);\n  });\n}"
+  },
+  {
+    "name": "net client writes then destroys right away, server still receives the bytes",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as net from 'node:net';\nfunction main(): void {\n  let got = '';\n  const server: any = net.createServer((sock: any): void => {\n    sock.on('data', (d: any): void => { got += d.toString(); });\n    sock.on('close', (): void => { server.close(); });\n  });\n  server.on('close', (): void => { console.log('server got', JSON.stringify(got)); });\n  server.listen(0, '127.0.0.1', (): void => {\n    const port = server.address().port;\n    const c: any = net.connect(port, '127.0.0.1', (): void => { c.write('ping'); c.destroy(); });\n  });\n}"
   }
 ]
 }
