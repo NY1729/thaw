@@ -357,3 +357,60 @@ fn thaw_js_routing_callback_sees_a_live_config_object_after_an_await() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A routed package that hands a callback's `Uint8Array` result to its own code: `pick` indexes the
+/// bytes the callback returns (nanoid's `customRandom` shape), `kind` reads their JS type.
+#[test]
+fn thaw_js_routing_callback_returning_uint8array_reaches_the_package_as_bytes() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-bytes-cb-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("tjs-bytes");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function pick(alphabet: string, size: number, random: (bytes: number) => Uint8Array): () => string;\n\
+         export declare function kind(random: (bytes: number) => Uint8Array): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = (function(require){\n\
+         var __thaw_bundle_factories = {\n\
+         \"tjs-bytes/index.js\": function(module, exports, require) {\n\
+           exports.pick = function (alphabet, size, random) { return function () { var bytes = random(size); var id = ''; for (var i = 0; i < size; i++) id += alphabet[bytes[i] % alphabet.length]; return id; }; };\n\
+           exports.kind = function (random) { var b = random(4); return [b instanceof Uint8Array, b.length, b[0], b[3]].join(','); };\n\
+         },\n\
+         };\n\
+         var __thaw_bundle_require_maps = { \"tjs-bytes/index.js\": {}, };\n\
+         var __thaw_bundle_entry_key = \"tjs-bytes/index.js\";\n\
+         var __thaw_entry = { exports: {} };\n\
+         __thaw_bundle_factories[__thaw_bundle_entry_key](__thaw_entry, __thaw_entry.exports, require);\n\
+         return __thaw_entry.exports;\n\
+         })(globalThis.require);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { pick, kind } from 'tjs-bytes';\n\
+         function main(): void {\n\
+           const det = (n: number): Uint8Array => {\n\
+             const b = new Uint8Array(n);\n\
+             for (let i = 0; i < n; i++) b[i] = (i * 37 + 11) & 255;\n\
+             return b;\n\
+           };\n\
+           const gen = pick('abcdefghijklmnopqrstuvwxyz0123456789', 12, det);\n\
+           console.log(gen());\n\
+           console.log(kind(det));\n\
+         }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-bytes"]));
+    std::fs::remove_dir_all(&registry).unwrap();
+    // Same text real Node prints for the equivalent JavaScript (`lmnopqropqrs`, `true,4,11,122`).
+    assert_eq!(thaw_js_run(&output), "lmnopqropqrs\ntrue,4,11,122\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

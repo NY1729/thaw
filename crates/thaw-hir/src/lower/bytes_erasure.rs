@@ -185,6 +185,15 @@ fn erase_dynamic_ty(ty: &mut HirType) {
     }
 }
 
+/// A callable's own result keeps the `Bytes` marker: a callback that returns a byte buffer
+/// (`(n) => new Uint8Array(n)`) crosses to thaw-js as a Buffer/Uint8Array, and the callback adapter
+/// can only pick that encoding from this type. Its physical value is already the byte view.
+fn erase_callable_ret(ty: &mut HirType) {
+    if *ty != HirType::Bytes {
+        erase_ty(ty);
+    }
+}
+
 fn erase_ty(ty: &mut HirType) {
     match ty {
         HirType::Bytes => *ty = HirType::Array(Box::new(HirType::F64)),
@@ -214,7 +223,7 @@ fn erase_ty(ty: &mut HirType) {
             for param in params {
                 erase_ty(param);
             }
-            erase_ty(ret);
+            erase_callable_ret(ret);
         }
         HirType::FunctionWithThis(receiver, signature) => {
             erase_ty(receiver);
@@ -228,7 +237,7 @@ fn erase_ty(ty: &mut HirType) {
             if let Some(rest) = rest {
                 erase_ty(rest);
             }
-            erase_ty(ret);
+            erase_callable_ret(ret);
         }
         HirType::OverloadedFunction(public, physical) => {
             for signature in public {
@@ -658,9 +667,10 @@ mod thaw_remaining_traversals_bytes_controls {
             program.globals[0].ty,
             HirType::FunctionWithThis(
                 Box::new(bytes_array()),
+                // A callable's own result keeps `Bytes` (see `erase_callable_ret`).
                 Box::new(HirType::Function(
                     vec![bytes_array()],
-                    Box::new(bytes_array()),
+                    Box::new(HirType::Bytes),
                 )),
             )
         );

@@ -541,7 +541,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     var list = [];
     items.forEach(function (b) {
       if (isPort(b)) {
-        if (b.__thawClosed || !b.__thawPeer) throw cloneErr('MessagePort in transfer list is already detached');
+        // an end is live while it has an in-realm peer or a cross-thread one (messaging.js)
+        if (b.__thawClosed || (!b.__thawPeer && b.__thawPeerAddr === null)) throw cloneErr('MessagePort in transfer list is already detached');
         if (list.indexOf(b) >= 0) throw cloneErr('Transfer list contains duplicate MessagePort');
         list.push(b);
         return;
@@ -585,7 +586,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       }
       if (typeof v !== 'object' || v === null) return v;
       if (seen.has(v)) return seen.get(v);
-      if (isPort(v)) throw cloneErr('Object that needs transfer was found in message but not listed in transferList');
+      if (isPort(v)) throw cloneErr(v.__thawClosed ? 'Cannot clone object of unsupported type.' : 'Object that needs transfer was found in message but not listed in transferList');
       var out;
       if (__thaw_is_proxy(v)) throw dataCloneError((Array.isArray(v) ? '[object Array]' : '#<Object>') + ' could not be cloned.');
       if (v instanceof WeakMap || v instanceof WeakSet || v instanceof WeakRef || v instanceof Promise) throw dataCloneError('#<' + v.constructor.name + '> could not be cloned.');

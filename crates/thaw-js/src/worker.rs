@@ -5,7 +5,7 @@
 //! that call these natives with the same `Interp`, so the state must follow the `Interp`, not the OS thread.
 //! `terminate()` sets an interrupt flag that the worker's `Interp` checks (`Interp::check_interrupt`), so busy loops stop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -37,6 +37,10 @@ enum Cmd {
     Thread(u32, u32, String),
     /// The answer to a `postMessageToThread` this worker sent: ack id, status, error wire.
     ThreadAck(u32, String, String),
+    /// A message to the port end at this address, and its wire (routed by the main thread, see `PORT_ROUTES`).
+    Port(u64, String),
+    /// The peer of the port end at this address closed.
+    PortClose(u64),
 }
 
 enum Evt {
@@ -50,6 +54,10 @@ enum Evt {
     Thread(u32, String),
     /// The parent's answer to a `postMessageToThread` the worker sent: ack id, status, error wire.
     ThreadAck(u32, String, String),
+    /// A message to a port end this worker owns (sent to the main thread, which routes it).
+    Port(u64, String),
+    /// The peer of a port end this worker owns closed.
+    PortClose(u64),
 }
 
 struct Worker {
@@ -58,12 +66,17 @@ struct Worker {
     interrupt: Arc<AtomicBool>,
     refd: bool,
     exited: bool,
+    /// The worker's port token (its port routes name it as their owner).
+    token: u64,
     join: Option<JoinHandle<()>>,
 }
 
 struct Side {
     rx: Receiver<Cmd>,
     tx: Sender<Evt>,
+    /// This worker's port token, and the port token of the main thread that spawned it (the hub).
+    token: u64,
+    hub: u64,
     interrupt: Arc<AtomicBool>,
     /// The worker's parentPort has a referenced `message` listener (set by the bootstrap).
     alive: Arc<AtomicBool>,
@@ -82,6 +95,12 @@ pub(crate) struct WorkerState {
     /// The environment table this realm's `process.env` reads and writes (`process_env.rs`); None is the real
     /// process environment (the main realm until a `SHARE_ENV` worker is spawned).
     pub(crate) env_table: Option<EnvTable>,
+    /// A referenced port this realm listens on keeps the loop alive (set by messaging.js).
+    pub(crate) ports_live: bool,
+    /// This Interp's port token as the main thread (allocated on first use; a worker realm uses its `Side`).
+    token: u64,
+    /// `port` events for this realm's own ports, routed by a script (main thread), delivered by the next poll.
+    local: Vec<String>,
 }
 
 /// SharedArrayBuffer blocks in flight between Interps: the wire carries only the id. An encode enters the block
@@ -150,6 +169,62 @@ fn node_ids(wire: &str, kind: &str) -> Vec<u64> {
     ids
 }
 
+/// A port end's route: the realm that owns it (its port token; a worker's token is fixed at spawn, the main realm's
+/// is allocated once per Interp) and the address of its peer end.
+#[derive(Clone, Copy)]
+struct Route {
+    owner: u64,
+    peer: u64,
+}
+
+/// Cross-thread MessagePort routing (worker_threads PR3). Every port end that crosses threads has an address; a
+/// message to an address goes to the realm that owns it. The main thread is the hub: a worker's send goes to it
+/// (`Evt::Port`), and it forwards to the owner. Tokens and addresses come from one process-wide counter, so routes of
+/// two Interps in one process never meet. `PORT_ROUTES` holds the owner and peer of each address that is live or in
+/// flight. `PORT_FLIGHT` holds the ends whose wire is encoded but not yet decoded by its reader: a released wire (its
+/// reader ended, or nothing took it) hangs up their peers through `PORT_HANGUPS` (owner, peer), which the owner's
+/// poll delivers.
+static PORT_ROUTES: Mutex<BTreeMap<u64, Route>> = Mutex::new(BTreeMap::new());
+static PORT_FLIGHT: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
+static PORT_HANGUPS: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+static PORT_NEXT: AtomicU64 = AtomicU64::new(1);
+
+fn locked<T>(table: &'static Mutex<T>) -> MutexGuard<'static, T> {
+    table.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The `(address, peer address)` of each `Port` node in a wire (plain, or nested in a JSON string).
+fn port_nodes(wire: &str) -> Vec<(u64, u64)> {
+    fn digits(s: &str) -> (&str, &str) {
+        s.split_at(s.bytes().take_while(u8::is_ascii_digit).count())
+    }
+    let mut found = Vec::new();
+    for (open, mid) in [
+        (r#""t":"Port","p":"#, r#","q":"#),
+        (r#"\"t\":\"Port\",\"p\":"#, r#",\"q\":"#),
+    ] {
+        let mut rest = wire;
+        while let Some(at) = rest.find(open) {
+            rest = &rest[at + open.len()..];
+            let (p, after_p) = digits(rest);
+            rest = after_p;
+            if let Some(tail) = after_p.strip_prefix(mid) {
+                let (q, after_q) = digits(tail);
+                if let (Ok(p), Ok(q)) = (p.parse(), q.parse()) {
+                    found.push((p, q));
+                }
+                rest = after_q;
+            }
+        }
+    }
+    found
+}
+
+/// A fresh address for a port end.
+pub(crate) fn port_address() -> u64 {
+    PORT_NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Releases the blocks a wire carries when nobody will decode it (a worker that ended first, or a send that could not
 /// be delivered). Every such node was written by the encoder, and a table entry is dropped once it is taken.
 pub(crate) fn release_wire(wire: &str) {
@@ -159,20 +234,80 @@ pub(crate) fn release_wire(wire: &str) {
     for id in node_ids(wire, "ABT") {
         ab_table().remove(&id);
     }
+    // a port end still in flight is freed: its route goes, and its peer hangs up (once; a decoded end is landed)
+    for (addr, peer) in port_nodes(wire) {
+        if locked(&PORT_FLIGHT).remove(&addr) {
+            locked(&PORT_ROUTES).remove(&addr);
+            let owner = locked(&PORT_ROUTES).get(&peer).map(|r| r.owner);
+            if let Some(owner) = owner {
+                locked(&PORT_HANGUPS).push((owner, peer));
+            }
+        }
+    }
 }
 
 /// Releases what a dropped command carries (its wire never reaches a reader).
 fn release_cmd(cmd: &Cmd) {
-    if let Cmd::Message(v) | Cmd::Thread(_, _, v) = cmd {
+    if let Cmd::Message(v) | Cmd::Thread(_, _, v) | Cmd::Port(_, v) = cmd {
         release_wire(v);
     }
 }
 
 /// Releases what a dropped event carries (its wire never reaches a reader).
 fn release_evt(evt: &Evt) {
-    if let Evt::Message(v) | Evt::Error(v) | Evt::Thread(_, v) = evt {
+    if let Evt::Message(v) | Evt::Error(v) | Evt::Thread(_, v) | Evt::Port(_, v) = evt {
         release_wire(v);
     }
+}
+
+/// The owner-side item a `port` (wire) or `portClose` (no wire) event becomes for this realm's dispatch.
+fn port_item(addr: u64, wire: Option<&str>) -> String {
+    match wire {
+        Some(v) => format!(r#"{{"type":"port","addr":{addr},"value":{}}}"#, quoted(v)),
+        None => format!(r#"{{"type":"portClose","addr":{addr}}}"#),
+    }
+}
+
+/// Routes a port event (`wire`, or None for a hang-up) to the thread that owns `addr`. Main thread only: the item for
+/// this realm is returned (owner 0), a worker gets the command; with no route the wire is released.
+fn route_port(it: &Interp, addr: u64, wire: Option<String>) -> Option<String> {
+    let owner = locked(&PORT_ROUTES).get(&addr).map(|r| r.owner);
+    let Some(owner) = owner else {
+        if let Some(v) = &wire {
+            release_wire(v);
+        }
+        return None;
+    };
+    if owner == it.worker.token {
+        return Some(port_item(addr, wire.as_deref()));
+    }
+    match it.worker.workers.values().find(|w| w.token == owner) {
+        Some(w) => send_cmd(
+            w,
+            match wire {
+                Some(v) => Cmd::Port(addr, v),
+                None => Cmd::PortClose(addr),
+            },
+        ),
+        None => {
+            if let Some(v) = &wire {
+                release_wire(v);
+            }
+        }
+    }
+    None
+}
+
+/// The port token of this realm: a worker's (from its `Side`), or the Interp's own as the main thread (allocated on
+/// first use).
+fn realm_token(it: &mut Interp) -> u64 {
+    if let Some(side) = &it.worker.side {
+        return side.token;
+    }
+    if it.worker.token == 0 {
+        it.worker.token = port_address();
+    }
+    it.worker.token
 }
 
 /// Sends a command to a worker; a worker whose thread has ended releases what the command carries.
@@ -210,6 +345,8 @@ fn spawn(
     stack_mb: f64,
     heap_mb: f64,
     share_env: bool,
+    // (the worker's port token, the spawning realm's port token: the hub its ports route through)
+    tokens: (u64, u64),
 ) -> u32 {
     let (tx, cmd_rx) = mpsc::channel();
     let (evt_tx, rx) = mpsc::channel();
@@ -225,6 +362,8 @@ fn spawn(
     let side = Side {
         rx: cmd_rx,
         tx: evt_tx,
+        token: tokens.0,
+        hub: tokens.1,
         interrupt: interrupt.clone(),
         alive: Arc::new(AtomicBool::new(false)),
         capture_out: false,
@@ -245,6 +384,7 @@ fn spawn(
             interrupt,
             refd: true,
             exited: false,
+            token: tokens.0,
             join: Some(join),
         },
     );
@@ -385,13 +525,24 @@ pub(crate) fn active(it: &Interp) -> bool {
         .side
         .as_ref()
         .is_some_and(|s| s.alive.load(Ordering::Relaxed));
-    listening || it.worker.workers.values().any(|w| w.refd && !w.exited)
+    listening
+        || it.worker.ports_live
+        || !it.worker.local.is_empty()
+        || it.worker.workers.values().any(|w| w.refd && !w.exited)
+}
+
+/// One pending item of a poll, in arrival order: a dispatch JSON item, or a port event to route once the loop over
+/// the workers is done (`None` is a hang-up).
+enum Item {
+    Json(String),
+    Route(u64, Option<String>),
 }
 
 /// Pending worker events as a JSON array (`[]` when none): parent events carry a `handle`, worker events
 /// (`message` from the parent) do not. Joins and forgets a worker once its `exit` is delivered.
 pub(crate) fn poll(it: &mut Interp) -> String {
-    let mut items = Vec::new();
+    let mut items: Vec<Item> = it.worker.local.drain(..).map(Item::Json).collect();
+    let mut exited_tokens = Vec::new();
     for (id, w) in it.worker.workers.iter_mut() {
         while !w.exited {
             let e = match w.rx.try_recv() {
@@ -399,7 +550,7 @@ pub(crate) fn poll(it: &mut Interp) -> String {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => Evt::Exit(1),
             };
-            items.push(match e {
+            let json = match e {
                 Evt::Online => format!(r#"{{"handle":{id},"type":"online"}}"#),
                 Evt::Message(v) => format!(
                     r#"{{"handle":{id},"type":"message","value":{}}}"#,
@@ -410,6 +561,7 @@ pub(crate) fn poll(it: &mut Interp) -> String {
                 }
                 Evt::Exit(code) => {
                     w.exited = true;
+                    exited_tokens.push(w.token);
                     format!(r#"{{"handle":{id},"type":"exit","code":{code}}}"#)
                 }
                 Evt::Stdio(fd, hex) => {
@@ -425,8 +577,44 @@ pub(crate) fn poll(it: &mut Interp) -> String {
                     quoted(&status),
                     quoted(&v)
                 ),
-            });
+                Evt::Port(addr, v) => {
+                    items.push(Item::Route(addr, Some(v)));
+                    continue;
+                }
+                Evt::PortClose(addr) => {
+                    items.push(Item::Route(addr, None));
+                    continue;
+                }
+            };
+            items.push(Item::Json(json));
         }
+    }
+    // a worker that exited takes its ports down: each peer hangs up (its owner's routes go with it)
+    for token in exited_tokens {
+        let mut routes = locked(&PORT_ROUTES);
+        let owned: Vec<u64> = routes
+            .iter()
+            .filter(|(_, r)| r.owner == token)
+            .map(|(addr, _)| *addr)
+            .collect();
+        for addr in owned {
+            if let Some(route) = routes.remove(&addr) {
+                items.push(Item::Route(route.peer, None));
+            }
+        }
+    }
+    // the hang-ups this Interp owns (its main token, or one of its workers): others' stay for their own poll
+    let mine: Vec<u64> = std::iter::once(it.worker.token)
+        .chain(it.worker.workers.values().map(|w| w.token))
+        .collect();
+    let mut hangups = locked(&PORT_HANGUPS);
+    let (ours, rest): (Vec<_>, Vec<_>) = hangups
+        .drain(..)
+        .partition(|(owner, _)| mine.contains(owner));
+    *hangups = rest;
+    drop(hangups);
+    for (_, peer) in ours {
+        items.push(Item::Route(peer, None));
     }
     it.worker.workers.retain(|_, w| {
         if w.exited {
@@ -442,28 +630,41 @@ pub(crate) fn poll(it: &mut Interp) -> String {
     });
     if let Some(side) = &it.worker.side {
         while let Ok(cmd) = side.rx.try_recv() {
-            match cmd {
+            let json = match cmd {
                 Cmd::Message(v) => {
-                    items.push(format!(r#"{{"type":"message","value":{}}}"#, quoted(&v)))
+                    format!(r#"{{"type":"message","value":{}}}"#, quoted(&v))
                 }
                 Cmd::Stdin(hex, end) => {
-                    items.push(format!(r#"{{"type":"stdin","value":"{hex}","end":{end}}}"#))
+                    format!(r#"{{"type":"stdin","value":"{hex}","end":{end}}}"#)
                 }
-                Cmd::Thread(source, ack, v) => items.push(format!(
+                Cmd::Thread(source, ack, v) => format!(
                     r#"{{"type":"thread","source":{source},"ack":{ack},"value":{}}}"#,
                     quoted(&v)
-                )),
-                Cmd::ThreadAck(ack, status, v) => items.push(format!(
+                ),
+                Cmd::ThreadAck(ack, status, v) => format!(
                     r#"{{"type":"threadAck","ack":{ack},"status":{},"value":{}}}"#,
                     quoted(&status),
                     quoted(&v)
-                )),
+                ),
+                Cmd::Port(addr, v) => port_item(addr, Some(&v)),
+                Cmd::PortClose(addr) => port_item(addr, None),
                 // the parent already set the flag; setting it here too covers a command sent alone
-                Cmd::Terminate => side.interrupt.store(true, Ordering::Relaxed),
-            }
+                Cmd::Terminate => {
+                    side.interrupt.store(true, Ordering::Relaxed);
+                    continue;
+                }
+            };
+            items.push(Item::Json(json));
         }
     }
-    format!("[{}]", items.join(","))
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            Item::Json(json) => out.push(json),
+            Item::Route(addr, wire) => out.extend(route_port(it, addr, wire)),
+        }
+    }
+    format!("[{}]", out.join(","))
 }
 
 pub(crate) fn install(it: &mut Interp) {
@@ -482,8 +683,17 @@ pub(crate) fn install(it: &mut Interp) {
         let heap_mb = it.num(&arg(a, 2));
         // arg 4 is `env: SHARE_ENV` (the worker shares this realm's environment table)
         let share_env = arg(a, 4).truthy();
+        // arg 5 is the worker's port token (its port routes name it as their owner); this realm is the hub
+        let token = it.num(&arg(a, 5)) as u64;
+        let hub = realm_token(it);
         Ok(Value::Number(f64::from(spawn(
-            it, source, opts, stack_mb, heap_mb, share_env,
+            it,
+            source,
+            opts,
+            stack_mb,
+            heap_mb,
+            share_env,
+            (token, hub),
         ))))
     });
     g.declare("__thaw_worker_spawn", f, true);
@@ -599,6 +809,84 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_capture", f, true);
+    // MessagePort ends across threads (messaging.js): a fresh address; the owner of an address; a move (the port end
+    // `p` goes to thread `dest`, its peer `q` is this thread's when `local`); a landed (decoded) end; a send to an
+    // address; a close (the peer is told unless `notify` is false); the loop-liveness of this realm's ports.
+    let f = it.native(|_, _, _| Ok(Value::Number(port_address() as f64)));
+    g.declare("__thaw_port_address", f, true);
+    let f = it.native(|it, _, a| {
+        let owner = locked(&PORT_ROUTES)
+            .get(&(it.num(&arg(a, 0)) as u64))
+            .map_or(0, |r| r.owner);
+        Ok(Value::Number(owner as f64))
+    });
+    g.declare("__thaw_port_owner", f, true);
+    // the token a wire to the main thread routes through: the spawning realm's (a worker), else this Interp's own
+    let f = it.native(|it, _, _| {
+        let hub = match &it.worker.side {
+            Some(side) => side.hub,
+            None => realm_token(it),
+        };
+        Ok(Value::Number(hub as f64))
+    });
+    g.declare("__thaw_port_hub", f, true);
+    let f = it.native(|it, _, a| {
+        let (p, q) = (it.num(&arg(a, 0)) as u64, it.num(&arg(a, 1)) as u64);
+        let dest = it.num(&arg(a, 2)) as u64;
+        let peer_here = arg(a, 3).truthy();
+        let me = realm_token(it);
+        {
+            let mut routes = locked(&PORT_ROUTES);
+            routes.insert(
+                p,
+                Route {
+                    owner: dest,
+                    peer: q,
+                },
+            );
+            if peer_here {
+                routes.insert(q, Route { owner: me, peer: p });
+            }
+        }
+        locked(&PORT_FLIGHT).insert(p);
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_port_move", f, true);
+    let f = it.native(|it, _, a| {
+        locked(&PORT_FLIGHT).remove(&(it.num(&arg(a, 0)) as u64));
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_port_landed", f, true);
+    let f = it.native(|it, _, a| {
+        let addr = it.num(&arg(a, 0)) as u64;
+        let wire = it.to_str(&arg(a, 1)).to_string();
+        if is_worker(it) {
+            to_parent(it, Evt::Port(addr, wire));
+        } else if let Some(item) = route_port(it, addr, Some(wire)) {
+            it.worker.local.push(item);
+        }
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_port_send", f, true);
+    let f = it.native(|it, _, a| {
+        let (own, peer) = (it.num(&arg(a, 0)) as u64, it.num(&arg(a, 1)) as u64);
+        let notify = arg(a, 2).truthy();
+        locked(&PORT_ROUTES).remove(&own);
+        if notify {
+            if is_worker(it) {
+                to_parent(it, Evt::PortClose(peer));
+            } else if let Some(item) = route_port(it, peer, None) {
+                it.worker.local.push(item);
+            }
+        }
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_port_closed", f, true);
+    let f = it.native(|it, _, a| {
+        it.worker.ports_live = arg(a, 0).truthy();
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_port_live", f, true);
 }
 
 #[cfg(test)]
@@ -626,5 +914,43 @@ mod transfer_tests {
         assert_eq!(ab_import(id), Some((vec![7, 7], None)));
         release_wire(&wire);
         assert!(ab_import(id).is_none());
+    }
+
+    #[test]
+    fn release_wire_frees_a_port_in_flight_and_hangs_up_its_peer() {
+        // a port end encoded for a worker (in flight, owner 7) whose wire nobody decodes: its route goes, and the
+        // peer end (q) is told to hang up
+        let (p, q) = (port_address(), port_address());
+        let (worker, main) = (port_address(), port_address());
+        locked(&PORT_ROUTES).insert(
+            p,
+            Route {
+                owner: worker,
+                peer: q,
+            },
+        );
+        locked(&PORT_ROUTES).insert(
+            q,
+            Route {
+                owner: main,
+                peer: p,
+            },
+        );
+        locked(&PORT_FLIGHT).insert(p);
+        let wire =
+            format!(r#"{{"root":{{"r":1}},"nodes":[{{"t":"Port","p":{p},"q":{q},"qs":[]}}]}}"#);
+        release_wire(&wire);
+        assert!(!locked(&PORT_ROUTES).contains_key(&p));
+        assert!(locked(&PORT_HANGUPS).contains(&(main, q)));
+        // a landed end (its reader decoded the wire) is not freed by releasing the same wire again
+        let (p, q) = (port_address(), port_address());
+        locked(&PORT_ROUTES).insert(p, Route { owner: 0, peer: q });
+        locked(&PORT_FLIGHT).insert(p);
+        locked(&PORT_FLIGHT).remove(&p);
+        let wire =
+            format!(r#"{{"root":{{"r":1}},"nodes":[{{"t":"Port","p":{p},"q":{q},"qs":[]}}]}}"#);
+        release_wire(&wire);
+        assert!(locked(&PORT_ROUTES).contains_key(&p));
+        assert!(!locked(&PORT_HANGUPS).iter().any(|(_, peer)| *peer == q));
     }
 }
