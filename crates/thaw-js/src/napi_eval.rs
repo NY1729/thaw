@@ -10,8 +10,8 @@ use base64::Engine;
 
 use crate::host::{
     awaited, check_handle_callable, classify, cstr, default_realm, error_text, from_value,
-    handle_result, on_handle_strict, store_handle, thaw_tjs_call_graph_result, to_value,
-    with_package, HandleResult, HostError, Native, ThawResult,
+    handle_result, live_packages, on_handle_strict, store_handle, thaw_tjs_call_graph_result,
+    to_value, with_package, HandleResult, HostError, Native, ThawResult,
 };
 use crate::napi_graph::{decode_napi_wire, encode_napi_graph};
 use crate::napi_props::ThawCallWithExceptionResult;
@@ -76,12 +76,33 @@ fn reference_name(context: *mut c_void) -> String {
     format!("__thaw_napi_reference_{}", context as usize)
 }
 
+/// The realm holding the callback global `name`: the default realm when it has one, else the first live package
+/// that does. An addon's callback is defined in the realm its proxy ran in, which need not be the default realm.
+/// ponytail: a linear probe over the packages; a reference id -> realm map if many packages get callbacks.
+fn reference_realm(name: &str) -> usize {
+    let default = default_realm();
+    let holds = |handle: usize| {
+        with_package(handle, |p| {
+            let it = &mut p.interp;
+            let global = it.global.clone();
+            Ok(it
+                .lookup(&global, name)
+                .is_some_and(|value| value.is_callable()))
+        })
+        .unwrap_or(false)
+    };
+    std::iter::once(default)
+        .chain(live_packages())
+        .find(|&handle| holds(handle))
+        .unwrap_or(default)
+}
+
 /// Calls the global `name` with the JSON array `args_json`; the result is its JSON text.
 fn call_reference_json(name: &str, args_json: &str) -> Result<String, String> {
     let Native::Array(args) = Native::from_json(args_json).map_err(|e| e.to_string())? else {
         return Err("arguments must be a JSON array".into());
     };
-    with_package(default_realm(), |p| {
+    with_package(reference_realm(name), |p| {
         let it = &mut p.interp;
         let target = it
             .lookup(&it.global.clone(), name)

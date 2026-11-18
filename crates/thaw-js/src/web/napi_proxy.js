@@ -388,7 +388,7 @@
   const symbolValues = new Map();
   const binaryValues = new Map();
   const promises = new Map();
-  let lastReference = 0;
+  const nextReference = cap.reference;
   const isBufferValue = value => bufferCtor !== undefined && bufferCtor.isBuffer(value);
   // ponytail: Array.prototype.slice.call on a typed array is [] in thaw-js, so the bytes are read through a Uint8Array.
   const bytesOf = value => arrayFrom(new uint8Array(value));
@@ -461,8 +461,7 @@
     if (id !== undefined && active.has(value)) return { __thaw_napi_ref__: id };
     const fresh = id === undefined;
     if (fresh) {
-      lastReference += 1;
-      id = lastReference;
+      id = nextReference();
       referenceIds.set(value, id);
       referenceValues.set(id, value);
     }

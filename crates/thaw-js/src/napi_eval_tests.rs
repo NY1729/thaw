@@ -153,6 +153,48 @@ fn call_reference_passes_arguments_and_reports_invalid_calls() {
     );
 }
 
+/// Loads a minimal package (a bundle with one entry module) and returns its handle.
+fn load_package(name: &str) -> usize {
+    let bundle = format!(
+        r#"module.exports = (function(require){{
+var __thaw_bundle_factories = {{ "{name}/index.js": function(module, exports) {{ exports.id = '{name}'; }} }};
+var __thaw_bundle_require_maps = {{ "{name}/index.js": {{}} }};
+var __thaw_bundle_entry_key = "{name}/index.js";
+}})(globalThis.require);"#
+    );
+    let handle = thaw_tjs_load(q(&bundle).as_ptr());
+    assert!(handle >= 0, "{name} loads");
+    handle as usize
+}
+
+/// Runs `source` in package `handle`, the realm whose global the script defines.
+fn run_in_package(handle: usize, source: &str) {
+    with_package(handle, |p| {
+        let it = &mut p.interp;
+        it.run_sloppy(source)
+            .map(|_| ())
+            .map_err(|c| classify(it, c))
+    })
+    .expect("the script runs in the package");
+}
+
+#[test]
+fn call_reference_finds_the_callback_in_a_package_that_is_not_the_default_realm() {
+    // An addon's callback global lives in the realm its proxy ran in. Another package entered last is the
+    // default realm, which does not have it; the call must still reach the callback.
+    let addon = load_package("addon");
+    let other = load_package("other");
+    run_in_package(
+        addon,
+        "globalThis.__thaw_napi_reference_746291611 = (v) => v * 2;",
+    );
+    with_package(other, |_| Ok::<(), HostError>(())).expect("enter the other package last");
+    assert_eq!(default_realm(), other);
+    let text =
+        take(unsafe { thaw_tjs_call_reference(746291611 as *mut c_void, q("[21]").as_ptr()) });
+    assert_eq!(text.as_deref(), Some("42"));
+}
+
 #[test]
 fn call_reference_graph_delivers_the_receiver_and_live_argument() {
     // The thaw-napi tests.rs:2770 flow: a live argument and receiver cross as handles.
