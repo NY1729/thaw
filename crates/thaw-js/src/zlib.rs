@@ -257,7 +257,7 @@ fn zlib_error(code: &str, message: &str) -> io::Error {
 }
 
 fn compress_bytes_with(format: &str, value: &[u8], options: &ZlibOptions) -> io::Result<Vec<u8>> {
-    use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
+    use flate2::write::{DeflateEncoder, ZlibEncoder};
     let compression = options.compression();
     match format {
         "brotli" => {
@@ -266,7 +266,10 @@ fn compress_bytes_with(format: &str, value: &[u8], options: &ZlibOptions) -> io:
             Ok(encoder.into_inner())
         }
         "gzip" => {
-            let mut encoder = GzEncoder::new(Vec::new(), compression);
+            // OS byte 3 (Unix), as Node writes; flate2's default is 255 (unknown).
+            let mut encoder = flate2::GzBuilder::new()
+                .operating_system(3)
+                .write(Vec::new(), compression);
             encoder.write_all(value)?;
             encoder.finish()
         }
@@ -574,9 +577,11 @@ impl WebZlibStream {
             Ok(compress)
         };
         let writer = match (operation, format) {
-            ("compress", "gzip") => {
-                WebZlibWriter::GzipEncoder(flate2::write::GzEncoder::new(Vec::new(), compression))
-            }
+            ("compress", "gzip") => WebZlibWriter::GzipEncoder(
+                flate2::GzBuilder::new()
+                    .operating_system(3)
+                    .write(Vec::new(), compression),
+            ),
             ("compress", "deflateRaw") => {
                 WebZlibWriter::DeflateEncoder(Deflate::new(encoder_state(false)?))
             }
@@ -602,7 +607,7 @@ impl WebZlibStream {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "invalid zlib stream",
-                ))
+                ));
             }
         };
         Ok(Self { writer })
@@ -657,5 +662,16 @@ impl WebZlibStream {
             }
         };
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn gzip_header_declares_the_unix_os_byte_like_node() {
+        let bytes =
+            super::compress_bytes_with("gzip", b"abc", &super::ZlibOptions::default()).unwrap();
+        assert_eq!(&bytes[..3], &[0x1f, 0x8b, 8]);
+        assert_eq!(bytes[9], 3, "gzip header OS byte (Node writes 3)");
     }
 }
