@@ -8,8 +8,9 @@
 //! `Interp` address) that names the host-thread state moved across the hand-off.
 //!
 //! Enum dispatch rather than a trait: the backend is a concrete type of `Co`, so the hot path has no
-//! vtable and no generic parameter on `Interp`. Two backends: the thread backend (co_thread.rs, the
-//! default) and the costack backend (co_stack.rs), selected by `THAW_JS_CO=stack|thread`.
+//! vtable and no generic parameter on `Interp`. Two backends: the thread backend (co_thread.rs) and
+//! the costack backend (co_stack.rs). `THAW_JS_CO=stack|thread` picks one explicitly; unset, the costack
+//! backend is used once a native addon is registered (see `choose_backend`).
 
 use std::sync::OnceLock;
 
@@ -34,24 +35,56 @@ const STACK_SUPPORTED: bool = cfg!(all(
     target_os = "linux"
 ));
 
-/// The backend for this process, read once from `THAW_JS_CO`. Unset or `thread`: the thread backend.
+/// The backend for a new coroutine. Evaluated per coroutine creation: an addon loaded after the first
+/// coroutine was made still moves later ones onto the costack backend. The env value is read once.
 pub(crate) fn backend() -> Backend {
-    static CHOICE: OnceLock<Backend> = OnceLock::new();
-    *CHOICE.get_or_init(|| choose(std::env::var("THAW_JS_CO").ok().as_deref()))
+    static ENV: OnceLock<Option<String>> = OnceLock::new();
+    let env = ENV.get_or_init(|| {
+        let value = std::env::var("THAW_JS_CO").ok();
+        match value.as_deref() {
+            Some("stack") if !STACK_SUPPORTED => eprintln!(
+                "thaw-js: THAW_JS_CO=stack is not supported on this target; using the thread backend"
+            ),
+            Some(other) if !matches!(other, "" | "stack" | "thread") => {
+                eprintln!("thaw-js: unknown THAW_JS_CO={other:?}; using the thread backend")
+            }
+            _ => {}
+        }
+        value
+    });
+    choose_backend(
+        env.as_deref(),
+        STACK_SUPPORTED,
+        crate::napi_bridge::registered(),
+    )
 }
 
-fn choose(value: Option<&str>) -> Backend {
-    match value {
-        None | Some("thread") => Backend::Thread,
-        Some("stack") if STACK_SUPPORTED => Backend::Stack,
+/// The selection rule, pure so the table test can cover every input. An explicit `THAW_JS_CO` wins:
+/// `stack` is the costack backend where supported, `thread` (or any unknown value) the thread backend.
+/// Unset or empty: the costack backend when a native addon is registered (the N-API host is per OS
+/// thread, so addon calls must stay on the thread that loaded it), else the thread backend.
+pub(crate) fn choose_backend(
+    env: Option<&str>,
+    stack_supported: bool,
+    addon_registered: bool,
+) -> Backend {
+    match env {
         Some("stack") => {
-            eprintln!("thaw-js: THAW_JS_CO=stack is not supported on this target; using the thread backend");
-            Backend::Thread
+            if stack_supported {
+                Backend::Stack
+            } else {
+                Backend::Thread
+            }
         }
-        Some(other) => {
-            eprintln!("thaw-js: unknown THAW_JS_CO={other:?}; using the thread backend");
-            Backend::Thread
+        Some("thread") => Backend::Thread,
+        Some("") | None => {
+            if stack_supported && addon_registered {
+                Backend::Stack
+            } else {
+                Backend::Thread
+            }
         }
+        Some(_) => Backend::Thread,
     }
 }
 
@@ -181,12 +214,46 @@ mod tests {
     }
 
     #[test]
-    fn backend_choice_follows_the_environment_value() {
-        assert_eq!(choose(None), Backend::Thread);
-        assert_eq!(choose(Some("thread")), Backend::Thread);
-        assert_eq!(choose(Some("bogus")), Backend::Thread);
-        let stack = choose(Some("stack"));
-        assert_eq!(stack == Backend::Stack, STACK_SUPPORTED);
+    fn backend_choice_table() {
+        for supported in [false, true] {
+            for registered in [false, true] {
+                let cases: [(Option<&str>, Backend); 5] = [
+                    (
+                        Some("stack"),
+                        if supported {
+                            Backend::Stack
+                        } else {
+                            Backend::Thread
+                        },
+                    ),
+                    (Some("thread"), Backend::Thread),
+                    (Some("bogus"), Backend::Thread),
+                    (
+                        None,
+                        if supported && registered {
+                            Backend::Stack
+                        } else {
+                            Backend::Thread
+                        },
+                    ),
+                    (
+                        Some(""),
+                        if supported && registered {
+                            Backend::Stack
+                        } else {
+                            Backend::Thread
+                        },
+                    ),
+                ];
+                for (env, want) in cases {
+                    assert_eq!(
+                        choose_backend(env, supported, registered),
+                        want,
+                        "env={env:?} supported={supported} registered={registered}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
