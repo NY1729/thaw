@@ -52,7 +52,8 @@
   }
 
   const decode = wire => __thaw_worker_decode(wire);
-  const encode = (value, transfer) => __thaw_worker_encode(value, transfer);
+  // `dest` is the port token of the realm the wire goes to (a port in it moves there); see worker.rs
+  const encode = (value, transfer, dest = 0) => __thaw_worker_encode(value, transfer, dest);
   const { Readable, Writable, hexToBytes } = __thaw_worker_stream;
 
   // postMessageToThread (W-D). The message runs the destination's 'workerMessage' listeners on its own loop, and the
@@ -105,7 +106,7 @@
     const deliver = route(target);
     // an unknown thread keeps its buffers (Node moves them only for a thread that receives the message)
     let wire;
-    try { wire = encode(value, deliver === undefined ? [] : transfer); } catch (error) { return Promise.reject(error); }
+    try { wire = encode(value, deliver === undefined ? [] : transfer, deliver === undefined ? 0 : liveThreads.get(target).token); } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
       const ack = nextAck++;
       const entry = { resolve, reject, timer: undefined };
@@ -135,12 +136,14 @@
         code = 'globalThis.__thaw_run_main_file(' + JSON.stringify(code) + ')';
       }
       const threadId = nextThreadId++;
+      // the worker's port token: ports that move to it are routed by this (worker.rs), unlike the Node threadId
+      const token = __thaw_port_address();
       // transferList (Node: any iterable, here by Array.from, so a non-iterable value is ignored): its buffers move to the
       // worker whether or not workerData names them. A bad list or a non-cloneable workerData throws here, as in Node.
       const transfer = options.transferList === undefined || options.transferList === null ? [] : __thaw_transfer_check(Array.from(options.transferList));
       const opts = {
         threadId,
-        workerData: encode(options.workerData, transfer),
+        workerData: encode(options.workerData, transfer, token),
         // the worker starts with a snapshot of the parent's environment data
         envData: encode(Array.from(environmentData)),
       };
@@ -169,10 +172,12 @@
       };
       opts.resourceLimits = resourceLimits;
       // heap limit (MiB, -1 = none) and stack (MiB): the natives' numeric arguments
-      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb, shareEnv);
+      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb, shareEnv, token);
       let resolveExit;
       const state = {
         handle,
+        threadId,
+        token,
         exited: false,
         exitCode: undefined,
         refd: true,
@@ -194,7 +199,7 @@
       const state = states.get(this);
       // after the worker exited Node neither checks the list nor moves its buffers
       if (state.exited) return;
-      __thaw_worker_post(state.handle, encode(value, __thaw_transfer_of(transferOrOptions)));
+      __thaw_worker_post(state.handle, encode(value, __thaw_transfer_of(transferOrOptions), state.token));
     }
 
     terminate() {
@@ -225,6 +230,9 @@
   // Events from the Rust poll (worker.rs `poll`), delivered by the event loop: [{handle, type, ...}].
   globalThis.__thaw_worker_dispatch = function (json) {
     for (const event of JSON.parse(json)) {
+      // port events have no handle: a port end of this thread, routed by the main thread (messaging.js)
+      if (event.type === 'port') { __thaw_port_deliver(event.addr, event.value); continue; }
+      if (event.type === 'portClose') { __thaw_port_hangup(event.addr); continue; }
       const worker = byHandle.get(event.handle);
       if (worker === undefined) continue;
       const state = states.get(worker);
