@@ -24,11 +24,8 @@
 
   const parentPort = new MessagePort();
   // Messages to the parent are wire strings; transferring ports between threads is not supported yet.
-  parentPort.postMessage = function postMessage(value, transferOrOptions = []) {
-    const transfer = Array.isArray(transferOrOptions) ? transferOrOptions
-      : (transferOrOptions && transferOrOptions.transfer) || [];
-    if (Array.from(transfer).length) throw new DOMException('Transferring ports to a worker parent is not supported', 'DataCloneError');
-    __thaw_worker_send(__thaw_worker_encode(value));
+  parentPort.postMessage = function postMessage(value, transferOrOptions) {
+    __thaw_worker_send(__thaw_worker_encode(value, __thaw_transfer_of(transferOrOptions)));
   };
 
   // postMessageToThread (W-D), this realm's copy of worker_threads.js's: the parent is the only thread a worker reaches.
@@ -72,20 +69,22 @@
       return Promise.reject(threadError('ERR_OUT_OF_RANGE', `The value of "timeout" is out of range. It must be >= 0. Received ${timeout}`, undefined, RangeError));
     }
     if (target === opts.threadId) return Promise.reject(threadError('ERR_WORKER_MESSAGING_SAME_THREAD', 'Cannot sent a message to the same thread'));
-    if (transferList !== undefined && Array.from(transferList).length) {
-      return Promise.reject(new DOMException('transfer lists are not supported on thaw-js yet', 'DataCloneError'));
-    }
+    let transfer;
+    try { transfer = __thaw_transfer_of(transferList); } catch (error) { return Promise.reject(error); }
+    // only the parent (0) is reachable from a worker. Node detaches the buffers even for another id (FAILED on a later
+    // turn), so the wire is encoded with them; that wire is released here, since nothing will decode it.
+    const reachable = target === 0;
     let wire;
-    try { wire = __thaw_worker_encode(value); } catch (error) { return Promise.reject(error); }
+    try { wire = __thaw_worker_encode(value, transfer); } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
       const ack = nextAck++;
       const entry = { resolve, reject, timer: undefined };
       pendingSends.set(ack, entry);
       sync();
       if (timeout !== undefined) entry.timer = setTimeout(() => settleSend(ack, 'timeout', ''), timeout);
-      // only the parent (0) is reachable from a worker; any other id is FAILED on a later turn than a zero timeout
-      if (target === 0) __thaw_worker_thread_to_parent(ack, wire);
-      else setTimeout(() => settleSend(ack, 'failed', ''), 0);
+      // any other id is FAILED on a later turn than a zero timeout
+      if (reachable) __thaw_worker_thread_to_parent(ack, wire);
+      else { __thaw_wire_release(wire); setTimeout(() => settleSend(ack, 'failed', ''), 0); }
     });
   }
 

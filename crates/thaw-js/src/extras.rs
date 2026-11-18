@@ -526,24 +526,46 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   Object.defineProperty(globalThis, '__thaw_clone_marks', {
     value: { untransferable: untransferableMarks, uncloneable: uncloneableMarks }, writable: false, enumerable: false, configurable: false
   });
+  // ----- transfer lists: postMessage, Worker and structuredClone share these checks (Node's messages) -----
+  var iterableObject = function (v) { return v !== null && typeof v === 'object' && typeof v[Symbol.iterator] === 'function'; };
+  var cloneErr = function (msg) {
+    if (typeof DOMException === 'function') return new DOMException(msg, 'DataCloneError');
+    var e = new Error(msg); e.name = 'DataCloneError'; return e;
+  };
+  var argErr = function (msg) { var e = new TypeError(msg); e.code = 'ERR_INVALID_ARG_TYPE'; return e; };
+  // The validated ArrayBuffers of a list (candidates in list order). The first bad entry throws; nothing is
+  // detached here: the caller detaches once its clone has succeeded.
+  var transferCheck = function (items) {
+    var list = [];
+    items.forEach(function (b) {
+      if (!(b instanceof ArrayBuffer)) throw cloneErr('Found invalid value in transferList.');
+      if (untransferableMarks.has(b) || detGet.call(b)) throw cloneErr('Cannot transfer object of unsupported type.');
+      if (list.indexOf(b) >= 0) throw cloneErr('Transfer list contains duplicate ArrayBuffer');
+      list.push(b);
+    });
+    return list;
+  };
+  globalThis.__thaw_transfer_check = transferCheck;
+  // postMessage's second argument: a transfer list, or an options object whose `transfer` is one
+  globalThis.__thaw_transfer_of = function (arg) {
+    if (arg === undefined || arg === null) return [];
+    if (iterableObject(arg)) return transferCheck(Array.from(arg));
+    if (typeof arg !== 'object') throw argErr('Optional transferList argument must be an iterable');
+    if (arg.transfer === undefined) return [];
+    if (!iterableObject(arg.transfer)) throw argErr('Optional options.transfer argument must be an iterable');
+    return transferCheck(Array.from(arg.transfer));
+  };
+
   globalThis.structuredClone = function structuredClone(value, options) {
     var seen = new Map();
-    function dataCloneError(msg) {
-      if (typeof DOMException === 'function') return new DOMException(msg, 'DataCloneError');
-      var e = new Error(msg); e.name = 'DataCloneError'; return e;
-    }
+    function dataCloneError(msg) { return cloneErr(msg); }
     // transfer: each buffer's copy is what the clone gets; the sources are detached only after the
     // whole clone succeeds, so a throwing value leaves them intact.
     var moves = [];
     if (options != null && options.transfer !== undefined) {
-      Array.from(options.transfer).forEach(function (b) {
-        if (untransferableMarks.has(b)) throw dataCloneError('Cannot transfer object of unsupported type.');
-        if (!(b instanceof ArrayBuffer)) throw dataCloneError('Found invalid value in transferList.');
-        if (moves.indexOf(b) >= 0) throw dataCloneError('Transfer list contains duplicate ArrayBuffer');
-        if (detGet.call(b)) throw dataCloneError('Cannot transfer object of unsupported type.');
-        moves.push(b);
-      });
-      moves.forEach(function (b) { seen.set(b, b.slice(0)); });
+      if (!iterableObject(options.transfer)) throw argErr("Failed to execute 'structuredClone': transfer in Options can not be converted to sequence.");
+      moves = transferCheck(Array.from(options.transfer));
+      moves.forEach(function (b) { seen.set(b, clone(b)); });
     }
     function clone(v) {
       if (typeof v === 'function' || typeof v === 'symbol') {
