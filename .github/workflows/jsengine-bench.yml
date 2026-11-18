@@ -17,6 +17,10 @@ on:
       runs:
         description: rounds per corpus program (each round runs QuickJS and thaw-js once, alternating); more rounds give a steadier paired ratio
         default: "5"
+      arena_ab:
+        description: run the malloc arena A/B legs (MALLOC_ARENA_MAX=1, informational), which are one extra micro benchmark pass and a second corpus pass for thaw-js only. Off skips both. PR runs always run them
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -118,6 +122,36 @@ jobs:
               echo
               echo "**Checksum mismatches with the thread backend:**"
               grep "checksum mismatch" "$RUNNER_TEMP/jsengine-thread.err" | sed 's/^/- /'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run benchmarks again with MALLOC_ARENA_MAX=1
+        # Same run, same runner: the A/B for glibc's malloc arena count. thaw-js runs the interpreter on a spawned
+        # thread, which allocates from a non-main arena; this leg exports MALLOC_ARENA_MAX=1 for the whole pass, so
+        # QuickJS runs under it too (its column is taken from the default pass). Informational only.
+        if: github.event_name != 'workflow_dispatch' || inputs.arena_ab
+        env:
+          MALLOC_ARENA_MAX: "1"
+        run: |
+          benchmarks/jsengine/run.sh -n 5 -o "$RUNNER_TEMP/jsengine-arena.tsv" 2> "$RUNNER_TEMP/jsengine-arena.err" || true
+          cat "$RUNNER_TEMP/jsengine-arena.err" || true
+      - name: Print malloc arena A/B summary
+        if: github.event_name != 'workflow_dispatch' || inputs.arena_ab
+        run: |
+          default="$RUNNER_TEMP/jsengine.tsv"; arena="$RUNNER_TEMP/jsengine-arena.tsv"
+          test -s "$arena" || { echo "no MALLOC_ARENA_MAX=1 TSV" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "## malloc arena A/B (MALLOC_ARENA_MAX=1 vs default, same run, best of 5)"
+            echo
+            echo "The quickjs column is from the default pass: MALLOC_ARENA_MAX=1 is exported to the whole arena pass."
+            echo
+            echo "| benchmark | default ms | arena=1 ms | speedup | quickjs ms |"
+            echo "|---|---|---|---|---|"
+            awk -F'\t' 'NR == FNR { if (FNR > 1 && $1 != "geomean") { base[$1] = $2; bq[$1] = $3 }; next }
+              FNR > 1 && $1 != "geomean" && ($1 in base) { printf "| %s | %s | %s | %.2fx | %s |\n", $1, base[$1], $2, (($2 + 0) > 0 ? base[$1] / $2 : 0), bq[$1] }' "$default" "$arena"
+            if grep -q "checksum mismatch" "$RUNNER_TEMP/jsengine-arena.err"; then
+              echo
+              echo "**Checksum mismatches with MALLOC_ARENA_MAX=1:**"
+              grep "checksum mismatch" "$RUNNER_TEMP/jsengine-arena.err" | sed 's/^/- /'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Print benchmark summary
@@ -322,6 +356,61 @@ jobs:
                 printf "- programs SKIPPED for a build failure (excluded from geomean/OVER): %d\n", skipped + 0
                 printf "%s", skiplist }' "$RUNNER_TEMP/corpus-ratios.tsv"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run corpus measurement again with MALLOC_ARENA_MAX=1 (thaw-js only)
+        # Same build and settings as the pass above. MEASURE_EXTRA_ENV reaches only the thaw-js timed runs (measure.sh
+        # wraps them in env; QuickJS runs never see it). Informational only.
+        if: steps.corpus.outputs.present == '1' && (github.event_name != 'workflow_dispatch' || inputs.arena_ab)
+        env:
+          THAW: ${{ github.workspace }}/target/release/thaw
+          THAW_SCAN: ${{ github.workspace }}/target/release/thaw-js-scan
+          SCRATCH: ${{ runner.temp }}/qjsq1-measure-arena
+          PK_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/pk
+          VERSIONS: ${{ github.workspace }}/tools/quickjs-removal/corpus/versions.txt
+          THAW_JS_COMPILE: ${{ (inputs.compile == 'off' || inputs.compile == 'on') && inputs.compile || '' }}
+          MEASURE_RUNS: ${{ inputs.runs || '5' }}
+          MEASURE_EXTRA_ENV: MALLOC_ARENA_MAX=1
+        run: |
+          tools/quickjs-removal/measure.sh --skip-node-compat -o "$RUNNER_TEMP/corpus-arena.tsv"
+      - name: Print malloc arena corpus A/B
+        if: steps.corpus.outputs.present == '1' && (github.event_name != 'workflow_dispatch' || inputs.arena_ab)
+        run: |
+          base="$RUNNER_TEMP/corpus.tsv"; arena="$RUNNER_TEMP/corpus-arena.tsv"
+          test -s "$arena" || { echo "no MALLOC_ARENA_MAX=1 corpus TSV" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "## malloc arena corpus A/B (thaw-js with MALLOC_ARENA_MAX=1 vs default, run_ms median; RSS is the max over rounds)"
+            echo
+            echo "Same thaw and thaw-js-scan binaries as the default pass; measure.sh rebuilds each program and re-measures QuickJS, but only the thaw-js timed runs get MALLOC_ARENA_MAX=1. Change is arena=1 / default - 1."
+            echo
+            echo "| program | default thaw-js ms | arena=1 thaw-js ms | change | default max RSS MB | arena=1 max RSS MB |"
+            echo "|---|---|---|---|---|---|"
+            # Emit one row per program: program default_ms arena_ms ratio status default_rss_mb arena_rss_mb.
+            awk -F'\t' '
+              $1 != "program" || $3 != "thaw-js" { next }
+              NR == FNR {
+                if ($4 == "run_ms") ams[$2] = $5
+                if ($4 == "rss_kb") arss[$2] = $5
+                if (($4 == "run_exit" && $5 != "0") || ($4 == "stdout_eq_node" && $5 != "1")) abad[$2] = 1
+                next
+              }
+              $4 == "run_ms" { dms[$2] = $5 }
+              $4 == "rss_kb" { drss[$2] = $5 }
+              ($4 == "run_exit" && $5 != "0") || ($4 == "stdout_eq_node" && $5 != "1") { dbad[$2] = 1 }
+              END {
+                for (p in dms) {
+                  a = (p in ams) ? ams[p] : ""
+                  ratio = (a != "" && dms[p] + 0 > 0) ? sprintf("%.4f", a / dms[p]) : ""
+                  status = ((p in dbad) || (p in abad)) ? "FAIL" : "ok"
+                  printf "%s\t%s\t%s\t%s\t%s\t%.1f\t%s\n", p, dms[p], a, ratio, status, drss[p] / 1024, (p in arss ? sprintf("%.1f", arss[p] / 1024) : "-")
+                }
+              }' "$arena" "$base" | sort | awk -F'\t' '
+              {
+                change = ($4 == "" ? "-" : sprintf("%+.1f%%", ($4 - 1) * 100))
+                if ($5 == "FAIL") change = change " FAIL"
+                printf "| %s | %s | %s | %s | %s | %s |\n", $1, $2, ($3 == "" ? "-" : $3), change, $6, $7
+                if ($4 != "" && $5 != "FAIL") { g += log($4); n++ }
+              }
+              END { if (n) printf "\n- geomean change over %d programs (FAIL rows excluded): %+.1f%%\n", n, (exp(g / n) - 1) * 100 }'
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -334,4 +423,17 @@ jobs:
           # Whole measure.sh scratch output: per-program .build, .stderr, .stdout, .node, .time, .inspect, add logs.
           name: jsengine-corpus-logs
           path: ${{ runner.temp }}/qjsq1-measure/out
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.corpus.outputs.present == '1' && (github.event_name != 'workflow_dispatch' || inputs.arena_ab)
+        with:
+          name: jsengine-corpus-arena-tsv
+          path: ${{ runner.temp }}/corpus-arena.tsv
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.corpus.outputs.present == '1' && (github.event_name != 'workflow_dispatch' || inputs.arena_ab)
+        with:
+          # Scratch output of the MALLOC_ARENA_MAX=1 pass (its own SCRATCH, so it does not overwrite the default logs).
+          name: jsengine-corpus-arena-logs
+          path: ${{ runner.temp }}/qjsq1-measure-arena/out
           if-no-files-found: ignore
