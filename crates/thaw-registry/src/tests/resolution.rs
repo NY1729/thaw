@@ -5236,6 +5236,11 @@ fn builtin_declared_classes_are_bundle_exports() {
         "url",
         "events",
         "fs",
+        "dns",
+        "net",
+        "http",
+        "https",
+        "util",
     ];
     let mut missing = Vec::new();
     for specifier in specifiers {
@@ -6055,26 +6060,64 @@ fn node_sqlite_is_prefix_only_with_its_declarations_and_natives() {
     assert!(bundle.contains("'SQLite is an experimental feature and might change at any time'"));
 }
 
-#[test]
-fn first_slice_builtin_declarations_cover_every_node_export() {
-    // Every export Node 22 has for these modules must be declared by the ambient d.ts; an
-    // undeclared member reads as `undefined` in typed code (see tools/parity-aot/README.md).
+/// `module export` pairs (Node 22.23.1, tools/parity-aot/module_table.tsv) that the ambient
+/// d.ts of `modules` does not declare.
+fn undeclared_builtin_exports(modules: &[&str]) -> Vec<String> {
     let table = include_str!("../../../../tools/parity-aot/module_table.tsv");
-    let slice = ["node:fs", "node:fs/promises", "node:zlib", "node:buffer", "node:events"];
     let mut missing = Vec::new();
-    for module in slice {
+    for module in modules.iter().copied() {
         let declared = resolve_builtin(module).unwrap().dts_source;
         let names: std::collections::BTreeSet<&str> = declared
             .lines()
             .filter_map(|line| line.strip_prefix("export declare ").or_else(|| line.strip_prefix("export interface ")))
-            .filter_map(|rest| rest.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).find(|w| !w.is_empty() && !matches!(*w, "function" | "class" | "const" | "let" | "var" | "namespace" | "interface" | "type" | "enum" | "async")))
+            .filter_map(|rest| {
+                // Only the leading keyword is skipped: `function type(...)` declares `type`.
+                let rest = rest.trim_start_matches("async ");
+                let rest = ["function ", "class ", "const ", "let ", "var ", "namespace ", "interface ", "type ", "enum "]
+                    .iter()
+                    .find_map(|&keyword| rest.strip_prefix(keyword))
+                    .unwrap_or(rest);
+                rest.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).find(|w| !w.is_empty())
+            })
             .collect();
         for row in table.lines().skip(1) {
             let cells: Vec<&str> = row.split('\t').collect();
-            if cells.first() == Some(&module) && !names.contains(cells[1]) {
+            // Symbol-keyed rows (`process @@kCapture`) are not identifiers, so they cannot be declared.
+            if cells.first() == Some(&module) && !cells[1].starts_with("@@") && !names.contains(cells[1]) {
                 missing.push(format!("{module} {}", cells[1]));
             }
         }
     }
+    missing
+}
+
+#[test]
+fn first_slice_builtin_declarations_cover_every_node_export() {
+    // Every export Node 22 has for these modules must be declared by the ambient d.ts; an
+    // undeclared member reads as `undefined` in typed code (see tools/parity-aot/README.md).
+    let missing = undeclared_builtin_exports(&["node:fs", "node:fs/promises", "node:zlib", "node:buffer", "node:events"]);
+    assert!(missing.is_empty(), "undeclared Node exports ({}): {}", missing.len(), missing.join(", "));
+}
+
+#[test]
+fn second_slice_builtin_declarations_cover_every_node_export() {
+    // Second slice (F1b): the modules whose every Node export is declared. Left out because a
+    // runtime-missing export must stay undeclared: `node:process` (mainModule), `node:readline`
+    // (promises), `node:url` (Url), `node:http` (OutgoingMessage), `node:util` (MIMEParams, MIMEType).
+    let missing = undeclared_builtin_exports(&[
+        "node:constants",
+        "node:dns",
+        "node:tls",
+        "node:punycode",
+        "node:worker_threads",
+        "node:https",
+        "node:net",
+        "node:os",
+        "node:path",
+        "node:child_process",
+        "node:crypto",
+        "node:stream",
+        "node:vm",
+    ]);
     assert!(missing.is_empty(), "undeclared Node exports ({}): {}", missing.len(), missing.join(", "));
 }
