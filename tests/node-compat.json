@@ -5072,6 +5072,12 @@
       "name": "node:sqlite file database reopened read-only",
       "expect": "matched",
       "source": "import { DatabaseSync } from 'node:sqlite';\nimport * as fs from 'node:fs';\nimport * as os from 'node:os';\nimport * as path from 'node:path';\nfunction main(): void {\n  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlite-compat-'));\n  const file = path.join(dir, 'data.db');\n  const db = new DatabaseSync(file);\n  db.exec(\"CREATE TABLE k (v TEXT); INSERT INTO k VALUES ('one')\");\n  console.log(String(db.location()) === file, db.isOpen);\n  db.close();\n  const ro = new DatabaseSync(file, { readOnly: true });\n  console.log((ro.prepare('SELECT v FROM k').get() as any).v);\n  try { ro.exec(\"INSERT INTO k VALUES ('two')\"); } catch (e: any) { console.log(e.code, e.errcode, e.errstr); }\n  ro.close();\n  fs.rmSync(dir, { recursive: true, force: true });\n}"
-    }
+    },
+  {
+    "name": "async_hooks promise async function awaits with a timer",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nasync function work(): Promise<void> { console.log('a'); await 1; console.log('b'); await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 1); }); console.log('c'); }\nfunction main(): void { setTimeout((): void => { const hook = trace(); work(); setTimeout((): void => { console.log('timer'); }, 0); setTimeout((): void => { hook.disable(); }, 30); }, 0); }"
+  }
   ]
 }

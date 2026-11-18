@@ -157,6 +157,12 @@ fn new_promise_linked(source: *const ThawPromise) -> *mut ThawPromise {
 
 fn new_promise_with_trigger(trigger_key: u64) -> *mut ThawPromise {
     let hook_key = async_hook_new_key();
+    // An untriggered promise right after `thaw_promise_await_outer` is that await's value wrapper.
+    let trigger_key = if trigger_key == 0 {
+        AWAIT_OUTER.with(|outer| outer.replace(0))
+    } else {
+        trigger_key
+    };
     let promise = Box::into_raw(Box::new(ThawPromise {
         result: None,
         fulfilled_provenance: std::ptr::null(),

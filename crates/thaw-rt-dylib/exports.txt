@@ -532,6 +532,7 @@ thaw_promise_all_slots
 thaw_promise_all_typed
 thaw_promise_any
 thaw_promise_arena_slot_replace
+thaw_promise_await_outer
 thaw_promise_chain
 thaw_promise_chain_both
 thaw_promise_destroy

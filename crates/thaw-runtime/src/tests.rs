@@ -5484,6 +5484,42 @@ fn native_promise_hooks_await_runs_as_a_throwaway_promise_resolved_after_the_con
 }
 
 #[test]
+fn native_promise_hooks_await_wrapper_of_a_literal_is_triggered_by_the_async_function() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    take_hook_events();
+    thaw_runtime_async_hooks_set(1, Some(record_hook_event));
+    let outer = thaw_promise_new();
+    let ko = unsafe { (*outer).hook_key };
+    take_hook_events();
+    // Two sequential `await <literal>` in one async function: both wrappers take the function's promise.
+    let mut wrappers = Vec::new();
+    for _ in 0..2 {
+        unsafe { thaw_promise_await_outer(outer) };
+        let wrapper = thaw_promise_new();
+        wrappers.push(unsafe { (*wrapper).hook_key });
+        unsafe { thaw_promise_destroy(wrapper) };
+    }
+    assert_eq!(
+        take_hook_events(),
+        wrappers.iter().map(|&kw| (0, kw, ko)).collect::<Vec<_>>(),
+        "a plain await's value wrapper is triggered by the async function's own promise"
+    );
+    // The outer is consumed: an ordinary promise created later is triggered by the current execution.
+    let later = thaw_promise_new();
+    assert_eq!(
+        take_hook_events(),
+        vec![(0, unsafe { (*later).hook_key }, 0)]
+    );
+    thaw_runtime_async_hooks_set(0, None);
+    unsafe {
+        thaw_promise_destroy(later);
+        thaw_promise_destroy(outer);
+    }
+}
+
+#[test]
 fn native_promise_hooks_stay_silent_for_linked_promises_while_off() {
     let _guard = HOOK_TEST_LOCK
         .lock()
