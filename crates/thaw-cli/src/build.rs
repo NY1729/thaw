@@ -1066,6 +1066,8 @@ fn build_with_native_mode_routed(
             || (thaw_js_user_dynamic_enabled() && source_uses_quickjs(&user_source))
             || thaw_js_route_all_enabled());
     thaw_hir::set_thaw_js_routed(thaw_js_route);
+    // `SHARE_ENV` shares the environment table with a worker: `process.env.NAME` must read that table
+    thaw_hir::set_shared_env_program(user_source.contains("SHARE_ENV"));
     let mut program = thaw_hir::lower_module(&module)?;
     for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
         let param_count = program

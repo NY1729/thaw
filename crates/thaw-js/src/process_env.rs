@@ -1,20 +1,91 @@
-//! `process.env`: a Proxy whose traps read and write the real process environment (std::env, which
-//! is the libc environ with getenv/setenv/unsetenv). JS reads and writes, `in`, enumeration, `delete`
-//! and the compiled `process.env.NAME` read (libc getenv) therefore share one table.
-//! Inspection (`console.log(process.env)`) renders the live environment through `env_view`.
+//! `process.env`: a Proxy whose traps read and write an environment table. Without a table (the main realm
+//! until a `SHARE_ENV` worker exists) the table is the real process environment (std::env, the libc environ that
+//! getenv reads). A worker realm has its own table: a copy-mode worker a private one, a `SHARE_ENV` worker the
+//! table of the thread that spawned it (`worker.rs`), so writes cross threads without touching the environ.
+//! Inspection (`console.log(process.env)`) renders the live table through `process_env_view`.
+//! ponytail: once a table is shared, the libc environ does not see its writes (native getenv): the one deviation.
 
 use crate::host::cstr;
 use crate::proxy::ProxyData;
 use crate::*;
+use std::collections::BTreeMap;
 use std::ffi::c_char;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+/// An environment table: the one `process.env` of every realm that shares it.
+pub(crate) type EnvTable = Arc<Mutex<BTreeMap<String, String>>>;
 
 /// Names setenv accepts: non-empty and without `=`.
 fn settable(name: &str) -> bool {
     !name.is_empty() && !name.contains('=') && !name.contains('\0')
 }
 
-fn env_get(name: &str) -> Option<String> {
-    std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
+fn table(t: &EnvTable) -> MutexGuard<'_, BTreeMap<String, String>> {
+    t.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The table `process.env` of this realm reads and writes.
+fn environment_entries(it: &Interp) -> Vec<(String, String)> {
+    match &it.worker.env_table {
+        Some(t) => table(t)
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        None => std::env::vars_os()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn env_get(it: &Interp, name: &str) -> Option<String> {
+    match &it.worker.env_table {
+        Some(t) => table(t).get(name).cloned(),
+        None => std::env::var_os(name).map(|v| v.to_string_lossy().into_owned()),
+    }
+}
+
+fn env_set(it: &Interp, name: &str, value: &str) {
+    match &it.worker.env_table {
+        Some(t) => {
+            table(t).insert(name.to_string(), value.to_string());
+        }
+        None => std::env::set_var(name, value),
+    }
+}
+
+fn env_remove(it: &Interp, name: &str) {
+    match &it.worker.env_table {
+        Some(t) => {
+            table(t).remove(name);
+        }
+        None => std::env::remove_var(name),
+    }
+}
+
+/// The table `SHARE_ENV` workers spawned by this realm share: created from the environment on first use.
+pub(crate) fn share_env_table(it: &mut Interp) -> EnvTable {
+    it.worker
+        .env_table
+        .get_or_insert_with(|| {
+            let entries = std::env::vars_os().map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            });
+            Arc::new(Mutex::new(entries.collect()))
+        })
+        .clone()
+}
+
+/// A realm's private table (a copy-mode worker's environment, filled by the bootstrap).
+pub(crate) fn private_env_table() -> EnvTable {
+    Arc::new(Mutex::new(BTreeMap::new()))
 }
 
 fn key_of(it: &mut Interp, key: &Value) -> Option<String> {
@@ -28,17 +99,13 @@ impl Interp {
     /// A plain object holding the live environment in environ order: what `process.env` shows when inspected.
     pub(crate) fn process_env_view(&self) -> Obj {
         let view = self.plain();
-        for (k, v) in std::env::vars_os() {
-            put(
-                &view,
-                &k.to_string_lossy(),
-                Value::str(&v.to_string_lossy()),
-            );
+        for (k, v) in environment_entries(self) {
+            put(&view, &k, Value::str(&v));
         }
         view
     }
 
-    /// The `process.env` object: a Proxy over an empty target whose traps answer from the environment.
+    /// The `process.env` object: a Proxy over an empty target whose traps answer from this realm's table.
     pub(crate) fn make_process_env(&self) -> Value {
         let target = self.plain();
         let proto = target.proto.borrow().clone();
@@ -47,7 +114,7 @@ impl Interp {
             let Some(k) = key_of(it, &arg(a, 1)) else {
                 return Ok(Value::Undefined);
             };
-            match env_get(&k) {
+            match env_get(it, &k) {
                 Some(v) => Ok(Value::str(&v)),
                 // not in the environment: the prototype chain (hasOwnProperty, toString, ...)
                 None => it.get(&arg(a, 0), &k),
@@ -58,7 +125,7 @@ impl Interp {
                 // Node stores every value as its string form: 5 -> '5', undefined -> 'undefined'
                 let text = it.to_str(&arg(a, 2)).to_string();
                 if settable(&k) && !text.contains('\0') {
-                    std::env::set_var(&k, &text);
+                    env_set(it, &k, &text);
                 }
             }
             Ok(Value::Bool(true))
@@ -67,7 +134,7 @@ impl Interp {
             let Some(k) = key_of(it, &arg(a, 1)) else {
                 return Ok(Value::Bool(false));
             };
-            if env_get(&k).is_some() {
+            if env_get(it, &k).is_some() {
                 return Ok(Value::Bool(true));
             }
             Ok(Value::Bool(it.has_property(&arg(a, 0), &k)?))
@@ -75,19 +142,20 @@ impl Interp {
         self.set_native(&handler, "deleteProperty", |it, _, a| {
             if let Some(k) = key_of(it, &arg(a, 1)) {
                 if settable(&k) {
-                    std::env::remove_var(&k);
+                    env_remove(it, &k);
                 }
             }
             Ok(Value::Bool(true))
         });
         self.set_native(&handler, "ownKeys", |it, _, _| {
-            let names = std::env::vars_os()
-                .map(|(k, _)| Value::str(&k.to_string_lossy()))
+            let names = environment_entries(it)
+                .into_iter()
+                .map(|(k, _)| Value::str(&k))
                 .collect();
             Ok(it.array(names))
         });
         self.set_native(&handler, "getOwnPropertyDescriptor", |it, _, a| {
-            let Some(v) = key_of(it, &arg(a, 1)).and_then(|k| env_get(&k)) else {
+            let Some(v) = key_of(it, &arg(a, 1)).and_then(|k| env_get(it, &k)) else {
                 return Ok(Value::Undefined);
             };
             let d = it.plain();
@@ -171,10 +239,10 @@ pub(crate) fn parse_dotenv(src: &str) -> Vec<(String, String)> {
 
 /// `process.loadEnvFile` assignment: each parsed pair whose name is not already in the environment (a preset
 /// value, even an empty one, wins over the file).
-pub(crate) fn apply_dotenv(src: &str) {
+pub(crate) fn apply_dotenv(it: &Interp, src: &str) {
     for (k, v) in parse_dotenv(src) {
-        if env_get(&k).is_none() && settable(&k) && !v.contains('\0') {
-            std::env::set_var(&k, &v);
+        if env_get(it, &k).is_none() && settable(&k) && !v.contains('\0') {
+            env_set(it, &k, &v);
         }
     }
 }
