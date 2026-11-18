@@ -306,3 +306,119 @@ fn terminate_stops_a_worker_blocked_in_an_infinite_atomics_wait() {
       })().catch((e) => console.log('failed ' + e));";
     assert_eq!(run_main(src), "exit 1");
 }
+
+// postMessageToThread (W-D). The expected lines are the output of the same programs under Node 22.23.1.
+
+#[test]
+fn post_message_to_thread_round_trips_between_main_and_workers() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      (async () => {
+        process.on('workerMessage', (value, src) => console.log('main workerMessage', JSON.stringify(value), src));
+        const echo = new wt.Worker(`
+          const wt = require('node:worker_threads');
+          const keep = setTimeout(() => {}, 400);
+          process.on('workerMessage', (value, src) => {
+            wt.parentPort.postMessage('worker got ' + JSON.stringify(value) + ' from ' + src);
+            setTimeout(() => wt.postMessageToThread(0, { back: value.hello }).then((r) => { wt.parentPort.postMessage('worker send ' + r); }, (e) => wt.parentPort.postMessage('worker send ' + e.code)), 50);
+          });
+          wt.parentPort.postMessage('ready');
+        `, { eval: true });
+        echo.on('message', (m) => console.log('from echo:', m));
+        await new Promise((resolve) => echo.on('message', (m) => { if (m === 'ready') resolve(); }));
+        const sent = await wt.postMessageToThread(echo.threadId, { hello: 'worker' });
+        console.log('A main send resolved', sent);
+        await new Promise((resolve) => echo.on('exit', resolve));
+        const sender = new wt.Worker(`
+          const wt = require('node:worker_threads');
+          wt.parentPort.on('message', (go) => {
+            wt.postMessageToThread(0, { from: 'sender', go }).then((r) => { wt.parentPort.postMessage('sender resolved ' + r); wt.parentPort.close(); }, (e) => { wt.parentPort.postMessage('sender ' + e.code); wt.parentPort.close(); });
+          });
+          wt.parentPort.postMessage('ready');
+        `, { eval: true });
+        await new Promise((resolve) => sender.on('message', (m) => { if (m === 'ready') resolve(); }));
+        sender.postMessage('go');
+        await new Promise((resolve) => sender.on('message', (m) => { console.log('from sender:', m); }).on('exit', resolve));
+        console.log('done');
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        "from echo: ready|from echo: worker got {\"hello\":\"worker\"} from 0|A main send resolved undefined|main workerMessage {\"back\":\"worker\"} 1|from echo: worker send undefined|main workerMessage {\"from\":\"sender\",\"go\":\"go\"} 2|from sender: sender resolved undefined|done"
+    );
+}
+
+#[test]
+fn post_message_to_thread_rejects_with_the_node_messaging_codes() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      const settle = (label, p) => p.then((v) => console.log(label, 'resolved', v), (e) => console.log(label, e.name, e.code, JSON.stringify(e.message)));
+      (async () => {
+        await settle('same thread', wt.postMessageToThread(0, 1));
+        await settle('unknown id', wt.postMessageToThread(99, 1));
+        const bare = new wt.Worker(`
+          const wt = require('node:worker_threads');
+          setTimeout(() => {}, 400);
+          wt.parentPort.postMessage('bare ready');
+        `, { eval: true });
+        await new Promise((resolve) => bare.on('message', resolve));
+        await settle('no listener', wt.postMessageToThread(bare.threadId, 'x'));
+        const thrower = new wt.Worker(`
+          const wt = require('node:worker_threads');
+          process.on('workerMessage', () => { throw new Error('boom'); });
+          setTimeout(() => {}, 400);
+          wt.parentPort.postMessage('thrower ready');
+        `, { eval: true });
+        await new Promise((resolve) => thrower.on('message', resolve));
+        await settle('listener throws', wt.postMessageToThread(thrower.threadId, 'x'));
+        const busy = new wt.Worker(`
+          const wt = require('node:worker_threads');
+          process.on('workerMessage', () => {});
+          wt.parentPort.postMessage('busy started');
+          const end = Date.now() + 600; while (Date.now() < end) {}
+        `, { eval: true });
+        await new Promise((resolve) => busy.on('message', resolve));
+        await settle('timeout', wt.postMessageToThread(busy.threadId, 'x', [], 50));
+        console.log('done');
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        "same thread Error ERR_WORKER_MESSAGING_SAME_THREAD \"Cannot sent a message to the same thread\"|unknown id Error ERR_WORKER_MESSAGING_FAILED \"Cannot find the destination thread or listener\"|no listener Error ERR_WORKER_MESSAGING_FAILED \"Cannot find the destination thread or listener\"|listener throws Error ERR_WORKER_MESSAGING_ERRORED \"The destination thread threw an error while processing the message\"|timeout Error ERR_WORKER_MESSAGING_TIMEOUT \"Sending a message to another thread timed out\"|done"
+    );
+}
+
+#[test]
+fn is_internal_thread_is_false_and_argument_errors_are_async() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      const settle = (label, p) => p.then((v) => console.log(label, 'resolved', v), (e) => console.log(label, e.name, e.code, JSON.stringify(e.message)));
+      (async () => {
+        console.log('isInternalThread main', wt.isInternalThread);
+        const worker = new wt.Worker(`
+          const wt = require('node:worker_threads');
+          wt.parentPort.postMessage('isInternalThread in worker ' + wt.isInternalThread + ' threadId ' + wt.threadId);
+        `, { eval: true });
+        worker.on('message', (m) => console.log(m));
+        await new Promise((resolve) => worker.on('exit', resolve));
+        await settle('timeout type', wt.postMessageToThread(99, 1, [], 'soon'));
+        await settle('timeout range', wt.postMessageToThread(99, 1, [], -1));
+        await settle('timeout zero unknown', wt.postMessageToThread(99, 1, [], 0));
+        console.log('done');
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        "isInternalThread main false|isInternalThread in worker false threadId 1|timeout type TypeError ERR_INVALID_ARG_TYPE \"The \\\"timeout\\\" argument must be of type number. Received type string ('soon')\"|timeout range RangeError ERR_OUT_OF_RANGE \"The value of \\\"timeout\\\" is out of range. It must be >= 0. Received -1\"|timeout zero unknown Error ERR_WORKER_MESSAGING_TIMEOUT \"Sending a message to another thread timed out\"|done"
+    );
+}
+
+#[test]
+fn post_message_to_thread_refuses_transfer_lists_as_before() {
+    // not Node parity (Node transfers the buffer): the thaw-specific not-supported error, as Worker.postMessage gives
+    let src = "const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const worker = new wt.Worker('setTimeout(() => {}, 100)', { eval: true });
+        try { await wt.postMessageToThread(worker.threadId, { a: 1 }, [new ArrayBuffer(1)]); console.log('resolved'); }
+        catch (e) { console.log(e.name, e.message); }
+        await new Promise((resolve) => worker.on('exit', resolve));
+      })().catch((e) => console.log('failed ' + e));";
+    assert_eq!(
+        run_main(src),
+        "DataCloneError transfer lists are not supported on thaw-js yet"
+    );
+}
