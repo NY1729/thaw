@@ -5188,6 +5188,24 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "import { MessageChannel } from 'node:worker_threads';\n\nfunction err(f: () => unknown): string {\n  try { const r = f(); return 'ok ' + String(r); } catch (e: any) { return `threw ${e?.name} code=${e?.code} ${JSON.stringify(e?.message ?? String(e))}`; }\n}\n\nfunction main(): void {\n  const c = new MessageChannel();\n  const d = new MessageChannel();\n  console.log('live return', c.port1.postMessage('a'));\n  console.log('transfer', err(() => c.port1.postMessage(1, [d.port1])));\n  console.log('again', err(() => c.port1.postMessage(1, [d.port1])));\n  console.log('dup', err(() => c.port1.postMessage(1, [d.port2, d.port2])));\n  console.log('own', err(() => c.port1.postMessage(1, [c.port1])));\n  console.log('own options', err(() => c.port1.postMessage(1, { transfer: [c.port1] })));\n  console.log('unlisted', err(() => c.port1.postMessage({ p: d.port2 })));\n  const e = new MessageChannel();\n  e.port1.close();\n  console.log('closed', err(() => c.port1.postMessage(1, [e.port1])));\n  console.log('closed return', err(() => e.port1.postMessage(2)));\n  console.log('bad', err(() => c.port1.postMessage(1, [{} as any])));\n  console.log('non-iterable', err(() => c.port1.postMessage(1, 'x' as any)));\n  console.log('transferred copy', err(() => d.port1.postMessage('x')));\n  c.port1.close();\n  c.port2.close();\n  d.port2.close();\n}"
+  },
+  {
+    "name": "node:os signals/errno and node:constants values match Node",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as os from 'node:os';\nimport * as C from 'node:constants';\nfunction main(): void {\n  console.log(typeof os.constants.signals.SIGINT, os.constants.signals.SIGINT, os.constants.errno.ENOENT);\n  console.log(typeof C.O_CREAT, C.O_CREAT, C.E2BIG, C.SIGTERM, C.S_IFMT, C.RTLD_NOW, typeof C.defaultCoreCipherList);\n}"
+  },
+  {
+    "name": "process platform, arch and debugPort match Node",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  console.log(process.platform, process.arch, process.debugPort, typeof process.version);\n}"
+  },
+  {
+    "name": "node:dns error codes and node:tls defaults match Node",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as dns from 'node:dns';\nimport * as tls from 'node:tls';\nfunction main(): void {\n  console.log(dns.ALL, dns.V4MAPPED, dns.ADDRCONFIG, dns.BADFLAGS, typeof dns.Resolver);\n  console.log(tls.DEFAULT_ECDH_CURVE, tls.DEFAULT_MIN_VERSION, tls.CLIENT_RENEG_LIMIT, typeof tls.SecureContext);\n}"
   }
 ]
 }
