@@ -1676,6 +1676,7 @@ impl Interp {
         it.compile_after =
             compile::parse_after(std::env::var("THAW_JS_COMPILE_AFTER").ok().as_deref());
         crate::mem_trace::mem_trace_report("after-build");
+        crate::gc::arm_for_thread();
         it
     }
 
@@ -1707,6 +1708,9 @@ impl Interp {
     /// are sampled every 1024 checks. Also the point where a worker's interrupt is observed.
     #[inline]
     pub(crate) fn check_deadline(&mut self) -> R<()> {
+        if crate::gc_registry::due() {
+            self.gc_safe_point();
+        }
         self.check_interrupt()?;
         let Some(d) = self.deadline else {
             return Ok(());
@@ -5873,6 +5877,8 @@ mod fetch_tests;
 mod fs_tests;
 #[cfg(test)]
 mod function_legacy_props_tests;
+#[cfg(test)]
+mod gc_trigger_tests;
 #[cfg(test)]
 mod gc_yup_tests;
 #[cfg(test)]

@@ -5136,6 +5136,7 @@ mod napi_dispatch_owner_scope_tests {
                 index: 0,
                 callback: Some(invoke_arena_callback),
                 context: context.cast(),
+                identity: context.cast(),
             };
             let result = thaw_napi_call_with_functions_typed_result(
                 c"napi-owner-scope::capture".as_ptr(),
@@ -5242,6 +5243,7 @@ mod napi_dispatch_owner_scope_tests {
                 index: 0,
                 callback: Some(unused_arena_callback),
                 context: ptr::null_mut(),
+                identity: ptr::null_mut(),
             };
             let first_result = thaw_napi_call_with_functions_typed_result(
                 c"napi-owner-scope::cache".as_ptr(),
@@ -5312,6 +5314,7 @@ mod napi_dispatch_owner_scope_tests {
                 index: 0,
                 callback: Some(unused_arena_callback),
                 context: ptr::null_mut(),
+                identity: ptr::null_mut(),
             };
             let result = thaw_napi_call_with_functions_typed_result(
                 c"napi-owner-scope::shutdown-cache".as_ptr(),

@@ -827,8 +827,8 @@ const THAW_JS_BUILTIN_MODULES: &[&str] = &[
 ];
 
 
-/// Native addons thaw-js cannot serve yet: `argon2` needs a live owner for its native exports, and
-/// `@parcel/watcher` subscription events are never delivered on thaw-js. Both stay on QuickJS.
+/// Native addons thaw-js cannot serve yet: `@parcel/watcher` subscription events are never delivered on
+/// thaw-js, so it stays on QuickJS. `argon2` is served on thaw-js (its native exports have live owners).
 fn thaw_js_unready_addon_blocker(pkg_name: &str) -> Option<&'static str> {
     // PROBE (draft, do not merge): the guard is off so the npm-integration shards show which layer really fails
     let _ = pkg_name;
