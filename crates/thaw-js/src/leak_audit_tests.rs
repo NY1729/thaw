@@ -1145,7 +1145,11 @@ fn stress(async_rounds: bool) {
             "round {r}: checksum mismatch"
         );
         it.collect_cycles();
-        ok(it.run_event_loop(), "run_event_loop");
+        // A realm runs its event loop once: a later `run_event_loop` returns at once (`exit_emitted`), so the async
+        // rounds drain their jobs in one call after the loop.
+        if !async_rounds {
+            ok(it.run_event_loop(), "run_event_loop");
+        }
         if r % 2 == 1 {
             run_script(&mut it, "stress", "drop_half()");
             let good = run_script(&mut it, "stress", "checksum()");
@@ -1154,6 +1158,9 @@ fn stress(async_rounds: bool) {
                 "round {r}: checksum after drop"
             );
         }
+    }
+    if async_rounds {
+        ok(it.run_event_loop(), "run_event_loop");
     }
     run_script(&mut it, "stress", "keep.length=0; vals.length=0");
     it.collect_cycles();
@@ -1167,9 +1174,281 @@ fn gc_stress_interleaved() {
 }
 
 #[test]
-#[ignore = "Promise is an opaque kind (not enumerated in PR-1): after 50 async rounds 98 Promise objects remain, and \
-            they remain with no collection run at all (only event-loop turns), so that part is not a collector \
-            regression; the .then closures and their round scopes (49 each) stay with their promises"]
 fn gc_stress_async_rounds() {
     stress(true);
+}
+
+// PR-3b control kinds (Promise, Generator): garbage cycles go flat after one collection.
+
+#[test]
+fn gc_flat_promise_then_closes_over_promise() {
+    assert_flat_after_cycles(
+        "promise_then_closes",
+        "const N=2000; function mk(){ var p=new Promise(()=>{}); p.then(function(){ p; }); return 0 }",
+        PROBE_LOOP,
+    );
+}
+
+#[test]
+fn gc_flat_pending_promise_chain() {
+    assert_flat_after_cycles(
+        "promise_chain",
+        "const N=2000; function mk(){ var p1=new Promise(()=>{}); var p2=p1.then(function(){ return p2 }); var p3=p2.then(function(){ return p3 }); return 0 }",
+        PROBE_LOOP,
+    );
+}
+
+#[test]
+fn gc_flat_promise_all_pending_cycle() {
+    assert_flat_after_cycles(
+        "promise_all_cycle",
+        "const N=2000; function mk(){ var a=new Promise(()=>{}); var b=new Promise(()=>{}); a.o=[a,b]; b.o=a; Promise.all([a,b]); return 0 }",
+        PROBE_LOOP,
+    );
+}
+
+#[test]
+fn gc_flat_never_started_generator_cycle() {
+    assert_flat_after_cycles(
+        "gen_unstarted_cycle",
+        "const N=2000; function mk(){ var it=(function*(){ yield it })(); return 0 }",
+        PROBE_LOOP,
+    );
+}
+
+/// Boundary, not a flat case: an async function suspended forever on a promise that closes over itself. Its frame
+/// (the coroutine's Rust stack) holds strong `Rc`s to its scope, so the cycle is a root and stays until PR-4
+/// (cancel-on-drop). The test pins that it survives collection and the program stays usable.
+#[test]
+fn gc_async_never_settles_is_kept_until_pr4() {
+    crate::gc::force_enabled();
+    let mut it = Interp::new();
+    crate::gc::no_auto();
+    run_script(
+        &mut it,
+        "async_kept",
+        "async function af(){ var p=new Promise(()=>{}); p.self=p; await p; } globalThis.mk=function(){ af(); return 0 };",
+    );
+    it.collect_cycles();
+    let base = live_counts();
+    run_script(&mut it, "async_kept", "for(let i=0;i<200;i++){ mk(); }");
+    it.collect_cycles();
+    assert!(
+        live_counts().0 > base.0,
+        "a suspended async frame's cycle is a root (PR-4 frees it)"
+    );
+    ok(it.run_event_loop(), "run_event_loop");
+    check_invariants().unwrap();
+}
+
+/// A started, unfinished generator is opaque: its frame holds the scope, so the collector never clears it. Dropping
+/// the garbage generator leaks its frame exactly as before; the test only pins that collection keeps it usable.
+#[test]
+fn gc_started_generator_garbage_is_a_root() {
+    crate::gc::force_enabled();
+    crate::gc::no_auto();
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        "started_gen",
+        "globalThis.keepit=null; globalThis.mk=function(){ var it=(function*(){ var o={}; o.f=()=>o; yield 1; yield o.f().self }).call(null); it.next(); it.self=it; return 0 };",
+    );
+    for _ in 0..50 {
+        run_script(&mut it, "started_gen", "mk()");
+        it.collect_cycles();
+    }
+    check_invariants().unwrap();
+}
+
+#[test]
+fn gc_flat_finished_generator_cycle() {
+    assert_flat_after_cycles(
+        "gen_finished_cycle",
+        "const N=2000; function mk(){ var it=(function*(){ yield 1 })(); it.self=it; for(var x of it){} return 0 }",
+        PROBE_LOOP,
+    );
+}
+
+// Negative: each must survive collection and stay usable.
+
+#[test]
+fn gc_timer_resolves_promise_held_by_queue() {
+    crate::gc::force_enabled();
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        "timer_promise",
+        "function mk(){ var o={a:3}; o.f=()=>o; var p=new Promise(function(r){ o.r=r }); \
+         setTimeout(function(){ o.r(o.a+1) },0); return p.then(function(x){ globalThis.out=x }) } mk();",
+    );
+    it.collect_cycles();
+    ok(it.run_event_loop(), "run_event_loop");
+    assert_eq!(number(&run_script(&mut it, "timer_promise", "out")), 4.0);
+    check_invariants().unwrap();
+}
+
+#[test]
+fn gc_async_suspended_on_timer_resumes() {
+    crate::gc::force_enabled();
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        "async_timer",
+        "async function af(){ var o={a:5}; o.f=()=>o; await new Promise(function(r){ setTimeout(r,0) }); globalThis.out=o.f().a; } af();",
+    );
+    it.collect_cycles();
+    it.collect_cycles();
+    it.collect_cycles();
+    ok(it.run_event_loop(), "run_event_loop");
+    assert_eq!(number(&run_script(&mut it, "async_timer", "out")), 5.0);
+    check_invariants().unwrap();
+}
+
+#[test]
+fn gc_suspended_generator_global_keeps_yielding() {
+    crate::gc::force_enabled();
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        "gen_global",
+        "function* g(){ var o={n:1}; o.f=()=>o; yield 1; yield o.f().n+1; yield o.f().n+2 } globalThis.gi=g(); gi.next();",
+    );
+    it.collect_cycles();
+    it.collect_cycles();
+    assert_eq!(
+        number(&run_script(&mut it, "gen_global", "gi.next().value")),
+        2.0
+    );
+    it.collect_cycles();
+    assert_eq!(
+        number(&run_script(&mut it, "gen_global", "gi.next().value")),
+        3.0
+    );
+    check_invariants().unwrap();
+}
+
+#[test]
+fn gc_global_promise_pending_reaction_runs() {
+    crate::gc::force_enabled();
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        "global_promise",
+        "globalThis.P=new Promise(function(r){ globalThis.R=r }); \
+         (function(){ var o={a:6}; o.f=()=>o; P.then(function(){ globalThis.out=o.f().a }) })();",
+    );
+    it.collect_cycles();
+    run_script(&mut it, "global_promise", "R(1)");
+    it.collect_cycles();
+    ok(it.run_event_loop(), "run_event_loop");
+    assert_eq!(number(&run_script(&mut it, "global_promise", "out")), 6.0);
+    check_invariants().unwrap();
+}
+
+/// The unhandled-rejection report of a run with a collection in front of it must match the run without one.
+#[test]
+fn gc_unhandled_rejection_unchanged() {
+    crate::gc::force_enabled();
+    let src = "function mk(){ var o={}; o.f=()=>o; Promise.reject(o); o.self=o; } mk();";
+    let mut plain = Interp::new();
+    run_script(&mut plain, "unhandled", src);
+    let plain_failed = plain.run_event_loop().is_err();
+    let mut collected = Interp::new();
+    run_script(&mut collected, "unhandled", src);
+    collected.collect_cycles();
+    let collected_failed = collected.run_event_loop().is_err();
+    assert!(
+        plain_failed,
+        "the plain run reports the unhandled rejection"
+    );
+    assert_eq!(
+        collected_failed, plain_failed,
+        "collection changed the report"
+    );
+    check_invariants().unwrap();
+}
+
+/// Promise and generator edges against `Rc` clones: each reaction callback, derived promise, unstarted argument and
+/// queued request is one clone the node owns. A started generator is opaque (its coroutine holds clones).
+#[test]
+fn gc_edges_match_rc_clones_control_kinds() {
+    crate::gc::force_enabled();
+    crate::gc::no_auto();
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        "ctl",
+        "globalThis.t=function(){}; globalThis.P=new Promise(function(){}); globalThis.Q=P.then(t,t); \
+         globalThis.G=(function*(){}).call(t,t,t);",
+    );
+    let g = it.global_object.clone();
+    let get = |it: &mut Interp, k: &str| match ok(it.get(&Value::Object(g.clone()), k), k) {
+        Value::Object(o) => o,
+        _ => panic!("{k} is not an object"),
+    };
+    let t = get(&mut it, "t");
+    let p = get(&mut it, "P");
+    let q = get(&mut it, "Q");
+    let gen = get(&mut it, "G");
+
+    // Holders of `t`: the global property, this test's handle, two reactions, and the generator's `this` and two
+    // arguments. The promise and the generator each yield exactly their share.
+    let p_edges = count_edges_to(|f| obj_edges(&p, f), &t);
+    assert_eq!(p_edges, 2, "promise: on_ful and on_rej");
+    let g_edges = count_edges_to(|f| obj_edges(&gen, f), &t);
+    assert_eq!(g_edges, 3, "unstarted generator: this and two args");
+    assert_eq!(
+        Rc::strong_count(&t),
+        2 + p_edges + g_edges,
+        "t: global + test handle + every edge"
+    );
+
+    // The derived promise is the reaction's `result`: one clone, held by `P`.
+    assert_eq!(count_edges_to(|f| obj_edges(&p, f), &q), 1, "result edge");
+    assert_eq!(
+        Rc::strong_count(&q),
+        3,
+        "Q: global + handle + reaction result"
+    );
+
+    // A queued request (value and promise) of a generator with no coroutine: the queue arm.
+    let base = Rc::strong_count(&t);
+    let pending = it.new_promise();
+    let qd = crate::generators::GenData {
+        status: std::cell::Cell::new(crate::generators::GStatus::Done),
+        start: std::cell::RefCell::new(None),
+        co: std::cell::RefCell::new(None),
+        queue: std::cell::RefCell::new(std::collections::VecDeque::from([(
+            crate::generators::Req::Next,
+            Value::Object(t.clone()),
+            pending.clone(),
+        )])),
+    };
+    let qobj = new_obj(None, Kind::Generator(Rc::new(qd)));
+    assert_eq!(Rc::strong_count(&t) - base, 1, "queue value handle");
+    assert_eq!(
+        count_edges_to(|f| obj_edges(&qobj, f), &t),
+        1,
+        "queue value edge"
+    );
+    assert_eq!(
+        count_edges_to(|f| obj_edges(&qobj, f), &pending),
+        1,
+        "queue promise edge"
+    );
+    assert_eq!(
+        Rc::strong_count(&pending),
+        2,
+        "pending: this handle and the queue's clone"
+    );
+
+    // A started, unfinished generator holds a coroutine: opaque.
+    run_script(
+        &mut it,
+        "ctl",
+        "globalThis.S=(function*(){ yield 1 })(); S.next();",
+    );
+    let s = get(&mut it, "S");
+    assert!(!obj_edges(&s, &mut |_| {}), "a started generator is opaque");
+    check_invariants().unwrap();
 }

@@ -13,9 +13,10 @@
 //! kind is audited against exactly one `Rc` clone (`obj_edges` documents each), and a negative count aborts the run.
 //!
 //! Opaque nodes are never cleared and always count as roots: a node whose cell is borrowed, a `Proxy` whose data is
-//! shared, and every kind whose edges are not enumerated yet (`Global`, `Promise`, `Generator`, the PR-3b kinds). Their
+//! shared, a started and unfinished generator (its coroutine frames hold strong `Rc`s), and the global object. Their
 //! own edges are not subtracted, so anything they hold stays externally referenced.
 
+use crate::eventloop::PState;
 use crate::gc_registry;
 use crate::{account, FxMap, Interp, Kind, Obj, ObjData, Prop, Scope, Slot, Value, Vars};
 use std::cell::Cell;
@@ -55,6 +56,28 @@ pub(crate) fn obj_edges(o: &ObjData, f: &mut dyn FnMut(Edge)) -> bool {
             Ok(h) => Some(h),
             Err(_) => return false,
         },
+        _ => None,
+    };
+    // A generator's cells are read only while it is not started or already finished. A started, unfinished generator
+    // owns a coroutine whose frames hold strong `Rc`s (roots by deduction): it is opaque, so it is never cleared.
+    // The guards live here, before `buf`, so the edges borrowed from them stay valid.
+    let gen_cells = match &*kind {
+        Kind::Generator(g) => {
+            if Rc::strong_count(g) != 1 {
+                return false;
+            }
+            let (Ok(start), Ok(co), Ok(queue)) = (
+                g.start.try_borrow(),
+                g.co.try_borrow(),
+                g.queue.try_borrow(),
+            ) else {
+                return false;
+            };
+            if co.is_some() {
+                return false;
+            }
+            Some((start, queue))
+        }
         _ => None,
     };
     let mut buf = Vec::new();
@@ -125,7 +148,43 @@ pub(crate) fn obj_edges(o: &ObjData, f: &mut dyn FnMut(Edge)) -> bool {
                 value_edge(&mut buf, h);
             }
         }
-        Kind::Global | Kind::Promise(_) | Kind::Generator(_) => return false,
+        // A promise's state and each reaction's callbacks, derived promise and async-context frame: one clone each
+        // (the reaction and the state are moved in once, `settle` moves them out to jobs without cloning).
+        // Reactions held by a queued job or a timer are not here: those holders are strong `Rc`s, roots by deduction.
+        Kind::Promise(d) => {
+            if let PState::Fulfilled(v) | PState::Rejected(v) = &d.state {
+                value_edge(&mut buf, v);
+            }
+            for r in &d.reactions {
+                value_edge(&mut buf, &r.on_ful);
+                value_edge(&mut buf, &r.on_rej);
+                if let Some(o) = &r.result {
+                    buf.push(Edge::Obj(o));
+                }
+                if let Some(f) = &r.frame {
+                    value_edge(&mut buf, f);
+                }
+            }
+        }
+        // Only the cells of `gen_cells` (a sole-owned, not-running generator): its unstarted arguments (`f`, the
+        // scope, `this`, each argument; `def` is no node) and its queued requests (the value and the promise).
+        Kind::Generator(_) => {
+            if let Some((start, queue)) = gen_cells.as_ref() {
+                if let Some(st) = start.as_ref() {
+                    value_edge(&mut buf, &st.f);
+                    buf.push(Edge::Scope(&st.scope));
+                    value_edge(&mut buf, &st.this);
+                    for a in &st.args {
+                        value_edge(&mut buf, a);
+                    }
+                }
+                for (_, v, p) in queue.iter() {
+                    value_edge(&mut buf, v);
+                    buf.push(Edge::Obj(p));
+                }
+            }
+        }
+        Kind::Global => return false,
     }
     for e in buf {
         f(e);

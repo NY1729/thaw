@@ -40,16 +40,17 @@ pub(crate) enum PState {
 }
 
 pub(crate) struct PromiseData {
-    state: PState,
-    reactions: Vec<Reaction>,
+    pub(crate) state: PState,
+    pub(crate) reactions: Vec<Reaction>,
     handled: bool,
 }
 
-struct Reaction {
-    on_ful: Value,
-    on_rej: Value,
-    result: Option<Obj>,
-    frame: Option<Value>,
+/// One `then` registration. Each field is the single `Rc` clone the promise owns (see `gc::obj_edges`).
+pub(crate) struct Reaction {
+    pub(crate) on_ful: Value,
+    pub(crate) on_rej: Value,
+    pub(crate) result: Option<Obj>,
+    pub(crate) frame: Option<Value>,
 }
 
 enum Job {
