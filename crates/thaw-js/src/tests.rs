@@ -10559,3 +10559,17 @@ fn graph_wire_origin_serials_name_the_decoded_root_container() {
     assert_eq!(thaw_tjs_origin_serial(handle.value), 0);
     assert_eq!(thaw_tjs_origin_serial(u64::MAX), 0);
 }
+
+// ----- `arguments` in a class constructor is the constructor's own, not the enclosing function's
+// (zod's ZodObject constructor is `super(...arguments)` inside a CommonJS factory whose `arguments[0]`
+// is the `module` object) -----
+
+#[test]
+fn class_constructor_arguments_are_its_own() {
+    assert_eq!(one("function outer(a, b) { class B { constructor(x) { this.x = x; } } class D extends B { constructor() { super(...arguments); this.n = arguments.length; } } var d = new D('in'); console.log(d.x, d.n); } outer('oa', 'ob');"), "in 1");
+    assert_eq!(one("function outer(a) { class B { constructor(x) { this.x = x; } } class E extends B { constructor() { super(arguments[0]); } } console.log(new E('e1').x); } outer('oa');"), "e1");
+    assert_eq!(
+        one("new (class { constructor() { console.log(arguments[0]); } })('top');"),
+        "top"
+    );
+}
