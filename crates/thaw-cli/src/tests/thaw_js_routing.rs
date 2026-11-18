@@ -1745,7 +1745,8 @@ fn thaw_js_default_import_used_only_as_namespace_calls_stays_typed() {
     assert!(!needs("import path from 'node:path'; const s = 1;"));
     // a namespace import binds the module object, not the default export
     assert!(!needs("import * as path from 'node:path'; const s = path.join('a');"));
-    assert!(!needs("import * as path from 'node:path'; const s = [path];"));
+    // a namespace used as a value is the module's own value, which the shim serves as the default handle
+    assert!(needs("import * as path from 'node:path'; const s = [path];"));
 }
 
 #[test]
