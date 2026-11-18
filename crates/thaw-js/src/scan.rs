@@ -279,6 +279,88 @@ pub fn reachable(parts: &BundleParts) -> BTreeSet<String> {
     seen
 }
 
+/// One `require(..)` call: its literal spec (`None` for a computed one), and whether it is guarded.
+struct Require {
+    spec: Option<String>,
+    guarded: bool,
+}
+
+/// Node's builtin module names without the `node:` prefix (the list of thaw-registry's NODE_BUILTIN_MODULES_JSON).
+#[rustfmt::skip]
+const NODE_BUILTIN_NAMES: &[&str] = &[
+    "_http_agent", "_http_client", "_http_common", "_http_incoming", "_http_outgoing", "_http_server",
+    "_stream_duplex", "_stream_passthrough", "_stream_readable", "_stream_transform", "_stream_wrap",
+    "_stream_writable", "_tls_common", "_tls_wrap", "assert", "assert/strict", "async_hooks", "buffer",
+    "child_process", "cluster", "console", "constants", "crypto", "dgram", "diagnostics_channel", "dns",
+    "dns/promises", "domain", "events", "fs", "fs/promises", "http", "http2", "https", "inspector",
+    "inspector/promises", "module", "net", "os", "path", "path/posix", "path/win32", "perf_hooks", "process",
+    "punycode", "querystring", "readline", "readline/promises", "repl", "stream", "stream/consumers",
+    "stream/promises", "stream/web", "string_decoder", "sys", "test", "test/reporters", "timers",
+    "timers/promises", "tls", "trace_events", "tty", "url", "util", "util/types", "v8", "vm", "wasi",
+    "worker_threads", "zlib",
+];
+
+/// `require(spec)` names an optional npm package: not a builtin (`node:` specs included), not a relative or
+/// absolute file of the package itself, not a native addon. Only such a require may be missing and guarded.
+fn is_optional_package_spec(spec: &str) -> bool {
+    !spec.is_empty()
+        && !spec.starts_with("node:")
+        && !spec.starts_with('.')
+        && !spec.starts_with('/')
+        && !spec.ends_with(".node")
+        && !NODE_BUILTIN_NAMES.contains(&spec)
+}
+
+/// A literal that is always falsy (`0`, `false`, `null`), possibly parenthesized: `0 && x` and `if (0)` are dead.
+fn is_falsy_constant(e: &a::Expr) -> bool {
+    match e {
+        a::Expr::Paren(p) => is_falsy_constant(&p.expr),
+        a::Expr::Lit(a::Lit::Num(n)) => n.value == 0.0,
+        a::Expr::Lit(a::Lit::Bool(b)) => !b.value,
+        a::Expr::Lit(a::Lit::Null(_)) => true,
+        _ => false,
+    }
+}
+
+/// The `CallSite` methods the engine implements (the `siteMethods` object of builtins.rs; a test pins the two lists
+/// together). A call of one of these names is not a missing method.
+pub(crate) const CALLSITE_METHODS: &[&str] = &[
+    "getThis",
+    "getTypeName",
+    "getFunction",
+    "getFunctionName",
+    "getMethodName",
+    "getFileName",
+    "getLineNumber",
+    "getColumnNumber",
+    "getEnclosingLineNumber",
+    "getEnclosingColumnNumber",
+    "getPosition",
+    "getPromiseIndex",
+    "getScriptNameOrSourceURL",
+    "getScriptHash",
+    "getEvalOrigin",
+    "isToplevel",
+    "isEval",
+    "isNative",
+    "isConstructor",
+    "isAsync",
+    "isPromiseAll",
+    "toString",
+];
+
+/// Finds a `throw` statement: a catch body containing one does not handle the failure it catches.
+#[derive(Default)]
+struct ThrowFinder {
+    found: bool,
+}
+
+impl Visit for ThrowFinder {
+    fn visit_throw_stmt(&mut self, _: &a::ThrowStmt) {
+        self.found = true;
+    }
+}
+
 #[derive(Default)]
 struct Walker {
     features: HashMap<String, usize>,
@@ -292,7 +374,9 @@ struct Walker {
     defined: HashSet<String>,
     /// identifiers used only as the right operand of `instanceof`
     instance_refs: HashSet<String>,
-    requires: Vec<Option<String>>,
+    requires: Vec<Require>,
+    /// inside a try block whose catch handles the failure, in the same function (see `visit_try_stmt`)
+    guarded: bool,
     /// identifiers probed with `typeof X` (assumed guarded)
     probed: HashSet<String>,
     /// `globalThis.X` members tested only for presence
@@ -373,7 +457,10 @@ impl Visit for Walker {
         if n.is_generator {
             self.feature("generator");
         }
+        // a nested function runs when called, not inside an enclosing try
+        let guarded = std::mem::replace(&mut self.guarded, false);
         n.visit_children_with(self);
+        self.guarded = guarded;
     }
     fn visit_arrow_expr(&mut self, n: &a::ArrowExpr) {
         if n.is_async {
@@ -382,7 +469,23 @@ impl Visit for Walker {
         if n.is_generator {
             self.feature("generator");
         }
+        let guarded = std::mem::replace(&mut self.guarded, false);
         n.visit_children_with(self);
+        self.guarded = guarded;
+    }
+    fn visit_try_stmt(&mut self, n: &a::TryStmt) {
+        let outer = self.guarded;
+        // a catch that does not rethrow handles the failure of a require in the try block
+        let handled = n.handler.as_ref().is_some_and(|h| {
+            let mut finder = ThrowFinder::default();
+            h.body.visit_with(&mut finder);
+            !finder.found
+        });
+        self.guarded = outer || handled;
+        n.block.visit_with(self);
+        self.guarded = outer;
+        n.handler.visit_with(self);
+        n.finalizer.visit_with(self);
     }
     fn visit_await_expr(&mut self, n: &a::AwaitExpr) {
         self.feature("await");
@@ -475,6 +578,10 @@ impl Visit for Walker {
         n.visit_children_with(self);
     }
     fn visit_bin_expr(&mut self, n: &a::BinExpr) {
+        // `0 && (module.exports = {...})` (esbuild's cjs-lexer annotation): the right operand never runs
+        if n.op == a::BinaryOp::LogicalAnd && is_falsy_constant(&n.left) {
+            return;
+        }
         if matches!(n.op, a::BinaryOp::LogicalAnd | a::BinaryOp::LogicalOr) {
             self.probe_member(&n.left);
         }
@@ -519,6 +626,13 @@ impl Visit for Walker {
     }
     fn visit_if_stmt(&mut self, n: &a::IfStmt) {
         self.probe_member(&n.test);
+        if is_falsy_constant(&n.test) {
+            // `if (0) {...} else {...}`: the consequent never runs
+            if let Some(alt) = &n.alt {
+                alt.visit_with(self);
+            }
+            return;
+        }
         n.visit_children_with(self);
     }
     fn visit_unary_expr(&mut self, n: &a::UnaryExpr) {
@@ -562,7 +676,10 @@ impl Visit for Walker {
                         Some(a::Expr::Lit(a::Lit::Str(s))) => s.value.as_str().map(str::to_string),
                         _ => None,
                     };
-                    self.requires.push(lit);
+                    self.requires.push(Require {
+                        spec: lit,
+                        guarded: self.guarded,
+                    });
                 }
                 _ => {}
             }
@@ -681,7 +798,8 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
     if module_loader {
         globals.extend(MODULE_LOADER_GLOBALS.iter().map(|g| g.to_string()));
     }
-    let known_methods: HashSet<String> = interp.known_method_names().into_iter().collect();
+    let mut known_methods: HashSet<String> = interp.known_method_names().into_iter().collect();
+    known_methods.extend(CALLSITE_METHODS.iter().map(|m| m.to_string()));
     let params = [
         "module",
         "exports",
@@ -704,9 +822,11 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
         walkers.push((key.clone(), w));
     }
     let node_require = walkers.iter().any(|(_, w)| {
-        w.requires
-            .iter()
-            .any(|r| r.as_deref().is_some_and(|spec| spec.ends_with(".node")))
+        w.requires.iter().any(|r| {
+            r.spec
+                .as_deref()
+                .is_some_and(|spec| spec.ends_with(".node"))
+        })
     });
     let add = |report: &mut Report, feature: String, n: usize, key: &str| {
         if crate::SUPPORTED_FEATURES.contains(&feature.as_str())
@@ -783,8 +903,11 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
         }
         let map = parts.require_maps.get(key);
         for r in &w.requires {
-            match r {
+            match &r.spec {
                 Some(spec) if map.is_some_and(|m| m.contains_key(spec)) => {}
+                // an optional package that is not installed: the require throws MODULE_NOT_FOUND inside the
+                // handling try, as on Node (host.rs `require_in`), so the program's catch takes over
+                Some(spec) if r.guarded && is_optional_package_spec(spec) => {}
                 Some(spec) => add(&mut report, format!("require:{spec}"), 1, key),
                 None => add(&mut report, "require:dynamic".into(), 1, key),
             }
