@@ -12,6 +12,11 @@
 //! the costack backend (co_stack.rs). `THAW_JS_CO=stack|thread` picks one explicitly; unset, the costack
 //! backend is used wherever it is supported (Linux x86_64 / aarch64) and the thread backend elsewhere
 //! (see `choose_backend`).
+//!
+//! The costack backend holds at most `costack::MAX_LIVE` (30,000) coroutines alive at once, because each
+//! stack is two kernel mappings and `vm.max_map_count` (65530 by default) bounds them. Creating one more
+//! throws `RangeError: cannot start coroutine (thread limit)`. The thread backend has no such cap, so
+//! `THAW_JS_CO=thread` is the way out for a program that needs more pending coroutines than that.
 
 use std::sync::OnceLock;
 
