@@ -316,18 +316,26 @@ fn post_message_to_thread_round_trips_between_main_and_workers() {
         process.on('workerMessage', (value, src) => console.log('main workerMessage', JSON.stringify(value), src));
         const echo = new wt.Worker(`
           const wt = require('node:worker_threads');
-          const keep = setTimeout(() => {}, 400);
-          process.on('workerMessage', (value, src) => {
-            wt.parentPort.postMessage('worker got ' + JSON.stringify(value) + ' from ' + src);
-            setTimeout(() => wt.postMessageToThread(0, { back: value.hello }).then((r) => { wt.parentPort.postMessage('worker send ' + r); }, (e) => wt.parentPort.postMessage('worker send ' + e.code)), 50);
+          let hello = null, src0 = null;
+          process.on('workerMessage', (value, src) => { hello = value.hello; src0 = src; });
+          wt.parentPort.on('message', (m) => {
+            if (m === 'report') wt.parentPort.postMessage('worker got ' + JSON.stringify({ hello }) + ' from ' + src0);
+            else if (m === 'send') wt.postMessageToThread(0, { back: hello }).then((r) => { wt.parentPort.postMessage('worker send ' + r); wt.parentPort.close(); }, (e) => { wt.parentPort.postMessage('worker send ' + e.code); wt.parentPort.close(); });
           });
           wt.parentPort.postMessage('ready');
         `, { eval: true });
-        echo.on('message', (m) => console.log('from echo:', m));
-        await new Promise((resolve) => echo.on('message', (m) => { if (m === 'ready') resolve(); }));
+        let message = undefined;
+        await new Promise((resolve) => echo.once('message', (m) => { message = m; resolve(); }));
+        console.log('from echo:', message);
         const sent = await wt.postMessageToThread(echo.threadId, { hello: 'worker' });
         console.log('A main send resolved', sent);
-        await new Promise((resolve) => echo.on('exit', resolve));
+        echo.postMessage('report');
+        await new Promise((resolve) => echo.once('message', (m) => { message = m; resolve(); }));
+        console.log('from echo:', message);
+        echo.postMessage('send');
+        await new Promise((resolve) => echo.once('message', (m) => { message = m; resolve(); }));
+        console.log('from echo:', message);
+        await new Promise((resolve) => echo.once('exit', resolve));
         const sender = new wt.Worker(`
           const wt = require('node:worker_threads');
           wt.parentPort.on('message', (go) => {
@@ -342,7 +350,7 @@ fn post_message_to_thread_round_trips_between_main_and_workers() {
       })().catch((e) => console.log('failed ' + e));"#;
     assert_eq!(
         run_main(src),
-        "from echo: ready|from echo: worker got {\"hello\":\"worker\"} from 0|A main send resolved undefined|main workerMessage {\"back\":\"worker\"} 1|from echo: worker send undefined|main workerMessage {\"from\":\"sender\",\"go\":\"go\"} 2|from sender: sender resolved undefined|done"
+        "from echo: ready|A main send resolved undefined|from echo: worker got {\"hello\":\"worker\"} from 0|main workerMessage {\"back\":\"worker\"} 1|from echo: worker send undefined|main workerMessage {\"from\":\"sender\",\"go\":\"go\"} 2|from sender: sender resolved undefined|done"
     );
 }
 
