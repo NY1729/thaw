@@ -43,8 +43,17 @@ const STACK_SUPPORTED: bool = cfg!(all(
 /// The backend for a new coroutine. Evaluated per coroutine creation: an addon loaded after the first
 /// coroutine was made still moves later ones onto the costack backend. The env value is read once.
 pub(crate) fn backend() -> Backend {
+    choose_backend(
+        env_value(),
+        STACK_SUPPORTED,
+        crate::napi_bridge::registered(),
+    )
+}
+
+/// `THAW_JS_CO`, read once per process: the one parse that `backend` and `stack_default` share.
+fn env_value() -> Option<&'static str> {
     static ENV: OnceLock<Option<String>> = OnceLock::new();
-    let env = ENV.get_or_init(|| {
+    ENV.get_or_init(|| {
         let value = std::env::var("THAW_JS_CO").ok();
         match value.as_deref() {
             Some("stack") if !STACK_SUPPORTED => eprintln!(
@@ -56,12 +65,14 @@ pub(crate) fn backend() -> Backend {
             _ => {}
         }
         value
-    });
-    choose_backend(
-        env.as_deref(),
-        STACK_SUPPORTED,
-        crate::napi_bridge::registered(),
-    )
+    })
+    .as_deref()
+}
+
+/// Whether the cycle collector may run: the costack backend is supported here and `THAW_JS_CO` does not name
+/// the thread backend. Unlike `backend`, addon registration does not matter, so the answer is fixed per process.
+pub(crate) fn stack_default() -> bool {
+    STACK_SUPPORTED && env_value() != Some("thread")
 }
 
 /// The selection rule, pure so the table test can cover every input. An explicit `THAW_JS_CO` wins:

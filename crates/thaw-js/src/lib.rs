@@ -48,6 +48,7 @@ mod dns;
 mod esm;
 mod eventloop;
 mod extras;
+mod gc;
 mod gc_registry;
 mod generators;
 mod heap_limit;
