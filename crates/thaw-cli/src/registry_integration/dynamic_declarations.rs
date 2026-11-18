@@ -1245,6 +1245,33 @@ fn thaw_js_promise_ret(
     }
 }
 
+/// A callable whose parameters and return are plain JSON data (optional forms included), the same
+/// shape the routing scan accepts as a callable result. A `JsValue` or class inside it is not plain.
+fn thaw_js_plain_callable(ty: &thaw_hir::HirType) -> bool {
+    fn plain(ty: &thaw_hir::HirType) -> bool {
+        match ty {
+            thaw_hir::HirType::Optional(inner)
+            | thaw_hir::HirType::Nullable(inner)
+            | thaw_hir::HirType::Nullish(inner) => plain(inner),
+            thaw_hir::HirType::Str
+            | thaw_hir::HirType::F64
+            | thaw_hir::HirType::Bool
+            | thaw_hir::HirType::Json
+            | thaw_hir::HirType::Null
+            | thaw_hir::HirType::Undefined
+            | thaw_hir::HirType::Void => true,
+            _ => false,
+        }
+    }
+    match ty {
+        thaw_hir::HirType::Function(params, ret)
+        | thaw_hir::HirType::CallableFunction(params, _, None, ret) => {
+            params.iter().all(plain) && plain(ret)
+        }
+        _ => false,
+    }
+}
+
 fn typed_dynamic_declaration(
     package: &str,
     function: &thaw_bridge::DtsFunction,
@@ -1260,6 +1287,12 @@ fn typed_dynamic_declaration(
             let keep_ret_js_value = !real.starts_with("node:")
                 && match &function.ret {
                     thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue) => true,
+                    // a callable result with plain parameters and return (`customAlphabet(...): (size?) => string`)
+                    // is a live handle the `__thaw_typed_callable_` adapter invokes (`callDynamicValueHandle`)
+                    thaw_bridge::DtsType::Native(
+                        ty @ (thaw_hir::HirType::Function(..)
+                        | thaw_hir::HirType::CallableFunction(..)),
+                    ) => thaw_js_plain_callable(ty),
                     thaw_bridge::DtsType::Unsupported(reason) => {
                         !(reason == "`any` is not supported"
                             || reason == "`unknown` is not supported"
