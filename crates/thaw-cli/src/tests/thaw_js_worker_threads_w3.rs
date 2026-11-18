@@ -19,6 +19,9 @@ fn thaw_js_worker_threads_blocker_keeps_unserved_worker_options_on_quickjs() {
         "Atomics.store(view, 0, 42);",
         // resourceLimits.maxOldGenerationSizeMb is enforced by heap_limit (B2), so a limited Worker routes to thaw-js
         "new Worker(src, { eval: true, resourceLimits: { maxOldGenerationSizeMb: 16 } });",
+        // transferList moves ArrayBuffers and MessagePorts across threads (PR3), so it routes to thaw-js
+        "const transferList = [buffer]; w.postMessage(x, transferList);",
+        "new Worker(src, { eval: true, workerData: { port }, transferList: [port] });",
     ] {
         assert!(
             thaw_js_worker_threads_blocker("node:worker_threads", &format!("{import}{routed}"))
@@ -26,7 +29,7 @@ fn thaw_js_worker_threads_blocker_keeps_unserved_worker_options_on_quickjs() {
             "{routed} routes to thaw-js"
         );
     }
-    let blocked = "w.postMessage(x, [buffer]); const transferList = [buffer];";
+    let blocked = "const moved = moveMessagePortToContext(port, context);";
     assert!(
         thaw_js_worker_threads_blocker("node:worker_threads", &format!("{import}{blocked}"))
             .is_some(),

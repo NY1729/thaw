@@ -4,16 +4,17 @@
 // keep name, message, stack and cause. A SharedArrayBuffer is an `SAB` node holding an id into the shared-block table
 // (worker.rs): the decoding Interp gets the same memory, so writes are seen by every thread holding it. An ArrayBuffer
 // in the transfer list is an `ABT` node: its bytes move to the in-flight table (worker.rs) and the buffer is detached.
+// A MessagePort in the list is a `Port` node: its address pair (`p` the moved end, `q` its peer) and the messages
+// queued on it (`qs`, each a wire of its own). The end moves with its routes (worker.rs `PORT_ROUTES`) to the realm
+// whose port token is `dest`.
 const cloneError = message => new DOMException(message, 'DataCloneError');
 // `transfer` is a list the caller has validated (__thaw_transfer_check); nothing is moved unless the whole value encodes.
-globalThis.__thaw_worker_encode = (value, transfer = []) => {
+globalThis.__thaw_worker_encode = (value, transfer = [], dest = 0) => {
   const seen = new Map(), nodes = [], taken = [];
-  for (const buffer of transfer) {
-    // ponytail: a port moves between threads once the cross-thread port protocol exists (worker_threads PR3)
-    if (typeof MessagePort === 'function' && buffer instanceof MessagePort) throw cloneError('MessagePort transfer across threads is not supported yet');
-    seen.set(buffer, nodes.length);
-    taken.push([nodes.length, buffer]);
-    nodes.push({ t: 'ABT', id: -1 });
+  for (const moved of transfer) {
+    seen.set(moved, nodes.length);
+    taken.push([nodes.length, moved]);
+    nodes.push(__thaw_is_message_port(moved) ? { t: 'Port', p: -1, q: -1, qs: [] } : { t: 'ABT', id: -1 });
   }
   const encode = input => {
     if (input === undefined) return { p: 'undefined' };
@@ -23,7 +24,7 @@ globalThis.__thaw_worker_encode = (value, transfer = []) => {
     if (input === null || typeof input !== 'object') return { v: input };
     if (seen.has(input)) return { r: seen.get(input) };
     if (input instanceof WeakMap || input instanceof WeakSet || input instanceof Promise) throw cloneError('value cannot be cloned');
-    if (typeof MessagePort === 'function' && input instanceof MessagePort) throw cloneError('Object that needs transfer was found in message but not listed in transferList');
+    if (typeof MessagePort === 'function' && input instanceof MessagePort) throw cloneError(input.__thawClosed ? 'Cannot clone object of unsupported type.' : 'Object that needs transfer was found in message but not listed in transferList');
     const id = nodes.length; seen.set(input, id); nodes.push(null);
     let node;
     if (Array.isArray(input)) {
@@ -54,11 +55,22 @@ globalThis.__thaw_worker_encode = (value, transfer = []) => {
     return { r: id };
   };
   const root = encode(value);
-  // the whole value encoded: the transferred buffers now move (a throw above leaves them attached)
-  for (const [index, buffer] of taken) nodes[index].id = __thaw_ab_take(buffer);
+  // the whole value encoded: the transferred buffers and ports now move (a throw above leaves them attached). Every
+  // port is prepared before any moves, so a refused port leaves the others attached too.
+  const plans = taken.map(([index, moved]) => [index, moved, __thaw_is_message_port(moved) ? __thaw_port_prepare(moved, transfer, dest) : null]);
+  for (const [index, moved, plan] of plans) {
+    if (plan === null) nodes[index].id = __thaw_ab_take(moved);
+    else {
+      nodes[index].p = plan.p;
+      nodes[index].q = plan.q;
+      nodes[index].qs = plan.qs;
+      __thaw_port_commit(moved, plan, dest);
+    }
+  }
   return JSON.stringify({ root, nodes });
 };
-globalThis.__thaw_worker_decode = source => {
+// The decoded value and its transferred ports (in list order), for a message event's `ports`.
+globalThis.__thaw_worker_decode_full = source => {
   const graph = JSON.parse(String(source)), values = new Array(graph.nodes.length);
   const primitive = item => {
     if ('r' in item) return values[item.r];
@@ -80,6 +92,7 @@ globalThis.__thaw_worker_decode = source => {
     else if (node.t === 'Object') values[id] = {};
     else if (node.t === 'SAB') values[id] = __thaw_sab_import(node.id);
     else if (node.t === 'ABT') values[id] = __thaw_ab_put(node.id);
+    else if (node.t === 'Port') values[id] = __thaw_port_adopt(node.p, node.q, node.qs.map(wire => ({ data: __thaw_worker_decode(wire), ports: [] })));
     else if (node.t === 'ArrayBuffer') {
       const bytes = new Uint8Array(node.v.length / 2);
       for (let index = 0; index < bytes.length; index++) bytes[index] = parseInt(node.v.slice(index * 2, index * 2 + 2), 16);
@@ -108,5 +121,7 @@ globalThis.__thaw_worker_decode = source => {
     else if (node.t === 'Object') node.v.forEach(([key, item]) => { values[id][key] = primitive(item); });
     else if (node.t === 'Error' && 'c' in node) values[id].cause = primitive(node.c);
   });
-  return primitive(graph.root);
+  const ports = graph.nodes.flatMap((node, id) => (node.t === 'Port' ? [values[id]] : []));
+  return { value: primitive(graph.root), ports };
 };
+globalThis.__thaw_worker_decode = source => globalThis.__thaw_worker_decode_full(source).value;

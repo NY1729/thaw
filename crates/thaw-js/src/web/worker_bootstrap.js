@@ -23,9 +23,9 @@
   Object.defineProperty(process, 'stdin', { get: () => stdin, enumerable: true, configurable: true });
 
   const parentPort = new MessagePort();
-  // Messages to the parent are wire strings; transferring ports between threads is not supported yet.
+  // Messages to the parent are wire strings; a port in the list moves to the main thread (its routes name it).
   parentPort.postMessage = function postMessage(value, transferOrOptions) {
-    __thaw_worker_send(__thaw_worker_encode(value, __thaw_transfer_of(transferOrOptions)));
+    __thaw_worker_send(__thaw_worker_encode(value, __thaw_transfer_of(transferOrOptions), __thaw_port_hub()));
     return true;
   };
 
@@ -76,7 +76,7 @@
     // turn), so the wire is encoded with them; that wire is released here, since nothing will decode it.
     const reachable = target === 0;
     let wire;
-    try { wire = __thaw_worker_encode(value, transfer); } catch (error) { return Promise.reject(error); }
+    try { wire = __thaw_worker_encode(value, transfer, __thaw_port_hub()); } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
       const ack = nextAck++;
       const entry = { resolve, reject, timer: undefined };
@@ -116,8 +116,13 @@
   globalThis.__thaw_worker_dispatch = function (json) {
     for (const event of JSON.parse(json)) {
       if (event.type === 'message') {
-        parentPort.__thawQueue.push({ data: decode(event.value), ports: [] });
+        const { value, ports } = __thaw_worker_decode_full(event.value);
+        parentPort.__thawQueue.push({ data: value, ports });
         parentPort.__thawSchedule();
+      } else if (event.type === 'port') {
+        __thaw_port_deliver(event.addr, event.value);
+      } else if (event.type === 'portClose') {
+        __thaw_port_hangup(event.addr);
       } else if (event.type === 'stdin') {
         if (event.value !== '') stdin.__thawPush(__thaw_worker_stream.hexToBytes(event.value));
         if (event.end) stdin.__thawEnd();
