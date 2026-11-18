@@ -34,6 +34,7 @@ mod child;
 mod classes;
 mod jsstr;
 pub mod mem_trace;
+mod profile;
 mod regexp_statics;
 pub use jsstr::JsStr;
 mod co;
