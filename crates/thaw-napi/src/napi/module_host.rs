@@ -272,6 +272,29 @@ unsafe extern "C" fn thaw_napi_call_typed_bridge(
 unsafe extern "C" fn thaw_napi_export_names() -> *const c_char {
     let exports = HOST.with(|host| {
         let host = host.borrow();
+        if std::env::var("THAW_NAPI_DEBUG").as_deref() == Ok("1") {
+            let thread = std::thread::current().id();
+            eprintln!(
+                "thaw-napi debug: export_names thread={thread:?} module_envs={} unloading={}",
+                host.module_envs.len(),
+                host.unloading,
+            );
+            for name in host.functions.keys() {
+                let owner = host.exports.get(name).map(|(owner, _)| *owner);
+                let env = owner.and_then(|owner| host.module_envs.iter()
+                    .find(|env| (&***env as *const Env as usize) == owner));
+                match env {
+                    Some(env) => eprintln!(
+                        "thaw-napi debug: export name={name} in_exports=true env_found=true finalizing={} finalized={} shutdown_requested={} graph_owner_id={} thread={thread:?}",
+                        env.finalizing, env.finalized, env.shutdown_requested, env.graph_owner_id,
+                    ),
+                    None => eprintln!(
+                        "thaw-napi debug: export name={name} in_exports={} env_found=false thread={thread:?}",
+                        owner.is_some(),
+                    ),
+                }
+            }
+        }
         let owners = host.exports.iter().filter_map(|(name, (owner, _))| {
             host.module_envs.iter()
                 .find(|env| (&***env as *const Env as usize) == *owner
@@ -1197,6 +1220,9 @@ pub unsafe extern "C" fn thaw_napi_load_named_qualified(
 #[no_mangle]
 pub extern "C" fn thaw_napi_begin_shutdown() -> u8 {
     if ForeignCallbackGuard::active() { return 0; }
+    if std::env::var("THAW_NAPI_DEBUG").as_deref() == Ok("1") {
+        eprintln!("thaw-napi debug: shutdown began thread={:?}", std::thread::current().id());
+    }
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         if !host.unloading {

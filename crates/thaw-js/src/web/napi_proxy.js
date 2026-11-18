@@ -825,9 +825,13 @@
   // ---- Trusted path (PR 6b-5; RJ runtime.js 1199-1240, 1301-1316). The generated shim calls these globals once
   // `bridgeAvailable()` is true, instead of its own untrusted codec. `args` is the shim's Arguments object.
   const ownerForExport = name => {
-    const owners = exports().ownerByExportName;
+    const table = exports();
+    const owners = table.ownerByExportName;
     const owner = owners && hasOwn(owners, name) ? owners[name] : undefined;
-    if (typeof owner !== 'string') throw new TypeError('Native addon export has no live owner');
+    if (typeof owner !== 'string') {
+      throw new TypeError('Native addon export has no live owner [name=' + name + '] [owners=' + jsonStringify(table)
+        + '] [stack=' + String(new Error().stack) + ']');
+    }
     return owner;
   };
 

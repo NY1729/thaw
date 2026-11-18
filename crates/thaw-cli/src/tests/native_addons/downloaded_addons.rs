@@ -271,13 +271,17 @@ async function main(): Promise<void> {
     )
     .unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
-    let result = Command::new(&output).output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
+    let result = Command::new(&output)
+        .env("THAW_NAPI_DEBUG", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "stderr: {stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\nfalse\n",
+        "stderr: {stderr}"
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\nfalse\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

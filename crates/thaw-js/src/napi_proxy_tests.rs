@@ -1084,9 +1084,9 @@ fn shim_trusted_path_calls_an_export_through_the_bridge_call() {
     assert_eq!(
         eval(
             "(() => { try { globalThis.__thaw_json_graph_napi_call_export('addon::missing', []); return 'no error'; } \
-             catch (e) { return e.name + '|' + e.message; } })()"
+             catch (e) { return e.name + '|' + e.message.startsWith('Native addon export has no live owner [name=addon::missing] [owners=') + '|' + e.message.includes('[stack='); } })()"
         ),
-        "TypeError|Native addon export has no live owner"
+        "TypeError|true|true"
     );
     E2E_CALLS.with(|c| {
         let calls = c.borrow();
