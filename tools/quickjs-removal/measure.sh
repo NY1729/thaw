@@ -140,7 +140,9 @@ measure_program() {
     local log="$SCRATCH/out/$name.$engine"
     local s e build_ok=1
     s=$(date +%s%N)
-    env "${envargs[@]}" timeout 900 "$THAW" build "$name.ts" -o "$bin" > "$log.build" 2>&1 || build_ok=0
+    # THAW_DUMP_SHIM writes the generated shim next to the build log (uploaded with the logs), so a fallback seen in
+    # `$log.build` can be read against the declarations the router and the typed lowering actually got
+    env "${envargs[@]}" THAW_DUMP_SHIM="$log.shim.ts" timeout 900 "$THAW" build "$name.ts" -o "$bin" > "$log.build" 2>&1 || build_ok=0
     e=$(date +%s%N)
     row program "$name" "$engine" build_ok "$build_ok"
     row program "$name" "$engine" build_ms "$(( (e - s) / 1000000 ))"
