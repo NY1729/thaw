@@ -5280,6 +5280,18 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  const err = (f: () => void): string => { try { f(); return 'ok'; } catch (e: any) { return `${e.name} ${e.code} ${e.message}`; } };\n  const worker = new wt.Worker('setInterval(() => {}, 1000)', { eval: true });\n  const channel = new wt.MessageChannel();\n  const port1 = channel.port1;\n  const port2 = channel.port2;\n  console.log('dup', err((): void => { worker.postMessage({}, [port2, port2]); }));\n  console.log('unlisted', err((): void => { worker.postMessage({ p: port2 }); }));\n  const c = new wt.MessageChannel();\n  console.log('transfer', err((): void => { worker.postMessage({}, [c.port1]); }));\n  console.log('again', err((): void => { worker.postMessage({}, [c.port1]); }));\n  c.port2.close();\n  console.log('closed', err((): void => { worker.postMessage({}, [c.port2]); }));\n  console.log('own', err((): void => { port1.postMessage('x', [port1]); }));\n  await worker.terminate();\n  console.log('terminated');\n}\n"
+  },
+  {
+    "name": "moveMessagePortToContext delivers into a vm context",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import { MessageChannel, moveMessagePortToContext } from 'node:worker_threads';\nimport { createContext, runInContext } from 'node:vm';\nasync function main(): Promise<void> {\n  const channel = new MessageChannel();\n  const port1: any = channel.port1;\n  const port2: any = channel.port2;\n  const ctx: any = { out: [] as string[], port: undefined as any };\n  createContext(ctx);\n  ctx.port = moveMessagePortToContext(port1, ctx);\n  runInContext(`port.onmessage = function (ev) { out.push([ev.data.constructor === Object, ev.data.list instanceof Array, Object.getPrototypeOf(ev.data) === Object.prototype, this === port, ev.target === port, ev.type, ev.ports.length, typeof MessagePort].join(',')); };`, ctx);\n  ctx.port.start();\n  port2.postMessage({ list: [1, 2] });\n  port2.postMessage({ list: [] });\n  for (let i = 0; i < 2000 && ctx.out.length < 2; i++) await new Promise<void>((resolve) => { setTimeout(resolve, 1); });\n  console.log(ctx.out.join('|'));\n  port2.close();\n  ctx.port.close();\n}"
+  },
+  {
+    "name": "moveMessagePortToContext argument and closed-port errors",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import { MessageChannel, moveMessagePortToContext } from 'node:worker_threads';\nimport { createContext } from 'node:vm';\nfunction main(): void {\n  const channel = new MessageChannel();\n  const port1: any = channel.port1;\n  const port2: any = channel.port2;\n  const ctx: any = createContext({});\n  const attempt = (run: () => unknown): string => { try { run(); return 'ok'; } catch (e: any) { return e.name + ' ' + e.code + ' ' + e.message; } };\n  const lines: string[] = [];\n  lines.push(attempt(() => moveMessagePortToContext()));\n  lines.push(attempt(() => moveMessagePortToContext({}, ctx)));\n  lines.push(attempt(() => moveMessagePortToContext(port1)));\n  lines.push(attempt(() => moveMessagePortToContext(port1, {})));\n  lines.push(attempt(() => moveMessagePortToContext(port1, null)));\n  lines.push(attempt(() => moveMessagePortToContext(port1, ctx)));\n  const closed = new MessageChannel();\n  closed.port1.close();\n  lines.push(attempt(() => moveMessagePortToContext(closed.port1, ctx)));\n  console.log(lines.join('\\n'));\n  port2.close();\n  closed.port2.close();\n}"
   }
 ]
 }

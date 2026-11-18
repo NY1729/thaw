@@ -16,6 +16,9 @@ function createContext(object, options) {
   if (contexts.has(context)) return context;
   var id = __thaw_vm_create();
   contexts.set(context, id);
+  // worker_threads (its own realm, which cannot read `contexts`) recognises a context by this marker, non-enumerable
+  // (string keys: symbols are per realm). A frozen context gets none, so it is refused there.
+  if (Object.isExtensible(context)) Object.defineProperty(context, '__thaw_vm_context', { value: true });
   if (contextReleaser) contextReleaser.register(context, id);
   return context;
 }
@@ -30,6 +33,11 @@ function vmTimeout(options) {
 function vmRun(id, code, sandbox, options) {
   if (typeof options === 'string') options = { filename: options };
   var timeout = vmTimeout(options);
+  // The context's own Object/Array/... prototypes, published once as data on the context (non-enumerable) for
+  // worker_threads' moveMessagePortToContext: a closure called from another realm cannot reach this realm's vm table.
+  if (sandbox !== null && (typeof sandbox === 'object' || typeof sandbox === 'function') && Object.isExtensible(sandbox) && !Object.prototype.hasOwnProperty.call(sandbox, '__thaw_vm_prototypes')) {
+    Object.defineProperty(sandbox, '__thaw_vm_prototypes', { value: __thaw_vm_run(id, '[Object.prototype, Array.prototype, Map.prototype, Set.prototype, Date.prototype, Error.prototype]', 'evalmachine.<anonymous>', 0, sandbox, Object.prototype) });
+  }
   var filename = options && options.filename !== undefined ? String(options.filename) : 'evalmachine.<anonymous>';
   return __thaw_vm_run(id, String(code), filename, timeout, sandbox, Object.prototype);
 }
