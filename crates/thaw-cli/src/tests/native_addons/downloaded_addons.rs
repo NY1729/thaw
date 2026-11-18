@@ -273,9 +273,9 @@ async function main(): Promise<void> {
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output)
         .env("THAW_NAPI_DEBUG", "1")
-        // PROBE: the failure above is a thread mismatch (the addon is registered on thread 1, the call comes from the
-        // async coroutine thread 2); the stack backend runs coroutines on the same OS thread
-        .env("THAW_JS_CO", "stack")
+        // PROBE: THAW_JS_CO is left unset on purpose: once an addon is registered the stack coroutine backend is the
+        // default (#778), so this run shows what still fails with the default selection
+        .env_remove("THAW_JS_CO")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&result.stderr);
