@@ -54,6 +54,8 @@ struct List<T: Node> {
     free: Vec<usize>,
     /// The length at which growing the list sweeps first.
     sweep_at: usize,
+    /// The live count at which a collection is due (`usize::MAX` = the trigger is off).
+    gc_at: usize,
 }
 
 impl<T: Node> List<T> {
@@ -62,6 +64,7 @@ impl<T: Node> List<T> {
             entries: Vec::new(),
             free: Vec::new(),
             sweep_at: SWEEP_MIN,
+            gc_at: usize::MAX,
         }
     }
 
@@ -89,6 +92,9 @@ impl<T: Node> List<T> {
         };
         node.reg_idx().set(idx);
         self.entries[idx] = Some(Rc::downgrade(node));
+        if self.live() >= self.gc_at {
+            set_due();
+        }
     }
 
     /// Frees `node`'s slot (its index is `reg_idx`), if this list holds it: a node dropped on another thread is
@@ -129,6 +135,71 @@ impl<T: Node> List<T> {
 thread_local! {
     static OBJS: RefCell<List<ObjData>> = const { RefCell::new(List::new()) };
     static SCOPES: RefCell<List<Scope>> = const { RefCell::new(List::new()) };
+    /// Set by `add` when a list reaches its `gc_at`; read at the interpreter's safe points (`due`).
+    static DUE: Cell<bool> = const { Cell::new(false) };
+    /// The trigger's floor on this thread (`usize::MAX` = never armed). See `threshold`.
+    static FLOOR: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+#[cold]
+fn set_due() {
+    DUE.with(|d| d.set(true));
+}
+
+/// Whether a collection is due on this thread: one thread-local load, read at each safe point.
+#[inline]
+pub(crate) fn due() -> bool {
+    DUE.with(Cell::get)
+}
+
+pub(crate) fn clear_due() {
+    DUE.with(|d| d.set(false));
+}
+
+/// The live count at which a list next makes a collection due: `max(floor, 2 x live)`, or 0 for a floor of 0 (every
+/// registration is due; stress mode).
+pub(crate) fn threshold(floor: usize, live: usize) -> usize {
+    if floor == 0 {
+        0
+    } else {
+        floor.max(live.saturating_mul(2))
+    }
+}
+
+/// Arms the trigger on this thread: a collection is due once a list's live count reaches `floor`.
+pub(crate) fn arm(floor: usize) {
+    FLOOR.with(|f| f.set(floor));
+    set_thresholds();
+}
+
+/// `arm`, unless this thread is already armed. `Interp::build` calls it for every realm; a later realm must not
+/// reset a threshold that collections have raised.
+pub(crate) fn arm_default(floor: usize) {
+    if FLOOR.with(Cell::get) == usize::MAX {
+        arm(floor);
+    }
+}
+
+/// Re-sets the thresholds from the live counts after a collection attempt (also a skipped one, so a busy or
+/// disabled collector does not re-trigger at every safe point). A no-op when the trigger is off.
+pub(crate) fn rearm() {
+    if FLOOR.with(Cell::get) != usize::MAX {
+        set_thresholds();
+    }
+}
+
+fn set_thresholds() {
+    let floor = FLOOR.with(Cell::get);
+    let _ = OBJS.try_with(|r| {
+        if let Ok(mut l) = r.try_borrow_mut() {
+            l.gc_at = threshold(floor, l.live());
+        }
+    });
+    let _ = SCOPES.try_with(|r| {
+        if let Ok(mut l) = r.try_borrow_mut() {
+            l.gc_at = threshold(floor, l.live());
+        }
+    });
 }
 
 /// Adds a new object record. Called once, from `new_obj`.
@@ -247,4 +318,12 @@ pub(crate) fn check_invariants() -> Result<(), String> {
         }
         Ok(())
     })
+}
+
+/// The `(objects, scopes)` thresholds (`gc_at`) currently set on this thread.
+#[cfg(test)]
+pub(crate) fn gc_at_for_test() -> (usize, usize) {
+    let o = OBJS.with(|r| r.borrow().gc_at);
+    let s = SCOPES.with(|r| r.borrow().gc_at);
+    (o, s)
 }

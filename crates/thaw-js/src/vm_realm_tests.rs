@@ -14,6 +14,9 @@ const VM_PRELUDE: &str =
 const MANY_CONTEXTS: &str = "let total = 0; for (let i = 0; i < 300; i++) total += runInNewContext('n * n', { n: i }); console.log(total);";
 
 fn run_lines(src: &str) -> Vec<String> {
+    // Timing and linearity are measured without the automatic trigger: under the stress interval every collection
+    // walks all live contexts, which is the cost being stress-tested, not the cost of creating a context.
+    crate::gc::no_auto();
     let mut it = Interp::new();
     let _ = it.run(src);
     std::mem::take(&mut it.out)
@@ -54,6 +57,7 @@ fn vm_300_contexts_run_once_each_finish_fast() {
 fn vm_contexts_leave_no_stdin_or_loop_work() {
     let (tx, rx) = mpsc::channel();
     let worker = std::thread::spawn(move || {
+        crate::gc::no_auto();
         let mut it = Interp::new();
         let _ = it.run(&format!("{VM_PRELUDE}\n{MANY_CONTEXTS}"));
         let pending = it.work_pending();
