@@ -48,6 +48,7 @@ mod dns;
 mod esm;
 mod eventloop;
 mod extras;
+mod gc;
 mod gc_registry;
 mod generators;
 mod heap_limit;
@@ -5872,6 +5873,8 @@ mod fetch_tests;
 mod fs_tests;
 #[cfg(test)]
 mod function_legacy_props_tests;
+#[cfg(test)]
+mod gc_yup_tests;
 #[cfg(test)]
 mod generator_function_tests;
 #[cfg(test)]

@@ -44,8 +44,13 @@ const STACK_SUPPORTED: bool = cfg!(all(
 /// The backend for a new coroutine, from `THAW_JS_CO` (read once). Native addons need no special case:
 /// the costack backend keeps addon calls on the thread that loaded them.
 pub(crate) fn backend() -> Backend {
+    choose_backend(env_value(), STACK_SUPPORTED)
+}
+
+/// `THAW_JS_CO`, read once per process: the one parse that `backend` and `stack_default` share.
+fn env_value() -> Option<&'static str> {
     static ENV: OnceLock<Option<String>> = OnceLock::new();
-    let env = ENV.get_or_init(|| {
+    ENV.get_or_init(|| {
         let value = std::env::var("THAW_JS_CO").ok();
         match value.as_deref() {
             Some("stack") if !STACK_SUPPORTED => eprintln!(
@@ -57,8 +62,14 @@ pub(crate) fn backend() -> Backend {
             _ => {}
         }
         value
-    });
-    choose_backend(env.as_deref(), STACK_SUPPORTED)
+    })
+    .as_deref()
+}
+
+/// Whether the cycle collector may run: the costack backend is supported here and `THAW_JS_CO` does not name
+/// the thread backend. The answer is fixed per process (it depends only on the environment and the target).
+pub(crate) fn stack_default() -> bool {
+    STACK_SUPPORTED && env_value() != Some("thread")
 }
 
 /// The selection rule, pure so the table test can cover every input. `thread` always wins, and so does
