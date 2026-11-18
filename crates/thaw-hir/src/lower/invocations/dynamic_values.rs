@@ -570,6 +570,9 @@ impl<'a> FnLowerer<'a> {
                     // JsValue here first would route through the generic
                     // borrowed-handle wrapper and erase that provenance.
                     Expr::Object(_) => self.lower_expr(&argument.expr)?,
+                    Expr::Array(array) if Self::is_promise_input_array(array) => {
+                        self.lower_dynamic_promise_input_array(array)?
+                    }
                     Expr::Arrow(arrow) => {
                         // Only a call result in return position has to stay a live handle; a
                         // returned parameter or literal keeps the value's own (`any`) type.
@@ -662,6 +665,46 @@ impl<'a> FnLowerer<'a> {
         } else {
             Ok(call)
         }
+    }
+
+    /// An array literal argument with no holes or spreads that holds at least one call
+    /// (`P.any([P.reject(1), P.resolve(2)])`): its calls are promise inputs of the callee.
+    fn is_promise_input_array(array: &swc_ecma_ast::ArrayLit) -> bool {
+        array.elems.iter().all(|element| matches!(element, Some(e) if e.spread.is_none()))
+            && array.elems.iter().flatten().any(|e| matches!(e.expr.as_ref(), Expr::Call(_)))
+    }
+
+    /// Lowers each call element of a promise-input array as a live handle that is not settled at
+    /// its own return. A plain `callDynamicMethodHandle` settles a Promise result (for
+    /// `P.reject(1)` that throws before the combinator sees it); the `Raw` intrinsics keep it, the
+    /// same chain-link mode a receiver uses. The handle then goes into the argument as a placeholder.
+    fn lower_dynamic_promise_input_array(
+        &mut self,
+        array: &swc_ecma_ast::ArrayLit,
+    ) -> Result<HirExpr, String> {
+        let mut elements = Vec::with_capacity(array.elems.len());
+        for element in array.elems.iter().flatten() {
+            let value = match element.expr.as_ref() {
+                Expr::Call(_) => {
+                    let lowered = self.lower_expr_with_expected_type(&element.expr, Some(&HirType::JsValue))?;
+                    match lowered {
+                        HirExpr::Call(callee, args) => match callee.as_ref() {
+                            HirExpr::Var(name) if name == "__thaw_call_selected_dynamic_method_handle" => {
+                                HirExpr::Call(Box::new(HirExpr::Var("__thaw_call_selected_dynamic_method_raw".into())), args)
+                            }
+                            HirExpr::Var(name) if name == "callDynamicMethodHandle" => {
+                                HirExpr::Call(Box::new(HirExpr::Var("callDynamicMethodHandleRaw".into())), args)
+                            }
+                            _ => HirExpr::Call(callee, args),
+                        },
+                        other => other,
+                    }
+                }
+                _ => self.lower_expr(&element.expr)?,
+            };
+            elements.push(self.coerce_to_declared(&HirType::Json, value)?);
+        }
+        Ok(HirExpr::ArrayLit(elements))
     }
 
     fn is_owned_consumed_dynamic_json(expr: &HirExpr) -> bool {

@@ -5280,6 +5280,18 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  const err = (f: () => void): string => { try { f(); return 'ok'; } catch (e: any) { return `${e.name} ${e.code} ${e.message}`; } };\n  const worker = new wt.Worker('setInterval(() => {}, 1000)', { eval: true });\n  const channel = new wt.MessageChannel();\n  const port1 = channel.port1;\n  const port2 = channel.port2;\n  console.log('dup', err((): void => { worker.postMessage({}, [port2, port2]); }));\n  console.log('unlisted', err((): void => { worker.postMessage({ p: port2 }); }));\n  const c = new wt.MessageChannel();\n  console.log('transfer', err((): void => { worker.postMessage({}, [c.port1]); }));\n  console.log('again', err((): void => { worker.postMessage({}, [c.port1]); }));\n  c.port2.close();\n  console.log('closed', err((): void => { worker.postMessage({}, [c.port2]); }));\n  console.log('own', err((): void => { port1.postMessage('x', [port1]); }));\n  await worker.terminate();\n  console.log('terminated');\n}\n"
+  },
+  {
+    "name": "dynamic any-typed Promise.any and allSettled consume inline rejected inputs",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const P: any = Promise;\n  P.any([P.reject(1), P.resolve(2)]).then((v: any): void => { console.log('any ' + v); });\n  P.allSettled([P.resolve(1), P.reject(2)]).then((v: any): void => { console.log(JSON.stringify(v)); });\n  P.allSettled([P.reject(3), P.reject(4)]).then((v: any): void => { console.log('settled-all-rejected ' + v.length + ' ' + v[1].reason); });\n}\n"
+  },
+  {
+    "name": "dynamic any-typed Promise all race any reject paths and AggregateError errors order",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const P: any = Promise;\n  P.all([P.reject(3), P.resolve(4)]).catch((e: any): void => { console.log('all ' + e); });\n  P.race([P.reject(5), P.resolve(6)]).catch((e: any): void => { console.log('race ' + e); });\n  P.any([P.reject(7), P.reject(8)]).catch((e: any): void => { console.log('any ' + e.errors.join(',')); });\n  P.any([P.reject(9), P.resolve(10)]).then((v: any): void => { console.log('any-mixed ' + v); });\n}\n"
   }
 ]
 }
