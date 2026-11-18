@@ -521,6 +521,11 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   def(ArrayBuffer, 'isView', function isView(v) { return nativeIsView(v) || v instanceof DataView; });
 
   // ----- structuredClone (plain data, Map, Set, Date, RegExp, typed arrays, Error; cycles preserved) -----
+  // node:worker_threads markAsUntransferable / markAsUncloneable add to these marks (worker_threads.js reads them).
+  var untransferableMarks = new WeakSet(), uncloneableMarks = new WeakSet();
+  Object.defineProperty(globalThis, '__thaw_clone_marks', {
+    value: { untransferable: untransferableMarks, uncloneable: uncloneableMarks }, writable: false, enumerable: false, configurable: false
+  });
   globalThis.structuredClone = function structuredClone(value, options) {
     var seen = new Map();
     function dataCloneError(msg) {
@@ -532,6 +537,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     var moves = [];
     if (options != null && options.transfer !== undefined) {
       Array.from(options.transfer).forEach(function (b) {
+        if (untransferableMarks.has(b)) throw dataCloneError('Cannot transfer object of unsupported type.');
         if (!(b instanceof ArrayBuffer)) throw dataCloneError('Found invalid value in transferList.');
         if (moves.indexOf(b) >= 0) throw dataCloneError('Transfer list contains duplicate ArrayBuffer');
         if (detGet.call(b)) throw dataCloneError('Cannot transfer object of unsupported type.');
@@ -576,11 +582,15 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       // a view over a resizable buffer keeps its length tracking (the clone's buffer is resizable too)
       if (ArrayBuffer.isView(v) && v.buffer instanceof ArrayBuffer && v.buffer.resizable) { out = new v.constructor(clone(v.buffer), v.byteOffset, __thaw_ta_track(v) ? undefined : v.length); seen.set(v, out); return out; }
       if (ArrayBuffer.isView(v)) { out = new v.constructor(v); seen.set(v, out); return out; }
+      // an uncloneable object is refused as a plain object or an Error (Node: the Date, Map, Array, RegExp, typed-array,
+      // ArrayBuffer and boxed-primitive cases still clone)
       if (v instanceof Error) {
+        if (uncloneableMarks.has(v)) throw dataCloneError('Cannot clone object of unsupported type.');
         out = Object.create(Object.getPrototypeOf(v)); seen.set(v, out);
         ['message', 'stack', 'cause'].forEach(function (k) { if (Object.prototype.hasOwnProperty.call(v, k)) def(out, k, clone(v[k])); });
         return out;
       }
+      if (uncloneableMarks.has(v)) throw dataCloneError('Cannot clone object of unsupported type.');
       out = {}; seen.set(v, out);
       Object.keys(v).forEach(function (k) { out[k] = clone(v[k]); });
       return out;
