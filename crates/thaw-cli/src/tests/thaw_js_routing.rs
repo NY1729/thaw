@@ -856,15 +856,17 @@ fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
 
 #[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
-    // A `node:worker_threads` program that names `moveMessagePortToContext` (thaw-js does not serve it yet) keeps that
+    // A `node:async_hooks` createHook program that uses `finally` (not yet Node-identical on thaw-js) keeps that
     // module on QuickJS; the build falls back and the artifact reports the blocker.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "blockers-fallback",
         "import { Counter } from 'tjs-ctr';\n\
-         import { isMainThread } from 'node:worker_threads';\n\
+         import { createHook } from 'node:async_hooks';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
-           console.log(c.add(2), isMainThread, Object.keys({ moveMessagePortToContext: 1 }).length);\n\
+           createHook({ init(): void {} }).enable();\n\
+           Promise.resolve(1).finally((): void => {});\n\
+           console.log(c.add(2));\n\
          }\n",
     );
     let output = dir.join("app");
@@ -872,7 +874,7 @@ fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
     assert_eq!(manifest["quickjs"], true, "{manifest}");
     let blockers = manifest["thaw_js_blockers"].as_array().unwrap_or_else(|| panic!("{manifest}"));
     assert!(
-        blockers.iter().any(|blocker| blocker["package"] == "node:worker_threads"),
+        blockers.iter().any(|blocker| blocker["package"] == "node:async_hooks"),
         "{manifest}"
     );
     let _ = std::fs::remove_dir_all(dir);
@@ -893,10 +895,12 @@ fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal_and_warn_mode_
     let (dir, registry, entry) = thaw_js_class_fixture(
         "fallback-modes",
         "import { Counter } from 'tjs-ctr';\n\
-         import { isMainThread } from 'node:worker_threads';\n\
+         import { createHook } from 'node:async_hooks';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
-           console.log(c.add(2), isMainThread, Object.keys({ moveMessagePortToContext: 1 }).length);\n\
+           createHook({ init(): void {} }).enable();\n\
+           Promise.resolve(1).finally((): void => {});\n\
+           console.log(c.add(2));\n\
          }\n",
     );
     let build =|output: &Path| {
@@ -908,7 +912,7 @@ fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal_and_warn_mode_
     set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let error = build(&dir.join("app-error")).unwrap_err();
     assert!(error.starts_with("unsupported on thaw-js: "), "{error}");
-    assert!(error.contains("package `node:worker_threads` refused"), "{error}");
+    assert!(error.contains("package `node:async_hooks` refused"), "{error}");
     // warn: the same program builds, falling back to QuickJS for the refused package
     set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Warn));
     build(&dir.join("app-warn")).unwrap();
@@ -1345,14 +1349,16 @@ fn thaw_js_ctor_option_callback_declaration_is_plain_only_for_constructors() {
     assert!(!thaw_js_declaration_plain_with(method, false));
 }
 
+// old: `@parcel/watcher` was blocked by `thaw_js_unready_addon_blocker` (kept on QuickJS); new: routes to thaw-js like argon2.
 #[test]
-fn thaw_js_unready_addon_blocker_keeps_subscription_addons_on_quickjs() {
-    // old: `argon2` was `is_some()` (live-owner blocker); new: `is_none()` (routes to thaw-js)
-    assert!(thaw_js_unready_addon_blocker("argon2").is_none());
-    assert!(thaw_js_unready_addon_blocker("@parcel/watcher").is_some());
-    assert!(thaw_js_unready_addon_blocker("bcrypt").is_none());
-    assert!(thaw_js_unready_addon_blocker("sqlite3").is_none());
-    assert!(thaw_js_unready_addon_blocker("some-unrelated-package").is_none());
+fn parcel_watcher_and_argon2_native_addon_programs_route_to_thaw_js() {
+    let bundle = "module.exports = (function(require){ var __thaw_bundle_factories = { \"pkg/index.js\": function(module, exports, require) { exports.subscribe = function () {}; } }; var __thaw_bundle_require_maps = { \"pkg/index.js\": {} }; var __thaw_bundle_entry_key = \"pkg/index.js\"; })(globalThis.require);";
+    let user = "import { subscribe } from 'pkg';\nfunction main(): void { subscribe(); }\n";
+    for name in ["@parcel/watcher", "argon2"] {
+        let mut pkg = builtin_routing_package(name);
+        pkg.native_addon = Some(std::path::PathBuf::from("native.node"));
+        assert!(thaw_js_package_eligible(&pkg, bundle, user, &Default::default(), ""), "{name}");
+    }
 }
 
 #[test]

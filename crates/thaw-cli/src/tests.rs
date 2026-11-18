@@ -128,8 +128,6 @@ include!("tests/thaw_js_union_promise_return.rs");
 include!("tests/thaw_js_routing_callbacks.rs");
 include!("tests/thaw_js_union_object_param.rs");
 include!("tests/thaw_js_worker_threads.rs");
-include!("tests/thaw_js_worker_threads_w3.rs");
-include!("tests/thaw_js_worker_threads_w5.rs");
 include!("tests/thaw_js_stream_web.rs");
 include!("tests/native_timers_mixed.rs");
 

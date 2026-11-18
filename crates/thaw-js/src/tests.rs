@@ -3359,6 +3359,113 @@ var __thaw_bundle_entry_key = \"p/index.js\";
     assert!(!crate::scan::scan_bundle(&unguarded).unwrap().is_clean());
 }
 
+/// One-module registry bundle `p/index.js` whose body is `code` and whose require map is `map` (JSON object body).
+fn one_module_bundle(code: &str, map: &str) -> String {
+    r#"module.exports = (function(require) {
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {
+CODE
+},
+};
+var __thaw_bundle_require_maps = { "p/index.js": {MAP}, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#
+        .replace("CODE", code)
+        .replace("MAP", map)
+}
+
+#[test]
+fn scan_ignores_statically_dead_and_operands_but_not_live_ones() {
+    // esbuild's cjs-lexer annotation: `0 && (module.exports = { Hono })` never runs
+    let dead = one_module_bundle(
+        "0 && (module.exports = { Hono, Context });
+         exports.a = false && Missing;
+         exports.b = null && Gone;
+         if (0) { exports.c = DeadOne; } else { exports.d = 1; }
+         if (false) { exports.e = DeadTwo; }",
+        "",
+    );
+    let report = crate::scan::scan_bundle(&dead).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    // the same names read on a live path are still refused
+    let live = one_module_bundle(
+        "exports.a = x && Hono; if (x) { exports.b = Context; } if (1) {} else { exports.c = Alive; }",
+        "",
+    );
+    let names: Vec<String> = crate::scan::scan_bundle(&live)
+        .ok()
+        .unwrap()
+        .blockers
+        .into_keys()
+        .collect();
+    assert_eq!(
+        names,
+        ["global:Alive", "global:Context", "global:Hono", "global:x"]
+    );
+    let else_live = one_module_bundle("if (false) {} else { exports.c = Alive; }", "");
+    assert!(!crate::scan::scan_bundle(&else_live).unwrap().is_clean());
+}
+
+#[test]
+fn scan_knows_exactly_the_callsite_methods_the_engine_implements() {
+    // the names must match the `siteMethods` object of builtins.rs (no more, no less)
+    let source = include_str!("builtins.rs");
+    let start = source.find("var siteMethods = {").expect("siteMethods");
+    let body = &source[start..];
+    let body = &body[..body.find("};").expect("end of siteMethods")];
+    let mut implemented: Vec<&str> = body
+        .lines()
+        .filter(|l| l.contains(": function"))
+        .filter_map(|l| l.trim().split(':').next())
+        .collect();
+    implemented.sort_unstable();
+    let mut listed: Vec<&str> = crate::scan::CALLSITE_METHODS.to_vec();
+    listed.sort_unstable();
+    assert_eq!(listed, implemented);
+    // a program calling every one of them is clean; a name the engine does not have is still a blocker
+    let calls: String = listed.iter().map(|m| format!("c.{m}();")).collect();
+    let clean = one_module_bundle(&format!("exports.f = function (c) {{ {calls} }};"), "");
+    assert!(crate::scan::scan_bundle(&clean).unwrap().is_clean());
+    let unknown = one_module_bundle("exports.f = function (c) { return c.getBogusSite(); };", "");
+    assert!(!crate::scan::scan_bundle(&unknown).unwrap().is_clean());
+}
+
+#[test]
+fn scan_tolerates_optional_requires_guarded_by_a_handling_try() {
+    // ws: `try { const b = require('bufferutil') } catch (e) {}` (a missing optional package)
+    let guarded = one_module_bundle(
+        "try { const b = require('bufferutil'); exports.b = b; } catch (e) { /* optional */ }
+         try { exports.u = require('utf-8-validate'); } catch (e) {}",
+        "",
+    );
+    assert!(crate::scan::scan_bundle(&guarded).unwrap().is_clean());
+    // unguarded, rethrowing, function-deferred, finally-only and builtin requires stay refused
+    let refused = [
+        "const b = require('bufferutil');",
+        "try { require('bufferutil'); } catch (e) { throw e; }",
+        "try { exports.f = function () { return require('bufferutil'); }; } catch (e) {}",
+        "try { require('bufferutil'); } finally {}",
+        "try { require('net'); } catch (e) {}",
+        "try { require('node:net'); } catch (e) {}",
+    ];
+    for code in refused {
+        let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
+            .ok()
+            .unwrap();
+        assert!(!report.is_clean(), "{code} should be refused");
+    }
+    // the tolerated shape still runs: a missing module throws MODULE_NOT_FOUND inside the try, as in Node
+    let program = one_module_bundle(
+        "exports.probe = function () { try { require('bufferutil'); return 'loaded'; } catch (e) { return e.code; } };",
+        "",
+    );
+    let mut p = crate::host::Package::load(&program).expect("loads");
+    assert_eq!(
+        p.call("probe", &[]).ok(),
+        Some(crate::host::Native::Str("MODULE_NOT_FOUND".into()))
+    );
+}
+
 const DATES: &str = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
 "d/index.js": function(module, exports, require) {
@@ -10558,4 +10665,18 @@ fn graph_wire_origin_serials_name_the_decoded_root_container() {
     let handle = thaw_tjs_retain_graph_result(plain.as_ptr());
     assert_eq!(thaw_tjs_origin_serial(handle.value), 0);
     assert_eq!(thaw_tjs_origin_serial(u64::MAX), 0);
+}
+
+// ----- `arguments` in a class constructor is the constructor's own, not the enclosing function's
+// (zod's ZodObject constructor is `super(...arguments)` inside a CommonJS factory whose `arguments[0]`
+// is the `module` object) -----
+
+#[test]
+fn class_constructor_arguments_are_its_own() {
+    assert_eq!(one("function outer(a, b) { class B { constructor(x) { this.x = x; } } class D extends B { constructor() { super(...arguments); this.n = arguments.length; } } var d = new D('in'); console.log(d.x, d.n); } outer('oa', 'ob');"), "in 1");
+    assert_eq!(one("function outer(a) { class B { constructor(x) { this.x = x; } } class E extends B { constructor() { super(arguments[0]); } } console.log(new E('e1').x); } outer('oa');"), "e1");
+    assert_eq!(
+        one("new (class { constructor() { console.log(arguments[0]); } })('top');"),
+        "top"
+    );
 }

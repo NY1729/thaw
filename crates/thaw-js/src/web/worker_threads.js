@@ -52,7 +52,8 @@
   }
 
   const decode = wire => __thaw_worker_decode(wire);
-  const encode = (value, transfer) => __thaw_worker_encode(value, transfer);
+  // `dest` is the port token of the realm the wire goes to (a port in it moves there); see worker.rs
+  const encode = (value, transfer, dest = 0) => __thaw_worker_encode(value, transfer, dest);
   const { Readable, Writable, hexToBytes } = __thaw_worker_stream;
 
   // postMessageToThread (W-D). The message runs the destination's 'workerMessage' listeners on its own loop, and the
@@ -105,7 +106,7 @@
     const deliver = route(target);
     // an unknown thread keeps its buffers (Node moves them only for a thread that receives the message)
     let wire;
-    try { wire = encode(value, deliver === undefined ? [] : transfer); } catch (error) { return Promise.reject(error); }
+    try { wire = encode(value, deliver === undefined ? [] : transfer, deliver === undefined ? 0 : liveThreads.get(target).token); } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
       const ack = nextAck++;
       const entry = { resolve, reject, timer: undefined };
@@ -135,12 +136,14 @@
         code = 'globalThis.__thaw_run_main_file(' + JSON.stringify(code) + ')';
       }
       const threadId = nextThreadId++;
+      // the worker's port token: ports that move to it are routed by this (worker.rs), unlike the Node threadId
+      const token = __thaw_port_address();
       // transferList (Node: any iterable, here by Array.from, so a non-iterable value is ignored): its buffers move to the
       // worker whether or not workerData names them. A bad list or a non-cloneable workerData throws here, as in Node.
       const transfer = options.transferList === undefined || options.transferList === null ? [] : __thaw_transfer_check(Array.from(options.transferList));
       const opts = {
         threadId,
-        workerData: encode(options.workerData, transfer),
+        workerData: encode(options.workerData, transfer, token),
         // the worker starts with a snapshot of the parent's environment data
         envData: encode(Array.from(environmentData)),
       };
@@ -169,10 +172,12 @@
       };
       opts.resourceLimits = resourceLimits;
       // heap limit (MiB, -1 = none) and stack (MiB): the natives' numeric arguments
-      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb, shareEnv);
+      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb, shareEnv, token);
       let resolveExit;
       const state = {
         handle,
+        threadId,
+        token,
         exited: false,
         exitCode: undefined,
         refd: true,
@@ -194,7 +199,7 @@
       const state = states.get(this);
       // after the worker exited Node neither checks the list nor moves its buffers
       if (state.exited) return;
-      __thaw_worker_post(state.handle, encode(value, __thaw_transfer_of(transferOrOptions)));
+      __thaw_worker_post(state.handle, encode(value, __thaw_transfer_of(transferOrOptions), state.token));
     }
 
     terminate() {
@@ -225,6 +230,9 @@
   // Events from the Rust poll (worker.rs `poll`), delivered by the event loop: [{handle, type, ...}].
   globalThis.__thaw_worker_dispatch = function (json) {
     for (const event of JSON.parse(json)) {
+      // port events have no handle: a port end of this thread, routed by the main thread (messaging.js)
+      if (event.type === 'port') { __thaw_port_deliver(event.addr, event.value); continue; }
+      if (event.type === 'portClose') { __thaw_port_hangup(event.addr); continue; }
       const worker = byHandle.get(event.handle);
       if (worker === undefined) continue;
       const state = states.get(worker);
@@ -269,6 +277,67 @@
   // Node ignores a non-object argument.
   const isObjectLike = value => (typeof value === 'object' && value !== null) || typeof value === 'function';
 
+  // moveMessagePortToContext (Node 22.23.1, probes in thaw-tmp/we1-scratch). The result is a new wrapper over the same
+  // port (nothing is transferred, so the original stays usable). Delivered messages are re-prototyped into the context's
+  // realm. ponytail: only plain objects, arrays, Map, Set, Date and Error are re-prototyped, and the event is a plain
+  // object (not a MessageEvent, with `ports` as received).
+  // vm_context.js marks each context (VM_CONTEXT) and publishes its prototypes on its first run (VM_PROTOTYPES). String
+  // keys: symbols are per realm. ponytail: a context never run before a message arrives keeps the host prototypes.
+  const VM_CONTEXT = '__thaw_vm_context';
+  const VM_PROTOTYPES = '__thaw_vm_prototypes';
+  const movedPorts = new WeakMap(); // wrapper -> { port, context, listening }
+  const hostPrototypes = [Object.prototype, Array.prototype, Map.prototype, Set.prototype, Date.prototype, Error.prototype];
+  const adoptInto = (value, protos, seen) => {
+    if (typeof value !== 'object' || value === null || seen.has(value)) return;
+    seen.add(value);
+    const kind = hostPrototypes.indexOf(Object.getPrototypeOf(value));
+    if (kind < 0) return;
+    if (kind === 2) for (const [key, entry] of value) { adoptInto(key, protos, seen); adoptInto(entry, protos, seen); }
+    else if (kind === 3) for (const entry of value) adoptInto(entry, protos, seen);
+    else if (kind !== 4) for (const entry of Object.values(value)) adoptInto(entry, protos, seen);
+    Object.setPrototypeOf(value, protos[kind]);
+  };
+  class HandleWrap {
+    close() { return movedPorts.get(this).port.close(); }
+    hasRef() { return movedPorts.get(this).port.hasRef(); }
+    ref() { movedPorts.get(this).port.ref(); return this; }
+    unref() { movedPorts.get(this).port.unref(); return this; }
+  }
+  class MessagePort extends HandleWrap {
+    postMessage(value, transferList) { return movedPorts.get(this).port.postMessage(value, transferList); }
+    start() {
+      const state = movedPorts.get(this);
+      if (!state.listening) {
+        state.listening = true;
+        state.port.addEventListener('message', event => {
+          adoptInto(event.data, state.context[VM_PROTOTYPES] || hostPrototypes, new Set());
+          if (typeof this.onmessage === 'function') this.onmessage.call(this, { data: event.data, target: this, type: 'message', ports: event.ports });
+        });
+      }
+      state.port.start();
+    }
+  }
+  function moveMessagePortToContext(port, context) {
+    if (!globalThis.__thaw_is_message_port(port)) {
+      const error = new TypeError('The "port" argument must be a MessagePort instance');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (!isObjectLike(context) || context[VM_CONTEXT] !== true) {
+      const error = new TypeError('Invalid context argument');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (port.__thawClosed) {
+      const error = new Error('Cannot send data on closed MessagePort');
+      error.code = 'ERR_CLOSED_MESSAGE_PORT';
+      throw error;
+    }
+    const moved = new MessagePort();
+    movedPorts.set(moved, { port, context, listening: false });
+    return moved;
+  }
+
   const workerThreadsExports = {
     isMainThread: true,
     isInternalThread: false,
@@ -294,6 +363,7 @@
       const record = port.__thawQueue.shift();
       return record ? { message: record.data } : undefined;
     },
+    moveMessagePortToContext,
     markAsUntransferable(value) { if (isObjectLike(value)) globalThis.__thaw_clone_marks.untransferable.add(value); },
     isMarkedAsUntransferable(value) { return isObjectLike(value) && globalThis.__thaw_clone_marks.untransferable.has(value); },
     markAsUncloneable(value) { if (isObjectLike(value)) globalThis.__thaw_clone_marks.uncloneable.add(value); },
