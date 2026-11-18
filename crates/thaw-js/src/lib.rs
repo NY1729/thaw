@@ -33,6 +33,7 @@ mod call_frames;
 mod child;
 mod classes;
 mod jsstr;
+pub mod mem_trace;
 mod regexp_statics;
 pub use jsstr::JsStr;
 mod co;
@@ -204,11 +205,14 @@ pub struct ObjData {
     index: RefCell<Option<FxMap<Rc<str>, usize>>>,
     /// Bytes this object has charged to the heap limit (`heap_limit`); credited back when it drops.
     charged: Cell<usize>,
+    /// Created as a closure (`Kind::Closure`), so `mem_trace` counts it as one (kind may change later).
+    closure_counted: bool,
 }
 
 impl Drop for ObjData {
     fn drop(&mut self) {
         heap_limit::credit(self.charged.get());
+        crate::mem_trace::obj_dropped(self.closure_counted);
     }
 }
 
@@ -927,6 +931,12 @@ fn compound_binop(op: a::AssignOp) -> Option<a::BinaryOp> {
     })
 }
 
+impl Drop for Scope {
+    fn drop(&mut self) {
+        crate::mem_trace::scope_dropped();
+    }
+}
+
 pub struct Scope {
     vars: RefCell<Vars>,
     /// Union of `name_bit` over the declared names (no false negatives).
@@ -955,6 +965,7 @@ impl Scope {
     fn new(parent: Option<Rc<Scope>>) -> Rc<Scope> {
         let strict = parent.as_ref().is_some_and(|p| p.strict.get());
         let in_with = parent.as_ref().is_some_and(|p| p.in_with);
+        crate::mem_trace::scope_created();
         Rc::new(Scope {
             vars: RefCell::new(Vars::default()),
             mask: Cell::new(0),
@@ -967,6 +978,7 @@ impl Scope {
         })
     }
     fn new_with(parent: Rc<Scope>, obj: Obj) -> Rc<Scope> {
+        crate::mem_trace::scope_created();
         Rc::new(Scope {
             vars: RefCell::new(Vars::default()),
             mask: Cell::new(u64::MAX),
@@ -1060,6 +1072,7 @@ impl Scope {
                 },
             );
         }
+        crate::mem_trace::scope_created();
         Rc::new(Scope {
             vars: RefCell::new(vars),
             mask: Cell::new(self.mask.get()),
@@ -1168,6 +1181,8 @@ impl Value {
 }
 
 fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
+    let closure_counted = matches!(kind, Kind::Closure { .. });
+    crate::mem_trace::obj_created(closure_counted);
     let obj = Rc::new(ObjData {
         raw_props: RefCell::new(Vec::new()),
         lazy_proto: Cell::new(false),
@@ -1179,6 +1194,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         ext: Cell::new(0),
         index: RefCell::new(None),
         charged: Cell::new(0),
+        closure_counted,
     });
     account(&obj);
     obj
@@ -1549,6 +1565,7 @@ impl Interp {
         if host {
             it.install_main_file_loader();
         }
+        crate::mem_trace::mem_trace_report("after-core-preludes");
         it.run_prelude(extras::EXTRAS).unwrap_or_else(|e| {
             let why = match &e {
                 Ctl::Throw(v) => {
@@ -1563,45 +1580,74 @@ impl Interp {
         it.install_typed();
         it.install_buffer();
         if host {
+            // mem_trace: each report line is the heap after that installer (per-prelude cost)
             it.install_sysio();
             it.install_process_stdin();
             it.install_process_members_js();
             it.install_ipc_if_marked(std::env::var_os(ipc::MARKER).as_deref());
+            crate::mem_trace::mem_trace_report("install-ipc");
             napi_bridge::install(&mut it);
+            crate::mem_trace::mem_trace_report("napi_bridge");
             net::install(&mut it);
+            crate::mem_trace::mem_trace_report("net");
             worker::install(&mut it);
+            crate::mem_trace::mem_trace_report("worker");
             dns::install(&mut it);
+            crate::mem_trace::mem_trace_report("dns");
             vm::install(&mut it);
+            crate::mem_trace::mem_trace_report("vm");
             zlib::install(&mut it);
+            crate::mem_trace::mem_trace_report("zlib");
             #[cfg(feature = "sqlite")]
             sqlite::install(&mut it);
             tls::install(&mut it);
+            crate::mem_trace::mem_trace_report("tls");
             it.install_fs_host();
             web_dom_exception::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_dom_exception");
             web_text_codec::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_text_codec");
             web_event_target::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_event_target");
             web_messaging::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_messaging");
             web_performance::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_performance");
             web_test_mock_timers::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_test_mock_timers");
             web_worker_stream::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_worker_stream");
             web_worker_wire::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_worker_wire");
             web_worker_threads::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_worker_threads");
             web_abort::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_abort");
             web_blob::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_blob");
             web_fetch::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_fetch");
             web_streams::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_streams");
             web_async_hooks::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_async_hooks");
             web_wasm::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_wasm");
             web_crypto::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_crypto");
             web_navigator::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_navigator");
             web_websocket::install(&mut it);
+            crate::mem_trace::mem_trace_report("web_websocket");
             node_crypto::install(&mut it);
+            crate::mem_trace::mem_trace_report("node_crypto");
             it.install_url();
             // host realm only: a vm context's global keeps the plain `Object` tag, as in Node
             it.run_builtin("Object.defineProperty(globalThis, Symbol.toStringTag, { value: 'global', configurable: true });")
                 .unwrap_or_else(|_| panic!("thaw-js globalThis tag must install"));
             #[cfg(feature = "intl")]
             it.install_intl();
+            crate::mem_trace::mem_trace_report("host-tail");
         }
         it.run_prelude(extras::EXTRAS_LATE)
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
@@ -1616,6 +1662,7 @@ impl Interp {
             compile::CompileMode::parse(std::env::var("THAW_JS_COMPILE").ok().as_deref());
         it.compile_after =
             compile::parse_after(std::env::var("THAW_JS_COMPILE_AFTER").ok().as_deref());
+        crate::mem_trace::mem_trace_report("after-build");
         it
     }
 
@@ -5828,6 +5875,8 @@ mod job_barrier_tests;
 #[cfg(test)]
 mod leak_audit_tests;
 #[cfg(test)]
+mod mem_trace_tests;
+#[cfg(test)]
 mod names_tests;
 #[cfg(test)]
 mod napi_bridge_tests;
@@ -5910,6 +5959,7 @@ impl Interp {
     /// (prototype <-> constructor, global scope <-> closures) so the realm's memory is freed on drop.
     /// Values still referenced from outside keep their memory but read as empty objects.
     pub(crate) fn teardown(&mut self) {
+        crate::mem_trace::mem_trace_report("teardown-before");
         // Contexts this realm made die with it; their script scopes are cleared, the sandboxes are the host's.
         for slot in std::mem::take(&mut self.vm).values_mut() {
             if let Some(r) = slot.realm_mut() {
@@ -6049,6 +6099,7 @@ impl Interp {
 
         crate::napi_graph::forget_objects(&cleared);
         crate::napi_symbols::forget_objects(&cleared);
+        crate::mem_trace::mem_trace_report("teardown-after");
     }
 }
 
