@@ -5242,6 +5242,26 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "import * as http from 'node:http';\nconst h: any = http;\nfunction main(): void {\n  console.log(typeof h.createServer, typeof h.STATUS_CODES, typeof h.default);\n}"
+  },
+  {
+    "name": "main thread stdin for await reads piped input",
+    "expect": "matched",
+    "stdin": "hello\nworld\n",
+    "source": "async function main(): Promise<void> {\n  const chunks: string[] = [];\n  for await (const chunk of process.stdin) { chunks.push(String(chunk)); }\n  console.log(JSON.stringify(chunks.join('')), chunks.length > 0);\n}"
+  },
+  {
+    "name": "main thread stdin beside worker_threads import reads data and end",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "stdin": "hi\nyo\n",
+    "source": "import { isMainThread } from 'node:worker_threads'; function main(): void { let text = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (chunk: string): void => { text += chunk; }); process.stdin.on('end', (): void => { console.log(isMainThread, JSON.stringify(text)); }); }"
+  },
+  {
+    "name": "main thread stdin beside worker_threads import with empty stdin",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "stdin": "",
+    "source": "import { isMainThread } from 'node:worker_threads'; function main(): void { let text = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (chunk: string): void => { text += chunk; }); process.stdin.on('end', (): void => { console.log(isMainThread, JSON.stringify(text)); }); }"
   }
 ]
 }

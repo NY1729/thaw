@@ -891,17 +891,12 @@ const THAW_JS_WORKER_THREADS_UNSUPPORTED: &[&str] = &[
 ];
 
 /// See `THAW_JS_WORKER_THREADS_UNSUPPORTED`: worker threads stay on QuickJS until thaw-js can run them.
-/// `process.stdin` is served only inside a worker: a program that mentions it without constructing a Worker (its
-/// main thread has no stdin on thaw-js) stays on QuickJS; one that starts a Worker routes, its eval'd source reads stdin.
 fn thaw_js_worker_threads_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    let main_thread_stdin = thaw_js_mentions(user_source, "stdin")
-        && !(user_source.contains("new Worker") || user_source.contains("Worker("));
     (pkg_name == "node:worker_threads"
-        && (main_thread_stdin
-            || THAW_JS_WORKER_THREADS_UNSUPPORTED
-                .iter()
-                .any(|name| thaw_js_mentions(user_source, name))))
-    .then_some("worker threads options (transferList, moveMessagePortToContext) and main-thread process.stdin are not supported on thaw-js yet")
+        && THAW_JS_WORKER_THREADS_UNSUPPORTED
+            .iter()
+            .any(|name| thaw_js_mentions(user_source, name)))
+    .then_some("worker threads options (transferList, moveMessagePortToContext) are not supported on thaw-js yet")
 }
 
 /// The thaw-js form of a `node:path` family specifier: the unmodified `node:path` bundle plus the realm marker
