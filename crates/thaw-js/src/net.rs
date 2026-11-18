@@ -246,6 +246,10 @@ struct NetWriter {
     failure: Arc<Mutex<Option<String>>>,
     /// `end()` already queued the write-side shutdown: a later `destroy()` must let the queued bytes drain first.
     shutdown_requested: bool,
+    /// Set by `destroy()` while bytes are still queued: the writer stops at the first write that would block.
+    closing: Arc<std::sync::atomic::AtomicBool>,
+    /// True while the writer is inside `write()`; only `shutdown` can wake a write blocked on a full send buffer.
+    in_write: Arc<std::sync::atomic::AtomicBool>,
 }
 
 static NET_WRITERS: Table<HashMap<u32, NetWriter>> = Table::new(|| Mutex::new(HashMap::new()));
@@ -255,6 +259,8 @@ fn net_writer_loop(
     receiver: std::sync::mpsc::Receiver<NetWriterMessage>,
     pending: Arc<std::sync::atomic::AtomicUsize>,
     failure: Arc<Mutex<Option<String>>>,
+    closing: Arc<std::sync::atomic::AtomicBool>,
+    in_write: Arc<std::sync::atomic::AtomicBool>,
 ) {
     use std::sync::atomic::Ordering;
     for message in receiver {
@@ -262,7 +268,10 @@ fn net_writer_loop(
             NetWriterMessage::Data(bytes) => {
                 let mut offset = 0;
                 while offset < bytes.len() {
-                    match stream.write(&bytes[offset..]) {
+                    in_write.store(true, Ordering::SeqCst);
+                    let result = stream.write(&bytes[offset..]);
+                    in_write.store(false, Ordering::SeqCst);
+                    match result {
                         Ok(0) => {
                             if let Ok(mut slot) = failure.lock() {
                                 slot.get_or_insert_with(|| "write returned zero bytes".to_string());
@@ -277,6 +286,10 @@ fn net_writer_loop(
                         // The reader toggles O_NONBLOCK on the shared descriptor while it polls.
                         // ponytail: sleep-retry, a poll(POLLOUT) wait is the upgrade if this ever shows up in profiles.
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            // Destroyed with bytes queued: what the kernel would not take right now is discarded, as in Node.
+                            if closing.load(Ordering::SeqCst) {
+                                return;
+                            }
                             std::thread::sleep(Duration::from_millis(1));
                         }
                         Err(error) => {
@@ -310,7 +323,7 @@ fn net_writer_failure(handle: u32) -> Option<String> {
 }
 
 /// Queues `value` for the socket's writer thread, creating the thread on the first write.
-fn net_write(handle: u32, value: &[u8]) -> String {
+pub(crate) fn net_write(handle: u32, value: &[u8]) -> String {
     use std::sync::atomic::Ordering;
     let clone = NET_STREAMS.with(|streams| {
         streams
@@ -334,10 +347,21 @@ fn net_write(handle: u32, value: &[u8]) -> String {
                 let failure = Arc::new(Mutex::new(None));
                 let thread_pending = Arc::clone(&pending);
                 let thread_failure = Arc::clone(&failure);
+                let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let in_write = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let (thread_closing, thread_in_write) =
+                    (Arc::clone(&closing), Arc::clone(&in_write));
                 if let Err(error) = std::thread::Builder::new()
                     .name("thaw-net-writer".to_string())
                     .spawn(move || {
-                        net_writer_loop(stream, receiver, thread_pending, thread_failure)
+                        net_writer_loop(
+                            stream,
+                            receiver,
+                            thread_pending,
+                            thread_failure,
+                            thread_closing,
+                            thread_in_write,
+                        )
                     })
                 {
                     return format!("err:{error}");
@@ -347,6 +371,8 @@ fn net_write(handle: u32, value: &[u8]) -> String {
                     pending,
                     failure,
                     shutdown_requested: false,
+                    closing,
+                    in_write,
                 })
             }
         };
@@ -569,19 +595,30 @@ pub(crate) fn net_take_stream(handle: u32) -> Option<TcpStream> {
     NET_STREAMS.with(|streams| streams.borrow_mut().1.remove(&handle))
 }
 
-fn net_destroy(handle: u32) {
+pub(crate) fn net_destroy(handle: u32) {
     net_destroy_with(handle, false);
+}
+
+/// True when a write would not wait for buffer space right now (`poll` with no timeout).
+fn socket_writable(stream: &TcpStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut pollfd = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    unsafe { libc::poll(&mut pollfd, 1, 0) > 0 && pollfd.revents & libc::POLLOUT != 0 }
 }
 
 /// `reset` closes with `SO_LINGER{on, 0}` and no FIN, so the peer sees an RST (`socket.resetAndDestroy()`).
 fn net_destroy_with(handle: u32, reset: bool) {
+    use std::sync::atomic::Ordering;
+    // Dropping the writer drops its channel sender, so the writer thread exits once its queue is handled.
+    let writer = NET_WRITERS.with(|writers| writers.borrow_mut().remove(&handle));
     // After `end()` the queued bytes still belong to the peer: the writer thread drains them and closes its descriptor.
-    let draining = NET_WRITERS.with(|writers| {
-        writers
-            .borrow_mut()
-            .remove(&handle)
-            .is_some_and(|writer| writer.shutdown_requested)
-    });
+    let draining = writer
+        .as_ref()
+        .is_some_and(|writer| writer.shutdown_requested);
     NET_STREAMS.with(|streams| {
         if let Some(stream) = streams.borrow_mut().1.remove(&handle) {
             if reset {
@@ -600,7 +637,24 @@ fn net_destroy_with(handle: u32, reset: bool) {
                     );
                 }
             } else if !draining {
-                let _ = stream.shutdown(Shutdown::Both);
+                match writer.as_ref() {
+                    // Node (libuv) closes now: bytes the kernel takes without blocking are delivered, the rest is discarded.
+                    // The writer shares this file description, so nonblocking makes its remaining writes fail fast instead of
+                    // blocking on a stalled peer. Only a write blocked on a full send buffer needs shutdown to wake it.
+                    Some(writer) if writer.pending.load(Ordering::SeqCst) > 0 => {
+                        writer.closing.store(true, Ordering::SeqCst);
+                        // Nonblocking first: writes that start from here on cannot block; one already inside write() is in `in_write`.
+                        let nonblocking = stream.set_nonblocking(true).is_ok();
+                        let blocked =
+                            writer.in_write.load(Ordering::SeqCst) && !socket_writable(&stream);
+                        if !nonblocking || blocked {
+                            let _ = stream.shutdown(Shutdown::Both);
+                        }
+                    }
+                    _ => {
+                        let _ = stream.shutdown(Shutdown::Both);
+                    }
+                }
             }
         }
     });
