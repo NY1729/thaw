@@ -68,7 +68,7 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
-    let result = command_output_with_timeout(&mut Command::new(&output), Duration::from_secs(60))
+    let result = command_output_with_timeout(&mut Command::new(&output), Duration::from_secs(60), None)
         .unwrap_or_else(|error| panic!("sqlite3 app failed or timed out: {error}"));
     assert!(
         result.status.success(),

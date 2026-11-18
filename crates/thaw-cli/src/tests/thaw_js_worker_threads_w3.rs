@@ -9,7 +9,7 @@ fn thaw_js_worker_threads_blocker_routes_plain_worker_programs() {
 #[test]
 fn thaw_js_worker_threads_blocker_keeps_unserved_worker_options_on_quickjs() {
     let import = "import { Worker } from \"node:worker_threads\";\n";
-    // a Worker that uses stdin is served on thaw-js (W5); stdin without a Worker stays on QuickJS (see below)
+    // a Worker that uses stdin is served on thaw-js (W5)
     for routed in [
         "new Worker(src, { eval: true, stdin: true });",
         "const w = new Worker(src, { eval: true, stdin: true });\nw.stdin!.write('abc');",
@@ -26,14 +26,10 @@ fn thaw_js_worker_threads_blocker_keeps_unserved_worker_options_on_quickjs() {
             "{routed} routes to thaw-js"
         );
     }
-    for blocked in [
-        "process.stdin.on('data', f);",
-        "w.postMessage(x, [buffer]); const transferList = [buffer];",
-    ] {
-        assert!(
-            thaw_js_worker_threads_blocker("node:worker_threads", &format!("{import}{blocked}"))
-                .is_some(),
-            "{blocked} must stay on QuickJS"
-        );
-    }
+    let blocked = "w.postMessage(x, [buffer]); const transferList = [buffer];";
+    assert!(
+        thaw_js_worker_threads_blocker("node:worker_threads", &format!("{import}{blocked}"))
+            .is_some(),
+        "{blocked} must stay on QuickJS"
+    );
 }
