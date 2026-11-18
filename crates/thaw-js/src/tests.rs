@@ -5043,16 +5043,22 @@ setTimeout(function () { hook.disable(); console.log(log.join(',')); }, 40);";
 }
 
 /// Timers and immediates scheduled while no hook is enabled report no events, even if a hook is enabled and disabled meanwhile.
+///
+/// The order of a 1 ms timer and a `setImmediate` is not guaranteed (Node documents it as depending on process
+/// performance), and the output used to be taken by a 5 ms timer, which on a loaded runner could run before the
+/// immediate (`t` instead of `t,i`; it failed in CI twice). The output is now taken from inside the immediate's own
+/// follow-up timer, after both callbacks ran, and the two callbacks are compared sorted: only the absence of hook
+/// events matters here.
 #[test]
 fn async_hooks_timers_without_an_enabled_hook_report_nothing() {
-    let src = "var A = __thaw_async_hooks_exports, n = [];
+    let src = "var A = __thaw_async_hooks_exports, n = [], ran = 0;
 var hook = A.createHook({ init(id, type) { n.push(type); }, before() { n.push('b'); }, after() { n.push('a'); }, destroy() { n.push('d'); } });
-setTimeout(function () { n.push('t'); }, 1);
-setImmediate(function () { n.push('i'); });
+function done() { if (++ran === 2) setTimeout(function () { console.log(n.slice().sort().join(',')); }, 20); }
+setTimeout(function () { n.push('t'); done(); }, 1);
+setImmediate(function () { n.push('i'); done(); });
 var t2 = setTimeout(function () {}, 1); clearTimeout(t2);
-hook.enable(); hook.disable();
-setTimeout(function () { console.log(n.join(',')); }, 5);";
-    assert_eq!(run_loop(src), "t,i");
+hook.enable(); hook.disable();";
+    assert_eq!(run_loop(src), "i,t");
 }
 
 /// new Promise(r => r(1)).then: init, resolve, before/after around the reaction. Expected: Node 22.23.1 trace (`node` on the same script).
