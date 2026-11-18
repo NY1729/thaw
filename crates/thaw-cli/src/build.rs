@@ -848,7 +848,11 @@ fn build_with_native_mode_routed(
         let registry_shim_len = registry_shim.len();
         let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
         if let Ok(path) = std::env::var("THAW_DUMP_SHIM") {
-            // debugging aid: the generated registry shim (TypeScript) of this build
+            // debugging aid: the generated registry shim (TypeScript) of this build. `path` keeps the LAST pass (the
+            // QuickJS retry of a routed build overwrites the thaw-js pass); `path.passN` keeps every pass in order
+            static DUMP_PASS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let pass = DUMP_PASS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let _ = std::fs::write(format!("{path}.pass{pass}"), &shim_source);
             let _ = std::fs::write(path, &shim_source);
         }
         if let Some(directory) = assets {
