@@ -74,8 +74,10 @@ if (typeof globalThis.MessageEvent !== 'function') {
           : transferOrOptions;
         if (Array.prototype.includes.call(Array.from(transfer), this)) throw new DOMException('Transfer list contains source port', 'DataCloneError');
         if (this.__thawClosed || !this.__thawPeer || this.__thawPeer.__thawClosed) return;
-        const copy = structuredClone(value, { transfer });
-        const ports = transfer.filter(item => item instanceof MessagePort)
+        // the argument is checked as Node reads it (a list, or options with `transfer`) before the clone
+        const list = __thaw_transfer_of(transferOrOptions);
+        const copy = structuredClone(value, { transfer: list });
+        const ports = list.filter(item => item instanceof MessagePort)
           .map(item => item.__thawTransferredPort || item);
         this.__thawPeer.__thawQueue.push({ data: copy, ports });
         this.__thawPeer.__thawSchedule();

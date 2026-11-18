@@ -14,6 +14,7 @@ use std::thread::JoinHandle;
 
 use crate::builtins::json_quote;
 use crate::heap_limit;
+use crate::process_env::{private_env_table, share_env_table, EnvTable};
 use crate::typed::SabBlock;
 use crate::*;
 
@@ -32,6 +33,10 @@ enum Cmd {
     /// Stdin bytes as hex, and whether this is the end of the stream (`worker.stdin.end()`).
     Stdin(String, bool),
     Terminate,
+    /// `postMessageToThread` from thread `source`, and the sender's ack id (answered with `ThreadAck`).
+    Thread(u32, u32, String),
+    /// The answer to a `postMessageToThread` this worker sent: ack id, status, error wire.
+    ThreadAck(u32, String, String),
 }
 
 enum Evt {
@@ -41,6 +46,10 @@ enum Evt {
     Exit(i32),
     /// Captured stdout (fd 1) or stderr (fd 2) bytes as hex (only when the parent asked for them).
     Stdio(u8, String),
+    /// `postMessageToThread` from the worker to the parent: the worker's ack id, and the wire.
+    Thread(u32, String),
+    /// The parent's answer to a `postMessageToThread` the worker sent: ack id, status, error wire.
+    ThreadAck(u32, String, String),
 }
 
 struct Worker {
@@ -70,6 +79,9 @@ pub(crate) struct WorkerState {
     next: u32,
     workers: BTreeMap<u32, Worker>,
     side: Option<Side>,
+    /// The environment table this realm's `process.env` reads and writes (`process_env.rs`); None is the real
+    /// process environment (the main realm until a `SHARE_ENV` worker is spawned).
+    pub(crate) env_table: Option<EnvTable>,
 }
 
 /// SharedArrayBuffer blocks in flight between Interps: the wire carries only the id. An encode enters the block
@@ -94,17 +106,79 @@ pub(crate) fn sab_import(id: u64) -> Option<Arc<SabBlock>> {
     sab_table().remove(&id)
 }
 
-/// Releases the blocks a wire carries when nobody will decode it. The wire is JSON and quotes inside strings are
-/// escaped, so every `"t":"SAB","id":N` found here is a node the encoder wrote.
-pub(crate) fn release_wire(wire: &str) {
-    const NODE: &str = r#""t":"SAB","id":"#;
-    let mut rest = wire;
-    while let Some(at) = rest.find(NODE) {
-        rest = &rest[at + NODE.len()..];
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        if let Ok(id) = digits.parse::<u64>() {
-            sab_table().remove(&id);
+/// A moved ArrayBuffer's bytes and its maxByteLength (`Some` for a resizable buffer).
+type MovedBytes = (Vec<u8>, Option<usize>);
+
+/// ArrayBuffers in flight between Interps (postMessage with a transfer list): the wire carries only the id, and the
+/// bytes move, they are not copied. `ab_export` takes the Vec out of the sender's buffer; the decode that reads the
+/// wire (`ab_import`) gives it to the receiver's new buffer.
+static AB_IN_FLIGHT: Mutex<BTreeMap<u64, MovedBytes>> = Mutex::new(BTreeMap::new());
+static AB_NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn ab_table() -> MutexGuard<'static, BTreeMap<u64, MovedBytes>> {
+    AB_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Enters moved bytes for one wire; returns the id that wire carries.
+pub(crate) fn ab_export(bytes: Vec<u8>, max: Option<usize>) -> u64 {
+    let id = AB_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    ab_table().insert(id, (bytes, max));
+    id
+}
+
+/// Takes the bytes of a wire node (once: the decode that reads the node owns them now).
+pub(crate) fn ab_import(id: u64) -> Option<MovedBytes> {
+    ab_table().remove(&id)
+}
+
+/// The ids of the `"t":"<kind>","id":N` nodes in a wire, both as the wire itself writes them and escaped (a wire
+/// nested in a JSON string, like the workerData in a worker's spawn options).
+fn node_ids(wire: &str, kind: &str) -> Vec<u64> {
+    let plain = format!(r#""t":"{kind}","id":"#);
+    let escaped = plain.replace('"', r#"\""#);
+    let mut ids = Vec::new();
+    for pattern in [plain, escaped] {
+        let mut rest = wire;
+        while let Some(at) = rest.find(&pattern) {
+            rest = &rest[at + pattern.len()..];
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(id) = digits.parse::<u64>() {
+                ids.push(id);
+            }
         }
+    }
+    ids
+}
+
+/// Releases the blocks a wire carries when nobody will decode it (a worker that ended first, or a send that could not
+/// be delivered). Every such node was written by the encoder, and a table entry is dropped once it is taken.
+pub(crate) fn release_wire(wire: &str) {
+    for id in node_ids(wire, "SAB") {
+        sab_table().remove(&id);
+    }
+    for id in node_ids(wire, "ABT") {
+        ab_table().remove(&id);
+    }
+}
+
+/// Releases what a dropped command carries (its wire never reaches a reader).
+fn release_cmd(cmd: &Cmd) {
+    if let Cmd::Message(v) | Cmd::Thread(_, _, v) = cmd {
+        release_wire(v);
+    }
+}
+
+/// Releases what a dropped event carries (its wire never reaches a reader).
+fn release_evt(evt: &Evt) {
+    if let Evt::Message(v) | Evt::Error(v) | Evt::Thread(_, v) = evt {
+        release_wire(v);
+    }
+}
+
+/// Sends a command to a worker; a worker whose thread has ended releases what the command carries.
+fn send_cmd(w: &Worker, cmd: Cmd) {
+    if let Err(mpsc::SendError(lost)) = w.tx.send(cmd) {
+        release_cmd(&lost);
     }
 }
 
@@ -129,17 +203,37 @@ pub(crate) fn stack_bytes(stack_mb: f64) -> usize {
     }
 }
 
-fn spawn(it: &mut Interp, source: String, opts: String, stack_mb: f64, heap_mb: f64) -> u32 {
+fn spawn(
+    it: &mut Interp,
+    source: String,
+    opts: String,
+    stack_mb: f64,
+    heap_mb: f64,
+    share_env: bool,
+) -> u32 {
     let (tx, cmd_rx) = mpsc::channel();
     let (evt_tx, rx) = mpsc::channel();
     let interrupt = Arc::new(AtomicBool::new(false));
-    let flag = interrupt.clone();
     let stack = stack_bytes(stack_mb);
     let heap = heap_bytes(heap_mb);
+    // a SHARE_ENV worker reads and writes the table of this realm; any other worker gets a table of its own
+    let env = if share_env {
+        share_env_table(it)
+    } else {
+        private_env_table()
+    };
+    let side = Side {
+        rx: cmd_rx,
+        tx: evt_tx,
+        interrupt: interrupt.clone(),
+        alive: Arc::new(AtomicBool::new(false)),
+        capture_out: false,
+        capture_err: false,
+    };
     let join = std::thread::Builder::new()
         .name("thaw-js-worker".into())
         .stack_size(stack)
-        .spawn(move || run_worker(&source, &opts, stack, heap, cmd_rx, evt_tx, flag))
+        .spawn(move || run_worker(&source, &opts, stack, heap, side, env))
         .expect("worker thread spawns");
     it.worker.next += 1;
     let id = it.worker.next;
@@ -159,7 +253,10 @@ fn spawn(it: &mut Interp, source: String, opts: String, stack_mb: f64, heap_mb: 
 
 fn to_parent(it: &Interp, e: Evt) {
     if let Some(side) = &it.worker.side {
-        let _ = side.tx.send(e);
+        // the parent is gone: nobody will read what this event carries
+        if let Err(mpsc::SendError(lost)) = side.tx.send(e) {
+            release_evt(&lost);
+        }
     }
 }
 
@@ -190,11 +287,10 @@ fn run_worker(
     opts: &str,
     stack: usize,
     heap: Option<usize>,
-    rx: Receiver<Cmd>,
-    tx: Sender<Evt>,
-    interrupt: Arc<AtomicBool>,
+    side: Side,
+    env: EnvTable,
 ) {
-    let exit_tx = tx.clone();
+    let exit_tx = side.tx.clone();
     let code = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut it = Box::new(Interp::runtime());
         // the limit counts what the script allocates, not the runtime built above
@@ -203,24 +299,18 @@ fn run_worker(
         }
         it.configure_stack(stack);
         it.set_stream(true);
-        it.interrupt = Some(interrupt.clone());
-        it.worker.side = Some(Side {
-            rx,
-            tx,
-            interrupt,
-            alive: Arc::new(AtomicBool::new(false)),
-            capture_out: false,
-            capture_err: false,
-        });
+        it.interrupt = Some(side.interrupt.clone());
+        it.worker.side = Some(side);
+        it.worker.env_table = Some(env);
         let code = run_script(&mut it, source, opts);
-        // messages the parent sent that this worker never read still carry their blocks
+        // messages the parent sent that this worker never read still carry their blocks; so does a workerData the
+        // bootstrap never reached (its wire is inside the spawn options)
         if let Some(side) = &it.worker.side {
             while let Ok(cmd) = side.rx.try_recv() {
-                if let Cmd::Message(v) = cmd {
-                    release_wire(&v);
-                }
+                release_cmd(&cmd);
             }
         }
+        release_wire(opts);
         code
     }))
     .unwrap_or(1);
@@ -326,6 +416,15 @@ pub(crate) fn poll(it: &mut Interp) -> String {
                     let name = if fd == 1 { "stdout" } else { "stderr" };
                     format!(r#"{{"handle":{id},"type":"{name}","value":"{hex}"}}"#)
                 }
+                Evt::Thread(ack, v) => format!(
+                    r#"{{"handle":{id},"type":"thread","ack":{ack},"value":{}}}"#,
+                    quoted(&v)
+                ),
+                Evt::ThreadAck(ack, status, v) => format!(
+                    r#"{{"handle":{id},"type":"threadAck","ack":{ack},"status":{},"value":{}}}"#,
+                    quoted(&status),
+                    quoted(&v)
+                ),
             });
         }
     }
@@ -333,9 +432,7 @@ pub(crate) fn poll(it: &mut Interp) -> String {
         if w.exited {
             // events the parent never polled still carry their blocks
             while let Ok(e) = w.rx.try_recv() {
-                if let Evt::Message(v) | Evt::Error(v) = e {
-                    release_wire(&v);
-                }
+                release_evt(&e);
             }
             if let Some(j) = w.join.take() {
                 let _ = j.join();
@@ -352,6 +449,15 @@ pub(crate) fn poll(it: &mut Interp) -> String {
                 Cmd::Stdin(hex, end) => {
                     items.push(format!(r#"{{"type":"stdin","value":"{hex}","end":{end}}}"#))
                 }
+                Cmd::Thread(source, ack, v) => items.push(format!(
+                    r#"{{"type":"thread","source":{source},"ack":{ack},"value":{}}}"#,
+                    quoted(&v)
+                )),
+                Cmd::ThreadAck(ack, status, v) => items.push(format!(
+                    r#"{{"type":"threadAck","ack":{ack},"status":{},"value":{}}}"#,
+                    quoted(&status),
+                    quoted(&v)
+                )),
                 // the parent already set the flag; setting it here too covers a command sent alone
                 Cmd::Terminate => side.interrupt.store(true, Ordering::Relaxed),
             }
@@ -374,15 +480,19 @@ pub(crate) fn install(it: &mut Interp) {
         // positive = the default stack)
         let stack_mb = it.num(&arg(a, 3));
         let heap_mb = it.num(&arg(a, 2));
+        // arg 4 is `env: SHARE_ENV` (the worker shares this realm's environment table)
+        let share_env = arg(a, 4).truthy();
         Ok(Value::Number(f64::from(spawn(
-            it, source, opts, stack_mb, heap_mb,
+            it, source, opts, stack_mb, heap_mb, share_env,
         ))))
     });
     g.declare("__thaw_worker_spawn", f, true);
     let f = it.native(|it, _, a| {
         let (h, wire) = (it.num(&arg(a, 0)) as u32, it.to_str(&arg(a, 1)).to_string());
-        if let Some(w) = it.worker.workers.get(&h) {
-            let _ = w.tx.send(Cmd::Message(wire));
+        match it.worker.workers.get(&h) {
+            Some(w) => send_cmd(w, Cmd::Message(wire)),
+            // no such worker: nothing will decode the wire
+            None => release_wire(&wire),
         }
         Ok(Value::Undefined)
     });
@@ -399,6 +509,56 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_stdin", f, true);
+    // postMessageToThread (W-D): the parent sends to a worker (`source` is the sender's thread id) and answers a
+    // worker's send (`ack` names the worker's pending send); a worker sends to the parent and answers a parent's send.
+    let f = it.native(|it, _, a| {
+        let h = it.num(&arg(a, 0)) as u32;
+        let (source, ack) = (it.num(&arg(a, 1)) as u32, it.num(&arg(a, 2)) as u32);
+        let wire = it.to_str(&arg(a, 3)).to_string();
+        match it.worker.workers.get(&h) {
+            Some(w) => send_cmd(w, Cmd::Thread(source, ack, wire)),
+            None => release_wire(&wire),
+        }
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_worker_thread_send", f, true);
+    let f = it.native(|it, _, a| {
+        let h = it.num(&arg(a, 0)) as u32;
+        let ack = it.num(&arg(a, 1)) as u32;
+        let (status, wire) = (
+            it.to_str(&arg(a, 2)).to_string(),
+            it.to_str(&arg(a, 3)).to_string(),
+        );
+        if let Some(w) = it.worker.workers.get(&h) {
+            let _ = w.tx.send(Cmd::ThreadAck(ack, status, wire));
+        }
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_worker_thread_ack", f, true);
+    let f = it.native(|it, _, a| {
+        let ack = it.num(&arg(a, 0)) as u32;
+        let wire = it.to_str(&arg(a, 1)).to_string();
+        to_parent(it, Evt::Thread(ack, wire));
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_worker_thread_to_parent", f, true);
+    // a wire that will not be sent (a send to a thread the worker cannot reach): its moved bytes are released
+    let f = it.native(|it, _, a| {
+        let wire = it.to_str(&arg(a, 0)).to_string();
+        release_wire(&wire);
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_wire_release", f, true);
+    let f = it.native(|it, _, a| {
+        let ack = it.num(&arg(a, 0)) as u32;
+        let (status, wire) = (
+            it.to_str(&arg(a, 1)).to_string(),
+            it.to_str(&arg(a, 2)).to_string(),
+        );
+        to_parent(it, Evt::ThreadAck(ack, status, wire));
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_worker_thread_reply", f, true);
     let f = it.native(|it, _, a| {
         let h = it.num(&arg(a, 0)) as u32;
         if let Some(w) = it.worker.workers.get(&h) {
@@ -439,4 +599,32 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_capture", f, true);
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+
+    #[test]
+    fn release_wire_frees_an_unconsumed_array_buffer() {
+        // a wire nobody decodes (its worker ended first) gives its moved bytes back to the table
+        let id = ab_export(vec![1, 2, 3], Some(8));
+        let wire = format!(r#"{{"root":{{"r":1}},"nodes":[{{"t":"ABT","id":{id}}}]}}"#);
+        release_wire(&wire);
+        assert!(ab_import(id).is_none());
+        // the same node nested in a JSON string (the worker's opts carry workerData that way)
+        let id = ab_export(vec![9], None);
+        let wire = format!(r#"{{"root":{{"r":1}},"nodes":[{{"t":"ABT","id":{id}}}]}}"#);
+        release_wire(&format!(
+            r#"{{"workerData":"{}"}}"#,
+            wire.replace('"', r#"\""#)
+        ));
+        assert!(ab_import(id).is_none());
+        // a decode takes the entry once; releasing the wire afterwards finds nothing
+        let id = ab_export(vec![7, 7], None);
+        let wire = format!(r#"{{"root":{{"r":1}},"nodes":[{{"t":"ABT","id":{id}}}]}}"#);
+        assert_eq!(ab_import(id), Some((vec![7, 7], None)));
+        release_wire(&wire);
+        assert!(ab_import(id).is_none());
+    }
 }

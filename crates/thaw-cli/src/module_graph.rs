@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
@@ -1231,6 +1232,17 @@ fn source_location(path: &Path, source: &str, specifier: &str) -> String {
     format!("{}:{line}:{column}", path.display())
 }
 
+/// External `import * as M` bindings that may also be used as a bare value (`const m = M`).
+/// A bare `M` reads a module-level object built from the namespace's exports; it is declared
+/// only when a bare use exists, so a namespace used through members alone links no extra export.
+#[derive(Default)]
+struct BareNamespaces {
+    /// `local namespace name -> module-level object name`.
+    targets: HashMap<String, String>,
+    /// Locals a bare use has named in the module being rewritten.
+    used: RefCell<BTreeSet<String>>,
+}
+
 struct RenameReferences<'a> {
     names: &'a HashMap<String, String>,
     namespaces: &'a HashMap<String, HashMap<String, String>>,
@@ -1249,6 +1261,7 @@ struct RenameReferences<'a> {
     /// have no declaration in the compiled program under that name -- see
     /// `visit_mut_expr`'s own `InstanceOf` handling.
     external_bindings: &'a HashSet<String>,
+    bare_namespaces: &'a BareNamespaces,
     import_meta_url: &'a str,
     import_meta_main: bool,
     module_path: &'a Path,
@@ -1267,6 +1280,21 @@ impl RenameReferences<'_> {
             return None;
         }
         self.namespaces.get(namespace)?.get(member)
+    }
+
+    /// The module-level object a bare value use of `ident` reads, or `None` when `ident` is
+    /// shadowed, is renamed as a local binding (`export =` binds the value itself), or is not an
+    /// external namespace import. Records the use so the object gets declared.
+    fn bare_namespace_object(&self, ident: &str) -> Option<String> {
+        if self.shadowed.contains(ident) || self.names.contains_key(ident) {
+            return None;
+        }
+        let object = self.bare_namespaces.targets.get(ident)?;
+        self.bare_namespaces
+            .used
+            .borrow_mut()
+            .insert(ident.to_string());
+        Some(object.clone())
     }
 
     /// A destructuring-assignment target (`[a, b] = [b, a]`) names existing bindings, so
@@ -1611,7 +1639,17 @@ impl VisitMut for RenameReferences<'_> {
                 call.args.visit_mut_with(self);
             }
         } else {
-            expr.visit_mut_children_with(self);
+            match expr {
+                // A member's object is resolved by the member rewrites below, so it keeps its
+                // name here; only a member the rewrites leave alone reads the bare-namespace object.
+                Expr::Member(member) if matches!(member.obj.as_ref(), Expr::Ident(_)) => {
+                    if let Expr::Ident(object) = member.obj.as_mut() {
+                        self.rename_ident(object);
+                    }
+                    member.prop.visit_mut_with(self);
+                }
+                _ => expr.visit_mut_children_with(self),
+            }
         }
         if let Expr::Call(call) = expr {
             if matches!(call.callee, Callee::Import(_)) {
@@ -1676,6 +1714,13 @@ impl VisitMut for RenameReferences<'_> {
             return;
         }
         if let Expr::Ident(ident) = expr {
+            if let Some(object) = self.bare_namespace_object(ident.sym.as_ref()) {
+                *expr = Expr::Ident(thaw_parser::ast::Ident::new_no_ctxt(
+                    object.into(),
+                    ident.span,
+                ));
+                return;
+            }
             self.rename_ident(ident);
             return;
         }
@@ -1722,6 +1767,14 @@ impl VisitMut for RenameReferences<'_> {
                     member.span,
                 ));
                 return;
+            }
+        }
+        // `M.prop` the member rewrites did not resolve (`M['basename']`, `M.unknown`) and `M`
+        // used as a value reads the namespace object.
+        if let Expr::Ident(object) = member.obj.as_ref() {
+            if let Some(name) = self.bare_namespace_object(object.sym.as_ref()) {
+                let span = object.span;
+                *member.obj = Expr::Ident(thaw_parser::ast::Ident::new_no_ctxt(name.into(), span));
             }
         }
         let Expr::MetaProp(meta) = member.obj.as_ref() else {
@@ -1915,6 +1968,11 @@ impl VisitMut for RenameReferences<'_> {
         if let thaw_parser::ast::Prop::Shorthand(ident) = property {
             let original = ident.clone();
             self.rename_ident(ident);
+            if ident.sym == original.sym {
+                if let Some(object) = self.bare_namespace_object(original.sym.as_ref()) {
+                    ident.sym = object.into();
+                }
+            }
             if ident.sym != original.sym {
                 *property = thaw_parser::ast::Prop::KeyValue(thaw_parser::ast::KeyValueProp {
                     key: thaw_parser::ast::PropName::Ident(thaw_parser::ast::IdentName::new(
@@ -2561,6 +2619,7 @@ pub(crate) fn bundle_with_named_source_transform(
         let mut names = HashMap::new();
         let mut namespaces = HashMap::new();
         let mut nested_namespaces = HashMap::new();
+        let mut bare_namespaces = BareNamespaces::default();
         // Local binding names that come from an *external* (npm/registry)
         // import, as opposed to a local declaration or a relative-module
         // import. Only these are deliberately left unrenamed on an
@@ -2641,6 +2700,12 @@ pub(crate) fn bundle_with_named_source_transform(
                             if let Some(value) = external_export_assignments.get(specifier) {
                                 names.insert(local.clone(), value.clone());
                                 namespaces.insert(value.clone(), dependency_exports.clone());
+                            }
+                            if !modules[index].dependencies.contains_key(specifier) {
+                                bare_namespaces.targets.insert(
+                                    local.clone(),
+                                    format!("__thawmod{index}_namespace_{local}"),
+                                );
                             }
                             namespaces.insert(local.clone(), dependency_exports.clone());
                             if let Some(nested) = external_nested_namespaces.get(specifier) {
@@ -2824,6 +2889,7 @@ pub(crate) fn bundle_with_named_source_transform(
                         nested_namespaces: &nested_namespaces,
                         dynamic_imports: &dynamic_import_exports,
                         external_bindings: &external_bindings,
+                        bare_namespaces: &bare_namespaces,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
@@ -2842,6 +2908,7 @@ pub(crate) fn bundle_with_named_source_transform(
                         nested_namespaces: &nested_namespaces,
                         dynamic_imports: &dynamic_import_exports,
                         external_bindings: &external_bindings,
+                        bare_namespaces: &bare_namespaces,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
@@ -2974,6 +3041,7 @@ pub(crate) fn bundle_with_named_source_transform(
                                 nested_namespaces: &nested_namespaces,
                                 dynamic_imports: &dynamic_import_exports,
                                 external_bindings: &external_bindings,
+                                bare_namespaces: &bare_namespaces,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -3007,6 +3075,7 @@ pub(crate) fn bundle_with_named_source_transform(
                                 nested_namespaces: &nested_namespaces,
                                 dynamic_imports: &dynamic_import_exports,
                                 external_bindings: &external_bindings,
+                                bare_namespaces: &bare_namespaces,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -3041,6 +3110,7 @@ pub(crate) fn bundle_with_named_source_transform(
                                 nested_namespaces: &nested_namespaces,
                                 dynamic_imports: &dynamic_import_exports,
                                 external_bindings: &external_bindings,
+                                bare_namespaces: &bare_namespaces,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -3074,6 +3144,7 @@ pub(crate) fn bundle_with_named_source_transform(
                         nested_namespaces: &nested_namespaces,
                         dynamic_imports: &dynamic_import_exports,
                         external_bindings: &external_bindings,
+                        bare_namespaces: &bare_namespaces,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
@@ -3188,6 +3259,39 @@ pub(crate) fn bundle_with_named_source_transform(
                 ))),
             },
         )));
+        // Declare each bare-used namespace object before the module's own statements. Keys are
+        // sorted so the emitted declaration is deterministic.
+        let mut bare_declarations = String::new();
+        for local in bare_namespaces.used.borrow().iter() {
+            let Some(exports) = namespaces.get(local) else {
+                continue;
+            };
+            // Type-only exports (`__thaw_type_*`) name no value, as in the namespace getters.
+            let mut fields: Vec<(&String, &String)> = exports
+                .iter()
+                .filter(|(_, target)| !target.starts_with("__thaw_type_"))
+                .collect();
+            fields.sort();
+            let body = fields
+                .iter()
+                .map(|(name, target)| {
+                    format!(
+                        "{}: {target}",
+                        serde_json::to_string(name).expect("a string key")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            bare_declarations.push_str(&format!(
+                "const {} = {{ {body} }};\n",
+                bare_namespaces.targets[local]
+            ));
+        }
+        if !bare_declarations.is_empty() {
+            let mut declared = thaw_parser::parse_typescript(&bare_declarations)?.body;
+            declared.append(&mut items);
+            items = declared;
+        }
         let start = bundled_items.len();
         bundled_items.extend(items);
         module_ranges.push((index, start, bundled_items.len()));
@@ -3204,12 +3308,14 @@ pub(crate) fn bundle_with_named_source_transform(
         let empty_namespaces = HashMap::new();
         let empty_nested = HashMap::new();
         let empty_external = HashSet::new();
+        let empty_bare = BareNamespaces::default();
         let mut rewriter = RenameReferences {
             names: &empty_names,
             namespaces: &empty_namespaces,
             nested_namespaces: &empty_nested,
             dynamic_imports: &targets,
             external_bindings: &empty_external,
+            bare_namespaces: &empty_bare,
             import_meta_url: "",
             import_meta_main: index == entry_index,
             module_path: &modules[index].path,

@@ -5254,8 +5254,18 @@ fn builtin_declared_classes_are_bundle_exports() {
                 .chars()
                 .take_while(|c| is_identifier_char(*c))
                 .collect();
-            if !mentions_identifier(&bundle, &name) {
-                missing.push(format!("node:{specifier} {name}"));
+            // Declared with Node's kind but not yet implemented by the bundle (the value is
+            // `undefined` at run time either way). Remove an entry once its bundle exports it.
+            const DECLARED_WITHOUT_RUNTIME: [&str; 5] = [
+                "node:fs Dirent",
+                "node:fs FileReadStream",
+                "node:fs FileWriteStream",
+                "node:zlib ZstdCompress",
+                "node:zlib ZstdDecompress",
+            ];
+            let key = format!("node:{specifier} {name}");
+            if !mentions_identifier(&bundle, &name) && !DECLARED_WITHOUT_RUNTIME.contains(&key.as_str()) {
+                missing.push(key);
             }
         }
     }
@@ -5263,6 +5273,26 @@ fn builtin_declared_classes_are_bundle_exports() {
         missing.is_empty(),
         "declared classes missing from bundle exports: {missing:?}"
     );
+}
+
+#[test]
+fn builtin_events_zlib_fs_promises_runtime_exports_match_declarations() {
+    // Each value declared by #786 must be assigned by its bundle: a missing `usingDomains`
+    // read back as events' callable `default` (`Uncaught: not plain data: function`).
+    let events = resolve_builtin("events").unwrap().bundle_js.unwrap_or_default();
+    for assignment in [
+        "module.exports.usingDomains = false;",
+        "module.exports.kMaxEventTargetListeners = Symbol('events.maxEventTargetListeners');",
+        "module.exports.kMaxEventTargetListenersWarned = Symbol('events.maxEventTargetListenersWarned');",
+        "module.exports.EventEmitterAsyncResource = EventEmitterAsyncResource;",
+    ] {
+        assert!(events.contains(assignment), "events bundle lacks `{assignment}`");
+    }
+    let zlib = resolve_builtin("zlib").unwrap().bundle_js.unwrap_or_default();
+    assert!(zlib.contains("module.exports = { codes: codes, crc32: crc32"), "zlib bundle lacks codes");
+    // fs/promises is `fs.promises` itself, so its `constants` is assigned on that object.
+    let fs = resolve_builtin("fs").unwrap().bundle_js.unwrap_or_default();
+    assert!(fs.contains("__thaw_fs.promises.constants = __thaw_fs.constants;"), "fs bundle lacks promises.constants");
 }
 
 #[test]
@@ -6023,4 +6053,28 @@ fn node_sqlite_is_prefix_only_with_its_declarations_and_natives() {
     let bundle = builtin_bundle_with("node:sqlite", &[]).unwrap();
     assert!(bundle.contains("__thaw_sqlite_open"));
     assert!(bundle.contains("'SQLite is an experimental feature and might change at any time'"));
+}
+
+#[test]
+fn first_slice_builtin_declarations_cover_every_node_export() {
+    // Every export Node 22 has for these modules must be declared by the ambient d.ts; an
+    // undeclared member reads as `undefined` in typed code (see tools/parity-aot/README.md).
+    let table = include_str!("../../../../tools/parity-aot/module_table.tsv");
+    let slice = ["node:fs", "node:fs/promises", "node:zlib", "node:buffer", "node:events"];
+    let mut missing = Vec::new();
+    for module in slice {
+        let declared = resolve_builtin(module).unwrap().dts_source;
+        let names: std::collections::BTreeSet<&str> = declared
+            .lines()
+            .filter_map(|line| line.strip_prefix("export declare ").or_else(|| line.strip_prefix("export interface ")))
+            .filter_map(|rest| rest.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).find(|w| !w.is_empty() && !matches!(*w, "function" | "class" | "const" | "let" | "var" | "namespace" | "interface" | "type" | "enum" | "async")))
+            .collect();
+        for row in table.lines().skip(1) {
+            let cells: Vec<&str> = row.split('\t').collect();
+            if cells.first() == Some(&module) && !names.contains(cells[1]) {
+                missing.push(format!("{module} {}", cells[1]));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "undeclared Node exports ({}): {}", missing.len(), missing.join(", "));
 }

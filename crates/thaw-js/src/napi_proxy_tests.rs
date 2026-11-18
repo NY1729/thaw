@@ -787,23 +787,42 @@ fn run_in(it: &mut Interp, source: &str) -> String {
     it.to_str(&value).to_string()
 }
 
+/// The number after the first `"<key>":` in `wire`: a reference id, which the process hands out in turn.
+fn id_of(wire: &str, key: &str) -> u64 {
+    let marker = format!("\"{key}\":");
+    let start = wire.find(&marker).expect("the key is in the wire") + marker.len();
+    wire[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .expect("the wire carries an id")
+}
+
 #[test]
 fn plain_argument_snapshots_objects_and_arrays_and_their_cycles_are_references() {
     let mut it = plain_realm();
-    assert_eq!(
-        run_in(
-            &mut it,
-            "(() => { const o = { a: 1 }; o.self = o; return JSON.stringify(api.argument(o)); })()"
-        ),
-        r#"{"__thaw_napi_object__":1,"value":{"a":1,"self":{"__thaw_napi_ref__":1}}}"#
+    let wire = run_in(
+        &mut it,
+        "(() => { const o = { a: 1 }; o.self = o; return JSON.stringify(api.argument(o)); })()",
     );
+    let n = id_of(&wire, "__thaw_napi_object__");
     assert_eq!(
-        run_in(
-            &mut it,
-            "(() => { const a = []; a.push(a); return JSON.stringify(api.argument(a)); })()"
-        ),
-        r#"{"__thaw_napi_array__":2,"value":[{"__thaw_napi_ref__":2}]}"#
+        wire,
+        format!(
+            r#"{{"__thaw_napi_object__":{n},"value":{{"a":1,"self":{{"__thaw_napi_ref__":{n}}}}}}}"#
+        )
     );
+    let wire = run_in(
+        &mut it,
+        "(() => { const a = []; a.push(a); return JSON.stringify(api.argument(a)); })()",
+    );
+    let m = id_of(&wire, "__thaw_napi_array__");
+    assert_eq!(
+        wire,
+        format!(r#"{{"__thaw_napi_array__":{m},"value":[{{"__thaw_napi_ref__":{m}}}]}}"#)
+    );
+    assert_ne!(n, m, "each value gets its own id");
     assert_eq!(
         run_in(&mut it, "JSON.stringify(api.arguments([1, 'x', null]))"),
         r#"[1,"x",null]"#
@@ -824,20 +843,20 @@ fn plain_argument_snapshots_objects_and_arrays_and_their_cycles_are_references()
 #[test]
 fn plain_function_argument_is_a_marker_whose_callback_global_the_reference_lookup_finds() {
     let mut it = plain_realm();
-    assert_eq!(
-        run_in(&mut it, "JSON.stringify(api.argument((a, b) => a + b))"),
-        r#"{"__thaw_napi_function__":1}"#
-    );
+    let wire = run_in(&mut it, "JSON.stringify(api.argument((a, b) => a + b))");
+    let id = id_of(&wire, "__thaw_napi_function__");
+    assert_eq!(wire, format!(r#"{{"__thaw_napi_function__":{id}}}"#));
+    let name = format!("__thaw_napi_reference_{id}");
     // The callback global is installed by `defineCallback` with a bare `Object.defineProperty`, so it is
     // both non-writable and non-configurable.
     assert_eq!(
-        run_in(&mut it, "Object.getOwnPropertyDescriptor(globalThis, '__thaw_napi_reference_1').writable === false && Object.getOwnPropertyDescriptor(globalThis, '__thaw_napi_reference_1').configurable === false"),
+        run_in(&mut it, &format!("Object.getOwnPropertyDescriptor(globalThis, '{name}').writable === false && Object.getOwnPropertyDescriptor(globalThis, '{name}').configurable === false")),
         "true"
     );
     // The lookup that napi_eval's call_reference makes on the realm global.
     let global = it.global.clone();
     let callback = it
-        .lookup(&global, "__thaw_napi_reference_1")
+        .lookup(&global, &name)
         .expect("the callback global is found by name");
     assert!(callback.is_callable());
     let result = it.call(
@@ -846,6 +865,17 @@ fn plain_function_argument_is_a_marker_whose_callback_global_the_reference_looku
         &[Value::Null, Value::Number(2.0), Value::Number(3.0)],
     );
     assert!(matches!(result, Ok(Value::Number(n)) if n == 5.0));
+}
+
+#[test]
+fn reference_ids_are_unique_across_proxy_instances() {
+    // Each realm runs its own proxy layer. A callback's id names its global, so two layers (two addons in two
+    // packages) must never hand out the same id.
+    let mut first = plain_realm();
+    let mut second = plain_realm();
+    let a = run_in(&mut first, "JSON.stringify(api.argument(() => 1))");
+    let b = run_in(&mut second, "JSON.stringify(api.argument(() => 1))");
+    assert_ne!(a, b);
 }
 
 #[test]
@@ -863,7 +893,7 @@ fn plain_decode_maps_error_undefined_reference_symbol_and_origin_markers() {
         "true"
     );
     assert_eq!(
-        run_in(&mut it, "(() => { const o = { x: 1 }; api.argument(o); return api.decode({ __thaw_napi_ref__: 1 }) === o; })()"),
+        run_in(&mut it, "(() => { const o = { x: 1 }; const w = api.argument(o); return api.decode({ __thaw_napi_ref__: w.__thaw_napi_object__ }) === o; })()"),
         "true"
     );
     assert_eq!(
@@ -887,6 +917,39 @@ fn plain_decode_maps_error_undefined_reference_symbol_and_origin_markers() {
             "JSON.stringify(api.decode({ __thaw_napi_ref__: 9 }, [[[], 'plain']]))"
         ),
         r#"{"__thaw_napi_ref__":9}"#
+    );
+}
+
+#[test]
+fn native_returned_buffer_wire_value_decodes_to_a_real_buffer() {
+    let mut it = plain_realm();
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const v = api.decode({ type: 'Buffer', data: [97, 98] }); return [Buffer.isBuffer(v), v.toString('hex')].join('|'); })()"
+        ),
+        "true|6162"
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const v = api.decode({ type: 'Buffer', data: [97, 98] }, [[[], 'plain']]); return [Buffer.isBuffer(v), typeof v.type].join('|'); })()"
+        ),
+        "false|string"
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const v = api.decode({ type: 'Other', data: [1] }); return [Buffer.isBuffer(v), JSON.stringify(v)].join('|'); })()"
+        ),
+        r#"false|{"type":"Other","data":[1]}"#
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const a = api.decode([{ type: 'Buffer', data: [1] }]); const o = api.decode({ k: { type: 'Buffer', data: [2] } }); return [Buffer.isBuffer(a[0]), Buffer.isBuffer(o.k), o.k[0]].join('|'); })()"
+        ),
+        "true|true|2"
     );
 }
 
@@ -918,10 +981,13 @@ fn plain_handle_wrapper_encodes_the_arguments_and_throws_the_error_reply() {
         ),
         r#"[1,{"a":2}]"#
     );
-    let last = OPS.with(|o| o.borrow().last().map(|(_, _, packet)| packet.clone()));
+    let last = OPS
+        .with(|o| o.borrow().last().map(|(_, _, packet)| packet.clone()))
+        .expect("the packet was sent");
+    let k = id_of(&last, "__thaw_napi_object__");
     assert_eq!(
-        last.as_deref(),
-        Some(r#"[{"__thaw_napi_object__":1,"value":{"k":1}}]"#)
+        last,
+        format!(r#"[{{"__thaw_napi_object__":{k},"value":{{"k":1}}}}]"#)
     );
 }
 
@@ -945,23 +1011,28 @@ fn plain_sync_arguments_writes_the_native_values_back_into_the_js_objects() {
 #[test]
 fn plain_buffer_and_array_buffer_arguments_cross_by_value_and_a_plain_view_is_still_refused() {
     let mut it = plain_realm();
+    let wire = run_in(&mut it, "JSON.stringify(api.argument(Buffer.from([1, 2])))");
+    let b = id_of(&wire, "__thaw_napi_buffer__");
     assert_eq!(
-        run_in(&mut it, "JSON.stringify(api.argument(Buffer.from([1, 2])))"),
-        r#"{"__thaw_napi_buffer__":1,"value":[1,2]}"#
+        wire,
+        format!(r#"{{"__thaw_napi_buffer__":{b},"value":[1,2]}}"#)
     );
+    let wire = run_in(
+        &mut it,
+        "JSON.stringify(api.argument(new Uint8Array([3]).buffer))",
+    );
+    let a = id_of(&wire, "__thaw_napi_arraybuffer__");
+    assert_eq!(
+        wire,
+        format!(r#"{{"__thaw_napi_arraybuffer__":{a},"shared":false,"value":[3]}}"#)
+    );
+    // The same ArrayBuffer keeps its id across arguments.
     assert_eq!(
         run_in(
             &mut it,
-            "JSON.stringify(api.argument(new Uint8Array([3]).buffer))"
+            "(() => { const ab = new ArrayBuffer(1); const first = api.argument(ab).__thaw_napi_arraybuffer__; return [api.argument(ab).__thaw_napi_arraybuffer__ === first, api.argument(ab).__thaw_napi_arraybuffer__ === first].join('|'); })()"
         ),
-        r#"{"__thaw_napi_arraybuffer__":2,"shared":false,"value":[3]}"#
-    );
-    assert_eq!(
-        run_in(
-            &mut it,
-            "(() => { const ab = new ArrayBuffer(1); return [api.argument(ab).__thaw_napi_arraybuffer__ === api.argument(ab).__thaw_napi_arraybuffer__, api.argument(ab).__thaw_napi_arraybuffer__].join('|'); })()"
-        ),
-        "true|3"
+        "true|true"
     );
 }
 

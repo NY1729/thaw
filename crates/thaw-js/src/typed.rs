@@ -977,6 +977,36 @@ impl Interp {
             }
         });
         g.declare("__thaw_sab_import", import, true);
+        // a transferred ArrayBuffer moves its bytes to the in-flight table (worker.rs, AB_IN_FLIGHT) and is detached;
+        // the decode that reads the wire gives them to a new buffer (no copy)
+        let take = self.native(|it, _, a| {
+            let Some(data) = Self::bytes_of_buffer(&arg(a, 0)) else {
+                return it.throw_error("TypeError", "value is not an ArrayBuffer");
+            };
+            if data.sab.is_some() || is_detached(&data) {
+                return it.throw_error("TypeError", "Cannot transfer object of unsupported type.");
+            }
+            // a wasm memory's bytes belong to its engine: those are copied, the storage is detached all the same
+            let bytes = if data.shared.is_some() {
+                data.borrow().clone()
+            } else {
+                std::mem::take(&mut *data.borrow_mut())
+            };
+            let max = data.max;
+            detach_bytes(&data);
+            Ok(Value::Number(crate::worker::ab_export(bytes, max) as f64))
+        });
+        g.declare("__thaw_ab_take", take, true);
+        let put = self.native(|it, _, a| {
+            let id = it.num(&arg(a, 0)) as u64;
+            let Some((bytes, max)) = crate::worker::ab_import(id) else {
+                return it.throw_error("TypeError", "unknown ArrayBuffer id");
+            };
+            let buffer = Value::Object(it.new_array_buffer(new_bytes_max(bytes, max)));
+            it.check_interrupt()?;
+            Ok(buffer)
+        });
+        g.declare("__thaw_ab_put", put, true);
         // Atomics over a SharedArrayBuffer (extras.rs sends only shared buffers here; the logic is atomics.rs)
         let atomic = self.native(|it, _, a| crate::atomics::atomic(it, a));
         g.declare("__thaw_atomic", atomic, true);

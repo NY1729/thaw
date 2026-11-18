@@ -5,11 +5,21 @@
 //! "Native addon proxy layer is not installed" error.
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::host::{default_realm, with_package};
 use crate::{arg, napi_bridge, napi_graph, new_obj, Interp, Kind, Value, R};
 
 const SOURCE: &str = include_str!("napi_proxy.js");
+
+/// The last `__thaw_napi_reference_<id>` id handed out. Process-wide, not per layer: the ids name callback globals
+/// that a call may find in any package realm, so two layers (two addons, two packages) must never share one.
+static REFERENCE_IDS: AtomicU64 = AtomicU64::new(0);
+
+/// The next reference id (starting at 1).
+fn next_reference() -> u64 {
+    REFERENCE_IDS.fetch_add(1, Ordering::Relaxed) + 1
+}
 
 thread_local! {
     /// Whether this thread's new realms get the layer. Thread-local, like the bridge's per-realm state, so
@@ -93,8 +103,14 @@ fn cap_object(it: &mut Interp) -> Value {
         .lookup(&global, "__thaw_napi_graph_owner")
         .unwrap_or(Value::Undefined);
     let invoker = napi_bridge::graph_invoker_factory(it);
+    let reference = it.native(|_, _, _| -> R<Value> { Ok(Value::Number(next_reference() as f64)) });
     let cap = Value::Object(new_obj(Some(it.object_proto.clone()), Kind::Plain));
-    for (name, value) in [("exports", exports), ("owner", owner), ("invoker", invoker)] {
+    for (name, value) in [
+        ("exports", exports),
+        ("owner", owner),
+        ("invoker", invoker),
+        ("reference", reference),
+    ] {
         let _ = it.set(&cap, name, value);
     }
     cap

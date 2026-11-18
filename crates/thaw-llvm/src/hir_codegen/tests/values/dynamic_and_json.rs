@@ -3098,3 +3098,24 @@ fn compiles_dynamic_live_handle_object_prototype_to_string_tags() {
         "[object Date]\n"
     );
 }
+
+#[test]
+fn a_void_call_in_a_dynamic_slot_yields_undefined() {
+    let source = r#"
+        function noop(): void { console.log('x'); }
+        function f(): any { return noop(); }
+        function take(v: any): any { return v; }
+        function main(): void {
+            console.log(f() === undefined, typeof f(), JSON.stringify(f()));
+            const g = (): any => noop();
+            console.log(g());
+            const h: any = noop();
+            console.log(h === undefined);
+            console.log(take(noop()) === undefined);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "void_dynamic_slot"),
+        "x\nx\nx\ntrue undefined undefined\nx\nundefined\nx\ntrue\nx\ntrue\n"
+    );
+}

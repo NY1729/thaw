@@ -11,16 +11,18 @@ fn thaw_js_worker_threads_blocker_keeps_unsupported_worker_use_on_quickjs() {
     // resourceLimits is enforced on thaw-js (maxOldGenerationSizeMb, heap_limit): a Worker that sets it routes too
     let limits = "import { Worker } from \"node:worker_threads\";\nnew Worker(src, { eval: true, resourceLimits: {} });";
     assert!(thaw_js_worker_threads_blocker("node:worker_threads", limits).is_none());
+    // postMessageToThread and isInternalThread are served on thaw-js (W-D): they route
     assert!(thaw_js_worker_threads_blocker(
         "node:worker_threads",
-        "import { postMessageToThread } from \"node:worker_threads\";"
+        "import { postMessageToThread, isInternalThread } from \"node:worker_threads\";"
     )
-    .is_some());
+    .is_none());
+    // SHARE_ENV is served on thaw-js (a shared environment table): a Worker that shares the environment routes
     assert!(thaw_js_worker_threads_blocker(
         "node:worker_threads",
-        "const { SHARE_ENV } = require(\"node:worker_threads\");"
+        "const { SHARE_ENV, Worker } = require(\"node:worker_threads\"); new Worker(src, { eval: true, env: SHARE_ENV });"
     )
-    .is_some());
+    .is_none());
     // the clone marks are served on thaw-js (W-A): they route, while names still in the list keep blocking
     let marks = "import { markAsUntransferable, markAsUncloneable, isMarkedAsUntransferable } from \"node:worker_threads\";";
     assert!(thaw_js_worker_threads_blocker("node:worker_threads", marks).is_none());

@@ -97,6 +97,29 @@ jobs:
               grep "checksum mismatch" "$RUNNER_TEMP/jsengine-on.err" | sed 's/^/- /'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run benchmarks again with the thread coroutine backend
+        # Same run, same runner: the A/B for the coroutine backend. The default is the costack backend now, so this
+        # leg runs THAW_JS_CO=thread (one OS thread per coroutine). Informational only.
+        run: |
+          THAW_JS_CO=thread benchmarks/jsengine/run.sh -n 5 -o "$RUNNER_TEMP/jsengine-thread.tsv" 2> "$RUNNER_TEMP/jsengine-thread.err" || true
+          cat "$RUNNER_TEMP/jsengine-thread.err" || true
+      - name: Print coroutine backend A/B summary
+        run: |
+          stack="$RUNNER_TEMP/jsengine.tsv"; thread="$RUNNER_TEMP/jsengine-thread.tsv"
+          test -s "$thread" || { echo "no THAW_JS_CO=thread TSV" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "## coroutine backend A/B (THAW_JS_CO=thread vs the default costack backend, same run, best of 5)"
+            echo
+            echo "| benchmark | default (stack) ms | thread ms | thread/default | quickjs ms |"
+            echo "|---|---|---|---|---|"
+            awk -F'\t' 'NR == FNR { if (FNR > 1 && $1 != "geomean") base[$1] = $2; next }
+              FNR > 1 && $1 != "geomean" && ($1 in base) { printf "| %s | %s | %s | %.2fx | %s |\n", $1, base[$1], $2, (base[$1] + 0 > 0 ? $2 / base[$1] : 0), $3 }' "$stack" "$thread"
+            if grep -q "checksum mismatch" "$RUNNER_TEMP/jsengine-thread.err"; then
+              echo
+              echo "**Checksum mismatches with the thread backend:**"
+              grep "checksum mismatch" "$RUNNER_TEMP/jsengine-thread.err" | sed 's/^/- /'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Print benchmark summary
         # Informational only: prints geomean, max ratio, rows over 4x, and the strict fib(20) <= 1.2x line.
         run: |

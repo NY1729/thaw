@@ -2177,6 +2177,58 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(storage)
     }
 
+    // Array elements are arena-tracked (not counted per use), so each one a
+    // combinator consumes needs its own retain, mirroring the borrowed-variable
+    // path. A null element makes the retain return 0; the runtime then reports
+    // the invalid input itself, as it did before.
+    fn retain_promise_array_elements(
+        &mut self,
+        promises: PointerValue<'ctx>,
+        len: IntValue<'ctx>,
+    ) -> Result<(), String> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i64_type = self.context.i64_type();
+        let function = self.current_function();
+        let entry = self.builder.get_insert_block().unwrap();
+        let check = self.context.append_basic_block(function, "promise_array_retain_check");
+        let body = self.context.append_basic_block(function, "promise_array_retain_body");
+        let done = self.context.append_basic_block(function, "promise_array_retain_done");
+        self.builder.build_unconditional_branch(check).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(check);
+        let index = self.builder.build_phi(i64_type, "promise_array_retain_index")
+            .map_err(|error| error.to_string())?;
+        index.add_incoming(&[(&i64_type.const_zero(), entry)]);
+        let index_value = index.as_basic_value().into_int_value();
+        let more = self.builder
+            .build_int_compare(IntPredicate::ULT, index_value, len, "promise_array_retain_more")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(more, body, done).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(body);
+        let slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(ptr_type, promises, &[index_value], "promise_array_retain_slot")
+                .map_err(|error| error.to_string())?
+        };
+        let promise = self.builder
+            .build_load(ptr_type, slot, "promise_array_retain_element")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_promise_retain").unwrap(),
+            &[promise.into()], "promise_array_retain",
+        ).map_err(|error| error.to_string())?;
+        let next = self.builder
+            .build_int_add(index_value, i64_type.const_int(1, false), "promise_array_retain_next")
+            .map_err(|error| error.to_string())?;
+        let body_end = self.builder.get_insert_block().unwrap();
+        index.add_incoming(&[(&next, body_end)]);
+        self.builder.build_unconditional_branch(check).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
     fn compile_promise_all(
         &mut self,
         args: &[HirExpr],
@@ -2189,7 +2241,7 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             let storage = self.compile_promise_input_words(args.len(), "promise_all_storage")?;
             for (index, arg) in args.iter().enumerate() {
-                let promise = self.compile_expr(arg)?.into_pointer_value();
+                let promise = self.compile_promise_for_consumption(arg)?;
                 let slot = unsafe {
                     self.builder
                         .build_in_bounds_gep(
@@ -2247,6 +2299,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?
         };
+        self.retain_promise_array_elements(promises, len)?;
         self.builder
             .build_call(
                 self.module.get_function("thaw_promise_all_slots").unwrap(),
@@ -2291,7 +2344,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_in_bounds_gep(ptr_type, promises, &[offset], "promise_tuple_slot")
                     .map_err(|error| error.to_string())?
             };
-            let promise = self.compile_expr(arg)?.into_pointer_value();
+            let promise = self.compile_promise_for_consumption(arg)?;
             self.builder
                 .build_store(promise_slot, promise)
                 .map_err(|error| error.to_string())?;
@@ -2345,7 +2398,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         )
                         .map_err(|error| error.to_string())?
                 };
-                let promise = self.compile_expr(arg)?.into_pointer_value();
+                let promise = self.compile_promise_for_consumption(arg)?;
                 self.builder
                     .build_store(slot, promise)
                     .map_err(|error| error.to_string())?;
@@ -2383,6 +2436,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?
         };
+        self.retain_promise_array_elements(promises, len)?;
         self.build_promise_all_settled_call(promises, len, element, "promise_all_settled_array")
     }
 
@@ -2442,7 +2496,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?
             };
-            let promise = self.compile_expr(arg)?.into_pointer_value();
+            let promise = self.compile_promise_for_consumption(arg)?;
             self.builder
                 .build_store(slot, promise)
                 .map_err(|error| error.to_string())?;
@@ -2500,6 +2554,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?
         };
+        self.retain_promise_array_elements(promises, len)?;
         self.builder
             .build_call(
                 self.module.get_function(runtime_symbol).unwrap(),

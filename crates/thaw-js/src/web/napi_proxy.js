@@ -388,7 +388,7 @@
   const symbolValues = new Map();
   const binaryValues = new Map();
   const promises = new Map();
-  let lastReference = 0;
+  const nextReference = cap.reference;
   const isBufferValue = value => bufferCtor !== undefined && bufferCtor.isBuffer(value);
   // ponytail: Array.prototype.slice.call on a typed array is [] in thaw-js, so the bytes are read through a Uint8Array.
   const bytesOf = value => arrayFrom(new uint8Array(value));
@@ -461,8 +461,7 @@
     if (id !== undefined && active.has(value)) return { __thaw_napi_ref__: id };
     const fresh = id === undefined;
     if (fresh) {
-      lastReference += 1;
-      id = lastReference;
+      id = nextReference();
       referenceIds.set(value, id);
       referenceValues.set(id, value);
     }
@@ -565,6 +564,7 @@
       if (!plain && value.__thaw_napi_handle__) return proxyForHandle(value.__thaw_napi_handle__);
       if (!plain && value.__thaw_napi_binary__) return binaryOf(value, origins, path);
       if (!plain && hasOwn(value, '__thaw_napi_promise__')) return promiseOf(value.__thaw_napi_promise__);
+      if (!plain && value.type === 'Buffer' && Array.isArray(value.data) && bufferCtor) return bufferCtor.from(value.data);
       if (Array.isArray(value)) return value.map((child, index) => decodeValue(child, origins, path.concat([index])));
       const decoded = {};
       Object.keys(value).forEach(key => {

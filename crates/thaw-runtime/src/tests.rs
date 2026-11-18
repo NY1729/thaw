@@ -1287,6 +1287,8 @@ fn promise_all_preserves_input_order_and_resolves_empty_inputs() {
 fn promise_all_typed_copies_position_sizes_and_deduplicates_handles() {
     let flag = thaw_promise_new();
     let pointer = thaw_promise_new();
+    // Each occurrence is consumed, so the repeated handle needs its own reference.
+    assert_eq!(unsafe { thaw_promise_retain(flag) }, 1);
     let children = [flag, pointer, flag];
     let sizes = [1usize, 8, 1];
     let joined =
@@ -1553,6 +1555,7 @@ fn promise_race_uses_completion_order_and_drains_the_loser() {
 fn promise_race_forwards_first_rejection_and_deduplicates_handles() {
     let failed = thaw_promise_new();
     let slow = timed_value(20, 4.0);
+    assert_eq!(unsafe { thaw_promise_retain(failed) }, 1);
     let children = [failed, slow, failed];
     let raced = unsafe { thaw_promise_race(children.as_ptr(), children.len()) };
     let error = b"race failure\0";
@@ -1579,6 +1582,7 @@ fn promise_any_ignores_rejections_and_uses_the_first_fulfillment() {
     let failed = thaw_promise_new();
     let slow = timed_value(25, 1.0);
     let fast = timed_value(2, 2.0);
+    assert_eq!(unsafe { thaw_promise_retain(failed) }, 1);
     let children = [failed, slow, fast, failed];
     let any = unsafe { thaw_promise_any(children.as_ptr(), children.len()) };
     let error = b"ignored failure\0";
@@ -1642,6 +1646,7 @@ fn promise_any_rejects_an_empty_input() {
 fn promise_all_settled_preserves_order_and_turns_rejections_into_values() {
     let fulfilled = thaw_promise_new();
     let rejected = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_retain(fulfilled) }, 1);
     let children = [fulfilled, rejected, fulfilled];
     let settled =
         unsafe { thaw_promise_all_settled(children.as_ptr(), children.len(), size_of::<f64>()) };
@@ -2072,6 +2077,7 @@ fn queued_result_is_rooted_through_reentrant_reset_and_released_on_purge() {
 #[test]
 fn promise_all_deduplicates_repeated_handles() {
     let child = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_retain(child) }, 1);
     let children = [child, child];
     let joined = unsafe { thaw_promise_all_f64(children.as_ptr(), children.len()) };
     let value = 9.0f64;
@@ -3967,6 +3973,7 @@ unsafe fn promise_any_reason_at(handle: *const u8, index: usize) -> (u8, u64) {
 fn promise_any_reason_slots_keep_input_order_duplicate_positions_and_empty_array() {
     let first = thaw_promise_new();
     let second = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_retain(first) }, 1);
     let children = [first, second, first];
     let any = unsafe { thaw_promise_any(children.as_ptr(), children.len()) };
     assert_eq!(
@@ -4029,6 +4036,7 @@ fn promise_any_nested_reason_and_native_text_outlive_child_handles() {
     let leaf = thaw_promise_new();
     let inner = unsafe { thaw_promise_any([leaf].as_ptr(), 1) };
     let native = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_retain(inner) }, 1);
     let outer = unsafe { thaw_promise_any([inner, native, inner].as_ptr(), 3) };
     let text = b"temporary native failure\0".to_vec();
     assert_eq!(
@@ -4321,6 +4329,7 @@ fn promise_any_stages_arena_backed_opaque_reason_across_reset() {
     unsafe { opaque.cast::<u64>().write(0x51a7_e2d3_f4b5_c6d7) };
     let first = thaw_promise_new();
     let last = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_retain(first) }, 1);
     let any = unsafe { thaw_promise_any([first, last, first].as_ptr(), 3) };
     assert_eq!(thaw_promise_reject(first, opaque), 1);
     thaw_runtime_run_until_idle();
@@ -4725,6 +4734,8 @@ fn private_array_provenance_reserves_before_visible_write_and_clears_truncated_s
 #[test]
 fn promise_all_copies_fulfilled_record_to_every_duplicate_array_index() {
     let child = thaw_promise_new();
+    // Each occurrence is consumed, so the repeated handle needs its own reference.
+    assert_eq!(unsafe { thaw_promise_retain(child) }, 1);
     let children = [child, child];
     let sizes = [8usize, 8];
     let joined = unsafe { thaw_promise_all_typed(children.as_ptr(), sizes.as_ptr(), 2) };
@@ -5520,6 +5531,83 @@ fn native_promise_hooks_await_wrapper_of_a_literal_is_triggered_by_the_async_fun
 }
 
 #[test]
+fn native_promise_hooks_all_children_run_as_reactions_triggered_by_each_child() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    take_hook_events();
+    thaw_runtime_async_hooks_set(1, Some(record_hook_event));
+    let first = thaw_promise_new();
+    let second = thaw_promise_new();
+    let (k1, k2) = unsafe { ((*first).hook_key, (*second).hook_key) };
+    take_hook_events();
+    let children = [first, second];
+    let sizes = [1usize, 1];
+    let joined =
+        unsafe { thaw_promise_all_typed(children.as_ptr(), sizes.as_ptr(), children.len()) };
+    let ko = unsafe { (*joined).hook_key };
+    // The output first, then one reaction per child in argument order, each triggered by its child.
+    let (r1, r2) = match take_hook_events().as_slice() {
+        [(0, out, 0), (0, r1, p1), (0, r2, p2)] if *out == ko && *p1 == k1 && *p2 == k2 => {
+            (*r1, *r2)
+        }
+        other => panic!("all must init its output, then a reaction per child: {other:?}"),
+    };
+    let flag = 1u8;
+    assert_eq!(thaw_promise_resolve(first, &flag), 1);
+    assert_eq!(take_hook_events(), vec![(3, k1, 0)]);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(take_hook_events(), vec![(1, r1, 0), (3, r1, 0), (2, r1, 0)]);
+    assert_eq!(thaw_promise_resolve(second, &flag), 1);
+    assert_eq!(take_hook_events(), vec![(3, k2, 0)]);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    // The last child's reaction settles the output inside its own before/after.
+    assert_eq!(
+        take_hook_events(),
+        vec![(1, r2, 0), (3, ko, 0), (3, r2, 0), (2, r2, 0)]
+    );
+    thaw_runtime_async_hooks_set(0, None);
+    unsafe { thaw_promise_destroy(joined) };
+}
+
+#[test]
+fn native_promise_hooks_race_losers_still_run_their_reaction_after_the_winner_settles_the_output() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    take_hook_events();
+    thaw_runtime_async_hooks_set(1, Some(record_hook_event));
+    let winner = thaw_promise_new();
+    let loser = thaw_promise_new();
+    let (kw, kl) = unsafe { ((*winner).hook_key, (*loser).hook_key) };
+    take_hook_events();
+    let children = [winner, loser];
+    let raced = unsafe { thaw_promise_race(children.as_ptr(), children.len()) };
+    let ko = unsafe { (*raced).hook_key };
+    let (rw, rl) = match take_hook_events().as_slice() {
+        [(0, out, 0), (0, rw, pw), (0, rl, pl)] if *out == ko && *pw == kw && *pl == kl => {
+            (*rw, *rl)
+        }
+        other => panic!("race must init its output, then a reaction per child: {other:?}"),
+    };
+    let flag = 1u8;
+    assert_eq!(thaw_promise_resolve(winner, &flag), 1);
+    assert_eq!(take_hook_events(), vec![(3, kw, 0)]);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    // The winner's reaction forwards to the output inside its before/after.
+    assert_eq!(
+        take_hook_events(),
+        vec![(1, rw, 0), (3, ko, 0), (3, rw, 0), (2, rw, 0)]
+    );
+    assert_eq!(thaw_promise_resolve(loser, &flag), 1);
+    assert_eq!(take_hook_events(), vec![(3, kl, 0)]);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(take_hook_events(), vec![(1, rl, 0), (3, rl, 0), (2, rl, 0)]);
+    thaw_runtime_async_hooks_set(0, None);
+    unsafe { thaw_promise_destroy(raced) };
+}
+
+#[test]
 fn native_promise_hooks_stay_silent_for_linked_promises_while_off() {
     let _guard = HOOK_TEST_LOCK
         .lock()
@@ -5556,4 +5644,105 @@ fn unhandled_failure_peek_keeps_the_latch_until_take() {
     thaw_promise_set_unhandled_reporter_result(None);
     assert_eq!(unsafe { thaw_promise_mark_handled(promise) }, 1);
     unsafe { thaw_promise_destroy(promise) };
+}
+
+// Codegen retains every occurrence it hands to a consuming combinator, so each
+// occurrence (including a repeated handle) must be released exactly once.
+fn promise_references(promise: *mut ThawPromise) -> usize {
+    unsafe { (*promise).references }
+}
+
+fn retain_duplicate_occurrences(promise: *mut ThawPromise, count: usize) {
+    for _ in 0..count {
+        assert_eq!(unsafe { thaw_promise_retain(promise) }, 1);
+    }
+}
+
+#[test]
+fn promise_all_typed_releases_each_duplicate_occurrence_once() {
+    let p = thaw_promise_new();
+    retain_duplicate_occurrences(p, 2);
+    assert_eq!(promise_references(p), 3);
+    let inputs = [p, p];
+    let sizes = [8usize, 8];
+    let out = unsafe { thaw_promise_all_typed(inputs.as_ptr(), sizes.as_ptr(), inputs.len()) };
+    let value = 3.0f64;
+    assert_eq!(thaw_promise_resolve(p, (&value as *const f64).cast()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(
+        promise_references(p),
+        1,
+        "only the owner's reference may remain"
+    );
+    let result = resolved_array_buffer(out);
+    assert_eq!(unsafe { result.read() }, 2);
+    assert_eq!(f64::from_bits(unsafe { result.add(1).read() }), 3.0);
+    assert_eq!(f64::from_bits(unsafe { result.add(2).read() }), 3.0);
+    unsafe {
+        thaw_promise_destroy(p);
+        thaw_promise_destroy(out);
+    }
+}
+
+#[test]
+fn promise_race_releases_each_duplicate_occurrence_once() {
+    let p = thaw_promise_new();
+    retain_duplicate_occurrences(p, 2);
+    let inputs = [p, p];
+    let out = unsafe { thaw_promise_race(inputs.as_ptr(), inputs.len()) };
+    let value = 3.0f64;
+    assert_eq!(thaw_promise_resolve(p, (&value as *const f64).cast()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(thaw_promise_state(out), 1);
+    assert_eq!(
+        promise_references(p),
+        1,
+        "only the owner's reference may remain"
+    );
+    unsafe {
+        thaw_promise_destroy(p);
+        thaw_promise_destroy(out);
+    }
+}
+
+#[test]
+fn promise_any_releases_each_duplicate_occurrence_once() {
+    let p = thaw_promise_new();
+    retain_duplicate_occurrences(p, 2);
+    let inputs = [p, p];
+    let out = unsafe { thaw_promise_any(inputs.as_ptr(), inputs.len()) };
+    let value = 3.0f64;
+    assert_eq!(thaw_promise_resolve(p, (&value as *const f64).cast()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(thaw_promise_state(out), 1);
+    assert_eq!(
+        promise_references(p),
+        1,
+        "only the owner's reference may remain"
+    );
+    unsafe {
+        thaw_promise_destroy(p);
+        thaw_promise_destroy(out);
+    }
+}
+
+#[test]
+fn promise_all_settled_releases_each_duplicate_occurrence_once() {
+    let p = thaw_promise_new();
+    retain_duplicate_occurrences(p, 2);
+    let inputs = [p, p];
+    let out = unsafe { thaw_promise_all_settled(inputs.as_ptr(), inputs.len(), size_of::<f64>()) };
+    let value = 3.0f64;
+    assert_eq!(thaw_promise_resolve(p, (&value as *const f64).cast()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(thaw_promise_state(out), 1);
+    assert_eq!(
+        promise_references(p),
+        1,
+        "only the owner's reference may remain"
+    );
+    unsafe {
+        thaw_promise_destroy(p);
+        thaw_promise_destroy(out);
+    }
 }

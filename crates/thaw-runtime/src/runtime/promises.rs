@@ -272,9 +272,21 @@ pub unsafe extern "C" fn thaw_promise_subscribe_await(
     resume: PromiseResumeFn,
     frame: *mut u8,
 ) -> u8 {
+    unsafe { subscribe_reaction(promise, resume, frame, Vec::new()) }
+}
+
+/// Subscribes a continuation to `promise` the way V8 runs a reaction: a derived promise triggered by
+/// `promise` whose before/resolve/after fire around the continuation. Used by `await` and by the
+/// combinators' per-element reactions.
+unsafe fn subscribe_reaction(
+    promise: *mut ThawPromise,
+    resume: PromiseResumeFn,
+    frame: *mut u8,
+    payload_roots: Vec<thaw_arena::ArenaRoot>,
+) -> u8 {
     let parent = unsafe { promise.as_ref() }.map_or(0, |promise| promise.hook_key);
-    let throwaway = async_hook_throwaway(parent);
-    unsafe { subscribe_with_roots(promise, resume, frame, Vec::new(), throwaway, true) }
+    let reaction = async_hook_throwaway(parent);
+    unsafe { subscribe_with_roots(promise, resume, frame, payload_roots, reaction, true) }
 }
 
 unsafe fn subscribe_with_roots(
@@ -1455,6 +1467,7 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
         unsafe { drop(Box::from_raw(state)) };
         return output;
     }
+    unsafe { release_duplicate_promise_occurrences(promises, len) };
     for (promise, indices) in grouped {
         let child = Box::into_raw(Box::new(PromiseAllChild {
             state,
@@ -1462,7 +1475,7 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
             indices,
         }));
         unsafe {
-            thaw_promise_subscribe(promise, resume_promise_all_child, child.cast());
+            subscribe_reaction(promise, resume_promise_all_child, child.cast(), Vec::new());
         }
     }
     output
@@ -1560,9 +1573,10 @@ pub unsafe extern "C" fn thaw_promise_race(
     if invalid {
         reject_native_text(output, PROMISE_RACE_INVALID_ERROR.as_ptr());
     }
+    unsafe { release_duplicate_promise_occurrences(promises, len) };
     for promise in unique {
         let child = Box::into_raw(Box::new(PromiseRaceChild { state, promise }));
-        unsafe { thaw_promise_subscribe(promise, resume_promise_race_child, child.cast()) };
+        unsafe { subscribe_reaction(promise, resume_promise_race_child, child.cast(), Vec::new()) };
     }
     if unsafe { (*state).remaining } == 0 {
         unsafe { drop(Box::from_raw(state)) };
@@ -1841,9 +1855,10 @@ pub unsafe extern "C" fn thaw_promise_any(
     }));
     PROMISE_ANY_STATES.with(|states| states.borrow_mut().push(state));
     ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
+    unsafe { release_duplicate_promise_occurrences(promises, len) };
     for (promise, indices) in grouped {
         let child = Box::into_raw(Box::new(PromiseAnyChild { state, promise, indices }));
-        unsafe { thaw_promise_subscribe(promise, resume_promise_any_child, child.cast()) };
+        unsafe { subscribe_reaction(promise, resume_promise_any_child, child.cast(), Vec::new()) };
     }
     output
 }
@@ -1912,18 +1927,31 @@ extern "C" fn resume_promise_all_settled_child(frame: *mut u8, value: *const u8)
     }
 }
 
-// Snapshot before destruction: retiring an input may reenter and reclaim
-// the arena array containing these handles.
-unsafe fn consume_distinct_promise_inputs(promises: *const *mut ThawPromise, len: usize) {
+// Every occurrence is one consumed reference (codegen retains each), so a
+// repeated handle is destroyed once per occurrence. Snapshot before
+// destruction: retiring an input may reenter and reclaim the arena array
+// containing these handles.
+unsafe fn consume_promise_inputs(promises: *const *mut ThawPromise, len: usize) {
     if promises.is_null() { return; }
-    let mut distinct = Vec::new();
-    for index in 0..len {
-        let promise = unsafe { *promises.add(index) };
-        // ponytail: preserve first-input retirement order with quadratic
-        // deduplication; use an auxiliary HashSet if large joins need it.
-        if !promise.is_null() && !distinct.contains(&promise) { distinct.push(promise); }
+    let inputs: Vec<*mut ThawPromise> = (0..len)
+        .map(|index| unsafe { *promises.add(index) })
+        .filter(|promise| !promise.is_null())
+        .collect();
+    for promise in inputs { unsafe { thaw_promise_destroy(promise) }; }
+}
+
+// Releases the extra reference of each repeated occurrence before any child
+// subscribes. The first occurrence's reference survives until its child
+// settles, so no count reaches zero early.
+// ponytail: quadratic duplicate scan; a HashSet if large joins need it.
+unsafe fn release_duplicate_promise_occurrences(promises: *const *mut ThawPromise, len: usize) {
+    if promises.is_null() { return; }
+    let inputs: Vec<*mut ThawPromise> = (0..len).map(|index| unsafe { *promises.add(index) }).collect();
+    for (index, &promise) in inputs.iter().enumerate() {
+        if !promise.is_null() && inputs[..index].contains(&promise) {
+            unsafe { thaw_promise_destroy(promise) };
+        }
     }
-    for promise in distinct { unsafe { thaw_promise_destroy(promise) }; }
 }
 
 /// Waits for every distinct input and resolves with an input-ordered array of
@@ -1943,13 +1971,13 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
     let output = thaw_promise_new();
     if element_size == 0 || (len != 0 && promises.is_null()) {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
-        unsafe { consume_distinct_promise_inputs(promises, len) };
+        unsafe { consume_promise_inputs(promises, len) };
         return output;
     }
     let Some(allocation_size) = len.checked_add(2)
         .and_then(|words| words.checked_mul(size_of::<u64>())) else {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
-        unsafe { consume_distinct_promise_inputs(promises, len) };
+        unsafe { consume_promise_inputs(promises, len) };
         return output;
     };
     let allocation = thaw_arena::thaw_arena_alloc(allocation_size, align_of::<u64>()).cast::<u64>();
@@ -1958,18 +1986,18 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
         .and_then(|size| size.checked_add(size_of::<u64>()))
     else {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
-        unsafe { consume_distinct_promise_inputs(promises, len) };
+        unsafe { consume_promise_inputs(promises, len) };
         return output;
     };
     let Some(objects_size) = len.checked_mul(object_stride) else {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
-        unsafe { consume_distinct_promise_inputs(promises, len) };
+        unsafe { consume_promise_inputs(promises, len) };
         return output;
     };
     let objects = thaw_arena::thaw_arena_alloc(objects_size, align_of::<u64>());
     if allocation.is_null() || (len != 0 && objects.is_null()) {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
-        unsafe { consume_distinct_promise_inputs(promises, len) };
+        unsafe { consume_promise_inputs(promises, len) };
         return output;
     }
     unsafe {
@@ -1981,7 +2009,7 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
     let result_handle = wrap_array_handle(unsafe { allocation.add(1) }.cast());
     if result_handle.is_null() {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
-        unsafe { consume_distinct_promise_inputs(promises, len) };
+        unsafe { consume_promise_inputs(promises, len) };
         return output;
     }
     let result_slot = allocation.cast::<*const u8>();
@@ -2004,7 +2032,7 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
         let promise = unsafe { *promises.add(index) };
         if promise.is_null() {
             reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
-            unsafe { consume_distinct_promise_inputs(promises, len) };
+            unsafe { consume_promise_inputs(promises, len) };
             return output;
         }
         if let Some((_, indices)) = grouped
@@ -2031,6 +2059,7 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
     }));
     PROMISE_ALL_SETTLED_STATES.with(|states| states.borrow_mut().push(state));
     ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
+    unsafe { release_duplicate_promise_occurrences(promises, len) };
     for (promise, indices) in grouped {
         let child = Box::into_raw(Box::new(PromiseAllSettledChild {
             state,
@@ -2042,13 +2071,11 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
             thaw_arena::ArenaRoot::new(objects as usize),
         ];
         unsafe {
-            subscribe_with_roots(
+            subscribe_reaction(
                 promise,
                 resume_promise_all_settled_child,
                 child.cast(),
                 payload_roots,
-                0,
-                false,
             )
         };
     }

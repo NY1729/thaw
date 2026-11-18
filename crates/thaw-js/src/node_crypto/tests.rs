@@ -357,7 +357,7 @@ fn kdf_argument_errors_match_the_quickjs_messages() {
              console.log(t(function () { m.scryptSync('p', 's', 8, { N: 16, r: 0 }); }));
              console.log(t(function () { m.scrypt('p', 's', 8, {}, 1); }));
              console.log(t(function () { m.pbkdf2('p', 's', 1, 8, 'sha1', 1); }));"#),
-        "RangeError:iterations out of range|RangeError:keylen out of range|RangeError:iterations out of range|Error:Digest method not supported|TypeError:Error converting from js 'scrypt cost' into type 'power of two greater than one': 3|TypeError:Error converting from js 'scrypt options' into type 'valid scrypt options': invalid scrypt parameters: N=16, r=0, p=1, length=8|TypeError:callback must be a function|TypeError:callback must be a function"
+        "RangeError:iterations out of range|RangeError:keylen out of range|RangeError:iterations out of range|TypeError:Invalid digest: nope|TypeError:Error converting from js 'scrypt cost' into type 'power of two greater than one': 3|TypeError:Error converting from js 'scrypt options' into type 'valid scrypt options': invalid scrypt parameters: N=16, r=0, p=1, length=8|TypeError:callback must be a function|TypeError:The \"callback\" argument must be of type function. Received type number (1)"
     );
 }
 
@@ -1010,5 +1010,402 @@ console.log(JSON.stringify([shared, symmetric, p1.privateKey.asymmetricKeyType])
     assert_eq!(
         run(&program),
         r#"["4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",true,"x25519"]"#
+    );
+}
+
+#[test]
+fn argument_validation_matches_node_for_every_entry_point() {
+    // Node 22.23.1 output for each call. The top-level sign/verify rows that take a key are left out: their
+    // errors come from key parsing (PR 1b).
+    let src = r##"var c = globalThis.__thaw_crypto_module;
+const run = (label, f) => { try { const r = f(); console.log(label + ' => OK ' + typeof r); } catch (e) { console.log(label + ' | ' + e.name + ' ' + e.code + ' | ' + e.message); } };
+(function main() {
+  run('createHash(num)', () => { return c.createHash(5); });
+  run('new Hash(num)', () => { return new c.Hash(5); });
+  run('createHmac(num,\'k\')', () => { return c.createHmac(5, 'k'); });
+  run('new Hmac(num,\'k\')', () => { return new c.Hmac(5, 'k'); });
+  run('hash(num,\'abc\')', () => { return c.hash(5, 'abc'); });
+  run('createSign(num)', () => { return c.createSign(5); });
+  run('new Sign(num)', () => { return new c.Sign(5); });
+  run('createVerify(num)', () => { return c.createVerify(5); });
+  run('new Verify(num)', () => { return new c.Verify(5); });
+  run('sign(num,\'abc\',\'k\')', () => { return c.sign(5, 'abc', 'k'); });
+  run('verify(num,\'abc\',\'k\',\'sig\')', () => { return c.verify(5, 'abc', 'k', 'sig'); });
+  run('pbkdf2Sync(\'p\',\'s\',1,1,num)', () => { return c.pbkdf2Sync('p', 's', 1, 1, 5); });
+  run('pbkdf2(\'p\',\'s\',1,1,num,cb)', () => { return c.pbkdf2('p', 's', 1, 1, 5, () => {}); });
+  run('createCipheriv(num,key16,iv16)', () => { return c.createCipheriv(5, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createDecipheriv(num,key16,iv16)', () => { return c.createDecipheriv(5, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('new Cipheriv(num,key16,iv16)', () => { return new c.Cipheriv(5, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createHash(obj)', () => { return c.createHash({}); });
+  run('new Hash(obj)', () => { return new c.Hash({}); });
+  run('createHmac(obj,\'k\')', () => { return c.createHmac({}, 'k'); });
+  run('new Hmac(obj,\'k\')', () => { return new c.Hmac({}, 'k'); });
+  run('hash(obj,\'abc\')', () => { return c.hash({}, 'abc'); });
+  run('createSign(obj)', () => { return c.createSign({}); });
+  run('new Sign(obj)', () => { return new c.Sign({}); });
+  run('createVerify(obj)', () => { return c.createVerify({}); });
+  run('new Verify(obj)', () => { return new c.Verify({}); });
+  run('sign(obj,\'abc\',\'k\')', () => { return c.sign({}, 'abc', 'k'); });
+  run('verify(obj,\'abc\',\'k\',\'sig\')', () => { return c.verify({}, 'abc', 'k', 'sig'); });
+  run('pbkdf2Sync(\'p\',\'s\',1,1,obj)', () => { return c.pbkdf2Sync('p', 's', 1, 1, {}); });
+  run('pbkdf2(\'p\',\'s\',1,1,obj,cb)', () => { return c.pbkdf2('p', 's', 1, 1, {}, () => {}); });
+  run('createCipheriv(obj,key16,iv16)', () => { return c.createCipheriv({}, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createDecipheriv(obj,key16,iv16)', () => { return c.createDecipheriv({}, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('new Cipheriv(obj,key16,iv16)', () => { return new c.Cipheriv({}, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createHash(undef)', () => { return c.createHash(undefined); });
+  run('new Hash(undef)', () => { return new c.Hash(undefined); });
+  run('createHmac(undef,\'k\')', () => { return c.createHmac(undefined, 'k'); });
+  run('new Hmac(undef,\'k\')', () => { return new c.Hmac(undefined, 'k'); });
+  run('hash(undef,\'abc\')', () => { return c.hash(undefined, 'abc'); });
+  run('createSign(undef)', () => { return c.createSign(undefined); });
+  run('new Sign(undef)', () => { return new c.Sign(undefined); });
+  run('createVerify(undef)', () => { return c.createVerify(undefined); });
+  run('new Verify(undef)', () => { return new c.Verify(undefined); });
+  run('verify(undef,\'abc\',\'k\',\'sig\')', () => { return c.verify(undefined, 'abc', 'k', 'sig'); });
+  run('pbkdf2Sync(\'p\',\'s\',1,1,undef)', () => { return c.pbkdf2Sync('p', 's', 1, 1, undefined); });
+  run('pbkdf2(\'p\',\'s\',1,1,undef,cb)', () => { return c.pbkdf2('p', 's', 1, 1, undefined, () => {}); });
+  run('createCipheriv(undef,key16,iv16)', () => { return c.createCipheriv(undefined, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createDecipheriv(undef,key16,iv16)', () => { return c.createDecipheriv(undefined, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('new Cipheriv(undef,key16,iv16)', () => { return new c.Cipheriv(undefined, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createHash(nul)', () => { return c.createHash(null); });
+  run('new Hash(nul)', () => { return new c.Hash(null); });
+  run('createHmac(nul,\'k\')', () => { return c.createHmac(null, 'k'); });
+  run('new Hmac(nul,\'k\')', () => { return new c.Hmac(null, 'k'); });
+  run('hash(nul,\'abc\')', () => { return c.hash(null, 'abc'); });
+  run('createSign(nul)', () => { return c.createSign(null); });
+  run('new Sign(nul)', () => { return new c.Sign(null); });
+  run('createVerify(nul)', () => { return c.createVerify(null); });
+  run('new Verify(nul)', () => { return new c.Verify(null); });
+  run('verify(nul,\'abc\',\'k\',\'sig\')', () => { return c.verify(null, 'abc', 'k', 'sig'); });
+  run('pbkdf2Sync(\'p\',\'s\',1,1,nul)', () => { return c.pbkdf2Sync('p', 's', 1, 1, null); });
+  run('pbkdf2(\'p\',\'s\',1,1,nul,cb)', () => { return c.pbkdf2('p', 's', 1, 1, null, () => {}); });
+  run('createCipheriv(nul,key16,iv16)', () => { return c.createCipheriv(null, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createDecipheriv(nul,key16,iv16)', () => { return c.createDecipheriv(null, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('new Cipheriv(nul,key16,iv16)', () => { return new c.Cipheriv(null, Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createHash(empty)', () => { return c.createHash(''); });
+  run('new Hash(empty)', () => { return new c.Hash(''); });
+  run('createHmac(empty,\'k\')', () => { return c.createHmac('', 'k'); });
+  run('new Hmac(empty,\'k\')', () => { return new c.Hmac('', 'k'); });
+  run('hash(empty,\'abc\')', () => { return c.hash('', 'abc'); });
+  run('createSign(empty)', () => { return c.createSign(''); });
+  run('new Sign(empty)', () => { return new c.Sign(''); });
+  run('createVerify(empty)', () => { return c.createVerify(''); });
+  run('new Verify(empty)', () => { return new c.Verify(''); });
+  run('verify(empty,\'abc\',\'k\',\'sig\')', () => { return c.verify('', 'abc', 'k', 'sig'); });
+  run('pbkdf2Sync(\'p\',\'s\',1,1,empty)', () => { return c.pbkdf2Sync('p', 's', 1, 1, ''); });
+  run('pbkdf2(\'p\',\'s\',1,1,empty,cb)', () => { return c.pbkdf2('p', 's', 1, 1, '', () => {}); });
+  run('createCipheriv(empty,key16,iv16)', () => { return c.createCipheriv('', Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createDecipheriv(empty,key16,iv16)', () => { return c.createDecipheriv('', Buffer.alloc(16), Buffer.alloc(16)); });
+  run('new Cipheriv(empty,key16,iv16)', () => { return new c.Cipheriv('', Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createHash(unk)', () => { return c.createHash('a/b'); });
+  run('new Hash(unk)', () => { return new c.Hash('a/b'); });
+  run('createHmac(unk,\'k\')', () => { return c.createHmac('a/b', 'k'); });
+  run('new Hmac(unk,\'k\')', () => { return new c.Hmac('a/b', 'k'); });
+  run('hash(unk,\'abc\')', () => { return c.hash('a/b', 'abc'); });
+  run('createSign(unk)', () => { return c.createSign('a/b'); });
+  run('new Sign(unk)', () => { return new c.Sign('a/b'); });
+  run('createVerify(unk)', () => { return c.createVerify('a/b'); });
+  run('new Verify(unk)', () => { return new c.Verify('a/b'); });
+  run('verify(unk,\'abc\',\'k\',\'sig\')', () => { return c.verify('a/b', 'abc', 'k', 'sig'); });
+  run('pbkdf2Sync(\'p\',\'s\',1,1,unk)', () => { return c.pbkdf2Sync('p', 's', 1, 1, 'a/b'); });
+  run('pbkdf2(\'p\',\'s\',1,1,unk,cb)', () => { return c.pbkdf2('p', 's', 1, 1, 'a/b', () => {}); });
+  run('createCipheriv(unk,key16,iv16)', () => { return c.createCipheriv('a/b', Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createDecipheriv(unk,key16,iv16)', () => { return c.createDecipheriv('a/b', Buffer.alloc(16), Buffer.alloc(16)); });
+  run('new Cipheriv(unk,key16,iv16)', () => { return new c.Cipheriv('a/b', Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createHmac(\'sha256\',num)', () => { return c.createHmac('sha256', 5); });
+  run('createCipheriv(\'aes-128-cbc\',num,iv16)', () => { return c.createCipheriv('aes-128-cbc', 5, Buffer.alloc(16)); });
+  run('createDecipheriv(\'aes-128-cbc\',num,iv16)', () => { return c.createDecipheriv('aes-128-cbc', 5, Buffer.alloc(16)); });
+  run('createCipheriv(\'aes-128-cbc\',key16,num)', () => { return c.createCipheriv('aes-128-cbc', Buffer.alloc(16), 5); });
+  run('createCipheriv(unk,num,num)', () => { return c.createCipheriv('a/b', 5, 5); });
+  run('hash(\'sha256\',num)', () => { return c.hash('sha256', 5); });
+  run('pbkdf2Sync(num,\'s\',1,1,\'sha256\')', () => { return c.pbkdf2Sync(5, 's', 1, 1, 'sha256'); });
+  run('pbkdf2Sync(\'p\',num,1,1,\'sha256\')', () => { return c.pbkdf2Sync('p', 5, 1, 1, 'sha256'); });
+  run('pbkdf2Sync(\'p\',\'s\',1,1,\'a/b\') with num salt-less', () => { return c.pbkdf2Sync('p', 's', 1, 1, 'a/b'); });
+  run('verify(\'sha256\',num,\'k\',\'sig\')', () => { return c.verify('sha256', 5, 'k', 'sig'); });
+  run('sign(\'sha256\',num,\'k\')', () => { return c.sign('sha256', 5, 'k'); });
+  run('createHmac(\'sha256\',obj)', () => { return c.createHmac('sha256', {}); });
+  run('createCipheriv(\'aes-128-cbc\',obj,iv16)', () => { return c.createCipheriv('aes-128-cbc', {}, Buffer.alloc(16)); });
+  run('createDecipheriv(\'aes-128-cbc\',obj,iv16)', () => { return c.createDecipheriv('aes-128-cbc', {}, Buffer.alloc(16)); });
+  run('createCipheriv(\'aes-128-cbc\',key16,obj)', () => { return c.createCipheriv('aes-128-cbc', Buffer.alloc(16), {}); });
+  run('createCipheriv(unk,obj,obj)', () => { return c.createCipheriv('a/b', {}, {}); });
+  run('hash(\'sha256\',obj)', () => { return c.hash('sha256', {}); });
+  run('pbkdf2Sync(obj,\'s\',1,1,\'sha256\')', () => { return c.pbkdf2Sync({}, 's', 1, 1, 'sha256'); });
+  run('pbkdf2Sync(\'p\',obj,1,1,\'sha256\')', () => { return c.pbkdf2Sync('p', {}, 1, 1, 'sha256'); });
+  run('verify(\'sha256\',obj,\'k\',\'sig\')', () => { return c.verify('sha256', {}, 'k', 'sig'); });
+  run('sign(\'sha256\',obj,\'k\')', () => { return c.sign('sha256', {}, 'k'); });
+  run('createHmac(\'sha256\',undef)', () => { return c.createHmac('sha256', undefined); });
+  run('createCipheriv(\'aes-128-cbc\',undef,iv16)', () => { return c.createCipheriv('aes-128-cbc', undefined, Buffer.alloc(16)); });
+  run('createDecipheriv(\'aes-128-cbc\',undef,iv16)', () => { return c.createDecipheriv('aes-128-cbc', undefined, Buffer.alloc(16)); });
+  run('createCipheriv(\'aes-128-cbc\',key16,undef)', () => { return c.createCipheriv('aes-128-cbc', Buffer.alloc(16), undefined); });
+  run('createCipheriv(unk,undef,undef)', () => { return c.createCipheriv('a/b', undefined, undefined); });
+  run('hash(\'sha256\',undef)', () => { return c.hash('sha256', undefined); });
+  run('pbkdf2Sync(undef,\'s\',1,1,\'sha256\')', () => { return c.pbkdf2Sync(undefined, 's', 1, 1, 'sha256'); });
+  run('pbkdf2Sync(\'p\',undef,1,1,\'sha256\')', () => { return c.pbkdf2Sync('p', undefined, 1, 1, 'sha256'); });
+  run('verify(\'sha256\',undef,\'k\',\'sig\')', () => { return c.verify('sha256', undefined, 'k', 'sig'); });
+  run('sign(\'sha256\',undef,\'k\')', () => { return c.sign('sha256', undefined, 'k'); });
+  run('createHmac(\'sha256\',nul)', () => { return c.createHmac('sha256', null); });
+  run('createCipheriv(\'aes-128-cbc\',nul,iv16)', () => { return c.createCipheriv('aes-128-cbc', null, Buffer.alloc(16)); });
+  run('createDecipheriv(\'aes-128-cbc\',nul,iv16)', () => { return c.createDecipheriv('aes-128-cbc', null, Buffer.alloc(16)); });
+  run('createCipheriv(\'aes-128-cbc\',key16,nul)', () => { return c.createCipheriv('aes-128-cbc', Buffer.alloc(16), null); });
+  run('createCipheriv(unk,nul,nul)', () => { return c.createCipheriv('a/b', null, null); });
+  run('hash(\'sha256\',nul)', () => { return c.hash('sha256', null); });
+  run('pbkdf2Sync(nul,\'s\',1,1,\'sha256\')', () => { return c.pbkdf2Sync(null, 's', 1, 1, 'sha256'); });
+  run('pbkdf2Sync(\'p\',nul,1,1,\'sha256\')', () => { return c.pbkdf2Sync('p', null, 1, 1, 'sha256'); });
+  run('verify(\'sha256\',nul,\'k\',\'sig\')', () => { return c.verify('sha256', null, 'k', 'sig'); });
+  run('sign(\'sha256\',nul,\'k\')', () => { return c.sign('sha256', null, 'k'); });
+  run('createHmac(\'sha256\',empty)', () => { return c.createHmac('sha256', ''); });
+  run('createCipheriv(\'aes-128-cbc\',empty,iv16)', () => { return c.createCipheriv('aes-128-cbc', '', Buffer.alloc(16)); });
+  run('createDecipheriv(\'aes-128-cbc\',empty,iv16)', () => { return c.createDecipheriv('aes-128-cbc', '', Buffer.alloc(16)); });
+  run('createCipheriv(\'aes-128-cbc\',key16,empty)', () => { return c.createCipheriv('aes-128-cbc', Buffer.alloc(16), ''); });
+  run('createCipheriv(unk,empty,empty)', () => { return c.createCipheriv('a/b', '', ''); });
+  run('hash(\'sha256\',empty)', () => { return c.hash('sha256', ''); });
+  run('pbkdf2Sync(empty,\'s\',1,1,\'sha256\')', () => { return c.pbkdf2Sync('', 's', 1, 1, 'sha256'); });
+  run('pbkdf2Sync(\'p\',empty,1,1,\'sha256\')', () => { return c.pbkdf2Sync('p', '', 1, 1, 'sha256'); });
+  run('verify(\'sha256\',empty,\'k\',\'sig\')', () => { return c.verify('sha256', '', 'k', 'sig'); });
+  run('createHash(\'\')', () => { return c.createHash(''); });
+  run('createHash(a/b)', () => { return c.createHash('a/b'); });
+  run('createHash(sha256)', () => { return c.createHash('sha256'); });
+  run('createHmac(a/b,\'k\')', () => { return c.createHmac('a/b', 'k'); });
+  run('createHmac(a/b,5) key first', () => { return c.createHmac('a/b', 5); });
+  run('createHmac(5,5) name first', () => { return c.createHmac(5, 5); });
+  run('createHmac(sha256,\'\') empty key', () => { return c.createHmac('sha256', ''); });
+  run('createHmac(empty,\'k\')', () => { return c.createHmac('', 'k'); });
+  run('hash(a/b,\'abc\')', () => { return c.hash('a/b', 'abc'); });
+  run('hash(a/b,5) input first', () => { return c.hash('a/b', 5); });
+  run('hash(5,5) name first', () => { return c.hash(5, 5); });
+  run('hash(empty,\'abc\')', () => { return c.hash('', 'abc'); });
+  run('hash(sha256,\'abc\',\'hex\')', () => { return c.hash('sha256', 'abc', 'hex'); });
+  run('pbkdf2Sync(5,5,1,1,\'a/b\') password first', () => { return c.pbkdf2Sync(5, 5, 1, 1, 'a/b'); });
+  run('pbkdf2Sync(\'p\',5,1,1,\'a/b\') salt second', () => { return c.pbkdf2Sync('p', 5, 1, 1, 'a/b'); });
+  run('pbkdf2Sync(\'p\',\'s\',1,1,\'\') empty digest', () => { return c.pbkdf2Sync('p', 's', 1, 1, ''); });
+  run('pbkdf2(\'p\',\'s\',1,1,\'a/b\') no callback', () => { return c.pbkdf2('p', 's', 1, 1, 'a/b'); });
+  run('pbkdf2(\'p\',\'s\',1,1,\'sha256\') no callback', () => { return c.pbkdf2('p', 's', 1, 1, 'sha256'); });
+  run('pbkdf2(\'p\',\'s\',1,1,5) no callback', () => { return c.pbkdf2('p', 's', 1, 1, 5); });
+  run('pbkdf2(\'p\',\'s\',1,1,\'sha256\',5)', () => { return c.pbkdf2('p', 's', 1, 1, 'sha256', 5); });
+  run('pbkdf2(5,\'s\',1,1,\'sha256\',cb)', () => { return c.pbkdf2(5, 's', 1, 1, 'sha256', () => {}); });
+  run('createSign(\'\')', () => { return c.createSign(''); });
+  run('createSign(a/b)', () => { return c.createSign('a/b'); });
+  run('createSign(sha256)', () => { return c.createSign('sha256'); });
+  run('createVerify(\'\')', () => { return c.createVerify(''); });
+  run('createVerify(a/b)', () => { return c.createVerify('a/b'); });
+  run('verify(\'sha256\',\'abc\',\'k\',5) signature', () => { return c.verify('sha256', 'abc', 'k', 5); });
+  run('verify(\'sha256\',\'abc\',\'k\',undef) signature', () => { return c.verify('sha256', 'abc', 'k', undefined); });
+  run('verify(\'a/b\',\'abc\',\'k\',5) signature first', () => { return c.verify('a/b', 'abc', 'k', 5); });
+  run('createCipheriv(unk,key16,5) iv first', () => { return c.createCipheriv('a/b', Buffer.alloc(16), 5); });
+  run('createCipheriv(unk,key16,undef)', () => { return c.createCipheriv('a/b', Buffer.alloc(16), undefined); });
+  run('createCipheriv(cbc,key16,undef)', () => { return c.createCipheriv('aes-128-cbc', Buffer.alloc(16), undefined); });
+  run('createCipheriv(ecb,key16,undef)', () => { return c.createCipheriv('aes-128-ecb', Buffer.alloc(16), undefined); });
+  run('createCipheriv(ecb,key16,5)', () => { return c.createCipheriv('aes-128-ecb', Buffer.alloc(16), 5); });
+  run('createCipheriv(cbc,key16,null)', () => { return c.createCipheriv('aes-128-cbc', Buffer.alloc(16), null); });
+  run('createCipheriv(ecb,key16,null) valid', () => { return typeof c.createCipheriv('aes-128-ecb', Buffer.alloc(16), null); });
+  run('createCipheriv(cbc,key5,iv16) keylen', () => { return c.createCipheriv('aes-128-cbc', Buffer.alloc(5), Buffer.alloc(16)); });
+  run('createCipheriv(cbc,key16,iv5) ivlen', () => { return c.createCipheriv('aes-128-cbc', Buffer.alloc(16), Buffer.alloc(5)); });
+  run('createCipheriv(a/b,key16,iv16) unknown', () => { return c.createCipheriv('a/b', Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createCipheriv(cbc,key16,iv16) valid', () => { return typeof c.createCipheriv('aes-128-cbc', Buffer.alloc(16), Buffer.alloc(16)); });
+  run('createDecipheriv(cbc,key16,5) iv', () => { return c.createDecipheriv('aes-128-cbc', Buffer.alloc(16), 5); });
+  run('createDecipheriv(a/b,key16,5) iv first', () => { return c.createDecipheriv('a/b', Buffer.alloc(16), 5); });
+  run('new Hash()', () => { return new c.Hash(); });
+  run('new Hmac()', () => { return new c.Hmac(); });
+  run('new Cipheriv()', () => { return new c.Cipheriv(); });
+  run('createHmac(sha256) no key', () => { return c.createHmac('sha256'); });
+  run('createCipheriv(cbc,key16) no iv', () => { return c.createCipheriv('aes-128-cbc', Buffer.alloc(16)); });
+})();
+"##;
+    let mut it = Interp::new();
+    assert!(it.run(src).is_ok());
+    let got: Vec<&str> = it.out.iter().map(String::as_str).collect();
+    assert_eq!(
+        got,
+        [
+            r#"createHash(num) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received type number (5)"#,
+            r#"new Hash(num) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received type number (5)"#,
+            r#"createHmac(num,'k') | TypeError ERR_INVALID_ARG_TYPE | The "hmac" argument must be of type string. Received type number (5)"#,
+            r#"new Hmac(num,'k') | TypeError ERR_INVALID_ARG_TYPE | The "hmac" argument must be of type string. Received type number (5)"#,
+            r#"hash(num,'abc') | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received type number (5)"#,
+            r#"createSign(num) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received type number (5)"#,
+            r#"new Sign(num) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received type number (5)"#,
+            r#"createVerify(num) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received type number (5)"#,
+            r#"new Verify(num) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received type number (5)"#,
+            r#"sign(num,'abc','k') | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received type number (5)"#,
+            r#"verify(num,'abc','k','sig') | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received type number (5)"#,
+            r#"pbkdf2Sync('p','s',1,1,num) | TypeError ERR_INVALID_ARG_TYPE | The "digest" argument must be of type string. Received type number (5)"#,
+            r#"pbkdf2('p','s',1,1,num,cb) | TypeError ERR_INVALID_ARG_TYPE | The "digest" argument must be of type string. Received type number (5)"#,
+            r#"createCipheriv(num,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received type number (5)"#,
+            r#"createDecipheriv(num,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received type number (5)"#,
+            r#"new Cipheriv(num,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received type number (5)"#,
+            r#"createHash(obj) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received an instance of Object"#,
+            r#"new Hash(obj) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received an instance of Object"#,
+            r#"createHmac(obj,'k') | TypeError ERR_INVALID_ARG_TYPE | The "hmac" argument must be of type string. Received an instance of Object"#,
+            r#"new Hmac(obj,'k') | TypeError ERR_INVALID_ARG_TYPE | The "hmac" argument must be of type string. Received an instance of Object"#,
+            r#"hash(obj,'abc') | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received an instance of Object"#,
+            r#"createSign(obj) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received an instance of Object"#,
+            r#"new Sign(obj) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received an instance of Object"#,
+            r#"createVerify(obj) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received an instance of Object"#,
+            r#"new Verify(obj) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received an instance of Object"#,
+            r#"sign(obj,'abc','k') | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received an instance of Object"#,
+            r#"verify(obj,'abc','k','sig') | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received an instance of Object"#,
+            r#"pbkdf2Sync('p','s',1,1,obj) | TypeError ERR_INVALID_ARG_TYPE | The "digest" argument must be of type string. Received an instance of Object"#,
+            r#"pbkdf2('p','s',1,1,obj,cb) | TypeError ERR_INVALID_ARG_TYPE | The "digest" argument must be of type string. Received an instance of Object"#,
+            r#"createCipheriv(obj,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received an instance of Object"#,
+            r#"createDecipheriv(obj,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received an instance of Object"#,
+            r#"new Cipheriv(obj,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received an instance of Object"#,
+            r#"createHash(undef) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received undefined"#,
+            r#"new Hash(undef) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received undefined"#,
+            r#"createHmac(undef,'k') | TypeError ERR_INVALID_ARG_TYPE | The "hmac" argument must be of type string. Received undefined"#,
+            r#"new Hmac(undef,'k') | TypeError ERR_INVALID_ARG_TYPE | The "hmac" argument must be of type string. Received undefined"#,
+            r#"hash(undef,'abc') | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received undefined"#,
+            r#"createSign(undef) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received undefined"#,
+            r#"new Sign(undef) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received undefined"#,
+            r#"createVerify(undef) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received undefined"#,
+            r#"new Verify(undef) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received undefined"#,
+            r#"verify(undef,'abc','k','sig') | TypeError ERR_INVALID_ARG_TYPE | The "signature" argument must be an instance of Buffer, TypedArray, or DataView. Received type string ('sig')"#,
+            r#"pbkdf2Sync('p','s',1,1,undef) | TypeError ERR_INVALID_ARG_TYPE | The "digest" argument must be of type string. Received undefined"#,
+            r#"pbkdf2('p','s',1,1,undef,cb) | TypeError ERR_INVALID_ARG_TYPE | The "digest" argument must be of type string. Received undefined"#,
+            r#"createCipheriv(undef,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received undefined"#,
+            r#"createDecipheriv(undef,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received undefined"#,
+            r#"new Cipheriv(undef,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received undefined"#,
+            r#"createHash(nul) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received null"#,
+            r#"new Hash(nul) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received null"#,
+            r#"createHmac(nul,'k') | TypeError ERR_INVALID_ARG_TYPE | The "hmac" argument must be of type string. Received null"#,
+            r#"new Hmac(nul,'k') | TypeError ERR_INVALID_ARG_TYPE | The "hmac" argument must be of type string. Received null"#,
+            r#"hash(nul,'abc') | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received null"#,
+            r#"createSign(nul) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received null"#,
+            r#"new Sign(nul) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received null"#,
+            r#"createVerify(nul) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received null"#,
+            r#"new Verify(nul) | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received null"#,
+            r#"verify(nul,'abc','k','sig') | TypeError ERR_INVALID_ARG_TYPE | The "signature" argument must be an instance of Buffer, TypedArray, or DataView. Received type string ('sig')"#,
+            r#"pbkdf2Sync('p','s',1,1,nul) | TypeError ERR_INVALID_ARG_TYPE | The "digest" argument must be of type string. Received null"#,
+            r#"pbkdf2('p','s',1,1,nul,cb) | TypeError ERR_INVALID_ARG_TYPE | The "digest" argument must be of type string. Received null"#,
+            r#"createCipheriv(nul,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received null"#,
+            r#"createDecipheriv(nul,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received null"#,
+            r#"new Cipheriv(nul,key16,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received null"#,
+            r#"createHash(empty) | Error undefined | Digest method not supported"#,
+            r#"new Hash(empty) | Error undefined | Digest method not supported"#,
+            r#"createHmac(empty,'k') | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: "#,
+            r#"new Hmac(empty,'k') | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: "#,
+            r#"hash(empty,'abc') | Error undefined | Digest method  is not supported"#,
+            r#"createSign(empty) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"new Sign(empty) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"createVerify(empty) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"new Verify(empty) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"verify(empty,'abc','k','sig') | TypeError ERR_INVALID_ARG_TYPE | The "signature" argument must be an instance of Buffer, TypedArray, or DataView. Received type string ('sig')"#,
+            r#"pbkdf2Sync('p','s',1,1,empty) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: "#,
+            r#"pbkdf2('p','s',1,1,empty,cb) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: "#,
+            r#"createCipheriv(empty,key16,iv16) | Error ERR_CRYPTO_UNKNOWN_CIPHER | Unknown cipher"#,
+            r#"createDecipheriv(empty,key16,iv16) | Error ERR_CRYPTO_UNKNOWN_CIPHER | Unknown cipher"#,
+            r#"new Cipheriv(empty,key16,iv16) | Error ERR_CRYPTO_UNKNOWN_CIPHER | Unknown cipher"#,
+            r#"createHash(unk) | Error undefined | Digest method not supported"#,
+            r#"new Hash(unk) | Error undefined | Digest method not supported"#,
+            r#"createHmac(unk,'k') | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: a/b"#,
+            r#"new Hmac(unk,'k') | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: a/b"#,
+            r#"hash(unk,'abc') | Error undefined | Digest method a/b is not supported"#,
+            r#"createSign(unk) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"new Sign(unk) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"createVerify(unk) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"new Verify(unk) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"verify(unk,'abc','k','sig') | TypeError ERR_INVALID_ARG_TYPE | The "signature" argument must be an instance of Buffer, TypedArray, or DataView. Received type string ('sig')"#,
+            r#"pbkdf2Sync('p','s',1,1,unk) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: a/b"#,
+            r#"pbkdf2('p','s',1,1,unk,cb) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: a/b"#,
+            r#"createCipheriv(unk,key16,iv16) | Error ERR_CRYPTO_UNKNOWN_CIPHER | Unknown cipher"#,
+            r#"createDecipheriv(unk,key16,iv16) | Error ERR_CRYPTO_UNKNOWN_CIPHER | Unknown cipher"#,
+            r#"new Cipheriv(unk,key16,iv16) | Error ERR_CRYPTO_UNKNOWN_CIPHER | Unknown cipher"#,
+            r#"createHmac('sha256',num) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received type number (5)"#,
+            r#"createCipheriv('aes-128-cbc',num,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received type number (5)"#,
+            r#"createDecipheriv('aes-128-cbc',num,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received type number (5)"#,
+            r#"createCipheriv('aes-128-cbc',key16,num) | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"createCipheriv(unk,num,num) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received type number (5)"#,
+            r#"hash('sha256',num) | TypeError ERR_INVALID_ARG_TYPE | The "input" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"pbkdf2Sync(num,'s',1,1,'sha256') | TypeError ERR_INVALID_ARG_TYPE | The "password" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"pbkdf2Sync('p',num,1,1,'sha256') | TypeError ERR_INVALID_ARG_TYPE | The "salt" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"pbkdf2Sync('p','s',1,1,'a/b') with num salt-less | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: a/b"#,
+            r#"verify('sha256',num,'k','sig') | TypeError ERR_INVALID_ARG_TYPE | The "data" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"sign('sha256',num,'k') | TypeError ERR_INVALID_ARG_TYPE | The "data" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"createHmac('sha256',obj) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received an instance of Object"#,
+            r#"createCipheriv('aes-128-cbc',obj,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received an instance of Object"#,
+            r#"createDecipheriv('aes-128-cbc',obj,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received an instance of Object"#,
+            r#"createCipheriv('aes-128-cbc',key16,obj) | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received an instance of Object"#,
+            r#"createCipheriv(unk,obj,obj) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received an instance of Object"#,
+            r#"hash('sha256',obj) | TypeError ERR_INVALID_ARG_TYPE | The "input" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Object"#,
+            r#"pbkdf2Sync(obj,'s',1,1,'sha256') | TypeError ERR_INVALID_ARG_TYPE | The "password" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received an instance of Object"#,
+            r#"pbkdf2Sync('p',obj,1,1,'sha256') | TypeError ERR_INVALID_ARG_TYPE | The "salt" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received an instance of Object"#,
+            r#"verify('sha256',obj,'k','sig') | TypeError ERR_INVALID_ARG_TYPE | The "data" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received an instance of Object"#,
+            r#"sign('sha256',obj,'k') | TypeError ERR_INVALID_ARG_TYPE | The "data" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received an instance of Object"#,
+            r#"createHmac('sha256',undef) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received undefined"#,
+            r#"createCipheriv('aes-128-cbc',undef,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received undefined"#,
+            r#"createDecipheriv('aes-128-cbc',undef,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received undefined"#,
+            r#"createCipheriv('aes-128-cbc',key16,undef) | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received undefined"#,
+            r#"createCipheriv(unk,undef,undef) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received undefined"#,
+            r#"hash('sha256',undef) | TypeError ERR_INVALID_ARG_TYPE | The "input" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received undefined"#,
+            r#"pbkdf2Sync(undef,'s',1,1,'sha256') | TypeError ERR_INVALID_ARG_TYPE | The "password" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received undefined"#,
+            r#"pbkdf2Sync('p',undef,1,1,'sha256') | TypeError ERR_INVALID_ARG_TYPE | The "salt" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received undefined"#,
+            r#"verify('sha256',undef,'k','sig') | TypeError ERR_INVALID_ARG_TYPE | The "data" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received undefined"#,
+            r#"sign('sha256',undef,'k') | TypeError ERR_INVALID_ARG_TYPE | The "data" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received undefined"#,
+            r#"createHmac('sha256',nul) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received null"#,
+            r#"createCipheriv('aes-128-cbc',nul,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received null"#,
+            r#"createDecipheriv('aes-128-cbc',nul,iv16) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received null"#,
+            r#"createCipheriv('aes-128-cbc',key16,nul) | TypeError ERR_CRYPTO_INVALID_IV | Invalid initialization vector"#,
+            r#"createCipheriv(unk,nul,nul) | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received null"#,
+            r#"hash('sha256',nul) | TypeError ERR_INVALID_ARG_TYPE | The "input" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received null"#,
+            r#"pbkdf2Sync(nul,'s',1,1,'sha256') | TypeError ERR_INVALID_ARG_TYPE | The "password" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received null"#,
+            r#"pbkdf2Sync('p',nul,1,1,'sha256') | TypeError ERR_INVALID_ARG_TYPE | The "salt" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received null"#,
+            r#"verify('sha256',nul,'k','sig') | TypeError ERR_INVALID_ARG_TYPE | The "data" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received null"#,
+            r#"sign('sha256',nul,'k') | TypeError ERR_INVALID_ARG_TYPE | The "data" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received null"#,
+            r#"createHmac('sha256',empty) => OK object"#,
+            r#"createCipheriv('aes-128-cbc',empty,iv16) | RangeError ERR_CRYPTO_INVALID_KEYLEN | Invalid key length"#,
+            r#"createDecipheriv('aes-128-cbc',empty,iv16) | RangeError ERR_CRYPTO_INVALID_KEYLEN | Invalid key length"#,
+            r#"createCipheriv('aes-128-cbc',key16,empty) | TypeError ERR_CRYPTO_INVALID_IV | Invalid initialization vector"#,
+            r#"createCipheriv(unk,empty,empty) | Error ERR_CRYPTO_UNKNOWN_CIPHER | Unknown cipher"#,
+            r#"hash('sha256',empty) => OK string"#,
+            r#"pbkdf2Sync(empty,'s',1,1,'sha256') => OK object"#,
+            r#"pbkdf2Sync('p',empty,1,1,'sha256') => OK object"#,
+            r#"verify('sha256',empty,'k','sig') | TypeError ERR_INVALID_ARG_TYPE | The "signature" argument must be an instance of Buffer, TypedArray, or DataView. Received type string ('sig')"#,
+            r#"createHash('') | Error undefined | Digest method not supported"#,
+            r#"createHash(a/b) | Error undefined | Digest method not supported"#,
+            r#"createHash(sha256) => OK object"#,
+            r#"createHmac(a/b,'k') | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: a/b"#,
+            r#"createHmac(a/b,5) key first | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received type number (5)"#,
+            r#"createHmac(5,5) name first | TypeError ERR_INVALID_ARG_TYPE | The "hmac" argument must be of type string. Received type number (5)"#,
+            r#"createHmac(sha256,'') empty key => OK object"#,
+            r#"createHmac(empty,'k') | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: "#,
+            r#"hash(a/b,'abc') | Error undefined | Digest method a/b is not supported"#,
+            r#"hash(a/b,5) input first | TypeError ERR_INVALID_ARG_TYPE | The "input" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"hash(5,5) name first | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received type number (5)"#,
+            r#"hash(empty,'abc') | Error undefined | Digest method  is not supported"#,
+            r#"hash(sha256,'abc','hex') => OK string"#,
+            r#"pbkdf2Sync(5,5,1,1,'a/b') password first | TypeError ERR_INVALID_ARG_TYPE | The "password" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"pbkdf2Sync('p',5,1,1,'a/b') salt second | TypeError ERR_INVALID_ARG_TYPE | The "salt" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"pbkdf2Sync('p','s',1,1,'') empty digest | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest: "#,
+            r#"pbkdf2('p','s',1,1,'a/b') no callback | TypeError ERR_INVALID_ARG_TYPE | The "callback" argument must be of type function. Received undefined"#,
+            r#"pbkdf2('p','s',1,1,'sha256') no callback | TypeError ERR_INVALID_ARG_TYPE | The "callback" argument must be of type function. Received undefined"#,
+            r#"pbkdf2('p','s',1,1,5) no callback | TypeError ERR_INVALID_ARG_TYPE | The "digest" argument must be of type string. Received type number (5)"#,
+            r#"pbkdf2('p','s',1,1,'sha256',5) | TypeError ERR_INVALID_ARG_TYPE | The "callback" argument must be of type function. Received type number (5)"#,
+            r#"pbkdf2(5,'s',1,1,'sha256',cb) | TypeError ERR_INVALID_ARG_TYPE | The "password" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"createSign('') | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"createSign(a/b) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"createSign(sha256) => OK object"#,
+            r#"createVerify('') | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"createVerify(a/b) | TypeError ERR_CRYPTO_INVALID_DIGEST | Invalid digest"#,
+            r#"verify('sha256','abc','k',5) signature | TypeError ERR_INVALID_ARG_TYPE | The "signature" argument must be an instance of Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"verify('sha256','abc','k',undef) signature | TypeError ERR_INVALID_ARG_TYPE | The "signature" argument must be an instance of Buffer, TypedArray, or DataView. Received undefined"#,
+            r#"verify('a/b','abc','k',5) signature first | TypeError ERR_INVALID_ARG_TYPE | The "signature" argument must be an instance of Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"createCipheriv(unk,key16,5) iv first | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"createCipheriv(unk,key16,undef) | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received undefined"#,
+            r#"createCipheriv(cbc,key16,undef) | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received undefined"#,
+            r#"createCipheriv(ecb,key16,undef) | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received undefined"#,
+            r#"createCipheriv(ecb,key16,5) | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"createCipheriv(cbc,key16,null) | TypeError ERR_CRYPTO_INVALID_IV | Invalid initialization vector"#,
+            r#"createCipheriv(ecb,key16,null) valid => OK string"#,
+            r#"createCipheriv(cbc,key5,iv16) keylen | RangeError ERR_CRYPTO_INVALID_KEYLEN | Invalid key length"#,
+            r#"createCipheriv(cbc,key16,iv5) ivlen | TypeError ERR_CRYPTO_INVALID_IV | Invalid initialization vector"#,
+            r#"createCipheriv(a/b,key16,iv16) unknown | Error ERR_CRYPTO_UNKNOWN_CIPHER | Unknown cipher"#,
+            r#"createCipheriv(cbc,key16,iv16) valid => OK string"#,
+            r#"createDecipheriv(cbc,key16,5) iv | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"createDecipheriv(a/b,key16,5) iv first | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received type number (5)"#,
+            r#"new Hash() | TypeError ERR_INVALID_ARG_TYPE | The "algorithm" argument must be of type string. Received undefined"#,
+            r#"new Hmac() | TypeError ERR_INVALID_ARG_TYPE | The "hmac" argument must be of type string. Received undefined"#,
+            r#"new Cipheriv() | TypeError ERR_INVALID_ARG_TYPE | The "cipher" argument must be of type string. Received undefined"#,
+            r#"createHmac(sha256) no key | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received undefined"#,
+            r#"createCipheriv(cbc,key16) no iv | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received undefined"#,
+        ]
     );
 }

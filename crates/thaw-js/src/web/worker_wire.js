@@ -2,10 +2,17 @@
 // JSON string `{root, nodes}` that crosses worker threads as plain text; `__thaw_worker_decode` rebuilds it.
 // Differences from the QuickJS wire: no uncloneable marks, no blob snapshots, and an `Error` node so error events
 // keep name, message, stack and cause. A SharedArrayBuffer is an `SAB` node holding an id into the shared-block table
-// (worker.rs): the decoding Interp gets the same memory, so writes are seen by every thread holding it.
+// (worker.rs): the decoding Interp gets the same memory, so writes are seen by every thread holding it. An ArrayBuffer
+// in the transfer list is an `ABT` node: its bytes move to the in-flight table (worker.rs) and the buffer is detached.
 const cloneError = message => new DOMException(message, 'DataCloneError');
-globalThis.__thaw_worker_encode = value => {
-  const seen = new Map(), nodes = [];
+// `transfer` is a list the caller has validated (__thaw_transfer_check); nothing is moved unless the whole value encodes.
+globalThis.__thaw_worker_encode = (value, transfer = []) => {
+  const seen = new Map(), nodes = [], taken = [];
+  for (const buffer of transfer) {
+    seen.set(buffer, nodes.length);
+    taken.push([nodes.length, buffer]);
+    nodes.push({ t: 'ABT', id: -1 });
+  }
   const encode = input => {
     if (input === undefined) return { p: 'undefined' };
     if (typeof input === 'number' && (!Number.isFinite(input) || Object.is(input, -0))) return { p: Object.is(input, -0) ? '-0' : String(input) };
@@ -14,7 +21,7 @@ globalThis.__thaw_worker_encode = value => {
     if (input === null || typeof input !== 'object') return { v: input };
     if (seen.has(input)) return { r: seen.get(input) };
     if (input instanceof WeakMap || input instanceof WeakSet || input instanceof Promise) throw cloneError('value cannot be cloned');
-    if (typeof MessagePort === 'function' && input instanceof MessagePort) throw cloneError('MessagePort requires a transfer list');
+    if (typeof MessagePort === 'function' && input instanceof MessagePort) throw cloneError('Object that needs transfer was found in message but not listed in transferList');
     const id = nodes.length; seen.set(input, id); nodes.push(null);
     let node;
     if (Array.isArray(input)) {
@@ -44,7 +51,10 @@ globalThis.__thaw_worker_encode = value => {
     nodes[id] = node;
     return { r: id };
   };
-  return JSON.stringify({ root: encode(value), nodes });
+  const root = encode(value);
+  // the whole value encoded: the transferred buffers now move (a throw above leaves them attached)
+  for (const [index, buffer] of taken) nodes[index].id = __thaw_ab_take(buffer);
+  return JSON.stringify({ root, nodes });
 };
 globalThis.__thaw_worker_decode = source => {
   const graph = JSON.parse(String(source)), values = new Array(graph.nodes.length);
@@ -67,6 +77,7 @@ globalThis.__thaw_worker_decode = source => {
     else if (node.t === 'Set') values[id] = new Set();
     else if (node.t === 'Object') values[id] = {};
     else if (node.t === 'SAB') values[id] = __thaw_sab_import(node.id);
+    else if (node.t === 'ABT') values[id] = __thaw_ab_put(node.id);
     else if (node.t === 'ArrayBuffer') {
       const bytes = new Uint8Array(node.v.length / 2);
       for (let index = 0; index < bytes.length; index++) bytes[index] = parseInt(node.v.slice(index * 2, index * 2 + 2), 16);
