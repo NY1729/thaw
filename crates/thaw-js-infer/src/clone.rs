@@ -509,12 +509,7 @@ impl ReadOnly<'_> {
     /// `p[idx]` is a read of element `idx` of `p` that cannot be out of bounds.
     fn index_safe(&mut self, p: &str, idx: &a::Expr) -> bool {
         match strip_paren(idx) {
-            a::Expr::Ident(i) => {
-                if self.safe.iter().any(|(a, v)| a == p && v == &*i.sym) {
-                    return true;
-                }
-                false
-            }
+            a::Expr::Ident(i) => self.safe.iter().any(|(a, v)| a == p && v == &*i.sym),
             e if is_num(e, 0.0) => self.nonempty.contains(p),
             a::Expr::Bin(b) if b.op == a::BinaryOp::Sub && is_num(&b.right, 1.0) => {
                 length_of(&b.left) == Some(p) && self.nonempty.contains(p)
