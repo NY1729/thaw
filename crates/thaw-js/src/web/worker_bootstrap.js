@@ -168,6 +168,10 @@
       const record = port.__thawQueue.shift();
       return record ? { message: record.data } : undefined;
     },
+    // the same function as the main thread's (worker_threads.js installs it in every realm)
+    moveMessagePortToContext(port, context) {
+      return globalThis.__thaw_worker_threads_exports.moveMessagePortToContext(port, context);
+    },
     getEnvironmentData(key) {
       const value = environmentData.get(key);
       return value === undefined ? undefined : structuredClone(value);
