@@ -1345,14 +1345,16 @@ fn thaw_js_ctor_option_callback_declaration_is_plain_only_for_constructors() {
     assert!(!thaw_js_declaration_plain_with(method, false));
 }
 
+// old: `@parcel/watcher` was blocked by `thaw_js_unready_addon_blocker` (kept on QuickJS); new: routes to thaw-js like argon2.
 #[test]
-fn thaw_js_unready_addon_blocker_keeps_subscription_addons_on_quickjs() {
-    // old: `argon2` was `is_some()` (live-owner blocker); new: `is_none()` (routes to thaw-js)
-    assert!(thaw_js_unready_addon_blocker("argon2").is_none());
-    assert!(thaw_js_unready_addon_blocker("@parcel/watcher").is_some());
-    assert!(thaw_js_unready_addon_blocker("bcrypt").is_none());
-    assert!(thaw_js_unready_addon_blocker("sqlite3").is_none());
-    assert!(thaw_js_unready_addon_blocker("some-unrelated-package").is_none());
+fn parcel_watcher_and_argon2_native_addon_programs_route_to_thaw_js() {
+    let bundle = "module.exports = (function(require){ var __thaw_bundle_factories = { \"pkg/index.js\": function(module, exports, require) { exports.subscribe = function () {}; } }; var __thaw_bundle_require_maps = { \"pkg/index.js\": {} }; var __thaw_bundle_entry_key = \"pkg/index.js\"; })(globalThis.require);";
+    let user = "import { subscribe } from 'pkg';\nfunction main(): void { subscribe(); }\n";
+    for name in ["@parcel/watcher", "argon2"] {
+        let mut pkg = builtin_routing_package(name);
+        pkg.native_addon = Some(std::path::PathBuf::from("native.node"));
+        assert!(thaw_js_package_eligible(&pkg, bundle, user, &Default::default(), ""), "{name}");
+    }
 }
 
 #[test]
