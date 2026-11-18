@@ -1791,3 +1791,101 @@ fn external_class_parameter_decorators_run_once_at_definition() {
         assert_eq!(rewritten.matches("__thaw_get(box)").count(), 2, "{rewritten}");
     }
 }
+
+#[test]
+fn static_rewrite_accepts_literal_that_omits_optional_object_fields() {
+    // luxon `Duration.fromObject({ hours: 1, minutes: 30 })`: every declared field is optional, so the
+    // literal may omit some of them and the typed static must still be selected.
+    let optional = |ty| thaw_hir::HirType::Optional(Box::new(ty));
+    let duration_like = thaw_hir::HirType::Object(vec![
+        ("years".into(), optional(thaw_hir::HirType::F64)),
+        ("hours".into(), optional(thaw_hir::HirType::F64)),
+        ("minutes".into(), optional(thaw_hir::HirType::F64)),
+    ]);
+    let statics: Vec<StaticClassMethodRewrite> = vec![(
+        "pkg".into(), "Duration".into(), "fromObject".into(), "duration_from_object".into(), 1, false, vec![duration_like],
+    )];
+    let rewritten = rewrite_external_class_methods_with_static(
+        "Duration.fromObject({ hours: 1, minutes: 30 });", &[], &[], &[], &statics, &[], &[], &[], &[], &[], &[],
+    )
+    .unwrap();
+    assert_eq!(rewritten, "duration_from_object({ hours: 1, minutes: 30 });");
+}
+
+#[test]
+fn static_rewrite_still_rejects_literal_that_omits_a_required_object_field() {
+    let optional = |ty| thaw_hir::HirType::Optional(Box::new(ty));
+    let shape = thaw_hir::HirType::Object(vec![
+        ("hours".into(), optional(thaw_hir::HirType::F64)),
+        ("minutes".into(), thaw_hir::HirType::F64),
+    ]);
+    let statics: Vec<StaticClassMethodRewrite> = vec![(
+        "pkg".into(), "Duration".into(), "fromObject".into(), "duration_from_object".into(), 1, false, vec![shape],
+    )];
+    let source = "Duration.fromObject({ hours: 1 });";
+    let rewritten = rewrite_external_class_methods_with_static(
+        source, &[], &[], &[], &statics, &[], &[], &[], &[], &[], &[],
+    )
+    .unwrap();
+    assert_eq!(rewritten, source);
+}
+
+#[test]
+fn thaw_js_routed_static_factory_with_optional_object_fields_builds_without_quickjs() {
+    // luxon shape: a class with a private constructor whose static `fromObject` takes an all-optional object.
+    // Under `THAW_JS_FALLBACK=error` the build must route to thaw-js (no QuickJS) and print what Node prints.
+    let dir = std::env::temp_dir().join(format!("thaw-cli-static-optional-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("tjs-dur");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Duration {\n\
+           private constructor(h: number, m: number);\n\
+           static fromObject(o: { years?: number; hours?: number; minutes?: number }): Duration;\n\
+           toISO(): string;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = (function(require){\n\
+         var __thaw_bundle_factories = {\n\
+         \"tjs-dur/index.js\": function(module, exports, require) {\n\
+           class Duration {\n\
+             constructor(h, m) { this.h = h; this.m = m; }\n\
+             static fromObject(o) { return new Duration(o.hours || 0, o.minutes || 0); }\n\
+             toISO() { return 'PT' + this.h + 'H' + this.m + 'M'; }\n\
+           }\n\
+           exports.Duration = Duration;\n\
+         },\n\
+         };\n\
+         var __thaw_bundle_require_maps = { \"tjs-dur/index.js\": {}, };\n\
+         var __thaw_bundle_entry_key = \"tjs-dur/index.js\";\n\
+         var __thaw_entry = { exports: {} };\n\
+         __thaw_bundle_factories[__thaw_bundle_entry_key](__thaw_entry, __thaw_entry.exports, require);\n\
+         return __thaw_entry.exports;\n\
+         })(globalThis.require);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { Duration } from 'tjs-dur';\n\
+         function main(): void {\n\
+           console.log(Duration.fromObject({ hours: 1, minutes: 30 }).toISO());\n\
+         }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let built = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    built.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run(&output), "PT1H30M\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

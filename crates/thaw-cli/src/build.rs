@@ -1099,6 +1099,7 @@ fn build_with_native_mode_routed(
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
     compiler.set_codegen_opt(codegen_opt_level()?);
     compiler.set_commonjs_entry(module_graph::entry_is_commonjs(input, &user_source)?);
+    compiler.set_uses_async_hooks(user_source.contains("async_hooks"));
     compiler.set_thaw_js_routed(thaw_js_route);
     if let Some(lib) = lib_mode {
         compiler.set_library_mode(lib.exports.clone());

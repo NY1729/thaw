@@ -188,6 +188,10 @@
     }
   };
 
+  // The clone marks (extras_late structuredClone checks them; it installs after this file, so read them per call).
+  // Node ignores a non-object argument.
+  const isObjectLike = value => (typeof value === 'object' && value !== null) || typeof value === 'function';
+
   const workerThreadsExports = {
     isMainThread: true,
     threadId: 0,
@@ -208,6 +212,9 @@
       const record = port.__thawQueue.shift();
       return record ? { message: record.data } : undefined;
     },
+    markAsUntransferable(value) { if (isObjectLike(value)) globalThis.__thaw_clone_marks.untransferable.add(value); },
+    isMarkedAsUntransferable(value) { return isObjectLike(value) && globalThis.__thaw_clone_marks.untransferable.has(value); },
+    markAsUncloneable(value) { if (isObjectLike(value)) globalThis.__thaw_clone_marks.uncloneable.add(value); },
     getEnvironmentData(key) {
       const value = environmentData.get(key);
       return value === undefined ? undefined : structuredClone(value);

@@ -1669,8 +1669,18 @@ fn rewrite_external_class_methods_with_static_qualified_named(
                 }
                 let mut score = 2u8;
                 for (name, declared_type) in declared {
-                    let (_, actual_type) =
-                        actual.iter().find(|(candidate, _)| candidate == name)?;
+                    let Some((_, actual_type)) =
+                        actual.iter().find(|(candidate, _)| candidate == name)
+                    else {
+                        // A field the literal omits is fine only when the declared field is optional.
+                        if matches!(
+                            declared_type,
+                            thaw_hir::HirType::Optional(_) | thaw_hir::HirType::Nullish(_)
+                        ) {
+                            continue;
+                        }
+                        return None;
+                    };
                     if matches!(actual_type, thaw_hir::HirType::Dynamic) {
                         score = score.saturating_add(1);
                         continue;

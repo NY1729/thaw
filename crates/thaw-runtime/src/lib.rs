@@ -569,6 +569,25 @@ fn async_hook_emit(kind: u8, key: u64, parent: u64) {
     ASYNC_HOOK_EMITTING.with(|emitting| emitting.set(false));
 }
 
+thread_local! {
+    /// The async function whose plain `await <literal>` operand is being evaluated (see `thaw_promise_await_outer`).
+    static AWAIT_OUTER: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Compiled code calls this before the value wrapper of a plain `await <literal>` is created, with
+/// `promise` the async function's own completion promise: V8 triggers that wrapper from it, and the
+/// next untriggered promise created on this thread takes it. Only emitted in modules that import
+/// `async_hooks`.
+///
+/// # Safety
+///
+/// `promise` is null or a live promise handle.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_await_outer(promise: *const ThawPromise) {
+    let key = unsafe { promise.as_ref() }.map_or(0, |promise| promise.hook_key);
+    AWAIT_OUTER.with(|outer| outer.set(key));
+}
+
 fn enqueue_continuation(subscription: PromiseSubscription, result: *const u8) {
     let js_barrier = js_queue_job_barrier();
     READY_CONTINUATIONS.with(|ready| {

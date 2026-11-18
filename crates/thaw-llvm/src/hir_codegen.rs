@@ -527,6 +527,8 @@ pub struct HirCompiler<'ctx> {
     codegen_opt: OptimizationLevel,
     uses_thaw_js: bool,
     uses_intl: bool,
+    /// The module imports `async_hooks`: a plain `await <literal>` reports its outer promise as the trigger.
+    uses_async_hooks: bool,
     /// The program is a thaw-js routed build (it falls back to an unrouted one if it needs QuickJS), so
     /// a plain callback coerced to a dynamic value is a thaw-js callback.
     thaw_js_routed: bool,
@@ -977,6 +979,7 @@ impl<'ctx> HirCompiler<'ctx> {
             has_lambda_handler: false,
             uses_thaw_js: false,
             uses_intl: false,
+            uses_async_hooks: false,
             thaw_js_routed: false,
             thaw_js_call_arguments: false,
             uses_quickjs: false,
@@ -1421,6 +1424,10 @@ impl<'ctx> HirCompiler<'ctx> {
     /// for the process entry point.
     pub fn set_commonjs_entry(&mut self, commonjs: bool) {
         self.commonjs_entry = commonjs;
+    }
+
+    pub fn set_uses_async_hooks(&mut self, uses: bool) {
+        self.uses_async_hooks = uses;
     }
 
     /// Selects the backend optimisation level used by `write_object_file`. `None` skips
