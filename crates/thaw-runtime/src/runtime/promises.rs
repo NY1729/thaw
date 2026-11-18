@@ -272,9 +272,21 @@ pub unsafe extern "C" fn thaw_promise_subscribe_await(
     resume: PromiseResumeFn,
     frame: *mut u8,
 ) -> u8 {
+    unsafe { subscribe_reaction(promise, resume, frame, Vec::new()) }
+}
+
+/// Subscribes a continuation to `promise` the way V8 runs a reaction: a derived promise triggered by
+/// `promise` whose before/resolve/after fire around the continuation. Used by `await` and by the
+/// combinators' per-element reactions.
+unsafe fn subscribe_reaction(
+    promise: *mut ThawPromise,
+    resume: PromiseResumeFn,
+    frame: *mut u8,
+    payload_roots: Vec<thaw_arena::ArenaRoot>,
+) -> u8 {
     let parent = unsafe { promise.as_ref() }.map_or(0, |promise| promise.hook_key);
-    let throwaway = async_hook_throwaway(parent);
-    unsafe { subscribe_with_roots(promise, resume, frame, Vec::new(), throwaway, true) }
+    let reaction = async_hook_throwaway(parent);
+    unsafe { subscribe_with_roots(promise, resume, frame, payload_roots, reaction, true) }
 }
 
 unsafe fn subscribe_with_roots(
@@ -1463,7 +1475,7 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
             indices,
         }));
         unsafe {
-            thaw_promise_subscribe(promise, resume_promise_all_child, child.cast());
+            subscribe_reaction(promise, resume_promise_all_child, child.cast(), Vec::new());
         }
     }
     output
@@ -1564,7 +1576,7 @@ pub unsafe extern "C" fn thaw_promise_race(
     unsafe { release_duplicate_promise_occurrences(promises, len) };
     for promise in unique {
         let child = Box::into_raw(Box::new(PromiseRaceChild { state, promise }));
-        unsafe { thaw_promise_subscribe(promise, resume_promise_race_child, child.cast()) };
+        unsafe { subscribe_reaction(promise, resume_promise_race_child, child.cast(), Vec::new()) };
     }
     if unsafe { (*state).remaining } == 0 {
         unsafe { drop(Box::from_raw(state)) };
@@ -1846,7 +1858,7 @@ pub unsafe extern "C" fn thaw_promise_any(
     unsafe { release_duplicate_promise_occurrences(promises, len) };
     for (promise, indices) in grouped {
         let child = Box::into_raw(Box::new(PromiseAnyChild { state, promise, indices }));
-        unsafe { thaw_promise_subscribe(promise, resume_promise_any_child, child.cast()) };
+        unsafe { subscribe_reaction(promise, resume_promise_any_child, child.cast(), Vec::new()) };
     }
     output
 }
@@ -2059,13 +2071,11 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
             thaw_arena::ArenaRoot::new(objects as usize),
         ];
         unsafe {
-            subscribe_with_roots(
+            subscribe_reaction(
                 promise,
                 resume_promise_all_settled_child,
                 child.cast(),
                 payload_roots,
-                0,
-                false,
             )
         };
     }

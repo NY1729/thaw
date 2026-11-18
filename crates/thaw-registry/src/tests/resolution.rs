@@ -5256,11 +5256,10 @@ fn builtin_declared_classes_are_bundle_exports() {
                 .collect();
             // Declared with Node's kind but not yet implemented by the bundle (the value is
             // `undefined` at run time either way). Remove an entry once its bundle exports it.
-            const DECLARED_WITHOUT_RUNTIME: [&str; 6] = [
+            const DECLARED_WITHOUT_RUNTIME: [&str; 5] = [
                 "node:fs Dirent",
                 "node:fs FileReadStream",
                 "node:fs FileWriteStream",
-                "node:events EventEmitterAsyncResource",
                 "node:zlib ZstdCompress",
                 "node:zlib ZstdDecompress",
             ];
@@ -5274,6 +5273,26 @@ fn builtin_declared_classes_are_bundle_exports() {
         missing.is_empty(),
         "declared classes missing from bundle exports: {missing:?}"
     );
+}
+
+#[test]
+fn builtin_events_zlib_fs_promises_runtime_exports_match_declarations() {
+    // Each value declared by #786 must be assigned by its bundle: a missing `usingDomains`
+    // read back as events' callable `default` (`Uncaught: not plain data: function`).
+    let events = resolve_builtin("events").unwrap().bundle_js.unwrap_or_default();
+    for assignment in [
+        "module.exports.usingDomains = false;",
+        "module.exports.kMaxEventTargetListeners = Symbol('events.maxEventTargetListeners');",
+        "module.exports.kMaxEventTargetListenersWarned = Symbol('events.maxEventTargetListenersWarned');",
+        "module.exports.EventEmitterAsyncResource = EventEmitterAsyncResource;",
+    ] {
+        assert!(events.contains(assignment), "events bundle lacks `{assignment}`");
+    }
+    let zlib = resolve_builtin("zlib").unwrap().bundle_js.unwrap_or_default();
+    assert!(zlib.contains("module.exports = { codes: codes, crc32: crc32"), "zlib bundle lacks codes");
+    // fs/promises is `fs.promises` itself, so its `constants` is assigned on that object.
+    let fs = resolve_builtin("fs").unwrap().bundle_js.unwrap_or_default();
+    assert!(fs.contains("__thaw_fs.promises.constants = __thaw_fs.constants;"), "fs bundle lacks promises.constants");
 }
 
 #[test]

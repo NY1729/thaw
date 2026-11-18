@@ -70,7 +70,15 @@ mod imp {
     const GUARD_BYTES: usize = 4096;
     /// Idle stacks kept for reuse per thread; the rest are unmapped.
     const POOL_CAP: usize = 256;
-    /// Stacks held by live coroutines at once. With the pool, mappings stay under 2 * (MAX_LIVE + POOL_CAP).
+    /// Cap on stacks held by live coroutines at once, process-wide (all threads share it).
+    ///
+    /// Why: each stack is two VMAs (the mapping, and the `PROT_NONE` guard that splits it), and the kernel
+    /// refuses new mappings past `vm.max_map_count`, 65530 by default. With the pool, mappings stay under
+    /// 2 * (MAX_LIVE + POOL_CAP) = 60,512, which is under that default with headroom for the rest of the
+    /// process. Past the cap `Costack::new` fails with `TooManyLive`, and the JS caller gets
+    /// `RangeError: cannot start coroutine (thread limit)`. Raising it means a larger `vm.max_map_count` or
+    /// fewer VMAs per stack (no guard page). `THAW_JS_CO=thread` has no such cap: it is bounded only by
+    /// threads and pids, so it is the escape hatch when a program really holds more than 30,000 at once.
     pub(crate) const MAX_LIVE: usize = 30_000;
     /// Depth of the canary word below the top: a stack that overwrote it went deep.
     const CANARY_DEPTH: usize = 128 << 10;
@@ -1072,7 +1080,7 @@ mod imp {
 ))]
 #[allow(unused_imports)]
 pub(crate) use imp::{
-    current_bounds, in_coroutine, suspend, Costack, CostackError, Status, STACK_BYTES,
+    current_bounds, in_coroutine, suspend, Costack, CostackError, Status, MAX_LIVE, STACK_BYTES,
 };
 
 /// Stub for targets without the assembly backend: construction always fails.
