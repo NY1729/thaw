@@ -5043,16 +5043,22 @@ setTimeout(function () { hook.disable(); console.log(log.join(',')); }, 40);";
 }
 
 /// Timers and immediates scheduled while no hook is enabled report no events, even if a hook is enabled and disabled meanwhile.
+///
+/// The order of a 1 ms timer and a `setImmediate` is not guaranteed (Node documents it as depending on process
+/// performance), and the output used to be taken by a 5 ms timer, which on a loaded runner could run before the
+/// immediate (`t` instead of `t,i`; it failed in CI twice). The output is now taken from inside the immediate's own
+/// follow-up timer, after both callbacks ran, and the two callbacks are compared sorted: only the absence of hook
+/// events matters here.
 #[test]
 fn async_hooks_timers_without_an_enabled_hook_report_nothing() {
-    let src = "var A = __thaw_async_hooks_exports, n = [];
+    let src = "var A = __thaw_async_hooks_exports, n = [], ran = 0;
 var hook = A.createHook({ init(id, type) { n.push(type); }, before() { n.push('b'); }, after() { n.push('a'); }, destroy() { n.push('d'); } });
-setTimeout(function () { n.push('t'); }, 1);
-setImmediate(function () { n.push('i'); });
+function done() { if (++ran === 2) setTimeout(function () { console.log(n.slice().sort().join(',')); }, 20); }
+setTimeout(function () { n.push('t'); done(); }, 1);
+setImmediate(function () { n.push('i'); done(); });
 var t2 = setTimeout(function () {}, 1); clearTimeout(t2);
-hook.enable(); hook.disable();
-setTimeout(function () { console.log(n.join(',')); }, 5);";
-    assert_eq!(run_loop(src), "t,i");
+hook.enable(); hook.disable();";
+    assert_eq!(run_loop(src), "i,t");
 }
 
 /// new Promise(r => r(1)).then: init, resolve, before/after around the reaction. Expected: Node 22.23.1 trace (`node` on the same script).
@@ -10732,4 +10738,18 @@ fn graph_wire_origin_serials_name_the_decoded_root_container() {
     let handle = thaw_tjs_retain_graph_result(plain.as_ptr());
     assert_eq!(thaw_tjs_origin_serial(handle.value), 0);
     assert_eq!(thaw_tjs_origin_serial(u64::MAX), 0);
+}
+
+// ----- `arguments` in a class constructor is the constructor's own, not the enclosing function's
+// (zod's ZodObject constructor is `super(...arguments)` inside a CommonJS factory whose `arguments[0]`
+// is the `module` object) -----
+
+#[test]
+fn class_constructor_arguments_are_its_own() {
+    assert_eq!(one("function outer(a, b) { class B { constructor(x) { this.x = x; } } class D extends B { constructor() { super(...arguments); this.n = arguments.length; } } var d = new D('in'); console.log(d.x, d.n); } outer('oa', 'ob');"), "in 1");
+    assert_eq!(one("function outer(a) { class B { constructor(x) { this.x = x; } } class E extends B { constructor() { super(arguments[0]); } } console.log(new E('e1').x); } outer('oa');"), "e1");
+    assert_eq!(
+        one("new (class { constructor() { console.log(arguments[0]); } })('top');"),
+        "top"
+    );
 }

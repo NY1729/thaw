@@ -399,16 +399,28 @@ fn number(v: &Value) -> f64 {
 /// `defs` runs first; `call` (a loop of garbage cycles) is measured. One collection must free all of it: the live
 /// counts return to the base taken after `defs`, and the registry is consistent.
 fn assert_flat_after_cycles(name: &str, defs: &str, call: &str) {
+    assert_flat_with(name, defs, call, run_script);
+}
+
+/// Sloppy-mode script (`with` is only legal here; `Interp::run` parses strict module text).
+fn run_sloppy_script(it: &mut Interp, name: &str, src: &str) -> Value {
+    match it.run_sloppy(src) {
+        Ok(v) => v,
+        Err(_) => panic!("{name}: sloppy script failed: {src}"),
+    }
+}
+
+fn assert_flat_with(name: &str, defs: &str, call: &str, run: fn(&mut Interp, &str, &str) -> Value) {
     crate::gc::force_enabled();
     // Counts the loop's garbage before the explicit collect: the automatic trigger must not run first.
     crate::gc::no_auto();
     let mut it = Interp::new();
-    run_script(&mut it, name, defs);
+    run(&mut it, name, defs);
     // The realm's own start-up garbage (about 8 closures, 8 objects, 1 scope) is freed by the first collection; the
     // base is taken after it, so the check measures the loop alone.
     it.collect_cycles();
     let base = live_counts();
-    run_script(&mut it, name, call);
+    run(&mut it, name, call);
     let grown = live_counts();
     assert!(
         grown.0 > base.0,
@@ -444,9 +456,6 @@ fn gc_flat_w2_let_used() {
 }
 
 #[test]
-#[ignore = "class evaluated per call: its constructor, prototype and field scope are reached through the uncounted \
-            FuncDef.class.field_scope edge (classes.rs:12), so each evaluation leaves 2 objects, 3 scopes and 1 closure \
-            uncollected (measured: class-only loop cleared 0 of 2000). Instances are freed. PR-1 limit, spec section 7 risk 4"]
 fn gc_flat_w4_class() {
     assert_flat_after_cycles(
         "w4_class",
@@ -471,6 +480,238 @@ fn gc_flat_w6_selfcycle() {
         "const N=2000; function mk(){ var o={}; o.o=o; return 0 }",
         PROBE_LOOP,
     );
+}
+
+// PR-3a data kinds: each garbage cycle must go flat after one collection (2000 iterations, back to the base).
+
+#[test]
+fn gc_flat_map_self_holder() {
+    assert_flat_after_cycles(
+        "map_self_holder",
+        "const N=2000; function mk(){ var o={}; var m=new Map(); m.set(o,1); o.m=m; return 0 }",
+        PROBE_LOOP,
+    );
+}
+
+#[test]
+fn gc_flat_set_and_iterator_cycle() {
+    assert_flat_after_cycles(
+        "set_and_iterator",
+        "const N=2000; function mk(){ var o={}; var s=new Set(); s.add(o); o.s=s; var m=new Map(); m.set(1,o); o.it=m.keys(); return 0 }",
+        PROBE_LOOP,
+    );
+}
+
+#[test]
+fn gc_flat_weakmap_cycle() {
+    // WeakMap is JS over a plain `Map` in `__store` (extras.rs:181): its entries are strong Map edges, so this cycle
+    // is collected like any Map cycle.
+    assert_flat_after_cycles(
+        "weakmap",
+        "const N=2000; function mk(){ var o={}; var w=new WeakMap(); w.set(o,w); o.w=w; return 0 }",
+        PROBE_LOOP,
+    );
+}
+
+#[test]
+fn gc_flat_proxy_target_cycle() {
+    assert_flat_after_cycles(
+        "proxy_target",
+        "const N=2000; function mk(){ var o={}; var p=new Proxy(o,{get:()=>o}); o.p=p; return 0 }",
+        PROBE_LOOP,
+    );
+}
+
+#[test]
+fn gc_flat_typed_view_cycle() {
+    assert_flat_after_cycles(
+        "typed_view",
+        "const N=2000; function mk(){ var u=new Uint8Array(8); u.self=u; return 0 }",
+        PROBE_LOOP,
+    );
+}
+
+#[test]
+fn gc_flat_with_scope_cycle() {
+    // The arrow captures the `with` scope, so that scope is registered; o -> arrow -> with-scope -> o is the cycle.
+    assert_flat_with(
+        "with_scope",
+        "const N=2000; function mk(){ var o={a:1}; with(o){ o.f=()=>a } return 0 }",
+        PROBE_LOOP,
+        run_sloppy_script,
+    );
+}
+
+#[test]
+fn gc_flat_class_field_arrow() {
+    assert_flat_after_cycles(
+        "class_field_arrow",
+        "const N=2000; function mk(){ class A{ f=()=>this; static s=mk } return new A() }",
+        PROBE_LOOP,
+    );
+}
+
+#[test]
+fn gc_flat_class_static_block() {
+    assert_flat_after_cycles(
+        "class_static_block",
+        "const N=2000; function mk(){ class A{ static t=1; static { this.u=A } } return 0 }",
+        PROBE_LOOP,
+    );
+}
+
+#[test]
+fn gc_flat_class_derived() {
+    assert_flat_after_cycles(
+        "class_derived",
+        "const N=2000; function mk(){ class A{ x=()=>this } class B extends A{ y=()=>B } return new B() }",
+        PROBE_LOOP,
+    );
+}
+
+/// Counts the edges of `visit` that name the scope `s` (its `Rc` clones held by the visited node).
+fn count_scope_edges_to(visit: impl FnOnce(&mut dyn FnMut(Edge)) -> bool, s: &Rc<Scope>) -> usize {
+    let mut n = 0;
+    let ok = visit(&mut |e| {
+        if let Edge::Scope(x) = e {
+            if Rc::ptr_eq(x, s) {
+                n += 1;
+            }
+        }
+    });
+    assert!(ok, "node is opaque");
+    n
+}
+
+// PR-3a negative cases: each keeps a live object usable after a collection (the automatic trigger runs too under
+// THAW_JS_GC_STRESS, so these do not opt out).
+
+#[test]
+fn gc_map_held_by_global_survives() {
+    crate::gc::force_enabled();
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        "map_global",
+        "globalThis.m = new Map(); \
+         (function(){ var o={v:9}; o.self=o; m.set('k', o) })(); \
+         for(let i=0;i<300;i++){ var g={}; g.m=new Map(); g.m.set(g,g.m); }",
+    );
+    it.collect_cycles();
+    assert!(matches!(
+        run_script(
+            &mut it,
+            "map_global",
+            "m.get('k').self===m.get('k') && m.get('k').v===9"
+        ),
+        Value::Bool(true)
+    ));
+    check_invariants().unwrap();
+}
+
+#[test]
+fn gc_map_iterator_survives_native_collect() {
+    crate::gc::force_enabled();
+    let mut it = Interp::new();
+    let gc_fn = it.native(|it, _, _| Ok(Value::Number(it.collect_cycles() as f64)));
+    it.global.declare("__gc", gc_fn, false);
+    // The iterator is live (a global) and mid-walk when the native collect runs.
+    let v = run_script(
+        &mut it,
+        "iter",
+        "globalThis.m = new Map([[1,{a:1}],[2,{a:2}],[3,{a:3}]]); \
+         globalThis.it = m.values(); var first = it.next().value.a; \
+         function mk(){ var o={}; var mm=new Map(); mm.set(o,mm); o.mm=mm; return 0 } \
+         for(let i=0;i<200;i++) mk(); \
+         __gc(); \
+         first*100 + it.next().value.a*10 + it.next().value.a",
+    );
+    assert_eq!(number(&v), 123.0);
+    check_invariants().unwrap();
+}
+
+#[test]
+fn gc_proxy_handler_held_by_live_object_survives() {
+    crate::gc::force_enabled();
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        "proxy",
+        "globalThis.keep = {}; \
+         (function(){ var h={get:function(t,k){return 'h:'+k}}; keep.h=h; keep.p=new Proxy({}, h); })(); \
+         for(let i=0;i<300;i++){ var q={}; var p2=new Proxy(q,{get:()=>q}); q.p=p2; }",
+    );
+    it.collect_cycles();
+    assert!(matches!(
+        run_script(&mut it, "proxy", "keep.p.zz==='h:zz'"),
+        Value::Bool(true)
+    ));
+    check_invariants().unwrap();
+}
+
+#[test]
+fn gc_class_held_by_global_survives() {
+    crate::gc::force_enabled();
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        "class_global",
+        "globalThis.C = (function(){ class A { static s = () => A; x = () => this } return A })(); \
+         globalThis.inst = new C(); \
+         function mk(){ class B { static t=()=>B; y=()=>this } return new B() } \
+         for(let i=0;i<300;i++) mk();",
+    );
+    it.collect_cycles();
+    assert!(matches!(
+        run_script(
+            &mut it,
+            "class_global",
+            "C.s()===C && inst.x()===inst && new C().x() instanceof C"
+        ),
+        Value::Bool(true)
+    ));
+    check_invariants().unwrap();
+}
+
+#[test]
+fn gc_with_scope_closure_held_by_global_survives() {
+    crate::gc::force_enabled();
+    let mut it = Interp::new();
+    run_sloppy_script(
+        &mut it,
+        "with_global",
+        "globalThis.g = (function(){ var o={a:5}; with(o){ return ()=>a } })(); \
+         function mk(){ var o={a:1}; with(o){ o.f=()=>a } return 0 } \
+         for(let i=0;i<300;i++) mk();",
+    );
+    it.collect_cycles();
+    assert!(matches!(
+        run_sloppy_script(&mut it, "with_global", "g()===5"),
+        Value::Bool(true)
+    ));
+    check_invariants().unwrap();
+}
+
+#[test]
+fn gc_typed_view_held_by_global_survives() {
+    crate::gc::force_enabled();
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        "typed_global",
+        "globalThis.u = new Uint8Array(4); u.self=u; u[0]=7; \
+         for(let i=0;i<300;i++){ var t=new Uint8Array(2); t.t=t; }",
+    );
+    it.collect_cycles();
+    assert!(matches!(
+        run_script(
+            &mut it,
+            "typed_global",
+            "u.self===u && u[0]===7 && u.buffer===u.buffer && u.self.buffer===u.buffer"
+        ),
+        Value::Bool(true)
+    ));
+    check_invariants().unwrap();
 }
 
 #[test]
@@ -574,8 +815,10 @@ fn gc_executing_closure_frame_survives() {
 }
 
 #[test]
-fn gc_map_cycle_is_kept_and_usable() {
+fn gc_map_cycle_with_global_holder_collects_garbage_only() {
     crate::gc::force_enabled();
+    // Exact live counts below: the automatic trigger must not run first.
+    crate::gc::no_auto();
     let mut it = Interp::new();
     run_script(
         &mut it,
@@ -585,8 +828,15 @@ fn gc_map_cycle_is_kept_and_usable() {
     );
     it.collect_cycles();
     let before = live_counts();
-    it.collect_cycles();
-    assert_eq!(live_counts(), before, "a Map is opaque: its cycles stay");
+    run_script(&mut it, "map", "for(let i=0;i<100;i++){ mk(); }");
+    assert!(live_counts().0 > before.0, "the loop made garbage");
+    let cleared = it.collect_cycles();
+    assert!(cleared >= 200, "collect cleared {cleared} Map-cycle nodes");
+    assert_eq!(
+        live_counts(),
+        before,
+        "Map cycles are freed; the held one is not"
+    );
     assert!(matches!(
         run_script(&mut it, "map", "k.m.get(1)===k"),
         Value::Bool(true)
@@ -708,6 +958,138 @@ fn gc_edges_match_rc_clones() {
     let (n_objs, n_scopes) = counts();
     assert_eq!(objs.iter().flatten().count(), n_objs);
     assert_eq!(scopes.iter().flatten().count(), n_scopes);
+}
+
+/// PR-3a edge audit: each data kind reports exactly one edge per `Rc` clone it owns (strong-count delta), and the
+/// shared-owner cases are opaque or uncounted, never over-counted.
+#[test]
+fn gc_edges_match_rc_clones_data_kinds() {
+    crate::gc::force_enabled();
+    crate::gc::no_auto();
+    let mut it = Interp::new();
+    let t = new_obj(None, Kind::Plain);
+    let base = Rc::strong_count(&t);
+
+    // Map: key and value of two entries are four clones of `t`.
+    let mut md = crate::collections::MapData::default();
+    for _ in 0..2 {
+        md.entries
+            .push((Value::Object(t.clone()), Value::Object(t.clone())));
+    }
+    let m = new_obj(None, Kind::Map(md));
+    assert_eq!(Rc::strong_count(&t) - base, 4, "map handles");
+    assert_eq!(count_edges_to(|f| obj_edges(&m, f), &t), 4, "map edges");
+
+    // Set: two items, two clones.
+    let before = Rc::strong_count(&t);
+    let mut sd = crate::collections::SetData::default();
+    sd.items.push(Value::Object(t.clone()));
+    sd.items.push(Value::Object(t.clone()));
+    let s = new_obj(None, Kind::Set(sd));
+    assert_eq!(Rc::strong_count(&t) - before, 2, "set handles");
+    assert_eq!(count_edges_to(|f| obj_edges(&s, f), &t), 2, "set edges");
+
+    // Proxy: target and handler, two clones.
+    let before = Rc::strong_count(&t);
+    let pd = crate::proxy::ProxyData {
+        target: Value::Object(t.clone()),
+        handler: std::cell::RefCell::new(Value::Object(t.clone())),
+        callable: false,
+        env_view: false,
+    };
+    let p = new_obj(None, Kind::Proxy(Rc::new(pd)));
+    assert_eq!(Rc::strong_count(&t) - before, 2, "proxy handles");
+    assert_eq!(count_edges_to(|f| obj_edges(&p, f), &t), 2, "proxy edges");
+    // A second owner of the ProxyData (a trap in flight) makes the node opaque: no edges, so `t` keeps its count.
+    let shared = match &*p.kind.borrow() {
+        Kind::Proxy(pd) => pd.clone(),
+        _ => unreachable!(),
+    };
+    assert!(!obj_edges(&p, &mut |_| {}), "a shared ProxyData is opaque");
+    drop(shared);
+
+    // Typed view: one edge, to its buffer object.
+    let ab = new_obj(None, Kind::ArrayBuffer(crate::typed::new_bytes(vec![0; 8])));
+    let ta = crate::typed::TypedArr {
+        abuf: ab.clone(),
+        data: crate::typed::new_bytes(vec![0; 8]),
+        ty: crate::typed::Ty::U8,
+        off: 0,
+        fixed_len: 8,
+        track: false,
+        rz: false,
+    };
+    let view = new_obj(None, Kind::Typed(ta));
+    assert_eq!(
+        count_edges_to(|f| obj_edges(&view, f), &ab),
+        1,
+        "typed edge"
+    );
+
+    // `with` scope: one object edge, one clone.
+    let before = Rc::strong_count(&t);
+    let ws = Scope::new_with(Scope::new(None), t.clone());
+    assert_eq!(Rc::strong_count(&t) - before, 1, "with handle");
+    let mut with_edges = 0;
+    assert!(scope_edges(&ws, &mut |e| {
+        if let Edge::Obj(o) = e {
+            if Rc::ptr_eq(o, &t) {
+                with_edges += 1;
+            }
+        }
+    }));
+    assert_eq!(with_edges, 1, "with edge");
+
+    // Class: the constructor's scope and the class field scope are two edges to one scope; the parent is two edges
+    // to `A` (the static-inheritance proto and `ClassInfo.parent`). Both need the FuncDef's sole owner.
+    let g = run_script(
+        &mut it,
+        "cls",
+        "globalThis.A = class A { x = () => this }; globalThis.B = class B extends A {}; globalThis",
+    );
+    let Value::Object(b) = ok(it.get(&g, "B"), "get B") else {
+        panic!("B is not an object")
+    };
+    let Value::Object(a) = ok(it.get(&g, "A"), "get A") else {
+        panic!("A is not an object")
+    };
+    let (def_rc, scope) = match &*b.kind.borrow() {
+        Kind::Closure { def, scope } => (def.clone(), scope.clone()),
+        _ => panic!("B is not a closure"),
+    };
+    assert_eq!(
+        Rc::strong_count(&def_rc),
+        2,
+        "the kind and this clone share the FuncDef"
+    );
+    drop(def_rc);
+    assert_eq!(
+        count_scope_edges_to(|f| obj_edges(&b, f), &scope),
+        2,
+        "class: closure scope + field scope"
+    );
+    assert_eq!(
+        count_edges_to(|f| obj_edges(&b, f), &a),
+        2,
+        "class: proto + parent"
+    );
+    // A second FuncDef owner (a call in flight) makes the class edges uncounted: the safe direction.
+    let hold = match &*b.kind.borrow() {
+        Kind::Closure { def, .. } => def.clone(),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        count_scope_edges_to(|f| obj_edges(&b, f), &scope),
+        1,
+        "shared FuncDef: field-scope edge not counted"
+    );
+    assert_eq!(
+        count_edges_to(|f| obj_edges(&b, f), &a),
+        1,
+        "shared FuncDef: parent edge not counted"
+    );
+    drop(hold);
+    check_invariants().unwrap();
 }
 
 /// A mixed heap: objects, arrays, classes, closures, prototype links, half of them kept alive. The per-node count
