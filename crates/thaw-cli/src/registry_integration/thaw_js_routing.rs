@@ -320,9 +320,47 @@ fn thaw_js_value_export_needs_handle(pkg: &ResolvedPackage, user_source: &str, n
     }
     // A builtin's default is the module's own namespace object, so calls of its functions stay typed.
     name == "default"
-        && thaw_js_default_import_locals(&pkg.name, user_source)
+        && (thaw_js_default_import_locals(&pkg.name, user_source)
             .iter()
             .any(|local| thaw_js_binding_needs_handle(pkg, user_source, local, true))
+            || !thaw_js_bare_namespace_locals(pkg, user_source).is_empty())
+}
+
+/// The local names the program binds to the whole namespace of the builtin `pkg` (`import * as p
+/// from 'node:..'`) and uses as a value rather than only through `p.member(..)` calls. Such a
+/// namespace is the module's own value: the shim serves its `default` handle (`module.exports`) and
+/// `module_graph` binds the namespace to that handle.
+fn thaw_js_bare_namespace_locals(pkg: &ResolvedPackage, user_source: &str) -> Vec<String> {
+    use thaw_parser::ast::{ImportSpecifier, ModuleDecl, ModuleItem};
+    if !pkg.name.starts_with("node:") {
+        return Vec::new();
+    }
+    let Ok((module, _)) = thaw_parser::parse_typescript_with_source_map_named(
+        user_source,
+        thaw_parser::common::FileName::Custom("thaw-js routing".into()),
+    ) else {
+        return Vec::new();
+    };
+    let same_module =
+        |source: &str| source.trim_start_matches("node:") == pkg.name.trim_start_matches("node:");
+    let mut locals = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+            continue;
+        };
+        if !import.src.value.as_str().is_some_and(same_module) {
+            continue;
+        }
+        for specifier in &import.specifiers {
+            if let ImportSpecifier::Namespace(namespace) = specifier {
+                let local = namespace.local.sym.to_string();
+                if thaw_js_binding_needs_handle(pkg, user_source, &local, true) {
+                    locals.push(local);
+                }
+            }
+        }
+    }
+    locals
 }
 
 /// Whether some use of the identifier `name` in the program is a value use rather than an import or a call

@@ -5188,6 +5188,42 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "import { MessageChannel } from 'node:worker_threads';\n\nfunction err(f: () => unknown): string {\n  try { const r = f(); return 'ok ' + String(r); } catch (e: any) { return `threw ${e?.name} code=${e?.code} ${JSON.stringify(e?.message ?? String(e))}`; }\n}\n\nfunction main(): void {\n  const c = new MessageChannel();\n  const d = new MessageChannel();\n  console.log('live return', c.port1.postMessage('a'));\n  console.log('transfer', err(() => c.port1.postMessage(1, [d.port1])));\n  console.log('again', err(() => c.port1.postMessage(1, [d.port1])));\n  console.log('dup', err(() => c.port1.postMessage(1, [d.port2, d.port2])));\n  console.log('own', err(() => c.port1.postMessage(1, [c.port1])));\n  console.log('own options', err(() => c.port1.postMessage(1, { transfer: [c.port1] })));\n  console.log('unlisted', err(() => c.port1.postMessage({ p: d.port2 })));\n  const e = new MessageChannel();\n  e.port1.close();\n  console.log('closed', err(() => c.port1.postMessage(1, [e.port1])));\n  console.log('closed return', err(() => e.port1.postMessage(2)));\n  console.log('bad', err(() => c.port1.postMessage(1, [{} as any])));\n  console.log('non-iterable', err(() => c.port1.postMessage(1, 'x' as any)));\n  console.log('transferred copy', err(() => d.port1.postMessage('x')));\n  c.port1.close();\n  c.port2.close();\n  d.port2.close();\n}"
+  },
+  {
+    "name": "bare node:fs namespace used as a value keeps thaw-js and matches Node",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as fs from 'node:fs';\nconst f: any = fs;\nfunction main(): void {\n  console.log(typeof f.existsSync, f.existsSync('/nonexistent'), typeof f.promises, typeof f.constants);\n}"
+  },
+  {
+    "name": "bare node:fs namespace passed to a helper function",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as fs from 'node:fs';\nfunction use(m: any): boolean { return Object.keys(m).length > 10; }\nfunction main(): void {\n  console.log(use(fs), typeof (fs as any).default, typeof (fs as any).promises.readFile);\n}"
+  },
+  {
+    "name": "bare node:fs/promises namespace used as a value",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as fsp from 'node:fs/promises';\nconst f: any = fsp;\nfunction main(): void {\n  console.log(typeof f.readFile, typeof f.constants, typeof f.default);\n}"
+  },
+  {
+    "name": "bare node:events namespace used as a value",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as ev from 'node:events';\nconst E: any = ev;\nfunction main(): void {\n  console.log(typeof E.default, typeof E.EventEmitter, typeof E.once, typeof E.default.defaultMaxListeners);\n}"
+  },
+  {
+    "name": "bare node:path namespace used as a value",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as path from 'node:path';\nconst p: any = path;\nfunction main(): void {\n  console.log(typeof p.default, typeof p.join, p.default.join('a', 'b'), typeof p.posix);\n}"
+  },
+  {
+    "name": "bare node:http namespace used as a value exposes STATUS_CODES",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as http from 'node:http';\nconst h: any = http;\nfunction main(): void {\n  console.log(typeof h.createServer, typeof h.STATUS_CODES, typeof h.default);\n}"
   }
 ]
 }
