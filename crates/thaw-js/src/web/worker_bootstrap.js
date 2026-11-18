@@ -30,12 +30,70 @@
     __thaw_worker_send(__thaw_worker_encode(value));
   };
 
+  // postMessageToThread (W-D), this realm's copy of worker_threads.js's: the parent is the only thread a worker reaches.
+  // The worker stays alive while a send is pending, so the ack can arrive (as the sender's promise needs it).
+  const pendingSends = new Map();
+  let nextAck = 1;
+  function threadError(code, message, cause, type = Error) {
+    const error = new type(message);
+    error.code = code;
+    if (cause !== undefined) error.cause = cause;
+    return error;
+  }
+  function settleSend(ack, status, wire) {
+    const entry = pendingSends.get(ack);
+    if (entry === undefined) return;
+    pendingSends.delete(ack);
+    clearTimeout(entry.timer);
+    if (status === 'ok') entry.resolve(undefined);
+    else if (status === 'timeout') entry.reject(threadError('ERR_WORKER_MESSAGING_TIMEOUT', 'Sending a message to another thread timed out'));
+    else if (status === 'error') entry.reject(threadError('ERR_WORKER_MESSAGING_ERRORED', 'The destination thread threw an error while processing the message', wire === '' ? undefined : decode(wire)));
+    else entry.reject(threadError('ERR_WORKER_MESSAGING_FAILED', 'Cannot find the destination thread or listener'));
+    sync();
+  }
+  function deliverThreadMessage(ack, source, wire, reply) {
+    if (process.listenerCount('workerMessage') === 0) return reply(ack, 'failed', '');
+    try {
+      process.emit('workerMessage', decode(wire), source);
+    } catch (error) {
+      let cause = '';
+      try { cause = __thaw_worker_encode(error); } catch (_) { /* not cloneable: the error has no cause */ }
+      return reply(ack, 'error', cause);
+    }
+    return reply(ack, 'ok', '');
+  }
+  function postToThread(target, value, transferList, timeout) {
+    if (timeout !== undefined && typeof timeout !== 'number') {
+      const received = typeof timeout === 'string' ? `type string ('${timeout}')` : `type ${typeof timeout}`;
+      return Promise.reject(threadError('ERR_INVALID_ARG_TYPE', `The "timeout" argument must be of type number. Received ${received}`, undefined, TypeError));
+    }
+    if (timeout !== undefined && !(timeout >= 0)) {
+      return Promise.reject(threadError('ERR_OUT_OF_RANGE', `The value of "timeout" is out of range. It must be >= 0. Received ${timeout}`, undefined, RangeError));
+    }
+    if (target === opts.threadId) return Promise.reject(threadError('ERR_WORKER_MESSAGING_SAME_THREAD', 'Cannot sent a message to the same thread'));
+    if (transferList !== undefined && Array.from(transferList).length) {
+      return Promise.reject(new DOMException('transfer lists are not supported on thaw-js yet', 'DataCloneError'));
+    }
+    let wire;
+    try { wire = __thaw_worker_encode(value); } catch (error) { return Promise.reject(error); }
+    return new Promise((resolve, reject) => {
+      const ack = nextAck++;
+      const entry = { resolve, reject, timer: undefined };
+      pendingSends.set(ack, entry);
+      sync();
+      if (timeout !== undefined) entry.timer = setTimeout(() => settleSend(ack, 'timeout', ''), timeout);
+      // only the parent (0) is reachable from a worker; any other id is FAILED on a later turn than a zero timeout
+      if (target === 0) __thaw_worker_thread_to_parent(ack, wire);
+      else setTimeout(() => settleSend(ack, 'failed', ''), 0);
+    });
+  }
+
   // Keep-alive: the worker runs while parentPort has a referenced message listener (close() or unref() releases it)
-  // or process.stdin is flowing and not ended.
+  // or process.stdin is flowing and not ended, or while a postMessageToThread it sent awaits its ack.
   const sync = () => {
     const listening = parentPort.__thawRefed && !parentPort.__thawClosed
       && ((parentPort.__thawNodeListeners.get('message') || []).length > 0 || parentPort.onmessage !== null);
-    __thaw_worker_set_alive(listening || (stdin.flowing && !stdin.endEmitted));
+    __thaw_worker_set_alive(listening || (stdin.flowing && !stdin.endEmitted) || pendingSends.size > 0);
   };
   stdin.onChange = sync;
   for (const name of ['on', 'once', 'off', 'addListener', 'removeListener', 'removeAllListeners', 'ref', 'unref', 'close', 'start']) {
@@ -63,6 +121,10 @@
         if (event.value !== '') stdin.__thawPush(__thaw_worker_stream.hexToBytes(event.value));
         if (event.end) stdin.__thawEnd();
         stdin.__thawFlush();
+      } else if (event.type === 'thread') {
+        deliverThreadMessage(event.ack, event.source, event.value, (ack, status, wire) => __thaw_worker_thread_reply(ack, status, wire));
+      } else if (event.type === 'threadAck') {
+        settleSend(event.ack, event.status, event.value);
       }
     }
     // queued after the delivery microtasks, so listeners added or removed by a handler are seen
@@ -71,10 +133,14 @@
 
   const exports = {
     isMainThread: false,
+    isInternalThread: false,
     threadId: opts.threadId === undefined ? 1 : opts.threadId,
     threadName: '',
     workerData,
     parentPort,
+    postMessageToThread(target, value, transferList, timeout) {
+      return postToThread(target, value, transferList, timeout);
+    },
     resourceLimits: opts.resourceLimits === undefined ? {} : opts.resourceLimits,
     MessageChannel: globalThis.MessageChannel,
     MessagePort: globalThis.MessagePort,
