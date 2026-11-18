@@ -333,6 +333,44 @@ fn take_ready_event_for_current_thread() -> Option<ReadyEvent> {
     ready.remove(position)
 }
 
+/// `THAW_NAPI_TRACE=1` enables the diagnostic eprintln probes below (the
+/// @parcel/watcher unsubscribe investigation, designs/addon-parcel-exit.md).
+/// Read once per process; unset, each probe is one cached bool test.
+fn napi_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("THAW_NAPI_TRACE").is_some_and(|value| !value.is_empty() && value != "0")
+    })
+}
+
+/// Prints the terms that keep the process alive, at most once per 500 ms.
+fn napi_trace_keepalive(origin: &str, ready: bool, uv_alive: bool) {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    static LAST_MS: AtomicU64 = AtomicU64::new(u64::MAX);
+    let now = START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64;
+    let last = LAST_MS.load(Ordering::Relaxed);
+    if last != u64::MAX && now.saturating_sub(last) < 500 {
+        return;
+    }
+    LAST_MS.store(now, Ordering::Relaxed);
+    let (active_work, cleanup) = HOST.with(|host| {
+        let host = host.borrow();
+        (host.has_active_async_work(), host.has_active_cleanup())
+    });
+    eprintln!(
+        "[thaw-napi-trace] keepalive origin={origin} active_async_work={active_work} active_cleanup={cleanup} \
+         tsfn_referenced={} ready_for_thread={ready} uv_alive={uv_alive} \
+         tsfn_active={} tsfn_unfinalized={} tsfn_live={}",
+        host_threadsafe_state(true),
+        ACTIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire),
+        UNFINALIZED_THREADSAFE_FUNCTIONS.load(Ordering::Acquire),
+        LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire),
+    );
+}
+
 #[allow(clippy::vec_box)]
 fn threadsafe_functions() -> &'static Mutex<Vec<Box<ThreadsafeFunction>>> {
     THREADSAFE_FUNCTIONS.get_or_init(|| Mutex::new(Vec::new()))

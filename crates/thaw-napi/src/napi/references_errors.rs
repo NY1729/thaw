@@ -34,6 +34,9 @@ pub unsafe extern "C" fn napi_create_reference(
     if value.is_null() || out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    if napi_trace_enabled() {
+        eprintln!("[thaw-napi-trace] create_reference value={value:p} initial_count={initial_count}");
+    }
     let generation = env_ref.value_generations.get(&(value as usize)).copied();
     #[cfg(feature = "js-engine")]
     let js_symbol = match value_ref(value) {
@@ -116,6 +119,9 @@ pub unsafe extern "C" fn napi_delete_reference(
     };
     #[cfg(feature = "js-engine")]
     let value = reference.value;
+    if napi_trace_enabled() {
+        eprintln!("[thaw-napi-trace] delete_reference reference={reference:p} count={}", reference.count);
+    }
     reference.deleted = true;
     #[cfg(feature = "js-engine")]
     sync_js_origin_symbol_pins(env);
@@ -260,6 +266,9 @@ pub unsafe extern "C" fn napi_reference_unref(
     let Ok(reference) = reference_mut(env, reference) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
+    if napi_trace_enabled() {
+        eprintln!("[thaw-napi-trace] reference_unref reference={reference:p} count_before={}", reference.count);
+    }
     if reference.count == 0 {
         return record_status(env, NAPI_GENERIC_FAILURE);
     }
