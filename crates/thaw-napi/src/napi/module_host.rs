@@ -5258,15 +5258,20 @@ pub unsafe extern "C" fn thaw_napi_call_export_handle_with_function_typed_result
         index: function_index,
         callback,
         context,
+        identity: context,
     };
     thaw_napi_call_export_handle_with_functions_typed_result(name, args, &argument, 1)
 }
 
+// Layout shared with the descriptor emitted by thaw-llvm `compile_napi_function_arguments`.
 #[repr(C)]
 pub struct ThawNativeFunctionArgument {
     index: usize,
     callback: Option<ThawNativeValueCallback>,
     context: *mut c_void,
+    /// The closure the adapter forwards to (`thaw_closure_alias_resolve` of `context`).
+    /// Stable across calls, unlike `context`, which is a fresh signature adapter per call.
+    identity: *mut c_void,
 }
 
 unsafe fn call_export_with_functions(
@@ -5300,10 +5305,11 @@ unsafe fn call_export_with_functions(
             ));
         }
         let value = if let Some(callback) = function.callback {
+            // Keyed on the original closure, not the per-call adapter in `context`.
             let callback_key = (
                 env as usize,
-                function.context as usize,
-                if function.context.is_null() {
+                function.identity as usize,
+                if function.identity.is_null() {
                     callback as usize
                 } else {
                     0
