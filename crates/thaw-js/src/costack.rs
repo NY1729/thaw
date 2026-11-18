@@ -1038,10 +1038,10 @@ mod imp {
         /// Deep JS recursion inside a costack body must be a `RangeError`, not a fault on the guard page.
         /// The costack is mapped first and the resumer thread spawned after it, so the thread's own stack
         /// lies BELOW the costack: the host thread's bounds then say "room" for a sp on the costack, which
-        /// is exactly what `thread_stack_has_room` must not believe. Ignored until co3a's stackful backend
-        /// runs coroutines on costacks by default (then the same check runs through `THAW_JS_CO=stack`).
+        /// is exactly what `thread_stack_has_room` must not believe. Ignored: CI runs it alone with `--ignored`
+        /// in the thaw-js-costack job, where the costack backend is the default.
         #[test]
-        #[ignore = "co3a: run with --ignored until the stackful backend is wired"]
+        #[ignore = "run alone with --ignored (CI: thaw-js-costack job)"]
         fn js_deep_recursion_on_a_costack_is_a_range_error() {
             let realm = Arc::new(AtomicUsize::new(0));
             let r2 = realm.clone();
