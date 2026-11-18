@@ -532,7 +532,11 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
         "snapshot-created\n"
     );
     assert!(snapshot.is_file());
-    let mut child = Command::new(&event_output).spawn().unwrap();
+    // PROBE: trace the N-API threadsafe-function and reference calls of the unsubscribe hang (stderr goes to the CI log).
+    let mut child = Command::new(&event_output)
+        .env("THAW_NAPI_TRACE", "1")
+        .spawn()
+        .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !callback_file.is_file() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
