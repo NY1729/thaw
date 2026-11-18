@@ -5176,6 +5176,24 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  process.on('workerMessage', (v: any, source: number): void => { console.log('main got', v.kind, source); });\n  const worker = new wt.Worker(`\n    const wt = require('node:worker_threads');\n    const keep = setInterval(() => {}, 1000);\n    wt.parentPort.on('message', (m) => {\n      if (m === 'send') {\n        const c = new ArrayBuffer(5);\n        wt.postMessageToThread(0, { kind: 'bytes', c }, [c]).then(() => wt.parentPort.postMessage({ tag: 'sent', len: c.byteLength, det: c.detached }));\n      } else {\n        const kept = new ArrayBuffer(4);\n        wt.postMessageToThread(99, 1, [kept]).then(() => wt.parentPort.postMessage({ tag: 'unknown resolved' }), (e) => wt.parentPort.postMessage({ tag: 'unknown', name: e.name, code: e.code, message: e.message, len: kept.byteLength, det: kept.detached }));\n      }\n    });\n    wt.parentPort.postMessage({ tag: 'ready' });\n  `, { eval: true });\n  const queue: any[] = [];\n  worker.on('message', (m: any): void => { queue.push(m); });\n  const next = async (): Promise<any> => {\n    while (queue.length === 0) { await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 1); }); }\n    return queue.shift();\n  };\n  await next();\n  worker.postMessage('send');\n  console.log('worker sent', JSON.stringify(await next()));\n  worker.postMessage('unknown');\n  const u: any = await next();\n  console.log('unknown', u.name, u.code, JSON.stringify(u.message), u.len, u.det);\n  await worker.terminate();\n  const late = new ArrayBuffer(4);\n  worker.postMessage(1, [late]);\n  console.log('after exit', late.byteLength, late.detached);\n  console.log('done');\n}"
+  },
+  {
+    "name": "node:os signals/errno and node:constants values match Node",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as os from 'node:os';\nimport * as C from 'node:constants';\nfunction main(): void {\n  console.log(typeof os.constants.signals.SIGINT, os.constants.signals.SIGINT, os.constants.errno.ENOENT);\n  console.log(typeof C.O_CREAT, C.O_CREAT, C.E2BIG, C.SIGTERM, C.S_IFMT, C.RTLD_NOW, typeof C.defaultCoreCipherList);\n}"
+  },
+  {
+    "name": "process platform, arch and debugPort match Node",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  console.log(process.platform, process.arch, process.debugPort, typeof process.version);\n}"
+  },
+  {
+    "name": "node:dns error codes and node:tls defaults match Node",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as dns from 'node:dns';\nimport * as tls from 'node:tls';\nfunction main(): void {\n  console.log(dns.ALL, dns.V4MAPPED, dns.ADDRCONFIG, dns.BADFLAGS, typeof dns.Resolver);\n  console.log(tls.DEFAULT_ECDH_CURVE, tls.DEFAULT_MIN_VERSION, tls.CLIENT_RENEG_LIMIT, typeof tls.SecureContext);\n}"
   }
 ]
 }
