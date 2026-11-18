@@ -5242,6 +5242,24 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "import * as http from 'node:http';\nconst h: any = http;\nfunction main(): void {\n  console.log(typeof h.createServer, typeof h.STATUS_CODES, typeof h.default);\n}"
+  },
+  {
+    "name": "worker port transfer echoes a port message and closes both ends",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  const channel = new wt.MessageChannel();\n  const port1 = channel.port1;\n  const port2 = channel.port2;\n  const worker = new wt.Worker(`\n    const { port } = require('node:worker_threads').workerData;\n    port.on('message', (m) => { port.postMessage('echo:' + m); if (m === 'bye') port.close(); });\n    port.postMessage('hello');\n  `, { eval: true, workerData: { port: port2 }, transferList: [port2] });\n  const exited = new Promise<number>((resolve: (code: number) => void): void => { worker.once('exit', resolve); });\n  const next = (): Promise<any> => new Promise<any>((resolve: (value: any) => void): void => { port1.once('message', resolve); });\n  console.log(await next());\n  port1.postMessage('a');\n  console.log(await next());\n  const closed = new Promise<void>((resolve: () => void): void => { port1.once('close', resolve); });\n  port1.postMessage('bye');\n  console.log(await next());\n  await closed;\n  console.log('closed');\n  console.log('exit', await exited);\n}\n"
+  },
+  {
+    "name": "worker port transfer returns a port the worker made and answers through it",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  const worker = new wt.Worker(`\n    const { parentPort, MessageChannel } = require('node:worker_threads');\n    parentPort.once('message', ({ p }) => {\n      const channel = new MessageChannel();\n      parentPort.postMessage({ tag: 'back', q: channel.port2 }, [channel.port2]);\n      channel.port1.on('message', (m) => { p.postMessage('echo ' + m); p.close(); channel.port1.close(); });\n    });\n  `, { eval: true });\n  const exited = new Promise<number>((resolve: (code: number) => void): void => { worker.once('exit', resolve); });\n  const channel = new wt.MessageChannel();\n  const port1 = channel.port1;\n  const port2 = channel.port2;\n  const back = new Promise<any>((resolve: (value: any) => void): void => { worker.once('message', resolve); });\n  worker.postMessage({ p: port2 }, [port2]);\n  const reply = await back;\n  console.log(reply.tag);\n  const echoed = new Promise<any>((resolve: (value: any) => void): void => { port1.once('message', resolve); });\n  reply.q.postMessage('ping');\n  console.log(await echoed);\n  console.log('exit', await exited);\n}\n"
+  },
+  {
+    "name": "transfer list port errors match Node (duplicates, unlisted, detached, own port)",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  const err = (f: () => void): string => { try { f(); return 'ok'; } catch (e: any) { return `${e.name} ${e.code} ${e.message}`; } };\n  const worker = new wt.Worker('setInterval(() => {}, 1000)', { eval: true });\n  const channel = new wt.MessageChannel();\n  const port1 = channel.port1;\n  const port2 = channel.port2;\n  console.log('dup', err((): void => { worker.postMessage({}, [port2, port2]); }));\n  console.log('unlisted', err((): void => { worker.postMessage({ p: port2 }); }));\n  const c = new wt.MessageChannel();\n  console.log('transfer', err((): void => { worker.postMessage({}, [c.port1]); }));\n  console.log('again', err((): void => { worker.postMessage({}, [c.port1]); }));\n  c.port2.close();\n  console.log('closed', err((): void => { worker.postMessage({}, [c.port2]); }));\n  console.log('own', err((): void => { port1.postMessage('x', [port1]); }));\n  await worker.terminate();\n  console.log('terminated');\n}\n"
   }
 ]
 }
