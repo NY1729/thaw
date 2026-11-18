@@ -102,17 +102,79 @@ pub(crate) fn sab_import(id: u64) -> Option<Arc<SabBlock>> {
     sab_table().remove(&id)
 }
 
-/// Releases the blocks a wire carries when nobody will decode it. The wire is JSON and quotes inside strings are
-/// escaped, so every `"t":"SAB","id":N` found here is a node the encoder wrote.
-pub(crate) fn release_wire(wire: &str) {
-    const NODE: &str = r#""t":"SAB","id":"#;
-    let mut rest = wire;
-    while let Some(at) = rest.find(NODE) {
-        rest = &rest[at + NODE.len()..];
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        if let Ok(id) = digits.parse::<u64>() {
-            sab_table().remove(&id);
+/// A moved ArrayBuffer's bytes and its maxByteLength (`Some` for a resizable buffer).
+type MovedBytes = (Vec<u8>, Option<usize>);
+
+/// ArrayBuffers in flight between Interps (postMessage with a transfer list): the wire carries only the id, and the
+/// bytes move, they are not copied. `ab_export` takes the Vec out of the sender's buffer; the decode that reads the
+/// wire (`ab_import`) gives it to the receiver's new buffer.
+static AB_IN_FLIGHT: Mutex<BTreeMap<u64, MovedBytes>> = Mutex::new(BTreeMap::new());
+static AB_NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn ab_table() -> MutexGuard<'static, BTreeMap<u64, MovedBytes>> {
+    AB_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Enters moved bytes for one wire; returns the id that wire carries.
+pub(crate) fn ab_export(bytes: Vec<u8>, max: Option<usize>) -> u64 {
+    let id = AB_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    ab_table().insert(id, (bytes, max));
+    id
+}
+
+/// Takes the bytes of a wire node (once: the decode that reads the node owns them now).
+pub(crate) fn ab_import(id: u64) -> Option<MovedBytes> {
+    ab_table().remove(&id)
+}
+
+/// The ids of the `"t":"<kind>","id":N` nodes in a wire, both as the wire itself writes them and escaped (a wire
+/// nested in a JSON string, like the workerData in a worker's spawn options).
+fn node_ids(wire: &str, kind: &str) -> Vec<u64> {
+    let plain = format!(r#""t":"{kind}","id":"#);
+    let escaped = plain.replace('"', r#"\""#);
+    let mut ids = Vec::new();
+    for pattern in [plain, escaped] {
+        let mut rest = wire;
+        while let Some(at) = rest.find(&pattern) {
+            rest = &rest[at + pattern.len()..];
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(id) = digits.parse::<u64>() {
+                ids.push(id);
+            }
         }
+    }
+    ids
+}
+
+/// Releases the blocks a wire carries when nobody will decode it (a worker that ended first, or a send that could not
+/// be delivered). Every such node was written by the encoder, and a table entry is dropped once it is taken.
+pub(crate) fn release_wire(wire: &str) {
+    for id in node_ids(wire, "SAB") {
+        sab_table().remove(&id);
+    }
+    for id in node_ids(wire, "ABT") {
+        ab_table().remove(&id);
+    }
+}
+
+/// Releases what a dropped command carries (its wire never reaches a reader).
+fn release_cmd(cmd: &Cmd) {
+    if let Cmd::Message(v) | Cmd::Thread(_, _, v) = cmd {
+        release_wire(v);
+    }
+}
+
+/// Releases what a dropped event carries (its wire never reaches a reader).
+fn release_evt(evt: &Evt) {
+    if let Evt::Message(v) | Evt::Error(v) | Evt::Thread(_, v) = evt {
+        release_wire(v);
+    }
+}
+
+/// Sends a command to a worker; a worker whose thread has ended releases what the command carries.
+fn send_cmd(w: &Worker, cmd: Cmd) {
+    if let Err(mpsc::SendError(lost)) = w.tx.send(cmd) {
+        release_cmd(&lost);
     }
 }
 
@@ -167,7 +229,10 @@ fn spawn(it: &mut Interp, source: String, opts: String, stack_mb: f64, heap_mb: 
 
 fn to_parent(it: &Interp, e: Evt) {
     if let Some(side) = &it.worker.side {
-        let _ = side.tx.send(e);
+        // the parent is gone: nobody will read what this event carries
+        if let Err(mpsc::SendError(lost)) = side.tx.send(e) {
+            release_evt(&lost);
+        }
     }
 }
 
@@ -221,14 +286,14 @@ fn run_worker(
             capture_err: false,
         });
         let code = run_script(&mut it, source, opts);
-        // messages the parent sent that this worker never read still carry their blocks
+        // messages the parent sent that this worker never read still carry their blocks; so does a workerData the
+        // bootstrap never reached (its wire is inside the spawn options)
         if let Some(side) = &it.worker.side {
             while let Ok(cmd) = side.rx.try_recv() {
-                if let Cmd::Message(v) | Cmd::Thread(_, _, v) = cmd {
-                    release_wire(&v);
-                }
+                release_cmd(&cmd);
             }
         }
+        release_wire(opts);
         code
     }))
     .unwrap_or(1);
@@ -350,9 +415,7 @@ pub(crate) fn poll(it: &mut Interp) -> String {
         if w.exited {
             // events the parent never polled still carry their blocks
             while let Ok(e) = w.rx.try_recv() {
-                if let Evt::Message(v) | Evt::Error(v) | Evt::Thread(_, v) = e {
-                    release_wire(&v);
-                }
+                release_evt(&e);
             }
             if let Some(j) = w.join.take() {
                 let _ = j.join();
@@ -407,8 +470,10 @@ pub(crate) fn install(it: &mut Interp) {
     g.declare("__thaw_worker_spawn", f, true);
     let f = it.native(|it, _, a| {
         let (h, wire) = (it.num(&arg(a, 0)) as u32, it.to_str(&arg(a, 1)).to_string());
-        if let Some(w) = it.worker.workers.get(&h) {
-            let _ = w.tx.send(Cmd::Message(wire));
+        match it.worker.workers.get(&h) {
+            Some(w) => send_cmd(w, Cmd::Message(wire)),
+            // no such worker: nothing will decode the wire
+            None => release_wire(&wire),
         }
         Ok(Value::Undefined)
     });
@@ -431,8 +496,9 @@ pub(crate) fn install(it: &mut Interp) {
         let h = it.num(&arg(a, 0)) as u32;
         let (source, ack) = (it.num(&arg(a, 1)) as u32, it.num(&arg(a, 2)) as u32);
         let wire = it.to_str(&arg(a, 3)).to_string();
-        if let Some(w) = it.worker.workers.get(&h) {
-            let _ = w.tx.send(Cmd::Thread(source, ack, wire));
+        match it.worker.workers.get(&h) {
+            Some(w) => send_cmd(w, Cmd::Thread(source, ack, wire)),
+            None => release_wire(&wire),
         }
         Ok(Value::Undefined)
     });
@@ -457,6 +523,13 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_thread_to_parent", f, true);
+    // a wire that will not be sent (a send to a thread the worker cannot reach): its moved bytes are released
+    let f = it.native(|it, _, a| {
+        let wire = it.to_str(&arg(a, 0)).to_string();
+        release_wire(&wire);
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_wire_release", f, true);
     let f = it.native(|it, _, a| {
         let ack = it.num(&arg(a, 0)) as u32;
         let (status, wire) = (
@@ -507,4 +580,32 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_capture", f, true);
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+
+    #[test]
+    fn release_wire_frees_an_unconsumed_array_buffer() {
+        // a wire nobody decodes (its worker ended first) gives its moved bytes back to the table
+        let id = ab_export(vec![1, 2, 3], Some(8));
+        let wire = format!(r#"{{"root":{{"r":1}},"nodes":[{{"t":"ABT","id":{id}}}]}}"#);
+        release_wire(&wire);
+        assert!(ab_import(id).is_none());
+        // the same node nested in a JSON string (the worker's opts carry workerData that way)
+        let id = ab_export(vec![9], None);
+        let wire = format!(r#"{{"root":{{"r":1}},"nodes":[{{"t":"ABT","id":{id}}}]}}"#);
+        release_wire(&format!(
+            r#"{{"workerData":"{}"}}"#,
+            wire.replace('"', r#"\""#)
+        ));
+        assert!(ab_import(id).is_none());
+        // a decode takes the entry once; releasing the wire afterwards finds nothing
+        let id = ab_export(vec![7, 7], None);
+        let wire = format!(r#"{{"root":{{"r":1}},"nodes":[{{"t":"ABT","id":{id}}}]}}"#);
+        assert_eq!(ab_import(id), Some((vec![7, 7], None)));
+        release_wire(&wire);
+        assert!(ab_import(id).is_none());
+    }
 }

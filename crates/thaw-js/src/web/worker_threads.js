@@ -52,7 +52,7 @@
   }
 
   const decode = wire => __thaw_worker_decode(wire);
-  const encode = value => __thaw_worker_encode(value);
+  const encode = (value, transfer) => __thaw_worker_encode(value, transfer);
   const { Readable, Writable, hexToBytes } = __thaw_worker_stream;
 
   // postMessageToThread (W-D). The message runs the destination's 'workerMessage' listeners on its own loop, and the
@@ -100,17 +100,17 @@
       return Promise.reject(threadError('ERR_OUT_OF_RANGE', `The value of "timeout" is out of range. It must be >= 0. Received ${timeout}`, undefined, RangeError));
     }
     if (target === selfId) return Promise.reject(threadError('ERR_WORKER_MESSAGING_SAME_THREAD', 'Cannot sent a message to the same thread'));
-    if (transferList !== undefined && Array.from(transferList).length) {
-      return Promise.reject(new DOMException('transfer lists are not supported on thaw-js yet', 'DataCloneError'));
-    }
+    let transfer;
+    try { transfer = __thaw_transfer_of(transferList); } catch (error) { return Promise.reject(error); }
+    const deliver = route(target);
+    // an unknown thread keeps its buffers (Node moves them only for a thread that receives the message)
     let wire;
-    try { wire = encode(value); } catch (error) { return Promise.reject(error); }
+    try { wire = encode(value, deliver === undefined ? [] : transfer); } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
       const ack = nextAck++;
       const entry = { resolve, reject, timer: undefined };
       pendingSends.set(ack, entry);
       if (timeout !== undefined) entry.timer = setTimeout(() => settleSend(ack, 'timeout', ''), timeout);
-      const deliver = route(target);
       // an unknown thread fails on a later turn than a zero timeout, so timeout 0 still times out first (as in Node)
       if (deliver === undefined) setTimeout(() => settleSend(ack, 'failed', ''), 0);
       else deliver(ack, wire);
@@ -135,10 +135,12 @@
         code = 'globalThis.__thaw_run_main_file(' + JSON.stringify(code) + ')';
       }
       const threadId = nextThreadId++;
+      // transferList (Node: any iterable, here by Array.from, so a non-iterable value is ignored): its buffers move to the
+      // worker whether or not workerData names them. A bad list or a non-cloneable workerData throws here, as in Node.
+      const transfer = options.transferList === undefined || options.transferList === null ? [] : __thaw_transfer_check(Array.from(options.transferList));
       const opts = {
         threadId,
-        // a non-cloneable workerData throws DataCloneError here, synchronously, as in Node
-        workerData: encode(options.workerData),
+        workerData: encode(options.workerData, transfer),
         // the worker starts with a snapshot of the parent's environment data
         envData: encode(Array.from(environmentData)),
         env: {},
@@ -183,13 +185,11 @@
       this.stderr = new Readable();
     }
 
-    postMessage(value, transferList) {
-      if (transferList !== undefined && Array.from(transferList).length) {
-        throw new DOMException('transfer lists are not supported on thaw-js yet', 'DataCloneError');
-      }
+    postMessage(value, transferOrOptions) {
       const state = states.get(this);
+      // after the worker exited Node neither checks the list nor moves its buffers
       if (state.exited) return;
-      __thaw_worker_post(state.handle, encode(value));
+      __thaw_worker_post(state.handle, encode(value, __thaw_transfer_of(transferOrOptions)));
     }
 
     terminate() {
