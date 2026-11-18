@@ -51,9 +51,12 @@ fn prop_key(p: &a::PropName) -> Option<String> {
 }
 
 /// A plain CommonJS script (the Node builtin shims: `node:path`, `node:assert`, ...) as a one-module
-/// registry bundle, so the scan and the loader treat it like any package. Registry bundles pass through.
+/// registry bundle, so the scan and the loader treat it like any package. Registry bundles pass through,
+/// and so does a pure native ESM bundle (the loader reads it through `native_payload`, not as a script).
 pub fn script_as_bundle(source: &str) -> std::borrow::Cow<'_, str> {
-    if source.contains("__thaw_bundle_factories") {
+    if source.contains("__thaw_bundle_factories")
+        || matches!(crate::esm::native_payload(source), Some((_, true)))
+    {
         return source.into();
     }
     format!(
