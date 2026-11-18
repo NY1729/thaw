@@ -1,9 +1,9 @@
 // node:worker_threads, main-thread side (W1, W3, W5): isMainThread/threadId, MessageChannel, environment data, and the
 // `Worker` class over the `__thaw_worker_*` natives of worker.rs (one OS thread and one Interp per worker). The
 // stdio streams (W5) are the private shim of worker_stream.js. `resourceLimits.maxOldGenerationSizeMb` is enforced by
-// heap_limit (an estimate, not V8's heap); SHARE_ENV is not implemented; thaw-cli keeps programs that use it on QuickJS
-// (thaw_js_worker_threads_blocker).
+// heap_limit (an estimate, not V8's heap). `env: SHARE_ENV` shares this realm's environment table (process_env.rs).
 (function () {
+  const SHARE_ENV = Symbol.for('nodejs.worker_threads.SHARE_ENV');
   const environmentData = new Map();
   let nextThreadId = 1;
   // handle (worker.rs table id) -> Worker, for events; Worker -> state, for everything else
@@ -143,10 +143,15 @@
         workerData: encode(options.workerData, transfer),
         // the worker starts with a snapshot of the parent's environment data
         envData: encode(Array.from(environmentData)),
-        env: {},
       };
-      const env = options.env === undefined ? process.env : options.env;
-      for (const key of Object.keys(env)) opts.env[key] = String(env[key]);
+      // SHARE_ENV: the worker reads and writes this realm's environment table (no copy is sent); otherwise the worker
+      // starts with a copy of `env` (default: process.env)
+      const shareEnv = options.env === SHARE_ENV;
+      if (!shareEnv) {
+        opts.env = {};
+        const env = options.env === undefined ? process.env : options.env;
+        for (const key of Object.keys(env)) opts.env[key] = String(env[key]);
+      }
       if (options.argv !== undefined) opts.argv = Array.from(options.argv, String);
       if (options.execArgv !== undefined) opts.execArgv = Array.from(options.execArgv, String);
       // stdio (W5): the worker's console output reaches stdout/stderr only when asked for; stdin exists only when asked
@@ -164,7 +169,7 @@
       };
       opts.resourceLimits = resourceLimits;
       // heap limit (MiB, -1 = none) and stack (MiB): the natives' numeric arguments
-      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb);
+      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb, shareEnv);
       let resolveExit;
       const state = {
         handle,
@@ -274,6 +279,7 @@
     },
     workerData: null,
     parentPort: null,
+    SHARE_ENV,
     resourceLimits: {},
     MessageChannel: globalThis.MessageChannel,
     MessagePort: globalThis.MessagePort,

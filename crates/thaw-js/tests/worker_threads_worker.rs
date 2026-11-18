@@ -416,6 +416,104 @@ fn is_internal_thread_is_false_and_argument_errors_are_async() {
 }
 
 #[test]
+fn share_env_symbol_is_a_symbol_named_as_in_node() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      console.log(typeof wt.SHARE_ENV, String(wt.SHARE_ENV), wt.SHARE_ENV === wt.SHARE_ENV);";
+    assert_eq!(
+        run_main(src),
+        "symbol Symbol(nodejs.worker_threads.SHARE_ENV) true"
+    );
+}
+
+#[test]
+fn share_env_worker_sees_parent_writes_and_its_writes_reach_the_parent() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      process.env.SV_A = 'parent1';
+      process.env.SV_DEL = 'gone';
+      (async () => {
+        const worker = new wt.Worker(`
+          const { parentPort } = require('node:worker_threads');
+          parentPort.on('message', () => {
+            parentPort.postMessage([process.env.SV_A, process.env.SV_AFTER, process.env.SV_DEL === undefined, 'SV_DEL' in process.env, Object.keys(process.env).includes('SV_A')].join(' '));
+            process.env.SV_B = 'fromworker';
+            process.env.SV_N = 7;
+            process.env.SV_U = undefined;
+            parentPort.postMessage('wrote');
+          });
+          parentPort.postMessage('ready');
+          setInterval(() => {}, 1000);
+        `, { eval: true, env: wt.SHARE_ENV });
+        const inbox = [];
+        let wake = null;
+        worker.on('message', (m) => { inbox.push(m); if (wake) { const f = wake; wake = null; f(); } });
+        const next = () => (inbox.length ? Promise.resolve(inbox.shift()) : new Promise((r) => { wake = () => r(inbox.shift()); }));
+        console.log('main got', await next());
+        process.env.SV_AFTER = 'afterstart';
+        delete process.env.SV_DEL;
+        worker.postMessage('read');
+        console.log('main got', await next());
+        console.log('main got', await next());
+        await worker.terminate();
+        console.log('main after', process.env.SV_B, typeof process.env.SV_N, process.env.SV_N, process.env.SV_U, Object.keys(process.env).includes('SV_B'));
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        "main got ready|main got parent1 afterstart true false true|main got wrote|main after fromworker string 7 undefined true"
+    );
+}
+
+#[test]
+fn default_and_object_env_are_copies_that_the_parent_never_sees() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      process.env.SV_C = 'parent1';
+      const alive = 'setInterval(() => {}, 1000);';
+      const copySource = `
+        const { parentPort } = require('node:worker_threads');
+        parentPort.postMessage('view ' + process.env.SV_C + ' ' + Object.keys(process.env).includes('SV_C'));
+        process.env.SV_B = 'fromworker';
+        parentPort.postMessage('wrote');
+        ${alive}
+      `;
+      const objectSource = `
+        const { parentPort } = require('node:worker_threads');
+        parentPort.postMessage('view ' + process.env.SV_O + ' ' + process.env.SV_C + ' ' + Object.keys(process.env).join(','));
+        process.env.SV_B = 'fromworker';
+        parentPort.postMessage('wrote');
+        ${alive}
+      `;
+      function inboxOf(w) {
+        const items = [];
+        let wake = null;
+        w.on('message', (m) => { items.push(m); if (wake) { const f = wake; wake = null; f(); } });
+        return () => (items.length ? Promise.resolve(items.shift()) : new Promise((r) => { wake = () => r(items.shift()); }));
+      }
+      (async () => {
+        const w1 = new wt.Worker(copySource, { eval: true });
+        const n1 = inboxOf(w1);
+        console.log('default', await n1());
+        console.log('default', await n1());
+        await w1.terminate();
+        console.log('default after', process.env.SV_B);
+        const w2 = new wt.Worker(objectSource, { eval: true, env: { SV_O: '1' } });
+        const n2 = inboxOf(w2);
+        console.log('object', await n2());
+        console.log('object', await n2());
+        await w2.terminate();
+        console.log('object after', process.env.SV_B, process.env.SV_O);
+        const w3 = new wt.Worker(copySource, { eval: true, env: process.env });
+        const n3 = inboxOf(w3);
+        console.log('copy-env', await n3());
+        console.log('copy-env', await n3());
+        await w3.terminate();
+        console.log('copy-env after', process.env.SV_B);
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        "default view parent1 true|default wrote|default after undefined|object view 1 undefined SV_O|object wrote|object after undefined undefined|copy-env view parent1 true|copy-env wrote|copy-env after undefined"
+    );
+}
+
+#[test]
 fn worker_post_message_moves_an_array_buffer_and_detaches_the_sender() {
     let src = r#"const wt = __thaw_worker_threads_exports;
       (async () => {

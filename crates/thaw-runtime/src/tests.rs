@@ -5531,6 +5531,83 @@ fn native_promise_hooks_await_wrapper_of_a_literal_is_triggered_by_the_async_fun
 }
 
 #[test]
+fn native_promise_hooks_all_children_run_as_reactions_triggered_by_each_child() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    take_hook_events();
+    thaw_runtime_async_hooks_set(1, Some(record_hook_event));
+    let first = thaw_promise_new();
+    let second = thaw_promise_new();
+    let (k1, k2) = unsafe { ((*first).hook_key, (*second).hook_key) };
+    take_hook_events();
+    let children = [first, second];
+    let sizes = [1usize, 1];
+    let joined =
+        unsafe { thaw_promise_all_typed(children.as_ptr(), sizes.as_ptr(), children.len()) };
+    let ko = unsafe { (*joined).hook_key };
+    // The output first, then one reaction per child in argument order, each triggered by its child.
+    let (r1, r2) = match take_hook_events().as_slice() {
+        [(0, out, 0), (0, r1, p1), (0, r2, p2)] if *out == ko && *p1 == k1 && *p2 == k2 => {
+            (*r1, *r2)
+        }
+        other => panic!("all must init its output, then a reaction per child: {other:?}"),
+    };
+    let flag = 1u8;
+    assert_eq!(thaw_promise_resolve(first, &flag), 1);
+    assert_eq!(take_hook_events(), vec![(3, k1, 0)]);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(take_hook_events(), vec![(1, r1, 0), (3, r1, 0), (2, r1, 0)]);
+    assert_eq!(thaw_promise_resolve(second, &flag), 1);
+    assert_eq!(take_hook_events(), vec![(3, k2, 0)]);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    // The last child's reaction settles the output inside its own before/after.
+    assert_eq!(
+        take_hook_events(),
+        vec![(1, r2, 0), (3, ko, 0), (3, r2, 0), (2, r2, 0)]
+    );
+    thaw_runtime_async_hooks_set(0, None);
+    unsafe { thaw_promise_destroy(joined) };
+}
+
+#[test]
+fn native_promise_hooks_race_losers_still_run_their_reaction_after_the_winner_settles_the_output() {
+    let _guard = HOOK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    take_hook_events();
+    thaw_runtime_async_hooks_set(1, Some(record_hook_event));
+    let winner = thaw_promise_new();
+    let loser = thaw_promise_new();
+    let (kw, kl) = unsafe { ((*winner).hook_key, (*loser).hook_key) };
+    take_hook_events();
+    let children = [winner, loser];
+    let raced = unsafe { thaw_promise_race(children.as_ptr(), children.len()) };
+    let ko = unsafe { (*raced).hook_key };
+    let (rw, rl) = match take_hook_events().as_slice() {
+        [(0, out, 0), (0, rw, pw), (0, rl, pl)] if *out == ko && *pw == kw && *pl == kl => {
+            (*rw, *rl)
+        }
+        other => panic!("race must init its output, then a reaction per child: {other:?}"),
+    };
+    let flag = 1u8;
+    assert_eq!(thaw_promise_resolve(winner, &flag), 1);
+    assert_eq!(take_hook_events(), vec![(3, kw, 0)]);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    // The winner's reaction forwards to the output inside its before/after.
+    assert_eq!(
+        take_hook_events(),
+        vec![(1, rw, 0), (3, ko, 0), (3, rw, 0), (2, rw, 0)]
+    );
+    assert_eq!(thaw_promise_resolve(loser, &flag), 1);
+    assert_eq!(take_hook_events(), vec![(3, kl, 0)]);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(take_hook_events(), vec![(1, rl, 0), (3, rl, 0), (2, rl, 0)]);
+    thaw_runtime_async_hooks_set(0, None);
+    unsafe { thaw_promise_destroy(raced) };
+}
+
+#[test]
 fn native_promise_hooks_stay_silent_for_linked_promises_while_off() {
     let _guard = HOOK_TEST_LOCK
         .lock()

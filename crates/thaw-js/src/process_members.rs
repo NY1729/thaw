@@ -591,7 +591,7 @@ fn load_env_file(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
             return Err(Ctl::Throw(err));
         }
     };
-    apply_dotenv(&text);
+    apply_dotenv(it, &text);
     Ok(Value::Undefined)
 }
 
