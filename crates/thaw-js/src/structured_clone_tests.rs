@@ -122,3 +122,56 @@ console.log(structuredClone(d).getTime(), structuredClone(ab).byteLength, struct
         r##"DataCloneError 25 Cannot clone object of unsupported type.|DataCloneError 25 Cannot clone object of unsupported type.|DataCloneError 25 Cannot clone object of unsupported type.|DataCloneError 25 Cannot clone object of unsupported type.|DataCloneError 25 Cannot clone object of unsupported type.|0 3 2"##
     );
 }
+
+// node:worker_threads moveMessagePortToContext (Node 22.23.1 expectations, thaw-tmp/we1-scratch/m1-m3.js).
+// Runs the event loop after the source, so a started port's delivery is seen. vm_context.js (the real createContext)
+// is loaded first, as the vm realm tests do.
+const VM_PRELUDE: &str =
+    include_str!("../../thaw-registry/src/registry/builtins/system/vm_context.js");
+
+fn one_with_jobs(src: &str) -> String {
+    let mut it = Interp::new();
+    match it.run(&format!("{VM_PRELUDE}\n{src}")) {
+        Ok(_) => {
+            it.run_event_loop().unwrap();
+            it.out.join("|")
+        }
+        Err(Ctl::Throw(v)) => format!("Uncaught {}", it.to_str(&v)),
+        Err(_) => "stray completion".into(),
+    }
+}
+
+#[test]
+fn move_message_port_to_context_argument_errors_match_node() {
+    assert_eq!(
+        one_with_jobs(
+            r##"const wt=__thaw_worker_threads_exports; const {port1,port2}=new MessageChannel(); const sb=createContext({});
+const e=f=>{try{f();return 'ok'}catch(x){return x.name+' '+x.code+' '+x.message}};
+console.log([e(()=>wt.moveMessagePortToContext()), e(()=>wt.moveMessagePortToContext({},sb)), e(()=>wt.moveMessagePortToContext(port1)), e(()=>wt.moveMessagePortToContext(port1,{})), e(()=>wt.moveMessagePortToContext(port1,null)), e(()=>wt.moveMessagePortToContext(port1,sb))].join(' ; '));
+port1.close(); console.log(e(()=>wt.moveMessagePortToContext(port1,sb))); port2.close();"##
+        ),
+        r##"TypeError ERR_INVALID_ARG_TYPE The "port" argument must be a MessagePort instance ; TypeError ERR_INVALID_ARG_TYPE The "port" argument must be a MessagePort instance ; TypeError ERR_INVALID_ARG_TYPE Invalid context argument ; TypeError ERR_INVALID_ARG_TYPE Invalid context argument ; TypeError ERR_INVALID_ARG_TYPE Invalid context argument ; ok|Error ERR_CLOSED_MESSAGE_PORT Cannot send data on closed MessagePort"##
+    );
+}
+
+#[test]
+fn move_message_port_to_context_delivers_only_after_start_into_the_context_realm() {
+    assert_eq!(
+        one_with_jobs(
+            r##"const wt=__thaw_worker_threads_exports; const sb=createContext({});
+const ctxObject=runInContext('Object', sb);
+const ctxArray=runInContext('Array', sb);
+const c=new MessageChannel(); const m=wt.moveMessagePortToContext(c.port1, sb);
+console.log(typeof m, m instanceof MessagePort, 'onmessage' in m, typeof m.start, typeof m.postMessage, typeof m.close, typeof m.hasRef);
+m.onmessage=function(ev){ console.log('got', this===m, ev.target===m, ev.type, ev.ports.length, ev.data.constructor===ctxObject, ev.data.arr instanceof ctxArray, Object.getPrototypeOf(ev.data)===ctxObject.prototype, ev.data.arr.constructor===ctxArray); };
+c.port2.postMessage({arr:[1,2]});
+const quiet=new MessageChannel(); const n=wt.moveMessagePortToContext(quiet.port1, sb);
+n.onmessage=()=>console.log('unstarted delivered');
+quiet.port2.postMessage(1); console.log('before start');
+m.start(); m.start(); wt.moveMessagePortToContext(quiet.port1, sb);
+c.port2.postMessage({arr:[3]});
+setTimeout(()=>{c.port1.close(); c.port2.close(); quiet.port1.close(); quiet.port2.close();}, 0);"##
+        ),
+        r##"object false false function function function function|before start|got true true message 0 true true true true|got true true message 0 true true true true"##
+    );
+}
