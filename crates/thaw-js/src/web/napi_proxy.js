@@ -565,6 +565,7 @@
       if (!plain && value.__thaw_napi_handle__) return proxyForHandle(value.__thaw_napi_handle__);
       if (!plain && value.__thaw_napi_binary__) return binaryOf(value, origins, path);
       if (!plain && hasOwn(value, '__thaw_napi_promise__')) return promiseOf(value.__thaw_napi_promise__);
+      if (!plain && value.type === 'Buffer' && Array.isArray(value.data) && bufferCtor) return bufferCtor.from(value.data);
       if (Array.isArray(value)) return value.map((child, index) => decodeValue(child, origins, path.concat([index])));
       const decoded = {};
       Object.keys(value).forEach(key => {
