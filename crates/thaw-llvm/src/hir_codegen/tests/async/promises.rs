@@ -2606,3 +2606,310 @@ fn promise_then_callback_returning_a_promise_flattens_like_node() {
         "returned 2\nuntyped 3\n"
     );
 }
+
+// A combinator consumes each child handle it is given. A borrowed variable
+// must be retained for that consumption, or the stack slot's cleanup frees the
+// pending Promise before its timer resolves it. Expected output matches Node 22.
+#[test]
+fn promise_all_over_borrowed_pending_variable_settles() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.all([slow]).then((v: number[]): void => { console.log('all', v.join(',')); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_all_borrowed_pending_settles"), "all 3\nlater\n");
+}
+
+#[test]
+fn promise_race_over_borrowed_pending_variable_settles() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.race([slow]).then((v: number): void => { console.log('race', v); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_race_borrowed_pending_settles"), "race 3\nlater\n");
+}
+
+#[test]
+fn promise_any_over_borrowed_pending_variable_settles() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.any([slow]).then((v: number): void => { console.log('any', v); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_any_borrowed_pending_settles"), "any 3\nlater\n");
+}
+
+#[test]
+fn promise_all_settled_over_borrowed_pending_variable_settles() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.allSettled([slow]).then((v: any[]): void => {
+                console.log('settled', v.length, v[0].status, v[0].value);
+            });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_all_settled_borrowed_pending_settles"),
+        "settled 1 fulfilled 3\nlater\n"
+    );
+}
+
+#[test]
+fn promise_all_and_race_over_two_borrowed_pending_variables_settle() {
+    let source = r#"
+        function main(): void {
+            const a = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            const b = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(4), 2); });
+            Promise.all([a, b]).then((v: number[]): void => { console.log('all', v.join(',')); });
+            Promise.race([a, b]).then((v: number): void => { console.log('race', v); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_all_race_two_borrowed_pending_settle"),
+        "race 3\nall 3,4\nlater\n"
+    );
+}
+
+#[test]
+fn promise_all_over_borrowed_pending_array_variable_settles() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            const arr: Promise<number>[] = [slow];
+            Promise.all(arr).then((v: number[]): void => { console.log('all', v.join(',')); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_all_borrowed_array_settles"), "all 3\nlater\n");
+}
+
+// Owned temporaries are consumed as-is (no extra retain). A duplicate-free
+// race over a retained handle plus a fresh resolved temporary must not double-free.
+#[test]
+fn promise_race_mixing_borrowed_and_owned_temporary_does_not_double_free() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.race([slow, Promise.resolve(9)]).then((v: number): void => { console.log('race2', v); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_race_borrowed_and_owned_no_double_free"), "race2 9\nlater\n");
+}
+
+// The combinator's retain must not break later use of the same handle.
+#[test]
+fn promise_all_over_borrowed_pending_variable_still_usable_afterwards() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.all([slow]).then((v: number[]): void => { console.log('all', v.join(',')); });
+            slow.then((v: number): void => { console.log('slow-then', v); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_all_borrowed_variable_still_usable"),
+        "slow-then 3\nall 3\nlater\n"
+    );
+}
+
+#[test]
+fn promise_all_over_the_same_borrowed_pending_variable_twice_settles() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.all([slow, slow]).then((v: number[]): void => { console.log('all', v.join(',')); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_all_duplicate_borrowed_settles"), "all 3,3\nlater\n");
+}
+
+#[test]
+fn promise_race_over_the_same_borrowed_pending_variable_twice_settles() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.race([slow, slow]).then((v: number): void => { console.log('race', v); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_race_duplicate_borrowed_settles"), "race 3\nlater\n");
+}
+
+#[test]
+fn promise_any_over_the_same_borrowed_pending_variable_twice_settles() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.any([slow, slow]).then((v: number): void => { console.log('any', v); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_any_duplicate_borrowed_settles"), "any 3\nlater\n");
+}
+
+#[test]
+fn promise_all_over_an_array_holding_an_owned_temporary_settles() {
+    let source = r#"
+        function main(): void {
+            const arr: Promise<number>[] = [Promise.resolve(9)];
+            Promise.all(arr).then((v: number[]): void => { console.log('arr', v.join(',')); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_all_owned_temporary_array_settles"), "arr 9\nlater\n");
+}
+
+#[test]
+fn promise_all_over_a_conditional_borrowed_branch_settles() {
+    let source = r#"
+        function run(c: boolean): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.all([c ? slow : Promise.resolve(9)]).then((v: number[]): void => { console.log('all', v.join(',')); });
+        }
+        function main(): void {
+            run(true);
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_all_conditional_borrowed_branch_true"), "all 3\nlater\n");
+}
+
+#[test]
+fn promise_all_over_a_conditional_owned_branch_settles() {
+    let source = r#"
+        function run(c: boolean): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.all([c ? slow : Promise.resolve(9)]).then((v: number[]): void => { console.log('all', v.join(',')); });
+        }
+        function main(): void {
+            run(false);
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_all_conditional_owned_branch_false"), "all 9\nlater\n");
+}
+
+// Repeated-handle callers that reach the combinators through other paths: an
+// await inside an async frame, a tuple, an array variable, a parameter (borrowed),
+// and a property read. Each occurrence must be retained, or the runtime frees early.
+#[test]
+fn promise_all_duplicate_inside_async_await_settles() {
+    let source = r#"
+        async function go(): Promise<void> {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            const v: number[] = await Promise.all([slow, slow]);
+            console.log('await-all', v.join(','));
+        }
+        function main(): void {
+            go();
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_all_duplicate_await_in_async"), "await-all 3,3\nlater\n");
+}
+
+#[test]
+fn promise_race_duplicate_inside_async_await_settles() {
+    let source = r#"
+        async function go(): Promise<void> {
+            const a = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            const v: number = await Promise.race([a, a]);
+            console.log('await-race', v);
+        }
+        function main(): void {
+            go();
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_race_duplicate_await_in_async"), "await-race 3\nlater\n");
+}
+
+#[test]
+fn promise_all_tuple_with_a_repeated_variable_settles() {
+    let source = r#"
+        async function numberValue(): Promise<number> {
+            await sleep(15);
+            return 3;
+        }
+        async function stringValue(): Promise<string> {
+            await sleep(1);
+            return "x";
+        }
+
+        async function main(): Promise<void> {
+            const slow = numberValue();
+            const values: [number, number, string] = await Promise.all([slow, slow, stringValue()]);
+            console.log(values[0]);
+            console.log(values[1]);
+            console.log(values[2]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_all_tuple_duplicate_settles"), "3\n3\nx\n");
+}
+
+#[test]
+fn promise_all_over_an_array_with_duplicate_variables_settles() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            const arr: Promise<number>[] = [slow, slow];
+            Promise.all(arr).then((v: number[]): void => { console.log('arr', v.join(',')); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_all_array_duplicate_variables_settles"), "arr 3,3\nlater\n");
+}
+
+#[test]
+fn promise_all_over_a_borrowed_parameter_twice_settles() {
+    let source = r#"
+        function run(p: Promise<number>): void {
+            Promise.all([p, p]).then((v: number[]): void => { console.log('param', v.join(',')); });
+        }
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            run(slow);
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_all_borrowed_parameter_duplicate_settles"), "param 3,3\nlater\n");
+}
+
+#[test]
+fn promise_all_over_a_property_read_twice_settles() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            const box: { p: Promise<number> } = { p: slow };
+            Promise.all([box.p, box.p]).then((v: number[]): void => { console.log('prop', v.join(',')); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_all_property_read_duplicate_settles"), "prop 3,3\nlater\n");
+}
+
+#[test]
+fn promise_race_over_a_repeated_variable_settles() {
+    let source = r#"
+        function main(): void {
+            const slow = new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => r(3), 1); });
+            Promise.race([slow, slow]).then((v: number): void => { console.log('race-dup', v); });
+            setTimeout((): void => { console.log('later'); }, 50);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_race_duplicate_variable_settles"), "race-dup 3\nlater\n");
+}
+

@@ -1354,6 +1354,12 @@ fn package_is_live(handle: usize) -> bool {
         || RUNNING.with(|r| r.borrow().contains_key(&handle))
 }
 
+/// Every live package handle, in slot order: the realms a callback global may live in.
+pub(crate) fn live_packages() -> Vec<usize> {
+    let count = PACKAGES.with(|ps| ps.borrow().len());
+    (0..count).filter(|&h| package_is_live(h)).collect()
+}
+
 /// `new Function(...args)` from the JSON array of the constructor's string arguments (the last is the
 /// body); the function is kept as a handle. The counterpart of QuickJS's `thaw_js_new_function`.
 #[no_mangle]

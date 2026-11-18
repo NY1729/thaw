@@ -855,7 +855,6 @@ const THAW_JS_WORKER_THREADS_FORM: &str =
 /// `node:worker_threads` names thaw-js does not serve yet (`Worker` runs on thaw-js; its options and the rest of the
 /// module do not). A program that names one keeps the module on QuickJS.
 const THAW_JS_WORKER_THREADS_UNSUPPORTED: &[&str] = &[
-    "postMessageToThread",
     "SHARE_ENV",
     "moveMessagePortToContext",
     "transferList",

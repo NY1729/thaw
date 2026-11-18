@@ -55,6 +55,72 @@
   const encode = value => __thaw_worker_encode(value);
   const { Readable, Writable, hexToBytes } = __thaw_worker_stream;
 
+  // postMessageToThread (W-D). The message runs the destination's 'workerMessage' listeners on its own loop, and the
+  // ack that comes back settles the sender's promise. Ack ids are per realm: pendingSends is this realm's table.
+  // Only the main thread (0) and its workers are reachable: a worker's send to another worker is FAILED.
+  const liveThreads = new Map(); // threadId -> worker state, while the worker runs
+  const pendingSends = new Map();
+  let nextAck = 1;
+  function threadError(code, message, cause, type = Error) {
+    const error = new type(message);
+    error.code = code;
+    if (cause !== undefined) error.cause = cause;
+    return error;
+  }
+  // The sender's side of an ack: 'ok', 'failed' (no thread or no listener), 'error' (the listener threw), 'timeout'.
+  function settleSend(ack, status, wire) {
+    const entry = pendingSends.get(ack);
+    if (entry === undefined) return;
+    pendingSends.delete(ack);
+    clearTimeout(entry.timer);
+    if (status === 'ok') entry.resolve(undefined);
+    else if (status === 'timeout') entry.reject(threadError('ERR_WORKER_MESSAGING_TIMEOUT', 'Sending a message to another thread timed out'));
+    else if (status === 'error') entry.reject(threadError('ERR_WORKER_MESSAGING_ERRORED', 'The destination thread threw an error while processing the message', wire === '' ? undefined : decode(wire)));
+    else entry.reject(threadError('ERR_WORKER_MESSAGING_FAILED', 'Cannot find the destination thread or listener'));
+  }
+  // The receiver's side: run this realm's 'workerMessage' listeners, then answer through reply(ack, status, wire).
+  function deliverThreadMessage(ack, source, wire, reply) {
+    if (globalThis.process.listenerCount('workerMessage') === 0) return reply(ack, 'failed', '');
+    try {
+      globalThis.process.emit('workerMessage', decode(wire), source);
+    } catch (error) {
+      let cause = '';
+      try { cause = encode(error); } catch (_) { /* not cloneable: the error has no cause */ }
+      return reply(ack, 'error', cause);
+    }
+    return reply(ack, 'ok', '');
+  }
+  // route(target) is the channel to a thread: deliver(ack, wire), or undefined when there is no such thread.
+  function postToThread(selfId, route, target, value, transferList, timeout) {
+    if (timeout !== undefined && typeof timeout !== 'number') {
+      const received = typeof timeout === 'string' ? `type string ('${timeout}')` : `type ${typeof timeout}`;
+      return Promise.reject(threadError('ERR_INVALID_ARG_TYPE', `The "timeout" argument must be of type number. Received ${received}`, undefined, TypeError));
+    }
+    if (timeout !== undefined && !(timeout >= 0)) {
+      return Promise.reject(threadError('ERR_OUT_OF_RANGE', `The value of "timeout" is out of range. It must be >= 0. Received ${timeout}`, undefined, RangeError));
+    }
+    if (target === selfId) return Promise.reject(threadError('ERR_WORKER_MESSAGING_SAME_THREAD', 'Cannot sent a message to the same thread'));
+    if (transferList !== undefined && Array.from(transferList).length) {
+      return Promise.reject(new DOMException('transfer lists are not supported on thaw-js yet', 'DataCloneError'));
+    }
+    let wire;
+    try { wire = encode(value); } catch (error) { return Promise.reject(error); }
+    return new Promise((resolve, reject) => {
+      const ack = nextAck++;
+      const entry = { resolve, reject, timer: undefined };
+      pendingSends.set(ack, entry);
+      if (timeout !== undefined) entry.timer = setTimeout(() => settleSend(ack, 'timeout', ''), timeout);
+      const deliver = route(target);
+      // an unknown thread fails on a later turn than a zero timeout, so timeout 0 still times out first (as in Node)
+      if (deliver === undefined) setTimeout(() => settleSend(ack, 'failed', ''), 0);
+      else deliver(ack, wire);
+    });
+  }
+  const mainRoute = target => {
+    const state = liveThreads.get(target);
+    return state === undefined ? undefined : (ack, wire) => __thaw_worker_thread_send(state.handle, 0, ack, wire);
+  };
+
   class Worker extends Emitter {
     constructor(source, options = {}) {
       super();
@@ -108,6 +174,7 @@
         resolveExit,
       };
       states.set(this, state);
+      liveThreads.set(threadId, state);
       byHandle.set(handle, this);
       Object.defineProperty(this, 'threadId', { value: threadId, enumerable: true });
       this.stdin = options.stdin === true ? new Writable((hex, end) => __thaw_worker_stdin(handle, hex, end)) : null;
@@ -169,6 +236,10 @@
         worker.emit('message', value);
       } else if (event.type === 'error') {
         worker.emit('error', decode(event.value));
+      } else if (event.type === 'thread') {
+        deliverThreadMessage(event.ack, worker.threadId, event.value, (ack, status, wire) => __thaw_worker_thread_ack(state.handle, ack, status, wire));
+      } else if (event.type === 'threadAck') {
+        settleSend(event.ack, event.status, event.value);
       } else if (event.type === 'stdout' || event.type === 'stderr') {
         const stream = event.type === 'stdout' ? worker.stdout : worker.stderr;
         stream.__thawPush(hexToBytes(event.value));
@@ -177,6 +248,7 @@
         state.exited = true;
         state.exitCode = event.code;
         byHandle.delete(event.handle);
+        liveThreads.delete(worker.threadId);
         // stdio ends before 'exit', as in Node (the events share one channel, so the data came first)
         for (const stream of [worker.stdout, worker.stderr]) {
           stream.__thawEnd();
@@ -194,8 +266,12 @@
 
   const workerThreadsExports = {
     isMainThread: true,
+    isInternalThread: false,
     threadId: 0,
     threadName: '',
+    postMessageToThread(target, value, transferList, timeout) {
+      return postToThread(0, mainRoute, target, value, transferList, timeout);
+    },
     workerData: null,
     parentPort: null,
     resourceLimits: {},

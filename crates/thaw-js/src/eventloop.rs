@@ -231,7 +231,7 @@ pub(crate) fn node_error(it: &mut Interp, kind: &str, code: &str, msg: &str) -> 
 }
 
 /// Resident set size in bytes: the second `/proc/self/statm` field (pages); 0 when unreadable.
-fn process_rss_bytes() -> u64 {
+pub(crate) fn process_rss_bytes() -> u64 {
     let pages = std::fs::read_to_string("/proc/self/statm")
         .ok()
         .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
@@ -1604,6 +1604,7 @@ impl Interp {
         let code = code.unwrap_or_else(|| self.exit_code());
         self.set_exit_code(Some(code as f64));
         self.emit_exit_event(code)?;
+        crate::mem_trace::mem_trace_report("exit");
         Ok(self.exit_code())
     }
 

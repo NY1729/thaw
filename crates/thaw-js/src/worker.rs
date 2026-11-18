@@ -32,6 +32,10 @@ enum Cmd {
     /// Stdin bytes as hex, and whether this is the end of the stream (`worker.stdin.end()`).
     Stdin(String, bool),
     Terminate,
+    /// `postMessageToThread` from thread `source`, and the sender's ack id (answered with `ThreadAck`).
+    Thread(u32, u32, String),
+    /// The answer to a `postMessageToThread` this worker sent: ack id, status, error wire.
+    ThreadAck(u32, String, String),
 }
 
 enum Evt {
@@ -41,6 +45,10 @@ enum Evt {
     Exit(i32),
     /// Captured stdout (fd 1) or stderr (fd 2) bytes as hex (only when the parent asked for them).
     Stdio(u8, String),
+    /// `postMessageToThread` from the worker to the parent: the worker's ack id, and the wire.
+    Thread(u32, String),
+    /// The parent's answer to a `postMessageToThread` the worker sent: ack id, status, error wire.
+    ThreadAck(u32, String, String),
 }
 
 struct Worker {
@@ -216,7 +224,7 @@ fn run_worker(
         // messages the parent sent that this worker never read still carry their blocks
         if let Some(side) = &it.worker.side {
             while let Ok(cmd) = side.rx.try_recv() {
-                if let Cmd::Message(v) = cmd {
+                if let Cmd::Message(v) | Cmd::Thread(_, _, v) = cmd {
                     release_wire(&v);
                 }
             }
@@ -326,6 +334,15 @@ pub(crate) fn poll(it: &mut Interp) -> String {
                     let name = if fd == 1 { "stdout" } else { "stderr" };
                     format!(r#"{{"handle":{id},"type":"{name}","value":"{hex}"}}"#)
                 }
+                Evt::Thread(ack, v) => format!(
+                    r#"{{"handle":{id},"type":"thread","ack":{ack},"value":{}}}"#,
+                    quoted(&v)
+                ),
+                Evt::ThreadAck(ack, status, v) => format!(
+                    r#"{{"handle":{id},"type":"threadAck","ack":{ack},"status":{},"value":{}}}"#,
+                    quoted(&status),
+                    quoted(&v)
+                ),
             });
         }
     }
@@ -333,7 +350,7 @@ pub(crate) fn poll(it: &mut Interp) -> String {
         if w.exited {
             // events the parent never polled still carry their blocks
             while let Ok(e) = w.rx.try_recv() {
-                if let Evt::Message(v) | Evt::Error(v) = e {
+                if let Evt::Message(v) | Evt::Error(v) | Evt::Thread(_, v) = e {
                     release_wire(&v);
                 }
             }
@@ -352,6 +369,15 @@ pub(crate) fn poll(it: &mut Interp) -> String {
                 Cmd::Stdin(hex, end) => {
                     items.push(format!(r#"{{"type":"stdin","value":"{hex}","end":{end}}}"#))
                 }
+                Cmd::Thread(source, ack, v) => items.push(format!(
+                    r#"{{"type":"thread","source":{source},"ack":{ack},"value":{}}}"#,
+                    quoted(&v)
+                )),
+                Cmd::ThreadAck(ack, status, v) => items.push(format!(
+                    r#"{{"type":"threadAck","ack":{ack},"status":{},"value":{}}}"#,
+                    quoted(&status),
+                    quoted(&v)
+                )),
                 // the parent already set the flag; setting it here too covers a command sent alone
                 Cmd::Terminate => side.interrupt.store(true, Ordering::Relaxed),
             }
@@ -399,6 +425,48 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_stdin", f, true);
+    // postMessageToThread (W-D): the parent sends to a worker (`source` is the sender's thread id) and answers a
+    // worker's send (`ack` names the worker's pending send); a worker sends to the parent and answers a parent's send.
+    let f = it.native(|it, _, a| {
+        let h = it.num(&arg(a, 0)) as u32;
+        let (source, ack) = (it.num(&arg(a, 1)) as u32, it.num(&arg(a, 2)) as u32);
+        let wire = it.to_str(&arg(a, 3)).to_string();
+        if let Some(w) = it.worker.workers.get(&h) {
+            let _ = w.tx.send(Cmd::Thread(source, ack, wire));
+        }
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_worker_thread_send", f, true);
+    let f = it.native(|it, _, a| {
+        let h = it.num(&arg(a, 0)) as u32;
+        let ack = it.num(&arg(a, 1)) as u32;
+        let (status, wire) = (
+            it.to_str(&arg(a, 2)).to_string(),
+            it.to_str(&arg(a, 3)).to_string(),
+        );
+        if let Some(w) = it.worker.workers.get(&h) {
+            let _ = w.tx.send(Cmd::ThreadAck(ack, status, wire));
+        }
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_worker_thread_ack", f, true);
+    let f = it.native(|it, _, a| {
+        let ack = it.num(&arg(a, 0)) as u32;
+        let wire = it.to_str(&arg(a, 1)).to_string();
+        to_parent(it, Evt::Thread(ack, wire));
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_worker_thread_to_parent", f, true);
+    let f = it.native(|it, _, a| {
+        let ack = it.num(&arg(a, 0)) as u32;
+        let (status, wire) = (
+            it.to_str(&arg(a, 1)).to_string(),
+            it.to_str(&arg(a, 2)).to_string(),
+        );
+        to_parent(it, Evt::ThreadAck(ack, status, wire));
+        Ok(Value::Undefined)
+    });
+    g.declare("__thaw_worker_thread_reply", f, true);
     let f = it.native(|it, _, a| {
         let h = it.num(&arg(a, 0)) as u32;
         if let Some(w) = it.worker.workers.get(&h) {

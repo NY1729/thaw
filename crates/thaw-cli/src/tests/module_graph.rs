@@ -1910,3 +1910,109 @@ fn qualified_namespace_type_annotation_builds_and_runs() {
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "/c ?d=1\n");
 }
+
+/// Bundles `source` with `node:path` exporting `join` and `basename` and returns every
+/// expression-position identifier left in the bundled module, in source order.
+fn namespace_value_idents(source: &str) -> Vec<String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+
+    #[derive(Default)]
+    struct Idents(Vec<String>);
+    impl Visit for Idents {
+        fn visit_expr(&mut self, expr: &thaw_parser::ast::Expr) {
+            if let thaw_parser::ast::Expr::Ident(ident) = expr {
+                self.0.push(ident.sym.to_string());
+            }
+            expr.visit_children_with(self);
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("thaw namespace value {}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, source).unwrap();
+    let external_exports = std::collections::HashMap::from([(
+        "node:path".to_string(),
+        std::collections::HashMap::from([
+            ("join".to_string(), "__thaw_path_join".to_string()),
+            ("basename".to_string(), "__thaw_path_basename".to_string()),
+        ]),
+    )]);
+    let module = module_graph::bundle(
+        &entry,
+        source,
+        &external_exports,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    let mut idents = Idents::default();
+    module.visit_with(&mut idents);
+    idents.0
+}
+
+#[test]
+fn bare_namespace_value_rewrites_to_a_namespace_object() {
+    let idents = namespace_value_idents(
+        "import * as M from 'node:path';\n\
+         function main(): void { const m: any = M; console.log(typeof M, m); }",
+    );
+    assert!(!idents.contains(&"M".to_string()), "{idents:?}");
+    // The synthesized object names the namespace's exports.
+    assert!(idents.contains(&"__thaw_path_join".to_string()), "{idents:?}");
+    assert!(idents.contains(&"__thaw_path_basename".to_string()), "{idents:?}");
+}
+
+#[test]
+fn shadowed_namespace_value_stays_the_local_binding() {
+    let idents = namespace_value_idents(
+        "import * as M from 'node:path';\n\
+         function main(M: any): void { const m: any = M; }",
+    );
+    assert!(idents.contains(&"M".to_string()), "{idents:?}");
+    assert!(!idents.contains(&"__thaw_path_basename".to_string()), "{idents:?}");
+}
+
+#[test]
+fn namespace_member_access_keeps_the_flattened_export_and_skips_the_object() {
+    let idents = namespace_value_idents(
+        "import * as M from 'node:path';\n\
+         function main(): void { console.log(M.join('a', 'b')); }",
+    );
+    assert!(!idents.contains(&"M".to_string()), "{idents:?}");
+    assert!(idents.contains(&"__thaw_path_join".to_string()), "{idents:?}");
+    // Only a bare use builds the object, so `basename` is not linked.
+    assert!(!idents.contains(&"__thaw_path_basename".to_string()), "{idents:?}");
+}
+
+#[test]
+fn bare_namespace_value_builds_and_runs() {
+    let (stdout, stderr, code) = run_async_streams_program(
+        "bare-namespace-path",
+        "import * as M from 'node:path';\n\
+         function main(): void { const m: any = M; console.log(typeof m.join, m.join('a', 'b'), typeof M, Object.keys(M).includes('basename')); }\n",
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "function a/b object true\n");
+}
+
+#[test]
+fn bare_namespace_value_builds_and_runs_for_os_and_url() {
+    let (stdout, stderr, code) = run_async_streams_program(
+        "bare-namespace-os",
+        "import * as O from 'node:os';\n\
+         function main(): void { const m: any = O; console.log(typeof m.platform, typeof O, Object.keys(O).includes('platform'), m.EOL === O.EOL); }\n",
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "function object true true\n");
+
+    let (stdout, stderr, code) = run_async_streams_program(
+        "bare-namespace-url",
+        "import * as U from 'node:url';\n\
+         function main(): void { const m: any = U; console.log(typeof m.URL, typeof U, Object.keys(U).includes('URL'), m.fileURLToPath('file:///a/b')); }\n",
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "function object true /a/b\n");
+}

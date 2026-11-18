@@ -4140,3 +4140,35 @@ fn object_prototype_to_string_of_json_value_reads_runtime_tag() {
         "an any-typed operand must be tagged through the runtime brand:\n{source}"
     );
 }
+
+/// A void call handed to a dynamic (`any`/`unknown`/JsValue) slot evaluates the call and
+/// yields the dynamic `undefined`, in every slot `coerce_to_declared` serves: return,
+/// `const` annotation, argument and expression-bodied arrow.
+#[test]
+fn a_void_call_in_a_dynamic_slot_yields_dynamic_undefined() {
+    let program = lower(
+        r#"
+            function noop(): void { console.log("x"); }
+            function take(v: any): any { return v; }
+            function f(): any { return noop(); }
+            function g(): unknown { const h: any = noop(); return h; }
+            function k(): any { return take(noop()); }
+            function main(): void {
+                const arrow = (): any => noop();
+                console.log(f(), g(), k(), arrow());
+            }
+        "#,
+    );
+    for name in ["f", "g", "k"] {
+        let function = program
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap_or_else(|| panic!("function `{name}` missing"));
+        let body = format!("{:?}", function.body);
+        assert!(
+            body.contains("EvalThen(Call(Var(\"noop\")"),
+            "`{name}` should evaluate the void call then yield the dynamic undefined:\n{body}"
+        );
+    }
+}
