@@ -2913,3 +2913,37 @@ fn promise_race_over_a_repeated_variable_settles() {
     assert_eq!(compile_and_run(source, "promise_race_duplicate_variable_settles"), "race-dup 3\nlater\n");
 }
 
+// A rejected input written inline in a dynamic (`any`-typed) combinator call must reach the
+// combinator, not throw at its own call (`Uncaught: 1` before the fix).
+#[test]
+fn dynamic_promise_combinators_consume_rejected_inline_inputs() {
+    let source = r#"
+        function main(): void {
+            const P: any = Promise;
+            P.any([P.reject(1), P.resolve(2)]).then((v: any): void => { console.log('any ' + v); });
+            P.allSettled([P.resolve(1), P.reject(2)]).then((v: any): void => { console.log(JSON.stringify(v)); });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_promise_any_allsettled_inline_rejections"),
+        "any 2\n[{\"status\":\"fulfilled\",\"value\":1},{\"status\":\"rejected\",\"reason\":2}]\n"
+    );
+}
+
+#[test]
+fn dynamic_promise_all_race_any_reject_paths_consume_inline_rejections() {
+    let source = r#"
+        function main(): void {
+            const P: any = Promise;
+            P.all([P.reject(3), P.resolve(4)]).catch((e: any): void => { console.log('all ' + e); });
+            P.race([P.reject(5), P.resolve(6)]).catch((e: any): void => { console.log('race ' + e); });
+            P.any([P.reject(7), P.reject(8)]).catch((e: any): void => { console.log('any ' + e.errors.join(',')); });
+            P.any([P.reject(9), P.resolve(10)]).then((v: any): void => { console.log('any-mixed ' + v); });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_promise_reject_paths_inline_rejections"),
+        "all 3\nrace 5\nany 7,8\nany-mixed 10\n"
+    );
+}
+

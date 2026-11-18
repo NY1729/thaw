@@ -5294,6 +5294,18 @@
     "source": "import { MessageChannel, moveMessagePortToContext } from 'node:worker_threads';\nimport { createContext } from 'node:vm';\nfunction main(): void {\n  const channel = new MessageChannel();\n  const port1: any = channel.port1;\n  const port2: any = channel.port2;\n  const ctx: any = createContext({});\n  const attempt = (run: () => unknown): string => { try { run(); return 'ok'; } catch (e: any) { return e.name + ' ' + e.code + ' ' + e.message; } };\n  const lines: string[] = [];\n  lines.push(attempt(() => moveMessagePortToContext()));\n  lines.push(attempt(() => moveMessagePortToContext({}, ctx)));\n  lines.push(attempt(() => moveMessagePortToContext(port1)));\n  lines.push(attempt(() => moveMessagePortToContext(port1, {})));\n  lines.push(attempt(() => moveMessagePortToContext(port1, null)));\n  lines.push(attempt(() => moveMessagePortToContext(port1, ctx)));\n  const closed = new MessageChannel();\n  closed.port1.close();\n  lines.push(attempt(() => moveMessagePortToContext(closed.port1, ctx)));\n  console.log(lines.join('\\n'));\n  port2.close();\n  closed.port2.close();\n}"
   },
   {
+    "name": "dynamic any-typed Promise.any and allSettled consume inline rejected inputs",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const P: any = Promise;\n  P.any([P.reject(1), P.resolve(2)]).then((v: any): void => { console.log('any ' + v); });\n  P.allSettled([P.resolve(1), P.reject(2)]).then((v: any): void => { console.log(JSON.stringify(v)); });\n  P.allSettled([P.reject(3), P.reject(4)]).then((v: any): void => { console.log('settled-all-rejected ' + v.length + ' ' + v[1].reason); });\n}\n"
+  },
+  {
+    "name": "dynamic any-typed Promise all race any reject paths and AggregateError errors order",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const P: any = Promise;\n  P.all([P.reject(3), P.resolve(4)]).catch((e: any): void => { console.log('all ' + e); });\n  P.race([P.reject(5), P.resolve(6)]).catch((e: any): void => { console.log('race ' + e); });\n  P.any([P.reject(7), P.reject(8)]).catch((e: any): void => { console.log('any ' + e.errors.join(',')); });\n  P.any([P.reject(9), P.resolve(10)]).then((v: any): void => { console.log('any-mixed ' + v); });\n}\n"
+  },
+  {
     "name": "net server destroys right after write, client still receives the echo",
     "expect": "matched",
     "expectQuickjsLink": false,
