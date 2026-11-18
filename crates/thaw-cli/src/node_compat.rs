@@ -155,6 +155,16 @@ fn run_node_compat_case(
     let source = case["source"]
         .as_str()
         .ok_or_else(|| format!("case `{name}` is missing `source`"))?;
+    // Absent `stdin` = closed stdin on both runs (deterministic); a string is piped to both.
+    let stdin_input = case
+        .get("stdin")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::as_bytes)
+                .ok_or_else(|| format!("case `{name}` has a non-string `stdin`"))
+        })
+        .transpose()?;
     let arguments = case
         .get("args")
         .and_then(serde_json::Value::as_array)
@@ -195,6 +205,7 @@ fn run_node_compat_case(
             command
         },
         &NODE_REFERENCE_TIMEOUTS,
+        stdin_input,
     ) {
         Ok(output) => output,
         Err(NodeReferenceError::TimedOut(detail)) => {
@@ -250,6 +261,7 @@ fn run_node_compat_case(
         command_output_with_timeout(
             Command::new(&output).args(&arguments),
             EXECUTION_TIMEOUT,
+            stdin_input,
         )
     });
     let thaw_exit_code = outcome
@@ -368,10 +380,11 @@ fn run_node_reference(
     case_name: &str,
     mut command: impl FnMut() -> Command,
     timeouts: &[std::time::Duration],
+    input: Option<&[u8]>,
 ) -> Result<std::process::Output, NodeReferenceError> {
     let mut last_timeout = String::new();
     for &timeout in timeouts {
-        match command_output_with_timeout(&mut command(), timeout) {
+        match command_output_with_timeout(&mut command(), timeout, input) {
             Ok(output) => return Ok(output),
             Err(error) if error.starts_with("timed out") => last_timeout = error,
             Err(error) => {
@@ -386,10 +399,13 @@ fn run_node_reference(
     )))
 }
 
+/// `input` is written to the child's stdin then closed; `None` gives the child a closed (null) stdin.
 fn command_output_with_timeout(
     command: &mut Command,
     timeout: std::time::Duration,
+    input: Option<&[u8]>,
 ) -> Result<std::process::Output, String> {
+    use std::io::Write;
     use std::process::Stdio;
     use std::sync::{Arc, Mutex};
     #[cfg(unix)]
@@ -399,10 +415,23 @@ fn command_output_with_timeout(
     }
 
     let mut child = command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| error.to_string())?;
+    if let Some(input) = input {
+        let mut pipe = child.stdin.take().unwrap();
+        let input = input.to_vec();
+        // Own thread: a child that never reads its stdin must not hold up the timeout loop below.
+        std::thread::spawn(move || {
+            let _ = pipe.write_all(&input);
+        });
+    }
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let read = |pipe: Box<dyn std::io::Read + Send>, capture: Arc<Mutex<Vec<u8>>>| {
@@ -532,6 +561,7 @@ mod node_reference_tests {
                 command
             },
             &[Duration::from_millis(100), Duration::from_millis(100)],
+            None,
         );
         assert_eq!(attempts.get(), 2);
         match outcome {
@@ -553,6 +583,7 @@ mod node_reference_tests {
                 Command::new("true")
             },
             &[Duration::from_secs(5), Duration::from_secs(5)],
+            None,
         );
         assert_eq!(attempts.get(), 1);
         assert!(outcome.is_ok());
