@@ -518,10 +518,13 @@ pub fn reachable(parts: &BundleParts) -> BTreeSet<String> {
     seen
 }
 
-/// One `require(..)` call: its literal spec (`None` for a computed one), and whether it is guarded.
+/// One `require(..)` call: its literal spec (`None` for a computed one), whether it is guarded, and whether its
+/// computed spec is unclassifiable (`unclassified`: a no-argument call, a spread, or a [`Fragments::Unclassified`]
+/// argument). A bare, prefix or suffix computed spec is not a blocker: [`reachable`] follows the entries it can name.
 struct Require {
     spec: Option<String>,
     guarded: bool,
+    unclassified: bool,
 }
 
 /// Node's builtin module names without the `node:` prefix (the list of thaw-registry's NODE_BUILTIN_MODULES_JSON).
@@ -972,9 +975,17 @@ impl Visit for Walker {
                         Some(a::Expr::Lit(a::Lit::Str(s))) => s.value.as_str().map(str::to_string),
                         _ => None,
                     };
+                    // `require()` and `require(...xs)` name nothing a classifier can see
+                    let unclassified = match n.args.first() {
+                        Some(x) if x.spread.is_none() => {
+                            matches!(spec_fragments(&x.expr), Fragments::Unclassified)
+                        }
+                        _ => true,
+                    };
                     self.requires.push(Require {
                         spec: lit,
                         guarded: self.guarded,
+                        unclassified,
                     });
                 }
                 _ => {}
@@ -1253,7 +1264,10 @@ fn scan_bundle_with(source: &str, addon: bool, known: &HashSet<String>) -> Resul
                 // handling try, as on Node (host.rs `require_in`), so the program's catch takes over
                 Some(spec) if r.guarded && is_optional_package_spec(spec) => {}
                 Some(spec) => add(&mut report, format!("require:{spec}"), 1, key),
-                None => add(&mut report, "require:dynamic".into(), 1, key),
+                // a bare, prefix or suffix computed spec is followed by `reachable`; one it does not name throws
+                // MODULE_NOT_FOUND at run time (host.rs `require_in`), as on Node
+                None if r.unclassified => add(&mut report, "require:dynamic".into(), 1, key),
+                None => {}
             }
         }
     }
