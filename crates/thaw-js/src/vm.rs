@@ -39,10 +39,9 @@ const HOST_ONLY: &[&str] = &[
 const SHARED: &[&str] = &["Intl", "WebAssembly", "SharedArrayBuffer", "Atomics"];
 
 /// A fresh context realm: its own ECMAScript intrinsics, with the host-only globals hidden.
-fn new_realm(id: u32, host: &Interp) -> Box<Interp> {
+fn new_realm(host: &Interp) -> Box<Interp> {
+    // symbols are thread-wide (symbol_table.rs), so this realm's symbol ids never collide with another realm's
     let mut sub = Box::new(Interp::new_vm_realm());
-    // symbols made in this realm get keys no other realm produces
-    sub.next_symbol += u64::from(id) << 32;
     let internal: Vec<Rc<str>> = sub
         .global
         .vars
@@ -223,7 +222,7 @@ pub(crate) fn install(it: &mut Interp) {
         let mut realm = match taken {
             Some(realm) => realm,
             None => Box::new(VmRealm {
-                interp: new_realm(id, it),
+                interp: new_realm(it),
                 script: None,
                 n0: 0,
                 vars: Vec::new(),

@@ -448,11 +448,11 @@ fn has_accessor(o: &Obj) -> bool {
 }
 
 /// The Symbol behind an internal `@@sym:<id>` property key.
-fn symbol_of_key(it: &Interp, key: &str) -> Result<Value, HostError> {
+fn symbol_of_key(key: &str) -> Result<Value, HostError> {
     key.strip_prefix("@@sym:")
         .and_then(|id| id.parse::<u64>().ok())
-        .and_then(|id| it.rt.symbols.get(&id))
-        .map(|o| Value::Object(o.clone()))
+        .and_then(crate::symbol_table::by_id)
+        .map(Value::Object)
         .ok_or_else(unsupported_value)
 }
 
@@ -598,9 +598,9 @@ impl NapiWireOut {
     }
 
     /// The wire key of an own property: its raw text, a `su` token, or the token of a Symbol.
-    fn key_token(&mut self, it: &Interp, key: &str) -> Result<String, HostError> {
+    fn key_token(&mut self, key: &str) -> Result<String, HostError> {
         if key.starts_with("@@sym:") {
-            let symbol = symbol_of_key(it, key)?;
+            let symbol = symbol_of_key(key)?;
             return self.token(&symbol);
         }
         Ok(match malformed_units(key) {
@@ -616,14 +616,13 @@ impl NapiWireOut {
     /// Property entries `[key, token, flags]` in own-key order. A masked root slot is its carrier.
     fn props(
         &mut self,
-        it: &Interp,
         o: &Obj,
         masks: &HashMap<usize, u64>,
         carriers: &mut HashMap<usize, usize>,
     ) -> Result<Vec<String>, HostError> {
         let mut parts = Vec::new();
         for (key, flags) in own_entries(o) {
-            let key_token = self.key_token(it, &key)?;
+            let key_token = self.key_token(&key)?;
             let masked = array_index(&key).and_then(|slot| masks.get(&slot).map(|h| (slot, *h)));
             let value = match masked {
                 Some((slot, handle)) => self.carrier(slot, handle, carriers),
@@ -770,14 +769,14 @@ impl NapiWireOut {
                     },
                 });
             }
-            let props = self.props(it, o, masks, &mut carriers)?;
+            let props = self.props(o, masks, &mut carriers)?;
             return Ok(format!(
                 "{{\"a\":[{}],\"p\":[{}]}}",
                 entries.join(","),
                 props.join(",")
             ));
         }
-        let props = self.props(it, o, masks, &mut carriers)?;
+        let props = self.props(o, masks, &mut carriers)?;
         Ok(format!("{{\"o\":[{}]}}", props.join(",")))
     }
 

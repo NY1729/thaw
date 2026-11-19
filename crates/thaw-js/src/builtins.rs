@@ -1580,7 +1580,7 @@ impl Interp {
                     .borrow()
                     .iter()
                     .filter_map(|p| p.key.strip_prefix("@@sym:")?.parse::<u64>().ok())
-                    .filter_map(|id| it.rt.symbols.get(&id).cloned().map(Value::Object))
+                    .filter_map(|id| crate::symbol_table::by_id(id).map(Value::Object))
                     .collect();
                 Ok(it.array(found))
             });

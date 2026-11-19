@@ -3,7 +3,7 @@
 //! key), the `{"nsy","hdl"}` wire token that carries the id with a handle to the Symbol, and the pin that
 //! keeps a native-created Symbol alive. Follows the bridge protocol of thaw-quickjs's runtime.js: the
 //! native id comes from the bridge (`symbol_graph`), a native handle is made through `symbol_metadata`.
-//! ponytail: `rt.symbols` (collections.rs) holds every Symbol strongly, so the `Weak` never dies and
+//! ponytail: `symbol_table` (symbol_table.rs) holds every Symbol strongly, so the `Weak` never dies and
 //! `thaw_tjs_napi_symbol_weak_live` answers live until that table is weak. Add when WeakRef gets a real weakness.
 
 use std::cell::RefCell;

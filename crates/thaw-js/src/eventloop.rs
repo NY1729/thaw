@@ -13,7 +13,7 @@
 
 use crate::*;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::co::{self, Resume, Yield};
@@ -143,8 +143,6 @@ pub(crate) struct Rt {
     /// Set by `construct` for the duration of entering a native constructor (`new Date()` vs `Date()`).
     pub(crate) constructing: bool,
     pub(crate) to_prim_key: Option<Rc<str>>,
-    /// Every symbol by id, so `Object.getOwnPropertySymbols` can map `@@sym:<id>` keys back.
-    pub(crate) symbols: HashMap<u64, Obj>,
     seq: u64,
     /// The loop turn's clock: the due test for timers. Timers take their start from the live clock.
     now: f64,
