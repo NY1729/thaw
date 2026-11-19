@@ -210,7 +210,7 @@ const BUILTIN_NAMES_MARK: &str = "var __thaw_bundle_builtin_names = Object.freez
 
 /// `node:module` needs the loader globals the registry renders in the bundle IIFE (which thaw-js never
 /// runs): `createRequire` reads `__thaw_bundle_create_require`, `isBuiltin` reads the names list.
-/// Only that entry gets them, so no other package sees new globals.
+/// Only a bundle that is that entry or embeds its factory gets them, so no other package sees new globals.
 fn install_module_loader(it: &mut Interp, loader: &Rc<Loader>, bundle_js: &str) -> R<()> {
     let names = bundle_js
         .find(BUILTIN_NAMES_MARK)
@@ -326,7 +326,7 @@ impl Package {
             addon: RefCell::new(None),
             package: name.to_string(),
         });
-        if entry == "node:module" {
+        if entry == "node:module" || loader.factories.contains_key("node:module") {
             install_module_loader(&mut interp, &loader, bundle_js)
                 .map_err(|c| classify(&mut interp, c))?;
         }

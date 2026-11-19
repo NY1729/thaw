@@ -291,6 +291,24 @@ fn thaw_js_newly_allowlisted_builtins_route_to_thaw_js() {
 }
 
 #[test]
+fn package_embedding_quickjs_worker_threads_routes_to_thaw_js() {
+    // The registry's real QuickJS `node:worker_threads` factory (builtins/system/workers.rs), embedded in a package
+    // bundle the way bundle/render.rs embeds a builtin the package requires: an entry `pkg/index.js` requires it.
+    let qjs = thaw_registry::builtin_bundle_with("node:worker_threads", &[]).unwrap();
+    let entry = "var __thaw_bundle_entry_key = \"node:worker_threads\";";
+    let maps = "var __thaw_bundle_require_maps = {\n";
+    let factories = "var __thaw_bundle_factories = {\n";
+    assert!(qjs.contains(entry) && qjs.contains(maps) && qjs.contains(factories));
+    let package_factory = "\"pkg/index.js\": function(module, exports, require, requireAsync, __filename) {\n  exports.isMain = require('node:worker_threads').isMainThread;\n},\n";
+    let bundle = qjs
+        .replacen(entry, "var __thaw_bundle_entry_key = \"pkg/index.js\";", 1)
+        .replacen(maps, &format!("{maps}\"pkg/index.js\": {{\"node:worker_threads\": \"node:worker_threads\"}},\n"), 1)
+        .replacen(factories, &format!("{factories}{package_factory}"), 1);
+    let user = "import pkg from 'pkg';\nconsole.log(pkg.isMain);\n";
+    assert!(thaw_js_package_eligible(&builtin_routing_package("pkg"), &bundle, user, &Default::default(), ""));
+}
+
+#[test]
 fn node_test_mock_timers_route_to_thaw_js() {
     // mock.timers is served by the thaw-js prelude now (no router blocker): the program stays on thaw-js
     let bundle = thaw_registry::builtin_bundle_with("node:test", &[]).unwrap();

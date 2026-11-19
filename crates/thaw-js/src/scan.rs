@@ -68,11 +68,57 @@ pub fn script_as_bundle(source: &str) -> std::borrow::Cow<'_, str> {
     .into()
 }
 
+/// The thaw-js form of `node:worker_threads`: the main-thread module the thaw-js prelude exports
+/// (`web/worker_threads.js`). Package bundles embed the QuickJS form of that builtin (natives that exist
+/// only in thaw-quickjs), so [`parse_bundle`] substitutes this one for every such embedded factory.
+pub const WORKER_THREADS_THAW_JS_FORM: &str =
+    "module.exports = globalThis.__thaw_worker_threads_exports;\n";
+
 /// Extract factories, require maps and the entry key from a registry bundle.
 pub fn parse_bundle(source: &str) -> Result<BundleParts, String> {
     let mut parts = parse_bundle_raw(source)?;
     stub_cheerio_undici(&mut parts)?;
+    substitute_builtin_factory(
+        &mut parts,
+        "node:worker_threads",
+        WORKER_THREADS_THAW_JS_FORM,
+    )?;
     Ok(parts)
+}
+
+/// Replace the factory `key` of a bundle (a builtin embedded in a package bundle) with the thaw-js form `body`.
+/// `key` must be a plain name (it is written between double quotes). Same technique as [`stub_cheerio_undici`]:
+/// the stub is appended and the bundle re-parsed so spans index the kept text; the older duplicate is dropped
+/// (keep-last); the builtin's own requires are cleared, so the modules only its QuickJS form pulled in are not reached.
+fn substitute_builtin_factory(
+    parts: &mut BundleParts,
+    key: &str,
+    body: &str,
+) -> Result<(), String> {
+    if !parts.factories.iter().any(|(k, _)| k == key) {
+        return Ok(());
+    }
+    let stub = format!(
+        "module.exports = (function(require){{ var __thaw_bundle_factories = {{ \"{key}\": function(module, exports, require) {{ {body} }} }}; }})(globalThis.require);"
+    );
+    let mut combined = parse_factories(&format!("{}\n{stub}", parts.source))?;
+    let mut seen = HashSet::new();
+    let mut kept: Vec<_> = combined
+        .factories
+        .drain(..)
+        .rev()
+        .filter(|(k, _)| seen.insert(k.clone()))
+        .collect();
+    kept.reverse();
+    combined.factories = kept;
+    combined.esm_problems = std::mem::take(&mut parts.esm_problems);
+    combined.require_maps = std::mem::take(&mut parts.require_maps);
+    combined
+        .require_maps
+        .insert(key.to_string(), HashMap::new());
+    combined.realm = parts.realm.take();
+    *parts = combined;
+    Ok(())
 }
 
 const UNDICI_STUB_KEY: &str = "thaw-js:undici-unavailable";
@@ -770,7 +816,10 @@ fn tolerated(feature: &str, key: &str) -> bool {
             | "builtin:process.browser"
             | "builtin:process.__nwjs"
             | "builtin:process.allowedNodeEnvironmentFlags"
-    ) || key.ends_with("debug/src/browser.js")
+            // Electron's probe `isElectronApp() && !process.defaultApp`: isElectronApp is false on Node
+            | "builtin:process.defaultApp"
+    ) ||
+        key.ends_with("debug/src/browser.js")
         || (feature == "require:supports-color" && key.ends_with("debug/src/node.js"))
         || (matches!(feature, "require:dynamic" | "method:inspect") && key == "node:assert")
         || (AXIOS_METHODS.contains(&feature) && key.ends_with("axios/./dist/node/axios.cjs"))
@@ -850,7 +899,8 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
         .collect();
     globals.extend(SQLITE_NATIVE_GLOBALS.iter().map(|g| g.to_string()));
     // the loader globals host.rs installs for node:module (see install_module_loader)
-    let module_loader = parts.entry == "node:module";
+    let module_loader =
+        parts.entry == "node:module" || parts.factories.iter().any(|(k, _)| k == "node:module");
     if module_loader {
         globals.extend(MODULE_LOADER_GLOBALS.iter().map(|g| g.to_string()));
     }

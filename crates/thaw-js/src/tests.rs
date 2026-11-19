@@ -4150,6 +4150,95 @@ fn cheerio_undici_is_stubbed_with_a_clear_error() {
     assert!(e.contains("undici is not available"), "{e}");
 }
 
+use crate::host::Native;
+
+// A package bundle that embeds the QuickJS form of `node:worker_threads` (crates/thaw-registry builtins/system/workers.rs:
+// natives `__thaw_worker_poll`, `__thaw_native_workers`, `__thaw_vm_contexts`, and `require('node:stream')`).
+const QJS_WORKER_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"app/index.js": function(module, exports, require) {
+  var wt = require('node:worker_threads');
+  exports.isMain = function () { return wt.isMainThread; };
+  exports.workerType = function () { return typeof wt.Worker; };
+  exports.isThawForm = function () { return wt === globalThis.__thaw_worker_threads_exports; };
+},
+"node:worker_threads": function(module, exports, require) {
+  var workerStream = require('node:stream'), WorkerReadable = workerStream.Readable;
+  var environmentData = globalThis.__thaw_worker_environment_data || (globalThis.__thaw_worker_environment_data = new Map());
+  var nativeWorkers = globalThis.__thaw_native_workers || (globalThis.__thaw_native_workers = new Map());
+  var contexts = globalThis.__thaw_vm_contexts;
+  function poll() { return __thaw_worker_poll(); }
+  module.exports = { isMainThread: false, Worker: WorkerReadable, poll: poll, contexts: contexts };
+},
+"node:stream": function(module, exports) { exports.Readable = function () {}; exports.Writable = function () {}; },
+};
+var __thaw_bundle_require_maps = { "app/index.js": {"node:worker_threads": "node:worker_threads"}, "node:worker_threads": {"node:stream": "node:stream"}, "node:stream": {}, };
+var __thaw_bundle_entry_key = "app/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn embedded_quickjs_worker_threads_is_substituted_with_the_thaw_js_form() {
+    // red before the substitution: the QuickJS natives are blockers
+    let r = crate::scan::scan_bundle(QJS_WORKER_BUNDLE).ok().unwrap();
+    assert!(r.is_clean(), "{:?}", r.blockers);
+    // green: the package loads, and its worker_threads is the thaw-js module object (the `new Worker` path)
+    let mut p = crate::host::Package::load(QJS_WORKER_BUNDLE).unwrap();
+    assert_eq!(p.call("isMain", &[]).ok(), Some(Native::Bool(true)));
+    assert_eq!(
+        p.call("workerType", &[]).ok(),
+        Some(Native::Str("function".into()))
+    );
+    assert_eq!(p.call("isThawForm", &[]).ok(), Some(Native::Bool(true)));
+}
+
+#[test]
+fn embedded_module_factory_runs_in_module_loader_mode() {
+    // a package that embeds node:module (createRequire, isBuiltin read the loader globals)
+    const BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_builtin_names = Object.freeze(["path","module"]);
+var __thaw_bundle_factories = {
+"app/index.js": function(module, exports, require, requireAsync, __filename) {
+  var m = require('node:module');
+  exports.ok = function () { return m.isBuiltin('path') && typeof m.createRequire === 'function'; };
+  exports.join = function () { return m.createRequire(__filename)('path').join('a', 'b'); };
+},
+"node:module": function(module, exports) {
+  exports.isBuiltin = function (n) { return __thaw_bundle_builtin_names.indexOf(n) >= 0; };
+  exports.createRequire = function (base) { return __thaw_bundle_create_require(base); };
+},
+"node:path": function(module, exports) { exports.join = function () { return Array.prototype.join.call(arguments, '/'); }; },
+};
+var __thaw_bundle_require_maps = { "app/index.js": {"node:module": "node:module"}, "node:module": {}, "node:path": {}, };
+var __thaw_bundle_entry_key = "app/index.js";
+})(globalThis.require);"#;
+    // red before PR-2: the loader globals are blockers because the entry is not node:module
+    let r = crate::scan::scan_bundle(BUNDLE).ok().unwrap();
+    assert!(r.is_clean(), "{:?}", r.blockers);
+    let mut p = crate::host::Package::load(BUNDLE).unwrap();
+    assert_eq!(p.call("ok", &[]).ok(), Some(Native::Bool(true)));
+    assert_eq!(p.call("join", &[]).ok(), Some(Native::Str("a/b".into())));
+}
+
+#[test]
+fn electron_default_app_probe_is_tolerated() {
+    // `isElectronApp() && !process.defaultApp`: isElectronApp is false on Node and thaw-js, so the read never runs
+    const BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"app/index.js": function(module, exports) {
+  function isElectronApp() { return false; }
+  exports.probe = function () { return isElectronApp() && !process.defaultApp; };
+},
+};
+var __thaw_bundle_require_maps = { "app/index.js": {}, };
+var __thaw_bundle_entry_key = "app/index.js";
+})(globalThis.require);"#;
+    // red before PR-2: builtin:process.defaultApp is a blocker
+    let r = crate::scan::scan_bundle(BUNDLE).ok().unwrap();
+    assert!(r.is_clean(), "{:?}", r.blockers);
+    let mut p = crate::host::Package::load(BUNDLE).unwrap();
+    assert_eq!(p.call("probe", &[]).ok(), Some(Native::Bool(false)));
+}
+
 // ----- graph callbacks and awaited Promises -----
 
 const GRAPH_BUNDLE: &str = r#"module.exports = (function(require){
@@ -5614,14 +5703,24 @@ var __thaw_bundle_entry_key = "node:module";
             .unwrap(),
         Native::Bool(false)
     );
-    // other entries get no loader globals
-    let other = bundle.replace(
+    // a package that embeds the node:module factory gets the loader globals too (PR-2: not only the entry) ...
+    let embedded = bundle.replace(
         r#"var __thaw_bundle_entry_key = "node:module";"#,
         r#"var __thaw_bundle_entry_key = "p/index.js";"#,
     );
-    let mut q = Package::load(&other).expect("loads");
+    let mut q = Package::load(&embedded).expect("loads");
     assert_eq!(
         q.call("probe", &[]).unwrap(),
+        Native::Str("function".into())
+    );
+    // ... and a package with no node:module factory gets none
+    let none = embedded.replace(
+        r#""node:module": function"#,
+        r#""node:module-unused": function"#,
+    );
+    let mut r = Package::load(&none).expect("loads");
+    assert_eq!(
+        r.call("probe", &[]).unwrap(),
         Native::Str("undefined".into())
     );
 }
