@@ -324,7 +324,7 @@ jobs:
       - name: Build thaw CLI and thaw-js-scan (release)
         run: |
           cargo build --release -p thaw-cli
-          cargo build --release -p thaw-js --bin thaw-js-scan
+          cargo build --release -p thaw-cli --bin thaw-js-scan
       - name: Check for corpus programs
         id: corpus
         run: |

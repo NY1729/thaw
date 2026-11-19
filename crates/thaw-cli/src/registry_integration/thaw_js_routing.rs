@@ -1190,16 +1190,9 @@ fn thaw_js_package_eligible_in(
             }
         }
     }
-    // R6: a method a served registry builtin defines (`thaw_registry::builtin_defined_names`) is thaw-js's own, not missing
-    let ctx = thaw_js::scan::ScanContext {
-        known_methods: thaw_registry::builtin_defined_names(),
-        installed_packages: installed,
-    };
-    let scanned = if pkg.native_addon.is_some() {
-        thaw_js::scan::scan_addon_bundle_in(bundle_js, &ctx)
-    } else {
-        thaw_js::scan::scan_bundle_in(bundle_js, &ctx)
-    };
+    // R6 and addon mode: `thaw_registry::scan_bundle_for_build` (shared with `thaw-js-scan`)
+    let scanned =
+        thaw_registry::scan_bundle_for_build(bundle_js, pkg.native_addon.is_some(), installed);
     match scanned {
         Ok(report) if report.is_clean() => {}
         Ok(report) => {
