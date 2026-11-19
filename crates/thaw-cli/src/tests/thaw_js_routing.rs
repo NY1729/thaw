@@ -1286,6 +1286,63 @@ fn thaw_js_export_equals_object_default_import_builds_under_error_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An ES package's `import.meta.url` (rewritten by `module_transform` to `'file://' + __filename`) must be an
+/// absolute `file:///thaw_modules/<pkg>/...` URL, so its directory is `/thaw_modules/<pkg>`, as in the QuickJS
+/// lane. Plain string ops keep the package inside the scanner's accepted shape (`node:path` method calls are
+/// refused); `fileURLToPath` itself is covered by the real yargs test.
+#[test]
+fn thaw_js_import_meta_url_dirname_is_absolute_under_error_mode() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-import-meta-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("tjs-url");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare const dir: string;\nexport declare const abs: boolean;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = (function(require){\n\
+         var __thaw_bundle_factories = {\n\
+         \"tjs-url/index.js\": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {\n\
+           var __thaw_import_meta_0;\n\
+           var meta = (__thaw_import_meta_0 || (__thaw_import_meta_0 = {url: ('file://' + __filename), resolve: function() { throw new Error('import.meta.resolve is not supported'); }}));\n\
+           var url = meta.url;\n\
+           exports.dir = url.slice('file://'.length, url.lastIndexOf('/'));\n\
+           exports.abs = url.indexOf('file:///') === 0;\n\
+         },\n\
+         };\n\
+         var __thaw_bundle_require_maps = { \"tjs-url/index.js\": {}, };\n\
+         var __thaw_bundle_entry_key = \"tjs-url/index.js\";\n\
+         })(globalThis.require);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import * as pkg from 'tjs-url';\n\
+         function main(): void {\n\
+           console.log(pkg.dir + ' ' + pkg.abs);\n\
+         }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run(&output), "/thaw_modules/tjs-url true\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The debug shape: `export =` of a callable with static members, used through a default import
 /// (`createDebug.enable(..)`). The callable must stay a handle, not bind to the typed function symbol.
 #[test]
