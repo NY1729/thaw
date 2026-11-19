@@ -82,6 +82,8 @@ pub(crate) struct VmRealm {
     n0: usize,
     /// Var and function names of earlier runs, and implicit globals already copied to the sandbox.
     vars: Vec<Rc<str>>,
+    /// The sandbox of the latest run: the context's promise jobs, run later, see the same one.
+    sandbox: Option<Obj>,
 }
 
 /// One context: `realm` is `None` until the first run, and taken out while the context runs.
@@ -117,6 +119,56 @@ pub(crate) fn take_owned(owner: usize) -> Vec<VmSlot> {
         let mut c = c.borrow_mut();
         ids.iter().filter_map(|id| c.remove(id)).collect()
     })
+}
+
+/// Whether a context `owner` created has promise jobs queued (an idle context; one running now is not seen).
+pub(crate) fn owned_jobs_pending(owner: usize) -> bool {
+    CONTEXTS.with(|c| {
+        c.borrow()
+            .values()
+            .any(|s| s.owner == owner && s.realm.as_ref().is_some_and(|r| r.interp.has_job_work()))
+    })
+}
+
+/// Runs the promise jobs of each idle context `host` created, each on its own Interp: the realm is taken out of its
+/// slot meanwhile, as in a run. Jobs queued by a context on a host handler stay on the host's queue (see
+/// `eventloop.rs` `Reaction::queue`). True if any context ran. A context running now is skipped.
+pub(crate) fn drain_owned_jobs(host: &Interp) -> R<bool> {
+    let owner = host.realm_id;
+    let ids: Vec<u32> = CONTEXTS.with(|c| {
+        c.borrow()
+            .iter()
+            .filter(|(_, s)| {
+                s.owner == owner && s.realm.as_ref().is_some_and(|r| r.interp.has_job_work())
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    });
+    let mut ran = false;
+    for id in ids {
+        let claimed = CONTEXTS.with(|c| match c.borrow_mut().get_mut(&id) {
+            Some(slot) if !slot.busy => {
+                slot.busy = true;
+                slot.realm.take()
+            }
+            _ => None,
+        });
+        let Some(mut realm) = claimed else { continue };
+        ran = true;
+        realm.interp.restore(host.snapshot());
+        realm.interp.vm_sandbox = realm.sandbox.clone();
+        let r = realm.interp.run_jobs();
+        realm.interp.vm_sandbox = None;
+        // the realm goes back (or drops here, if its context was freed while the job ran)
+        CONTEXTS.with(|c| {
+            if let Some(slot) = c.borrow_mut().get_mut(&id) {
+                slot.realm = Some(realm);
+                slot.busy = false;
+            }
+        });
+        r?;
+    }
+    Ok(ran)
 }
 
 /// The global object of the first context realm built on this thread (tests).
@@ -284,11 +336,13 @@ pub(crate) fn install(it: &mut Interp) {
                 script: None,
                 n0: 0,
                 vars: Vec::new(),
+                sandbox: None,
             }),
         };
         // stack limits and depth follow the calling thread
         realm.interp.restore(it.snapshot());
         realm.interp.vm_sandbox = sandbox.clone();
+        realm.sandbox = sandbox.clone();
         arm(&mut realm.interp, ms);
         let r = match &sandbox {
             Some(sb) => run_in_sandbox(it, &mut realm, sb, &code),
