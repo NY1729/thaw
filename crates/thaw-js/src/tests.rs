@@ -11290,3 +11290,66 @@ fn an_os_signal_from_outside_reaches_a_process_listener() {
     let out = std::mem::take(&mut it.out);
     assert_eq!(out, ["got SIGUSR2 12", "end"]);
 }
+
+/// R6: a method name the registry's JS builtins define is served on thaw-js (`extra_known`); a Node method
+/// name that no builtin defines is still a blocker. Excerpts from the graphql diagnostics and socket.io adapter.
+#[test]
+fn builtin_defined_method_names_are_known_to_the_scan() {
+    use std::collections::HashSet;
+    let graphql = r#"var dc = process.getBuiltinModule('node:diagnostics_channel');
+exports.parseChannel = dc?.tracingChannel('graphql:parse');
+function traceMixed(channel, contextInput, fn) {
+    const context = contextInput;
+    return channel.start.runStores(context, () => {
+        let result;
+        try { result = fn(); } catch (err) { context.error = err; channel.error.publish(context); throw err; }
+        channel.end.publish(context);
+        return result;
+    });
+}
+exports.parse = (p, src) => exports.parseChannel.traceSync(() => src, { source: p });
+exports.traceMixed = traceMixed;"#;
+    let socket = r#"Adapter.prototype.del = function (id, room) {
+    const websocket = this.nsp.sockets.get(id).conn.transport.socket;
+    websocket.unsubscribe(room);
+};"#;
+    let dlopen = "process.dlopen(module, 'x.node');";
+    let heap = "exports.h = process.getHeapSnapshot();";
+    let known: HashSet<String> = ["publish", "runStores", "traceSync", "unsubscribe"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let blockers = |src: &str, extra: &HashSet<String>| {
+        crate::scan::scan_bundle_with_known(&one_module_bundle(src, ""), extra)
+            .ok()
+            .unwrap()
+            .blockers
+            .into_keys()
+            .collect::<Vec<_>>()
+    };
+    // without the builtin set they are refused, as before
+    let without = blockers(graphql, &HashSet::new());
+    assert!(
+        without.contains(&"method:runStores".to_string()),
+        "{without:?}"
+    );
+    assert!(
+        without.contains(&"method:publish".to_string()),
+        "{without:?}"
+    );
+    assert!(
+        without.contains(&"method:traceSync".to_string()),
+        "{without:?}"
+    );
+    assert!(blockers(socket, &HashSet::new()).contains(&"method:unsubscribe".to_string()));
+    // with it they are not
+    assert!(
+        blockers(graphql, &known).is_empty(),
+        "{:?}",
+        blockers(graphql, &known)
+    );
+    assert!(blockers(socket, &known).is_empty());
+    // a Node method that no builtin defines, and a process.dlopen call, stay blocked with the set
+    assert_eq!(blockers(heap, &known), ["method:getHeapSnapshot"]);
+    assert_eq!(blockers(dlopen, &known), ["method:dlopen"]);
+}

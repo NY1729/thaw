@@ -2045,6 +2045,54 @@ fn nested_namespace_alias_class_routes_to_thaw_js_without_linking_quickjs() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A one-module registry bundle (`pkg/index.js`) whose body is `code`.
+fn one_package_bundle(code: &str) -> String {
+    format!(
+        "module.exports = (function(require) {{\nvar __thaw_bundle_factories = {{\n\"pkg/index.js\": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {{\n{code}\n}},\n}};\nvar __thaw_bundle_require_maps = {{ \"pkg/index.js\": {{}}, }};\nvar __thaw_bundle_entry_key = \"pkg/index.js\";\n}})(globalThis.require);"
+    )
+}
+
+#[test]
+fn builtin_defined_methods_make_graphql_and_socket_io_shaped_packages_eligible() {
+    // R6: `runStores`/`publish`/`traceSync` (graphql's diagnostics_channel calls) and `unsubscribe` (socket.io's
+    // adapter) are methods the registry's JS builtins define, so the packages are served by thaw-js. A Node method
+    // no builtin defines, and `process.dlopen`, stay blockers.
+    let pkg = builtin_routing_package("pkg");
+    let graphql = one_package_bundle(
+        "var dc = process.getBuiltinModule('node:diagnostics_channel');\n\
+         exports.p = dc?.tracingChannel('graphql:parse');\n\
+         exports.run = (ch, ctx, fn) => ch.start.runStores(ctx, () => { ch.error.publish(ctx); return fn(); });\n\
+         exports.trace = (ch, src) => ch.traceSync(() => src, {});",
+    );
+    let socket = one_package_bundle(
+        "exports.del = (websocket, room) => websocket.unsubscribe(room);",
+    );
+    assert!(thaw_js_package_eligible(&pkg, &graphql, "", &Default::default(), ""));
+    assert!(thaw_js_package_eligible(&pkg, &socket, "", &Default::default(), ""));
+    // a method that no builtin defines is still refused
+    let heap = one_package_bundle("exports.h = (p) => p.writeHeapSnapshot();");
+    assert!(!thaw_js_package_eligible(&pkg, &heap, "", &Default::default(), ""));
+    let dlopen = one_package_bundle("exports.d = (m) => process.dlopen(m, 'x.node');");
+    assert!(!thaw_js_package_eligible(&pkg, &dlopen, "", &Default::default(), ""));
+    // execa's IPC `channel.refCounted()`: the child_process builtin defines it since #842, so it is served now
+    let ipc = one_package_bundle("exports.r = (child) => child.channel.refCounted();");
+    assert!(thaw_js_package_eligible(&pkg, &ipc, "", &Default::default(), ""));
+}
+
+#[test]
+fn builtin_defined_method_names_hold_the_builtin_methods_and_no_helpers() {
+    let names = thaw_registry::builtin_defined_names();
+    for name in ["publish", "runStores", "traceSync", "unsubscribe", "refCounted"] {
+        assert!(names.contains(name), "{name} is not defined by a served builtin");
+    }
+    // a Node method no builtin defines is not in the set (`getHeapSnapshot` is: the Worker builtin defines it)
+    assert!(!names.contains("writeHeapSnapshot"));
+    // too generic to excuse a call (`GENERIC_METHOD_NAMES`)
+    assert!(!names.contains("get") && !names.contains("write") && !names.contains("on"));
+    // module-private `__thaw_*` helpers never are
+    assert!(names.iter().all(|name| !name.starts_with("__thaw")));
+}
+
 #[test]
 fn node_sqlite_bundle_scans_clean() {
     let bundle = thaw_registry::builtin_bundle_with("node:sqlite", &[]).unwrap();
