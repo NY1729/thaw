@@ -237,7 +237,8 @@ return res;
 fn j_worker_error_late() {
     // expected: node22
     assert_eq!(
-        p2c_run("j_worker_error_late", r#####"const { Worker } = require('node:worker_threads');
+        // QuickJS: thaw-js parity gap, Worker late error (PR C).
+        p2c_run_qjs("j_worker_error_late",r#####"const { Worker } = require('node:worker_threads');
 const res = await new Promise((resolve) => {
   const w = new Worker('require("node:worker_threads").parentPort.on("message", () => { throw new SyntaxError("late"); });', { eval: true });
   w.on('error', (e) => resolve({ name: e.name, message: e.message, isSyntax: e instanceof SyntaxError }));
@@ -298,7 +299,8 @@ return out;
 fn j_child_ipc_utf8_split() {
     // expected: thaw-only
     assert_eq!(
-        p2c_run("j_child_ipc_utf8_split", r#####"// thaw-only: {"messages":[{"t":"€"},{"t":"€"}],"events":["disconnect"]}
+        // QuickJS: stubs QuickJS-embedding natives, rewrite pending (PR F, child_process).
+        p2c_run_qjs("j_child_ipc_utf8_split",r#####"// thaw-only: {"messages":[{"t":"€"},{"t":"€"}],"events":["disconnect"]}
 const cp = require('node:child_process');
 const host = globalThis;
 const previous = { spawn: host.__thaw_child_process_spawn, stdin: host.__thaw_child_process_stdin, poll: host.__thaw_child_process_poll, active: host.__thaw_child_process_active };
@@ -435,7 +437,8 @@ return out;
 fn j_vm_script_compile() {
     // expected: node22
     assert_eq!(
-        p2c_run("j_vm_script_compile", r#####"const vm = require('node:vm');
+        // QuickJS: thaw-js parity gap, vm family (PR B).
+        p2c_run_qjs("j_vm_script_compile",r#####"const vm = require('node:vm');
 const out = {};
 try { new vm.Script('return 1'); out.topReturn = 'no throw'; } catch (e) { out.topReturn = e.name; }
 const s = new vm.Script('1 + 1', { filename: 'one.js' });
@@ -454,7 +457,8 @@ return out;
 fn j_v8_heap_growth() {
     // expected: node22
     assert_eq!(
-        p2c_run("j_v8_heap_growth", r#####"const v8 = require('node:v8');
+        // QuickJS: thaw-js parity gap, v8 heap statistics (PR E).
+        p2c_run_qjs("j_v8_heap_growth",r#####"const v8 = require('node:v8');
 const before = v8.getHeapStatistics();
 const keep = [];
 for (let i = 0; i < 200; i++) keep.push(new Array(50000).fill(i));

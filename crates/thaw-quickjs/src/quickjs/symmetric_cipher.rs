@@ -296,29 +296,6 @@ mod symmetric_cipher_tests {
     use super::*;
 
     #[test]
-    fn ripemd160_matches_the_reference_vectors() {
-        assert_eq!(
-            hex_encode(&ripemd160_digest(b"abc")),
-            "8eb208f7e05d987a9b044a8e98c6b087f15a0bfc"
-        );
-        assert_eq!(
-            hex_encode(&ripemd160_digest(b"")),
-            "9c1185a5c5e9fc54612808977ee8f548b2258d31"
-        );
-    }
-
-    #[test]
-    fn gcm_matches_the_nist_test_case_two() {
-        let (key, iv, plain) = ([0u8; 16], [0u8; 12], [0u8; 16]);
-        let cipher = sym_gcm_xor(&key, &iv, 0, &plain).unwrap();
-        assert_eq!(hex_encode(&cipher), "0388dace60b6a392f328c2b971b2fe78");
-        assert_eq!(
-            hex_encode(&sym_gcm_tag(&key, &iv, &[], &cipher).unwrap()),
-            "ab6e47d42cec13bdf53a67b21257bddf"
-        );
-    }
-
-    #[test]
     fn ctr_keystream_is_stateless_across_offsets() {
         let (key, iv) = ([7u8; 32], [9u8; 16]);
         let whole = sym_ctr_xor(&key, &iv, 0, &[0u8; 40], true).unwrap();

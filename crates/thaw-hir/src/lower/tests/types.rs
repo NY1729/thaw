@@ -150,6 +150,60 @@ fn contextual_callback_abi_overrides_explicit_any_parameters() {
 }
 
 #[test]
+fn unannotated_callbacks_in_an_object_argument_of_a_dynamic_method_are_contextually_any() {
+    // Hapi's `server.route({ handler: (request, h) => .. })` on an `any` receiver:
+    // the literal's unannotated callbacks take live `JsValue` parameters, as in TypeScript.
+    let program = lower(
+        r#"
+        declare function serverValue(): JsValue;
+        function main(): void {
+            const s: JsValue = serverValue();
+            s.route({ method: 'GET', path: '/', handler: (r, h) => h.response(r.path) });
+        }
+        "#,
+    );
+    let body = format!(
+        "{:?}",
+        program.functions.iter().find(|function| function.name == "main").unwrap().body,
+    );
+    assert!(body.contains("name: \"r\", ty: JsValue"), "{body}");
+    assert!(body.contains("name: \"h\", ty: JsValue"), "{body}");
+}
+
+#[test]
+fn unannotated_callback_in_a_plain_object_literal_still_needs_an_annotation() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+        function main(): void {
+            const o = { f: (x) => x };
+        }
+        "#,
+    )
+    .expect("parse error");
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("needs an explicit type annotation"), "{error}");
+}
+
+#[test]
+fn unannotated_callback_in_an_object_argument_of_a_typed_call_keeps_its_contextual_json_parameters() {
+    // A typed (non-dynamic) callee supplies the callback's parameter types: the new
+    // dynamic-receiver rule must not change this path.
+    let program = lower(
+        r#"
+        declare function typed(options: { handler: (request: any) => any }): void;
+        function main(): void {
+            typed({ handler: (request) => request });
+        }
+        "#,
+    );
+    let body = format!(
+        "{:?}",
+        program.functions.iter().find(|function| function.name == "main").unwrap().body,
+    );
+    assert!(body.contains("name: \"request\", ty: Json"), "{body}");
+}
+
+#[test]
 fn accepts_an_abi_compatible_object_prefix() {
     lower(
         r#"
