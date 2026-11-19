@@ -24,6 +24,15 @@ fn run_lines(src: &str) -> Vec<String> {
     std::mem::take(&mut it.out)
 }
 
+/// Like `run_lines`, then drains the event loop, so the `await` continuations of async bodies run too.
+fn run_lines_async(src: &str) -> Vec<String> {
+    crate::gc::no_auto();
+    let mut it = Interp::new();
+    assert!(it.run(src).is_ok());
+    assert!(it.run_event_loop().is_ok());
+    std::mem::take(&mut it.out)
+}
+
 /// Builds `n` contexts, each created and run once; returns the sum of i*i and the elapsed time.
 fn run_many_contexts(n: usize) -> (Vec<String>, Duration) {
     let t = Instant::now();
@@ -391,6 +400,74 @@ try { runInContext('let a = ;', sb, { filename: 'bad-syntax.js' }); } catch (e) 
 fn vm_script_without_filename_keeps_the_plain_stack() {
     let src = r#"console.log(__thaw_vm_run(-1, 'new Error("plain").stack', undefined, 0));"#;
     assert_eq!(run_lines(src), vec!["Error: plain".to_string()]);
+}
+
+/// A context made at top level and run inside async bodies, before and after an `await`. Under the thread
+/// coroutine backend each async body runs on its own thread, so the context table has to follow the control.
+#[test]
+fn vm_context_made_at_top_level_runs_in_async_bodies() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"const ctx = createContext({ x: 1 });
+(async () => {
+  console.log(`before ${runInContext('x + 1', ctx)}`);
+  await null;
+  console.log(`after ${runInContext('x + 2', ctx)}`);
+})().catch((e) => console.log(`E:${e.message}`));"#
+    );
+    assert_eq!(
+        run_lines_async(&src),
+        vec!["before 2".to_string(), "after 3".to_string()]
+    );
+}
+
+/// A context made inside an async body (before its `await`) is found afterwards at top level and in another
+/// async body that runs after an `await`.
+#[test]
+fn vm_context_made_in_async_body_runs_later() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"let ctx;
+(async () => {
+  ctx = createContext({ y: 5 });
+  await null;
+  console.log(`inner ${runInContext('y * 3', ctx)}`);
+})().catch((e) => console.log(`E:${e.message}`));
+console.log(`top ${runInContext('y * 2', ctx)}`);
+(async () => {
+  await null;
+  console.log(`later ${runInContext('y * 4', ctx)}`);
+})().catch((e) => console.log(`E:${e.message}`));"#
+    );
+    assert_eq!(
+        run_lines_async(&src),
+        vec![
+            "top 10".to_string(),
+            "inner 15".to_string(),
+            "later 20".to_string()
+        ]
+    );
+}
+
+/// Two contexts made on two different coroutine threads (and one at top level) each keep their own slot:
+/// every context runs its own script, so no id is reused.
+#[test]
+fn vm_contexts_made_on_different_coroutine_threads_stay_distinct() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"let a, b;
+(async () => {
+  a = createContext({ v: 'a' });
+  await null;
+})().catch((e) => console.log(`E:${e.message}`));
+(async () => {
+  b = createContext({ v: 'b' });
+  await null;
+})().catch((e) => console.log(`E:${e.message}`));
+const c = createContext({ v: 'c' });
+console.log(runInContext('v', a) + runInContext('v', b) + runInContext('v', c));"#
+    );
+    assert_eq!(run_lines_async(&src), vec!["abc".to_string()]);
 }
 
 /// A bare call of a function the sandbox holds has no `this` of its own: a sloppy callee sees the context's global
