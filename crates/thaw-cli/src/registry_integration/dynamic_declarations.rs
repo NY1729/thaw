@@ -1004,6 +1004,7 @@ fn typed_dynamic_bare_alias(
     function: &thaw_bridge::DtsFunction,
     is_jit_backed: bool,
     napi: bool,
+    thaw_js_package: bool,
 ) -> Option<String> {
     if function.rest_param.is_some() || function.generic.is_some() {
         return None;
@@ -1103,10 +1104,13 @@ fn typed_dynamic_bare_alias(
         thaw_bridge::DtsType::Native(ty) => contains_callable_type(ty),
         thaw_bridge::DtsType::Unsupported(_) => false,
     });
+    // Not on thaw-js: its lane has no untyped `callDynamic` wrapper at all (shim_generation.rs), so
+    // skipping here leaves the bare name undeclared ("call to undeclared function").
     if function.params.len() == 1
         && function.required_params == 1
         && !param_needs_marshaling
         && !callback_adapter_applies
+        && !thaw_js_package
     {
         return None;
     }
