@@ -579,8 +579,8 @@ fn n_instantiate(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
 
 #[cfg(feature = "wasi")]
 fn n_instantiate_wasi(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
-    // options: {args: [string], env: [[k, v]], preopens: [[guestPath, hostPath]]}
-    let options = arg(a, 2);
+    // (module, linkage, prefix, options); options: {args: [string], env: [[k, v]], preopens: [[guestPath, hostPath]]}
+    let options = arg(a, 3);
     let mut wasi = WasiOptions {
         args: Vec::new(),
         env: Vec::new(),
@@ -606,12 +606,7 @@ fn n_instantiate_wasi(it: &mut Interp, sh: &Shared, a: &[Value]) -> R<Value> {
             std::path::PathBuf::from(it.to_str(&host).to_string()),
         ));
     }
-    instantiate_module(
-        it,
-        sh,
-        &[arg(a, 0), arg(a, 1), Value::str("WebAssembly.Instance()")],
-        Some(wasi),
-    )
+    instantiate_module(it, sh, &[arg(a, 0), arg(a, 1), arg(a, 2)], Some(wasi))
 }
 
 /// `[{name, kind, handle, ...}]` for the instance's exports, in declaration order. Functions carry
