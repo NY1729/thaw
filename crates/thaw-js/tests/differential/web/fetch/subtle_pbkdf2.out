@@ -1,0 +1,62 @@
+0c60c80f961f0e71f3a9b524af6012062fe037a6
+ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957
+4b007901b765489abead49d926f721d065a429c1
+3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038
+55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783
+4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56
+54f775c6d790f21930459162fc535dbf04a939185127016a04176a0730c6f1f4fb48832ad1261baadd2cedd50814b1c8
+e1d9c16aa681708a45f5c7c4e215ceb66e011a2e9f0040713f18aefdb866d53cf76cab2868a39b9f7840edce4fef5a82be67335c77a6068e04112754f27ccf4e
+dcd9d25ed02d170d7cf86a36987ddac1
+SaltedPassword a97517ae572f9dac71586d340dd460562a11da09d4a6e5f9afedc4675add8556
+ClientKey 4a6701840c1fc8301c3652e8cf0c8abd2820861b7daae823aba7a62946e4b670
+StoredKey 14efbd8c16f7314ba4b7a8c99f38cf64e59ce68c3f3eee89b4fca3bb46aa684f
+ServerKey ab127549b992022e44712d09e4293f70a026ffe2316be2b0a7addfe0e1c3833a
+SyntaxError "PBKDF2 keys are not extractable"
+SyntaxError "PBKDF2 keys are not extractable"
+SyntaxError "Unsupported key usage for a PBKDF2 key"
+SyntaxError "Usages cannot be empty when importing a secret key."
+SyntaxError "Unsupported key usage for a PBKDF2 key"
+NotSupportedError "Unable to import PBKDF2 using jwk format"
+TypeError "Failed to execute 'importKey' on 'SubtleCrypto': 2nd argument is not instance of ArrayBuffer, Buffer, TypedArray, or DataView."
+NotSupportedError "Unrecognized algorithm name"
+ok key secret
+secret {"name":"PBKDF2"} false deriveBits,deriveKey 0
+ok bytes 32
+NotSupportedError "Unrecognized algorithm name"
+NotSupportedError "Unrecognized algorithm name"
+TypeError "Failed to normalize algorithm: passed algorithm can not be converted to 'Pbkdf2Params' because 'hash' is required in 'Pbkdf2Params'."
+OperationError "iterations cannot be zero"
+TypeError "Failed to normalize algorithm: 'iterations' of 'Pbkdf2Params' (passed algorithm) is outside the expected range of 0 to 4294967295."
+TypeError "Failed to normalize algorithm: 'iterations' of 'Pbkdf2Params' (passed algorithm) is not a finite number."
+ok bytes 16
+TypeError "Failed to normalize algorithm: passed algorithm can not be converted to 'Pbkdf2Params' because 'iterations' is required in 'Pbkdf2Params'."
+TypeError "Failed to normalize algorithm: 'salt' of 'Pbkdf2Params' (passed algorithm) is not instance of ArrayBuffer, Buffer, TypedArray, or DataView."
+TypeError "Failed to normalize algorithm: passed algorithm can not be converted to 'Pbkdf2Params' because 'salt' is required in 'Pbkdf2Params'."
+OperationError "length cannot be null"
+OperationError "length cannot be null"
+OperationError "length must be a multiple of 8"
+ok bytes 1
+OperationError "The operation failed for an operation-specific reason"
+TypeError "Failed to execute 'deriveBits' on 'SubtleCrypto': 2nd argument is not of type CryptoKey."
+InvalidAccessError "baseKey does not have deriveBits usage"
+InvalidAccessError "baseKey does not have deriveBits usage"
+TypeError "Failed to normalize algorithm: passed algorithm can not be converted to 'Pbkdf2Params' because 'hash' is required in 'Pbkdf2Params'."
+ok bytes 0
+{"name":"HMAC","hash":{"name":"SHA-256"},"length":128} secret sign 061df616343cb988307172e2c3074be6
+{"name":"HMAC","hash":{"name":"SHA-1"},"length":512} 64
+{"name":"AES-GCM","length":256} encrypt,decrypt 061df616343cb988307172e2c3074be63e953b28237ea96184f6a48bec7a8a55
+DataError "Zero-length key is not supported"
+NotSupportedError "Unsupported algorithm.length"
+TypeError "Failed to normalize algorithm: passed algorithm can not be converted to 'HmacImportParams' because 'hash' is required in 'HmacImportParams'."
+TypeError "Failed to normalize algorithm: passed algorithm can not be converted to 'AesDerivedKeyParams' because 'length' is required in 'AesDerivedKeyParams'."
+OperationError "AES key length must be 128, 192, or 256 bits"
+SyntaxError "Unsupported key usage for an AES key"
+NotSupportedError "Unrecognized algorithm name"
+SyntaxError "Usages cannot be empty when importing a secret key."
+InvalidAccessError "baseKey does not have deriveKey usage"
+TypeError "Failed to execute 'deriveKey' on 'SubtleCrypto': 2nd argument is not of type CryptoKey."
+203d1e5cedd2d18f8c5a3beff0bd9c1ebcb97097dfcb288c46b00c9227fde2c0
+InvalidAccessError "Unable to use this key to sign"
+InvalidAccessError "Unable to use this key to sign"
+TypeError "Failed to execute 'sign' on 'SubtleCrypto': 3rd argument is not instance of ArrayBuffer, Buffer, TypedArray, or DataView."
+NotSupportedError "PBKDF2 key export is not supported"

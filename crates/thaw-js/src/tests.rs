@@ -2930,8 +2930,9 @@ fn web_crypto_operations_not_implemented_reject_not_supported() {
              })();"
         ),
         "NotSupportedError:AES-GCM encrypt is not implemented|NotSupportedError:AES-GCM decrypt is not implemented|\
-         NotSupportedError:HMAC sign is not implemented|NotSupportedError:HMAC verify is not implemented|\
-         NotSupportedError:PBKDF2 deriveBits is not implemented|NotSupportedError:PBKDF2 deriveKey is not implemented|\
+         resolved|NotSupportedError:HMAC verify is not implemented|\
+         TypeError:Failed to normalize algorithm: passed algorithm can not be converted to 'Pbkdf2Params' because 'hash' is required in 'Pbkdf2Params'.|\
+         TypeError:Failed to normalize algorithm: passed algorithm can not be converted to 'Pbkdf2Params' because 'hash' is required in 'Pbkdf2Params'.|\
          NotSupportedError:AES-KW wrapKey is not implemented|NotSupportedError:AES-KW unwrapKey is not implemented|\
          NotSupportedError:RSA-PSS generateKey is not implemented|NotSupportedError:Unrecognized algorithm name|\
          NotSupportedError:Unrecognized algorithm name|NotSupportedError:Unrecognized algorithm name|\
