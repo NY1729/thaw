@@ -88,8 +88,7 @@ return out;
 fn l_vm_errors() {
     // expected: node22
     assert_eq!(
-        // QuickJS: thaw-js parity gap, vm family (PR B).
-        p2c_run_qjs("l_vm_errors",r#####"const vm = require('node:vm');
+        p2c_run("l_vm_errors", r#####"const vm = require('node:vm');
 const out = {};
 const sb = vm.createContext({});
 try { vm.runInContext('null.x', sb, { filename: 'ctx-file.js' }); } catch (e) { out.typeError = [e.name, e instanceof TypeError, e.constructor.name, String(e.stack).includes('ctx-file.js')]; }
