@@ -142,3 +142,18 @@ fn call_of_call_on_json_receiver_lowers_without_build_error() {
     );
     assert!(!body.is_empty(), "{body}");
 }
+
+#[test]
+fn awaiting_an_inline_json_dynamic_call_adopts_a_returned_thenable() {
+    let body = dynamic_callee_chain_main_body(
+        r##"
+        declare function mk(): JsValue;
+        async function main(): Promise<void> {
+            const c = mk();
+            const r = await c.inject({ url: "/x" });
+            console.log(r);
+        }
+        "##,
+    );
+    assert!(body.contains("__thaw_await_json_"), "{body}");
+}
