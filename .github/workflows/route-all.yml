@@ -64,7 +64,7 @@ jobs:
       - name: Install system dependencies
         run: |
           for attempt in 1 2 3; do
-            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update reported an error (a broken mirror?), trying the install with the cached package lists" >&2;
                sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
               exit 0
             fi
@@ -72,7 +72,7 @@ jobs:
             if [ "$attempt" = 1 ]; then
               # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
               sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
-              printf 'Types: deb\nURIs: http://archive.ubuntulinux.jp/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+              printf 'Types: deb\nURIs: http://mirrors.kernel.org/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
             fi
             sleep 10
           done
@@ -276,7 +276,7 @@ jobs:
       - name: Install system dependencies
         run: |
           for attempt in 1 2 3; do
-            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update reported an error (a broken mirror?), trying the install with the cached package lists" >&2;
                sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev time; then
               exit 0
             fi
