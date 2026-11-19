@@ -2389,7 +2389,7 @@ impl Interp {
                 code = it.get(&opts, "code")?;
             }
             let warning = match &first {
-                Value::Object(o) if crate::builtins::is_error_instance(it, o) => first.clone(),
+                Value::Object(o) if crate::builtins::is_error_instance(o) => first.clone(),
                 _ => {
                     let msg = it.to_str(&first);
                     let e = it.make_error("Error", &msg)?;

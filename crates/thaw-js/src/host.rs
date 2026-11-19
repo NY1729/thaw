@@ -4752,7 +4752,7 @@ fn callback_arg_token(
 ) -> Result<String, HostError> {
     if error {
         if let Value::Object(o) = item {
-            if crate::builtins::is_error_instance(it, o) {
+            if crate::builtins::is_error_instance(o) {
                 if let Some((_, framed)) = frame_error(it, item) {
                     let mut q = String::new();
                     crate::builtins::json_quote(&framed, &mut q);
@@ -5692,8 +5692,7 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
             }
             // an Error object crosses as its framed string, the form a compiled Error takes, so compiled
             // code revives it as an Error again (a plain object with a `message` stays an object)
-            if matches!(&*o.kind.borrow(), Kind::Plain) && crate::builtins::is_error_instance(it, o)
-            {
+            if matches!(&*o.kind.borrow(), Kind::Plain) && crate::builtins::is_error_instance(o) {
                 if let Some((_, framed)) = frame_error(it, v) {
                     return Ok(Native::Str(framed));
                 }
@@ -8392,6 +8391,40 @@ var __thaw_bundle_entry_key = "dump-pkg/index.js";
             .expect("probe runs");
         let text = it.to_str(&out);
         assert_eq!(text, r#"[1,"own",2,5,false,false,"own,shadow,x,y"]"#.into());
+    }
+}
+
+#[cfg(test)]
+mod missing_require_tests {
+    use super::*;
+
+    /// A factory whose requires name specs its bundle does not map: a package-relative file the package does not
+    /// ship (@node-rs/crc32's `.wasi.cjs`) inside a try/catch, and a lazy getter (pg's `get native()`) that requires
+    /// an uninstalled optional package. Each throws MODULE_NOT_FOUND where it is called, and the program goes on.
+    #[test]
+    fn unmapped_require_throws_module_not_found_and_the_program_continues() {
+        let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require) {
+  exports.probe = function () {
+    var out = [];
+    try { require('./crc32.wasi.cjs'); out.push('loaded'); } catch (e) { out.push(e.code); }
+    try { exports.native; out.push('loaded'); } catch (e) { out.push(e.code); }
+    out.push('continued');
+    return out.join(',');
+  };
+  Object.defineProperty(exports, 'native', { get: function () { return require('pg-native'); } });
+},
+};
+var __thaw_bundle_require_maps = { "p/index.js": {}, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#;
+        assert!(crate::scan::scan_bundle(bundle).unwrap().is_clean());
+        let mut pkg = Package::load(bundle).expect("loads");
+        assert_eq!(
+            pkg.call("probe", &[]).unwrap(),
+            Native::Str("MODULE_NOT_FOUND,MODULE_NOT_FOUND,continued".into())
+        );
     }
 }
 

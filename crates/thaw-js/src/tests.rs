@@ -3832,14 +3832,30 @@ fn scan_tolerates_optional_requires_guarded_by_a_handling_try() {
         "",
     );
     assert!(crate::scan::scan_bundle(&guarded).unwrap().is_clean());
-    // unguarded, rethrowing, function-deferred, finally-only and builtin requires stay refused
-    let refused = [
+    // any spec the bundle does not map is clean, guarded or not: rethrowing, function-deferred (pg's lazy
+    // `get native()`), finally-only, and a package-relative file the package does not ship (@node-rs/crc32)
+    let unmapped = [
         "const b = require('bufferutil');",
         "try { require('bufferutil'); } catch (e) { throw e; }",
-        "try { exports.f = function () { return require('bufferutil'); }; } catch (e) {}",
+        "exports.f = function () { return require('pg-native'); };",
         "try { require('bufferutil'); } finally {}",
+        "try { exports.w = require('./crc32.wasi.cjs'); } catch (err) { exports.c = err; }",
+    ];
+    for code in unmapped {
+        let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
+            .ok()
+            .unwrap();
+        assert!(report.is_clean(), "{code} should be clean");
+    }
+    // still refused: builtins (thaw serves them by name), native addons (dlopen is never served), and a
+    // computed spec, guarded or not
+    let refused = [
         "try { require('net'); } catch (e) {}",
         "try { require('node:net'); } catch (e) {}",
+        "const n = require('node:nonexistentbuiltin');",
+        "try { require('./addon.node'); } catch (e) {}",
+        "exports.f = function () { return require('./addon.node'); };",
+        "const x = 'bufferutil'; try { require(x); } catch (e) {}",
     ];
     for code in refused {
         let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
@@ -3857,6 +3873,81 @@ fn scan_tolerates_optional_requires_guarded_by_a_handling_try() {
         p.call("probe", &[]).ok(),
         Some(crate::host::Native::Str("MODULE_NOT_FOUND".into()))
     );
+}
+
+#[test]
+fn scan_blocks_an_unmapped_require_only_of_an_installed_package() {
+    use std::collections::HashSet;
+    // drizzle's `drizzle-orm/neon-serverless` requires its peer `@neondatabase/serverless`: a non-blocker while the
+    // peer is not installed (Node throws MODULE_NOT_FOUND too), a blocker once it is installed but unmapped
+    let none = HashSet::new();
+    // (scan of `code` with the installed packages `installed`; the map of the one module is empty unless given)
+    let scan = |code: &str, map: &str, installed: &HashSet<String>| {
+        let ctx = crate::scan::ScanContext {
+            known_methods: &none,
+            installed_packages: installed,
+        };
+        crate::scan::scan_bundle_in(&one_module_bundle(code, map), &ctx).unwrap()
+    };
+    let peer_code = "exports.n = function () { return require('@neondatabase/serverless'); };";
+    assert!(scan(peer_code, "", &none).is_clean());
+    let peer: HashSet<String> = ["@neondatabase/serverless".to_string()].into();
+    let report = scan(peer_code, "", &peer);
+    assert!(!report.is_clean());
+    assert!(report
+        .blockers
+        .contains_key("require:@neondatabase/serverless"));
+    // a mapped spec is clean whatever is installed
+    let mapped = "exports.n = require('@neondatabase/serverless');";
+    assert!(scan(
+        mapped,
+        "\"@neondatabase/serverless\": \"p/index.js\"",
+        &peer
+    )
+    .is_clean());
+    // the package an unmapped spec names is the one that counts: `name/sub` and `@scope/name/sub` belong to their
+    // installed package; a package sharing only a prefix, a bare scope, a relative spec and a dotted name do not
+    let installed: HashSet<String> = ["pkg", "@scope/name"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for spec in ["pkg/sub/x", "pkg", "@scope/name/deep/x", "@scope/name"] {
+        let code = format!("exports.f = function () {{ return require('{spec}'); }};");
+        assert!(
+            !scan(&code, "", &installed).is_clean(),
+            "{spec} names an installed package: blocked"
+        );
+    }
+    for spec in [
+        "pkgx/sub",
+        "pkg2",
+        "@scope/other",
+        "@scope",
+        "./pkg",
+        "../pkg/sub",
+        ".prisma/client/sql",
+    ] {
+        let code = format!("exports.f = function () {{ return require('{spec}'); }};");
+        assert!(
+            scan(&code, "", &installed).is_clean(),
+            "{spec} names no installed package: clean"
+        );
+    }
+    // a relative spec stays a non-blocker even when an installed package has its name
+    let names_file: HashSet<String> = [".", "crc32.wasi.cjs"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let wasi = "try { exports.w = require('./crc32.wasi.cjs'); } catch (err) { exports.c = err; }";
+    assert!(scan(wasi, "", &names_file).is_clean());
+    // a dotted package name is a package: `.prisma/client/sql` is blocked once `.prisma` is installed
+    let dotted: HashSet<String> = [".prisma".to_string()].into();
+    assert!(!scan(
+        "exports.g = function () { return require('.prisma/client/sql'); };",
+        "",
+        &dotted
+    )
+    .is_clean());
 }
 
 const DATES: &str = r#"module.exports = (function(require){
@@ -11361,7 +11452,11 @@ exports.traceMixed = traceMixed;"#;
         .map(|s| s.to_string())
         .collect();
     let blockers = |src: &str, extra: &HashSet<String>| {
-        crate::scan::scan_bundle_with_known(&one_module_bundle(src, ""), extra)
+        let ctx = crate::scan::ScanContext {
+            known_methods: extra,
+            installed_packages: &HashSet::new(),
+        };
+        crate::scan::scan_bundle_in(&one_module_bundle(src, ""), &ctx)
             .ok()
             .unwrap()
             .blockers

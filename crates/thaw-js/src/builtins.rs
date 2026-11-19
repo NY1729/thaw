@@ -295,7 +295,7 @@ pub(crate) fn object_prototype_to_string(it: &mut Interp, this: &Value) -> R<Val
             Kind::Wrapper(Value::BigInt(_)) => "[object BigInt]",
             Kind::Wrapper(_) => "[object Boolean]",
             Kind::Plain if find_in_chain(o, "__time").is_some() => "[object Date]",
-            Kind::Plain if is_error_instance(it, o) => "[object Error]",
+            Kind::Plain if is_error_instance(o) => "[object Error]",
             Kind::Plain
             | Kind::Global
             | Kind::Generator(_)
@@ -3014,16 +3014,22 @@ pub(crate) fn collate(a: &str, b: &str) -> std::cmp::Ordering {
         .then_with(|| case(a).cmp(&case(b)))
 }
 
-pub(crate) fn is_error_instance(it: &mut Interp, o: &Obj) -> bool {
+/// Marks this realm's `Error.prototype` (after the prelude defined `Error`). Every realm marks its own, so an
+/// error made in a `node:vm` context is an error for the host too, as in Node ([[ErrorData]] is per object).
+pub(crate) fn mark_error_proto(it: &mut Interp) {
     let Some(ctor) = it.lookup(&it.global.clone(), "Error") else {
-        return false;
+        return;
     };
-    let Ok(Value::Object(proto)) = it.get(&ctor, "prototype") else {
-        return false;
-    };
+    if let Ok(Value::Object(proto)) = it.get(&ctor, "prototype") {
+        proto.error_proto.set(true);
+    }
+}
+
+/// Whether `o` inherits from some realm's `Error.prototype` (a subclass or a native error type alike).
+pub(crate) fn is_error_instance(o: &Obj) -> bool {
     let mut cur = o.proto.borrow().clone();
     while let Some(c) = cur {
-        if Rc::ptr_eq(&c, &proto) {
+        if c.error_proto.get() {
             return true;
         }
         cur = c.proto.borrow().clone();
