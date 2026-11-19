@@ -24,6 +24,15 @@ fn run_lines(src: &str) -> Vec<String> {
     std::mem::take(&mut it.out)
 }
 
+/// Like `run_lines`, then drains the event loop, so the `await` continuations of async bodies run too.
+fn run_lines_async(src: &str) -> Vec<String> {
+    crate::gc::no_auto();
+    let mut it = Interp::new();
+    assert!(it.run(src).is_ok());
+    assert!(it.run_event_loop().is_ok());
+    std::mem::take(&mut it.out)
+}
+
 /// Builds `n` contexts, each created and run once; returns the sum of i*i and the elapsed time.
 fn run_many_contexts(n: usize) -> (Vec<String>, Duration) {
     let t = Instant::now();
@@ -441,5 +450,201 @@ console.log([tag('new Error("x")'), tag('new TypeError("y")'), tag('class E2 ext
     assert_eq!(
         run_lines(&src),
         vec!["[object Error] [object Error] [object Error] [object Object]".to_string()]
+    );
+}
+
+/// An error made while a named script runs carries the filename in `stack`, after the `Name: message` header.
+#[test]
+fn vm_error_stack_names_the_script_file() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"const sb = createContext({});
+try { runInContext('throw new Error("boom")', sb, { filename: 'ctx-file.js' }); } catch (e) {
+  const lines = String(e.stack).split('\n');
+  console.log([lines[0], String(e.stack).includes('ctx-file.js')].join(' | '));
+}
+try { runInContext('null.x', sb, { filename: 'ctx-null.js' }); } catch (e) { console.log(String(e.stack).includes('ctx-null.js')); }
+console.log(new Error('host').stack.includes('ctx-file.js'));"#
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec![
+            "Error: boom | true".to_string(),
+            "true".to_string(),
+            "false".to_string()
+        ]
+    );
+}
+
+/// A run nested inside another (a host closure called by one context runs a second, named script) restores the
+/// outer filename once it returns: an error the outer script makes afterwards still names the outer file.
+#[test]
+fn vm_nested_script_run_restores_the_outer_filename() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"globalThis.inner = () => runInThisContext('new Error("in").stack', { filename: 'inner.js' });
+console.log(runInThisContext('[inner().includes("inner.js"), new Error("o").stack.includes("outer.js"), new Error("o").stack.includes("inner.js")].join(",")', { filename: 'outer.js' }));
+console.log(new Error("after").stack.includes("outer.js"));"#
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec!["true,true,false".to_string(), "false".to_string()]
+    );
+}
+
+/// A SyntaxError from a named script keeps `SyntaxError` as its name, has a message, and its stack names the file
+/// (V8 puts the `file:line` header and the source line above `SyntaxError: message`).
+#[test]
+fn vm_syntax_error_names_the_script_file() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"try { __thaw_vm_eval('(', 'bad.js', true); } catch (e) {
+  console.log([e.name, e.message.length > 0, String(e.stack).includes('bad.js'), String(e.stack).split('\n').some((l) => l.startsWith('SyntaxError: '))].join(','));
+}
+const sb = createContext({});
+try { runInContext('let a = ;', sb, { filename: 'bad-syntax.js' }); } catch (e) {
+  console.log([e.name, String(e.stack).includes('bad-syntax.js')].join(','));
+}"#
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec![
+            "SyntaxError,true,true,true".to_string(),
+            "SyntaxError,true".to_string()
+        ]
+    );
+}
+
+/// Without a filename the stack is the plain header, as before.
+#[test]
+fn vm_script_without_filename_keeps_the_plain_stack() {
+    let src = r#"console.log(__thaw_vm_run(-1, 'new Error("plain").stack', undefined, 0));"#;
+    assert_eq!(run_lines(src), vec!["Error: plain".to_string()]);
+}
+
+/// A context made at top level and run inside async bodies, before and after an `await`. Under the thread
+/// coroutine backend each async body runs on its own thread, so the context table has to follow the control.
+#[test]
+fn vm_context_made_at_top_level_runs_in_async_bodies() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"const ctx = createContext({ x: 1 });
+(async () => {
+  console.log(`before ${runInContext('x + 1', ctx)}`);
+  await null;
+  console.log(`after ${runInContext('x + 2', ctx)}`);
+})().catch((e) => console.log(`E:${e.message}`));"#
+    );
+    assert_eq!(
+        run_lines_async(&src),
+        vec!["before 2".to_string(), "after 3".to_string()]
+    );
+}
+
+/// A context made inside an async body (before its `await`) is found afterwards at top level and in another
+/// async body that runs after an `await`.
+#[test]
+fn vm_context_made_in_async_body_runs_later() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"let ctx;
+(async () => {
+  ctx = createContext({ y: 5 });
+  await null;
+  console.log(`inner ${runInContext('y * 3', ctx)}`);
+})().catch((e) => console.log(`E:${e.message}`));
+console.log(`top ${runInContext('y * 2', ctx)}`);
+(async () => {
+  await null;
+  console.log(`later ${runInContext('y * 4', ctx)}`);
+})().catch((e) => console.log(`E:${e.message}`));"#
+    );
+    assert_eq!(
+        run_lines_async(&src),
+        vec![
+            "top 10".to_string(),
+            "inner 15".to_string(),
+            "later 20".to_string()
+        ]
+    );
+}
+
+/// Two contexts made on two different coroutine threads (and one at top level) each keep their own slot:
+/// every context runs its own script, so no id is reused.
+#[test]
+fn vm_contexts_made_on_different_coroutine_threads_stay_distinct() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"let a, b;
+(async () => {
+  a = createContext({ v: 'a' });
+  await null;
+})().catch((e) => console.log(`E:${e.message}`));
+(async () => {
+  b = createContext({ v: 'b' });
+  await null;
+})().catch((e) => console.log(`E:${e.message}`));
+const c = createContext({ v: 'c' });
+console.log(runInContext('v', a) + runInContext('v', b) + runInContext('v', c));"#
+    );
+    assert_eq!(run_lines_async(&src), vec!["abc".to_string()]);
+}
+
+/// A bare call of a function the sandbox holds has no `this` of its own: a sloppy callee sees the context's global
+/// object, a strict one `undefined`. The sandbox is not the `this` (the `with` of the vm scope is not a user `with`).
+#[test]
+fn vm_bare_call_this_is_not_the_sandbox() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({ f() { return this === sb; }, sf: function () { "use strict"; return typeof this; } });
+console.log([runInContext('f()', sb), runInContext('sf()', sb), runInContext('(function () { "use strict"; return typeof this; })()', sb)].join(','));"##
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec!["false,undefined,undefined".to_string()]
+    );
+}
+
+/// A user `with` keeps its object as the `this` of a call it resolves, and a method call keeps its receiver.
+#[test]
+fn vm_user_with_and_method_call_keep_their_this() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({});
+console.log([runInContext('var wo = { k() { return this === wo; } }; var wr; with (wo) { wr = k(); } wr', sb), runInContext('const holder = { m() { return this === holder; } }; holder.m()', sb)].join(','));"##
+    );
+    assert_eq!(run_lines(&src), vec!["true,true".to_string()]);
+}
+
+/// `let`/`const`/`class` persist in a context's script scope. A later run that declares the same name with
+/// let/class throws a SyntaxError before any of its code runs; `var` redeclaration stays legal; a `let` conflicts with
+/// an earlier `var` or function of the name; the same name in two contexts is fine.
+#[test]
+fn vm_let_redeclaration_throws_before_the_script_runs() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const attempt = (code, c) => { try { runInContext(code, c); return 'ok'; } catch (e) { return e.name + ':' + e.message; } };
+const sb = createContext({ hits: 0 });
+console.log(attempt('hits = hits + 1; let dup = 1', sb), attempt('hits = hits + 1; let dup = 2', sb), sb.hits);
+console.log(attempt('var dup = 3', sb));
+const v = createContext({});
+console.log(attempt('var lv = 1; function fn1() { return 1 }', v), attempt('let lv = 2', v), attempt('let fn1 = 2', v));
+console.log(attempt('var vv = 1; function fv() { return 1 }', v), attempt('var vv = 2; function fv() { return 2 }', v), runInContext('vv + fv()', v));
+const a = createContext({}), b = createContext({});
+console.log(attempt('let same = 1', a), attempt('let same = 2', b), runInContext('same', b));
+console.log(attempt('class K1 {}', a), attempt('class K1 {}', a));
+console.log(attempt('const k = 5', a), attempt('k = 6', a));"##
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec![
+            "ok SyntaxError:Identifier 'dup' has already been declared 1".to_string(),
+            "SyntaxError:Identifier 'dup' has already been declared".to_string(),
+            "ok SyntaxError:Identifier 'lv' has already been declared SyntaxError:Identifier 'fn1' has already been declared".to_string(),
+            "ok ok 4".to_string(),
+            "ok ok 2".to_string(),
+            "ok SyntaxError:Identifier 'K1' has already been declared".to_string(),
+            "ok TypeError:Assignment to constant variable.".to_string(),
+        ]
     );
 }

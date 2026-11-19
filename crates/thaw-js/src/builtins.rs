@@ -66,15 +66,20 @@ pub(crate) const PRELUDE: &str = r#"
     toString: function () { var n = siteFrame(this)[0]; return n === null ? '<anonymous>' : n; }
   };
   for (var k in siteMethods) def(siteProto, k, siteMethods[k]);
+  // the filename of the vm script running in this realm (undefined when none); captured here, since `__thaw_` names
+  // are hidden in a vm realm once it is built
+  var scriptFile = __thaw_vm_script_file;
   function mkError(name, Parent) {
     var C = function (message, options) {
       if (!(this instanceof C)) return new C(message, options);
       if (message !== undefined) def(this, 'message', String(message));
       if (options !== null && typeof options === 'object' && 'cause' in options) def(this, 'cause', options.cause);
       var hook = usableHook();
+      var file = scriptFile();
+      // ponytail: one fake frame at 1:1 naming the script; no call-site tracking yet
       def(this, 'stack', typeof hook === 'function'
         ? formatStack(this, hook, __thaw_call_frames(C, E.stackTraceLimit, undefined))
-        : name + (message !== undefined ? ': ' + String(message) : ''));
+        : name + (message !== undefined ? ': ' + String(message) : '') + (file === undefined ? '' : '\n    at <anonymous> (' + file + ':1:1)'));
     };
     def(C, 'name', name);
     C.prototype = Parent ? Object.create(Parent.prototype) : {};

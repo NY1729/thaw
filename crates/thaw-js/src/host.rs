@@ -5967,10 +5967,12 @@ struct HostTls {
     last_frame: Option<(String, String)>,
     watches: Vec<Watch>,
     heap: crate::heap_limit::State,
+    contexts: std::mem::ManuallyDrop<HashMap<u32, crate::vm::VmSlot>>,
 }
 
 // SAFETY: the host thread and the coroutine thread strictly alternate (each hands control to the
-// other through a channel), so the `Rc`s and raw pointers inside are never touched by two threads at once.
+// other through a channel), so the `Rc`s and raw pointers inside (the realms of the vm context table
+// included) are never touched by two threads at once.
 struct SendHostTls(HostTls);
 unsafe impl Send for SendHostTls {}
 
@@ -5995,6 +5997,7 @@ pub(crate) fn park_host_tls(key: usize) {
         last_frame: LAST_FRAME.with(|c| std::mem::take(&mut *c.borrow_mut())),
         watches: WATCHES.with(|c| std::mem::take(&mut *c.borrow_mut())),
         heap: crate::heap_limit::take(),
+        contexts: crate::vm::take_contexts(),
     };
     PARKED.lock().unwrap().push((key, SendHostTls(tls)));
 }
@@ -6028,8 +6031,11 @@ pub(crate) fn adopt_host_tls(key: usize) {
         last_frame,
         watches,
         heap,
+        contexts,
     } = tls;
     crate::heap_limit::restore(heap);
+    // the table it replaces is empty (the other thread parked it), so discarding it runs no code
+    crate::vm::restore_contexts(contexts);
     // the replaced values are empty (the other thread parked them), so dropping them runs no code
     drop(PACKAGES.with(|c| c.replace(packages)));
     drop(RUNNING.with(|c| c.replace(running)));
