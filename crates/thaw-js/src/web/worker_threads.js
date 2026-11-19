@@ -127,12 +127,15 @@
       super();
       // a file worker runs its file as a CommonJS main module (the disk loader resolves relative paths)
       let code = String(source);
+      // the file a non-eval worker runs (a bundled module's virtual path runs from its bundle, worker.rs)
+      let file;
       if (!options || !options.eval) {
         if (!code.startsWith('/') && !code.startsWith('./') && !code.startsWith('../')) {
           const error = new Error('The worker script or module filename must be an absolute path or a relative path starting with ./ or ../. Received "' + code + '"');
           error.code = 'ERR_WORKER_PATH';
           throw error;
         }
+        file = code;
         code = 'globalThis.__thaw_run_main_file(' + JSON.stringify(code) + ')';
       }
       const threadId = nextThreadId++;
@@ -172,7 +175,7 @@
       };
       opts.resourceLimits = resourceLimits;
       // heap limit (MiB, -1 = none) and stack (MiB): the natives' numeric arguments
-      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb, shareEnv, token);
+      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb, shareEnv, token, file);
       let resolveExit;
       const state = {
         handle,

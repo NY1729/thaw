@@ -101,6 +101,50 @@ pub(crate) struct WorkerState {
     token: u64,
     /// `port` events for this realm's own ports, routed by a script (main thread), delivered by the next poll.
     local: Vec<String>,
+    /// The registry bundles this realm loaded, in load order: a worker whose file is one of their modules runs it.
+    bundles: Vec<LoadedBundle>,
+}
+
+/// A registry bundle loaded into this realm: its package name, its text (one copy per loaded package, made once at
+/// load and shared by every worker spawned from it), and its factory keys.
+struct LoadedBundle {
+    package: String,
+    text: Arc<str>,
+    keys: BTreeSet<String>,
+}
+
+/// The bundled module a worker starts as its main module (see [`main_bundle`]).
+pub(crate) struct MainBundle {
+    package: String,
+    text: Arc<str>,
+    key: String,
+}
+
+/// Records a bundle loaded into `it` (`Package::load_named`), so a worker spawned from `it` can run its modules.
+pub(crate) fn register_bundle(
+    it: &mut Interp,
+    package: &str,
+    text: &str,
+    parts: &crate::scan::BundleParts,
+) {
+    let keys = parts.factories.iter().map(|(key, _)| key.clone()).collect();
+    it.worker.bundles.push(LoadedBundle {
+        package: package.to_string(),
+        text: Arc::from(text),
+        keys,
+    });
+}
+
+/// The bundled module a worker's file names, `/thaw_modules/<key>` (the virtual `__filename` of a bundled module):
+/// the first loaded bundle with that factory key, as `require` resolves a key. None keeps the disk loader.
+fn main_bundle(it: &Interp, file: &str) -> Option<MainBundle> {
+    let key = file.strip_prefix("/thaw_modules/")?;
+    let bundle = it.worker.bundles.iter().find(|b| b.keys.contains(key))?;
+    Some(MainBundle {
+        package: bundle.package.clone(),
+        text: bundle.text.clone(),
+        key: key.to_string(),
+    })
 }
 
 /// SharedArrayBuffer blocks in flight between Interps: the wire carries only the id. An encode enters the block
@@ -338,6 +382,7 @@ pub(crate) fn stack_bytes(stack_mb: f64) -> usize {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn(
     it: &mut Interp,
     source: String,
@@ -347,6 +392,8 @@ fn spawn(
     share_env: bool,
     // (the worker's port token, the spawning realm's port token: the hub its ports route through)
     tokens: (u64, u64),
+    // the bundled module the worker runs as its main module instead of the disk loader's `source`
+    main: Option<MainBundle>,
 ) -> u32 {
     let (tx, cmd_rx) = mpsc::channel();
     let (evt_tx, rx) = mpsc::channel();
@@ -372,7 +419,7 @@ fn spawn(
     let join = std::thread::Builder::new()
         .name("thaw-js-worker".into())
         .stack_size(stack)
-        .spawn(move || run_worker(&source, &opts, stack, heap, side, env))
+        .spawn(move || run_worker(&source, &opts, stack, heap, side, env, main))
         .expect("worker thread spawns");
     it.worker.next += 1;
     let id = it.worker.next;
@@ -429,6 +476,7 @@ fn run_worker(
     heap: Option<usize>,
     side: Side,
     env: EnvTable,
+    main: Option<MainBundle>,
 ) {
     let exit_tx = side.tx.clone();
     let code = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -442,7 +490,7 @@ fn run_worker(
         it.interrupt = Some(side.interrupt.clone());
         it.worker.side = Some(side);
         it.worker.env_table = Some(env);
-        let code = run_script(&mut it, source, opts);
+        let code = run_script(&mut it, source, opts, main);
         // messages the parent sent that this worker never read still carry their blocks; so does a workerData the
         // bootstrap never reached (its wire is inside the spawn options)
         if let Some(side) = &it.worker.side {
@@ -457,7 +505,7 @@ fn run_worker(
     let _ = exit_tx.send(Evt::Exit(code));
 }
 
-fn run_script(it: &mut Interp, source: &str, opts: &str) -> i32 {
+fn run_script(it: &mut Interp, source: &str, opts: &str, main: Option<MainBundle>) -> i32 {
     it.global
         .declare("__thaw_worker_opts", Value::str(opts), true);
     match it.run_builtin(BOOTSTRAP) {
@@ -475,7 +523,11 @@ fn run_script(it: &mut Interp, source: &str, opts: &str) -> i32 {
         ("worker_threads".into(), exports),
     ]);
     to_parent(it, Evt::Online);
-    let r = it.run_commonjs(source).and_then(|_| it.run_event_loop());
+    let entry = match &main {
+        Some(m) => crate::host::run_bundle_main(it, &m.package, &m.text, &m.key),
+        None => it.run_commonjs(source),
+    };
+    let r = entry.and_then(|_| it.run_event_loop());
     if let Some(code) = check_heap(it) {
         return code;
     }
@@ -686,6 +738,12 @@ pub(crate) fn install(it: &mut Interp) {
         // arg 5 is the worker's port token (its port routes name it as their owner); this realm is the hub
         let token = it.num(&arg(a, 5)) as u64;
         let hub = realm_token(it);
+        // arg 6 is the file a non-eval Worker runs (undefined for eval): a bundled module's path runs from the bundle
+        let file = match arg(a, 6) {
+            Value::Undefined => None,
+            v => Some(it.to_str(&v).to_string()),
+        };
+        let main = file.and_then(|f| main_bundle(it, &f));
         Ok(Value::Number(f64::from(spawn(
             it,
             source,
@@ -694,6 +752,7 @@ pub(crate) fn install(it: &mut Interp) {
             heap_mb,
             share_env,
             (token, hub),
+            main,
         ))))
     });
     g.declare("__thaw_worker_spawn", f, true);
