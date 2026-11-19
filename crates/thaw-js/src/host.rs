@@ -4752,7 +4752,7 @@ fn callback_arg_token(
 ) -> Result<String, HostError> {
     if error {
         if let Value::Object(o) = item {
-            if crate::builtins::is_error_instance(it, o) {
+            if crate::builtins::is_error_instance(o) {
                 if let Some((_, framed)) = frame_error(it, item) {
                     let mut q = String::new();
                     crate::builtins::json_quote(&framed, &mut q);
@@ -5692,8 +5692,7 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
             }
             // an Error object crosses as its framed string, the form a compiled Error takes, so compiled
             // code revives it as an Error again (a plain object with a `message` stays an object)
-            if matches!(&*o.kind.borrow(), Kind::Plain) && crate::builtins::is_error_instance(it, o)
-            {
+            if matches!(&*o.kind.borrow(), Kind::Plain) && crate::builtins::is_error_instance(o) {
                 if let Some((_, framed)) = frame_error(it, v) {
                     return Ok(Native::Str(framed));
                 }
