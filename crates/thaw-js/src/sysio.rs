@@ -446,6 +446,14 @@ impl Interp {
         g.declare("__thaw_process_set_stdin_ref", f, true);
         let f = self.native(|_, _, a| Ok(Value::Bool(set_stdin_raw_mode(arg(a, 0).truthy()))));
         g.declare("__thaw_process_set_raw_mode", f, true);
+        // (fd, raw) -> whether the terminal took the mode; registry tty.ReadStream.setRawMode calls it for its own fd
+        let f = self.native(|it, _, a| {
+            let fd = it.num(&arg(a, 0)) as i32;
+            Ok(Value::Bool(
+                fd >= 0 && set_fd_raw_mode(fd, arg(a, 1).truthy()),
+            ))
+        });
+        g.declare("__thaw_tty_set_raw_mode", f, true);
         // (fd, hex) -> raw bytes to stdout/stderr, after any pending partial line
         let f = self.native(|it, _, a| {
             let fd = it.num(&arg(a, 0)) as i32;

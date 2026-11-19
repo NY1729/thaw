@@ -6237,6 +6237,36 @@ fn busy_worker_does_not_starve_native_continuation() {
     );
 }
 
+/// A pending 3 s timer must not hold back a worker's `message`: while the loop sleeps toward the timer it still polls the
+/// worker every 2 ms (`platform_events_live`).
+#[test]
+fn pending_timer_does_not_delay_worker_message() {
+    let mut it = Interp::new();
+    let waiting = it
+        .run(
+            "globalThis.__t = setTimeout(() => {}, 3000); \
+             globalThis.__w = new (globalThis.__thaw_worker_threads_exports.Worker)('require(\"node:worker_threads\").parentPort.postMessage(7)', { eval: true }); \
+             new Promise((resolve) => globalThis.__w.on('message', resolve))",
+        )
+        .unwrap_or_else(|_| panic!("script must run"));
+    let started = std::time::Instant::now();
+    let settled = it
+        .await_settled(&waiting)
+        .unwrap_or_else(|_| panic!("loop runs"));
+    let waited = started.elapsed();
+    assert!(
+        matches!(settled, Some(Ok(_))),
+        "the worker's message arrives"
+    );
+    assert!(
+        waited < std::time::Duration::from_millis(1500),
+        "message waited {waited:?} behind a 3 s timer"
+    );
+    it.run("clearTimeout(__t); __w.terminate()")
+        .unwrap_or_else(|_| panic!("cleanup runs"));
+    it.run_event_loop().unwrap_or_else(|_| panic!("loop ends"));
+}
+
 thread_local! {
     static FAKE_READY: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }

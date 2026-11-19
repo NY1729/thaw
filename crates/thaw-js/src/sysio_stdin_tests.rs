@@ -67,6 +67,67 @@ fn raw_mode_clears_icanon_and_restores() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn tty_raw_mode_native_clears_icanon_and_echo_on_its_fd() {
+    let (mut master, mut slave) = (0i32, 0i32);
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    let lflag = |fd: i32| {
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(fd, &mut t) }, 0);
+        t.c_lflag
+    };
+    let mut it = Interp::new();
+    let installed = it
+        .run("typeof __thaw_tty_set_raw_mode === 'function'")
+        .unwrap_or_else(|_| panic!("typeof must run"));
+    assert!(installed.truthy(), "the registry tty shim needs the native");
+    let original = lflag(slave);
+    assert_ne!(
+        original & (libc::ICANON | libc::ECHO),
+        0,
+        "a fresh pty is canonical with echo"
+    );
+    let on = it
+        .run(&format!("__thaw_tty_set_raw_mode({slave}, true)"))
+        .unwrap_or_else(|_| panic!("native must run"));
+    assert!(on.truthy());
+    assert_eq!(
+        lflag(slave) & (libc::ICANON | libc::ECHO),
+        0,
+        "raw mode clears ICANON and ECHO"
+    );
+    let off = it
+        .run(&format!("__thaw_tty_set_raw_mode({slave}, false)"))
+        .unwrap_or_else(|_| panic!("native must run"));
+    assert!(off.truthy());
+    assert_eq!(
+        lflag(slave),
+        original,
+        "raw mode off restores the original settings"
+    );
+    // a descriptor that is not one reports failure, which setRawMode turns into ENOTTY
+    let bad = it
+        .run("__thaw_tty_set_raw_mode(-1, true)")
+        .unwrap_or_else(|_| panic!("native must run"));
+    assert!(!bad.truthy());
+    unsafe {
+        libc::close(master);
+        libc::close(slave);
+    }
+}
+
 /// Runs `body` on its own thread and fails, instead of hanging the whole test binary, if it takes over 5s.
 #[cfg(unix)]
 fn guarded<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
