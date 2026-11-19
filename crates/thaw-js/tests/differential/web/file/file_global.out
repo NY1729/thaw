@@ -1,0 +1,13 @@
+greeting.txt 11 text/plain 1700000000000 undefined false
+true true [object File] [object File]
+number true "" 0 d.bin
+42 5
+2 File true false
+function true false true
+true false 5 text/html
+TypeError ERR_MISSING_ARGS The "fileBits" and "fileName" arguments must be specified code
+TypeError ERR_MISSING_ARGS The "fileBits" and "fileName" arguments must be specified code
+TypeError Class constructor File cannot be invoked without 'new'
+"hello world"
+11 hello
+true blob 2 text/plain
