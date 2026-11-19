@@ -2,7 +2,8 @@
 //! `tools/scan-names/gen.js` (see the header of `data/node22_names.txt`); nothing here reads the host.
 //! Lookups are by name only: `is_node_method_name` (any string key reachable on a Node builtin),
 //! `is_node_global` (own key of `globalThis`), and `node_global_has` (own or inherited key of a
-//! `process`, `Symbol`, `crypto`, `globalThis` or `navigator` member).
+//! `process`, `Symbol`, `crypto`, `globalThis` or `navigator` member), and `method_owners` (the builtin modules
+//! whose exports reach a method name; `*` for a name reachable from `globalThis`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -14,6 +15,7 @@ struct Names {
     methods: HashSet<&'static str>,
     globals: HashSet<&'static str>,
     members: HashMap<&'static str, HashSet<&'static str>>,
+    owners: HashMap<&'static str, Vec<&'static str>>,
 }
 
 fn names() -> &'static Names {
@@ -27,6 +29,7 @@ fn parse(data: &'static str) -> Names {
         methods: HashSet::new(),
         globals: HashSet::new(),
         members: HashMap::new(),
+        owners: HashMap::new(),
     };
     let mut section = "";
     for line in data.lines() {
@@ -47,6 +50,11 @@ fn parse(data: &'static str) -> Names {
                 "members" => {
                     if let Some((root, key)) = line.split_once('.') {
                         out.members.entry(root).or_default().insert(key);
+                    }
+                }
+                "owners" => {
+                    if let Some((name, mods)) = line.split_once('\t') {
+                        out.owners.insert(name, mods.split(',').collect());
                     }
                 }
                 _ => {}
@@ -75,6 +83,12 @@ pub fn is_node_method_name(name: &str) -> bool {
 /// True if `name` is an own property of Node 22's `globalThis`.
 pub fn is_node_global(name: &str) -> bool {
     names().globals.contains(name)
+}
+
+/// The builtin modules (`node:` stripped) whose exports reach the method name `name`, or `*` when it is reachable
+/// from `globalThis`. `None` when the data has no owner line for it: the caller must then assume Node's object.
+pub fn method_owners(name: &str) -> Option<&'static [&'static str]> {
+    names().owners.get(name).map(Vec::as_slice)
 }
 
 /// True if Node 22 has `member` (own or inherited) on the global `global`, for the members the data covers
@@ -170,6 +184,21 @@ mod tests {
             !node_global_has("Math", "random"),
             "roots outside the data give false"
         );
+    }
+
+    #[test]
+    fn method_owners_name_the_modules_that_reach_a_method() {
+        assert_eq!(
+            method_owners("commit"),
+            Some(&["readline", "readline/promises"][..])
+        );
+        assert_eq!(method_owners("createZstdDecompress"), Some(&["zlib"][..]));
+        // net's keys reach the modules that hand out net.Socket instances
+        assert!(method_owners("connect").is_some_and(|o| o.contains(&"http") && o.contains(&"net")));
+        // reachable from globalThis: always an owner `*`
+        assert!(method_owners("close").is_some_and(|o| o.contains(&"*")));
+        // a name no module reaches (a diagnostics channel or IPC method) has no owner line
+        assert_eq!(method_owners("refCounted"), None);
     }
 
     #[test]

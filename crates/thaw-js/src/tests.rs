@@ -3618,9 +3618,10 @@ var __thaw_bundle_entry_key = \"p/index.js\";
 })(globalThis.require);";
     let report = crate::scan::scan_bundle(src).ok().unwrap();
     assert!(report.is_clean(), "{:?}", report.blockers);
+    // v8 is loaded so the unguarded call is a v8 owner's method (R7); without the load it is not a finding
     let unguarded = src.replace(
         "options?.getHeapSnapshot ? options.getHeapSnapshot(date) : date",
-        "options.getHeapSnapshot(date)",
+        "(require('node:v8'), options.getHeapSnapshot(date))",
     );
     assert!(!crate::scan::scan_bundle(&unguarded).unwrap().is_clean());
 }
@@ -3653,15 +3654,16 @@ fn scan_accepts_negated_and_null_compared_method_probes() {
     }
     // the same Node name called without any probe is still refused (`customMerge` is not a Node name: see
     // scan_flags_method_calls_only_for_node_names_thaw_lacks)
+    // (v8 is loaded: getHeapSnapshot is v8's, so the call can be on a v8 object; see the owner rule)
     let unguarded = one_module_bundle(
-        "exports.a = function (o) { return o.getHeapSnapshot(1); };",
+        "exports.a = function (o) { require('node:v8'); return o.getHeapSnapshot(1); };",
         "",
     );
     let report = crate::scan::scan_bundle(&unguarded).ok().unwrap();
     assert!(report.blockers.contains_key("method:getHeapSnapshot"));
     // a probe excuses calls of the probed name only
     let other = one_module_bundle(
-        "exports.a = function (o) { if (!o.customMerge) return 0; return o.getHeapSnapshot(1); };",
+        "exports.a = function (o) { require('node:v8'); if (!o.customMerge) return 0; return o.getHeapSnapshot(1); };",
         "",
     );
     let report = crate::scan::scan_bundle(&other).ok().unwrap();
@@ -3680,20 +3682,21 @@ fn scan_refuses_unguarded_host_method_calls_the_probe_rules_do_not_excuse() {
             "exports.a = function (m) { process.dlopen(m, 'x'); };",
             "method:dlopen",
         ),
+        // the owner modules are loaded (publish: diagnostics_channel, execute: _http_common, getHeapSnapshot: v8)
         (
-            "exports.a = function (c) { return c.publish('x'); };",
+            "exports.a = function (c) { require('node:diagnostics_channel'); return c.publish('x'); };",
             "method:publish",
         ),
         (
-            "exports.a = function () { return this.execute(); };",
+            "exports.a = function () { require('node:_http_common'); return this.execute(); };",
             "method:execute",
         ),
         (
-            "exports.a = class C extends EventEmitter { f() { return this.getHeapSnapshot(); } };",
+            "exports.a = class C extends EventEmitter { f() { require('node:v8'); return this.getHeapSnapshot(); } };",
             "method:getHeapSnapshot",
         ),
         (
-            "exports.a = class C { f() { return function () { return this.execute(); }; } };",
+            "exports.a = class C { f() { require('node:_http_common'); return function () { return this.execute(); }; } };",
             "method:execute",
         ),
     ];
@@ -3724,7 +3727,7 @@ fn scan_flags_method_calls_only_for_node_names_thaw_lacks() {
     // Node names thaw lacks (or the dlopen special case) stay refused
     for (code, blocker) in [
         (
-            "exports.a = function (c) { return c.getHeapSnapshot(); };",
+            "exports.a = function (c) { require('node:v8'); return c.getHeapSnapshot(); };",
             "method:getHeapSnapshot",
         ),
         (
@@ -3736,8 +3739,90 @@ fn scan_flags_method_calls_only_for_node_names_thaw_lacks() {
             "method:dlopen",
         ),
         (
-            "exports.a = function (c) { return c.publish('x'); };",
+            "exports.a = function (c) { require('node:diagnostics_channel'); return c.publish('x'); };",
             "method:publish",
+        ),
+    ] {
+        let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
+            .ok()
+            .unwrap();
+        assert!(
+            report.blockers.contains_key(blocker),
+            "{code}: {:?}",
+            report.blockers
+        );
+    }
+}
+
+#[test]
+fn scan_drops_method_calls_no_loaded_builtin_can_have_made() {
+    // R7 (owner-module reachability): a Node method is a finding only when a builtin that owns it is loaded, or
+    // a global reaches it. The drizzle driver calls (libsql transaction, pg pool, mysql session) load no owner:
+    // their receivers are the driver's objects, never a Node object the bundle obtained.
+    let drizzle = [
+        "exports.a = async function (client, q) { const tx = await client.transaction(); await tx.commit(); await tx.rollback(); };",
+        "exports.a = class C { f() { return this.client.connect(); } };",
+        "exports.a = function (session, q) { return session.execute(q); };",
+    ];
+    for code in drizzle {
+        let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
+            .ok()
+            .unwrap();
+        assert!(report.is_clean(), "{code}: {:?}", report.blockers);
+    }
+    // stream hands out no net.Socket: a stream-only bundle does not make `connect` a finding (the net alias closure)
+    let stream_only = one_module_bundle(
+        "exports.a = function (c) { require('node:stream'); return c.connect(); };",
+        "",
+    );
+    let report = crate::scan::scan_bundle(&stream_only).ok().unwrap();
+    assert!(
+        !report.blockers.contains_key("method:connect"),
+        "{:?}",
+        report.blockers
+    );
+}
+
+#[test]
+fn scan_keeps_method_findings_when_an_owner_is_loaded_or_unknowable() {
+    // R7 negatives: the owner is loaded (directly, through an ESM import rewrite, or through an alias that hands
+    // out net.Socket), a global reaches the object (process.stdin), or the bundle loads something dynamically.
+    for (code, blocker) in [
+        (
+            "exports.a = function () { const net = require('node:net'); return net.connect(80); };",
+            "method:connect",
+        ),
+        (
+            "exports.a = function () { return require('node:zlib').createZstdDecompress(); };",
+            "method:createZstdDecompress",
+        ),
+        (
+            "exports.a = function (x) { return require('node:util/types').isSharedArrayBuffer(x); };",
+            "method:isSharedArrayBuffer",
+        ),
+        (
+            "exports.a = function (m) { process.dlopen(m, 'x'); };",
+            "method:dlopen",
+        ),
+        (
+            "exports.a = function (x, a) { require(x); return a.commit(); };",
+            "method:commit",
+        ),
+        (
+            "exports.a = function (c) { require('node:http'); return c.connect(); };",
+            "method:connect",
+        ),
+        (
+            "exports.a = function (c) { require('node:tls'); return c.connect(); };",
+            "method:connect",
+        ),
+        (
+            "exports.a = function (c) { var s = process.stdin; return c.connect(s); };",
+            "method:connect",
+        ),
+        (
+            "var __thaw_esm_import_0 = __thaw_require('node:net'); exports.a = function (c) { return __thaw_esm_import_0.connect(c); };",
+            "method:connect",
         ),
     ] {
         let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
@@ -3844,8 +3929,9 @@ fn scan_does_not_flag_this_calls_inside_a_class_without_extends() {
     );
     assert!(report.is_clean(), "{:?}", report.blockers);
     // a class that extends something may inherit a host method: still flagged
+    // (_http_common is loaded: execute's owner, see the owner rule)
     let extends = one_module_bundle(
-        "exports.q = class Q extends Base { then(a, b) { return this.execute().then(a, b); } };",
+        "exports.q = class Q extends Base { then(a, b) { require('node:_http_common'); return this.execute().then(a, b); } };",
         "",
     );
     let report = crate::scan::scan_bundle(&extends).ok().unwrap();
@@ -3931,8 +4017,9 @@ fn scan_knows_exactly_the_callsite_methods_the_engine_implements() {
     let calls: String = listed.iter().map(|m| format!("c.{m}();")).collect();
     let clean = one_module_bundle(&format!("exports.f = function (c) {{ {calls} }};"), "");
     assert!(crate::scan::scan_bundle(&clean).unwrap().is_clean());
+    // (v8 is loaded: getHeapSnapshot's owner, see the owner rule)
     let unknown = one_module_bundle(
-        "exports.f = function (c) { return c.getHeapSnapshot(); };",
+        "exports.f = function (c) { require('node:v8'); return c.getHeapSnapshot(); };",
         "",
     );
     assert!(!crate::scan::scan_bundle(&unknown).unwrap().is_clean());
@@ -11615,12 +11702,15 @@ function traceMixed(channel, contextInput, fn) {
 }
 exports.parse = (p, src) => exports.parseChannel.traceSync(() => src, { source: p });
 exports.traceMixed = traceMixed;"#;
+    // (a dynamic load, as the graphql fixture: unsubscribe's owner is diagnostics_channel, see the owner rule)
     let socket = r#"Adapter.prototype.del = function (id, room) {
+    process.getBuiltinModule('node:diagnostics_channel');
     const websocket = this.nsp.sockets.get(id).conn.transport.socket;
     websocket.unsubscribe(room);
 };"#;
     let dlopen = "process.dlopen(module, 'x.node');";
-    let heap = "exports.h = process.getHeapSnapshot();";
+    // (v8 is loaded dynamically: `process` has no getHeapSnapshot on Node, so the call is no process method, see the owner rule)
+    let heap = "exports.h = process.getBuiltinModule('node:v8').getHeapSnapshot();";
     let known: HashSet<String> = ["publish", "runStores", "traceSync", "unsubscribe"]
         .iter()
         .map(|s| s.to_string())
