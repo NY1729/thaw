@@ -978,10 +978,9 @@ fn thaw_js_bundle_form<'a>(
     }
 }
 
-/// The thaw-js form of `node:worker_threads`: the main-thread module the thaw-js prelude exports
-/// (`web/worker_threads.js`). Its QuickJS form needs `node:stream`, which thaw-js now loads too.
-const THAW_JS_WORKER_THREADS_FORM: &str =
-    "module.exports = globalThis.__thaw_worker_threads_exports;\n";
+/// The thaw-js form of `node:worker_threads` (owned by thaw-js: `scan::WORKER_THREADS_THAW_JS_FORM`, which package
+/// bundles' embedded factories are substituted with too).
+const THAW_JS_WORKER_THREADS_FORM: &str = thaw_js::scan::WORKER_THREADS_THAW_JS_FORM;
 
 /// The thaw-js form of a `node:path` family specifier: the unmodified `node:path` bundle plus the realm marker
 /// `thaw_tjs_register` reads (`member` is the export path of the shared realm: `posix`, `win32`, or empty for
