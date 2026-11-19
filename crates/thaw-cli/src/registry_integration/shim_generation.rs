@@ -1031,7 +1031,7 @@ fn generate_registry_shims_pass(
                         &observed_arities,
                         &mut shim,
                         true,
-                        thaw_js_package,
+                        thaw_js_package && !pkg.name.starts_with("node:"),
                         &mut callback_instance_rewrites,
                     )
                 {
@@ -1063,7 +1063,7 @@ fn generate_registry_shims_pass(
                         &observed_arities,
                         &mut shim,
                         true,
-                        thaw_js_package,
+                        thaw_js_package && !pkg.name.starts_with("node:"),
                         &mut callback_instance_rewrites,
                     )
                 {
@@ -1181,7 +1181,7 @@ fn generate_registry_shims_pass(
                         &observed_arities,
                         &mut shim,
                         false,
-                        thaw_js_package,
+                        thaw_js_package && !pkg.name.starts_with("node:"),
                         &mut callback_instance_rewrites,
                     )
                 {
@@ -1202,7 +1202,7 @@ fn generate_registry_shims_pass(
                         &observed_arities,
                         &mut shim,
                         false,
-                        thaw_js_package,
+                        thaw_js_package && !pkg.name.starts_with("node:"),
                         &mut callback_instance_rewrites,
                     )
                 {
@@ -1462,7 +1462,7 @@ fn generate_registry_shims_pass(
                             &alias_function,
                             jit_operation.is_some(),
                             napi,
-                            thaw_js_package,
+                            thaw_js_package && !pkg.name.starts_with("node:"),
                         ) {
                             shim.push_str(&thaw_js_retarget_alias(
                                 alias,
@@ -1499,7 +1499,7 @@ fn generate_registry_shims_pass(
                             &alias_function,
                             jit_operation.is_some(),
                             napi,
-                            thaw_js_package,
+                            thaw_js_package && !pkg.name.starts_with("node:"),
                         ) {
                             shim.push_str(&thaw_js_retarget_alias(
                                 alias,

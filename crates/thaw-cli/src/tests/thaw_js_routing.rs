@@ -1111,6 +1111,30 @@ fn thaw_js_single_arg_bare_callable_builds_under_error_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A builtin `node:` module routed to thaw-js must not get a typed bare alias for its single-argument
+/// functions: a module function named `createServer` makes thaw-llvm treat the program as a native http
+/// server (`thaw_http_run_servers`), which ignores the latched unhandled-rejection exit.
+#[test]
+fn thaw_js_node_net_single_arg_functions_get_no_bare_alias() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-node-net-alias-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let packages = ["node:net".to_string()];
+    let active = packages.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let source = "import { createServer } from \"node:net\";\nfunction main(): void {\n    const server = createServer();\n    server.close();\n}\n";
+    let routed: ThawJsPackages = std::iter::once("node:net".to_string()).collect();
+    let (shims, _) = generate_registry_shims_pass(
+        &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
+        &thaw_parser::common::FileName::Custom("node net.ts".into()),
+        false, &dir.join("app"), Some(&dir.join("staging")),
+        &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &routed,
+    ).unwrap();
+    assert!(
+        !shims.0.lines().any(|line| line.starts_with("function createServer(")),
+        "node:net got a bare createServer alias:\n{}",
+        shims.0
+    );
+}
+
 #[test]
 fn thaw_js_callable_results_are_live_handles_and_build_under_error_mode() {
     let (dir, registry, entry) = thaw_js_callable_result_fixture(
