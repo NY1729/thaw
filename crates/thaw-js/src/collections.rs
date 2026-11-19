@@ -430,14 +430,10 @@ impl Interp {
         else {
             return key.into();
         };
-        let desc = self
-            .rt
-            .symbols
-            .get(&id)
-            .and_then(|o| match &*o.kind.borrow() {
-                Kind::Symbol { desc, .. } => desc.clone(),
-                _ => None,
-            });
+        let desc = symbol_table::by_id(id).and_then(|o| match &*o.kind.borrow() {
+            Kind::Symbol { desc, .. } => desc.clone(),
+            _ => None,
+        });
         desc.map_or("".into(), |d| format!("[{d}]").into())
     }
 
@@ -456,7 +452,7 @@ impl Interp {
         let registry = self
             .symbol_registry
             .clone()
-            .expect("Symbol is installed at realm setup");
+            .unwrap_or_else(symbol_table::registry);
         if let Some((Slot::Data(v), _)) = find_own(&registry, &key) {
             return Ok(v);
         }
@@ -467,20 +463,16 @@ impl Interp {
 
     /// `Symbol.keyFor(sym)`: the key `sym` is registered under by `Symbol.for`, if any.
     pub(crate) fn symbol_key_for(&self, sym: &Obj) -> Option<Rc<str>> {
-        let registry = self.symbol_registry.as_ref()?;
-        registry
-            .raw_props
-            .borrow()
-            .iter()
-            .find_map(|p| match &p.slot {
-                Slot::Data(Value::Object(o)) if Rc::ptr_eq(o, sym) => Some(p.key.clone()),
-                _ => None,
-            })
+        let registry = self
+            .symbol_registry
+            .clone()
+            .unwrap_or_else(symbol_table::registry);
+        symbol_table::key_in_registry(&registry, sym)
     }
 
     /// Whether `sym` is one of the intrinsic well-known symbols (`Symbol.iterator`, ...).
     pub(crate) fn is_well_known(&self, sym: &Obj) -> bool {
-        self.well_known.iter().any(|w| Rc::ptr_eq(w, sym))
+        symbol_table::is_well_known(sym)
     }
 
     pub(crate) fn install_collections(&mut self) {
@@ -490,32 +482,18 @@ impl Interp {
         let symbol = self.native({
             let sp = sym_proto.clone();
             move |it, _, args| {
-                it.next_symbol += 1;
                 let desc = match arg(args, 0) {
                     Value::Undefined => None,
                     v => Some(it.to_str(&v).into_rc()),
                 };
-                let o = new_obj(
-                    Some(sp.clone()),
-                    Kind::Symbol {
-                        id: it.next_symbol,
-                        desc: desc.clone(),
-                    },
-                );
-                put_hidden(
-                    &o,
-                    "description",
-                    desc.map_or(Value::Undefined, |d| Value::Str(d.into())),
-                );
-                let id = it.next_symbol;
-                it.rt.symbols.insert(id, o.clone());
+                let (id, o) = symbol_table::new_symbol(sp.clone(), desc);
+                it.symbols_made.push(id);
                 Ok(Value::Object(o))
             }
         });
         if let Value::Object(s) = &symbol {
             put_hidden(s, "prototype", Value::Object(sym_proto.clone()));
             self.symbol_ctor = Some(s.clone());
-            self.symbol_registry = Some(self.plain());
             self.set_native(s, "keyFor", move |it, _, args| {
                 let Value::Object(sym) = arg(args, 0) else {
                     let shown = it.inspect(&arg(args, 0), false);
@@ -529,35 +507,11 @@ impl Interp {
                 let key = it.to_str(&arg(args, 0)).into_rc();
                 it.symbol_for(key)
             });
-            for name in [
-                "iterator",
-                "asyncIterator",
-                "hasInstance",
-                "toPrimitive",
-                "toStringTag",
-                "species",
-                "isConcatSpreadable",
-                "match",
-                "matchAll",
-                "replace",
-                "search",
-                "split",
-                "unscopables",
-                "dispose",
-                "asyncDispose",
-            ] {
-                self.next_symbol += 1;
-                let desc: Rc<str> = format!("Symbol.{name}").into();
-                let o = new_obj(
-                    Some(sym_proto.clone()),
-                    Kind::Symbol {
-                        id: self.next_symbol,
-                        desc: Some(desc.clone()),
-                    },
-                );
-                put_hidden(&o, "description", Value::Str(desc.into()));
-                self.rt.symbols.insert(self.next_symbol, o.clone());
-                self.well_known.push(o.clone());
+            // the same symbol objects in every realm of the thread
+            for (name, o) in symbol_table::WELL_KNOWN_NAMES
+                .iter()
+                .zip(symbol_table::well_known(&sym_proto))
+            {
                 put_hidden(s, name, Value::Object(o));
             }
         }
