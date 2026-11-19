@@ -253,6 +253,9 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// The v8 `heap_size_limit` when no resourceLimits cap is set: 4 GiB, the registry's own fallback figure.
+const V8_DEFAULT_HEAP_LIMIT: usize = 4 << 30;
+
 /// The compiler's dynamic-value helpers (`getDynamicValue("__thaw_...")`) the QuickJS realm defines in its
 /// runtime prelude; only the ones that are plain JavaScript.
 // ponytail: graph-origin identity (`__thaw_strict_equal_dynamic` on shadow containers) and native-callback
@@ -446,6 +449,17 @@ impl Interp {
         g.declare("__thaw_process_set_stdin_ref", f, true);
         let f = self.native(|_, _, a| Ok(Value::Bool(set_stdin_raw_mode(arg(a, 0).truthy()))));
         g.declare("__thaw_process_set_raw_mode", f, true);
+        // The v8 figures (the registry's getHeapStatistics and memoryUsage): `estimate_bytes` summed over this thread's
+        // live objects. The limit is the resourceLimits cap when one is set, else a constant (see `heap_limit`).
+        // ponytail: the registry is per OS thread. Under the thread coroutine backend (THAW_JS_CO=thread, the default
+        // off Linux x86_64/aarch64) an object built on a coroutine thread is missed by a read on another thread.
+        // Upgrade path: move the object list with `host::park_host_tls` like `heap_limit::take`.
+        let f = self.native(|_, _, _| {
+            let used: usize = crate::gc_registry::live_objs().iter().map(|o| crate::estimate_bytes(o)).sum();
+            let limit = if crate::heap_limit::enabled() { crate::heap_limit::limit().max(used) } else { V8_DEFAULT_HEAP_LIMIT.max(used) };
+            Ok(Value::str(&format!("{{\"malloc_size\":{used},\"malloc_limit\":{limit},\"memory_used_size\":{used},\"js_func_code_size\":0}}")))
+        });
+        g.declare("__thaw_memory_usage", f, true);
         // (fd, hex) -> raw bytes to stdout/stderr, after any pending partial line
         let f = self.native(|it, _, a| {
             let fd = it.num(&arg(a, 0)) as i32;
