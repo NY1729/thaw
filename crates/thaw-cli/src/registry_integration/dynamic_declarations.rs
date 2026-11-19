@@ -1194,8 +1194,9 @@ const THAW_JS_PACKAGE_MARK: &str = "tjs!";
 /// `JsValue` result (an `any`-typed return, never a class instance: the routing scan rules those
 /// out) becomes plain `Json`, since thaw-js returns plain data by value. Packages in
 /// `thaw_js_keeps_js_value` keep `JsValue`, so their objects stay live handles. `keep_ret_js_value`
-/// keeps only the return type of a `JsValue` result (the parameters still flatten), so the caller
-/// gets a live handle back.
+/// keeps the return type of a `JsValue` result (the parameters still flatten), so the caller gets a
+/// live handle back; the body lines of such a multi-line adapter keep `JsValue` too, since they hold
+/// that handle (`const callable: JsValue = wrapper(..)`).
 fn thaw_js_retarget(
     symbol: String,
     declaration: String,
@@ -1206,14 +1207,24 @@ fn thaw_js_retarget(
     let declaration = if keep_js_value {
         declaration
     } else {
+        // Brace depth before each line: lines inside a function body are not parameters.
+        let mut depth = 0usize;
         declaration
             .split_inclusive('\n')
-            .map(|line| match line.rfind("): ") {
-                Some(split) if keep_ret_js_value => {
-                    let (head, tail) = line.split_at(split + "): ".len());
-                    format!("{}{tail}", head.replace("JsValue", "Json"))
+            .map(|line| {
+                let in_body = depth > 0;
+                depth = (depth + line.matches('{').count())
+                    .saturating_sub(line.matches('}').count());
+                match line.rfind("): ") {
+                    // A body line of a live-handle adapter (`const callable: JsValue = wrapper(..)`) holds
+                    // that handle, so its `JsValue` stays.
+                    _ if in_body && keep_ret_js_value => line.to_string(),
+                    Some(split) if keep_ret_js_value => {
+                        let (head, tail) = line.split_at(split + "): ".len());
+                        format!("{}{tail}", head.replace("JsValue", "Json"))
+                    }
+                    _ => line.replace("JsValue", "Json"),
                 }
-                _ => line.replace("JsValue", "Json"),
             })
             .collect()
     };
@@ -1272,6 +1283,24 @@ fn thaw_js_promise_ret(
         }
         _ => std::borrow::Cow::Borrowed(function),
     }
+}
+
+/// A single callable whose own return `typed_dynamic_callable_adapter` converts (`string`, `number`,
+/// `boolean`, `Json`, or a handle `JsValue`), whatever its parameters: that adapter is generated for it, and
+/// it invokes the declared result, so the result must be a live handle on thaw-js.
+fn thaw_js_adapter_callable(ty: &thaw_hir::HirType) -> bool {
+    matches!(
+        ty,
+        thaw_hir::HirType::Function(_, ret) | thaw_hir::HirType::CallableFunction(_, _, None, ret)
+            if matches!(
+                ret.as_ref(),
+                thaw_hir::HirType::Str
+                    | thaw_hir::HirType::F64
+                    | thaw_hir::HirType::Bool
+                    | thaw_hir::HirType::Json
+                    | thaw_hir::HirType::JsValue
+            )
+    )
 }
 
 /// A callable (or a union of callables) whose parameters and return are plain JSON data, optional forms
@@ -1348,12 +1377,14 @@ fn typed_dynamic_declaration(
                 && match &function.ret {
                     thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue) => true,
                     // a callable result with plain parameters and return (`customAlphabet(...): (size?) => string`)
-                    // is a live handle the `__thaw_typed_callable_` adapter invokes (`callDynamicValueHandle`)
+                    // is a live handle the `__thaw_typed_callable_` adapter invokes (`callDynamicValueHandle`).
+                    // So is any callable the adapter is generated for (`thaw_js_adapter_callable`), whatever its
+                    // parameters: ejs's `ClientFunction` takes callbacks but still gets an adapter.
                     thaw_bridge::DtsType::Native(
                         ty @ (thaw_hir::HirType::Function(..)
                         | thaw_hir::HirType::CallableFunction(..)
                         | thaw_hir::HirType::Union(_)),
-                    ) => thaw_js_plain_callable(ty),
+                    ) => thaw_js_plain_callable(ty) || thaw_js_adapter_callable(ty),
                     thaw_bridge::DtsType::Unsupported(reason) => {
                         !(reason == "`any` is not supported"
                             || reason == "`unknown` is not supported"

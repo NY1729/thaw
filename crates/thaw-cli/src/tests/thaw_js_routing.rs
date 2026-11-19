@@ -1079,6 +1079,40 @@ fn thaw_js_union_callable_result_ejs_shape_builds_under_error_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The verbatim ejs 7.0.2 `package.d.ts` (`ejs_package.d.ts`): `compile` has sync, async and union
+/// overloads whose function results are adapters. Called as the ejs repro does (`ejs.compile(..)`
+/// then `compiled({ name })`). The module body is a stand-in; the shape comes from the d.ts.
+#[test]
+fn thaw_js_union_callable_result_real_ejs_overloads_build_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "ejs-real-overloads",
+        "import ejs from 'tjs-ejs';\n\
+         function main(): void {\n\
+           const compiled = ejs.compile('Hello NAME');\n\
+           console.log(compiled({ name: 'Alice' }));\n\
+         }\n",
+        &[(
+            "tjs-ejs",
+            include_str!("ejs_package.d.ts"),
+            "exports.compile = function (template, opts) { return function (data) { return template.replace('NAME', data.name); }; };\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run(&output), "Hello Alice\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn thaw_js_callable_results_are_live_handles_and_build_under_error_mode() {
     let (dir, registry, entry) = thaw_js_callable_result_fixture(
