@@ -29,15 +29,19 @@ fn json_convertible_native_type(ty: &HirType) -> bool {
     )
 }
 
-/// Whether a computed-key `Object.defineProperties` descriptor only uses attributes a dynamic
-/// object models: `writable` and `configurable` are not stored on a dynamic object, so the
-/// entry must state them as `true` (Node defaults both to `false`), and a data entry needs a
-/// `value`; an accessor (`get`/`set`) needs `configurable: true` and no `value`. A literal
-/// `enumerable` may be omitted (the dynamic path defaults it like Node) but must be a boolean
-/// when given. Any other shape is a compile error, not a silently different property.
+/// Whether a `Object.defineProperties` entry on a dynamic object (a computed, numeric or
+/// literal key on a `Json`/`Dictionary` target) has a descriptor the dynamic path can express.
+///
+/// Dynamic objects do not store `writable` or `configurable` (known gap G3: the direct
+/// `Object.defineProperty` path ignores them too). So an omitted, `true` or non-literal
+/// `writable`/`configurable` is accepted, as the direct path accepts it: the property is then
+/// writable and configurable like any dynamic field. Only a literal `false` is an error, since
+/// silently ignoring it would make the property writable when the program asked for it not to
+/// be. `enumerable` may be omitted (it defaults to false like Node) or non-literal (the runtime
+/// decides, as on the direct path). A descriptor needs a `value` or an accessor, not both.
 fn dynamic_descriptor_is_modelled(descriptor: &swc_ecma_ast::ObjectLit) -> bool {
     use swc_ecma_ast::{Expr, Lit, Prop, PropName, PropOrSpread};
-    let (mut value, mut accessor, mut writable, mut configurable) = (false, false, false, false);
+    let (mut value, mut accessor) = (false, false);
     for entry in &descriptor.props {
         let PropOrSpread::Prop(entry) = entry else {
             return false;
@@ -61,17 +65,11 @@ fn dynamic_descriptor_is_modelled(descriptor: &swc_ecma_ast::ObjectLit) -> bool 
         match (name.as_str(), literal) {
             ("value", _) => value = true,
             ("get" | "set", _) => accessor = true,
-            ("writable", Some(true)) => writable = true,
-            ("configurable", Some(true)) => configurable = true,
-            ("enumerable", Some(_)) | ("writable" | "configurable", _) => {}
-            ("enumerable", None) => return false,
+            ("writable" | "configurable", Some(false)) => return false,
             _ => {}
         }
-        if matches!(name.as_str(), "writable" | "configurable") && literal != Some(true) {
-            return false;
-        }
     }
-    configurable && if accessor { !value } else { value && writable }
+    value != accessor
 }
 
 fn contains_js_value(ty: &HirType) -> bool {
@@ -2412,7 +2410,7 @@ impl<'a> FnLowerer<'a> {
                                 };
                                 if !dynamic_descriptor_is_modelled(descriptor) {
                                     return Err(
-                                        "`Object.defineProperties` on a dynamic object needs `configurable: true`, and `writable: true` with a `value` (or an accessor without `value`): a dynamic object does not store non-writable or non-configurable properties".into(),
+                                        "`Object.defineProperties` on a dynamic object needs either a `value` or an accessor (not both), and no literal `writable: false` or `configurable: false`: a dynamic object does not store those attributes".into(),
                                     );
                                 }
                                 let HirExpr::Var(target_name) = &target_value else {

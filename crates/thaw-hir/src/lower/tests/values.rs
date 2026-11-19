@@ -3589,16 +3589,17 @@ fn computed_symbol_key_to_a_host_backed_define_properties_stays_on_the_host_path
     assert!(!body.contains("\"defineProperty\""), "{body}");
 }
 
-/// A dynamic-object entry whose `writable` or `configurable` is omitted or `false`, or an
-/// accessor without `configurable: true`, is a compile error: a dynamic object does not store
-/// those attributes, so the result would silently differ from Node's defaults.
+/// A dynamic-object entry with a literal `writable: false` or `configurable: false` is a compile
+/// error, as is a descriptor with neither or both of `value` and an accessor. Dynamic objects do
+/// not store those attributes, so a literal `false` would silently make the property writable.
 #[test]
-fn dynamic_define_properties_rejects_unstored_attributes() {
+fn dynamic_define_properties_rejects_unstorable_or_invalid_descriptors() {
     for descriptor in [
-        "{ value: 1, enumerable: true, configurable: true }",
         "{ value: 1, enumerable: true, writable: false, configurable: true }",
-        "{ value: 1, enumerable: true, writable: true }",
-        "{ get() { return 1; }, enumerable: true }",
+        "{ value: 1, enumerable: true, configurable: false }",
+        "{ get() { return 1; }, configurable: false }",
+        "{ value: 1, get() { return 1; } }",
+        "{ enumerable: true }",
     ] {
         let module = thaw_parser::parse_typescript(&format!(r#"
             function main(): void {{
@@ -3607,7 +3608,29 @@ fn dynamic_define_properties_rejects_unstored_attributes() {
             }}
         "#)).expect("parse error");
         let error = lower_module(&module).expect_err(descriptor);
-        assert!(error.contains("does not store non-writable or non-configurable"), "{descriptor}: {error}");
+        assert!(error.contains("needs either a `value` or an accessor"), "{descriptor}: {error}");
+    }
+}
+
+/// Omitted `writable`/`configurable` and non-literal flags lower on a dynamic object, as the
+/// direct `Object.defineProperty` path accepts them (known gap G3: the flags are not stored).
+#[test]
+fn dynamic_define_properties_accepts_omitted_and_non_literal_attributes() {
+    for descriptor in [
+        "{ value: 1 }",
+        "{ value: 1, enumerable: flag }",
+        "{ value: 1, writable: flag, configurable: flag }",
+        "{ get() { return 1; }, enumerable: true }",
+    ] {
+        let module = thaw_parser::parse_typescript(&format!(r#"
+            function main(): void {{
+                const S = Symbol('s');
+                const flag: boolean = true;
+                const o: any = Object.defineProperties({{}}, {{ [S]: {descriptor} }});
+                console.log(o[S]);
+            }}
+        "#)).expect("parse error");
+        lower_module(&module).unwrap_or_else(|error| panic!("{descriptor}: {error}"));
     }
 }
 
