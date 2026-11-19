@@ -29,6 +29,49 @@ fn json_convertible_native_type(ty: &HirType) -> bool {
     )
 }
 
+/// Whether a `Object.defineProperties` entry on a dynamic object (a computed, numeric or
+/// literal key on a `Json`/`Dictionary` target) has a descriptor the dynamic path can express.
+///
+/// Dynamic objects do not store `writable` or `configurable` (known gap G3: the direct
+/// `Object.defineProperty` path ignores them too). So an omitted, `true` or non-literal
+/// `writable`/`configurable` is accepted, as the direct path accepts it: the property is then
+/// writable and configurable like any dynamic field. Only a literal `false` is an error, since
+/// silently ignoring it would make the property writable when the program asked for it not to
+/// be. `enumerable` may be omitted (it defaults to false like Node) or non-literal (the runtime
+/// decides, as on the direct path). A descriptor needs a `value` or an accessor, not both.
+fn dynamic_descriptor_is_modelled(descriptor: &swc_ecma_ast::ObjectLit) -> bool {
+    use swc_ecma_ast::{Expr, Lit, Prop, PropName, PropOrSpread};
+    let (mut value, mut accessor) = (false, false);
+    for entry in &descriptor.props {
+        let PropOrSpread::Prop(entry) = entry else {
+            return false;
+        };
+        let (key, literal) = match entry.as_ref() {
+            Prop::KeyValue(pair) => (
+                &pair.key,
+                match pair.value.as_ref() {
+                    Expr::Lit(Lit::Bool(flag)) => Some(flag.value),
+                    _ => None,
+                },
+            ),
+            Prop::Method(method) => (&method.key, None),
+            _ => return false,
+        };
+        let name = match key {
+            PropName::Ident(ident) => ident.sym.to_string(),
+            PropName::Str(text) => text.value.to_string_lossy().into_owned(),
+            _ => return false,
+        };
+        match (name.as_str(), literal) {
+            ("value", _) => value = true,
+            ("get" | "set", _) => accessor = true,
+            ("writable" | "configurable", Some(false)) => return false,
+            _ => {}
+        }
+    }
+    value != accessor
+}
+
 fn contains_js_value(ty: &HirType) -> bool {
     match ty {
         HirType::JsValue => true,
@@ -2330,6 +2373,87 @@ impl<'a> FnLowerer<'a> {
                                         .into(),
                                 );
                             };
+                            // An entry lowers as `Object.defineProperty(target, key, descriptor)`
+                            // (in source order with the others) when its key is computed or
+                            // numeric, or when the target is a dynamic object: the defineProperty
+                            // path honours the descriptor's attributes, which the fixed-layout
+                            // literal path below drops on a dynamic object.
+                            let (key_expr, dynamic_key) = match &property.key {
+                                swc_ecma_ast::PropName::Computed(computed) => {
+                                    (Some(computed.expr.clone()), true)
+                                }
+                                swc_ecma_ast::PropName::Num(number) => (
+                                    Some(Box::new(Expr::Lit(swc_ecma_ast::Lit::Num(number.clone())))),
+                                    true,
+                                ),
+                                swc_ecma_ast::PropName::Ident(ident) => (
+                                    Some(Box::new(Expr::Lit(swc_ecma_ast::Lit::Str(
+                                        swc_ecma_ast::Str {
+                                            span: ident.span,
+                                            value: ident.sym.as_ref().into(),
+                                            raw: None,
+                                        },
+                                    )))),
+                                    false,
+                                ),
+                                swc_ecma_ast::PropName::Str(value) => (
+                                    Some(Box::new(Expr::Lit(swc_ecma_ast::Lit::Str(value.clone())))),
+                                    false,
+                                ),
+                                _ => (None, false),
+                            };
+                            let dynamic_target =
+                                matches!(target_type, HirType::Json | HirType::Dictionary(_));
+                            if let Some(key_expr) = key_expr.filter(|_| dynamic_key || dynamic_target) {
+                                let Expr::Object(descriptor) = property.value.as_ref() else {
+                                    return Err("`Object.defineProperties` descriptor must be an object literal".into());
+                                };
+                                if !dynamic_descriptor_is_modelled(descriptor) {
+                                    return Err(
+                                        "`Object.defineProperties` on a dynamic object needs either a `value` or an accessor (not both), and no literal `writable: false` or `configurable: false`: a dynamic object does not store those attributes".into(),
+                                    );
+                                }
+                                let HirExpr::Var(target_name) = &target_value else {
+                                    unreachable!("the target is bound to a variable above")
+                                };
+                                let define = swc_ecma_ast::CallExpr {
+                                    span: call.span,
+                                    ctxt: call.ctxt,
+                                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                        span: call.span,
+                                        obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                                            "Object".into(),
+                                            call.span,
+                                        ))),
+                                        prop: MemberProp::Ident(IdentName::new(
+                                            "defineProperty".into(),
+                                            call.span,
+                                        )),
+                                    }))),
+                                    args: vec![
+                                        swc_ecma_ast::ExprOrSpread {
+                                            spread: None,
+                                            expr: Box::new(Expr::Ident(
+                                                swc_ecma_ast::Ident::new_no_ctxt(
+                                                    target_name.clone().into(),
+                                                    call.span,
+                                                ),
+                                            )),
+                                        },
+                                        swc_ecma_ast::ExprOrSpread {
+                                            spread: None,
+                                            expr: key_expr,
+                                        },
+                                        swc_ecma_ast::ExprOrSpread {
+                                            spread: None,
+                                            expr: property.value.clone(),
+                                        },
+                                    ],
+                                    type_args: None,
+                                };
+                                body.push(HirStmt::Expr(self.lower_call(&define)?));
+                                continue;
+                            }
                             let key = match &property.key {
                                 swc_ecma_ast::PropName::Ident(ident) => ident.sym.to_string(),
                                 swc_ecma_ast::PropName::Str(value) => {
