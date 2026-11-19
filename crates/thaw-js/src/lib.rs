@@ -467,8 +467,8 @@ pub type R<T> = Result<T, Ctl>;
 
 /// Where an identifier resolves on a scope chain that holds a `with` record.
 enum Resolved<'s> {
-    /// The object of a `with` record whose `HasBinding` holds.
-    Object(Obj),
+    /// The object of a `with` record whose `HasBinding` holds; `true` for a vm sandbox (`SK_VMGLOBAL`).
+    Object(Obj, bool),
     /// A declarative scope that binds the name.
     Declared(&'s Scope),
 }
@@ -982,6 +982,9 @@ const SK_VAR: u8 = 1;
 const SK_FUNC: u8 = 2;
 /// A class field initializer frame (`this` is bound, `arguments` is not).
 const SK_FIELD: u8 = 4;
+/// The `with` scope of a vm context's sandbox (vm.rs): the global object's record, not a user `with`, so a call it
+/// resolves has no `this` object.
+const SK_VMGLOBAL: u8 = 8;
 
 impl Scope {
     fn new(parent: Option<Rc<Scope>>) -> Rc<Scope> {
@@ -3322,7 +3325,10 @@ impl Interp {
             if cur.mask.get() & bit != 0 {
                 if let Some(o) = &cur.with {
                     if self.with_has(o, name)? {
-                        return Ok(Some(Resolved::Object(o.clone())));
+                        return Ok(Some(Resolved::Object(
+                            o.clone(),
+                            cur.kind.get() & SK_VMGLOBAL != 0,
+                        )));
                     }
                 } else if cur.vars.borrow().contains_key(name) {
                     return Ok(Some(Resolved::Declared(cur)));
@@ -3343,9 +3349,10 @@ impl Interp {
         name: &str,
     ) -> R<Option<(Value, Option<Obj>)>> {
         match self.find_binding(scope, name)? {
-            Some(Resolved::Object(o)) => {
+            Some(Resolved::Object(o, vm_global)) => {
                 let v = self.get(&Value::Object(o.clone()), name)?;
-                Ok(Some((v, Some(o))))
+                // a vm sandbox is a global record: a call through it has `undefined` as its `this`
+                Ok(Some((v, (!vm_global).then_some(o))))
             }
             Some(Resolved::Declared(s)) => {
                 let v = s.vars.borrow().get(name).map(|b| b.value.clone());
@@ -3777,6 +3784,7 @@ impl Interp {
         source: &str,
         scope: &Rc<Scope>,
         sandbox: &Obj,
+        lets: &mut Vec<Rc<str>>,
     ) -> (R<Value>, Vec<Rc<str>>) {
         let mut module = match self.parse_vm_script(source) {
             Ok(m) => m,
@@ -3793,6 +3801,23 @@ impl Interp {
             }
         }
         let names = hoisted_names(&stmts);
+        let lexicals = lexical_names(&stmts);
+        // Redeclaration is an early error: checked before any of the script runs. A let/const/class conflicts with
+        // any name the context's script scope holds; a var or function conflicts with an earlier let/const/class.
+        // ponytail: a let vs a `var` the host put on the sandbox is not checked.
+        let clash = lexicals
+            .iter()
+            .find(|n| scope.vars.borrow().contains_key(n))
+            .or_else(|| names.iter().find(|n| lets.contains(n)));
+        if let Some(name) = clash {
+            let message = format!("Identifier '{name}' has already been declared");
+            return (self.throw_error("SyntaxError", &message), Vec::new());
+        }
+        for name in lexicals {
+            if !lets.contains(&name) {
+                lets.push(name);
+            }
+        }
         for name in &names {
             if find_in_chain(sandbox, name).is_none() {
                 scope.declare_if_absent(name);
@@ -5935,20 +5960,41 @@ fn hoisted_names(stmts: &[a::Stmt]) -> Vec<Rc<str>> {
             n.visit_children_with(self);
         }
     }
-    struct Names(Vec<String>);
-    impl Visit for Names {
-        fn visit_binding_ident(&mut self, n: &a::BindingIdent) {
-            self.0.push(n.id.sym.to_string());
-        }
-        fn visit_assign_pat_prop(&mut self, n: &a::AssignPatProp) {
-            self.0.push(n.key.id.sym.to_string());
-        }
-        fn visit_prop_name(&mut self, _: &a::PropName) {}
-        fn visit_expr(&mut self, _: &a::Expr) {}
-    }
     let mut h = Hoister(Vec::new());
     stmts.visit_with(&mut h);
     h.0
+}
+
+/// The names bound by the top-level `let`/`const`/`class` of `stmts` (destructuring included).
+fn lexical_names(stmts: &[a::Stmt]) -> Vec<Rc<str>> {
+    let mut out = Vec::new();
+    for s in stmts {
+        match s {
+            a::Stmt::Decl(a::Decl::Var(v)) if !matches!(v.kind, a::VarDeclKind::Var) => {
+                for d in &v.decls {
+                    let mut names = Names(Vec::new());
+                    d.name.visit_with(&mut names);
+                    out.extend(names.0.iter().map(|n| Rc::from(n.as_str())));
+                }
+            }
+            a::Stmt::Decl(a::Decl::Class(c)) => out.push(Rc::from(&*c.ident.sym)),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The identifiers a binding pattern declares.
+struct Names(Vec<String>);
+impl Visit for Names {
+    fn visit_binding_ident(&mut self, n: &a::BindingIdent) {
+        self.0.push(n.id.sym.to_string());
+    }
+    fn visit_assign_pat_prop(&mut self, n: &a::AssignPatProp) {
+        self.0.push(n.key.id.sym.to_string());
+    }
+    fn visit_prop_name(&mut self, _: &a::PropName) {}
+    fn visit_expr(&mut self, _: &a::Expr) {}
 }
 
 /// Declare every `var` in `stmts` (not crossing function boundaries) as `undefined` in `scope`.

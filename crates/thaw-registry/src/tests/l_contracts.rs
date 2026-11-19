@@ -5,8 +5,7 @@
 fn l_vm_basic() {
     // expected: node22
     assert_eq!(
-        // QuickJS: thaw-js parity gap, vm family (PR B).
-        p2c_run_qjs("l_vm_basic",r#####"const vm = require('node:vm');
+        p2c_run("l_vm_basic",r#####"const vm = require('node:vm');
 const out = {};
 const sb = { a: 1, f() { return this === sb; } };
 vm.createContext(sb);
