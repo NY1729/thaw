@@ -3555,6 +3555,85 @@ fn symbol_key_to_a_host_backed_define_property_still_rejects() {
     assert!(error.contains("value has type Symbol, expected Json"), "{error}");
 }
 
+/// A computed (`[S]`) key of `Object.defineProperties` lowers through the dynamic-key
+/// `Object.defineProperty` path, so its symbol becomes a wire-text key instead of the
+/// old "requires literal keys" compile error.
+#[test]
+fn computed_symbol_key_in_define_properties_lowers_to_its_wire_key() {
+    let program = lower(r#"
+        function main(): void {
+            const S = Symbol('s');
+            const o: any = Object.defineProperties({}, { [S]: { value: 1, enumerable: true, writable: true, configurable: true } });
+            console.log(o[S]);
+        }
+    "#);
+    let body = format!("{program:#?}");
+    assert!(body.contains("__thaw_symbol_key"), "{body}");
+    assert!(body.contains("defineProperty"), "{body}");
+}
+
+/// A computed symbol key on a host-backed (`JsValue`) `Object.defineProperties` target does not
+/// reach the new fixed-layout entry lowering: the whole call still goes to the host object
+/// (`defineProperties` on the dynamic handle), as before this change.
+#[test]
+fn computed_symbol_key_to_a_host_backed_define_properties_stays_on_the_host_path() {
+    let module = thaw_parser::parse_typescript(r#"
+        function main(host: JsValue): void {
+            const S = Symbol('s');
+            Object.defineProperties(host, { [S]: { value: 5, enumerable: true } });
+        }
+    "#).expect("parse error");
+    let program = lower_module(&module).expect("host-backed defineProperties must lower");
+    let body = format!("{program:#?}");
+    assert!(body.contains("\"defineProperties\""), "{body}");
+    assert!(!body.contains("\"defineProperty\""), "{body}");
+}
+
+/// A dynamic-object entry with a literal `writable: false` or `configurable: false` is a compile
+/// error, as is a descriptor with neither or both of `value` and an accessor. Dynamic objects do
+/// not store those attributes, so a literal `false` would silently make the property writable.
+#[test]
+fn dynamic_define_properties_rejects_unstorable_or_invalid_descriptors() {
+    for descriptor in [
+        "{ value: 1, enumerable: true, writable: false, configurable: true }",
+        "{ value: 1, enumerable: true, configurable: false }",
+        "{ get() { return 1; }, configurable: false }",
+        "{ value: 1, get() { return 1; } }",
+        "{ enumerable: true }",
+    ] {
+        let module = thaw_parser::parse_typescript(&format!(r#"
+            function main(): void {{
+                const S = Symbol('s');
+                Object.defineProperties({{}}, {{ [S]: {descriptor} }});
+            }}
+        "#)).expect("parse error");
+        let error = lower_module(&module).expect_err(descriptor);
+        assert!(error.contains("needs either a `value` or an accessor"), "{descriptor}: {error}");
+    }
+}
+
+/// Omitted `writable`/`configurable` and non-literal flags lower on a dynamic object, as the
+/// direct `Object.defineProperty` path accepts them (known gap G3: the flags are not stored).
+#[test]
+fn dynamic_define_properties_accepts_omitted_and_non_literal_attributes() {
+    for descriptor in [
+        "{ value: 1 }",
+        "{ value: 1, enumerable: flag }",
+        "{ value: 1, writable: flag, configurable: flag }",
+        "{ get() { return 1; }, enumerable: true }",
+    ] {
+        let module = thaw_parser::parse_typescript(&format!(r#"
+            function main(): void {{
+                const S = Symbol('s');
+                const flag: boolean = true;
+                const o: any = Object.defineProperties({{}}, {{ [S]: {descriptor} }});
+                console.log(o[S]);
+            }}
+        "#)).expect("parse error");
+        lower_module(&module).unwrap_or_else(|error| panic!("{descriptor}: {error}"));
+    }
+}
+
 #[test]
 fn symbol_bearing_native_composites_select_projection() {
     let program = lower(r#"

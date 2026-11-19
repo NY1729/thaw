@@ -5381,6 +5381,78 @@
     "name": "fork child channel has ref counting methods",
     "expect": "matched",
     "source": "import cp from \"node:child_process\";\nfunction main(): void {\n  const child = cp.fork(\"/dev/null\", [], { execPath: \"node\", silent: true });\n  const channel: any = child.channel;\n  const log: string[] = [];\n  log.push([typeof channel.ref, typeof channel.unref, typeof channel.refCounted, typeof channel.unrefCounted].join(\",\"));\n  const results: string[] = [];\n  results.push(String(channel.refCounted()), String(channel.refCounted()), String(channel.unrefCounted()), String(channel.unrefCounted()), String(channel.ref()), String(channel.unref()));\n  log.push(results.join(\" \"));\n  child.disconnect();\n  child.on(\"exit\", (code: any) => { log.push(\"exit \" + code); console.log(log.join(\"|\")); });\n}"
+  },
+  {
+    "name": "Object.defineProperties accepts computed symbol, string and number keys",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({}, { [S]: { value: 1, enumerable: true, writable: true, configurable: true }, ['a' + 'b']: { value: 2, enumerable: true, writable: true, configurable: true }, 3: { value: 3, enumerable: true, writable: true, configurable: true } });\n  console.log(o[S], o.ab, o[3]);\n  console.log(Object.prototype.hasOwnProperty.call(o, S), Object.prototype.hasOwnProperty.call(o, 'ab'), Object.prototype.hasOwnProperty.call(o, 3));\n  console.log(Object.getOwnPropertySymbols(o).length, Object.keys(o).join());\n}"
+  },
+  {
+    "name": "non-enumerable computed defineProperties key is excluded from keys, assign and spread",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const k = 'hid' + 'den';\n  const o: any = Object.defineProperties({ a: 1 }, { [k]: { value: 5, enumerable: false, writable: true, configurable: true }, ['vis' + 'ible']: { value: 6, enumerable: true, writable: true, configurable: true } });\n  console.log(Object.keys(o).join(), o.hidden, o.visible);\n  const c: any = Object.assign({}, o);\n  console.log(Object.keys(c).join());\n  const sp: any = { ...o };\n  console.log(Object.keys(sp).join());\n  const { a, ...rest }: any = o;\n  console.log(a, Object.keys(rest).join());\n}"
+  },
+  {
+    "name": "defineProperties evaluates computed keys and descriptor values once in source order",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const log: string[] = [];\n  const key = (label: string): string => { log.push('key ' + label); return label; };\n  const tick = (label: string): number => { log.push('val ' + label); return log.length; };\n  const o: any = Object.defineProperties({}, {\n    [key('a')]: { value: tick('a'), enumerable: true, writable: true, configurable: true },\n    [key('b')]: { value: tick('b'), enumerable: true, writable: true, configurable: true },\n    c: { value: tick('c'), enumerable: true, writable: true, configurable: true },\n  });\n  console.log(log.join('|'));\n  console.log(o.a, o.b, o.c, Object.keys(o).join());\n}"
+  },
+  {
+    "name": "computed non-enumerable symbol and string keys are read but excluded from keys, assign, spread and JSON",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({ a: 1 }, { [S]: { value: 7, enumerable: false, writable: true, configurable: true }, ['a' + 'b']: { value: 8, enumerable: false, writable: true, configurable: true } });\n  console.log(o[S], o.ab, Object.getOwnPropertySymbols(o).length, Object.keys(o).join());\n  const c: any = Object.assign({}, o);\n  console.log(c[S], c.ab, Object.getOwnPropertySymbols(c).length, Object.keys(c).join());\n  const sp: any = { ...o };\n  console.log(sp[S], sp.ab, Object.getOwnPropertySymbols(sp).length, Object.keys(sp).join());\n  console.log(JSON.stringify(o));\n}"
+  },
+  {
+    "name": "computed writable data property accepts assignment and reads back the new value",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const o: any = Object.defineProperties({ a: 1 }, { ['w' + 'x']: { value: 1, enumerable: true, writable: true, configurable: true } });\n  o.wx = 5;\n  console.log(o.wx, Object.keys(o).join());\n}"
+  },
+  {
+    "name": "computed key on a class instance with a fixed layout defines a dynamic field",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "class P { x = 1; }\nfunction main(): void {\n  const p: any = new P();\n  Object.defineProperties(p, { ['y' + 'z']: { value: 2, enumerable: true, writable: true, configurable: true } });\n  console.log(p.x, p.yz, Object.keys(p).join());\n}"
+  },
+  {
+    "name": "computed key on a typed object literal with a fixed layout defines a dynamic field",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const q: { a: number } = { a: 1 };\n  Object.defineProperties(q, { ['b' + 'c']: { value: 2, enumerable: true, writable: true, configurable: true } });\n  console.log((q as any).bc, Object.keys(q).join());\n}"
+  },
+  {
+    "name": "computed symbol key with omitted enumerable is non-enumerable: excluded from keys, assign and spread",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({ a: 1 }, { [S]: { value: 7, writable: true, configurable: true } });\n  console.log(o[S], Object.getOwnPropertySymbols(o).length, Object.keys(o).join());\n  const c: any = Object.assign({}, o);\n  console.log(c[S], Object.getOwnPropertySymbols(c).length);\n  const sp: any = { ...o };\n  console.log(sp[S], Object.getOwnPropertySymbols(sp).length, Object.keys(o).join());\n}"
+  },
+  {
+    "name": "computed string key with omitted enumerable is non-enumerable and absent from JSON",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const o: any = Object.defineProperties({ a: 1 }, { ['a' + 'b']: { value: 7, writable: true, configurable: true } });\n  console.log(o.ab, Object.prototype.propertyIsEnumerable.call(o, 'ab'), Object.keys(o).join());\n  console.log(JSON.stringify(o));\n}"
+  },
+  {
+    "name": "computed symbol accessor with get and set runs through the accessor and keeps its counters",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const S = Symbol('s');\n  let reads = 0;\n  let writes = 0;\n  let stored = 0;\n  const o: any = Object.defineProperties({}, { [S]: { get: () => { reads++; return stored; }, set: (v: number) => { writes++; stored = v; }, enumerable: true, configurable: true } });\n  o[S] = 9;\n  console.log(o[S], reads, writes, stored);\n}"
+  },
+  {
+    "name": "literal key omitted enumerable on a dynamic target is non-enumerable",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const o: any = Object.defineProperties({ a: 1 }, { k: { value: 7, writable: true, configurable: true } });\n  console.log(o.k, Object.keys(o).join());\n}"
+  },
+  {
+    "name": "computed keys that omit writable and configurable read back the value and stay non-enumerable",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({ a: 1 }, { [S]: { value: 7 }, ['x' + 'y']: { value: 8 } });\n  console.log(o[S], o.xy, Object.keys(o).join(), Object.getOwnPropertySymbols(o).length);\n  const c: any = Object.assign({}, o);\n  console.log(c.xy, Object.keys(c).join());\n  console.log(JSON.stringify(o));\n}"
   }
 ]
 }
