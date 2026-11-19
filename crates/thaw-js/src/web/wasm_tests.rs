@@ -637,3 +637,27 @@ fn webassembly_api_rejects_a_dataview_as_a_buffer_source_like_node() {
         "TypeError WebAssembly.Module(): Argument 0 must be a buffer source|true undefined"
     );
 }
+
+/// `_start` calls `wasi_snapshot_preview1.proc_exit(6)`: the hand-assembled 93-byte fixture that Node 22
+/// runs to exit code 6 under `node:wasi` with `returnOnExit`.
+#[cfg(feature = "wasi")]
+const PROC_EXIT_6: &[u8] = &[
+    0, 97, 115, 109, 1, 0, 0, 0, 1, 8, 2, 96, 1, 127, 0, 96, 0, 0, 2, 36, 1, 22, 119, 97, 115, 105,
+    95, 115, 110, 97, 112, 115, 104, 111, 116, 95, 112, 114, 101, 118, 105, 101, 119, 49, 9, 112,
+    114, 111, 99, 95, 101, 120, 105, 116, 0, 0, 3, 2, 1, 1, 5, 3, 1, 0, 1, 7, 19, 2, 6, 109, 101,
+    109, 111, 114, 121, 2, 0, 6, 95, 115, 116, 97, 114, 116, 0, 1, 10, 8, 1, 6, 0, 65, 6, 16, 0,
+    11,
+];
+
+/// The import object `node:wasi` hands to `WebAssembly.Instance` (its normalized options as JSON).
+#[cfg(feature = "wasi")]
+#[test]
+fn wasi_options_import_links_preview1_and_proc_exit_becomes_wasi_exit() {
+    let src = format!(
+        "const wasi = {{ wasi_snapshot_preview1: {{ __thawWasiOptions: JSON.stringify({{ args: ['embedded'], env: {{ MODE: 'standalone' }}, preopens: {{}}, returnOnExit: true, version: 'preview1' }}) }} }};
+         const instance = new WebAssembly.Instance(new WebAssembly.Module({}), wasi);
+         try {{ instance.exports._start(); console.log('returned'); }} catch (e) {{ console.log(e.message, e.__thawWasiExit); }}",
+        js_bytes(PROC_EXIT_6)
+    );
+    assert_eq!(run(&src), "WASI exited with code 6 6");
+}
