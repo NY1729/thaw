@@ -9839,6 +9839,31 @@ var __thaw_bundle_entry_key = "addon/index.js";
     );
 }
 
+#[test]
+fn scan_refuses_process_dlopen_even_when_the_bundle_defines_a_dlopen_key() {
+    // Prisma-shaped: an os-constants object defines a `dlopen` key, which must not excuse a real process.dlopen call
+    // (a runtime native addon load is never served on thaw-js, whoever defines a key of that name)
+    for code in [
+        "var c = { dlopen: { RTLD_LAZY: 1 } }; exports.a = function (m, p) { process.dlopen(m, p); };",
+        "var c = { dlopen: { RTLD_LAZY: 1 } }; exports.a = function (m, p) { return require('os').constants.dlopen; }; exports.b = function (m, p) { process.dlopen(m, p); };",
+        // a probe of the member is true on thaw-js (it exists and throws): it must not excuse the call either
+        "exports.a = function (m, p) { if (typeof process.dlopen === 'function') { process.dlopen(m, p); } };",
+        "exports.a = function (m, p) { return process.dlopen && process.dlopen(m, p); };",
+    ] {
+        let bundle = one_module_bundle(code, "");
+        for report in [
+            crate::scan::scan_bundle(&bundle).ok().unwrap(),
+            crate::scan::scan_addon_bundle(&bundle).ok().unwrap(),
+        ] {
+            assert!(
+                report.blockers.contains_key("method:dlopen"),
+                "{code}: {:?}",
+                report.blockers
+            );
+        }
+    }
+}
+
 /// W2 guard: reads of outer names through a 100-variable scope, and a shadowed name one hop deeper, give the
 /// binding a by-name lookup gives (hinted reads included). Holds with or without the exact-membership check.
 #[test]

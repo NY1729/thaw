@@ -1027,12 +1027,14 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
         for m in &w.called {
             // `util.styleText` calls `stream.hasColors()` only after `typeof stream.hasColors === 'function'`
             // `process.dlopen` is exported now (it throws ERR_DLOPEN_FAILED), but no addon loads at runtime, so
-            // a bundle that calls it stays a blocker, as it was when the member was missing.
+            // a bundle that calls it stays a blocker, as it was when the member was missing. `defined` never excuses
+            // it: an os-constants object's `dlopen` key (Prisma) is no addon load the bundle serves.
             // Node-parity (R2): a name Node 22 does not have is the package's own method, never a missing one.
             if (!known_methods.contains(m) || m == "dlopen")
                 && is_node_method_name(m)
-                && !defined.contains(m)
-                && !w.probed_methods.contains(m)
+                && (m == "dlopen" || !defined.contains(m))
+                // a probe of `dlopen` proves nothing: thaw-js has the member and it throws, so the probe is true
+                && (m == "dlopen" || !w.probed_methods.contains(m))
                 && m != "hasColors"
             {
                 add(&mut report, format!("method:{m}"), 1, key);
