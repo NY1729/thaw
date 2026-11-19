@@ -111,3 +111,21 @@ fn no_channel_without_the_env_marker() {
     assert_eq!(take_out(&mut a), "undefined undefined undefined");
     assert_eq!(sink.text(), "");
 }
+
+/// Node 22's `process.channel` has ref/unref/refCounted/unrefCounted, and each returns undefined. The counter
+/// has no hook here (the child's channel reference is the Rust-owned `ipc_live`), so only shape and no-throw are checked.
+#[test]
+fn channel_has_ref_counting_methods_that_return_undefined() {
+    let sink = Sink::default();
+    channel(&sink);
+    let mut a = Interp::new();
+    a.install_ipc();
+    a.run("console.log(['ref', 'unref', 'refCounted', 'unrefCounted'].map(k => typeof process.channel[k]).join(','))")
+        .unwrap();
+    a.run("const c = process.channel; console.log(c.refCounted(), c.refCounted(), c.unrefCounted(), c.unrefCounted(), c.unrefCounted(), c.ref(), c.unref(), c.refCounted())")
+        .unwrap();
+    assert_eq!(
+        take_out(&mut a),
+        "function,function,function,function|undefined undefined undefined undefined undefined undefined undefined undefined"
+    );
+}
