@@ -500,10 +500,10 @@ fn scan_reports_reachable_blockers_only() {
     let clean = crate::scan::scan_bundle(MINI).ok().unwrap();
     assert!(clean.is_clean(), "{:?}", clean.blockers);
     assert_eq!((clean.factories_total, clean.factories_reachable), (3, 2)); // the unused generator is unreachable
-    let blocked = MINI.replace("exports.VERSION = '1.0';", "exports.V = async () => await File.from('x'); var fs = require('fs'); label: for (;;) { break label; } if (typeof process !== 'undefined') {}");
+    let blocked = MINI.replace("exports.VERSION = '1.0';", "exports.V = async () => await __thaw_probe.from('x'); var fs = require('fs'); label: for (;;) { break label; } if (typeof process !== 'undefined') {}");
     let r = crate::scan::scan_bundle(&blocked).ok().unwrap();
     let names: Vec<&str> = r.blockers.keys().map(String::as_str).collect();
-    assert_eq!(names, ["global:File", "require:fs"]); // typeof-probed `process` and labels are not reported
+    assert_eq!(names, ["global:__thaw_probe", "require:fs"]); // typeof-probed `process` and labels are not reported
     assert!(crate::scan::scan_bundle("var x = 1;").is_err());
 }
 
@@ -3702,11 +3702,12 @@ fn scan_reads_node_members_and_globals_only_where_node_has_them() {
         let report = crate::scan::scan_bundle(&one_module_bundle(&code, "")).ok().unwrap();
         assert!(report.is_clean(), "{body}: {:?}", report.blockers);
     }
-    // a Node global thaw lacks is refused (`File` is only usable as an instanceof operand)
-    let file = one_module_bundle("exports.a = function () { return File; };", "");
+    // a free name refused on every feature set: a host-internal (`__`) global stays a blocker though Node does not
+    // define it. No Node 22 global is missing from every build (`Intl` exists with the `intl` feature), so none is used
+    let file = one_module_bundle("exports.a = function () { return __thaw_probe; };", "");
     let report = crate::scan::scan_bundle(&file).ok().unwrap();
     assert!(
-        report.blockers.contains_key("global:File"),
+        report.blockers.contains_key("global:__thaw_probe"),
         "{:?}",
         report.blockers
     );
@@ -3804,14 +3805,14 @@ var __thaw_bundle_entry_key = "p/index.js";
 
 #[test]
 fn scan_ignores_statically_dead_and_operands_but_not_live_ones() {
-    // esbuild's cjs-lexer annotation: `0 && (module.exports = { File })` never runs. `File` is the one Node 22 global
-    // thaw lacks (scan_names), so it stands in for the names the test used to read (R5: a non-Node name is no finding)
+    // esbuild's cjs-lexer annotation: `0 && (module.exports = { __thaw_probe })` never runs. `__thaw_probe` is a host-internal
+    // name, refused on every feature set (a non-Node name would be no finding, R5)
     let dead = one_module_bundle(
-        "0 && (module.exports = { File });
-         exports.a = false && File;
-         exports.b = null && File;
-         if (0) { exports.c = File; } else { exports.d = 1; }
-         if (false) { exports.e = File; }",
+        "0 && (module.exports = { __thaw_probe });
+         exports.a = false && __thaw_probe;
+         exports.b = null && __thaw_probe;
+         if (0) { exports.c = __thaw_probe; } else { exports.d = 1; }
+         if (false) { exports.e = __thaw_probe; }",
         "",
     );
     let report = crate::scan::scan_bundle(&dead).ok().unwrap();
@@ -3819,10 +3820,10 @@ fn scan_ignores_statically_dead_and_operands_but_not_live_ones() {
     // the same global read on a live path is still refused: the right operand of `&&`, a branch, an else branch.
     // (The old `x` left operand is no longer a finding: a free name Node does not define is no blocker, R5.)
     for live in [
-        "exports.a = x && File;",
-        "if (x) { exports.b = File; }",
-        "if (1) {} else { exports.c = File; }",
-        "if (false) {} else { exports.c = File; }",
+        "exports.a = x && __thaw_probe;",
+        "if (x) { exports.b = __thaw_probe; }",
+        "if (1) {} else { exports.c = __thaw_probe; }",
+        "if (false) {} else { exports.c = __thaw_probe; }",
     ] {
         let names: Vec<String> = crate::scan::scan_bundle(&one_module_bundle(live, ""))
             .ok()
@@ -3830,8 +3831,16 @@ fn scan_ignores_statically_dead_and_operands_but_not_live_ones() {
             .blockers
             .into_keys()
             .collect();
-        assert_eq!(names, ["global:File"], "{live}");
+        assert_eq!(names, ["global:__thaw_probe"], "{live}");
     }
+    // `File` is a Node 22 global thaw defines (web/blob.js): reading it is no finding, as an operand or a value
+    let file_ok = crate::scan::scan_bundle(&one_module_bundle(
+        "exports.a = function () { return File; }; exports.b = x instanceof File;",
+        "",
+    ))
+    .ok()
+    .unwrap();
+    assert!(file_ok.is_clean(), "{:?}", file_ok.blockers);
 }
 
 #[test]
