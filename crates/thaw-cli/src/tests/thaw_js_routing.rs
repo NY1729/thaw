@@ -1222,6 +1222,56 @@ fn thaw_js_union_callable_result_real_ejs_overloads_build_under_error_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The hapi shape: a factory returns a `Server` whose `route` takes an options object with a
+/// handler callback that is unannotated in the program (`(request, h) => ..`). The `.d.ts` gives the
+/// handler a union type with callback members, so the callback's parameters come from the literal's
+/// dynamic receiver, not from a typed signature.
+#[test]
+fn thaw_js_object_literal_route_handler_on_dynamic_server_builds_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "hapi-route",
+        "import * as Hapi from 'tjs-hapi';\n\
+         async function main(): Promise<void> {\n\
+           const server = Hapi.server({ port: 0 });\n\
+           server.route({ method: 'GET', path: '/', handler: (request, h) => h.response(request.path) });\n\
+           const res = await server.inject('/');\n\
+           console.log(res.statusCode);\n\
+           console.log(res.payload);\n\
+         }\n",
+        &[(
+            "tjs-hapi",
+            "export interface Request { path: string; }\n\
+             export interface ResponseToolkit { response(value: any): any; }\n\
+             export interface ServerRoute { method: string; path: string; handler: ((request: Request, h: ResponseToolkit) => any) | ((request: Request, h: ResponseToolkit, err: Error) => any) | object; }\n\
+             export declare class Server { route(options: ServerRoute | ServerRoute[]): void; inject(path: string): Promise<{ statusCode: number; payload: string }>; }\n\
+             export declare function server(options: { port: number }): Server;\n",
+            "function Server() { this.routes = {}; }\n\
+             Server.prototype.route = function (options) { this.routes[options.method + ' ' + options.path] = options.handler; };\n\
+             Server.prototype.inject = function (path) {\n\
+               var handler = this.routes['GET ' + path];\n\
+               var h = { response: function (value) { return { statusCode: 200, payload: value }; } };\n\
+               return Promise.resolve(handler({ path: path }, h));\n\
+             };\n\
+             exports.server = function (options) { return new Server(options); };\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    // Same text real Node prints for the equivalent JavaScript.
+    assert_eq!(thaw_js_run(&output), "200\n/\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn thaw_js_callable_results_are_live_handles_and_build_under_error_mode() {
     let (dir, registry, entry) = thaw_js_callable_result_fixture(
