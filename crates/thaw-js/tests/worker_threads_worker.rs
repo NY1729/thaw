@@ -734,3 +734,21 @@ fn worker_post_message_to_unknown_thread_detaches_its_transfer_list() {
       })().catch((e) => console.log('failed ' + e));"#;
     assert_eq!(run_main(src), "{\"sync\":[0,true],\"name\":\"Error\",\"code\":\"ERR_WORKER_MESSAGING_FAILED\",\"after\":[0,true]}");
 }
+
+/// The factory a bundle's `require('node:worker_threads')` evaluates to (`scan::WORKER_THREADS_THAW_JS_FORM`) must hand a
+/// worker realm its worker-side exports (`isMainThread` false, the parent's `workerData`), and the main realm the main-thread
+/// form. Lowest level available: a bundled module cannot start a Worker from `/thaw_modules/<key>` yet, so the real
+/// substituted expression is evaluated in the worker code text.
+#[test]
+fn substituted_worker_threads_factory_is_worker_side_in_a_worker() {
+    let form = thaw_js::scan::WORKER_THREADS_THAW_JS_FORM;
+    let load = format!(
+        "const m = {{ exports: {{}} }}; (function (module) {{ {form} }})(m); const wt = m.exports;"
+    );
+    let worker_code = format!("{load} wt.parentPort.postMessage(JSON.stringify([wt.isMainThread, (wt.workerData || {{}}).n]));");
+    let src = format!(
+        "{load} const w = new wt.Worker(`{worker_code}`, {{ eval: true, workerData: {{ n: 7 }} }}); \
+         w.once('message', (v) => {{ console.log('worker ' + v + ' main ' + wt.isMainThread + ' ' + wt.workerData); w.terminate(); }});"
+    );
+    assert_eq!(run_main(&src), "worker [false,7] main true null");
+}
