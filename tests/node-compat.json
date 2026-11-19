@@ -5376,6 +5376,11 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "function main(): void {\n  const S = Symbol('s');\n  const T = Symbol('t');\n  const o: any = { a: 1, [S]: 2 };\n  Object.defineProperty(o, T, { value: 9, enumerable: false });\n  console.log(Object.getOwnPropertySymbols(o).length, Reflect.ownKeys(o).length, Object.keys(o).length);\n  console.log(Object.getOwnPropertySymbols(o).length, Object.getOwnPropertySymbols(o).length === 2);\n}"
+  },
+  {
+    "name": "fork child channel has ref counting methods",
+    "expect": "matched",
+    "source": "import cp from \"node:child_process\";\nfunction main(): void {\n  const child = cp.fork(\"/dev/null\", [], { execPath: \"node\", silent: true });\n  const channel: any = child.channel;\n  const log: string[] = [];\n  log.push([typeof channel.ref, typeof channel.unref, typeof channel.refCounted, typeof channel.unrefCounted].join(\",\"));\n  const results: string[] = [];\n  results.push(String(channel.refCounted()), String(channel.refCounted()), String(channel.unrefCounted()), String(channel.unrefCounted()), String(channel.ref()), String(channel.unref()));\n  log.push(results.join(\" \"));\n  child.disconnect();\n  child.on(\"exit\", (code: any) => { log.push(\"exit \" + code); console.log(log.join(\"|\")); });\n}"
   }
 ]
 }
