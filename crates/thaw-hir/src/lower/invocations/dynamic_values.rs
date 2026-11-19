@@ -569,7 +569,14 @@ impl<'a> FnLowerer<'a> {
                     // can mark its acquired live projection as owned. Forcing
                     // JsValue here first would route through the generic
                     // borrowed-handle wrapper and erase that provenance.
-                    Expr::Object(_) => self.lower_expr(&argument.expr)?,
+                    Expr::Object(_) => {
+                        // A literal passed to a dynamic receiver: its unannotated callbacks are
+                        // contextually `any` (noImplicitAny off), as for an `any`-expected literal.
+                        let saved = std::mem::replace(&mut self.implicit_any_callbacks, true);
+                        let lowered = self.lower_expr(&argument.expr);
+                        self.implicit_any_callbacks = saved;
+                        lowered?
+                    }
                     Expr::Array(array) if Self::is_promise_input_array(array) => {
                         self.lower_dynamic_promise_input_array(array)?
                     }
