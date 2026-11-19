@@ -1075,6 +1075,7 @@ impl Interp {
             // a data descriptor ends a Node accessor global's accessor form (`node_accessor`).
             // ponytail: only a descriptor with a value redefines; a writable-only one keeps the accessor form.
             self.global.set_redefined(key);
+            self.publish_global(key);
         }
         let existing = o.position(key);
         let flag = |v: &Option<Value>, default: bool| v.as_ref().map_or(default, |v| v.truthy());
