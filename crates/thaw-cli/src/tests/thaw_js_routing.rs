@@ -1079,6 +1079,38 @@ fn thaw_js_union_callable_result_ejs_shape_builds_under_error_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A single-argument bare callable with no import (`utf-8-validate`'s `isValidUTF8(buffer: Buffer): boolean`
+/// via `--use`): thaw-js must still emit a typed bare-name wrapper, since it has no untyped `callDynamic` shim.
+#[test]
+fn thaw_js_single_arg_bare_callable_builds_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "single-arg-bare",
+        "function main(): void {\n\
+           console.log(isValid(Buffer.from(\"a\")));\n\
+         }\n",
+        &[(
+            "tjs-utf8",
+            "export declare function isValid(buf: Buffer): boolean;\n",
+            "module.exports.isValid = function isValid(buf) { return buf.length > 0; };\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &["tjs-utf8".to_string()], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    // Same text real Node prints for the equivalent JavaScript.
+    assert_eq!(thaw_js_run(&output), "true\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn thaw_js_callable_results_are_live_handles_and_build_under_error_mode() {
     let (dir, registry, entry) = thaw_js_callable_result_fixture(

@@ -1462,6 +1462,7 @@ fn generate_registry_shims_pass(
                             &alias_function,
                             jit_operation.is_some(),
                             napi,
+                            thaw_js_package,
                         ) {
                             shim.push_str(&thaw_js_retarget_alias(
                                 alias,
@@ -1498,6 +1499,7 @@ fn generate_registry_shims_pass(
                             &alias_function,
                             jit_operation.is_some(),
                             napi,
+                            thaw_js_package,
                         ) {
                             shim.push_str(&thaw_js_retarget_alias(
                                 alias,
