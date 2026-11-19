@@ -56,6 +56,8 @@ struct Loader {
     addon: RefCell<Option<Value>>,
     /// The package name the napi bridge keys its exports by.
     package: String,
+    /// `make(key)` of [`STAR_ORIGIN_RUNTIME`]: the per-module origin object for a registry bundle's export graph.
+    origins: Option<Value>,
 }
 
 /// Builds the addon object from the napi proxy layer globals: one function per export, routed to
@@ -186,7 +188,11 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     // ESM-converted modules are `function (origin) { return function (module, exports, ...) {...}; }`
     let mut f = factory;
     if it.get(&f, "length")?.as_number() == Some(1.0) {
-        f = it.call(&f, &Value::Undefined, &[Value::Undefined])?;
+        let origin = match &loader.origins {
+            Some(make) => it.call(make, &Value::Undefined, &[Value::str(key)])?,
+            None => Value::Undefined,
+        };
+        f = it.call(&f, &Value::Undefined, &[origin])?;
     }
     let file = Value::str(key);
     it.call(
@@ -203,6 +209,81 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         ],
     )?;
     it.get(&module, "exports")
+}
+
+/// The thaw-js form of the registry's per-module origin (`__thaw_bundle_origin_for` in `render.rs`, which
+/// thaw-js never runs), for the `export *` prologue of an ES module factory: `track` records the module's
+/// exports, `edge(spec, ns)` records each import's namespace, and once every star target is recorded the
+/// star names are defined on the exports as live getters. Like ES star export, a name that two stars provide
+/// through different bindings is ambiguous and absent, a binding reached through two stars is one binding,
+/// and a module's own export (or `default`, or `__esModule`) is never a star name. Input: the bundle's
+/// export-graph JSON; `make(key)` is undefined for a key without a graph, which keeps the factory's old `undefined`.
+// ponytail: named-import link checks (`validateRequests`) are not enforced, cyclic star targets that are still
+// partial when their edge is recorded lose the names they gain later, and dynamic `import()` is not wired.
+const STAR_ORIGIN_RUNTIME: &str = r#"function (graphs) {
+  var own = Object.prototype.hasOwnProperty, canonical = new WeakMap();
+  // The binding a namespace property names: a star-provided name resolves to the module that owns it.
+  function bindingOf(ns, name) {
+    var table = canonical.get(ns);
+    return table && own.call(table, name) ? table[name] : { ns: ns, name: name };
+  }
+  function make(key) {
+    if (!own.call(graphs, key)) return undefined;
+    var graph = graphs[key], stars = [], local = Object.create(null), edges = Object.create(null);
+    var exportsObject = null, linked = false;
+    Object.keys(graph.local || {}).concat(Object.keys(graph.indirect || {})).forEach(function (name) { local[name] = true; });
+    (graph.stars || []).forEach(function (spec) { if (stars.indexOf(spec) < 0) stars.push(spec); });
+    function edged(spec) {
+      if (!own.call(edges, spec)) throw new ReferenceError('Import is not initialized');
+      return edges[spec];
+    }
+    function link() {
+      if (linked || !exportsObject) return;
+      for (var i = 0; i < stars.length; i++) if (!own.call(edges, stars[i])) return;
+      linked = true;
+      var found = Object.create(null), order = [], table = Object.create(null);
+      stars.forEach(function (spec) {
+        var ns = edges[spec];
+        if (ns === null || (typeof ns !== 'object' && typeof ns !== 'function')) return;
+        Object.keys(ns).forEach(function (name) {
+          if (name === 'default' || name === '__esModule' || local[name]) return;
+          var binding = bindingOf(ns, name);
+          if (!own.call(found, name)) { found[name] = { binding: binding, ambiguous: false }; order.push(name); }
+          else if (found[name].binding.ns !== binding.ns || found[name].binding.name !== binding.name) found[name].ambiguous = true;
+        });
+      });
+      order.forEach(function (name) {
+        var entry = found[name];
+        if (entry.ambiguous || own.call(exportsObject, name)) return;
+        table[name] = entry.binding;
+        Object.defineProperty(exportsObject, name, { enumerable: true, get: function () { return entry.binding.ns[entry.binding.name]; } });
+      });
+      canonical.set(exportsObject, table);
+    }
+    var origin = {
+      track: function (exports) { exportsObject = exports; link(); },
+      edge: function (spec, value) { edges[spec] = value; link(); },
+      validateRequests: function () {},
+      validateDynamic: function () {},
+      completeDynamic: function (spec, promise) { return promise; },
+      rejectDynamic: function (error) { return Promise.reject(error); },
+      defaultImport: function (spec, value) { return value && value.__esModule ? value.default : value; },
+      readDefault: function (spec) { return origin.defaultImport(spec, edged(spec)); },
+      readImport: function (spec, name) { return edged(spec)[name]; },
+      namespaceImport: function (spec) { return edged(spec); }
+    };
+    return origin;
+  }
+  return make;
+}"#;
+
+/// The `make` of [`STAR_ORIGIN_RUNTIME`] for `bundle_js`'s export graphs, or `None` for a bundle without them.
+fn star_origins(it: &mut Interp, bundle_js: &str) -> R<Option<Value>> {
+    let Some(graphs) = crate::esm::export_graphs_literal(bundle_js) else {
+        return Ok(None);
+    };
+    let make = it.run(&format!("({STAR_ORIGIN_RUNTIME})(JSON.parse({graphs}))"))?;
+    Ok(Some(make))
 }
 
 /// Bundle text that starts the builtin-name JSON array (`render.rs` writes it verbatim).
@@ -320,12 +401,14 @@ impl Package {
                 .map_err(|c| classify(&mut interp, c))?;
             factories.insert(key.clone(), f);
         }
+        let origins = star_origins(&mut interp, bundle_js).map_err(|c| classify(&mut interp, c))?;
         let loader = Rc::new(Loader {
             parts,
             factories,
             cache: RefCell::new(HashMap::new()),
             addon: RefCell::new(None),
             package: name.to_string(),
+            origins,
         });
         if entry == "node:module" || loader.factories.contains_key("node:module") {
             install_module_loader(&mut interp, &loader, bundle_js)
@@ -8215,5 +8298,84 @@ var __thaw_bundle_entry_key = "a/index.js";
             .unwrap();
         adopt_host_tls(KEY);
         assert_eq!(wire("path::posix"), expected);
+    }
+}
+
+#[cfg(test)]
+mod export_star_origin_tests {
+    use super::*;
+
+    /// Registry output for `index.js` (`export * from './b.js'; export * from './c.js'; export const own`,
+    /// `shadow` declared locally), `b.js` (`x`, `amb`, default) and `c.js` (`amb`, `y`, `shadow`): the
+    /// factories, import maps and export graph exactly as `bundle_commonjs_package` renders them.
+    const STAR_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"dump-pkg/index.js": function(__thaw_esm_origin_0) { return function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {
+module.exports.__esModule = true;
+Object.defineProperty(exports, "own", { enumerable: true, get: function() { return own; } });
+Object.defineProperty(exports, "shadow", { enumerable: true, get: function() { return shadow; } });
+if (typeof __thaw_esm_origin_0 === 'undefined') throw new TypeError('export * requires bundle origin graph');
+__thaw_esm_origin_0.track(exports);
+var __thaw_esm_reexport_all_0 = __thaw_require("./b.js");
+if (typeof __thaw_esm_origin_0 !== 'undefined') __thaw_esm_origin_0.edge("./b.js", __thaw_esm_reexport_all_0);
+var __thaw_esm_reexport_all_1 = __thaw_require("./c.js");
+if (typeof __thaw_esm_origin_0 !== 'undefined') __thaw_esm_origin_0.edge("./c.js", __thaw_esm_reexport_all_1);
+if (typeof __thaw_esm_origin_0 !== 'undefined') __thaw_esm_origin_0.validateRequests();
+const own = 1;
+const shadow = 'own';
+
+}; },
+"dump-pkg/c.js": function(__thaw_esm_origin_0) { return function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {
+module.exports.__esModule = true;
+Object.defineProperty(exports, "amb", { enumerable: true, get: function() { return amb; } });
+Object.defineProperty(exports, "y", { enumerable: true, get: function() { return y; } });
+Object.defineProperty(exports, "shadow", { enumerable: true, get: function() { return shadow; } });
+if (typeof __thaw_esm_origin_0 !== 'undefined') __thaw_esm_origin_0.validateRequests();
+const amb = 'c';
+const y = 5;
+const shadow = 'star';
+
+}; },
+"dump-pkg/b.js": function(__thaw_esm_origin_0) { return function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {
+module.exports.__esModule = true;
+Object.defineProperty(exports, "x", { enumerable: true, get: function() { return x; } });
+Object.defineProperty(exports, "amb", { enumerable: true, get: function() { return amb; } });
+if (typeof __thaw_esm_origin_0 !== 'undefined') __thaw_esm_origin_0.validateRequests();
+const x = 2;
+const amb = 'b';
+module.exports.default = 4;
+
+}; },
+};
+var __thaw_bundle_import_maps = {
+"dump-pkg/index.js": {"./b.js": "dump-pkg/b.js", "./c.js": "dump-pkg/c.js", },
+"dump-pkg/c.js": {},
+"dump-pkg/b.js": {},
+};
+var __thaw_bundle_require_maps = {
+"dump-pkg/index.js": {},
+"dump-pkg/c.js": {},
+"dump-pkg/b.js": {},
+};
+var __thaw_bundle_export_graphs = JSON.parse("{\"dump-pkg/index.js\":{\"local\":{\"own\":\"own\",\"shadow\":\"shadow\"},\"indirect\":{},\"stars\":[\"./b.js\",\"./c.js\"],\"requests\":[],\"dependencies\":[\"./b.js\",\"./c.js\"]},\"dump-pkg/c.js\":{\"local\":{\"amb\":\"amb\",\"y\":\"y\",\"shadow\":\"shadow\"},\"indirect\":{},\"stars\":[],\"requests\":[],\"dependencies\":[]},\"dump-pkg/b.js\":{\"local\":{\"x\":\"x\",\"amb\":\"amb\",\"default\":\"*default*\"},\"indirect\":{},\"stars\":[],\"requests\":[],\"dependencies\":[]}}");
+var __thaw_bundle_entry_key = "dump-pkg/index.js";
+})(globalThis.require);"#;
+
+    /// Node 22 on the same three files: own exports and the unique star names are visible, the name
+    /// two stars provide (`amb`) is ambiguous and absent, `default` is not re-exported, and the own
+    /// `shadow` wins over the star's.
+    #[test]
+    fn star_names_reach_the_importer_like_node() {
+        let mut pkg = Package::load(STAR_BUNDLE).expect("package loads");
+        let exports = pkg.exports();
+        let it = pkg.interp();
+        let probe = it
+            .run("(function (ex) { return JSON.stringify([ex.own, ex.shadow, ex.x, ex.y, 'amb' in ex, 'default' in ex, Object.keys(ex).filter(function (k) { return k !== '__esModule'; }).join(',')]); })")
+            .expect("probe compiles");
+        let out = it
+            .call(&probe, &Value::Undefined, &[exports])
+            .expect("probe runs");
+        let text = it.to_str(&out);
+        assert_eq!(text, r#"[1,"own",2,5,false,false,"own,shadow,x,y"]"#.into());
     }
 }
