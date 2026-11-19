@@ -6142,6 +6142,8 @@ mod vm_realm_tests;
 #[cfg(test)]
 mod web_class_tag_tests;
 #[cfg(test)]
+mod worker_bundle_tests;
+#[cfg(test)]
 mod worker_limits_tests;
 
 impl Interp {
