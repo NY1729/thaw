@@ -1409,7 +1409,11 @@ impl Interp {
             self.set_native(o, "assign", |it, _, args| {
                 let target = arg(args, 0);
                 for src in args.iter().skip(1) {
-                    for k in it.own_keys(src) {
+                    let keys = it
+                        .own_keys(src)
+                        .into_iter()
+                        .chain(it.own_enumerable_symbol_keys(src));
+                    for k in keys {
                         let v = it.get(src, &k)?;
                         it.set(&target, &k, v)?;
                     }
