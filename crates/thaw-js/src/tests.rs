@@ -507,6 +507,145 @@ fn scan_reports_reachable_blockers_only() {
     assert!(crate::scan::scan_bundle("var x = 1;").is_err());
 }
 
+/// A three-module registry bundle: `p/index.js` (the given body), `p/b.js` (clean) and `p/c.js` (a blocker,
+/// `process.dlopen`). The map of `p/index.js` lists both `./b` and `./c`, as a bundler's catch-all map does.
+fn index_bundle(index_body: &str) -> String {
+    r#"module.exports = (function(require) {
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {
+INDEX
+},
+"p/b.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) { exports.b = 1; },
+"p/c.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) { process.dlopen('x'); },
+};
+var __thaw_bundle_require_maps = { "p/index.js": {"./b": "p/b.js", "./c": "p/c.js"}, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#
+        .replace("INDEX", index_body)
+}
+
+#[test]
+fn reachability_follows_only_literal_specs_of_a_dynamic_require_factory() {
+    let blockers = |src: &str| -> Vec<String> {
+        crate::scan::scan_bundle(src)
+            .ok()
+            .unwrap()
+            .blockers
+            .into_keys()
+            .collect()
+    };
+    let reached = |src: &str| -> Vec<String> {
+        let parts = crate::scan::parse_bundle(src).ok().unwrap();
+        crate::scan::reachable(&parts).into_iter().collect()
+    };
+    // a computed `require(n)` names nothing: the map entry `./c` is not followed, so c's blocker is gone
+    let dynamic =
+        index_bundle("var n = './b'; exports.v = require(n); exports.b = require('./b');");
+    assert_eq!(blockers(&dynamic), ["require:dynamic"]);
+    assert_eq!(reached(&dynamic), ["p/b.js", "p/index.js"]);
+    // a literal `require('./c')` beside it names c: c is reachable and blocks
+    let named = index_bundle("var n = './b'; exports.v = require(n); exports.c = require('./c');");
+    assert_eq!(blockers(&named), ["method:dlopen", "require:dynamic"]);
+    assert!(reached(&named).contains(&"p/c.js".to_string()));
+    // a template literal without holes names its spec too
+    let templated =
+        index_bundle("var n = './b'; exports.v = require(n); exports.c = require(`./c`);");
+    assert_eq!(blockers(&templated), ["method:dlopen", "require:dynamic"]);
+    // ESM edges (`__thaw_require`) are named the same way: a literal one keeps its target, a computed one names nothing
+    let esm_named = index_bundle(
+        "var n = './b'; exports.v = __thaw_require(n); exports.c = __thaw_require('./c');",
+    );
+    assert_eq!(blockers(&esm_named), ["method:dlopen"]);
+    let esm_dynamic = index_bundle(
+        "var n = './b'; exports.v = __thaw_require(n); exports.b = __thaw_require('./b');",
+    );
+    assert_eq!(blockers(&esm_dynamic), Vec::<String>::new());
+    assert!(!reached(&esm_dynamic).contains(&"p/c.js".to_string()));
+    // a factory without a dynamic require keeps following every map entry, as before
+    let static_only = index_bundle("exports.b = require('./b');");
+    assert_eq!(blockers(&static_only), ["method:dlopen"]);
+    assert_eq!(reached(&static_only).len(), 3);
+}
+
+/// Like [`index_bundle`] with `p/lib/x.js` (a blocker) and a clean `p/other.js`; `map` is the map of `p/index.js`.
+fn named_bundle(index_body: &str, map: &str) -> String {
+    r#"module.exports = (function(require) {
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {
+INDEX
+},
+"p/lib/x.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) { process.dlopen('x'); },
+"p/other.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) { exports.o = 1; },
+};
+var __thaw_bundle_require_maps = { "p/index.js": MAP, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#
+        .replace("INDEX", index_body)
+        .replace("MAP", map)
+}
+
+#[test]
+fn reachability_follows_the_entries_a_computed_spec_fragment_can_name() {
+    let scan = |src: &str| crate::scan::scan_bundle(src).ok().unwrap();
+    let reached = |src: &str| -> Vec<String> {
+        let parts = crate::scan::parse_bundle(src).ok().unwrap();
+        crate::scan::reachable(&parts).into_iter().collect()
+    };
+    let prefix_map = r#"{"./lib/x": "p/lib/x.js", "./other": "p/other.js"}"#;
+    let suffix_map = r#"{"./lib/x.js": "p/lib/x.js", "./other.json": "p/other.js"}"#;
+    // `'./lib/' + n` and its template form start with `./lib/`: `./lib/x` (a blocker) is named, `./other` is not
+    for body in [
+        "var n = 'x'; exports.v = require('./lib/' + n);",
+        "var n = 'x'; exports.v = require(`./lib/${n}`);",
+    ] {
+        let src = named_bundle(body, prefix_map);
+        let scan = scan(&src);
+        assert!(scan.blockers.contains_key("method:dlopen"), "{body}");
+        let keys = reached(&src);
+        assert!(keys.contains(&"p/lib/x.js".to_string()), "{body}");
+        assert!(!keys.contains(&"p/other.js".to_string()), "{body}");
+    }
+    // `name + '.js'` ends with `.js`: the start is unknown, so every entry ending in `.js` is named
+    let src = named_bundle(
+        "var n = './lib/x'; exports.v = require(n + '.js');",
+        suffix_map,
+    );
+    let keys = reached(&src);
+    assert!(keys.contains(&"p/lib/x.js".to_string()));
+    assert!(!keys.contains(&"p/other.js".to_string()));
+    assert!(scan(&src).blockers.contains_key("method:dlopen"));
+    // a bare variable names nothing extra (the express `require(mod)` shape)
+    let src = named_bundle("var n = 'x'; exports.v = require(n);", prefix_map);
+    assert_eq!(reached(&src), ["p/index.js"]);
+    assert_eq!(
+        scan(&src)
+            .blockers
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["require:dynamic"]
+    );
+    // fragments that do not tell which entries are named (a middle literal, a conditional, a call with a literal
+    // argument) follow every entry
+    for body in [
+        "var n = 'x'; exports.v = require(n + './lib/' + n);",
+        "var n = 'x'; exports.v = require(n ? './lib/x' : './other');",
+        "var n = 'x'; exports.v = require(['./lib', n].join('/'));",
+    ] {
+        let keys = reached(&named_bundle(body, prefix_map));
+        assert!(keys.contains(&"p/lib/x.js".to_string()), "{body}");
+        assert!(keys.contains(&"p/other.js".to_string()), "{body}");
+    }
+    // an aliased require is not seen as a require call: the factory keeps following every entry
+    let src = named_bundle(
+        "var r = require; var n = 'x'; exports.v = r('./lib/' + n);",
+        prefix_map,
+    );
+    let keys = reached(&src);
+    assert!(keys.contains(&"p/lib/x.js".to_string()));
+    assert!(keys.contains(&"p/other.js".to_string()));
+}
+
 /// Run `src` as a program (event loop included); console lines plus the exit code.
 fn main_run(src: &str) -> (Vec<String>, i32) {
     main_run_after_gap(src, 0)
@@ -3105,7 +3244,7 @@ var __thaw_bundle_entry_key = \"p/index.js\";
     assert!(report.is_clean(), "{:?}", report.blockers);
     let called = src.replace(
         "exports.c = globalThis.Zed && 1;",
-        "exports.c = globalThis.Zed();",
+        "exports.c = Math.zzzNot();",
     );
     assert!(!crate::scan::scan_bundle(&called).unwrap().is_clean());
     // generated `with (..)` source is supported (sloppy `new Function`), no longer a blocker
@@ -3354,7 +3493,7 @@ fn scan_accepts_method_calls_guarded_by_a_truthiness_test_of_the_same_name() {
     let src = "module.exports = (function(require) {
 var __thaw_bundle_factories = {
 \"p/index.js\": function(module, exports, require) {
-  exports.a = function (options, date) { return options?.in ? options.in(date) : date; };
+  exports.a = function (options, date) { return options?.getHeapSnapshot ? options.getHeapSnapshot(date) : date; };
   exports.b = function (locale, parts) { if (locale.localize.preprocessor) { parts = locale.localize.preprocessor(parts); } return parts; };
 },
 };
@@ -3363,7 +3502,10 @@ var __thaw_bundle_entry_key = \"p/index.js\";
 })(globalThis.require);";
     let report = crate::scan::scan_bundle(src).ok().unwrap();
     assert!(report.is_clean(), "{:?}", report.blockers);
-    let unguarded = src.replace("options?.in ? options.in(date) : date", "options.in(date)");
+    let unguarded = src.replace(
+        "options?.getHeapSnapshot ? options.getHeapSnapshot(date) : date",
+        "options.getHeapSnapshot(date)",
+    );
     assert!(!crate::scan::scan_bundle(&unguarded).unwrap().is_clean());
 }
 
@@ -3393,30 +3535,46 @@ fn scan_accepts_negated_and_null_compared_method_probes() {
         );
         assert!(report.is_clean(), "{code}: {:?}", report.blockers);
     }
-    // the same call without any probe is still refused
-    let unguarded = one_module_bundle("exports.a = function (o) { return o.customMerge(1); };", "");
+    // the same Node name called without any probe is still refused (`customMerge` is not a Node name: see
+    // scan_flags_method_calls_only_for_node_names_thaw_lacks)
+    let unguarded = one_module_bundle(
+        "exports.a = function (o) { return o.getHeapSnapshot(1); };",
+        "",
+    );
     let report = crate::scan::scan_bundle(&unguarded).ok().unwrap();
-    assert!(report.blockers.contains_key("method:customMerge"));
+    assert!(report.blockers.contains_key("method:getHeapSnapshot"));
     // a probe excuses calls of the probed name only
     let other = one_module_bundle(
-        "exports.a = function (o) { if (!o.customMerge) return 0; return o.other(1); };",
+        "exports.a = function (o) { if (!o.customMerge) return 0; return o.getHeapSnapshot(1); };",
         "",
     );
     let report = crate::scan::scan_bundle(&other).ok().unwrap();
-    assert!(report.blockers.contains_key("method:other"));
+    assert!(report.blockers.contains_key("method:getHeapSnapshot"));
     assert!(!report.blockers.contains_key("method:customMerge"));
 }
 
 #[test]
 fn scan_refuses_unguarded_host_method_calls_the_probe_rules_do_not_excuse() {
     let refused = [
-        ("exports.a = function (c) { return c.refCounted(); };", "method:refCounted"),
-        ("exports.a = function (m) { process.dlopen(m, 'x'); };", "method:dlopen"),
-        ("exports.a = function (c) { return c.publish('x'); };", "method:publish"),
-        ("exports.a = function () { return this.execute(); };", "method:execute"),
         (
-            "exports.a = class C extends EventEmitter { f() { return this.nonexistentNodeThing(); } };",
-            "method:nonexistentNodeThing",
+            "exports.a = function (c) { return c.refCounted(); };",
+            "method:refCounted",
+        ),
+        (
+            "exports.a = function (m) { process.dlopen(m, 'x'); };",
+            "method:dlopen",
+        ),
+        (
+            "exports.a = function (c) { return c.publish('x'); };",
+            "method:publish",
+        ),
+        (
+            "exports.a = function () { return this.execute(); };",
+            "method:execute",
+        ),
+        (
+            "exports.a = class C extends EventEmitter { f() { return this.getHeapSnapshot(); } };",
+            "method:getHeapSnapshot",
         ),
         (
             "exports.a = class C { f() { return function () { return this.execute(); }; } };",
@@ -3433,6 +3591,125 @@ fn scan_refuses_unguarded_host_method_calls_the_probe_rules_do_not_excuse() {
             report.blockers
         );
     }
+}
+
+#[test]
+fn scan_flags_method_calls_only_for_node_names_thaw_lacks() {
+    // R2: a method name Node 22 does not have is the package's own member or a guarded probe, never a missing feature
+    for code in [
+        "exports.a = function (o) { return o.customMerge(1); };",
+        "exports.a = function (o) { return o.notANodeName(1); };",
+    ] {
+        let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
+            .ok()
+            .unwrap();
+        assert!(report.is_clean(), "{code}: {:?}", report.blockers);
+    }
+    // Node names thaw lacks (or the dlopen special case) stay refused
+    for (code, blocker) in [
+        (
+            "exports.a = function (c) { return c.getHeapSnapshot(); };",
+            "method:getHeapSnapshot",
+        ),
+        (
+            "exports.a = function (c) { return c.refCounted(); };",
+            "method:refCounted",
+        ),
+        (
+            "exports.a = function (m) { process.dlopen(m, 'x'); };",
+            "method:dlopen",
+        ),
+        (
+            "exports.a = function (c) { return c.publish('x'); };",
+            "method:publish",
+        ),
+    ] {
+        let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
+            .ok()
+            .unwrap();
+        assert!(
+            report.blockers.contains_key(blocker),
+            "{code}: {:?}",
+            report.blockers
+        );
+    }
+}
+
+#[test]
+fn scan_reads_node_members_and_globals_only_where_node_has_them() {
+    // R4/R5: a member or global that Node 22 does not have (a browser probe, a host or package global) is no
+    // blocker: it is undefined on Node too, so the same read behaves the same on thaw-js
+    for body in [
+        "return typeof crypto != 'undefined' && crypto && (crypto.getRandomValues || crypto.randomBytes);",
+        "return (typeof Symbol === 'function' && Symbol.observable) || '@@observable';",
+        "return process.noDeprecation === true;",
+        "var request = requestAnimationFrame; return request;",
+        "return Character.x;",
+        "return navigator.product;",
+        "return typeof window !== 'undefined' ? window : 0;",
+        "return process.zzzNotAMember;",
+        "return Zed;",
+    ] {
+        let code = format!("exports.a = function () {{ {body} }};");
+        let report = crate::scan::scan_bundle(&one_module_bundle(&code, "")).ok().unwrap();
+        assert!(report.is_clean(), "{body}: {:?}", report.blockers);
+    }
+    // a Node global thaw lacks is refused (`File` is only usable as an instanceof operand)
+    let file = one_module_bundle("exports.a = function () { return File; };", "");
+    let report = crate::scan::scan_bundle(&file).ok().unwrap();
+    assert!(
+        report.blockers.contains_key("global:File"),
+        "{:?}",
+        report.blockers
+    );
+    // a root the Node data does not model (Math) keeps the old flag: the data cannot say Node lacks the member
+    let math = one_module_bundle(
+        "exports.a = function () { return Math.zzzNotAMember; };",
+        "",
+    );
+    let report = crate::scan::scan_bundle(&math).ok().unwrap();
+    assert!(
+        report.blockers.contains_key("builtin:Math.zzzNotAMember"),
+        "{:?}",
+        report.blockers
+    );
+}
+
+#[test]
+fn scan_keeps_double_underscore_globals_flagged_while_node_lacked_members_stay_clean() {
+    // carve-out of R4/R5: a `__`-prefixed name is a host-internal or loader convention (the `__thaw_*` natives, the
+    // webpack probe), not a Node-API name, so the "Node lacks it" relaxation does not apply: it stays flagged as before
+    for (code, blocker) in [
+        (
+            "exports.a = function () { return globalThis.__thaw_register_native_bundle(1); };",
+            "builtin:globalThis.__thaw_register_native_bundle",
+        ),
+        (
+            "exports.a = function () { return __thaw_anything; };",
+            "global:__thaw_anything",
+        ),
+        (
+            "exports.a = function () { return __non_webpack_require__; };",
+            "global:__non_webpack_require__",
+        ),
+    ] {
+        let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
+            .ok()
+            .unwrap();
+        assert!(
+            report.blockers.contains_key(blocker),
+            "{code}: {:?}",
+            report.blockers
+        );
+    }
+    // a non-`__` member Node lacks is still no blocker
+    let report = crate::scan::scan_bundle(&one_module_bundle(
+        "exports.a = function () { return process.noDeprecation === true; };",
+        "",
+    ))
+    .ok()
+    .unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
 }
 
 #[test]
@@ -3479,34 +3756,34 @@ var __thaw_bundle_entry_key = "p/index.js";
 
 #[test]
 fn scan_ignores_statically_dead_and_operands_but_not_live_ones() {
-    // esbuild's cjs-lexer annotation: `0 && (module.exports = { Hono })` never runs
+    // esbuild's cjs-lexer annotation: `0 && (module.exports = { File })` never runs. `File` is the one Node 22 global
+    // thaw lacks (scan_names), so it stands in for the names the test used to read (R5: a non-Node name is no finding)
     let dead = one_module_bundle(
-        "0 && (module.exports = { Hono, Context });
-         exports.a = false && Missing;
-         exports.b = null && Gone;
-         if (0) { exports.c = DeadOne; } else { exports.d = 1; }
-         if (false) { exports.e = DeadTwo; }",
+        "0 && (module.exports = { File });
+         exports.a = false && File;
+         exports.b = null && File;
+         if (0) { exports.c = File; } else { exports.d = 1; }
+         if (false) { exports.e = File; }",
         "",
     );
     let report = crate::scan::scan_bundle(&dead).ok().unwrap();
     assert!(report.is_clean(), "{:?}", report.blockers);
-    // the same names read on a live path are still refused
-    let live = one_module_bundle(
-        "exports.a = x && Hono; if (x) { exports.b = Context; } if (1) {} else { exports.c = Alive; }",
-        "",
-    );
-    let names: Vec<String> = crate::scan::scan_bundle(&live)
-        .ok()
-        .unwrap()
-        .blockers
-        .into_keys()
-        .collect();
-    assert_eq!(
-        names,
-        ["global:Alive", "global:Context", "global:Hono", "global:x"]
-    );
-    let else_live = one_module_bundle("if (false) {} else { exports.c = Alive; }", "");
-    assert!(!crate::scan::scan_bundle(&else_live).unwrap().is_clean());
+    // the same global read on a live path is still refused: the right operand of `&&`, a branch, an else branch.
+    // (The old `x` left operand is no longer a finding: a free name Node does not define is no blocker, R5.)
+    for live in [
+        "exports.a = x && File;",
+        "if (x) { exports.b = File; }",
+        "if (1) {} else { exports.c = File; }",
+        "if (false) {} else { exports.c = File; }",
+    ] {
+        let names: Vec<String> = crate::scan::scan_bundle(&one_module_bundle(live, ""))
+            .ok()
+            .unwrap()
+            .blockers
+            .into_keys()
+            .collect();
+        assert_eq!(names, ["global:File"], "{live}");
+    }
 }
 
 #[test]
@@ -3529,7 +3806,10 @@ fn scan_knows_exactly_the_callsite_methods_the_engine_implements() {
     let calls: String = listed.iter().map(|m| format!("c.{m}();")).collect();
     let clean = one_module_bundle(&format!("exports.f = function (c) {{ {calls} }};"), "");
     assert!(crate::scan::scan_bundle(&clean).unwrap().is_clean());
-    let unknown = one_module_bundle("exports.f = function (c) { return c.getBogusSite(); };", "");
+    let unknown = one_module_bundle(
+        "exports.f = function (c) { return c.getHeapSnapshot(); };",
+        "",
+    );
     assert!(!crate::scan::scan_bundle(&unknown).unwrap().is_clean());
 }
 
@@ -9648,8 +9928,17 @@ fn q9_scan_clean_for_process_config_and_prepare_stack_trace() {
 fn q9_addon_mode_tolerates_method_exports_only() {
     let src = "module.exports = (function(require){ var __thaw_bundle_factories = { \"p/index.js\": function(module, exports, require) { var b = require('./build/Release/x.node'); exports.v = b.encrypt_sync('a'); } }; var __thaw_bundle_require_maps = { \"p/index.js\": {} }; var __thaw_bundle_entry_key = \"p/index.js\"; })(globalThis.require);";
     let plain = crate::scan::scan_bundle(src).ok().unwrap();
+    // plain mode still refuses the native addon through its `.node` require; `encrypt_sync` is not a Node method
+    // name, so the method call itself is no blocker any more (R2: only Node names thaw lacks are flagged)
     assert!(
-        plain.blockers.contains_key("method:encrypt_sync"),
+        plain
+            .blockers
+            .contains_key("require:./build/Release/x.node"),
+        "{:?}",
+        plain.blockers
+    );
+    assert!(
+        !plain.blockers.contains_key("method:encrypt_sync"),
         "{:?}",
         plain.blockers
     );
@@ -9687,6 +9976,31 @@ var __thaw_bundle_entry_key = "addon/index.js";
         "{:?}",
         addon.blockers
     );
+}
+
+#[test]
+fn scan_refuses_process_dlopen_even_when_the_bundle_defines_a_dlopen_key() {
+    // Prisma-shaped: an os-constants object defines a `dlopen` key, which must not excuse a real process.dlopen call
+    // (a runtime native addon load is never served on thaw-js, whoever defines a key of that name)
+    for code in [
+        "var c = { dlopen: { RTLD_LAZY: 1 } }; exports.a = function (m, p) { process.dlopen(m, p); };",
+        "var c = { dlopen: { RTLD_LAZY: 1 } }; exports.a = function (m, p) { return require('os').constants.dlopen; }; exports.b = function (m, p) { process.dlopen(m, p); };",
+        // a probe of the member is true on thaw-js (it exists and throws): it must not excuse the call either
+        "exports.a = function (m, p) { if (typeof process.dlopen === 'function') { process.dlopen(m, p); } };",
+        "exports.a = function (m, p) { return process.dlopen && process.dlopen(m, p); };",
+    ] {
+        let bundle = one_module_bundle(code, "");
+        for report in [
+            crate::scan::scan_bundle(&bundle).ok().unwrap(),
+            crate::scan::scan_addon_bundle(&bundle).ok().unwrap(),
+        ] {
+            assert!(
+                report.blockers.contains_key("method:dlopen"),
+                "{code}: {:?}",
+                report.blockers
+            );
+        }
+    }
 }
 
 /// W2 guard: reads of outer names through a 100-variable scope, and a shadowed name one hop deeper, give the

@@ -54,14 +54,19 @@ fn string_literal_at(rest: &str) -> Option<&str> {
 /// JSON.parse("...")`: `(exported name, specifier, imported name)`. Namespace (`*`) re-exports are
 /// not included.
 // ponytail: namespace re-exports (`export * as X`) of an indirect graph are skipped; add when a package needs it.
-fn indirect_exports(source: &str) -> BTreeMap<String, Vec<(String, String, String)>> {
+/// The JS string literal of a registry bundle's `var __thaw_bundle_export_graphs = JSON.parse("...")`
+/// (quotes included): the JSON text of every ES module's export graph, keyed by module key.
+pub(crate) fn export_graphs_literal(source: &str) -> Option<&str> {
     const VAR: &str = "var __thaw_bundle_export_graphs = JSON.parse(";
-    let mut out = BTreeMap::new();
-    let Some(literal) = source
+    source
         .find(VAR)
         .and_then(|at| source.get(at + VAR.len()..))
         .and_then(string_literal_at)
-    else {
+}
+
+fn indirect_exports(source: &str) -> BTreeMap<String, Vec<(String, String, String)>> {
+    let mut out = BTreeMap::new();
+    let Some(literal) = export_graphs_literal(source) else {
         return out;
     };
     let Ok(Native::Array(mut wrapped)) = crate::json::parse_native(&format!("[{literal}]")) else {
