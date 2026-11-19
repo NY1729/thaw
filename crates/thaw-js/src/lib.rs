@@ -75,6 +75,7 @@ mod procstate;
 mod proxy;
 mod reflect;
 pub mod scan;
+pub mod scan_names;
 mod strict;
 mod sysio;
 mod tls;
