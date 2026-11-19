@@ -3555,6 +3555,62 @@ fn symbol_key_to_a_host_backed_define_property_still_rejects() {
     assert!(error.contains("value has type Symbol, expected Json"), "{error}");
 }
 
+/// A computed (`[S]`) key of `Object.defineProperties` lowers through the dynamic-key
+/// `Object.defineProperty` path, so its symbol becomes a wire-text key instead of the
+/// old "requires literal keys" compile error.
+#[test]
+fn computed_symbol_key_in_define_properties_lowers_to_its_wire_key() {
+    let program = lower(r#"
+        function main(): void {
+            const S = Symbol('s');
+            const o: any = Object.defineProperties({}, { [S]: { value: 1, enumerable: true, writable: true, configurable: true } });
+            console.log(o[S]);
+        }
+    "#);
+    let body = format!("{program:#?}");
+    assert!(body.contains("__thaw_symbol_key"), "{body}");
+    assert!(body.contains("defineProperty"), "{body}");
+}
+
+/// A computed symbol key on a host-backed (`JsValue`) `Object.defineProperties` target does not
+/// reach the new fixed-layout entry lowering: the whole call still goes to the host object
+/// (`defineProperties` on the dynamic handle), as before this change.
+#[test]
+fn computed_symbol_key_to_a_host_backed_define_properties_stays_on_the_host_path() {
+    let module = thaw_parser::parse_typescript(r#"
+        function main(host: JsValue): void {
+            const S = Symbol('s');
+            Object.defineProperties(host, { [S]: { value: 5, enumerable: true } });
+        }
+    "#).expect("parse error");
+    let program = lower_module(&module).expect("host-backed defineProperties must lower");
+    let body = format!("{program:#?}");
+    assert!(body.contains("\"defineProperties\""), "{body}");
+    assert!(!body.contains("\"defineProperty\""), "{body}");
+}
+
+/// A dynamic-object entry whose `writable` or `configurable` is omitted or `false`, or an
+/// accessor without `configurable: true`, is a compile error: a dynamic object does not store
+/// those attributes, so the result would silently differ from Node's defaults.
+#[test]
+fn dynamic_define_properties_rejects_unstored_attributes() {
+    for descriptor in [
+        "{ value: 1, enumerable: true, configurable: true }",
+        "{ value: 1, enumerable: true, writable: false, configurable: true }",
+        "{ value: 1, enumerable: true, writable: true }",
+        "{ get() { return 1; }, enumerable: true }",
+    ] {
+        let module = thaw_parser::parse_typescript(&format!(r#"
+            function main(): void {{
+                const S = Symbol('s');
+                Object.defineProperties({{}}, {{ [S]: {descriptor} }});
+            }}
+        "#)).expect("parse error");
+        let error = lower_module(&module).expect_err(descriptor);
+        assert!(error.contains("does not store non-writable or non-configurable"), "{descriptor}: {error}");
+    }
+}
+
 #[test]
 fn symbol_bearing_native_composites_select_projection() {
     let program = lower(r#"
