@@ -24,8 +24,8 @@ impl Interp {
             .strip_prefix("@@sym:")
             .and_then(|i| i.parse::<u64>().ok())
         {
-            if let Some(s) = self.rt.symbols.get(&id) {
-                return Value::Object(s.clone());
+            if let Some(s) = crate::symbol_table::by_id(id) {
+                return Value::Object(s);
             }
         }
         Value::Str(key.into())

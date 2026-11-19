@@ -77,6 +77,7 @@ mod reflect;
 pub mod scan;
 pub mod scan_names;
 mod strict;
+mod symbol_table;
 mod sysio;
 mod tls;
 mod typed;
@@ -1304,7 +1305,6 @@ pub struct Interp {
     global_object: Obj,
     /// The accessor pair of each `NODE_ACCESSOR_GLOBALS` name, built once (`node_accessor_slots`).
     global_accessors: Vec<(&'static str, Slot)>,
-    next_symbol: u64,
     regex_cache: HashMap<(String, String), Rc<regress::Regex>>,
     /// The realm's last successful match (legacy `RegExp.$1`-style statics).
     last_match: regexp_statics::LastMatch,
@@ -1405,11 +1405,13 @@ pub struct Interp {
     /// Native exception packets a thrown carrier names (`\0pkt`, host.rs `packet_error`), by packet id. The
     /// arena keeps packets weakly, so this keeps a carrier's packet resolvable until release_all.
     pub(crate) native_packets: HashMap<u64, Rc<thaw_arena::exception::ExceptionPacket>>,
-    /// The intrinsic `Symbol` constructor, its `Symbol.for` registry and the well-known symbols, captured at
-    /// realm setup (collections.rs `install_collections`), so Rust never looks `Symbol` up in the global scope.
+    /// The intrinsic `Symbol` constructor, captured at realm setup (collections.rs `install_collections`), so Rust
+    /// never looks `Symbol` up in the global scope. The well-known symbols and the `Symbol.for` registry are
+    /// per thread (symbol_table.rs); only a vm realm has its own registry here.
     pub(crate) symbol_ctor: Option<Obj>,
     pub(crate) symbol_registry: Option<Obj>,
-    pub(crate) well_known: Vec<Obj>,
+    /// Ids of the symbols this realm made: its teardown forgets their native pins (napi_symbols::forget_objects).
+    pub(crate) symbols_made: Vec<u64>,
     /// The intrinsic global `eval`: a call through an identifier `eval` that resolves to it is direct.
     pub(crate) intrinsic_eval: Option<Obj>,
     /// Completion value of the direct eval running at the given call depth (see `note_completion`).
@@ -1496,7 +1498,6 @@ impl Interp {
             regexp_proto,
             global_object: new_obj(Some(object_proto.clone()), Kind::Global),
             global_accessors: Vec::new(),
-            next_symbol: 0,
             regex_cache: HashMap::new(),
             last_match: Default::default(),
             number_proto,
@@ -1557,7 +1558,7 @@ impl Interp {
             native_packets: HashMap::new(),
             symbol_ctor: None,
             symbol_registry: None,
-            well_known: Vec::new(),
+            symbols_made: Vec::new(),
             intrinsic_eval: None,
             eval_completion: None,
         };
@@ -1566,6 +1567,10 @@ impl Interp {
         it.install_builtins();
         it.install_call_frames();
         it.install_collections();
+        if !host {
+            // a vm realm keeps its own `Symbol.for` registry, as it always has (host realms share the thread's)
+            it.symbol_registry = Some(it.plain());
+        }
         it.install_eventloop();
         it.install_generators();
         it.install_bigint();
@@ -6001,6 +6006,8 @@ mod coroutine_teardown_tests;
 #[cfg(test)]
 mod costack_cap_tests;
 #[cfg(test)]
+mod cross_interp_symbol_tests;
+#[cfg(test)]
 mod ipc_tests;
 #[cfg(test)]
 mod url_tests;
@@ -6034,8 +6041,18 @@ impl Interp {
         let mut seen_scopes: std::collections::HashSet<*const Scope> = Default::default();
         // addresses of the objects this walk emptied: tables that name objects by address forget them
         let mut cleared: std::collections::HashSet<usize> = Default::default();
+        // the symbols this realm made stay alive (shared), but their native pins are forgotten as before
+        for id in &self.symbols_made {
+            if let Some(s) = symbol_table::by_id(*id) {
+                cleared.insert(Rc::as_ptr(&s) as usize);
+            }
+        }
         for o in &self.vm_shared {
             seen_objs.insert(Rc::as_ptr(o));
+        }
+        // the prototype the thread's symbols inherit from stays intact for the other Interps that use them
+        if let Some(p) = symbol_table::shared_proto() {
+            seen_objs.insert(Rc::as_ptr(&p));
         }
         let mut objs: Vec<Obj> = vec![
             self.object_proto.clone(),
@@ -6049,12 +6066,10 @@ impl Interp {
         ];
         objs.extend(self.symbol_ctor.take());
         objs.extend(self.symbol_registry.take());
-        objs.append(&mut self.well_known);
         objs.extend(self.rt.arraybuffer_proto.take());
         objs.extend(self.rt.sharedarraybuffer_proto.take());
         objs.extend(self.rt.typed_base_proto.take());
         objs.append(&mut self.rt.typed_protos);
-        objs.extend(self.rt.symbols.drain().map(|(_, o)| o));
         self.rt.push_object_roots(&mut objs);
         for v in self.callback_values.drain().map(|(_, v)| v) {
             if let Value::Object(o) = v {
@@ -6107,6 +6122,10 @@ impl Interp {
             }
             let Some(o) = objs.pop() else { break };
             if !seen_objs.insert(Rc::as_ptr(&o)) {
+                continue;
+            }
+            // symbols belong to the thread, not this realm: they are never emptied (symbol_table.rs)
+            if matches!(&*o.kind.borrow(), Kind::Symbol { .. }) {
                 continue;
             }
             cleared.insert(Rc::as_ptr(&o) as usize);
