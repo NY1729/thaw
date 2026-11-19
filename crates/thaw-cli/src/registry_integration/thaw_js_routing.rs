@@ -339,7 +339,7 @@ fn thaw_js_default_import_locals(pkg_name: &str, user_source: &str) -> Vec<Strin
 /// `export =` value, so those uses count.
 fn thaw_js_value_export_needs_handle(pkg: &ResolvedPackage, user_source: &str, name: &str) -> bool {
     if pkg.classes.iter().any(|class| class.name == name) {
-        return false;
+        return thaw_js_class_needs_handle(pkg, user_source, name);
     }
     // (a builtin's other value exports -- `path.posix`, `path.win32` -- are objects of their own
     // whose members differ from the module's functions, so `posix.join(..)` needs the value)
@@ -407,29 +407,7 @@ fn thaw_js_binding_needs_handle(
         return false;
     }
     let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-    let mut rest = user_source;
-    let mut offset = 0;
-    while let Some(found) = rest.find(name) {
-        let start = offset + found;
-        let (before, after) = (&user_source[..start], &user_source[start + name.len()..]);
-        offset = start + name.len();
-        rest = after;
-        let is_quote = |c: char| matches!(c, '\'' | '"' | '`');
-        if before.chars().next_back().is_some_and(|c| is_word(c) || is_quote(c))
-            || after.chars().next().is_some_and(|c| is_word(c) || is_quote(c))
-        {
-            continue; // part of a longer identifier, or the text of a string (`'node:path'`)
-        }
-        let import_binding = before.trim_end().ends_with("import")
-            || before.trim_end().ends_with("* as")
-            || before.trim_end().ends_with(',')
-                && before
-                    .rfind("import")
-                    .is_some_and(|i| !before[i..].contains(';'))
-            || after.trim_start().starts_with("from ");
-        if import_binding {
-            continue;
-        }
+    thaw_js_identifier_uses(user_source, name).into_iter().any(|(_, after)| {
         let member = after.strip_prefix('.').map(|member| {
             let end = member.find(|c: char| !is_word(c)).unwrap_or(member.len());
             (&member[..end], member[end..].trim_start())
@@ -442,11 +420,78 @@ fn thaw_js_binding_needs_handle(
             && pkg.functions.iter().any(|function| {
                 function.name == name || function.name == name.rsplit('.').next().unwrap_or(name)
             }));
-        if !called_function {
-            return true;
+        !called_function
+    })
+}
+
+/// The uses of the identifier `name` in the program as `(text before, text after)` pairs. Not an import binding,
+/// not part of a longer identifier, not the text of a string (`'node:path'`).
+fn thaw_js_identifier_uses<'a>(user_source: &'a str, name: &str) -> Vec<(&'a str, &'a str)> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let is_quote = |c: char| matches!(c, '\'' | '"' | '`');
+    let mut uses = Vec::new();
+    let mut offset = 0;
+    while let Some(found) = user_source[offset..].find(name) {
+        let start = offset + found;
+        let (before, after) = (&user_source[..start], &user_source[start + name.len()..]);
+        offset = start + name.len();
+        if before.chars().next_back().is_some_and(|c| is_word(c) || is_quote(c))
+            || after.chars().next().is_some_and(|c| is_word(c) || is_quote(c))
+        {
+            continue;
+        }
+        let import_binding = before.trim_end().ends_with("import")
+            || before.trim_end().ends_with("* as")
+            || before.trim_end().ends_with(',')
+                && before
+                    .rfind("import")
+                    .is_some_and(|i| !before[i..].contains(';'))
+            || after.trim_start().starts_with("from ");
+        if !import_binding {
+            uses.push((before, after));
         }
     }
-    false
+    uses
+}
+
+/// Whether the program uses the class `name` as a bare value (`thaw_js_value_export_needs_handle`): a read of a
+/// member that is not one of the class's methods, getters and properties included (`DateTime.DATE_FULL`), or the
+/// class itself in a value position. `new C(..)`, `C.method(..)`, `C.prop = ..` (typed property assignment),
+/// `x instanceof C` and type positions (`: C`, `<C>`, `C[]`, `as C`) keep the typed class, so a program that only
+/// calls the class's static methods gets no value handle.
+fn thaw_js_class_needs_handle(pkg: &ResolvedPackage, user_source: &str, name: &str) -> bool {
+    let Some(class) = pkg.classes.iter().find(|class| class.name == name) else {
+        return false;
+    };
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let ends_with_keyword = |before: &str, keyword: &str| {
+        before.strip_suffix(keyword).is_some_and(|rest| !rest.ends_with(|c: char| is_word(c)))
+    };
+    thaw_js_identifier_uses(user_source, name).into_iter().any(|(before, after)| {
+        let before = before.trim_end();
+        if let Some(member) = after.strip_prefix('.') {
+            let end = member.find(|c: char| !is_word(c)).unwrap_or(member.len());
+            let (member, tail) = (&member[..end], member[end..].trim_start());
+            let assigned = tail.starts_with('=') && !tail.starts_with("==") && !tail.starts_with("=>");
+            // (a static getter such as `DateTime.DATE_FULL` is a method entry of kind `Getter`: not a method call)
+            return !assigned
+                && !tail.starts_with('(')
+                && !class.methods.iter().any(|method| {
+                    method.name == member && matches!(method.kind, thaw_bridge::DtsMethodKind::Method)
+                });
+        }
+        // `import { C } from 'pkg'`: the specifier is a binding, not a use (the `,` form is already skipped by
+        // `thaw_js_identifier_uses`).
+        let first_import_specifier = before.ends_with('{')
+            && before.rfind("import").is_some_and(|i| !before[i..].contains(';'));
+        let type_or_construct = first_import_specifier
+            || before.ends_with([':', '<', '|', '&', '.'])
+            || ["new", "instanceof", "typeof", "keyof", "as", "extends", "implements"]
+                .iter()
+                .any(|keyword| ends_with_keyword(before, keyword))
+            || after.trim_start().starts_with(['(', '[', '<']);
+        !type_or_construct
+    })
 }
 
 /// A thaw-js package returns plain data, so a bare alias' opaque `JsValue` result becomes `Json`.

@@ -29,7 +29,7 @@ def(Blob.prototype, 'stream', function () { var bytes = this._bytes; return new 
 Object.defineProperty(Blob.prototype, Symbol.toStringTag, { value: 'Blob', configurable: true });
 function File(parts, name, options) {
   if (!(this instanceof File)) throw new TypeError("Class constructor File cannot be invoked without 'new'");
-  if (arguments.length < 2) throw new TypeError("Failed to construct 'File': 2 arguments required, but only " + arguments.length + ' present.');
+  if (arguments.length < 2) { var missing = new TypeError('The "fileBits" and "fileName" arguments must be specified'); missing.code = 'ERR_MISSING_ARGS'; throw missing; }
   Blob.call(this, parts, options);
   def(this, '_name', String(name));
   def(this, '_mtime', options && options.lastModified !== undefined ? Number(options.lastModified) : Date.now());

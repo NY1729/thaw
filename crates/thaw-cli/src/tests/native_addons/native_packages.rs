@@ -532,11 +532,13 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
     );
     assert!(snapshot.is_file());
     let mut child = Command::new(&event_output).spawn().unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // Both waits leave as soon as their condition holds, so the bounds below only matter for a real hang: a
+    // loaded CI runner can need much more than 5 s to start the addon and to let the process exit after unsubscribe.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while !callback_file.is_file() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while child.try_wait().unwrap().is_none() && std::time::Instant::now() < exit_deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }

@@ -1079,6 +1079,59 @@ fn thaw_js_union_callable_result_ejs_shape_builds_under_error_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An event-emitter `on(event, cb)` whose listener is typed `(...args: any[]) => any` (minipass's
+/// `ReadStream.on`): the callback's declared return is `any` (a JsValue), so the class operation must
+/// still cross the thaw-js boundary instead of failing the build (`fs-minipass` under error fallback).
+#[test]
+fn thaw_js_class_callback_returning_any_builds_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "class-callback-any",
+        "import { ReadStream } from \"tjs-stream\";\n\
+         function run(): void {\n\
+           const rs = new ReadStream();\n\
+           let total = \"\";\n\
+           rs.on(\"data\", function (chunk: any) {\n\
+             total += chunk.toString();\n\
+           });\n\
+           rs.on(\"end\", function () {\n\
+             console.log(\"end:\", total);\n\
+           });\n\
+           rs.fire(\"data\", \"hello\");\n\
+           rs.fire(\"end\", \"\");\n\
+         }\n\
+         run();\n",
+        &[(
+            "tjs-stream",
+            "export declare class ReadStream {\n\
+               constructor();\n\
+               on(event: string, cb: (...args: any[]) => any): this;\n\
+               fire(event: string, value: string): void;\n\
+             }\n",
+            "class ReadStream {\n\
+               constructor() { this.listeners = {}; }\n\
+               on(event, cb) { (this.listeners[event] ||= []).push(cb); return this; }\n\
+               fire(event, value) { for (const cb of this.listeners[event] || []) cb(value); }\n\
+             }\n\
+             exports.ReadStream = ReadStream;\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &["tjs-stream".to_string()], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    // Same text real Node prints for the equivalent JavaScript.
+    assert_eq!(thaw_js_run(&output), "end: hello\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A single-argument bare callable with no import (`utf-8-validate`'s `isValidUTF8(buffer: Buffer): boolean`
 /// via `--use`): thaw-js must still emit a typed bare-name wrapper, since it has no untyped `callDynamic` shim.
 #[test]
@@ -1133,6 +1186,40 @@ fn thaw_js_node_net_single_arg_functions_get_no_bare_alias() {
         "node:net got a bare createServer alias:\n{}",
         shims.0
     );
+}
+
+/// The verbatim ejs 7.0.2 `package.d.ts` (`ejs_package.d.ts`): `compile` has sync, async and union
+/// overloads whose function results are adapters. Called as the ejs repro does (`ejs.compile(..)`
+/// then `compiled({ name })`). The module body is a stand-in; the shape comes from the d.ts.
+#[test]
+fn thaw_js_union_callable_result_real_ejs_overloads_build_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "ejs-real-overloads",
+        "import ejs from 'tjs-ejs';\n\
+         function main(): void {\n\
+           const compiled = ejs.compile('Hello NAME');\n\
+           console.log(compiled({ name: 'Alice' }));\n\
+         }\n",
+        &[(
+            "tjs-ejs",
+            include_str!("ejs_package.d.ts"),
+            "exports.compile = function (template, opts) { return function (data) { return template.replace('NAME', data.name); }; };\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run(&output), "Hello Alice\n");
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -1242,6 +1329,97 @@ fn thaw_js_export_equals_callable_default_import_builds_under_error_mode() {
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(thaw_js_run(&output), "true\nfalse\ndone\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The luxon shape: a class with a private constructor used as a bare value for its static constants
+/// (`DateTime.DATE_FULL`), while its static method stays typed. The shim must serve the class as a `$value$`
+/// handle; without it the program's `DateTime` is the type alias and the build fails (`unknown variable`).
+#[test]
+fn thaw_js_class_value_for_static_constant_builds_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "class-value",
+        "import { DateTime } from 'tjs-luxon';\n\
+         function main(): void {\n\
+           console.log(DateTime.now().toLocaleString(DateTime.DATE_FULL));\n\
+           console.log(JSON.stringify(DateTime.DATE_FULL));\n\
+         }\n",
+        &[(
+            "tjs-luxon",
+            "export declare class DateTime {\n\
+               private constructor(config: unknown);\n\
+               static get DATE_FULL(): Intl.DateTimeFormatOptions;\n\
+               static now(): DateTime;\n\
+               toLocaleString(fmt?: Intl.DateTimeFormatOptions): string;\n\
+             }\n",
+            "function DateTime() {}\n\
+             DateTime.DATE_FULL = { year: 'numeric', month: 'long', day: 'numeric' };\n\
+             DateTime.now = function () { return new DateTime(); };\n\
+             DateTime.prototype.toLocaleString = function (fmt) { return JSON.stringify(fmt); };\n\
+             module.exports.DateTime = DateTime;\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    // Same text real Node prints for the equivalent JavaScript.
+    assert_eq!(
+        thaw_js_run(&output),
+        "{\"year\":\"numeric\",\"month\":\"long\",\"day\":\"numeric\"}\n{\"year\":\"numeric\",\"month\":\"long\",\"day\":\"numeric\"}\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A class the program only constructs or calls statically (`new DateTime()`, `DateTime.now()`) gets no value
+/// handle: those stay typed operations, and only a bare value use (`DateTime.DATE_FULL`) serves the class.
+#[test]
+fn thaw_js_class_value_handle_only_for_bare_value_uses() {
+    let (dir, registry, _entry) = thaw_js_package_fixture(
+        "class-value-negative",
+        "",
+        &[(
+            "tjs-luxon",
+            "export declare class DateTime {\n\
+               static get DATE_FULL(): Intl.DateTimeFormatOptions;\n\
+               static now(): DateTime;\n\
+               constructor(ms?: number);\n\
+             }\n",
+            "function DateTime(ms) { this.ms = ms; }\n\
+             DateTime.DATE_FULL = { year: 'numeric' };\n\
+             DateTime.now = function () { return new DateTime(0); };\n\
+             module.exports.DateTime = DateTime;\n",
+        )],
+    );
+    let packages = ["tjs-luxon".to_string()];
+    let active = packages.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let routed = active.clone();
+    let shim_for = |source: &str| {
+        let (shims, _) = generate_registry_shims_pass(
+            &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
+            &thaw_parser::common::FileName::Custom("class value.ts".into()),
+            false, &dir.join("app"), Some(&dir.join("staging")),
+            &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &routed,
+        ).unwrap();
+        shims.0
+    };
+    let value_handle = "__thaw_value_tjs_luxon_DateTime";
+    let typed = shim_for(
+        "import { DateTime } from 'tjs-luxon';\nfunction main(): void {\n  console.log(DateTime.now() !== null);\n  console.log(new DateTime(5) !== null);\n}\n",
+    );
+    assert!(!typed.contains(value_handle), "{typed}");
+    let bare = shim_for(
+        "import { DateTime } from 'tjs-luxon';\nfunction main(): void {\n  console.log(JSON.stringify(DateTime.DATE_FULL));\n}\n",
+    );
+    assert!(bare.contains(value_handle), "{bare}");
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -1121,12 +1121,7 @@ fn scan_bundle_with(source: &str, addon: bool, ctx: &ScanContext) -> Result<Repo
         ..Default::default()
     };
     let interp = crate::Interp::new();
-    // `File` exists only so `x instanceof File` is false for non-files; any other use is unsupported.
-    let mut globals: HashSet<String> = interp
-        .global_names()
-        .into_iter()
-        .filter(|n| n != "File")
-        .collect();
+    let mut globals: HashSet<String> = interp.global_names().into_iter().collect();
     globals.extend(SQLITE_NATIVE_GLOBALS.iter().map(|g| g.to_string()));
     // the loader globals host.rs installs for node:module (see install_module_loader)
     let module_loader =
@@ -1209,8 +1204,7 @@ fn scan_bundle_with(source: &str, addon: bool, ctx: &ScanContext) -> Result<Repo
             }
         }
         for r in &w.instance_refs {
-            let known = globals.contains(r) || r == "File";
-            if !known
+            if !globals.contains(r)
                 && !w.declared.contains(r)
                 && !params.contains(&r.as_str())
                 && !w.probed.contains(r)
@@ -1224,7 +1218,6 @@ fn scan_bundle_with(source: &str, addon: bool, ctx: &ScanContext) -> Result<Repo
             // model (`Math`, `Array`, ...) keeps the old flag: the data cannot tell that Node lacks the member.
             // Carve-out: a `__`-prefixed member (`globalThis.__thaw_*`) is host-internal, so it stays a blocker.
             if interp.is_builtin_global(g)
-                && g != "File"
                 && !w.declared.contains(g)
                 && !interp.builtin_member_exists(g, p)
                 && (!node_global_covered(g) || node_global_has(g, p) || is_host_internal(p))
