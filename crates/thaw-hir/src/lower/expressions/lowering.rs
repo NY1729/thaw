@@ -5097,10 +5097,11 @@ impl<'a> FnLowerer<'a> {
                         HirExpr::DynamicCall(signature, _)
                             if signature.backend == DynamicBackend::QuickJs
                     );
-                    if resolves_at_dynamic_boundary {
-                        Ok(value)
-                    } else if value_type == HirType::Json {
+                    // A Json result may still be a thenable (the host awaits Promises, not user thenables).
+                    if value_type == HirType::Json {
                         self.lower_await_json_thenable(value)
+                    } else if resolves_at_dynamic_boundary {
+                        Ok(value)
                     } else if matches!(
                         value_type,
                         HirType::F64 | HirType::Bool | HirType::Str | HirType::StrLiteral(_)

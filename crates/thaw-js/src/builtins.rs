@@ -1075,6 +1075,7 @@ impl Interp {
             // a data descriptor ends a Node accessor global's accessor form (`node_accessor`).
             // ponytail: only a descriptor with a value redefines; a writable-only one keeps the accessor form.
             self.global.set_redefined(key);
+            self.publish_global(key);
         }
         let existing = o.position(key);
         let flag = |v: &Option<Value>, default: bool| v.as_ref().map_or(default, |v| v.truthy());
@@ -1427,8 +1428,14 @@ impl Interp {
                 };
                 let obj = Value::Object(new_obj(proto, Kind::Plain));
                 if let Value::Object(props) = arg(args, 1) {
-                    for k in it.own_keys(&Value::Object(props.clone())) {
-                        let d = it.get(&Value::Object(props.clone()), &k)?;
+                    let pv = Value::Object(props.clone());
+                    let keys: Vec<_> = it
+                        .own_keys(&pv)
+                        .into_iter()
+                        .chain(it.own_enumerable_symbol_keys(&pv))
+                        .collect();
+                    for k in keys {
+                        let d = it.get(&pv, &k)?;
                         it.define_property(&obj, &k, &d)?;
                     }
                 }
@@ -1451,7 +1458,12 @@ impl Interp {
             });
             self.set_native(o, "defineProperties", |it, _, args| {
                 let props = arg(args, 1);
-                for k in it.own_keys(&props) {
+                let keys: Vec<_> = it
+                    .own_keys(&props)
+                    .into_iter()
+                    .chain(it.own_enumerable_symbol_keys(&props))
+                    .collect();
+                for k in keys {
                     let d = it.get(&props, &k)?;
                     it.define_property(&arg(args, 0), &k, &d)?;
                 }
