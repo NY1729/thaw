@@ -5,7 +5,19 @@
   const stringify = JSON.stringify, parse = JSON.parse;
   const proc = process;
   proc.connected = true;
-  proc.channel = {};
+  // Node's Channel reference counter (same rule as the registry's makeChannel in child_process). Nothing reads it:
+  // the child's loop is held by ipc.rs, not by this object.
+  // ponytail: ref state is not wired to the loop; upgrade = ipc.rs reads a ref flag, as it does for a message listener.
+  function makeChannel() {
+    let refs = 0, explicit = false, ref = true;
+    const channel = {};
+    channel.ref = function () { explicit = true; ref = true; };
+    channel.unref = function () { explicit = true; ref = false; };
+    channel.refCounted = function () { if (++refs === 1 && !explicit) ref = true; };
+    channel.unrefCounted = function () { if (--refs === 0 && !explicit) ref = false; };
+    return channel;
+  }
+  proc.channel = makeChannel();
   proc.send = function (value, handle, options, callback) {
     if (typeof handle === 'function') callback = handle;
     else if (typeof options === 'function') callback = options;
