@@ -11329,12 +11329,25 @@ exports.traceMixed = traceMixed;"#;
     };
     // without the builtin set they are refused, as before
     let without = blockers(graphql, &HashSet::new());
-    assert!(without.contains(&"method:runStores".to_string()), "{without:?}");
-    assert!(without.contains(&"method:publish".to_string()), "{without:?}");
-    assert!(without.contains(&"method:traceSync".to_string()), "{without:?}");
+    assert!(
+        without.contains(&"method:runStores".to_string()),
+        "{without:?}"
+    );
+    assert!(
+        without.contains(&"method:publish".to_string()),
+        "{without:?}"
+    );
+    assert!(
+        without.contains(&"method:traceSync".to_string()),
+        "{without:?}"
+    );
     assert!(blockers(socket, &HashSet::new()).contains(&"method:unsubscribe".to_string()));
     // with it they are not
-    assert!(blockers(graphql, &known).is_empty(), "{:?}", blockers(graphql, &known));
+    assert!(
+        blockers(graphql, &known).is_empty(),
+        "{:?}",
+        blockers(graphql, &known)
+    );
     assert!(blockers(socket, &known).is_empty());
     // a Node method that no builtin defines, and a process.dlopen call, stay blocked with the set
     assert_eq!(blockers(heap, &known), ["method:getHeapSnapshot"]);

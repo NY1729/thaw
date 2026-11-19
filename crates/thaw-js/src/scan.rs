@@ -1099,7 +1099,10 @@ pub fn scan_bundle_with_known(source: &str, known: &HashSet<String>) -> Result<R
 }
 
 /// [`scan_addon_bundle`] with the `known` method names of [`scan_bundle_with_known`].
-pub fn scan_addon_bundle_with_known(source: &str, known: &HashSet<String>) -> Result<Report, String> {
+pub fn scan_addon_bundle_with_known(
+    source: &str,
+    known: &HashSet<String>,
+) -> Result<Report, String> {
     scan_bundle_with(source, true, known)
 }
 

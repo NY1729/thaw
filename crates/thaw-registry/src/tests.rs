@@ -1559,7 +1559,10 @@ fn builtin_sources_parse_for_the_defined_method_names() {
     let names: Vec<String> = serde_json::from_str(NODE_BUILTIN_MODULES_JSON).unwrap();
     for name in names {
         if let Some(source) = builtin_module_source(&name) {
-            assert!(thaw_parser::parse_javascript(source).is_ok(), "node:{name} does not parse");
+            assert!(
+                thaw_parser::parse_javascript(source).is_ok(),
+                "node:{name} does not parse"
+            );
         }
     }
 }
