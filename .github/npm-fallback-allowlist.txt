@@ -6,4 +6,3 @@
 # such tests). Never add a line: a PR that adds one fails CI, so fix the test instead.
 # One test function name per line, without the tests:: prefix. Sorted.
 registry_add_exposes_real_undici_named_exports_when_enabled
-registry_add_transforms_typescript_with_real_esbuild_when_enabled
