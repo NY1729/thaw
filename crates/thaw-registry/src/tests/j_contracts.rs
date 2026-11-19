@@ -237,8 +237,7 @@ return res;
 fn j_worker_error_late() {
     // expected: node22
     assert_eq!(
-        // QuickJS: thaw-js parity gap, Worker late error (PR C).
-        p2c_run_qjs("j_worker_error_late",r#####"const { Worker } = require('node:worker_threads');
+        p2c_run("j_worker_error_late", r#####"const { Worker } = require('node:worker_threads');
 const res = await new Promise((resolve) => {
   const w = new Worker('require("node:worker_threads").parentPort.on("message", () => { throw new SyntaxError("late"); });', { eval: true });
   w.on('error', (e) => resolve({ name: e.name, message: e.message, isSyntax: e instanceof SyntaxError }));
@@ -297,36 +296,31 @@ return out;
 
 #[test]
 fn j_child_ipc_utf8_split() {
-    // expected: thaw-only
+    // expected: node22-shape
     assert_eq!(
-        // QuickJS: stubs QuickJS-embedding natives, rewrite pending (PR F, child_process).
-        p2c_run_qjs("j_child_ipc_utf8_split",r#####"// thaw-only: {"messages":[{"t":"€"},{"t":"€"}],"events":["disconnect"]}
-const cp = require('node:child_process');
-const host = globalThis;
-const previous = { spawn: host.__thaw_child_process_spawn, stdin: host.__thaw_child_process_stdin, poll: host.__thaw_child_process_poll, active: host.__thaw_child_process_active };
-const hex = (bytes) => Buffer.from(bytes).toString('hex');
-const prefix = [...Buffer.from('__THAW_IPC__{"t":"')];
-const suffix = [...Buffer.from('"}\n')];
-const euro = [0xe2, 0x82, 0xac];
-const batches = [
-  [{ type: 'spawn', pid: 7 }, { type: 'stdout', value: hex([...prefix, 0xe2, 0x82]) }],
-  [{ type: 'stdout', value: hex([0xac, ...suffix, ...prefix, 0xe2]) }],
-  [{ type: 'stdout', value: hex([0x82, 0xac, ...suffix]) }, { type: 'exit', code: 0, signal: null }],
-];
+        p2c_run("j_child_ipc_utf8_split", r#####"const cp = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+// a real child: each printf ends mid-euro-sign, and the sleeps make the pipe deliver the halves as separate chunks
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ipcsplit-'));
+const script = path.join(dir, 'child.sh');
 try {
-  let handle = 0, polls = 0;
-  host.__thaw_child_process_spawn = function () { handle = 91; return handle; };
-  host.__thaw_child_process_stdin = function () {};
-  host.__thaw_child_process_active = function () { return polls < batches.length; };
-  host.__thaw_child_process_poll = function () { const batch = batches[polls++]; return JSON.stringify(batch ? batch.map((e) => ({ handle, ...e })) : []); };
-  const child = cp.fork('/nowhere.js', [], { silent: true });
+  fs.writeFileSync(script, String.raw`#!/bin/sh
+printf '__THAW_IPC__{"t":"\342\202'
+sleep 0.2
+printf '\254"}\n__THAW_IPC__{"t":"\342'
+sleep 0.2
+printf '\202\254"}\n'
+`, { mode: 0o755 });
+  const child = cp.fork('/nowhere.js', [], { silent: true, execPath: script });
   const messages = [], events = [];
   child.on('message', (m) => messages.push(m));
   child.on('disconnect', () => events.push('disconnect'));
   await new Promise((resolve) => child.on('close', resolve));
   return { messages, events };
 } finally {
-  host.__thaw_child_process_spawn = previous.spawn; host.__thaw_child_process_stdin = previous.stdin; host.__thaw_child_process_poll = previous.poll; host.__thaw_child_process_active = previous.active;
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 "#####),
         r#####"{"messages":[{"t":"€"},{"t":"€"}],"events":["disconnect"]}"#####
@@ -437,8 +431,7 @@ return out;
 fn j_vm_script_compile() {
     // expected: node22
     assert_eq!(
-        // QuickJS: thaw-js parity gap, vm family (PR B).
-        p2c_run_qjs("j_vm_script_compile",r#####"const vm = require('node:vm');
+        p2c_run("j_vm_script_compile", r#####"const vm = require('node:vm');
 const out = {};
 try { new vm.Script('return 1'); out.topReturn = 'no throw'; } catch (e) { out.topReturn = e.name; }
 const s = new vm.Script('1 + 1', { filename: 'one.js' });

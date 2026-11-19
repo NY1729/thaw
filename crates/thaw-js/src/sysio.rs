@@ -460,6 +460,14 @@ impl Interp {
             Ok(Value::str(&format!("{{\"malloc_size\":{used},\"malloc_limit\":{limit},\"memory_used_size\":{used},\"js_func_code_size\":0}}")))
         });
         g.declare("__thaw_memory_usage", f, true);
+        // (fd, raw) -> whether the terminal took the mode; registry tty.ReadStream.setRawMode calls it for its own fd
+        let f = self.native(|it, _, a| {
+            let fd = it.num(&arg(a, 0)) as i32;
+            Ok(Value::Bool(
+                fd >= 0 && set_fd_raw_mode(fd, arg(a, 1).truthy()),
+            ))
+        });
+        g.declare("__thaw_tty_set_raw_mode", f, true);
         // (fd, hex) -> raw bytes to stdout/stderr, after any pending partial line
         let f = self.native(|it, _, a| {
             let fd = it.num(&arg(a, 0)) as i32;

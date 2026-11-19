@@ -188,16 +188,34 @@ fn run_in_sandbox(it: &mut Interp, realm: &mut VmRealm, sb: &Obj, code: &str) ->
     r.and_then(|v| synced.map(|()| v))
 }
 
-/// A `SyntaxError` in this realm if `code` does not parse. Parses a second time when it runs; fine
-/// for vm-sized scripts. ponytail: the parser's own message is dropped, add it when a test needs it.
-fn syntax_check(it: &mut Interp, code: &str) -> R<()> {
+/// The filename a vm call was given: `None` when it was not a value (no filename, no stack frame).
+fn script_file(it: &mut Interp, v: &Value) -> Option<Rc<str>> {
+    match v {
+        Value::Undefined => None,
+        v => Some(Rc::from(it.to_str(v).to_string())),
+    }
+}
+
+/// The SyntaxError of `code` for `new vm.Script(code, { filename })`, which compiles it without running it.
+fn syntax_check(it: &mut Interp, code: &str, file: Option<Rc<str>>) -> R<()> {
     if crate::too_nested(code) {
         return it.throw_error("RangeError", crate::STACK_OVERFLOW);
     }
-    match thaw_parser::parse_javascript_script(code) {
+    match thaw_parser::parse_javascript_script_located(code) {
         Ok(_) => Ok(()),
-        Err(_) => it.throw_error("SyntaxError", "Invalid or unexpected token"),
+        Err(f) => it.throw_syntax(file.as_deref(), code, &f),
     }
+}
+
+/// The filename of the vm script running in this realm, for errors' `stack` (`undefined` when none).
+pub(crate) fn install_script_file(it: &mut Interp) {
+    let get = it.native(|it, _, _| {
+        Ok(match &it.script_filename {
+            Some(file) => Value::str(file),
+            None => Value::Undefined,
+        })
+    });
+    it.global.declare("__thaw_vm_script_file", get, true);
 }
 
 /// Starts the timeout of a run (`0` is none); `disarm` ends it.
@@ -242,17 +260,20 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_vm_free", free, true);
-    // (id, code, filename, timeoutMs, sandbox, stop); the filename is only for stack traces (ponytail)
+    // (id, code, filename, timeoutMs, sandbox, stop). The filename names the script in the stack of an error the
+    // run makes (`script_filename`); the previous one is put back when the run ends, on every path.
     let run = it.native(|it, _, a| {
         let id = it.num(&arg(a, 0)) as i64;
         let code = it.to_str(&arg(a, 1)).to_string();
+        let file = script_file(it, &arg(a, 2));
         let ms = it.num(&arg(a, 3)) as u64;
         if id < 0 {
             // runInThisContext: indirect-eval semantics in this realm
-            syntax_check(it, &code)?;
+            let prev = std::mem::replace(&mut it.script_filename, file);
             arm(it, ms);
-            let r = it.run_sloppy(&code);
+            let r = it.run_vm_plain(&code);
             disarm(it);
+            it.script_filename = prev;
             return r;
         }
         let sandbox = match arg(a, 4) {
@@ -289,13 +310,15 @@ pub(crate) fn install(it: &mut Interp) {
         // stack limits and depth follow the calling thread
         realm.interp.restore(it.snapshot());
         realm.interp.vm_sandbox = sandbox.clone();
+        let prev = std::mem::replace(&mut realm.interp.script_filename, file);
         arm(&mut realm.interp, ms);
         let r = match &sandbox {
             Some(sb) => run_in_sandbox(it, &mut realm, sb, &code),
-            None => realm.interp.run_sloppy(&code),
+            None => realm.interp.run_vm_plain(&code),
         };
         disarm(&mut realm.interp);
         realm.interp.vm_sandbox = None;
+        realm.interp.script_filename = prev;
         // put the realm back unless the context was freed while it ran (then it drops here, after the borrow)
         CONTEXTS.with(|c| {
             if let Some(slot) = c.borrow_mut().get_mut(&id) {
@@ -306,11 +329,12 @@ pub(crate) fn install(it: &mut Interp) {
         r
     });
     g.declare("__thaw_vm_run", run, true);
-    // (source, filename, syntaxOnly): `new vm.Script` checks the syntax with `syntaxOnly`; the
-    // filename is unused, as in `__thaw_vm_run`
+    // (source, filename, syntaxOnly): `new vm.Script` checks the syntax with `syntaxOnly`, and a SyntaxError names
+    // the filename
     let eval = it.native(|it, _, a| {
         let src = it.to_str(&arg(a, 0)).to_string();
-        syntax_check(it, &src)?;
+        let file = script_file(it, &arg(a, 1));
+        syntax_check(it, &src, file)?;
         if arg(a, 2).truthy() {
             Ok(Value::Undefined)
         } else {

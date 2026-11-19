@@ -1389,6 +1389,9 @@ pub struct Interp {
     pub(crate) vm_shared: Vec<Obj>,
     /// The sandbox of the `node:vm` run in progress, so `globalThis.x` / `this.x` reach it (vm.rs).
     pub(crate) vm_sandbox: Option<Obj>,
+    /// The filename of the `node:vm` script running in this realm, set and restored around each run (vm.rs).
+    /// Errors made meanwhile carry it in `stack`, and a SyntaxError gets the file header.
+    pub(crate) script_filename: Option<Rc<str>>,
     /// When a `node:vm` run with a timeout must stop (vm.rs `arm`), and the timeout in ms.
     pub(crate) deadline: Option<std::time::Instant>,
     pub(crate) dl_ms: u64,
@@ -1554,6 +1557,7 @@ impl Interp {
             rt: Default::default(),
             vm_shared: Vec::new(),
             vm_sandbox: None,
+            script_filename: None,
             deadline: None,
             dl_ms: 0,
             dl_hit: false,
@@ -1577,6 +1581,8 @@ impl Interp {
         it.global_accessors = it.node_accessor_slots();
         it.install_builtins();
         it.install_call_frames();
+        // before the preludes: the Error prelude captures it (a `__thaw_` name is hidden in a vm realm afterwards)
+        vm::install_script_file(&mut it);
         it.install_collections();
         if !host {
             // a vm realm keeps its own `Symbol.for` registry, as it always has (host realms share the thread's)
@@ -3718,6 +3724,51 @@ impl Interp {
         Ok(last)
     }
 
+    /// Runs a `node:vm` script (no sandbox) in this realm: a sloppy script, as `run_sloppy`, with a SyntaxError that
+    /// names the script file (`script_filename`).
+    pub(crate) fn run_vm_plain(&mut self, source: &str) -> R<Value> {
+        let module = self.parse_vm_script(source)?;
+        self.run_parsed(source, Ok(module), false)
+    }
+
+    /// Parses a `node:vm` script in this realm. A failure throws a SyntaxError here, with the script file in effect.
+    pub(crate) fn parse_vm_script(&mut self, source: &str) -> R<a::Module> {
+        if too_nested(source) {
+            return self.throw_error("RangeError", STACK_OVERFLOW);
+        }
+        match thaw_parser::parse_javascript_script_located(source) {
+            Ok(module) => Ok(module),
+            Err(f) => {
+                let file = self.script_filename.clone();
+                self.throw_syntax(file.as_deref(), source, &f)
+            }
+        }
+    }
+
+    /// The SyntaxError of a failed parse. With a script file, its `stack` is V8's shape: `file:line`, the source line,
+    /// a caret under the column, a blank line, then `SyntaxError: message`. No frames follow it yet.
+    pub(crate) fn throw_syntax<T>(
+        &mut self,
+        file: Option<&str>,
+        source: &str,
+        f: &thaw_parser::SyntaxFailure,
+    ) -> R<T> {
+        let Some(file) = file else {
+            return self.throw_error("SyntaxError", &f.message);
+        };
+        let line = source.lines().nth(f.line as usize - 1).unwrap_or("");
+        let caret = " ".repeat(f.col as usize - 1);
+        let stack = format!(
+            "{file}:{}\n{line}\n{caret}^\n\nSyntaxError: {}",
+            f.line, f.message
+        );
+        let err = self.make_error("SyntaxError", &f.message)?;
+        if let Value::Object(o) = &err {
+            put_hidden(o, "stack", Value::str(&stack));
+        }
+        Err(Ctl::Throw(err))
+    }
+
     /// A `node:vm` script run in a context whose scope chain is `scope -> with(sandbox) -> global`
     /// (see vm.rs). Vars and functions are hoisted into `scope`, except names `sandbox` already has,
     /// so those stay bound to the sandbox property. Returns the value and the hoisted names.
@@ -3727,14 +3778,9 @@ impl Interp {
         scope: &Rc<Scope>,
         sandbox: &Obj,
     ) -> (R<Value>, Vec<Rc<str>>) {
-        let mut module = match thaw_parser::parse_javascript_script(source) {
+        let mut module = match self.parse_vm_script(source) {
             Ok(m) => m,
-            Err(_) => {
-                return (
-                    self.throw_error("SyntaxError", "Invalid or unexpected token"),
-                    Vec::new(),
-                )
-            }
+            Err(e) => return (Err(e), Vec::new()),
         };
         hints::annotate(&mut module, &mut self.ident_hints);
         self.run_id = next_run_id();

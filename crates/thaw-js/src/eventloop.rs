@@ -1436,20 +1436,14 @@ impl Interp {
                 .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             {
                 let mut wait = next - clock_ms();
-                // a pending napi completion or a live native server is polled every 2 ms, not only at the next timer
-                if crate::napi_bridge::pending() || crate::host::native_servers_live() {
+                // a live platform source is polled every 2 ms, not only at the next timer
+                if self.platform_events_live() {
                     wait = wait.min(2.0);
                 }
                 if wait > 0.0 {
                     loop_idle_sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
-            } else if crate::child::active()
-                || crate::zlib::active_for(self.realm_id)
-                || crate::worker::active(self)
-                || self.stdin_live()
-                || crate::napi_bridge::pending()
-                || crate::host::native_servers_live()
-            {
+            } else if self.platform_events_live() {
                 // nothing timed to wait for, but a platform event will arrive: poll again shortly
                 loop_idle_sleep(Duration::from_millis(2));
             }
@@ -1476,6 +1470,20 @@ impl Interp {
     /// This realm reads `process.stdin` and the reader is still open and referenced.
     fn stdin_live(&self) -> bool {
         self.rt.stdin_started && crate::sysio::stdin_active()
+    }
+
+    /// A platform source the loop must poll: while one is live, a sleep toward a timer wakes every 2 ms, and with no
+    /// timer the loop ticks every 2 ms. Shared by `run_event_loop` and `await_settled`.
+    fn platform_events_live(&self) -> bool {
+        crate::child::active()
+            || crate::zlib::active_for(self.realm_id)
+            || crate::worker::active(self)
+            || self.stdin_live()
+            || self.ipc_live()
+            || self.interrupt.is_some()
+            || crate::host::native_servers_live()
+            || crate::atomics::async_pending()
+            || crate::napi_bridge::pending()
     }
 
     /// Call the shim-installed `globalThis.__thaw_poll_platform_events` (async zlib jobs, child process output and exits),
@@ -1588,16 +1596,7 @@ impl Interp {
             {
                 let mut wait = next - clock_ms();
                 // a worker wakes every 2ms so a terminate() is seen even while a timer is pending
-                // a live compiled http server is polled every 2 ms too, so a long timer does not starve it
-                if crate::child::active()
-                    || crate::zlib::active_for(self.realm_id)
-                    || crate::worker::active(self)
-                    || self.stdin_live()
-                    || self.ipc_live()
-                    || self.interrupt.is_some()
-                    || crate::host::native_servers_live()
-                    || crate::atomics::async_pending()
-                {
+                if self.platform_events_live() {
                     wait = wait.min(2.0);
                 }
                 if self.slice_end.is_some() && crate::host::other_packages_have_work() {
@@ -1606,15 +1605,7 @@ impl Interp {
                 if wait > 0.0 {
                     loop_idle_sleep(Duration::from_secs_f64(wait / 1000.0));
                 }
-            } else if crate::child::active()
-                || crate::zlib::active_for(self.realm_id)
-                || crate::worker::active(self)
-                || self.stdin_live()
-                || self.ipc_live()
-                || self.interrupt.is_some()
-                || crate::host::native_servers_live()
-                || crate::atomics::async_pending()
-            {
+            } else if self.platform_events_live() {
                 loop_idle_sleep(Duration::from_millis(2));
             }
         }
