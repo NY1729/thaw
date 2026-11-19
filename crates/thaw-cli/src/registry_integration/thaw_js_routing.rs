@@ -1090,17 +1090,62 @@ fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'st
     .then_some("createHook with finally or Promise combinators is not supported on thaw-js yet")
 }
 
-/// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
-/// feature scan, the program touches no class of it (those are live JavaScript objects), and
-/// every function the program mentions is a typed call whose declaration only carries plain data, or
-/// a native FastPath function (which keeps its own declaration and has no typed target).
-/// `segment` is the package's slice of the generated shim.
+/// The packages installed in the registry at `registry_dir`: each package directory holding a `package.d.ts`
+/// (what `thaw_registry::resolve` loads), by name; a scoped package is `@scope/name` under its scope directory.
+pub(crate) fn registry_installed_packages(registry_dir: &std::path::Path) -> std::collections::HashSet<String> {
+    let mut installed = std::collections::HashSet::new();
+    let Ok(entries) = std::fs::read_dir(registry_dir) else {
+        return installed;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if name.starts_with('@') {
+            for scoped in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+                if scoped.path().join("package.d.ts").is_file() {
+                    let scoped_name = scoped.file_name().to_string_lossy().into_owned();
+                    installed.insert(format!("{name}/{scoped_name}"));
+                }
+            }
+        } else if path.join("package.d.ts").is_file() {
+            installed.insert(name);
+        }
+    }
+    installed
+}
+
+/// [`thaw_js_package_eligible_in`] with no installed packages (every unmapped bare require is a non-blocker).
+#[cfg(test)]
 fn thaw_js_package_eligible(
     pkg: &ResolvedPackage,
     bundle_js: &str,
     user_source: &str,
     typed_targets: &std::collections::HashMap<(String, String), String>,
     segment: &str,
+) -> bool {
+    thaw_js_package_eligible_in(
+        pkg,
+        bundle_js,
+        user_source,
+        typed_targets,
+        segment,
+        &std::collections::HashSet::new(),
+    )
+}
+
+/// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
+/// feature scan, the program touches no class of it (those are live JavaScript objects), and
+/// every function the program mentions is a typed call whose declaration only carries plain data, or
+/// a native FastPath function (which keeps its own declaration and has no typed target).
+/// `segment` is the package's slice of the generated shim. `installed` is the registry's installed packages
+/// ([`registry_installed_packages`]): a require of one the bundle does not map blocks the package.
+fn thaw_js_package_eligible_in(
+    pkg: &ResolvedPackage,
+    bundle_js: &str,
+    user_source: &str,
+    typed_targets: &std::collections::HashMap<(String, String), String>,
+    segment: &str,
+    installed: &std::collections::HashSet<String>,
 ) -> bool {
     let mentions = |name: &str| thaw_js_mentions(user_source, name);
     let debug = std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1");
@@ -1146,11 +1191,14 @@ fn thaw_js_package_eligible(
         }
     }
     // R6: a method a served registry builtin defines (`thaw_registry::builtin_defined_names`) is thaw-js's own, not missing
-    let builtin_methods = thaw_registry::builtin_defined_names();
+    let ctx = thaw_js::scan::ScanContext {
+        known_methods: thaw_registry::builtin_defined_names(),
+        installed_packages: installed,
+    };
     let scanned = if pkg.native_addon.is_some() {
-        thaw_js::scan::scan_addon_bundle_with_known(bundle_js, builtin_methods)
+        thaw_js::scan::scan_addon_bundle_in(bundle_js, &ctx)
     } else {
-        thaw_js::scan::scan_bundle_with_known(bundle_js, builtin_methods)
+        thaw_js::scan::scan_bundle_in(bundle_js, &ctx)
     };
     match scanned {
         Ok(report) if report.is_clean() => {}
