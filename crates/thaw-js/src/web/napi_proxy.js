@@ -415,8 +415,9 @@
   const defineCallback = (id, target) => {
     Object.defineProperty(globalThis, '__thaw_napi_reference_' + id, {
       value: function () {
-        const args = Array.prototype.slice.call(arguments);
-        const meta = args.shift();
+        const meta = arguments[0];
+        // the native side sends JSON: revive its Buffers ({type:'Buffer',data}) and other markers
+        const args = Array.prototype.slice.call(arguments, 1).map(value => decodeValue(value));
         let receiver;
         if (meta && meta.__thaw_napi_argument_handles__) {
           meta.__thaw_napi_argument_handles__.forEach(entry => {

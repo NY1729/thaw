@@ -868,6 +868,22 @@ fn plain_function_argument_is_a_marker_whose_callback_global_the_reference_looku
 }
 
 #[test]
+fn native_callback_arguments_revive_buffers() {
+    // The native side sends a callback's arguments as JSON, a Buffer as `{type:'Buffer',data:[..]}` (sharp's
+    // toBuffer callback): the reference global must hand the callback a real Buffer.
+    let mut it = plain_realm();
+    let wire = run_in(
+        &mut it,
+        "JSON.stringify(api.argument((b) => Buffer.isBuffer(b) && b.length === 3))",
+    );
+    let id = id_of(&wire, "__thaw_napi_function__");
+    assert_eq!(
+        run_in(&mut it, &format!("globalThis.__thaw_napi_reference_{id}(null, {{ type: 'Buffer', data: [1, 2, 3] }})")),
+        "true"
+    );
+}
+
+#[test]
 fn reference_ids_are_unique_across_proxy_instances() {
     // Each realm runs its own proxy layer. A callback's id names its global, so two layers (two addons in two
     // packages) must never hand out the same id.
