@@ -75,8 +75,10 @@ pub fn script_as_bundle(source: &str) -> std::borrow::Cow<'_, str> {
 /// The thaw-js form of `node:worker_threads`: the main-thread module the thaw-js prelude exports
 /// (`web/worker_threads.js`). Package bundles embed the QuickJS form of that builtin (natives that exist
 /// only in thaw-quickjs), so [`parse_bundle`] substitutes this one for every such embedded factory.
+/// A worker realm defines `__thaw_worker_side_exports` (`web/worker_bootstrap.js`) and gets that; the main
+/// realm has it undefined and gets the main-thread module.
 pub const WORKER_THREADS_THAW_JS_FORM: &str =
-    "module.exports = globalThis.__thaw_worker_threads_exports;\n";
+    "module.exports = globalThis.__thaw_worker_side_exports || globalThis.__thaw_worker_threads_exports;\n";
 
 /// Extract factories, require maps and the entry key from a registry bundle.
 pub fn parse_bundle(source: &str) -> Result<BundleParts, String> {

@@ -106,3 +106,40 @@ fn heap_limit_off_leaves_no_accounting() {
     assert_eq!(heap_limit::used(), 0);
     assert!(!heap_limit::tripped());
 }
+
+#[test]
+fn v8_memory_usage_grows_with_live_objects_and_falls_when_they_are_dropped() {
+    // `__thaw_memory_usage` (the registry's v8 and memoryUsage figures): the estimate over the live objects, which
+    // is always on; the resourceLimits accounting is not involved
+    let src = "const used = () => JSON.parse(__thaw_memory_usage()).memory_used_size;
+      used();
+      const quiet0 = used();
+      const quiet1 = used();
+      const before = used();
+      const keep = [];
+      for (let i = 0; i < 200; i++) keep.push(new Array(50000).fill(i));
+      const after = used();
+      keep.length = 0;
+      const dropped = used();
+      console.log(before > 0);
+      console.log(Math.abs(quiet1 - quiet0) < (1 << 20));
+      console.log(after - before > (10 << 20));
+      console.log(after - dropped > (10 << 20));";
+    assert_eq!(lines(src), ["true", "true", "true", "true"]);
+}
+
+#[test]
+fn v8_memory_usage_counts_objects_allocated_after_an_await() {
+    // allocated and read inside one async body: it runs on one coroutine, so both reads see the same registry. A read
+    // on another thread than the allocation misses it (see the `sysio` native's comment)
+    let src = "const used = () => JSON.parse(__thaw_memory_usage()).memory_used_size;
+      (async () => {
+        await null;
+        const before = used();
+        const keep = [];
+        for (let i = 0; i < 200; i++) keep.push(new Array(50000).fill(i));
+        console.log(used() - before > (10 << 20));
+        console.log(keep.length);
+      })();";
+    assert_eq!(lines(src), ["true", "200"]);
+}

@@ -362,6 +362,53 @@ fn install_fetch_transport(it: &mut Interp, loader: &Rc<Loader>) -> R<()> {
     Ok(())
 }
 
+/// Evaluates the factories of `parts` on `it` and returns module `key`'s exports. The package entry
+/// ([`Package::load_named`]) and a worker realm's main module ([`run_bundle_main`]) both boot through here.
+fn boot_bundle(
+    it: &mut Interp,
+    mut parts: BundleParts,
+    bundle_js: &str,
+    name: &str,
+    key: &str,
+) -> R<Value> {
+    it.run_id = crate::next_run_id(); // factory spans come from this one parse
+    it.sources
+        .insert(it.run_id, std::rc::Rc::from(parts.source.as_str()));
+    for (_, func) in parts.factories.iter_mut() {
+        it.annotate_function(func);
+    }
+    let mut factories = HashMap::new();
+    for (k, func) in &parts.factories {
+        let scope = it.global.clone();
+        let f = it.function_value(None, func, &scope)?;
+        factories.insert(k.clone(), f);
+    }
+    let origins = star_origins(it, bundle_js)?;
+    let loader = Rc::new(Loader {
+        parts,
+        factories,
+        cache: RefCell::new(HashMap::new()),
+        addon: RefCell::new(None),
+        package: name.to_string(),
+        origins,
+    });
+    if loader.parts.entry == "node:module" || loader.factories.contains_key("node:module") {
+        install_module_loader(it, &loader, bundle_js)?;
+    }
+    if loader.factories.contains_key("node:http") {
+        install_fetch_transport(it, &loader)?;
+    }
+    load_module(&loader, it, key)
+}
+
+/// Runs module `key` of the registry bundle `bundle_js` (package `name`) as the main module of `it`, a worker
+/// realm (`worker.rs`): the same factories and `require` graph as the package entry, with `__filename` the
+/// module's virtual path. A worker that runs a bundled module's file starts here instead of the disk loader.
+pub(crate) fn run_bundle_main(it: &mut Interp, name: &str, bundle_js: &str, key: &str) -> R<Value> {
+    let parts = parse_bundle(bundle_js).map_err(|e| Ctl::Throw(Value::str(&e)))?;
+    boot_bundle(it, parts, bundle_js, name, key)
+}
+
 /// A loaded package: one interpreter, the bundle's modules, and its entry exports.
 pub struct Package {
     /// Boxed: async functions hold its address while suspended.
@@ -388,7 +435,7 @@ impl Package {
         bundle_js: &str,
         stack_bytes: usize,
     ) -> Result<Package, HostError> {
-        let mut parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
+        let parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
         if let Some(problem) = parts.esm_problems.iter().next() {
             return Err(HostError::Unsupported((*problem).to_string()));
         }
@@ -400,40 +447,10 @@ impl Package {
         if stack_bytes != 0 {
             interp.configure_stack(stack_bytes);
         }
-        interp.run_id = crate::next_run_id(); // factory spans come from this one parse
-        interp
-            .sources
-            .insert(interp.run_id, std::rc::Rc::from(parts.source.as_str()));
+        crate::worker::register_bundle(&mut interp, name, bundle_js, &parts);
         let entry = parts.entry.clone();
-        for (_, func) in parts.factories.iter_mut() {
-            interp.annotate_function(func);
-        }
-        let mut factories = HashMap::new();
-        for (key, func) in &parts.factories {
-            let scope = interp.global.clone();
-            let f = interp
-                .function_value(None, func, &scope)
-                .map_err(|c| classify(&mut interp, c))?;
-            factories.insert(key.clone(), f);
-        }
-        let origins = star_origins(&mut interp, bundle_js).map_err(|c| classify(&mut interp, c))?;
-        let loader = Rc::new(Loader {
-            parts,
-            factories,
-            cache: RefCell::new(HashMap::new()),
-            addon: RefCell::new(None),
-            package: name.to_string(),
-            origins,
-        });
-        if entry == "node:module" || loader.factories.contains_key("node:module") {
-            install_module_loader(&mut interp, &loader, bundle_js)
-                .map_err(|c| classify(&mut interp, c))?;
-        }
-        if loader.factories.contains_key("node:http") {
-            install_fetch_transport(&mut interp, &loader).map_err(|c| classify(&mut interp, c))?;
-        }
-        let exports =
-            load_module(&loader, &mut interp, &entry).map_err(|c| classify(&mut interp, c))?;
+        let exports = boot_bundle(&mut interp, parts, bundle_js, name, &entry)
+            .map_err(|c| classify(&mut interp, c))?;
         Ok(Package { interp, exports })
     }
 
@@ -5967,10 +5984,12 @@ struct HostTls {
     last_frame: Option<(String, String)>,
     watches: Vec<Watch>,
     heap: crate::heap_limit::State,
+    contexts: std::mem::ManuallyDrop<HashMap<u32, crate::vm::VmSlot>>,
 }
 
 // SAFETY: the host thread and the coroutine thread strictly alternate (each hands control to the
-// other through a channel), so the `Rc`s and raw pointers inside are never touched by two threads at once.
+// other through a channel), so the `Rc`s and raw pointers inside (the realms of the vm context table
+// included) are never touched by two threads at once.
 struct SendHostTls(HostTls);
 unsafe impl Send for SendHostTls {}
 
@@ -5995,6 +6014,7 @@ pub(crate) fn park_host_tls(key: usize) {
         last_frame: LAST_FRAME.with(|c| std::mem::take(&mut *c.borrow_mut())),
         watches: WATCHES.with(|c| std::mem::take(&mut *c.borrow_mut())),
         heap: crate::heap_limit::take(),
+        contexts: crate::vm::take_contexts(),
     };
     PARKED.lock().unwrap().push((key, SendHostTls(tls)));
 }
@@ -6028,8 +6048,11 @@ pub(crate) fn adopt_host_tls(key: usize) {
         last_frame,
         watches,
         heap,
+        contexts,
     } = tls;
     crate::heap_limit::restore(heap);
+    // the table it replaces is empty (the other thread parked it), so discarding it runs no code
+    crate::vm::restore_contexts(contexts);
     // the replaced values are empty (the other thread parked them), so dropping them runs no code
     drop(PACKAGES.with(|c| c.replace(packages)));
     drop(RUNNING.with(|c| c.replace(running)));

@@ -2,10 +2,11 @@
 //! A context is a separate `Interp` (its own intrinsics and global scope), built on its first run
 //! so that contexts which are only created cost nothing.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{arg, find_own, Interp, Obj, Scope, Slot, Value, R, SK_VMGLOBAL};
 
@@ -82,6 +83,8 @@ pub(crate) struct VmRealm {
     n0: usize,
     /// Var and function names of earlier runs, and implicit globals already copied to the sandbox.
     vars: Vec<Rc<str>>,
+    /// The sandbox of the latest run: the context's promise jobs, run later, see the same one.
+    sandbox: Option<Obj>,
     /// let/const/class names of earlier runs (a later `var` or function of the same name is a redeclaration).
     lets: Vec<Rc<str>>,
 }
@@ -97,12 +100,28 @@ pub(crate) struct VmSlot {
 thread_local! {
     /// Every context on this thread, by id, shared by all realms. A context can be run from inside another
     /// realm (a host closure called by a context calls `vm.runInContext`), and that run executes on the caller's
-    /// Interp, so a per-Interp table would not find it. Thread-local, not shared: an Interp holds `Rc`s and
-    /// never leaves its thread. `ManuallyDrop`: at thread exit the table is not dropped, so no realm is torn down
+    /// Interp, so a per-Interp table would not find it. Not shared between threads: an Interp holds `Rc`s, so the
+    /// table moves with the control at a coroutine hand-off (`take_contexts`), never used by two threads at once.
+    /// `ManuallyDrop`: at thread exit the table is not dropped, so no realm is torn down
     /// while other thread-locals are already gone; a context outlives its thread only if its owner was leaked.
     static CONTEXTS: RefCell<ManuallyDrop<HashMap<u32, VmSlot>>> =
         RefCell::new(ManuallyDrop::new(HashMap::new()));
-    static NEXT_ID: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Process-wide, not thread-local: a context made on a coroutine thread must not reuse an id of another thread's table.
+static NEXT_ID: AtomicU32 = AtomicU32::new(0);
+
+/// This thread's context table, moved out with the other host tables at a coroutine hand-off
+/// (`host::park_host_tls`); the table left behind is empty.
+pub(crate) fn take_contexts() -> ManuallyDrop<HashMap<u32, VmSlot>> {
+    CONTEXTS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+/// Puts back a table from `take_contexts` (`host::adopt_host_tls`); the table it replaces is empty.
+pub(crate) fn restore_contexts(
+    table: ManuallyDrop<HashMap<u32, VmSlot>>,
+) -> ManuallyDrop<HashMap<u32, VmSlot>> {
+    CONTEXTS.with(|c| c.replace(table))
 }
 
 /// Removes the slots `owner` created and returns them. The caller drops them after the borrow ends:
@@ -119,6 +138,56 @@ pub(crate) fn take_owned(owner: usize) -> Vec<VmSlot> {
         let mut c = c.borrow_mut();
         ids.iter().filter_map(|id| c.remove(id)).collect()
     })
+}
+
+/// Whether a context `owner` created has promise jobs queued (an idle context; one running now is not seen).
+pub(crate) fn owned_jobs_pending(owner: usize) -> bool {
+    CONTEXTS.with(|c| {
+        c.borrow()
+            .values()
+            .any(|s| s.owner == owner && s.realm.as_ref().is_some_and(|r| r.interp.has_job_work()))
+    })
+}
+
+/// Runs the promise jobs of each idle context `host` created, each on its own Interp: the realm is taken out of its
+/// slot meanwhile, as in a run. Jobs queued by a context on a host handler stay on the host's queue (see
+/// `eventloop.rs` `Reaction::queue`). True if any context ran. A context running now is skipped.
+pub(crate) fn drain_owned_jobs(host: &Interp) -> R<bool> {
+    let owner = host.realm_id;
+    let ids: Vec<u32> = CONTEXTS.with(|c| {
+        c.borrow()
+            .iter()
+            .filter(|(_, s)| {
+                s.owner == owner && s.realm.as_ref().is_some_and(|r| r.interp.has_job_work())
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    });
+    let mut ran = false;
+    for id in ids {
+        let claimed = CONTEXTS.with(|c| match c.borrow_mut().get_mut(&id) {
+            Some(slot) if !slot.busy => {
+                slot.busy = true;
+                slot.realm.take()
+            }
+            _ => None,
+        });
+        let Some(mut realm) = claimed else { continue };
+        ran = true;
+        realm.interp.restore(host.snapshot());
+        realm.interp.vm_sandbox = realm.sandbox.clone();
+        let r = realm.interp.run_jobs();
+        realm.interp.vm_sandbox = None;
+        // the realm goes back (or drops here, if its context was freed while the job ran)
+        CONTEXTS.with(|c| {
+            if let Some(slot) = c.borrow_mut().get_mut(&id) {
+                slot.realm = Some(realm);
+                slot.busy = false;
+            }
+        });
+        r?;
+    }
+    Ok(ran)
 }
 
 /// The global object of the first context realm built on this thread (tests).
@@ -239,10 +308,7 @@ fn disarm(ip: &mut Interp) {
 pub(crate) fn install(it: &mut Interp) {
     let g = it.global.clone();
     let create = it.native(|it, _, _| {
-        let id = NEXT_ID.with(|n| {
-            n.set(n.get() + 1);
-            n.get()
-        });
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed) + 1;
         let owner = it.realm_id;
         CONTEXTS.with(|c| {
             c.borrow_mut().insert(
@@ -310,12 +376,14 @@ pub(crate) fn install(it: &mut Interp) {
                 script: None,
                 n0: 0,
                 vars: Vec::new(),
+                sandbox: None,
                 lets: Vec::new(),
             }),
         };
         // stack limits and depth follow the calling thread
         realm.interp.restore(it.snapshot());
         realm.interp.vm_sandbox = sandbox.clone();
+        realm.sandbox = sandbox.clone();
         let prev = std::mem::replace(&mut realm.interp.script_filename, file);
         arm(&mut realm.interp, ms);
         let r = match &sandbox {

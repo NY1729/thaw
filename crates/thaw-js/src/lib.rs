@@ -244,6 +244,19 @@ pub(crate) fn grow_slots(o: &ObjData, elem: usize, before: usize, after: usize) 
     }
 }
 
+/// The estimated bytes of one object: its record, its array slot capacity and its property slot capacity. This is the
+/// one formula behind both `account` (the resourceLimits charge) and `__thaw_memory_usage` (the v8 figures). Not
+/// counted: the strings, closures and scopes it refers to, Map and Set tables, ArrayBuffer bytes and data held by
+/// natives. ponytail: capacity-based estimate, not V8's heap; a `Value` is larger than a V8 slot.
+pub(crate) fn estimate_bytes(o: &ObjData) -> usize {
+    let slots = match &*o.kind.borrow() {
+        Kind::Array(items) => std::mem::size_of::<Value>() * items.capacity(),
+        _ => 0,
+    };
+    let props = std::mem::size_of::<Prop>() * o.raw_props.borrow().capacity();
+    std::mem::size_of::<ObjData>() + slots + props
+}
+
 /// Recomputes `o`'s estimated size (the object record, its array slots, its property slots) and charges or credits
 /// the change since its last `account`/`grow_slots`. Call it where no borrow of `o.kind` is live. A no-op unless a
 /// heap limit is on (see `heap_limit`).
@@ -251,12 +264,7 @@ pub(crate) fn account(o: &ObjData) {
     if !heap_limit::enabled() {
         return;
     }
-    let slots = match &*o.kind.borrow() {
-        Kind::Array(items) => std::mem::size_of::<Value>() * items.capacity(),
-        _ => 0,
-    };
-    let props = std::mem::size_of::<Prop>() * o.raw_props.borrow().capacity();
-    let now = std::mem::size_of::<ObjData>() + slots + props;
+    let now = estimate_bytes(o);
     let before = o.charged.replace(now);
     if now > before {
         heap_limit::charge(now - before);
@@ -6133,6 +6141,8 @@ mod url_tests;
 mod vm_realm_tests;
 #[cfg(test)]
 mod web_class_tag_tests;
+#[cfg(test)]
+mod worker_bundle_tests;
 #[cfg(test)]
 mod worker_limits_tests;
 
