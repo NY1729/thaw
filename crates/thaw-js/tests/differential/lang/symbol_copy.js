@@ -1,0 +1,14 @@
+const S = Symbol('s');
+const T = Symbol('t');
+const o = { [S]: 1, a: 2 };
+Object.defineProperty(o, T, { value: 9, enumerable: false });
+const copy = Object.assign({}, o);
+console.log(copy[S], ({ ...o })[S], Object.getOwnPropertySymbols(copy).length, copy[T], ({ ...o })[T]);
+const { a, ...rest } = o;
+console.log(rest[S], Object.getOwnPropertySymbols(rest).length, rest[T]);
+const t = { [S]: 0 };
+Object.assign(t, { [S]: 5 });
+console.log(t[S]);
+const g = { get [S]() { return 7; } };
+console.log(Object.assign({}, g)[S], ({ ...g })[S]);
+console.log(Object.keys(Object.assign({}, o)).join(), JSON.stringify({ ...o }));

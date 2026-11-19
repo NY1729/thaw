@@ -2594,6 +2594,14 @@ fn symbol_keyed_define_property_and_to_string_tag() {
 }
 
 #[test]
+fn object_assign_and_spread_copy_enumerable_symbol_keys() {
+    assert_eq!(
+        one("const S = Symbol('s'); const N = Symbol('n'); const o = { [S]: 1 }; Object.defineProperty(o, N, { value: 2 }); const c = Object.assign({}, o); console.log(c[S], ({ ...o })[S], c[N], ({ ...o })[N], Object.getOwnPropertySymbols(c).length)"),
+        "1 1 undefined undefined 1"
+    );
+}
+
+#[test]
 fn namespace_globals_carry_to_string_tag_and_inspect_as_tagged_objects() {
     assert_eq!(
         one("console.log(Object.prototype.toString.call(Math), Object.prototype.toString.call(JSON), Object.prototype.toString.call(Reflect))"),
