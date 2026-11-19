@@ -2,10 +2,11 @@
 //! A context is a separate `Interp` (its own intrinsics and global scope), built on its first run
 //! so that contexts which are only created cost nothing.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{arg, find_own, Interp, Obj, Scope, Slot, Value, R};
 
@@ -95,12 +96,28 @@ pub(crate) struct VmSlot {
 thread_local! {
     /// Every context on this thread, by id, shared by all realms. A context can be run from inside another
     /// realm (a host closure called by a context calls `vm.runInContext`), and that run executes on the caller's
-    /// Interp, so a per-Interp table would not find it. Thread-local, not shared: an Interp holds `Rc`s and
-    /// never leaves its thread. `ManuallyDrop`: at thread exit the table is not dropped, so no realm is torn down
+    /// Interp, so a per-Interp table would not find it. Not shared between threads: an Interp holds `Rc`s, so the
+    /// table moves with the control at a coroutine hand-off (`take_contexts`), never used by two threads at once.
+    /// `ManuallyDrop`: at thread exit the table is not dropped, so no realm is torn down
     /// while other thread-locals are already gone; a context outlives its thread only if its owner was leaked.
     static CONTEXTS: RefCell<ManuallyDrop<HashMap<u32, VmSlot>>> =
         RefCell::new(ManuallyDrop::new(HashMap::new()));
-    static NEXT_ID: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Process-wide, not thread-local: a context made on a coroutine thread must not reuse an id of another thread's table.
+static NEXT_ID: AtomicU32 = AtomicU32::new(0);
+
+/// This thread's context table, moved out with the other host tables at a coroutine hand-off
+/// (`host::park_host_tls`); the table left behind is empty.
+pub(crate) fn take_contexts() -> ManuallyDrop<HashMap<u32, VmSlot>> {
+    CONTEXTS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+/// Puts back a table from `take_contexts` (`host::adopt_host_tls`); the table it replaces is empty.
+pub(crate) fn restore_contexts(
+    table: ManuallyDrop<HashMap<u32, VmSlot>>,
+) -> ManuallyDrop<HashMap<u32, VmSlot>> {
+    CONTEXTS.with(|c| c.replace(table))
 }
 
 /// Removes the slots `owner` created and returns them. The caller drops them after the borrow ends:
@@ -234,10 +251,7 @@ fn disarm(ip: &mut Interp) {
 pub(crate) fn install(it: &mut Interp) {
     let g = it.global.clone();
     let create = it.native(|it, _, _| {
-        let id = NEXT_ID.with(|n| {
-            n.set(n.get() + 1);
-            n.get()
-        });
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed) + 1;
         let owner = it.realm_id;
         CONTEXTS.with(|c| {
             c.borrow_mut().insert(
