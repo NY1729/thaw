@@ -507,6 +507,145 @@ fn scan_reports_reachable_blockers_only() {
     assert!(crate::scan::scan_bundle("var x = 1;").is_err());
 }
 
+/// A three-module registry bundle: `p/index.js` (the given body), `p/b.js` (clean) and `p/c.js` (a blocker,
+/// `process.dlopen`). The map of `p/index.js` lists both `./b` and `./c`, as a bundler's catch-all map does.
+fn index_bundle(index_body: &str) -> String {
+    r#"module.exports = (function(require) {
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {
+INDEX
+},
+"p/b.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) { exports.b = 1; },
+"p/c.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) { process.dlopen('x'); },
+};
+var __thaw_bundle_require_maps = { "p/index.js": {"./b": "p/b.js", "./c": "p/c.js"}, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#
+        .replace("INDEX", index_body)
+}
+
+#[test]
+fn reachability_follows_only_literal_specs_of_a_dynamic_require_factory() {
+    let blockers = |src: &str| -> Vec<String> {
+        crate::scan::scan_bundle(src)
+            .ok()
+            .unwrap()
+            .blockers
+            .into_keys()
+            .collect()
+    };
+    let reached = |src: &str| -> Vec<String> {
+        let parts = crate::scan::parse_bundle(src).ok().unwrap();
+        crate::scan::reachable(&parts).into_iter().collect()
+    };
+    // a computed `require(n)` names nothing: the map entry `./c` is not followed, so c's blocker is gone
+    let dynamic =
+        index_bundle("var n = './b'; exports.v = require(n); exports.b = require('./b');");
+    assert_eq!(blockers(&dynamic), ["require:dynamic"]);
+    assert_eq!(reached(&dynamic), ["p/b.js", "p/index.js"]);
+    // a literal `require('./c')` beside it names c: c is reachable and blocks
+    let named = index_bundle("var n = './b'; exports.v = require(n); exports.c = require('./c');");
+    assert_eq!(blockers(&named), ["method:dlopen", "require:dynamic"]);
+    assert!(reached(&named).contains(&"p/c.js".to_string()));
+    // a template literal without holes names its spec too
+    let templated =
+        index_bundle("var n = './b'; exports.v = require(n); exports.c = require(`./c`);");
+    assert_eq!(blockers(&templated), ["method:dlopen", "require:dynamic"]);
+    // ESM edges (`__thaw_require`) are named the same way: a literal one keeps its target, a computed one names nothing
+    let esm_named = index_bundle(
+        "var n = './b'; exports.v = __thaw_require(n); exports.c = __thaw_require('./c');",
+    );
+    assert_eq!(blockers(&esm_named), ["method:dlopen"]);
+    let esm_dynamic = index_bundle(
+        "var n = './b'; exports.v = __thaw_require(n); exports.b = __thaw_require('./b');",
+    );
+    assert_eq!(blockers(&esm_dynamic), Vec::<String>::new());
+    assert!(!reached(&esm_dynamic).contains(&"p/c.js".to_string()));
+    // a factory without a dynamic require keeps following every map entry, as before
+    let static_only = index_bundle("exports.b = require('./b');");
+    assert_eq!(blockers(&static_only), ["method:dlopen"]);
+    assert_eq!(reached(&static_only).len(), 3);
+}
+
+/// Like [`index_bundle`] with `p/lib/x.js` (a blocker) and a clean `p/other.js`; `map` is the map of `p/index.js`.
+fn named_bundle(index_body: &str, map: &str) -> String {
+    r#"module.exports = (function(require) {
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {
+INDEX
+},
+"p/lib/x.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) { process.dlopen('x'); },
+"p/other.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) { exports.o = 1; },
+};
+var __thaw_bundle_require_maps = { "p/index.js": MAP, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#
+        .replace("INDEX", index_body)
+        .replace("MAP", map)
+}
+
+#[test]
+fn reachability_follows_the_entries_a_computed_spec_fragment_can_name() {
+    let scan = |src: &str| crate::scan::scan_bundle(src).ok().unwrap();
+    let reached = |src: &str| -> Vec<String> {
+        let parts = crate::scan::parse_bundle(src).ok().unwrap();
+        crate::scan::reachable(&parts).into_iter().collect()
+    };
+    let prefix_map = r#"{"./lib/x": "p/lib/x.js", "./other": "p/other.js"}"#;
+    let suffix_map = r#"{"./lib/x.js": "p/lib/x.js", "./other.json": "p/other.js"}"#;
+    // `'./lib/' + n` and its template form start with `./lib/`: `./lib/x` (a blocker) is named, `./other` is not
+    for body in [
+        "var n = 'x'; exports.v = require('./lib/' + n);",
+        "var n = 'x'; exports.v = require(`./lib/${n}`);",
+    ] {
+        let src = named_bundle(body, prefix_map);
+        let scan = scan(&src);
+        assert!(scan.blockers.contains_key("method:dlopen"), "{body}");
+        let keys = reached(&src);
+        assert!(keys.contains(&"p/lib/x.js".to_string()), "{body}");
+        assert!(!keys.contains(&"p/other.js".to_string()), "{body}");
+    }
+    // `name + '.js'` ends with `.js`: the start is unknown, so every entry ending in `.js` is named
+    let src = named_bundle(
+        "var n = './lib/x'; exports.v = require(n + '.js');",
+        suffix_map,
+    );
+    let keys = reached(&src);
+    assert!(keys.contains(&"p/lib/x.js".to_string()));
+    assert!(!keys.contains(&"p/other.js".to_string()));
+    assert!(scan(&src).blockers.contains_key("method:dlopen"));
+    // a bare variable names nothing extra (the express `require(mod)` shape)
+    let src = named_bundle("var n = 'x'; exports.v = require(n);", prefix_map);
+    assert_eq!(reached(&src), ["p/index.js"]);
+    assert_eq!(
+        scan(&src)
+            .blockers
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["require:dynamic"]
+    );
+    // fragments that do not tell which entries are named (a middle literal, a conditional, a call with a literal
+    // argument) follow every entry
+    for body in [
+        "var n = 'x'; exports.v = require(n + './lib/' + n);",
+        "var n = 'x'; exports.v = require(n ? './lib/x' : './other');",
+        "var n = 'x'; exports.v = require(['./lib', n].join('/'));",
+    ] {
+        let keys = reached(&named_bundle(body, prefix_map));
+        assert!(keys.contains(&"p/lib/x.js".to_string()), "{body}");
+        assert!(keys.contains(&"p/other.js".to_string()), "{body}");
+    }
+    // an aliased require is not seen as a require call: the factory keeps following every entry
+    let src = named_bundle(
+        "var r = require; var n = 'x'; exports.v = r('./lib/' + n);",
+        prefix_map,
+    );
+    let keys = reached(&src);
+    assert!(keys.contains(&"p/lib/x.js".to_string()));
+    assert!(keys.contains(&"p/other.js".to_string()));
+}
+
 /// Run `src` as a program (event loop included); console lines plus the exit code.
 fn main_run(src: &str) -> (Vec<String>, i32) {
     main_run_after_gap(src, 0)
