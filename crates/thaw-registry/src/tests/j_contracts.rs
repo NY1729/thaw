@@ -450,8 +450,7 @@ return out;
 fn j_v8_heap_growth() {
     // expected: node22
     assert_eq!(
-        // QuickJS: thaw-js parity gap, v8 heap statistics (PR E).
-        p2c_run_qjs("j_v8_heap_growth",r#####"const v8 = require('node:v8');
+        p2c_run("j_v8_heap_growth",r#####"const v8 = require('node:v8');
 const before = v8.getHeapStatistics();
 const keep = [];
 for (let i = 0; i < 200; i++) keep.push(new Array(50000).fill(i));
