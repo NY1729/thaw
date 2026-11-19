@@ -446,12 +446,12 @@ var __thaw_bundle_entry_key = "addon/index.js";
 fn scan_addon_mode_tolerates_native_loader_keys_only() {
     let blocked = crate::scan::scan_bundle(NATIVE_ADDON_BUNDLE).ok().unwrap();
     let names: Vec<&str> = blocked.blockers.keys().map(String::as_str).collect();
+    // `require(exports.p)` is a bare computed spec: not a blocker, so no `require:dynamic` here
     assert_eq!(
         names,
         [
             "global:__non_webpack_require__",
             "require:./build/Release/addon.node",
-            "require:dynamic"
         ]
     );
     // addon mode: the `.node` require, the webpack probe and the dynamic require beside it are the loader
@@ -471,11 +471,11 @@ fn scan_addon_mode_tolerates_native_loader_keys_only() {
             .collect::<Vec<_>>(),
         ["require:./build/Release/addon.node"]
     );
-    // the addon-mode tolerance is scoped to native loader keys: a dynamic require with no `.node`
+    // the addon-mode tolerance is scoped to native loader keys: an unclassifiable dynamic require with no `.node`
     // require beside it stays blocked in addon mode
     let dynamic_only = plain.replace(
         "require('./build/Release/addon.node')",
-        "require(exports.p)",
+        "require(exports.p + './x' + exports.q)",
     );
     let report = crate::scan::scan_addon_bundle(&dynamic_only).ok().unwrap();
     assert_eq!(
@@ -541,16 +541,16 @@ fn reachability_follows_only_literal_specs_of_a_dynamic_require_factory() {
     // a computed `require(n)` names nothing: the map entry `./c` is not followed, so c's blocker is gone
     let dynamic =
         index_bundle("var n = './b'; exports.v = require(n); exports.b = require('./b');");
-    assert_eq!(blockers(&dynamic), ["require:dynamic"]);
+    assert_eq!(blockers(&dynamic), Vec::<String>::new());
     assert_eq!(reached(&dynamic), ["p/b.js", "p/index.js"]);
     // a literal `require('./c')` beside it names c: c is reachable and blocks
     let named = index_bundle("var n = './b'; exports.v = require(n); exports.c = require('./c');");
-    assert_eq!(blockers(&named), ["method:dlopen", "require:dynamic"]);
+    assert_eq!(blockers(&named), ["method:dlopen"]);
     assert!(reached(&named).contains(&"p/c.js".to_string()));
     // a template literal without holes names its spec too
     let templated =
         index_bundle("var n = './b'; exports.v = require(n); exports.c = require(`./c`);");
-    assert_eq!(blockers(&templated), ["method:dlopen", "require:dynamic"]);
+    assert_eq!(blockers(&templated), ["method:dlopen"]);
     // ESM edges (`__thaw_require`) are named the same way: a literal one keeps its target, a computed one names nothing
     let esm_named = index_bundle(
         "var n = './b'; exports.v = __thaw_require(n); exports.c = __thaw_require('./c');",
@@ -617,14 +617,7 @@ fn reachability_follows_the_entries_a_computed_spec_fragment_can_name() {
     // a bare variable names nothing extra (the express `require(mod)` shape)
     let src = named_bundle("var n = 'x'; exports.v = require(n);", prefix_map);
     assert_eq!(reached(&src), ["p/index.js"]);
-    assert_eq!(
-        scan(&src)
-            .blockers
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["require:dynamic"]
-    );
+    assert!(scan(&src).blockers.is_empty());
     // fragments that do not tell which entries are named (a middle literal, a conditional, a call with a literal
     // argument) follow every entry
     for body in [
@@ -644,6 +637,61 @@ fn reachability_follows_the_entries_a_computed_spec_fragment_can_name() {
     let keys = reached(&src);
     assert!(keys.contains(&"p/lib/x.js".to_string()));
     assert!(keys.contains(&"p/other.js".to_string()));
+}
+
+#[test]
+fn computed_require_is_no_blocker_when_its_spec_is_classified() {
+    // a bare, prefix or suffix computed spec follows only the entries it can name; the blocked `p/lib/x.js` is not
+    // among them, so the bundle is clean
+    let prefix_map = r#"{"./lib/x": "p/other.js", "./other": "p/other.js"}"#;
+    let suffix_map = r#"{"./lib/x.js": "p/other.js", "./other.json": "p/other.js"}"#;
+    for (body, map) in [
+        ("var n = 'x'; exports.v = require(n);", prefix_map),
+        (
+            "var n = 'x'; exports.v = require('./lib/' + n);",
+            prefix_map,
+        ),
+        (
+            "var n = 'x'; exports.v = require(`./lib/${n}`);",
+            prefix_map,
+        ),
+        (
+            "var n = './lib/x'; exports.v = require(n + '.js');",
+            suffix_map,
+        ),
+    ] {
+        let report = crate::scan::scan_bundle(&named_bundle(body, map))
+            .ok()
+            .unwrap();
+        assert!(report.is_clean(), "{body}: {:?}", report.blockers);
+    }
+}
+
+#[test]
+fn computed_require_stays_a_blocker_when_its_spec_is_unclassifiable() {
+    // no argument, a spread, and fragments the classifier cannot name: every entry is followed, so the map here is
+    // clean and the only finding is `require:dynamic`
+    let clean_map = r#"{"./lib/x": "p/other.js", "./other": "p/other.js"}"#;
+    for body in [
+        "exports.v = require();",
+        "var xs = ['./b']; exports.v = require(...xs);",
+        "var n = 'x'; exports.v = require(n + './lib/' + n);",
+        "var n = 'x'; exports.v = require(n ? './lib/x' : './other');",
+        "var n = 'x'; exports.v = require(['./lib', n].join('/'));",
+    ] {
+        let report = crate::scan::scan_bundle(&named_bundle(body, clean_map))
+            .ok()
+            .unwrap();
+        assert_eq!(
+            report
+                .blockers
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["require:dynamic"],
+            "{body}"
+        );
+    }
 }
 
 /// Run `src` as a program (event loop included); console lines plus the exit code.
@@ -3840,6 +3888,9 @@ fn scan_tolerates_optional_requires_guarded_by_a_handling_try() {
         "exports.f = function () { return require('pg-native'); };",
         "try { require('bufferutil'); } finally {}",
         "try { exports.w = require('./crc32.wasi.cjs'); } catch (err) { exports.c = err; }",
+        // a bare computed spec is classified (the express `require(mod)` shape): not a blocker, and at run time a
+        // spec the map does not name throws MODULE_NOT_FOUND
+        "const x = 'bufferutil'; try { require(x); } catch (e) {}",
     ];
     for code in unmapped {
         let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
@@ -3847,15 +3898,16 @@ fn scan_tolerates_optional_requires_guarded_by_a_handling_try() {
             .unwrap();
         assert!(report.is_clean(), "{code} should be clean");
     }
-    // still refused: builtins (thaw serves them by name), native addons (dlopen is never served), and a
-    // computed spec, guarded or not
+    // still refused: builtins (thaw serves them by name), native addons (dlopen is never served), and a computed
+    // spec the scanner cannot classify (a call with literal pieces, a spread, no argument), guarded or not
     let refused = [
+        "try { require(path.join(__dirname, 'x')); } catch (e) {}",
+        "try { require(...['bufferutil']); } catch (e) {}",
         "try { require('net'); } catch (e) {}",
         "try { require('node:net'); } catch (e) {}",
         "const n = require('node:nonexistentbuiltin');",
         "try { require('./addon.node'); } catch (e) {}",
         "exports.f = function () { return require('./addon.node'); };",
-        "const x = 'bufferutil'; try { require(x); } catch (e) {}",
     ];
     for code in refused {
         let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
@@ -3872,6 +3924,28 @@ fn scan_tolerates_optional_requires_guarded_by_a_handling_try() {
     assert_eq!(
         p.call("probe", &[]).ok(),
         Some(crate::host::Native::Str("MODULE_NOT_FOUND".into()))
+    );
+}
+
+#[test]
+fn computed_require_of_a_spec_missing_from_the_map_throws_module_not_found() {
+    // the scanner no longer blocks a bare computed require (express `require(mod)`); at run time a spec the factory's
+    // map does not name throws MODULE_NOT_FOUND as on Node, and the program catches it and goes on
+    let program = one_module_bundle(
+        "exports.probe = function (mod) { try { require(mod); return 'loaded'; } catch (e) { return e.code; } }; \
+         exports.after = function () { return 'continues'; };",
+        "",
+    );
+    assert!(crate::scan::scan_bundle(&program).ok().unwrap().is_clean());
+    let mut p = crate::host::Package::load(&program).expect("loads");
+    assert_eq!(
+        p.call("probe", &[crate::host::Native::Str("./nope".into())])
+            .ok(),
+        Some(crate::host::Native::Str("MODULE_NOT_FOUND".into()))
+    );
+    assert_eq!(
+        p.call("after", &[]).ok(),
+        Some(crate::host::Native::Str("continues".into()))
     );
 }
 
