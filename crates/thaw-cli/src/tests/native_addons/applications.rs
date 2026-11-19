@@ -343,25 +343,173 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Drains a child pipe on a background thread so a chatty child cannot block on a full pipe.
-fn drain_in_background<R: std::io::Read + Send + 'static>(
-    mut pipe: R,
-) -> (
-    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    std::thread::JoinHandle<()>,
-) {
-    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let sink = buf.clone();
-    let handle = std::thread::spawn(move || {
-        let mut chunk = [0u8; 4096];
-        while let Ok(n) = pipe.read(&mut chunk) {
-            if n == 0 {
-                break;
-            }
-            sink.lock().unwrap().extend_from_slice(&chunk[..n]);
+/// Read and write bound for every socket a server test talks to: a server
+/// that accepts but never answers fails the test after this long instead of
+/// hanging the CI job.
+const SERVER_IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How much of a child's log a failure message shows.
+const LOG_TAIL_BYTES: usize = 4096;
+
+/// A child whose stdout and stderr go to files under the test dir, never to
+/// an unread pipe (a chatty child cannot block). Killed and reaped on drop,
+/// so a failing assertion never leaves a server running. On a panic the drop
+/// also prints the stderr tail.
+struct LoggedChild {
+    child: std::process::Child,
+    stdout_log: std::path::PathBuf,
+    stderr_log: std::path::PathBuf,
+}
+
+impl std::ops::Deref for LoggedChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &std::process::Child {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for LoggedChild {
+    fn deref_mut(&mut self) -> &mut std::process::Child {
+        &mut self.child
+    }
+}
+
+impl Drop for LoggedChild {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "child stderr (last {LOG_TAIL_BYTES} bytes):\n{}",
+                log_tail(&self.stderr_log)
+            );
         }
-    });
-    (buf, handle)
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_with_log(command: &mut Command, dir: &Path) -> LoggedChild {
+    std::fs::create_dir_all(dir).unwrap();
+    let stdout_log = dir.join("stdout.log");
+    let stderr_log = dir.join("stderr.log");
+    let child = command
+        .stdout(Stdio::from(std::fs::File::create(&stdout_log).unwrap()))
+        .stderr(Stdio::from(std::fs::File::create(&stderr_log).unwrap()))
+        .spawn()
+        .unwrap();
+    LoggedChild {
+        child,
+        stdout_log,
+        stderr_log,
+    }
+}
+
+fn read_log(path: &Path) -> String {
+    String::from_utf8_lossy(&std::fs::read(path).unwrap_or_default()).into_owned()
+}
+
+fn log_tail(path: &Path) -> String {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(LOG_TAIL_BYTES)..]).into_owned()
+}
+
+/// `message` followed by the tail of the child's stderr log.
+fn server_failure_message(stderr_log: &Path, message: &str) -> String {
+    format!(
+        "{message}\n--- child stderr (last {LOG_TAIL_BYTES} bytes of {}) ---\n{}",
+        stderr_log.display(),
+        log_tail(stderr_log)
+    )
+}
+
+fn fail_with_server_log(stderr_log: &Path, message: &str) -> ! {
+    panic!("{}", server_failure_message(stderr_log, message))
+}
+
+fn io_failure(what: &str, error: &std::io::Error, timeout: Duration) -> String {
+    match error.kind() {
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+            format!("{what} timed out after {timeout:?}: {error}")
+        }
+        _ => format!("{what} failed: {error}"),
+    }
+}
+
+fn set_io_timeouts(stream: &TcpStream, timeout: Duration) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))
+}
+
+/// Writes `request` on a connected `stream` and reads the response to EOF,
+/// with reads and writes both bounded by `timeout`.
+fn exchange_http_request(
+    stream: &mut TcpStream,
+    request: &[u8],
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    set_io_timeouts(stream, timeout)
+        .map_err(|error| io_failure("setting socket timeouts", &error, timeout))?;
+    stream
+        .write_all(request)
+        .map_err(|error| io_failure("writing the request", &error, timeout))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| io_failure("reading the response", &error, timeout))?;
+    Ok(response)
+}
+
+/// Unwraps a socket read, failing with the child's stderr tail on error or timeout.
+fn expect_io<T>(result: std::io::Result<T>, what: &str, stderr_log: &Path) -> T {
+    result.unwrap_or_else(|error| {
+        fail_with_server_log(stderr_log, &io_failure(what, &error, SERVER_IO_TIMEOUT))
+    })
+}
+
+/// Waits for `child` to exit, failing with its stderr tail if it outlives `timeout`.
+fn wait_with_deadline(child: &mut LoggedChild, timeout: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            fail_with_server_log(
+                &child.stderr_log,
+                &format!("child did not exit within {timeout:?}"),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn server_exchange_times_out_instead_of_hanging() {
+    // Listener is alive but never accepts: the connect succeeds from the
+    // backlog and the server never answers.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let started = Instant::now();
+    let error = exchange_http_request(
+        &mut stream,
+        b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        Duration::from_millis(200),
+    )
+    .unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn server_failure_message_carries_the_log_tail() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-server-log-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("stderr.log");
+    std::fs::write(&log, format!("{}END-OF-LOG", "x".repeat(10_000))).unwrap();
+    let message = server_failure_message(&log, "request timed out");
+    assert!(message.starts_with("request timed out"), "{message}");
+    assert!(message.contains("END-OF-LOG"), "{message}");
+    assert!(message.len() < LOG_TAIL_BYTES + 512, "{}", message.len());
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -414,14 +562,7 @@ async function main(): Promise<void> {
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = probe.local_addr().unwrap().port();
     drop(probe);
-    let mut child = Command::new(&output)
-        .env("PORT", port.to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let (stdout_buf, stdout_reader) = drain_in_background(child.stdout.take().unwrap());
-    let (stderr_buf, stderr_reader) = drain_in_background(child.stderr.take().unwrap());
+    let mut child = spawn_with_log(Command::new(&output).env("PORT", port.to_string()), &dir);
     let connected = (0..500).find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
         Ok(stream) => Some(stream),
         Err(_) => {
@@ -429,29 +570,15 @@ async function main(): Promise<void> {
             None
         }
     });
-    let mut stream = match connected {
-        Some(stream) => stream,
-        None => {
-            let exited = child.try_wait().unwrap();
-            let _ = child.kill();
-            let status = match exited {
-                Some(status) => status,
-                None => child.wait().unwrap(),
-            };
-            stdout_reader.join().unwrap();
-            stderr_reader.join().unwrap();
-            panic!(
-                "compiled Fastify server did not start\nstatus: {status:?}\nstdout: {}\nstderr: {}",
-                String::from_utf8_lossy(&stdout_buf.lock().unwrap()),
-                String::from_utf8_lossy(&stderr_buf.lock().unwrap()),
-            );
-        }
-    };
-    stream
-        .write_all(b"GET /api/users/42 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .unwrap();
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).unwrap();
+    let mut stream = connected.unwrap_or_else(|| {
+        fail_with_server_log(&child.stderr_log, "compiled Fastify server did not start")
+    });
+    let response = exchange_http_request(
+        &mut stream,
+        b"GET /api/users/42 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        SERVER_IO_TIMEOUT,
+    )
+    .unwrap_or_else(|error| fail_with_server_log(&child.stderr_log, &error));
     child.kill().unwrap();
     child.wait().unwrap();
     assert!(response.starts_with(b"HTTP/1.1 200"));
@@ -511,12 +638,7 @@ async function main(): Promise<void> {
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = probe.local_addr().unwrap().port();
     drop(probe);
-    let mut child = Command::new(&output)
-        .env("PORT", port.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = spawn_with_log(Command::new(&output).env("PORT", port.to_string()), &dir);
     std::thread::sleep(Duration::from_millis(100));
     assert!(
         child.try_wait().unwrap().is_none(),
@@ -531,14 +653,14 @@ async function main(): Promise<void> {
                     None
                 }
             })
-            .expect("compiled Express server did not accept a request");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        stream.write_all(request).unwrap();
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).unwrap();
-        response
+            .unwrap_or_else(|| {
+                fail_with_server_log(
+                    &child.stderr_log,
+                    "compiled Express server did not accept a request",
+                )
+            });
+        exchange_http_request(&mut stream, request, SERVER_IO_TIMEOUT)
+            .unwrap_or_else(|error| fail_with_server_log(&child.stderr_log, &error))
     };
     let request = |id: usize| {
         let request = format!(
@@ -836,12 +958,7 @@ async function main(): Promise<void> {
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = probe.local_addr().unwrap().port();
     drop(probe);
-    let mut child = Command::new(&output)
-        .env("PORT", port.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = spawn_with_log(Command::new(&output).env("PORT", port.to_string()), &dir);
     (0..500)
         .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
             Ok(stream) => Some(stream),
@@ -853,8 +970,12 @@ async function main(): Promise<void> {
         .expect("compiled Fastify server did not start");
     for _ in 0..20 {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        stream.write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
-        stream.read_to_end(&mut Vec::new()).unwrap();
+        exchange_http_request(
+            &mut stream,
+            b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            SERVER_IO_TIMEOUT,
+        )
+        .unwrap_or_else(|error| fail_with_server_log(&child.stderr_log, &error));
     }
     #[cfg(target_os = "linux")]
     let initial_rss = process_rss_kb(child.id());
@@ -864,14 +985,12 @@ async function main(): Promise<void> {
     // remove this cap when long-lived servers gain per-request arena resets.
     while Instant::now() < deadline && count < 25_000 {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        stream
-            .write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .unwrap();
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).unwrap();
+        let response = exchange_http_request(
+            &mut stream,
+            b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            SERVER_IO_TIMEOUT,
+        )
+        .unwrap_or_else(|error| fail_with_server_log(&child.stderr_log, &error));
         assert!(
             response.starts_with(b"HTTP/1.1 200"),
             "request {count} failed: {}",
@@ -948,12 +1067,7 @@ async function main(): Promise<void> {
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = probe.local_addr().unwrap().port();
     drop(probe);
-    let mut child = Command::new(&output)
-        .env("PORT", port.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = spawn_with_log(Command::new(&output).env("PORT", port.to_string()), &dir);
     (0..500)
         .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
             Ok(stream) => Some(stream),
@@ -965,8 +1079,12 @@ async function main(): Promise<void> {
         .expect("compiled Express server did not start");
     for _ in 0..20 {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        stream.write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
-        stream.read_to_end(&mut Vec::new()).unwrap();
+        exchange_http_request(
+            &mut stream,
+            b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            SERVER_IO_TIMEOUT,
+        )
+        .unwrap_or_else(|error| fail_with_server_log(&child.stderr_log, &error));
     }
     #[cfg(target_os = "linux")]
     let initial_rss = process_rss_kb(child.id());
@@ -974,14 +1092,12 @@ async function main(): Promise<void> {
     let mut count = 0usize;
     while Instant::now() < deadline {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        stream
-            .write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .unwrap();
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).unwrap();
+        let response = exchange_http_request(
+            &mut stream,
+            b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            SERVER_IO_TIMEOUT,
+        )
+        .unwrap_or_else(|error| fail_with_server_log(&child.stderr_log, &error));
         assert!(
             response.starts_with(b"HTTP/1.1 200"),
             "request {count} failed: {}",
@@ -1075,13 +1191,12 @@ function main(): void {
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = probe.local_addr().unwrap().port();
     drop(probe);
-    let mut child = Command::new(&output)
-        .current_dir(&dir)
-        .env("PORT", port.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = spawn_with_log(
+        Command::new(&output)
+            .current_dir(&dir)
+            .env("PORT", port.to_string()),
+        &dir,
+    );
     let mut stream = (0..500)
         .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
             Ok(stream) => Some(stream),
@@ -1092,21 +1207,15 @@ function main(): void {
         })
         .expect("compiled Hono + sharp server did not start");
     let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>"#;
-    stream
-        .write_all(
-            format!(
-                "POST /images HTTP/1.1\r\nHost: localhost\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{svg}",
-                svg.len()
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).unwrap();
+    let request = format!(
+        "POST /images HTTP/1.1\r\nHost: localhost\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{svg}",
+        svg.len()
+    );
+    let response = exchange_http_request(&mut stream, request.as_bytes(), SERVER_IO_TIMEOUT)
+        .unwrap_or_else(|error| fail_with_server_log(&child.stderr_log, &error));
     child.kill().unwrap();
     child.wait().unwrap();
-    let mut stderr = String::new();
-    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    let stderr = read_log(&child.stderr_log);
     assert!(
         response.starts_with(b"HTTP/1.1 200"),
         "{}\n{stderr}",
@@ -1186,14 +1295,13 @@ fn builds_and_serves_hono_react_prisma_postgres_when_enabled() {
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = probe.local_addr().unwrap().port();
     drop(probe);
-    let mut child = Command::new(&output)
-        .current_dir(&dir)
-        .env("DATABASE_URL", &database_url)
-        .env("PORT", port.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = spawn_with_log(
+        Command::new(&output)
+            .current_dir(&dir)
+            .env("DATABASE_URL", &database_url)
+            .env("PORT", port.to_string()),
+        &dir,
+    );
     let request = |method: &str, path: &str, body: &str| {
         let mut stream = (0..500)
             .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
@@ -1204,18 +1312,13 @@ fn builds_and_serves_hono_react_prisma_postgres_when_enabled() {
                 }
             })
             .expect("compiled Hono + React + Prisma server did not start");
-        stream
-            .write_all(
-                format!(
-                    "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            )
-            .unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
-        response
+        let raw = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let response = exchange_http_request(&mut stream, raw.as_bytes(), SERVER_IO_TIMEOUT)
+            .unwrap_or_else(|error| fail_with_server_log(&child.stderr_log, &error));
+        String::from_utf8_lossy(&response).into_owned()
     };
     assert!(request("GET", "/", "").contains("<title>Thaw掲示板</title>"));
     assert!(request("GET", "/api/posts", "").contains(r#"{"posts":[]}"#));

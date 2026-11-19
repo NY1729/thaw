@@ -464,10 +464,7 @@ async function main(): Promise<void> {
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
-    let child = Command::new(&output)
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = spawn_with_log(&mut Command::new(&output), &dir);
     use std::io::{Read, Write};
     let address = format!("127.0.0.1:{}", 20_000 + std::process::id() % 20_000);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -481,9 +478,7 @@ async function main(): Promise<void> {
             Err(error) => panic!("failed to connect to ws server: {error}"),
         }
     };
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
+    set_io_timeouts(&stream, SERVER_IO_TIMEOUT).unwrap();
     stream
         .write_all(
             format!(
@@ -493,7 +488,11 @@ async function main(): Promise<void> {
         )
         .unwrap();
     let mut response = [0_u8; 1024];
-    let response_len = stream.read(&mut response).unwrap();
+    let response_len = expect_io(
+        stream.read(&mut response),
+        "reading the websocket upgrade response",
+        &child.stderr_log,
+    );
     assert!(
         String::from_utf8_lossy(&response[..response_len]).starts_with("HTTP/1.1 101"),
         "{}",
@@ -503,11 +502,16 @@ async function main(): Promise<void> {
         .write_all(&[0x81, 0x85, 1, 2, 3, 4, b'h' ^ 1, b'e' ^ 2, b'l' ^ 3, b'l' ^ 4, b'o' ^ 1])
         .unwrap();
     let mut frame = [0_u8; 7];
-    stream.read_exact(&mut frame).unwrap();
+    expect_io(
+        stream.read_exact(&mut frame),
+        "reading the websocket echo frame",
+        &child.stderr_log,
+    );
     assert_eq!(&frame, b"\x82\x05hello");
-    let result = child.wait_with_output().unwrap();
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "hello\n");
+    let status = wait_with_deadline(&mut child, SERVER_IO_TIMEOUT);
+    let stderr = read_log(&child.stderr_log);
+    assert!(status.success(), "{stderr}");
+    assert_eq!(read_log(&child.stdout_log), "hello\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -540,7 +544,7 @@ function main(): void {
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
-    let mut child = Command::new(&output).spawn().unwrap();
+    let mut child = spawn_with_log(&mut Command::new(&output), &dir);
 
     use std::io::{Read, Write};
     let address = format!("127.0.0.1:{port}");
@@ -554,9 +558,7 @@ function main(): void {
             Err(error) => panic!("failed to connect to Socket.IO server: {error}"),
         }
     };
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
+    set_io_timeouts(&stream, SERVER_IO_TIMEOUT).unwrap();
     stream
         .write_all(
             format!(
@@ -568,7 +570,11 @@ function main(): void {
     let mut response = Vec::new();
     while !response.ends_with(b"\r\n\r\n") {
         let mut byte = [0_u8; 1];
-        stream.read_exact(&mut byte).unwrap();
+        expect_io(
+            stream.read_exact(&mut byte),
+            "reading the Socket.IO upgrade response",
+            &child.stderr_log,
+        );
         response.push(byte[0]);
     }
     assert!(
@@ -589,9 +595,17 @@ function main(): void {
     };
     let read_frame = |stream: &mut std::net::TcpStream| {
         let mut header = [0_u8; 2];
-        stream.read_exact(&mut header).unwrap();
+        expect_io(
+            stream.read_exact(&mut header),
+            "reading a Socket.IO frame header",
+            &child.stderr_log,
+        );
         let mut payload = vec![0_u8; usize::from(header[1] & 0x7f)];
-        stream.read_exact(&mut payload).unwrap();
+        expect_io(
+            stream.read_exact(&mut payload),
+            "reading a Socket.IO frame payload",
+            &child.stderr_log,
+        );
         payload
     };
     assert!(read_frame(&mut stream).starts_with(b"0{"));
@@ -675,7 +689,7 @@ function main(): void {
     )
     .unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
-    let mut server = Command::new(&server_output).spawn().unwrap();
+    let mut server = spawn_with_log(&mut Command::new(&server_output), &dir);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
         assert!(
@@ -684,18 +698,15 @@ function main(): void {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let mut client = Command::new(&client_output)
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut client = spawn_with_log(&mut Command::new(&client_output), &dir);
     std::thread::sleep(std::time::Duration::from_secs(3));
     if client.try_wait().unwrap().is_none() {
         client.kill().unwrap();
     }
-    let client = client.wait_with_output().unwrap();
+    client.wait().unwrap();
     server.kill().unwrap();
     server.wait().unwrap();
-    let stderr = String::from_utf8_lossy(&client.stderr);
+    let stderr = read_log(&client.stderr_log);
     assert!(stderr.lines().any(|line| line == "ack:hello"), "{stderr}");
     assert!(stderr.lines().any(|line| line == "hello"), "{stderr}");
     assert!(

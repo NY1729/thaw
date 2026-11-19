@@ -11,6 +11,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use swc_ecma_visit::{Visit, VisitWith};
 use thaw_parser::ast as a;
 
+use crate::scan_names::{
+    is_node_global, is_node_method_name, node_global_covered, node_global_has,
+};
+
 /// Per-package scan result.
 #[derive(Debug, Default, Clone)]
 pub struct Report {
@@ -310,16 +314,205 @@ fn parse_factories(source: &str) -> Result<BundleParts, String> {
     })
 }
 
-/// Factory keys reachable from the entry through `require_maps`.
+/// What a factory's source names for [`reachable`]: whether it has a `require`-like call with a computed spec, every
+/// string literal in it (a spec written out, `require('x')`, `__thaw_require('x')`, a template without holes), and
+/// the literal fragments of its computed specs (see [`spec_fragments`]).
+#[derive(Default)]
+struct RequireNames {
+    dynamic: bool,
+    literals: HashSet<String>,
+    /// a computed spec starts with this literal (`'./lib/' + name`): the entries it prefixes are named
+    prefixes: Vec<String>,
+    /// a computed spec ends with this literal (`name + '.js'`): the entries it suffixes are named
+    suffixes: Vec<String>,
+    /// a computed spec whose literal fragments do not tell which entries it names: every entry is followed
+    unclassified: bool,
+}
+
+/// The literal part of a computed spec that tells which map entries it can name.
+enum Fragments {
+    Prefix(String),
+    Suffix(String),
+    Unclassified,
+    /// no literal anywhere in the expression (a variable, a member, a call of variables): it names nothing extra
+    Bare,
+}
+
+/// `a + b + c` as its operands, left to right (parentheses on the left spine are looked through).
+fn plus_operands<'e>(e: &'e a::Expr, out: &mut Vec<&'e a::Expr>) {
+    match e {
+        a::Expr::Paren(p) => plus_operands(&p.expr, out),
+        a::Expr::Bin(b) if b.op == a::BinaryOp::Add => {
+            plus_operands(&b.left, out);
+            out.push(&b.right);
+        }
+        _ => out.push(e),
+    }
+}
+
+/// Classifies the argument of a computed `require`. A concatenation whose first operand is a string literal starts
+/// with it (a prefix); one whose last operand is a string literal ends with it (a suffix: the start is unknown, so
+/// `name + '.js'` names every entry ending in `.js`). A template with holes uses its first non-empty quasi the same
+/// way, else its last one. Any other expression that contains a string literal is unclassified (every entry is
+/// followed); an expression with none is bare and names nothing extra.
+fn spec_fragments(arg: &a::Expr) -> Fragments {
+    let text = |e: &a::Expr| match e {
+        a::Expr::Lit(a::Lit::Str(s)) => s.value.as_str().map(str::to_string),
+        _ => None,
+    };
+    let is_str = |e: &a::Expr| matches!(e, a::Expr::Lit(a::Lit::Str(_)));
+    let contains_literal = || {
+        let mut sub = RequireNames::default();
+        arg.visit_with(&mut sub);
+        !sub.literals.is_empty()
+    };
+    match arg {
+        a::Expr::Paren(p) => spec_fragments(&p.expr),
+        a::Expr::Lit(a::Lit::Str(_)) => {
+            text(arg).map_or(Fragments::Unclassified, Fragments::Prefix)
+        }
+        a::Expr::Tpl(t) => {
+            let quasis: Option<Vec<String>> = t
+                .quasis
+                .iter()
+                .map(|q| {
+                    q.cooked
+                        .as_ref()
+                        .and_then(|c| c.as_str())
+                        .map(str::to_string)
+                })
+                .collect();
+            let Some(quasis) = quasis else {
+                return Fragments::Unclassified;
+            };
+            if let Some(first) = quasis.first().filter(|s| !s.is_empty()) {
+                return Fragments::Prefix(first.clone());
+            }
+            if let Some(last) = quasis.last().filter(|s| !s.is_empty()) {
+                return Fragments::Suffix(last.clone());
+            }
+            if quasis.iter().any(|s| !s.is_empty()) {
+                Fragments::Unclassified
+            } else {
+                Fragments::Bare
+            }
+        }
+        a::Expr::Bin(b) if b.op == a::BinaryOp::Add => {
+            let mut ops = Vec::new();
+            plus_operands(arg, &mut ops);
+            if is_str(ops[0]) {
+                let run: Option<Vec<String>> = ops
+                    .iter()
+                    .take_while(|e| is_str(e))
+                    .map(|e| text(e))
+                    .collect();
+                return run.map_or(Fragments::Unclassified, |v| Fragments::Prefix(v.concat()));
+            }
+            if is_str(ops[ops.len() - 1]) {
+                let run: Option<Vec<String>> = ops
+                    .iter()
+                    .rev()
+                    .take_while(|e| is_str(e))
+                    .map(|e| text(e))
+                    .collect();
+                return run.map_or(Fragments::Unclassified, |mut v| {
+                    v.reverse();
+                    Fragments::Suffix(v.concat())
+                });
+            }
+            if contains_literal() {
+                Fragments::Unclassified
+            } else {
+                Fragments::Bare
+            }
+        }
+        _ if contains_literal() => Fragments::Unclassified,
+        _ => Fragments::Bare,
+    }
+}
+
+impl Visit for RequireNames {
+    fn visit_lit(&mut self, n: &a::Lit) {
+        if let a::Lit::Str(s) = n {
+            if let Some(v) = s.value.as_str() {
+                self.literals.insert(v.to_string());
+            }
+        }
+    }
+    fn visit_tpl(&mut self, n: &a::Tpl) {
+        for q in &n.quasis {
+            if let Some(c) = q.cooked.as_ref().and_then(|c| c.as_str()) {
+                self.literals.insert(c.to_string());
+            }
+        }
+        n.visit_children_with(self);
+    }
+    fn visit_call_expr(&mut self, n: &a::CallExpr) {
+        if let a::Callee::Expr(c) = &n.callee {
+            if matches!(&**c, a::Expr::Ident(i) if matches!(&*i.sym, "require" | "requireAsync" | "__thaw_require"))
+            {
+                match n.args.first() {
+                    Some(x)
+                        if x.spread.is_none()
+                            && matches!(&*x.expr, a::Expr::Lit(a::Lit::Str(_))) => {}
+                    Some(x) if x.spread.is_none() => {
+                        self.dynamic = true;
+                        match spec_fragments(&x.expr) {
+                            Fragments::Prefix(p) => self.prefixes.push(p),
+                            Fragments::Suffix(s) => self.suffixes.push(s),
+                            Fragments::Unclassified => self.unclassified = true,
+                            Fragments::Bare => {}
+                        }
+                    }
+                    // `require()` and `require(...xs)`: the spec is whatever the list yields
+                    _ => {
+                        self.dynamic = true;
+                        self.unclassified = true;
+                    }
+                }
+            }
+        }
+        n.visit_children_with(self);
+    }
+}
+
+/// Factory keys reachable from the entry through `require_maps`. A factory with a computed require (host.rs
+/// `require_in` looks the computed string up in that factory's own map) follows only the map entries that its
+/// computed specs can name: those written out as a string literal, those starting with a leading literal fragment,
+/// and those ending with a trailing one (see [`spec_fragments`]). A computed spec with no literal fragment names
+/// nothing extra; one whose fragments cannot be classified makes the factory follow every entry. A factory without
+/// a computed require follows every entry of its map, as a bundler's catch-all map is then the only source of specs.
 pub fn reachable(parts: &BundleParts) -> BTreeSet<String> {
+    let factories: HashMap<&str, &a::Function> = parts
+        .factories
+        .iter()
+        .map(|(k, f)| (k.as_str(), f))
+        .collect();
     let mut seen = BTreeSet::new();
     let mut stack = vec![parts.entry.clone()];
     while let Some(k) = stack.pop() {
         if !seen.insert(k.clone()) {
             continue;
         }
-        if let Some(m) = parts.require_maps.get(&k) {
-            stack.extend(m.values().cloned());
+        let Some(m) = parts.require_maps.get(&k) else {
+            continue;
+        };
+        let names = factories.get(k.as_str()).map(|f| {
+            let mut names = RequireNames::default();
+            f.visit_with(&mut names);
+            names
+        });
+        match names {
+            Some(names) if names.dynamic && !names.unclassified => stack.extend(
+                m.iter()
+                    .filter(|(spec, _)| {
+                        names.literals.contains(*spec)
+                            || names.prefixes.iter().any(|p| spec.starts_with(p.as_str()))
+                            || names.suffixes.iter().any(|s| spec.ends_with(s.as_str()))
+                    })
+                    .map(|(_, key)| key.clone()),
+            ),
+            _ => stack.extend(m.values().cloned()),
         }
     }
     seen
@@ -379,7 +572,8 @@ fn is_nullish_literal(e: &a::Expr) -> bool {
 }
 
 /// The `CallSite` methods the engine implements (the `siteMethods` object of builtins.rs; a test pins the two lists
-/// together). A call of one of these names is not a missing method.
+/// together). A call of one of these names is not a missing method. Node-parity: the method rule (`method:X`) flags a
+/// call only when Node 22 has `X` (`scan_names::is_node_method_name`) and thaw-js does not know it.
 pub(crate) const CALLSITE_METHODS: &[&str] = &[
     "getThis",
     "getTypeName",
@@ -798,6 +992,9 @@ impl Visit for Walker {
 /// - axios: `AxiosHeaders` accessors are installed from a name list (`getContentType`, ...), `zlib.createZstdDecompress`
 ///   is feature-tested, `postMessage`/`send` sit behind `typeof` / XHR-only paths, `isDeepStrictEqual` is http2 session
 ///   reuse (http2 needs TLS, which thaw-js does not link), `onSocket` is `agent-base`'s `typeof` check.
+///
+/// Node-parity (R2/R4/R5): a member or global Node 22 lacks is no finding at all, so the `process.type|browser|__nwjs`
+/// entries below are inert now (Node lacks them too); only `allowedNodeEnvironmentFlags` (a Node member) still needs its entry.
 fn tolerated(feature: &str, key: &str) -> bool {
     const AXIOS_METHODS: &[&str] = &[
         "method:getContentType",
@@ -869,6 +1066,19 @@ fn addon_tolerated(feature: &str, node_require: bool) -> bool {
         || (feature == "require:dynamic" && node_require)
         || feature == "global:__non_webpack_require__"
         || (feature.starts_with("method:") && feature != "method:dlopen")
+}
+
+/// A `__`-prefixed name: a host-internal or loader convention (`__thaw_*` natives, `__non_webpack_require__`), never a
+/// Node API name. The Node-parity relaxations of R4 (members) and R5 (globals) do not apply to it: it stays a blocker
+/// exactly as before the rules. R2 (method names) has no such carve-out: `__emitTokens` is a package-own method guarded
+/// by a probe and must stay clean.
+fn is_host_internal(name: &str) -> bool {
+    name.starts_with("__")
+}
+
+/// The R5 test for a free name: Node 22 defines it, or it is host-internal (see [`is_host_internal`]).
+fn is_node_or_host_internal(name: &str) -> bool {
+    is_node_global(name) || is_host_internal(name)
 }
 
 /// Scan a registry bundle.
@@ -962,6 +1172,8 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
             // UMD wrappers fall back to `self` only when `globalThis` is missing
             let umd_self =
                 r == "self" && (w.refs.contains("globalThis") || w.probed.contains("globalThis"));
+            // Node-parity (R5): a free name Node 22 does not define is a ReferenceError on Node too, so it is no blocker.
+            // Carve-out: a `__`-prefixed name is host-internal or a loader convention, never a Node name: still a blocker.
             if !w.declared.contains(r)
                 && !umd_self
                 && !globals.contains(r)
@@ -969,6 +1181,7 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
                 && !w.probed.contains(r)
                 // service-worker globals Node does not define either: a ReferenceError there, same here
                 && r != "addEventListener"
+                && is_node_or_host_internal(r)
             {
                 add(&mut report, format!("global:{r}"), 1, key);
             }
@@ -979,15 +1192,20 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
                 && !w.declared.contains(r)
                 && !params.contains(&r.as_str())
                 && !w.probed.contains(r)
+                && is_node_or_host_internal(r)
             {
                 add(&mut report, format!("global:{r}"), 1, key);
             }
         }
         for (g, p) in &w.builtin_members {
+            // Node-parity (R4): a member Node 22 lacks is undefined on Node too. A root the Node data does not
+            // model (`Math`, `Array`, ...) keeps the old flag: the data cannot tell that Node lacks the member.
+            // Carve-out: a `__`-prefixed member (`globalThis.__thaw_*`) is host-internal, so it stays a blocker.
             if interp.is_builtin_global(g)
                 && g != "File"
                 && !w.declared.contains(g)
                 && !interp.builtin_member_exists(g, p)
+                && (!node_global_covered(g) || node_global_has(g, p) || is_host_internal(p))
                 // the package creates its own `globalThis.x` slot (`globalThis.x ??= {}`)
                 && !(g == "globalThis" && (defined.contains(p) || w.probed_members.contains(p)))
                 && !(module_loader && g == "globalThis" && p == "__thaw_bundle_create_require")
@@ -998,10 +1216,14 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
         for m in &w.called {
             // `util.styleText` calls `stream.hasColors()` only after `typeof stream.hasColors === 'function'`
             // `process.dlopen` is exported now (it throws ERR_DLOPEN_FAILED), but no addon loads at runtime, so
-            // a bundle that calls it stays a blocker, as it was when the member was missing.
+            // a bundle that calls it stays a blocker, as it was when the member was missing. `defined` never excuses
+            // it: an os-constants object's `dlopen` key (Prisma) is no addon load the bundle serves.
+            // Node-parity (R2): a name Node 22 does not have is the package's own method, never a missing one.
             if (!known_methods.contains(m) || m == "dlopen")
-                && !defined.contains(m)
-                && !w.probed_methods.contains(m)
+                && is_node_method_name(m)
+                && (m == "dlopen" || !defined.contains(m))
+                // a probe of `dlopen` proves nothing: thaw-js has the member and it throws, so the probe is true
+                && (m == "dlopen" || !w.probed_methods.contains(m))
                 && m != "hasColors"
             {
                 add(&mut report, format!("method:{m}"), 1, key);
