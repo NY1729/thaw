@@ -2594,6 +2594,14 @@ fn symbol_keyed_define_property_and_to_string_tag() {
 }
 
 #[test]
+fn object_assign_and_spread_copy_enumerable_symbol_keys() {
+    assert_eq!(
+        one("const S = Symbol('s'); const N = Symbol('n'); const o = { [S]: 1 }; Object.defineProperty(o, N, { value: 2 }); const c = Object.assign({}, o); console.log(c[S], ({ ...o })[S], c[N], ({ ...o })[N], Object.getOwnPropertySymbols(c).length)"),
+        "1 1 undefined undefined 1"
+    );
+}
+
+#[test]
 fn namespace_globals_carry_to_string_tag_and_inspect_as_tagged_objects() {
     assert_eq!(
         one("console.log(Object.prototype.toString.call(Math), Object.prototype.toString.call(JSON), Object.prototype.toString.call(Reflect))"),
@@ -3357,6 +3365,101 @@ var __thaw_bundle_entry_key = \"p/index.js\";
     assert!(report.is_clean(), "{:?}", report.blockers);
     let unguarded = src.replace("options?.in ? options.in(date) : date", "options.in(date)");
     assert!(!crate::scan::scan_bundle(&unguarded).unwrap().is_clean());
+}
+
+#[test]
+fn scan_accepts_negated_and_null_compared_method_probes() {
+    // deepmerge, socket.io, highlight.js: the option/language key is probed with `!x.m`, never called unguarded
+    let probes = [
+        "exports.dm = function (options, key) { if (!options.customMerge) { return 1; } return options.customMerge(key); };",
+        "exports.sk = function (req, fn) { if (!this.opts.allowRequest) return fn(); return this.opts.allowRequest(req, fn); };",
+        "exports.hl = function (language) { if (!language.__emitTokens) return 0; return language.__emitTokens(1); };",
+        "exports.or = function (o) { return !o.customMerge || o.customMerge(1); };",
+        "exports.nl = function (o) { if (o.customMerge == null) return 0; return o.customMerge(1); };",
+        "exports.ne = function (o) { return o.customMerge !== null ? o.customMerge(1) : 0; };",
+        "exports.un = function (o) { if (o.customMerge === undefined) return 0; return o.customMerge(1); };",
+        "exports.ty = function (o) { return typeof o.customMerge === 'function' ? o.customMerge(1) : 0; };",
+    ];
+    for code in probes {
+        let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
+            .ok()
+            .unwrap();
+        assert!(
+            !report.blockers.contains_key("method:customMerge")
+                && !report.blockers.contains_key("method:allowRequest")
+                && !report.blockers.contains_key("method:__emitTokens"),
+            "{code}: {:?}",
+            report.blockers
+        );
+        assert!(report.is_clean(), "{code}: {:?}", report.blockers);
+    }
+    // the same call without any probe is still refused
+    let unguarded = one_module_bundle("exports.a = function (o) { return o.customMerge(1); };", "");
+    let report = crate::scan::scan_bundle(&unguarded).ok().unwrap();
+    assert!(report.blockers.contains_key("method:customMerge"));
+    // a probe excuses calls of the probed name only
+    let other = one_module_bundle(
+        "exports.a = function (o) { if (!o.customMerge) return 0; return o.other(1); };",
+        "",
+    );
+    let report = crate::scan::scan_bundle(&other).ok().unwrap();
+    assert!(report.blockers.contains_key("method:other"));
+    assert!(!report.blockers.contains_key("method:customMerge"));
+}
+
+#[test]
+fn scan_refuses_unguarded_host_method_calls_the_probe_rules_do_not_excuse() {
+    let refused = [
+        ("exports.a = function (c) { return c.refCounted(); };", "method:refCounted"),
+        ("exports.a = function (m) { process.dlopen(m, 'x'); };", "method:dlopen"),
+        ("exports.a = function (c) { return c.publish('x'); };", "method:publish"),
+        ("exports.a = function () { return this.execute(); };", "method:execute"),
+        (
+            "exports.a = class C extends EventEmitter { f() { return this.nonexistentNodeThing(); } };",
+            "method:nonexistentNodeThing",
+        ),
+        (
+            "exports.a = class C { f() { return function () { return this.execute(); }; } };",
+            "method:execute",
+        ),
+    ];
+    for (code, blocker) in refused {
+        let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
+            .ok()
+            .unwrap();
+        assert!(
+            report.blockers.contains_key(blocker),
+            "{code}: {:?}",
+            report.blockers
+        );
+    }
+}
+
+#[test]
+fn scan_does_not_flag_this_calls_inside_a_class_without_extends() {
+    // drizzle QueryPromise: `execute` is an abstract method implemented by subclasses in other modules
+    let abstract_base = one_module_bundle(
+        "exports.q = class QueryPromise { then(a, b) { return this.execute().then(a, b); } };",
+        "",
+    );
+    let report = crate::scan::scan_bundle(&abstract_base).ok().unwrap();
+    assert!(
+        !report.blockers.contains_key("method:execute"),
+        "{:?}",
+        report.blockers
+    );
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    // a class that extends something may inherit a host method: still flagged
+    let extends = one_module_bundle(
+        "exports.q = class Q extends Base { then(a, b) { return this.execute().then(a, b); } };",
+        "",
+    );
+    let report = crate::scan::scan_bundle(&extends).ok().unwrap();
+    assert!(
+        report.blockers.contains_key("method:execute"),
+        "{:?}",
+        report.blockers
+    );
 }
 
 /// One-module registry bundle `p/index.js` whose body is `code` and whose require map is `map` (JSON object body).

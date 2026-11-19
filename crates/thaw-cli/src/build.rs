@@ -593,7 +593,9 @@ fn build_with_thaw_js_routing_inner(
                     let sep = if refused.is_empty() { "" } else { "; " };
                     return Err(format!("unsupported on thaw-js: {error}{sep}{refused}"));
                 }
-                ThawJsFallbackMode::Warn => eprintln!("FALLBACK: {error}"),
+                ThawJsFallbackMode::Warn => {
+                    eprintln!("FALLBACK: {}", thaw_js_fallback_message(&error, &take_thaw_js_refusals()))
+                }
                 ThawJsFallbackMode::Silent => {
                     if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
                         eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
@@ -1138,7 +1140,7 @@ fn build_with_native_mode_routed(
         let why = if refusals.is_empty() {
             "the program links QuickJS".to_string()
         } else {
-            refusals.join("; ")
+            refusals.iter().map(|(package, why)| format!("package `{package}` stays on QuickJS: {why}")).collect::<Vec<_>>().join("; ")
         };
         if thaw_js_fallback_mode() == ThawJsFallbackMode::Error {
             return Err(format!("unsupported on thaw-js: {why}"));

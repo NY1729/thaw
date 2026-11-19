@@ -75,6 +75,7 @@ mod procstate;
 mod proxy;
 mod reflect;
 pub mod scan;
+pub mod scan_names;
 mod strict;
 mod sysio;
 mod tls;
@@ -2469,6 +2470,26 @@ impl Interp {
         }
     }
 
+    /// Own enumerable symbol-keyed properties (raw `@@sym:<id>` keys) in insertion order: the symbol
+    /// half of CopyDataProperties, which `own_keys` hides. Copy sites run it after `own_keys`.
+    // ponytail: proxy symbol keys skipped (proxy_own_keys is string-only); add when a package needs them.
+    pub(crate) fn own_enumerable_symbol_keys(&self, v: &Value) -> Vec<Rc<str>> {
+        let Value::Object(o) = v else {
+            return Vec::new();
+        };
+        o.raw_props
+            .borrow()
+            .iter()
+            .filter(|p| {
+                p.enumerable
+                    && p.key
+                        .strip_prefix("@@sym:")
+                        .is_some_and(|id| id.parse::<u64>().is_ok())
+            })
+            .map(|p| p.key.clone())
+            .collect()
+    }
+
     pub(crate) fn throw_error<T>(&mut self, class: &str, message: &str) -> R<T> {
         let ctor = self
             .lookup(&self.global.clone(), class)
@@ -3505,7 +3526,11 @@ impl Interp {
                         }
                         a::ObjectPatProp::Rest(r) => {
                             let rest = self.plain();
-                            for k in self.own_keys(&value) {
+                            let keys = self
+                                .own_keys(&value)
+                                .into_iter()
+                                .chain(self.own_enumerable_symbol_keys(&value));
+                            for k in keys {
                                 if !used.contains(&k) {
                                     let v = self.get(&value, &k)?;
                                     put(&rest, &k, v);
@@ -4458,7 +4483,11 @@ impl Interp {
                     match p {
                         a::PropOrSpread::Spread(sp) => {
                             let src = self.eval(&sp.expr, scope)?;
-                            for k in self.own_keys(&src) {
+                            let keys = self
+                                .own_keys(&src)
+                                .into_iter()
+                                .chain(self.own_enumerable_symbol_keys(&src));
+                            for k in keys {
                                 let v = self.get(&src, &k)?;
                                 put(&obj, &k, v);
                             }

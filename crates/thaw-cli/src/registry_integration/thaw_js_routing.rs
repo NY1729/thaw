@@ -46,16 +46,16 @@ thread_local! {
 thread_local! {
     /// Packages the LAST shim-generation pass left on QuickJS (`THAW_JS_FALLBACK` warn/error). A pass can refuse a
     /// package that the next pass (with forced fallbacks) accepts, so only the final pass's list counts.
-    static THAW_JS_REFUSALS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static THAW_JS_REFUSALS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Replaces the refusal list with the current pass's.
-fn set_thaw_js_refusals(refusals: Vec<String>) {
+/// Replaces the refusal list (`(package, why)`) with the current pass's.
+fn set_thaw_js_refusals(refusals: Vec<(String, String)>) {
     THAW_JS_REFUSALS.with(|r| *r.borrow_mut() = refusals);
 }
 
 /// The final pass's refusals (cleared).
-fn take_thaw_js_refusals() -> Vec<String> {
+fn take_thaw_js_refusals() -> Vec<(String, String)> {
     THAW_JS_REFUSALS.with(|r| std::mem::take(&mut *r.borrow_mut()))
 }
 
@@ -103,6 +103,34 @@ fn thaw_js_recorded_refusals_text() -> String {
             .collect::<Vec<_>>()
             .join("; ")
     })
+}
+
+/// The `FALLBACK:` line of a routed build that stayed on QuickJS: the error, then the refused packages (sorted, one
+/// reason each: its first line, its first term, at most 80 chars; at most 8 packages, then `+N more`).
+fn thaw_js_fallback_message(error: &str, refusals: &[(String, String)]) -> String {
+    const MAX_PACKAGES: usize = 8;
+    const MAX_REASON: usize = 80;
+    let mut by_package: std::collections::BTreeMap<&str, String> = std::collections::BTreeMap::new();
+    for (package, why) in refusals {
+        by_package.entry(package.as_str()).or_insert_with(|| {
+            let line = why.lines().next().unwrap_or_default();
+            let term = line.rsplit(": ").next().unwrap_or_default().split(", ").next().unwrap_or_default();
+            term.trim().chars().take(MAX_REASON).collect()
+        });
+    }
+    if by_package.is_empty() {
+        return error.to_string();
+    }
+    let total = by_package.len();
+    let mut items: Vec<String> = by_package
+        .iter()
+        .take(MAX_PACKAGES)
+        .map(|(package, why)| if why.is_empty() { package.to_string() } else { format!("{package} ({why})") })
+        .collect();
+    if total > MAX_PACKAGES {
+        items.push(format!("+{} more", total - MAX_PACKAGES));
+    }
+    format!("{error}; refused: {}", items.join(", "))
 }
 
 /// What happens when thaw-js cannot serve something (`THAW_JS_FALLBACK`): `Silent` keeps the QuickJS
