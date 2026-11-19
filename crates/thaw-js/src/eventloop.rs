@@ -218,6 +218,57 @@ const PROCESS_SIGNALS: [(&str, i32); 15] = [
     ("SIGTSTP", libc::SIGTSTP),
 ];
 
+static PENDING_SIGNALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static HOOKED_SIGNALS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+extern "C" fn record_signal(sig: libc::c_int) {
+    PENDING_SIGNALS.fetch_or(1 << sig, std::sync::atomic::Ordering::Relaxed);
+}
+
+impl Interp {
+    /// Hook the OS signals `process` has listeners for (once each) and emit the ones that arrived.
+    // ponytail: handlers are never restored to SIG_DFL when the last listener is removed.
+    fn poll_process_signals(&mut self) -> R<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        // Node delivers OS signals to the main thread's `process` only; a worker never hooks or consumes them.
+        if crate::worker::is_worker(self) {
+            return Ok(());
+        }
+        for (name, sig) in PROCESS_SIGNALS {
+            if matches!(
+                sig,
+                libc::SIGKILL
+                    | libc::SIGSTOP
+                    | libc::SIGSEGV
+                    | libc::SIGABRT
+                    | libc::SIGPIPE
+                    | libc::SIGCHLD
+            ) {
+                continue;
+            }
+            if HOOKED_SIGNALS.load(Relaxed) & (1 << sig) == 0 && self.has_process_listeners(name) {
+                HOOKED_SIGNALS.fetch_or(1 << sig, Relaxed);
+                unsafe { libc::signal(sig, record_signal as *const () as libc::sighandler_t) };
+            }
+        }
+        // A realm consumes only the signals it has a listener for: another realm on this thread (or a test's
+        // interpreter) polling first must not swallow a signal it cannot deliver.
+        let mut emitted = false;
+        for (name, sig) in PROCESS_SIGNALS {
+            if PENDING_SIGNALS.load(Relaxed) & (1 << sig) != 0 && self.has_process_listeners(name) {
+                PENDING_SIGNALS.fetch_and(!(1 << sig), Relaxed);
+                self.emit(name, &[Value::str(name), Value::Number(sig as f64)])?;
+                emitted = true;
+            }
+        }
+        if emitted {
+            self.run_jobs()?;
+        }
+        Ok(())
+    }
+}
+
 /// A Node-style error of `kind` with a `code` property, ready to throw.
 pub(crate) fn node_error(it: &mut Interp, kind: &str, code: &str, msg: &str) -> Ctl {
     match it.make_error(kind, msg) {
@@ -1431,6 +1482,7 @@ impl Interp {
     /// then hand pending worker events to `globalThis.__thaw_worker_dispatch`.
     fn poll_platform_events(&mut self) -> R<()> {
         crate::napi_bridge::poll();
+        self.poll_process_signals()?;
         let g = Value::Object(self.global_object.clone());
         let f = self.get(&g, "__thaw_poll_platform_events")?;
         if matches!(f, Value::Object(_)) {

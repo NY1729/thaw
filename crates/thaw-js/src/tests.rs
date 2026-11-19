@@ -11105,3 +11105,24 @@ fn class_constructor_arguments_are_its_own() {
         "top"
     );
 }
+
+#[test]
+fn an_os_signal_from_outside_reaches_a_process_listener() {
+    let pid = std::process::id() as i32;
+    std::thread::spawn(move || {
+        // wait for the loop to hook the signal, then deliver it from outside
+        while crate::eventloop::HOOKED_SIGNALS.load(std::sync::atomic::Ordering::Relaxed)
+            & (1 << libc::SIGUSR2)
+            == 0
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        unsafe { libc::kill(pid, libc::SIGUSR2) };
+    });
+    let mut it = Interp::new();
+    it.run("process.on('SIGUSR2', (n, c) => console.log('got', n, c)); setTimeout(() => console.log('end'), 700);")
+        .ok();
+    it.run_event_loop().ok();
+    let out = std::mem::take(&mut it.out);
+    assert_eq!(out, ["got SIGUSR2 12", "end"]);
+}
