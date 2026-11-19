@@ -5453,6 +5453,12 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({ a: 1 }, { [S]: { value: 7 }, ['x' + 'y']: { value: 8 } });\n  console.log(o[S], o.xy, Object.keys(o).join(), Object.getOwnPropertySymbols(o).length);\n  const c: any = Object.assign({}, o);\n  console.log(c.xy, Object.keys(c).join());\n  console.log(JSON.stringify(o));\n}"
+  },
+  {
+    "name": "wasi embedded binary module exits through proc_exit with code 6",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "import { WASI } from 'node:wasi'; function main(): void { const wasi = new WASI({ version: 'preview1', returnOnExit: true, args: ['embedded'], env: { MODE: 'standalone' } }); const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,8,2,96,1,127,0,96,0,0,2,36,1,22,119,97,115,105,95,115,110,97,112,115,104,111,116,95,112,114,101,118,105,101,119,49,9,112,114,111,99,95,101,120,105,116,0,0,3,2,1,1,5,3,1,0,1,7,19,2,6,109,101,109,111,114,121,2,0,6,95,115,116,97,114,116,0,1,10,8,1,6,0,65,6,16,0,11]); const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { wasi_snapshot_preview1: wasi.wasiImport }); console.log(wasi.start(instance)); }"
   }
 ]
 }

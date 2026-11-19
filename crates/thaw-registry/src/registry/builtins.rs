@@ -49,3 +49,97 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         .or_else(|| system::source(name))
         .or_else(|| sqlite::source(name))
 }
+
+/// Method names the registry's JS builtin modules define: every method of a class or object literal in the
+/// source of each Node builtin served to thaw-js (`Channel.prototype.publish = function`, `class X { m() {} }`,
+/// `{ m() {} }`, `{ m: function() {} }`). Module-local helper functions and `__thaw_*` internals are not in it.
+///
+/// The principle: a method name that a served builtin defines is implemented on thaw-js, so a call to it is
+/// not a missing feature. A Node method name that no builtin defines stays a blocker in thaw-js's scanner
+/// (`scan_bundle_with_known` takes this set as the extra known methods).
+pub fn builtin_defined_names() -> &'static std::collections::HashSet<String> {
+    static NAMES: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let names: Vec<String> = serde_json::from_str(NODE_BUILTIN_MODULES_JSON).unwrap_or_default();
+        names
+            .iter()
+            .filter_map(|name| builtin_module_source(name))
+            .flat_map(builtin_source_method_names)
+            .filter(|name| !GENERIC_METHOD_NAMES.contains(&name.as_str()))
+            .collect()
+    })
+}
+
+/// Names too generic to excuse a call: a builtin defines `get`/`on`/`write`/... on its own objects, and a call
+/// `x.get(` on a host object thaw lacks would then pass the scan. They stay blockers as before. (The
+/// channel-specific names graphql and socket.io need, `publish`/`runStores`/`traceSync`/`unsubscribe`, are not here.)
+const GENERIC_METHOD_NAMES: &[&str] = &[
+    "add", "bind", "close", "connect", "end", "error", "emit", "format", "get", "has", "listen", "on", "once", "open",
+    "pipe", "push", "read", "resolve", "reset", "run", "send", "set", "start", "stop", "subscribe", "write",
+];
+
+fn builtin_source_method_names(source: &str) -> Vec<String> {
+    let Ok(module) = thaw_parser::parse_javascript(source) else {
+        return Vec::new();
+    };
+    let mut names = BuiltinMethodNames::default();
+    swc_ecma_visit::VisitWith::visit_with(&module, &mut names);
+    names.0
+}
+
+#[derive(Default)]
+struct BuiltinMethodNames(Vec<String>);
+
+impl BuiltinMethodNames {
+    fn add_key(&mut self, key: &thaw_parser::ast::PropName) {
+        use thaw_parser::ast::PropName;
+        let name = match key {
+            PropName::Ident(i) => Some(i.sym.to_string()),
+            PropName::Str(s) => s.value.as_str().map(str::to_string),
+            _ => None,
+        };
+        self.add_name(name);
+    }
+    fn add_name(&mut self, name: Option<String>) {
+        if let Some(name) = name.filter(|n| !n.is_empty() && !n.starts_with("__thaw")) {
+            self.0.push(name);
+        }
+    }
+}
+
+fn is_fn_value(e: &thaw_parser::ast::Expr) -> bool {
+    use thaw_parser::ast::Expr;
+    match e {
+        Expr::Fn(_) | Expr::Arrow(_) => true,
+        Expr::Paren(p) => is_fn_value(&p.expr),
+        _ => false,
+    }
+}
+
+impl swc_ecma_visit::Visit for BuiltinMethodNames {
+    fn visit_class_method(&mut self, n: &thaw_parser::ast::ClassMethod) {
+        self.add_key(&n.key);
+        swc_ecma_visit::VisitWith::visit_children_with(n, self);
+    }
+    fn visit_method_prop(&mut self, n: &thaw_parser::ast::MethodProp) {
+        self.add_key(&n.key);
+        swc_ecma_visit::VisitWith::visit_children_with(n, self);
+    }
+    fn visit_key_value_prop(&mut self, n: &thaw_parser::ast::KeyValueProp) {
+        if is_fn_value(&n.value) {
+            self.add_key(&n.key);
+        }
+        swc_ecma_visit::VisitWith::visit_children_with(n, self);
+    }
+    fn visit_assign_expr(&mut self, n: &thaw_parser::ast::AssignExpr) {
+        use thaw_parser::ast::{AssignTarget, MemberProp, SimpleAssignTarget};
+        if let AssignTarget::Simple(SimpleAssignTarget::Member(m)) = &n.left {
+            if let MemberProp::Ident(p) = &m.prop {
+                if is_fn_value(&n.right) {
+                    self.add_name(Some(p.sym.to_string()));
+                }
+            }
+        }
+        swc_ecma_visit::VisitWith::visit_children_with(n, self);
+    }
+}

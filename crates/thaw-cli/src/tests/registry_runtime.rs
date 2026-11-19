@@ -2128,9 +2128,14 @@ fn bare_import_resolution_errors_include_source_location() {
 #[test]
 fn builds_and_runs_embedded_wasi_preview1_module() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-wasi-preview1-{}", std::process::id()));
-    let registry = dir.join("modules");
-    let package = registry.join("wasi-fixture");
+    // A real npm layout (not a registry script): the bundler records `node:wasi` as a require target.
+    let package = dir.join("node_modules").join("wasi-fixture");
     std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"wasi-fixture","version":"1.0.0","types":"./package.d.ts","main":"./bundle.js"}"#,
+    )
+    .unwrap();
     std::fs::write(
         package.join("package.d.ts"),
         "export declare function run(): number;\n",
@@ -2138,17 +2143,12 @@ fn builds_and_runs_embedded_wasi_preview1_module() {
     .unwrap();
     std::fs::write(
             package.join("bundle.js"),
-            r#"module.exports = { run: function () {
-                 var options = { args: ['embedded'], env: { MODE: 'standalone' }, preopens: {}, returnOnExit: true, version: 'preview1' };
-                 var imports = { wasi_snapshot_preview1: Object.freeze({ __thawWasiOptions: JSON.stringify(options) }) };
-                 var source = new TextEncoder().encode(`(module
-                   (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
-                   (memory (export "memory") 1)
-                   (func (export "_start") i32.const 6 call $exit))`);
-                 var instance = new WebAssembly.Instance(new WebAssembly.Module(source), imports);
-                 try { instance.exports._start(); } catch (error) { if (error && error.__thawWasiExit !== undefined) return Number(error.__thawWasiExit); throw error; }
-                 return 0;
-               } };
+            r#"const { WASI } = require('node:wasi');
+module.exports = { run: function () {
+  const wasi = new WASI({ version: 'preview1', returnOnExit: true, args: ['embedded'], env: { MODE: 'standalone' } });
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,1,8,2,96,1,127,0,96,0,0,2,36,1,22,119,97,115,105,95,115,110,97,112,115,104,111,116,95,112,114,101,118,105,101,119,49,9,112,114,111,99,95,101,120,105,116,0,0,3,2,1,1,5,3,1,0,1,7,19,2,6,109,101,109,111,114,121,2,0,6,95,115,116,97,114,116,0,1,10,8,1,6,0,65,6,16,0,11])), { wasi_snapshot_preview1: wasi.wasiImport });
+  return wasi.start(instance);
+} };
 "#,
         )
         .unwrap();
@@ -2159,8 +2159,7 @@ fn builds_and_runs_embedded_wasi_preview1_module() {
     )
     .unwrap();
     let output = dir.join("app");
-    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
-    std::fs::remove_dir_all(&registry).unwrap();
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
         result.status.success(),

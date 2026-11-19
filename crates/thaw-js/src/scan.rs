@@ -1083,16 +1083,30 @@ fn is_node_or_host_internal(name: &str) -> bool {
 
 /// Scan a registry bundle.
 pub fn scan_bundle(source: &str) -> Result<Report, String> {
-    scan_bundle_with(source, false)
+    scan_bundle_with(source, false, &HashSet::new())
 }
 
 /// Scan the bundle of a package that ships a native (`.node`) addon: the loader keys of
 /// [`addon_tolerated`] are accepted on top of [`scan_bundle`]'s rules. Only addon packages use it.
 pub fn scan_addon_bundle(source: &str) -> Result<Report, String> {
-    scan_bundle_with(source, true)
+    scan_bundle_with(source, true, &HashSet::new())
 }
 
-fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
+/// [`scan_bundle`], where every name in `known` is a method thaw-js serves (the registry's JS builtins define
+/// it, see `thaw_registry::builtin_defined_names`): a call `.name(` is not flagged as `method:name`.
+pub fn scan_bundle_with_known(source: &str, known: &HashSet<String>) -> Result<Report, String> {
+    scan_bundle_with(source, false, known)
+}
+
+/// [`scan_addon_bundle`] with the `known` method names of [`scan_bundle_with_known`].
+pub fn scan_addon_bundle_with_known(
+    source: &str,
+    known: &HashSet<String>,
+) -> Result<Report, String> {
+    scan_bundle_with(source, true, known)
+}
+
+fn scan_bundle_with(source: &str, addon: bool, known: &HashSet<String>) -> Result<Report, String> {
     let parts = parse_bundle(source)?;
     let reach = reachable(&parts);
     let mut report = Report {
@@ -1116,6 +1130,8 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
     }
     let mut known_methods: HashSet<String> = interp.known_method_names().into_iter().collect();
     known_methods.extend(CALLSITE_METHODS.iter().map(|m| m.to_string()));
+    // R6: names the registry's JS builtins define are served by thaw-js (see `scan_bundle_with_known`)
+    known_methods.extend(known.iter().cloned());
     let params = [
         "module",
         "exports",

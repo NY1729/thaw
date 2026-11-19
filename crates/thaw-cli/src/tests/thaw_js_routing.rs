@@ -1165,6 +1165,86 @@ fn thaw_js_callable_results_are_live_handles_and_build_under_error_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The picocolors shape: `export =` of an object whose members are callables, used through a default
+/// import (`pc.dim(..)`). The shim must serve the package's value under its `export =` name as a handle.
+#[test]
+fn thaw_js_export_equals_object_default_import_builds_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "export-equals-object",
+        "import pc from 'tjs-colors';\n\
+         function main(): void {\n\
+           console.log(pc.dim('x') + pc.green('y'));\n\
+         }\n",
+        &[(
+            "tjs-colors",
+            "interface Colors { dim(s: string): string; green(s: string): string; }\n\
+             declare const colors: Colors & { createColors: (enabled?: boolean) => Colors };\n\
+             export = colors;\n",
+            "module.exports = { dim: function (s) { return '<' + s + '>'; }, green: function (s) { return '[' + s + ']'; } };\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run(&output), "<x>[y]\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The debug shape: `export =` of a callable with static members, used through a default import
+/// (`createDebug.enable(..)`). The callable must stay a handle, not bind to the typed function symbol.
+#[test]
+fn thaw_js_export_equals_callable_default_import_builds_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "export-equals-callable",
+        "import createDebug from 'tjs-debug';\n\
+         function main(): void {\n\
+           createDebug.enable('app:db');\n\
+           console.log(createDebug.enabled('app:db'));\n\
+           console.log(createDebug.enabled('other'));\n\
+           const log = createDebug('app:db');\n\
+           log('query');\n\
+           console.log('done');\n\
+         }\n",
+        &[(
+            "tjs-debug",
+            "declare var debug: debug.Debug & { debug: debug.Debug; default: debug.Debug };\n\
+             export = debug;\n\
+             export as namespace debug;\n\
+             declare namespace debug {\n\
+               interface Debug { (namespace: string): (...args: any[]) => void; enable: (namespaces: string) => void; enabled: (namespaces: string) => boolean; }\n\
+             }\n",
+            "function debug(ns) { return function () { return ns; }; }\n\
+             var enabledNames = [];\n\
+             debug.enable = function (ns) { enabledNames.push(ns); };\n\
+             debug.enabled = function (name) { return enabledNames.indexOf(name) >= 0; };\n\
+             module.exports = debug;\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run(&output), "true\nfalse\ndone\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn node_perf_hooks_thaw_js_bundle_scans_clean() {
     let bundle = thaw_registry::builtin_bundle_with("node:perf_hooks", &[]).unwrap();
@@ -1858,6 +1938,17 @@ fn thaw_js_default_import_used_only_as_namespace_calls_stays_typed() {
 }
 
 #[test]
+fn thaw_js_export_equals_value_is_served_for_its_default_import_local() {
+    // `export = picocolors`: the value is named after the export, the program binds it under another local
+    let mut pkg = builtin_routing_package("picocolors");
+    pkg.commonjs_export_name = Some("picocolors".into());
+    let needs = |user: &str| thaw_js_value_export_needs_handle(&pkg, user, "picocolors");
+    assert!(needs("import pc from 'picocolors'; const s = pc.dim('x') + 'y';"));
+    // a default import of another module does not bind this export
+    assert!(!needs("import pc from 'other'; const s = pc.dim('x') + 'y';"));
+}
+
+#[test]
 fn thaw_js_default_import_of_another_module_does_not_match() {
     let pkg = path_routing_package_with_join();
     let needs = |user: &str| thaw_js_value_export_needs_handle(&pkg, user, "default");
@@ -2008,6 +2099,54 @@ fn nested_namespace_alias_class_routes_to_thaw_js_without_linking_quickjs() {
         "QuickJS was linked"
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A one-module registry bundle (`pkg/index.js`) whose body is `code`.
+fn one_package_bundle(code: &str) -> String {
+    format!(
+        "module.exports = (function(require) {{\nvar __thaw_bundle_factories = {{\n\"pkg/index.js\": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {{\n{code}\n}},\n}};\nvar __thaw_bundle_require_maps = {{ \"pkg/index.js\": {{}}, }};\nvar __thaw_bundle_entry_key = \"pkg/index.js\";\n}})(globalThis.require);"
+    )
+}
+
+#[test]
+fn builtin_defined_methods_make_graphql_and_socket_io_shaped_packages_eligible() {
+    // R6: `runStores`/`publish`/`traceSync` (graphql's diagnostics_channel calls) and `unsubscribe` (socket.io's
+    // adapter) are methods the registry's JS builtins define, so the packages are served by thaw-js. A Node method
+    // no builtin defines, and `process.dlopen`, stay blockers.
+    let pkg = builtin_routing_package("pkg");
+    let graphql = one_package_bundle(
+        "var dc = process.getBuiltinModule('node:diagnostics_channel');\n\
+         exports.p = dc?.tracingChannel('graphql:parse');\n\
+         exports.run = (ch, ctx, fn) => ch.start.runStores(ctx, () => { ch.error.publish(ctx); return fn(); });\n\
+         exports.trace = (ch, src) => ch.traceSync(() => src, {});",
+    );
+    let socket = one_package_bundle(
+        "exports.del = (websocket, room) => websocket.unsubscribe(room);",
+    );
+    assert!(thaw_js_package_eligible(&pkg, &graphql, "", &Default::default(), ""));
+    assert!(thaw_js_package_eligible(&pkg, &socket, "", &Default::default(), ""));
+    // a method that no builtin defines is still refused
+    let heap = one_package_bundle("exports.h = (p) => p.writeHeapSnapshot();");
+    assert!(!thaw_js_package_eligible(&pkg, &heap, "", &Default::default(), ""));
+    let dlopen = one_package_bundle("exports.d = (m) => process.dlopen(m, 'x.node');");
+    assert!(!thaw_js_package_eligible(&pkg, &dlopen, "", &Default::default(), ""));
+    // execa's IPC `channel.refCounted()`: the child_process builtin defines it since #842, so it is served now
+    let ipc = one_package_bundle("exports.r = (child) => child.channel.refCounted();");
+    assert!(thaw_js_package_eligible(&pkg, &ipc, "", &Default::default(), ""));
+}
+
+#[test]
+fn builtin_defined_method_names_hold_the_builtin_methods_and_no_helpers() {
+    let names = thaw_registry::builtin_defined_names();
+    for name in ["publish", "runStores", "traceSync", "unsubscribe", "refCounted"] {
+        assert!(names.contains(name), "{name} is not defined by a served builtin");
+    }
+    // a Node method no builtin defines is not in the set (`getHeapSnapshot` is: the Worker builtin defines it)
+    assert!(!names.contains("writeHeapSnapshot"));
+    // too generic to excuse a call (`GENERIC_METHOD_NAMES`)
+    assert!(!names.contains("get") && !names.contains("write") && !names.contains("on"));
+    // module-private `__thaw_*` helpers never are
+    assert!(names.iter().all(|name| !name.starts_with("__thaw")));
 }
 
 #[test]
