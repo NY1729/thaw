@@ -360,6 +360,11 @@
         error.code = 'ERR_INVALID_ARG_TYPE';
         throw error;
       }
+      // a message another thread already posted to this port is still in the native queue: take it now
+      if (port.__thawQueue.length === 0 && typeof __thaw_worker_poll_ports === 'function') {
+        const pending = __thaw_worker_poll_ports();
+        if (pending !== '[]') globalThis.__thaw_worker_dispatch(pending);
+      }
       const record = port.__thawQueue.shift();
       return record ? { message: record.data } : undefined;
     },
