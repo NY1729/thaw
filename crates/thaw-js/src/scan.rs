@@ -331,6 +331,30 @@ struct RequireNames {
     unclassified: bool,
 }
 
+/// `x.join(.., 'name')` / `x.resolve(.., 'name')`: the path it returns ends with its last literal argument, so that
+/// literal is a suffix. Not when the literal's last segment names no entry (`''`, `.`, `..`, a trailing `/`).
+fn join_suffix(call: &a::CallExpr) -> Option<String> {
+    let a::Callee::Expr(c) = &call.callee else {
+        return None;
+    };
+    let a::Expr::Member(m) = &**c else {
+        return None;
+    };
+    let a::MemberProp::Ident(p) = &m.prop else {
+        return None;
+    };
+    if !matches!(&*p.sym, "join" | "resolve") {
+        return None;
+    }
+    let last = call.args.last().filter(|x| x.spread.is_none())?;
+    let a::Expr::Lit(a::Lit::Str(s)) = &*last.expr else {
+        return None;
+    };
+    let s = s.value.as_str()?.to_string();
+    let segment = s.rsplit('/').next()?;
+    (!matches!(segment, "" | "." | "..")).then_some(s)
+}
+
 /// The literal part of a computed spec that tells which map entries it can name.
 enum Fragments {
     Prefix(String),
@@ -355,9 +379,15 @@ fn plus_operands<'e>(e: &'e a::Expr, out: &mut Vec<&'e a::Expr>) {
 /// Classifies the argument of a computed `require`. A concatenation whose first operand is a string literal starts
 /// with it (a prefix); one whose last operand is a string literal ends with it (a suffix: the start is unknown, so
 /// `name + '.js'` names every entry ending in `.js`). A template with holes uses its first non-empty quasi the same
-/// way, else its last one. Any other expression that contains a string literal is unclassified (every entry is
-/// followed); an expression with none is bare and names nothing extra.
+/// way, else its last one. A `join`/`resolve` call whose last argument is a literal is a suffix ([`join_suffix`]).
+/// Any other expression that contains a string literal is unclassified (every entry is followed); an expression
+/// with none is bare and names nothing extra.
 fn spec_fragments(arg: &a::Expr) -> Fragments {
+    if let a::Expr::Call(c) = arg {
+        if let Some(suffix) = join_suffix(c) {
+            return Fragments::Suffix(suffix);
+        }
+    }
     let text = |e: &a::Expr| match e {
         a::Expr::Lit(a::Lit::Str(s)) => s.value.as_str().map(str::to_string),
         _ => None,

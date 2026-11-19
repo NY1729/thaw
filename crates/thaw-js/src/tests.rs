@@ -694,6 +694,73 @@ fn computed_require_stays_a_blocker_when_its_spec_is_unclassifiable() {
     }
 }
 
+#[test]
+fn join_or_resolve_with_a_literal_last_segment_is_a_suffix_spec() {
+    let blockers = |code: &str| -> Vec<String> {
+        crate::scan::scan_bundle(&one_module_bundle(code, ""))
+            .ok()
+            .unwrap()
+            .blockers
+            .into_keys()
+            .collect()
+    };
+    // esbuild's install.js:3895 `require(path2.join(__dirname, "package.json"))`: the join ends with its literal last
+    // segment, so it is a suffix spec (a non-blocker), not an unclassified one (`require:dynamic`)
+    assert_eq!(
+        blockers(r#"exports.p = require(path2.join(__dirname, "package.json"));"#),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        blockers(r#"exports.m = require(path.resolve(__dirname, './lib/main.js'));"#),
+        Vec::<String>::new()
+    );
+    // a non-literal last argument names nothing extra: as before, bare and clean
+    assert_eq!(
+        blockers("exports.x = require(path2.join(__dirname, x));"),
+        Vec::<String>::new()
+    );
+    // a literal that is not the last argument stays unclassified
+    assert_eq!(
+        blockers(r#"exports.x = require(path2.join("lib", x));"#),
+        ["require:dynamic"]
+    );
+    // a last segment that names no entry (`..`, `.`, empty, a trailing `/`) stays unclassified
+    for last in ["..", ".", "", "lib/", "lib/..", "lib/."] {
+        let code = format!(r#"exports.x = require(path2.join(__dirname, "{last}"));"#);
+        assert_eq!(blockers(&code), ["require:dynamic"], "{code}");
+    }
+}
+
+#[test]
+fn join_suffix_follows_only_the_entries_it_ends_with() {
+    let reached = |src: &str| -> Vec<String> {
+        let parts = crate::scan::parse_bundle(src).ok().unwrap();
+        crate::scan::reachable(&parts).into_iter().collect()
+    };
+    // `./lib/x.js` is blocked (`process.dlopen`), `./other.json` is clean: only the entry a spec ends with is followed
+    let map = r#"{"./lib/x.js": "p/lib/x.js", "./other.json": "p/other.js"}"#;
+    let json = named_bundle(
+        "exports.v = require(path.join(__dirname, 'other.json'));",
+        map,
+    );
+    assert!(crate::scan::scan_bundle(&json).ok().unwrap().is_clean());
+    let keys = reached(&json);
+    assert!(keys.contains(&"p/other.js".to_string()));
+    assert!(!keys.contains(&"p/lib/x.js".to_string()));
+    let js = named_bundle(
+        "exports.v = require(path.resolve(__dirname, './lib/x.js'));",
+        map,
+    );
+    let keys = reached(&js);
+    assert!(keys.contains(&"p/lib/x.js".to_string()));
+    assert!(!keys.contains(&"p/other.js".to_string()));
+    assert!(crate::scan::scan_bundle(&js)
+        .ok()
+        .unwrap()
+        .blockers
+        .contains_key("method:dlopen"));
+}
+
 /// Run `src` as a program (event loop included); console lines plus the exit code.
 fn main_run(src: &str) -> (Vec<String>, i32) {
     main_run_after_gap(src, 0)
@@ -3891,6 +3958,9 @@ fn scan_tolerates_optional_requires_guarded_by_a_handling_try() {
         // a bare computed spec is classified (the express `require(mod)` shape): not a blocker, and at run time a
         // spec the map does not name throws MODULE_NOT_FOUND
         "const x = 'bufferutil'; try { require(x); } catch (e) {}",
+        // a join/resolve whose last argument is a string literal is a suffix spec (esbuild's install.js
+        // `require(path.join(__dirname, 'package.json'))`): classified, so not a blocker
+        "try { require(path.join(__dirname, 'x')); } catch (e) {}",
     ];
     for code in unmapped {
         let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
@@ -3899,9 +3969,9 @@ fn scan_tolerates_optional_requires_guarded_by_a_handling_try() {
         assert!(report.is_clean(), "{code} should be clean");
     }
     // still refused: builtins (thaw serves them by name), native addons (dlopen is never served), and a computed
-    // spec the scanner cannot classify (a call with literal pieces, a spread, no argument), guarded or not
+    // spec the scanner cannot classify (a join ending in `..`, a spread, no argument), guarded or not
     let refused = [
-        "try { require(path.join(__dirname, 'x')); } catch (e) {}",
+        "try { require(path.join(__dirname, '..')); } catch (e) {}",
         "try { require(...['bufferutil']); } catch (e) {}",
         "try { require('net'); } catch (e) {}",
         "try { require('node:net'); } catch (e) {}",
