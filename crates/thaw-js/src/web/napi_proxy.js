@@ -412,12 +412,29 @@
 
   // The `__thaw_napi_reference_<id>` global the native side calls: its first argument is the metadata
   // (`true` with a receiver, or `{__thaw_napi_argument_handles__, __thaw_napi_this_handle__}`), then the arguments.
+  // The native side sends a callback's arguments as JSON, so a Buffer arrives as `{type:'Buffer',data:[..]}`.
+  // Only Buffers are revived, in place: the other wire markers (handles, references, ...) must stay in their JSON
+  // form because `__thaw_napi_argument_handles__` below addresses them by path and replaces them itself.
+  const reviveBuffers = value => {
+    if (!value || typeof value !== 'object') return value;
+    if (value.type === 'Buffer' && Array.isArray(value.data) && bufferCtor) return bufferCtor.from(value.data);
+    const proto = Object.getPrototypeOf(value);
+    if (!Array.isArray(value) && proto !== Object.prototype && proto !== null) return value;
+    Object.keys(value).forEach(key => {
+      const child = value[key];
+      if (child && typeof child === 'object') {
+        const revived = reviveBuffers(child);
+        if (revived !== child) value[key] = revived;
+      }
+    });
+    return value;
+  };
+
   const defineCallback = (id, target) => {
     Object.defineProperty(globalThis, '__thaw_napi_reference_' + id, {
       value: function () {
         const meta = arguments[0];
-        // the native side sends JSON: revive its Buffers ({type:'Buffer',data}) and other markers
-        const args = Array.prototype.slice.call(arguments, 1).map(value => decodeValue(value));
+        const args = Array.prototype.slice.call(arguments, 1).map(value => reviveBuffers(value));
         let receiver;
         if (meta && meta.__thaw_napi_argument_handles__) {
           meta.__thaw_napi_argument_handles__.forEach(entry => {

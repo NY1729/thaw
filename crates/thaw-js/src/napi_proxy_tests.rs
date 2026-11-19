@@ -884,6 +884,29 @@ fn native_callback_arguments_revive_buffers() {
 }
 
 #[test]
+fn native_callback_arguments_revive_only_buffers_and_leave_other_markers_as_json() {
+    // A nested Buffer is revived, but the other wire markers (handles, `undefined`, references) must reach the
+    // callback in their JSON form: `__thaw_napi_argument_handles__` addresses them by path and replaces them
+    // itself (sqlite3's statement callbacks), so decoding them early would hand it live proxies.
+    let mut it = plain_realm();
+    let wire = run_in(
+        &mut it,
+        "JSON.stringify(api.argument((a, b) => JSON.stringify([Buffer.isBuffer(a.data), a.n, b])))",
+    );
+    let id = id_of(&wire, "__thaw_napi_function__");
+    assert_eq!(
+        run_in(
+            &mut it,
+            &format!(
+                "globalThis.__thaw_napi_reference_{id}(null, {{ data: {{ type: 'Buffer', data: [1] }}, n: 7 }}, \
+                 {{ '$__thaw_napi_undefined$': true }})"
+            )
+        ),
+        r#"[true,7,{"$__thaw_napi_undefined$":true}]"#
+    );
+}
+
+#[test]
 fn reference_ids_are_unique_across_proxy_instances() {
     // Each realm runs its own proxy layer. A callback's id names its global, so two layers (two addons in two
     // packages) must never hand out the same id.
