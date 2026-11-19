@@ -323,3 +323,72 @@ console.log([tag('new Error("x")'), tag('new TypeError("y")'), tag('class E2 ext
         vec!["[object Error] [object Error] [object Error] [object Object]".to_string()]
     );
 }
+
+/// An error made while a named script runs carries the filename in `stack`, after the `Name: message` header.
+#[test]
+fn vm_error_stack_names_the_script_file() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"const sb = createContext({});
+try { runInContext('throw new Error("boom")', sb, { filename: 'ctx-file.js' }); } catch (e) {
+  const lines = String(e.stack).split('\n');
+  console.log([lines[0], String(e.stack).includes('ctx-file.js')].join(' | '));
+}
+try { runInContext('null.x', sb, { filename: 'ctx-null.js' }); } catch (e) { console.log(String(e.stack).includes('ctx-null.js')); }
+console.log(new Error('host').stack.includes('ctx-file.js'));"#
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec![
+            "Error: boom | true".to_string(),
+            "true".to_string(),
+            "false".to_string()
+        ]
+    );
+}
+
+/// A run nested inside another (a host closure called by one context runs a second, named script) restores the
+/// outer filename once it returns: an error the outer script makes afterwards still names the outer file.
+#[test]
+fn vm_nested_script_run_restores_the_outer_filename() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"globalThis.inner = () => runInThisContext('new Error("in").stack', { filename: 'inner.js' });
+console.log(runInThisContext('[inner().includes("inner.js"), new Error("o").stack.includes("outer.js"), new Error("o").stack.includes("inner.js")].join(",")', { filename: 'outer.js' }));
+console.log(new Error("after").stack.includes("outer.js"));"#
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec!["true,true,false".to_string(), "false".to_string()]
+    );
+}
+
+/// A SyntaxError from a named script keeps `SyntaxError` as its name, has a message, and its stack names the file
+/// (V8 puts the `file:line` header and the source line above `SyntaxError: message`).
+#[test]
+fn vm_syntax_error_names_the_script_file() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"try { __thaw_vm_eval('(', 'bad.js', true); } catch (e) {
+  console.log([e.name, e.message.length > 0, String(e.stack).includes('bad.js'), String(e.stack).split('\n').some((l) => l.startsWith('SyntaxError: '))].join(','));
+}
+const sb = createContext({});
+try { runInContext('let a = ;', sb, { filename: 'bad-syntax.js' }); } catch (e) {
+  console.log([e.name, String(e.stack).includes('bad-syntax.js')].join(','));
+}"#
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec![
+            "SyntaxError,true,true,true".to_string(),
+            "SyntaxError,true".to_string()
+        ]
+    );
+}
+
+/// Without a filename the stack is the plain header, as before.
+#[test]
+fn vm_script_without_filename_keeps_the_plain_stack() {
+    let src = r#"console.log(__thaw_vm_run(-1, 'new Error("plain").stack', undefined, 0));"#;
+    assert_eq!(run_lines(src), vec!["Error: plain".to_string()]);
+}

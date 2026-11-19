@@ -4,7 +4,7 @@
 
 use swc_common::errors::Handler;
 use swc_common::sync::Lrc;
-use swc_common::{FileName, SourceMap};
+use swc_common::{FileName, SourceMap, Span, Spanned};
 use swc_ecma_ast::{Module, ModuleItem};
 use swc_ecma_parser::{lexer::Lexer, Context, EsSyntax, Parser, StringInput, Syntax, TsSyntax};
 
@@ -260,10 +260,39 @@ pub fn parse_javascript_script(source: &str) -> Result<Module, String> {
     parse_javascript_eval(source, EvalContext::default())
 }
 
+/// A parse failure: the parser's message and where it is (1-based line and column).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxFailure {
+    pub message: String,
+    pub line: u32,
+    pub col: u32,
+}
+
+/// [`parse_javascript_script`] with the failure's position.
+pub fn parse_javascript_script_located(source: &str) -> Result<Module, SyntaxFailure> {
+    parse_javascript_eval_located(source, EvalContext::default())
+}
+
 /// [`parse_javascript_script`] for a direct `eval` in a scope described by `cx`.
 pub fn parse_javascript_eval(source: &str, cx: EvalContext) -> Result<Module, String> {
+    parse_javascript_eval_located(source, cx).map_err(|f| f.message)
+}
+
+/// [`parse_javascript_eval`] with the failure's position. Diagnostics go to a sink, not stderr: the caller throws
+/// the SyntaxError and prints nothing itself.
+pub fn parse_javascript_eval_located(
+    source: &str,
+    cx: EvalContext,
+) -> Result<Module, SyntaxFailure> {
     let cm: Lrc<SourceMap> = Default::default();
-    let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
+    let handler = Handler::with_emitter_writer(Box::new(std::io::sink()), Some(cm.clone()));
+    let failure = |cm: &SourceMap, span: Span, message: String| {
+        let (line, col) = cm
+            .try_lookup_char_pos(span.lo)
+            .map(|loc| (loc.line as u32, loc.col.0 as u32 + 1))
+            .unwrap_or((1, 1));
+        SyntaxFailure { message, line, col }
+    };
     let fm = cm.new_source_file(
         Lrc::new(FileName::Custom("input.js".into())),
         source.to_string(),
@@ -292,8 +321,9 @@ pub fn parse_javascript_eval(source: &str, cx: EvalContext) -> Result<Module, St
     // Errors carry the parser's own message so callers can throw it as a `SyntaxError`.
     let script = parser.parse_script().map_err(|err| {
         let msg = err.kind().msg().into_owned();
+        let at = failure(&cm, err.span(), msg);
         err.into_diagnostic(&handler).emit();
-        msg
+        at
     })?;
     match parser.take_errors().first() {
         None => Ok(Module {
@@ -301,7 +331,7 @@ pub fn parse_javascript_eval(source: &str, cx: EvalContext) -> Result<Module, St
             body: script.body.into_iter().map(ModuleItem::Stmt).collect(),
             shebang: script.shebang,
         }),
-        Some(err) => Err(err.kind().msg().into_owned()),
+        Some(err) => Err(failure(&cm, err.span(), err.kind().msg().into_owned())),
     }
 }
 

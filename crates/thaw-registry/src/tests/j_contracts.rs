@@ -431,8 +431,7 @@ return out;
 fn j_vm_script_compile() {
     // expected: node22
     assert_eq!(
-        // QuickJS: thaw-js parity gap, vm family (PR B).
-        p2c_run_qjs("j_vm_script_compile",r#####"const vm = require('node:vm');
+        p2c_run("j_vm_script_compile", r#####"const vm = require('node:vm');
 const out = {};
 try { new vm.Script('return 1'); out.topReturn = 'no throw'; } catch (e) { out.topReturn = e.name; }
 const s = new vm.Script('1 + 1', { filename: 'one.js' });
