@@ -45,12 +45,18 @@ pub(crate) struct PromiseData {
     handled: bool,
 }
 
+/// One realm's promise-job queue. A reaction keeps the queue of the realm that registered it (`Reaction::queue`),
+/// so its job runs on that realm, whichever realm settles the promise (vm contexts are separate Interps).
+type JobQueue = Rc<RefCell<VecDeque<(Option<Value>, Job)>>>;
+
 /// One `then` registration. Each field is the single `Rc` clone the promise owns (see `gc::obj_edges`).
 pub(crate) struct Reaction {
     pub(crate) on_ful: Value,
     pub(crate) on_rej: Value,
     pub(crate) result: Option<Obj>,
     pub(crate) frame: Option<Value>,
+    /// The job queue of the realm that called `then`: the handler belongs to that realm.
+    queue: JobQueue,
 }
 
 enum Job {
@@ -119,7 +125,7 @@ pub(crate) struct Co {
 
 #[derive(Default)]
 pub(crate) struct Rt {
-    micro: VecDeque<(Option<Value>, Job)>,
+    micro: JobQueue,
     ticks: VecDeque<(Option<Value>, Value, Vec<Value>)>,
     /// Barrier ids this realm popped while draining another barrier (so that drain is already done).
     barriers_seen: std::collections::HashSet<u64>,
@@ -510,7 +516,8 @@ impl Interp {
             self.rt.unhandled.push(p.clone());
         }
         for r in reactions {
-            self.rt.micro.push_back((
+            // the job runs on the realm that registered the reaction, not on the one that settled it
+            r.queue.borrow_mut().push_back((
                 r.frame,
                 Job::React {
                     handler: if ok { r.on_ful } else { r.on_rej },
@@ -550,7 +557,7 @@ impl Interp {
                 Err(e) => return Err(e),
             };
             if then.is_callable() {
-                self.rt.micro.push_back((
+                self.rt.micro.borrow_mut().push_back((
                     self.rt.actx.clone(),
                     Job::Thenable {
                         promise: p.clone(),
@@ -597,6 +604,7 @@ impl Interp {
                         on_rej,
                         result,
                         frame: self.rt.actx.clone(),
+                        queue: self.rt.micro.clone(),
                     });
                     return;
                 }
@@ -604,7 +612,7 @@ impl Interp {
                 PState::Rejected(v) => (false, v.clone()),
             }
         };
-        self.rt.micro.push_back((
+        self.rt.micro.borrow_mut().push_back((
             self.rt.actx.clone(),
             Job::React {
                 handler: if ok { on_ful } else { on_rej },
@@ -707,14 +715,25 @@ impl Interp {
         }
     }
 
-    /// Whether this realm has jobs queued that a native continuation must run behind.
+    /// Whether this realm has jobs queued that a native continuation must run behind (its own, or those of a
+    /// vm context it created).
     pub(crate) fn has_job_work(&self) -> bool {
-        !self.rt.micro.is_empty() || !self.rt.ticks.is_empty()
+        !self.rt.micro.borrow().is_empty()
+            || !self.rt.ticks.is_empty()
+            || crate::vm::owned_jobs_pending(self.realm_id)
+    }
+
+    /// The next queued promise job of this realm. The queue borrow ends here, before the job runs.
+    fn pop_job(&self) -> Option<(Option<Value>, Job)> {
+        self.rt.micro.borrow_mut().pop_front()
     }
 
     /// Queue the barrier marker `id` behind every job pending now.
     pub(crate) fn push_job_barrier(&mut self, id: u64) {
-        self.rt.micro.push_back((None, Job::Barrier(id)));
+        self.rt
+            .micro
+            .borrow_mut()
+            .push_back((None, Job::Barrier(id)));
     }
 
     /// Run this realm's jobs in FIFO order up to the marker `id`, so every job queued before it runs and
@@ -727,13 +746,14 @@ impl Interp {
         if !self
             .rt
             .micro
+            .borrow()
             .iter()
             .any(|(_, j)| matches!(j, Job::Barrier(b) if *b == id))
         {
             return Ok(());
         }
         loop {
-            let Some((fr, job)) = self.rt.micro.pop_front() else {
+            let Some((fr, job)) = self.pop_job() else {
                 return Ok(());
             };
             match job {
@@ -784,10 +804,14 @@ impl Interp {
         loop {
             loop {
                 self.drain_ticks()?;
-                while let Some((fr, j)) = self.rt.micro.pop_front() {
+                while let Some((fr, j)) = self.pop_job() {
                     self.in_frame(fr, |it| it.run_job(j))?;
                 }
-                if self.rt.ticks.is_empty() && self.rt.micro.is_empty() {
+                // the contexts this realm created drain at the same checkpoint, after this realm's own queue
+                if self.rt.ticks.is_empty()
+                    && self.rt.micro.borrow().is_empty()
+                    && !crate::vm::drain_owned_jobs(self)?
+                {
                     break;
                 }
             }
@@ -820,7 +844,7 @@ impl Interp {
                     return Err(Ctl::Throw(e));
                 }
             }
-            if self.rt.ticks.is_empty() && self.rt.micro.is_empty() {
+            if !self.has_job_work() {
                 return Ok(());
             }
         }
@@ -843,7 +867,7 @@ impl Interp {
         self.rt.timers.clear();
         self.rt.immediates.clear();
         self.rt.ticks.clear();
-        self.rt.micro.clear();
+        self.rt.micro.borrow_mut().clear();
     }
 
     /// Whether this realm already emitted `exit` (it runs no more work after that).
@@ -1452,7 +1476,7 @@ impl Interp {
 
     /// Referenced timers/immediates or queued jobs remain.
     pub fn work_pending(&self) -> bool {
-        self.loop_alive() || !self.rt.ticks.is_empty() || !self.rt.micro.is_empty()
+        self.loop_alive() || self.has_job_work()
     }
 
     fn loop_alive(&self) -> bool {
@@ -1465,6 +1489,7 @@ impl Interp {
             || self.ipc_live()
             || crate::napi_bridge::pending()
             || crate::atomics::delivery_pending(self.realm_id)
+            || crate::vm::owned_jobs_pending(self.realm_id)
     }
 
     /// This realm reads `process.stdin` and the reader is still open and referenced.
@@ -1644,7 +1669,7 @@ impl Interp {
                 }
                 Err(e) => return Err(e),
             }
-            if self.rt.ticks.is_empty() && self.rt.micro.is_empty() && !self.loop_alive() {
+            if !self.has_job_work() && !self.loop_alive() {
                 break;
             }
         }
@@ -2004,6 +2029,7 @@ impl Interp {
             it.need_callback(&cb)?;
             it.rt
                 .micro
+                .borrow_mut()
                 .push_back((it.rt.actx.clone(), Job::Call(cb, Vec::new())));
             Ok(Value::Undefined)
         });

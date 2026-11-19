@@ -318,6 +318,126 @@ console.log(runInContext("1 + 1", outer));"#
     assert_eq!(it.out, vec!["2,undefined,1".to_string(), "2".to_string()]);
 }
 
+/// A script threw: panics with its message (the tests below run several scripts and drains in turn).
+fn report_ctl(it: &mut Interp, e: Ctl) -> ! {
+    match e {
+        Ctl::Throw(v) => {
+            let m = it.get(&v, "message").unwrap_or(Value::Undefined);
+            panic!("script threw: {}", it.to_str(&m))
+        }
+        _ => panic!("script aborted"),
+    }
+}
+
+fn run_script(it: &mut Interp, src: &str) {
+    if let Err(e) = it.run(src) {
+        report_ctl(it, e);
+    }
+}
+
+/// Runs the host's promise jobs, then prints `globalThis.out` (the array the contexts push into).
+fn drain_and_report(it: &mut Interp) -> Vec<String> {
+    if let Err(e) = it.run_jobs() {
+        report_ctl(it, e);
+    }
+    run_script(it, "console.log(globalThis.out.join(','))");
+    std::mem::take(&mut it.out)
+}
+
+/// A context's promise reactions run: `then` on a context promise, an async function inside the context, and
+/// a context promise the host awaits all settle with the host draining its jobs.
+#[test]
+fn vm_context_promise_jobs_run_on_host_drain() {
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        &format!(
+            "{VM_PRELUDE}\n{}",
+            r#"globalThis.out = []; const ctx = createContext({ out });
+runInContext('Promise.resolve(1).then(v => { out.push("then" + v) })', ctx);
+runInContext('(async () => { await null; out.push("a"); return 5 })().then(v => out.push("r" + v))', ctx);
+(async () => { const v = await runInContext('(async () => { await null; return 7 })()', ctx); out.push("host" + v); })();"#
+        ),
+    );
+    assert_eq!(
+        drain_and_report(&mut it),
+        vec!["then1,a,r5,host7".to_string()]
+    );
+}
+
+/// A host promise's `then`, called from inside a context, runs its handler on that context's queue.
+#[test]
+fn vm_host_promise_then_called_from_a_context_runs() {
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        &format!(
+            "{VM_PRELUDE}\n{}",
+            r#"globalThis.out = []; const ctx = createContext({ out, hp: Promise.resolve(3) });
+runInContext('hp.then(v => out.push("hp" + v))', ctx);"#
+        ),
+    );
+    assert_eq!(drain_and_report(&mut it), vec!["hp3".to_string()]);
+}
+
+/// Host and context reactions queued in one tick: the host's checkpoint runs first, then the context's queue
+/// (the accepted ordering: per-realm FIFOs, realm queues after the host's). Node interleaves them in queue order
+/// (`host1,ctx,host2`); pinned here so that a change of model shows up.
+#[test]
+fn vm_host_and_context_then_same_tick_order_is_pinned() {
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        &format!(
+            "{VM_PRELUDE}\n{}",
+            r#"globalThis.out = []; const ctx = createContext({ out });
+Promise.resolve().then(() => out.push("host1"));
+runInContext('Promise.resolve().then(() => out.push("ctx"))', ctx);
+Promise.resolve().then(() => out.push("host2"));"#
+        ),
+    );
+    assert_eq!(
+        drain_and_report(&mut it),
+        vec!["host1,host2,ctx".to_string()]
+    );
+}
+
+/// A context's jobs wait for the host's checkpoint: the host code after a `runInContext` finishes first, as in Node.
+#[test]
+fn vm_context_jobs_wait_for_the_host_checkpoint() {
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        &format!(
+            "{VM_PRELUDE}\n{}",
+            r#"globalThis.out = []; const ctx = createContext({ out });
+runInContext('Promise.resolve().then(() => out.push("ctx"))', ctx);
+out.push("sync");"#
+        ),
+    );
+    assert_eq!(drain_and_report(&mut it), vec!["sync,ctx".to_string()]);
+}
+
+/// A due timer (pending work) does not stop the loop from draining a context's promise jobs first.
+#[test]
+fn vm_timer_pending_run_still_drains_context_jobs() {
+    let mut it = Interp::new();
+    run_script(
+        &mut it,
+        &format!(
+            "{VM_PRELUDE}\n{}",
+            r#"globalThis.out = []; const ctx = createContext({ out });
+setTimeout(() => out.push("timer"), 5);
+runInContext('Promise.resolve(1).then(v => out.push("ctx" + v))', ctx);"#
+        ),
+    );
+    if let Err(e) = it.run_event_loop() {
+        report_ctl(&mut it, e);
+    }
+    run_script(&mut it, "console.log(globalThis.out.join(','))");
+    assert_eq!(std::mem::take(&mut it.out), vec!["ctx1,timer".to_string()]);
+}
+
 /// `Object.prototype.toString` tags an error made in a context as `[object Error]`, whatever its subclass.
 #[test]
 fn vm_context_errors_keep_the_error_tag() {

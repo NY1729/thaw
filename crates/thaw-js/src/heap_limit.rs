@@ -52,6 +52,11 @@ pub(crate) fn enabled() -> bool {
     ON.with(Cell::get)
 }
 
+/// The limit in bytes this thread was enabled with (`usize::MAX` when off).
+pub(crate) fn limit() -> usize {
+    LIMIT.with(Cell::get)
+}
+
 #[cfg(test)]
 pub(crate) fn used() -> usize {
     USED.with(Cell::get)
