@@ -344,6 +344,12 @@ fn generate_registry_shims_pass(
     thaw_js_routed: &ThawJsPackages,
 ) -> Result<(RegistryShims, ThawJsPackages), String> {
     let mut thaw_js_eligible = ThawJsPackages::new();
+    // the registry's packages as installed now (a require of one the bundle does not map blocks thaw-js routing)
+    let thaw_js_installed = if thaw_js_routing {
+        registry_installed_packages(registry_dir)
+    } else {
+        Default::default()
+    };
     // `THAW_JS_FALLBACK=warn|error`: every package thaw-js refuses in this pass (reported by `build` after the last pass).
     let mut thaw_js_refusals: Vec<(String, String)> = Vec::new();
     let observed_arities = observed_member_call_arities_named(user_source, user_source_name)?;
@@ -2230,12 +2236,13 @@ fn generate_registry_shims_pass(
                     || !value_exports.is_empty())
             {
                 if thaw_js_routing {
-                    if thaw_js_package_eligible(
+                    if thaw_js_package_eligible_in(
                         pkg,
                         &thaw_js_bundle_form(&thaw_js_bundles, &pkg.name, bundle_js),
                         user_source,
                         &typed_targets,
                         &shim[segment_start..segment_end],
+                        &thaw_js_installed,
                     ) {
                         thaw_js_eligible.insert(pkg.name.clone());
                     } else if thaw_js_fallback_mode() != ThawJsFallbackMode::Silent {

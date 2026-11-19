@@ -2080,6 +2080,32 @@ fn builtin_defined_methods_make_graphql_and_socket_io_shaped_packages_eligible()
 }
 
 #[test]
+fn unmapped_require_of_an_installed_peer_keeps_a_package_on_quickjs() {
+    // drizzle-orm's neon driver requires its peer `@neondatabase/serverless`, which the bundle does not map. While the
+    // peer is not installed the require is a MODULE_NOT_FOUND at run time, as on Node: the package is served. Once the
+    // peer is installed (a bundler gap or a peer added after the bundle) thaw-js could not serve it: QuickJS keeps it.
+    let bundle = one_package_bundle(
+        "exports.connect = function () { return require('@neondatabase/serverless'); };",
+    );
+    let pkg = builtin_routing_package("drizzle-orm");
+    let (dir, registry, _entry) = thaw_js_package_fixture(
+        "drizzle-unmapped-peer",
+        "export {};\n",
+        &[("drizzle-orm", "export {};\n", "exports.x = 1;\n")],
+    );
+    let absent = registry_installed_packages(&registry);
+    assert!(!absent.contains("@neondatabase/serverless"));
+    assert!(thaw_js_package_eligible_in(&pkg, &bundle, "", &Default::default(), "", &absent));
+    let peer = registry.join("@neondatabase").join("serverless");
+    std::fs::create_dir_all(&peer).unwrap();
+    std::fs::write(peer.join("package.d.ts"), "export {};\n").unwrap();
+    let installed = registry_installed_packages(&registry);
+    assert!(installed.contains("@neondatabase/serverless") && installed.contains("drizzle-orm"));
+    assert!(!thaw_js_package_eligible_in(&pkg, &bundle, "", &Default::default(), "", &installed));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn builtin_defined_method_names_hold_the_builtin_methods_and_no_helpers() {
     let names = thaw_registry::builtin_defined_names();
     for name in ["publish", "runStores", "traceSync", "unsubscribe", "refCounted"] {
