@@ -150,7 +150,7 @@ impl SetData {
 pub(crate) struct CollIterData {
     /// The collection being walked: one `Rc` clone, read by the collector's edge enumeration (gc.rs).
     pub(crate) src: Obj,
-    is_map: bool,
+    pub(crate) is_map: bool,
     /// 0 keys, 1 values, 2 entries.
     mode: u8,
     /// Number of entries already visited; shared with the collection so it can be fixed up.
