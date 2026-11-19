@@ -10,8 +10,10 @@ use super::*;
 const VM_PRELUDE: &str =
     include_str!("../../thaw-registry/src/registry/builtins/system/vm_context.js");
 
-/// 300 distinct contexts, each created and run once; prints the sum of i*i for i < 300.
-const MANY_CONTEXTS: &str = "let total = 0; for (let i = 0; i < 300; i++) total += runInNewContext('n * n', { n: i }); console.log(total);";
+/// 30 distinct contexts, each created and run once; prints the sum of i*i for i < 30. Scale (300 contexts) is
+/// covered by `vm_300_contexts_run_once_each_finish_fast`; this test only needs several contexts to check that
+/// none of them leaves stdin or event-loop work behind.
+const MANY_CONTEXTS: &str = "let total = 0; for (let i = 0; i < 30; i++) total += runInNewContext('n * n', { n: i }); console.log(total);";
 
 fn run_lines(src: &str) -> Vec<String> {
     // Timing and linearity are measured without the automatic trigger: under the stress interval every collection
@@ -65,11 +67,12 @@ fn vm_contexts_leave_no_stdin_or_loop_work() {
         let loop_ok = it.run_event_loop().is_ok();
         let _ = tx.send((it.out.clone(), pending, stdin, loop_ok));
     });
+    // Hang bound only: the run takes about 1.5 s in a debug build; 120 s cannot trip on a loaded machine.
     let (out, pending, stdin, loop_ok) = rx
-        .recv_timeout(Duration::from_secs(30))
-        .expect("contexts run and the event loop returns within 30 s");
+        .recv_timeout(Duration::from_secs(120))
+        .expect("contexts run and the event loop returns within 120 s (hang bound)");
     worker.join().expect("worker thread");
-    assert_eq!(out, vec!["8955050".to_string()]);
+    assert_eq!(out, vec!["8555".to_string()]);
     assert!(!pending, "contexts left pending work");
     assert!(!stdin, "contexts started stdin");
     assert!(loop_ok, "event loop failed after contexts");
