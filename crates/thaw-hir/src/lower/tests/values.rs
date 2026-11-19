@@ -3519,6 +3519,42 @@ fn ordinary_json_and_napi_calls_do_not_select_native_symbol_projection() {
     assert!(!napi_body.contains("retainDynamicNative"), "{napi_body}");
 }
 
+/// A symbol key in a `Json` slot (`Object.defineProperty`, `hasOwnProperty.call`,
+/// `getOwnPropertyDescriptor`) lowers to its wire-text key through `__thaw_symbol_key`
+/// instead of failing with "value has type Symbol, expected Json". A `JsValue` slot keeps
+/// its `retainEventKey` path.
+#[test]
+fn symbol_key_in_a_json_slot_lowers_to_its_wire_key() {
+    let program = lower(r#"
+        declare function acceptValue(value: JsValue): void;
+        function main(): void {
+            const S = Symbol('s');
+            const o: any = { a: 1 };
+            Object.defineProperty(o, S, { value: 5, enumerable: true });
+            console.log(Object.prototype.hasOwnProperty.call(o, S));
+            console.log(Object.getOwnPropertyDescriptor(o, S));
+            acceptValue(S);
+        }
+    "#);
+    let body = format!("{program:#?}");
+    assert!(body.contains("__thaw_symbol_key"), "{body}");
+    assert!(body.contains("retainEventKey"), "{body}");
+}
+
+/// A symbol key to a host-backed (`JsValue`) `Object.defineProperty` target is not covered
+/// by the property-key rule: it still fails with the old compile error, not a wire-text key.
+#[test]
+fn symbol_key_to_a_host_backed_define_property_still_rejects() {
+    let module = thaw_parser::parse_typescript(r#"
+        function main(host: JsValue): void {
+            const S = Symbol('s');
+            Object.defineProperty(host, S, { value: 5, enumerable: true });
+        }
+    "#).expect("parse error");
+    let error = lower_module(&module).expect_err("host-backed symbol key must not lower");
+    assert!(error.contains("value has type Symbol, expected Json"), "{error}");
+}
+
 #[test]
 fn symbol_bearing_native_composites_select_projection() {
     let program = lower(r#"

@@ -499,7 +499,45 @@ impl<'a> FnLowerer<'a> {
         matches!(self.peek_type_without_lowering(expr), Some(HirType::Bytes))
     }
 
+    /// `Object.prototype.hasOwnProperty.call(recv, sym)` with a symbol key. The generic
+    /// `.call` route marshals its arguments as Json and cannot take a symbol key, so
+    /// this rewrites the call to the method form `recv.hasOwnProperty(sym)`, which already
+    /// lowers a symbol key. Any other key type keeps the generic route.
+    fn lower_prototype_has_own_symbol_call(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else { return Ok(None) };
+        let Expr::Member(call_member) = callee.as_ref() else { return Ok(None) };
+        if member_property_name(&call_member.prop).as_deref() != Some("call") { return Ok(None) }
+        let Expr::Member(has_own) = call_member.obj.as_ref() else { return Ok(None) };
+        if member_property_name(&has_own.prop).as_deref() != Some("hasOwnProperty") { return Ok(None) }
+        let Expr::Member(prototype) = has_own.obj.as_ref() else { return Ok(None) };
+        if member_property_name(&prototype.prop).as_deref() != Some("prototype") { return Ok(None) }
+        let Expr::Ident(owner) = prototype.obj.as_ref() else { return Ok(None) };
+        let owner_name = self.resolve_binding(owner.sym.as_ref());
+        if owner.sym.as_ref() != "Object" || self.scope.contains_key(&owner_name) || self.interfaces.contains_key(&owner_name) {
+            return Ok(None);
+        }
+        let [receiver, key] = call.args.as_slice() else { return Ok(None) };
+        if receiver.spread.is_some() || key.spread.is_some() {
+            return Ok(None);
+        }
+        let key_value = self.lower_expr(&key.expr)?;
+        if self.infer_expr_type(&key_value)? != HirType::Symbol {
+            return Ok(None);
+        }
+        let mut method = call.clone();
+        method.callee = Callee::Expr(Box::new(Expr::Member(MemberExpr {
+            span: has_own.span,
+            obj: receiver.expr.clone(),
+            prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("hasOwnProperty".into(), has_own.span)),
+        })));
+        method.args = vec![key.clone()];
+        self.lower_expr(&Expr::Call(method)).map(Some)
+    }
+
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        if let Some(has_own) = self.lower_prototype_has_own_symbol_call(call)? {
+            return Ok(has_own);
+        }
         if let Some(timer) = self.try_lower_native_timer(call)? {
             return Ok(timer);
         }
