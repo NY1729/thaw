@@ -335,7 +335,8 @@ fn thaw_js_default_import_locals(pkg_name: &str, user_source: &str) -> Vec<Strin
 /// anything but a namespace object whose only uses are calls of the package's own functions
 /// (`validator.isEmail(..)`, which the shim resolves to the typed functions) and its import. Such a
 /// value is served to the program as a thaw-js handle (`$value$` class operation). The default export
-/// is also used under the program's own local name (`import p from 'node:path'`), so those uses count.
+/// is also used under the program's own local name (`import p from 'node:path'`), and so is a CommonJS
+/// `export =` value, so those uses count.
 fn thaw_js_value_export_needs_handle(pkg: &ResolvedPackage, user_source: &str, name: &str) -> bool {
     if pkg.classes.iter().any(|class| class.name == name) {
         return false;
@@ -346,12 +347,15 @@ fn thaw_js_value_export_needs_handle(pkg: &ResolvedPackage, user_source: &str, n
     if thaw_js_binding_needs_handle(pkg, user_source, name, namespace_like) {
         return true;
     }
-    // A builtin's default is the module's own namespace object, so calls of its functions stay typed.
-    name == "default"
-        && (thaw_js_default_import_locals(&pkg.name, user_source)
+    // The `export =` value of a CommonJS package is its default export too: a default import binds it
+    // under the program's own local name (`import pc from 'picocolors'`), so those uses count.
+    let default_export = name == "default" || pkg.commonjs_export_name.as_deref() == Some(name);
+    (default_export
+        && thaw_js_default_import_locals(&pkg.name, user_source)
             .iter()
-            .any(|local| thaw_js_binding_needs_handle(pkg, user_source, local, true))
-            || !thaw_js_bare_namespace_locals(pkg, user_source).is_empty())
+            .any(|local| thaw_js_binding_needs_handle(pkg, user_source, local, true)))
+        // A builtin's default is the module's own namespace object, so calls of its functions stay typed.
+        || (name == "default" && !thaw_js_bare_namespace_locals(pkg, user_source).is_empty())
 }
 
 /// The local names the program binds to the whole namespace of the builtin `pkg` (`import * as p

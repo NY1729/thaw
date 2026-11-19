@@ -1109,6 +1109,86 @@ fn thaw_js_callable_results_are_live_handles_and_build_under_error_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The picocolors shape: `export =` of an object whose members are callables, used through a default
+/// import (`pc.dim(..)`). The shim must serve the package's value under its `export =` name as a handle.
+#[test]
+fn thaw_js_export_equals_object_default_import_builds_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "export-equals-object",
+        "import pc from 'tjs-colors';\n\
+         function main(): void {\n\
+           console.log(pc.dim('x') + pc.green('y'));\n\
+         }\n",
+        &[(
+            "tjs-colors",
+            "interface Colors { dim(s: string): string; green(s: string): string; }\n\
+             declare const colors: Colors & { createColors: (enabled?: boolean) => Colors };\n\
+             export = colors;\n",
+            "module.exports = { dim: function (s) { return '<' + s + '>'; }, green: function (s) { return '[' + s + ']'; } };\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run(&output), "<x>[y]\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The debug shape: `export =` of a callable with static members, used through a default import
+/// (`createDebug.enable(..)`). The callable must stay a handle, not bind to the typed function symbol.
+#[test]
+fn thaw_js_export_equals_callable_default_import_builds_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "export-equals-callable",
+        "import createDebug from 'tjs-debug';\n\
+         function main(): void {\n\
+           createDebug.enable('app:db');\n\
+           console.log(createDebug.enabled('app:db'));\n\
+           console.log(createDebug.enabled('other'));\n\
+           const log = createDebug('app:db');\n\
+           log('query');\n\
+           console.log('done');\n\
+         }\n",
+        &[(
+            "tjs-debug",
+            "declare var debug: debug.Debug & { debug: debug.Debug; default: debug.Debug };\n\
+             export = debug;\n\
+             export as namespace debug;\n\
+             declare namespace debug {\n\
+               interface Debug { (namespace: string): (...args: any[]) => void; enable: (namespaces: string) => void; enabled: (namespaces: string) => boolean; }\n\
+             }\n",
+            "function debug(ns) { return function () { return ns; }; }\n\
+             var enabledNames = [];\n\
+             debug.enable = function (ns) { enabledNames.push(ns); };\n\
+             debug.enabled = function (name) { return enabledNames.indexOf(name) >= 0; };\n\
+             module.exports = debug;\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run(&output), "true\nfalse\ndone\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn node_perf_hooks_thaw_js_bundle_scans_clean() {
     let bundle = thaw_registry::builtin_bundle_with("node:perf_hooks", &[]).unwrap();
@@ -1799,6 +1879,17 @@ fn thaw_js_default_import_used_only_as_namespace_calls_stays_typed() {
     assert!(!needs("import * as path from 'node:path'; const s = path.join('a');"));
     // a namespace used as a value is the module's own value, which the shim serves as the default handle
     assert!(needs("import * as path from 'node:path'; const s = [path];"));
+}
+
+#[test]
+fn thaw_js_export_equals_value_is_served_for_its_default_import_local() {
+    // `export = picocolors`: the value is named after the export, the program binds it under another local
+    let mut pkg = builtin_routing_package("picocolors");
+    pkg.commonjs_export_name = Some("picocolors".into());
+    let needs = |user: &str| thaw_js_value_export_needs_handle(&pkg, user, "picocolors");
+    assert!(needs("import pc from 'picocolors'; const s = pc.dim('x') + 'y';"));
+    // a default import of another module does not bind this export
+    assert!(!needs("import pc from 'other'; const s = pc.dim('x') + 'y';"));
 }
 
 #[test]
