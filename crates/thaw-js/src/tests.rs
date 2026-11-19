@@ -9690,8 +9690,17 @@ fn q9_scan_clean_for_process_config_and_prepare_stack_trace() {
 fn q9_addon_mode_tolerates_method_exports_only() {
     let src = "module.exports = (function(require){ var __thaw_bundle_factories = { \"p/index.js\": function(module, exports, require) { var b = require('./build/Release/x.node'); exports.v = b.encrypt_sync('a'); } }; var __thaw_bundle_require_maps = { \"p/index.js\": {} }; var __thaw_bundle_entry_key = \"p/index.js\"; })(globalThis.require);";
     let plain = crate::scan::scan_bundle(src).ok().unwrap();
+    // plain mode still refuses the native addon through its `.node` require; `encrypt_sync` is not a Node method
+    // name, so the method call itself is no blocker any more (R2: only Node names thaw lacks are flagged)
     assert!(
-        plain.blockers.contains_key("method:encrypt_sync"),
+        plain
+            .blockers
+            .contains_key("require:./build/Release/x.node"),
+        "{:?}",
+        plain.blockers
+    );
+    assert!(
+        !plain.blockers.contains_key("method:encrypt_sync"),
         "{:?}",
         plain.blockers
     );
