@@ -6,7 +6,33 @@ fn p2c_ipv6_available() -> bool {
     std::net::TcpListener::bind("[::1]:0").is_ok()
 }
 
+/// Runs a contract body through thaw-js (the default executor). The bundle serialises the result with `JSON.stringify`
+/// and returns it as a string: `Native::to_json` on the object would leak thaw-js's null-prototype marker.
 fn p2c_run(label: &str, body: &str) -> String {
+    let dir = temp_registry(&format!("p2c_{label}"));
+    fs::write(dir.join("index.js"), format!("module.exports = async function () {{ return JSON.stringify(await (async function () {{ {body}\n}})()); }};")).unwrap();
+    let empty_node_modules = temp_registry(&format!("p2c_{label}_modules"));
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let result = std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || match thaw_js::host::Package::load(&bundle) {
+            Ok(mut package) => match package.call("", &[]) {
+                Ok(thaw_js::host::Native::Str(json)) => json,
+                Ok(other) => other.to_json(),
+                Err(error) => format!("ERROR: {error}"),
+            },
+            Err(_) => String::from("load failed"),
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    result
+}
+
+/// QuickJS executor, kept only for the tests whose thaw-js parity gap is not fixed yet (see the comment at each call).
+fn p2c_run_qjs(label: &str, body: &str) -> String {
     use std::ffi::{CStr, CString};
     let dir = temp_registry(&format!("p2c_{label}"));
     fs::write(dir.join("index.js"), format!("module.exports = async function () {{ {body}\n}};")).unwrap();

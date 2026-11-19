@@ -108,7 +108,7 @@ pub(crate) fn thaw_js_graph_callback_type(ty: &HirType) -> bool {
                 (thaw_js_param_leaf_type(p) && !thaw_js_contains_bytes(p))
                     || thaw_js_class_instance_type(p)
                     || thaw_js_ctor_nested_callback(p)
-            }) && thaw_js_plain_type(&ret)
+            }) && (thaw_js_plain_type(&ret) || ret == HirType::JsValue)
                 && !thaw_js_contains_bytes(&ret)
         }),
     }

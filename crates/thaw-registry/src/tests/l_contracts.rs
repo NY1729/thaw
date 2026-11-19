@@ -5,7 +5,8 @@
 fn l_vm_basic() {
     // expected: node22
     assert_eq!(
-        p2c_run("l_vm_basic", r#####"const vm = require('node:vm');
+        // QuickJS: thaw-js parity gap, vm family (PR B).
+        p2c_run_qjs("l_vm_basic",r#####"const vm = require('node:vm');
 const out = {};
 const sb = { a: 1, f() { return this === sb; } };
 vm.createContext(sb);
@@ -47,7 +48,8 @@ return out;
 fn l_vm_objects() {
     // expected: node22
     assert_eq!(
-        p2c_run("l_vm_objects", r#####"const vm = require('node:vm');
+        // QuickJS: thaw-js parity gap, vm family (PR B).
+        p2c_run_qjs("l_vm_objects",r#####"const vm = require('node:vm');
 const out = {};
 const proto = { inherited: 'p' };
 const sb = Object.create(proto);
@@ -86,7 +88,8 @@ return out;
 fn l_vm_errors() {
     // expected: node22
     assert_eq!(
-        p2c_run("l_vm_errors", r#####"const vm = require('node:vm');
+        // QuickJS: thaw-js parity gap, vm family (PR B).
+        p2c_run_qjs("l_vm_errors",r#####"const vm = require('node:vm');
 const out = {};
 const sb = vm.createContext({});
 try { vm.runInContext('null.x', sb, { filename: 'ctx-file.js' }); } catch (e) { out.typeError = [e.name, e instanceof TypeError, e.constructor.name, String(e.stack).includes('ctx-file.js')]; }
@@ -110,7 +113,8 @@ return out;
 fn l_vm_nested() {
     // expected: node22
     assert_eq!(
-        p2c_run("l_vm_nested", r#####"const vm = require('node:vm');
+        // QuickJS: thaw-js parity gap, vm family (PR B).
+        p2c_run_qjs("l_vm_nested",r#####"const vm = require('node:vm');
 const out = {};
 const outer = vm.createContext({ vm, inner: vm.createContext({}) });
 out.nested = vm.runInContext('vm.runInContext("var deep = 1; deep + 1", inner)', outer);
@@ -155,7 +159,8 @@ return out;
 fn l_vm_async() {
     // expected: node22
     assert_eq!(
-        p2c_run("l_vm_async", r#####"const vm = require('node:vm');
+        // QuickJS: thaw-js parity gap, vm family (PR B).
+        p2c_run_qjs("l_vm_async",r#####"const vm = require('node:vm');
 const out = {};
 const sb = vm.createContext({ log: [] });
 const p = vm.runInContext('(async () => { await null; log.push("a"); return 5; })()', sb);

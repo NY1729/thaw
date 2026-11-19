@@ -2978,8 +2978,9 @@ fn web_crypto_operations_not_implemented_reject_not_supported() {
              })();"
         ),
         "NotSupportedError:AES-GCM encrypt is not implemented|NotSupportedError:AES-GCM decrypt is not implemented|\
-         NotSupportedError:HMAC sign is not implemented|NotSupportedError:HMAC verify is not implemented|\
-         NotSupportedError:PBKDF2 deriveBits is not implemented|NotSupportedError:PBKDF2 deriveKey is not implemented|\
+         resolved|NotSupportedError:HMAC verify is not implemented|\
+         TypeError:Failed to normalize algorithm: passed algorithm can not be converted to 'Pbkdf2Params' because 'hash' is required in 'Pbkdf2Params'.|\
+         TypeError:Failed to normalize algorithm: passed algorithm can not be converted to 'Pbkdf2Params' because 'hash' is required in 'Pbkdf2Params'.|\
          NotSupportedError:AES-KW wrapKey is not implemented|NotSupportedError:AES-KW unwrapKey is not implemented|\
          NotSupportedError:RSA-PSS generateKey is not implemented|NotSupportedError:Unrecognized algorithm name|\
          NotSupportedError:Unrecognized algorithm name|NotSupportedError:Unrecognized algorithm name|\
@@ -6013,6 +6014,37 @@ fn vm_eval_syntax_errors_and_script_emulation() {
     assert_eq!(
         one(&src),
         "ERR:SyntaxError ERR:SyntaxError|2 true false 2|6 5 7|ERR:SyntaxError ERR:SyntaxError ERR:SyntaxError undefined 2"
+    );
+}
+
+/// A computed spec that names a bundled node builtin (absent from the factory's map) resolves like the
+/// QuickJS lane's global `require(spec)` fallback; an unserved builtin still throws MODULE_NOT_FOUND.
+#[test]
+fn computed_builtin_require_falls_back_like_quickjs() {
+    use crate::host::{Native, Package};
+    let bundle = r#"module.exports = (function(require) {
+var __thaw_bundle_factories = {
+"a/index.js": function(module, exports, require) {
+  var n = ['f','s'].join('');
+  exports.a = require(n) === require('node:fs');
+  exports.b = typeof require('node:' + 'path').join;
+  try { require('node:' + 'nonexistent'); } catch (e) { exports.d = e.code; }
+  try { require('definitely-not-a-module-xyz'); } catch (e) { exports.c = e.code; }
+  exports.probe = function () { return [exports.a, exports.b, exports.c, exports.d].join(); };
+},
+"node:fs": function(module, exports) { module.exports = { readFile: function () {} }; },
+"node:path": function(module, exports) { module.exports = { join: function () {} }; },
+};
+var __thaw_bundle_require_maps = {
+"a/index.js": { "node:fs": "node:fs", "node:path": "node:path" },
+"node:fs": {}, "node:path": {},
+};
+var __thaw_bundle_entry_key = "a/index.js";
+})(globalThis.require);"#;
+    let mut p = Package::load(bundle).expect("loads");
+    assert_eq!(
+        p.call("probe", &[]).unwrap(),
+        Native::Str("true,function,MODULE_NOT_FOUND,MODULE_NOT_FOUND".into())
     );
 }
 

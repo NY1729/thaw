@@ -3380,6 +3380,7 @@ dependencies = [
  "sha2",
  "swc_ecma_visit",
  "tar",
+ "thaw-js",
  "thaw-js-infer",
  "thaw-parser",
  "thaw-quickjs",
