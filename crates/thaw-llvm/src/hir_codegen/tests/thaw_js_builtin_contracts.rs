@@ -107,6 +107,8 @@ fn thaw_js_graph_callback_types_accept_live_parameters_and_nested_callables() {
         Box::new(Void),
     );
     assert!(thaw_js_graph_callback_type(&Function(vec![JsValue], Box::new(Void))));
+    // an `any`-typed return (`(...args: any[]) => any`) crosses as a handle, like the graph adapter's JsValue arm
+    assert!(thaw_js_graph_callback_type(&Function(vec![JsValue], Box::new(JsValue))));
     assert!(thaw_js_graph_callback_type(&Function(
         vec![JsValue, Array(Box::new(Json))],
         Box::new(Void)

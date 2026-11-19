@@ -1079,6 +1079,59 @@ fn thaw_js_union_callable_result_ejs_shape_builds_under_error_mode() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An event-emitter `on(event, cb)` whose listener is typed `(...args: any[]) => any` (minipass's
+/// `ReadStream.on`): the callback's declared return is `any` (a JsValue), so the class operation must
+/// still cross the thaw-js boundary instead of failing the build (`fs-minipass` under error fallback).
+#[test]
+fn thaw_js_class_callback_returning_any_builds_under_error_mode() {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "class-callback-any",
+        "import { ReadStream } from \"tjs-stream\";\n\
+         function run(): void {\n\
+           const rs = new ReadStream();\n\
+           let total = \"\";\n\
+           rs.on(\"data\", function (chunk: any) {\n\
+             total += chunk.toString();\n\
+           });\n\
+           rs.on(\"end\", function () {\n\
+             console.log(\"end:\", total);\n\
+           });\n\
+           rs.fire(\"data\", \"hello\");\n\
+           rs.fire(\"end\", \"\");\n\
+         }\n\
+         run();\n",
+        &[(
+            "tjs-stream",
+            "export declare class ReadStream {\n\
+               constructor();\n\
+               on(event: string, cb: (...args: any[]) => any): this;\n\
+               fire(event: string, value: string): void;\n\
+             }\n",
+            "class ReadStream {\n\
+               constructor() { this.listeners = {}; }\n\
+               on(event, cb) { (this.listeners[event] ||= []).push(cb); return this; }\n\
+               fire(event, value) { for (const cb of this.listeners[event] || []) cb(value); }\n\
+             }\n\
+             exports.ReadStream = ReadStream;\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &["tjs-stream".to_string()], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    // Same text real Node prints for the equivalent JavaScript.
+    assert_eq!(thaw_js_run(&output), "end: hello\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A single-argument bare callable with no import (`utf-8-validate`'s `isValidUTF8(buffer: Buffer): boolean`
 /// via `--use`): thaw-js must still emit a typed bare-name wrapper, since it has no untyped `callDynamic` shim.
 #[test]
