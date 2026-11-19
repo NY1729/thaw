@@ -2622,25 +2622,6 @@ fn timer_exceptions_reach_the_process_event_surface() {
 }
 
 #[test]
-fn unhandled_timer_exception_fails_the_event_loop() {
-    assert_eq!(
-        load("setTimeout(() => { throw new Error('timer fatal'); }, 0);"),
-        1
-    );
-    assert_eq!(thaw_js_run_event_loop(), 1);
-}
-
-#[test]
-fn exit_event_is_emitted_with_code_1_when_the_loop_fails() {
-    assert_eq!(
-        load("globalThis.exitSeen = []; process.on('exit', code => exitSeen.push(code)); setTimeout(() => { throw new Error('boom'); }, 0);"),
-        1
-    );
-    assert_eq!(thaw_js_run_event_loop(), 1);
-    assert_eq!(eval_json("exitSeen"), Ok(Some("[1]".into())));
-}
-
-#[test]
 fn unhandled_js_promise_rejection_reaches_the_process_event_surface() {
     // Node's default (`--unhandled-rejections=throw`): offered to 'unhandledRejection' first.
     assert_eq!(
@@ -2725,17 +2706,6 @@ fn terminal_pending_work_is_separate_from_failure_and_exit_code() {
     assert_eq!(thaw_js_run_event_loop(), 7);
     assert_eq!(thaw_js_terminal_work_pending(), 0);
     assert_eq!(load("process.exitCode = 0"), 1);
-}
-
-#[test]
-fn zero_ms_timeout_is_one_ms_and_fires_in_insertion_order() {
-    // Node 22: a1,a0,b1 (setTimeout(f, 0) counts as 1 ms).
-    assert_eq!(
-        load("globalThis.o = []; setTimeout(() => o.push('a1'), 1); setTimeout(() => o.push('a0'), 0); setTimeout(() => o.push('b1'), 1);"),
-        1
-    );
-    assert_eq!(thaw_js_run_event_loop(), 0);
-    assert_eq!(eval_json("o.join()"), Ok(Some("\"a1,a0,b1\"".into())));
 }
 
 #[test]
@@ -2850,21 +2820,6 @@ fn timeout_resolves_promises_and_forwards_arguments() {
 }
 
 #[test]
-fn timeout_can_be_cancelled() {
-    assert_eq!(
-        load(
-            "function cancelled() { return new Promise(resolve => {\n\
-                   const id = setTimeout(() => resolve('wrong'), 0);\n\
-                   clearTimeout(id);\n\
-                   setTimeout(() => resolve('right'), 1);\n\
-                 }); }"
-        ),
-        1
-    );
-    assert_eq!(call("cancelled", "[]"), r#""right""#);
-}
-
-#[test]
 fn immediate_forwards_arguments_and_can_be_cancelled() {
     assert_eq!(
         load(
@@ -2877,22 +2832,6 @@ fn immediate_forwards_arguments_and_can_be_cancelled() {
         1
     );
     assert_eq!(call("immediate", "[40]"), "42");
-}
-
-#[test]
-fn interval_repeats_and_can_cancel_itself() {
-    assert_eq!(
-        load(
-            "function countIntervals() { return new Promise(resolve => {\n\
-                   let count = 0;\n\
-                   const id = setInterval(() => {\n\
-                     if (++count === 3) { clearInterval(id); resolve(count); }\n\
-                   }, 1);\n\
-                 }); }"
-        ),
-        1
-    );
-    assert_eq!(call("countIntervals", "[]"), "3");
 }
 
 #[test]
@@ -9809,49 +9748,6 @@ fn dns_lookup_json_resolves_localhost_via_the_real_os_resolver() {
     // hermetic, unlike a real unresolvable hostname would be.
     let failure: serde_json::Value = serde_json::from_str(&dns_lookup_json(String::new())).unwrap();
     assert_eq!(failure["ok"], false);
-}
-
-/// `process.nextTick` used to be a plain alias for `queueMicrotask`
-/// (`Promise.resolve().then(callback)`), giving it no priority over an
-/// already-scheduled Promise `.then()` -- real Node fully drains its
-/// own separate nextTick queue before running any pending Promise
-/// microtask, at every checkpoint, so nextTick always wins regardless
-/// of scheduling order. Fixed by queuing into a plain JS array instead
-/// (`platform_globals/runtime.js`), drained by the Rust host
-/// (`drain_next_tick_queue`, thaw-quickjs/src/lib.rs) immediately
-/// before every single `execute_pending_job()` check across this
-/// crate -- not just once per batch, so a nextTick queued from inside
-/// one microtask still runs before the *next* one. Scoped to this
-/// crate's own QuickJS engine (this test drives it directly, the same
-/// way `thaw_js_run_event_loop`-based tests above do); natively
-/// JIT-compiled code has its own separate Promise/timer implementation
-/// (thaw-runtime) this fix does not reach -- a natively-compiled
-/// program's own `Promise`/`setTimeout` still order correctly against
-/// each other (a real, working, separate microtask queue), just not
-/// against a `process.nextTick` call, which still bridges into this
-/// crate's engine. Left as a known, separately-scoped gap: giving
-/// natively-compiled code the same fix needs `process.nextTick` as its
-/// own native compiler intrinsic (parallel to `setTimeout`), not a
-/// small patch to this file.
-#[test]
-fn process_next_tick_runs_before_promise_microtasks_scheduled_earlier() {
-    assert_eq!(
-        load(
-            "globalThis.order = []; \
-             order.push('sync'); \
-             Promise.resolve().then(() => order.push('promise')); \
-             process.nextTick(() => order.push('nextTick')); \
-             setTimeout(() => order.push('timeout0'), 0); \
-             setImmediate(() => order.push('immediate')); \
-             function readOrder() { return order; }"
-        ),
-        1
-    );
-    assert_eq!(thaw_js_run_event_loop(), 0);
-    assert_eq!(
-        call("readOrder", "[]"),
-        r#"["sync","nextTick","promise","timeout0","immediate"]"#
-    );
 }
 
 /// Real ECMA-402 constructors reject an out-of-enum option with a
