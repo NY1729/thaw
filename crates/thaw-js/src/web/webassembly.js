@@ -71,6 +71,7 @@
     moduleExports: guard(__thaw_wasm_module_exports),
     customSections: guard(__thaw_wasm_module_custom_sections),
     instantiate: guard(__thaw_wasm_instantiate),
+    instantiateWasi: typeof __thaw_wasm_instantiate_wasi === 'function' ? guard(__thaw_wasm_instantiate_wasi) : undefined,
     instanceExports: guard(__thaw_wasm_instance_exports),
     callFunc: guard(__thaw_wasm_call_func),
     funcType: guard(__thaw_wasm_func_type),
@@ -237,13 +238,25 @@
       default: return undefined;
     }
   };
+  // node:wasi passes its normalized options as `wasi_snapshot_preview1.__thawWasiOptions` (JSON). Such an
+  // instance gets a native WASI context (as in the QuickJS lane), and its preview1 imports are left to it.
+  const wasiOptionsOf = (importObject) => {
+    const ns = isObject(importObject) ? importObject.wasi_snapshot_preview1 : undefined;
+    const json = isObject(ns) ? ns.__thawWasiOptions : undefined;
+    if (json === undefined || nat.instantiateWasi === undefined) return undefined;
+    const options = JSON.parse(String(json));
+    return { args: options.args, env: Object.entries(options.env), preopens: Object.entries(options.preopens) };
+  };
   const setupInstance = (self, module, importObject, prefix) => {
     const data = moduleOf(module, prefix);
     if (importObject !== undefined && !isObject(importObject)) throw new TypeError(`${prefix}: Argument 1 must be an object`);
     const imports = nat.moduleImports(data.handle);
     if (imports.length > 0 && importObject === undefined) throw new TypeError(`${prefix}: Imports argument must be present and must be an object`);
-    const linkage = imports.map((item, index) => linkImport(item, index, importObject, prefix));
-    const handle = nat.instantiate(data.handle, linkage, prefix);
+    const wasi = wasiOptionsOf(importObject);
+    const linkage = imports.map((item, index) => (wasi && item.module === 'wasi_snapshot_preview1'
+      ? [item.module, item.name, 'missing', undefined]
+      : linkImport(item, index, importObject, prefix)));
+    const handle = wasi ? nat.instantiateWasi(data.handle, linkage, prefix, wasi) : nat.instantiate(data.handle, linkage, prefix);
     const indexes = exportIndexes(data.bytes);
     const exportsObject = Object.create(null);
     for (const item of nat.instanceExports(handle)) {
