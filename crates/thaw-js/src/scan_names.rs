@@ -61,6 +61,11 @@ pub fn node_version() -> &'static str {
     names().node_version
 }
 
+/// True if the data records Node 22's members of `global`: only then does [`node_global_has`] answer for it.
+pub fn node_global_covered(global: &str) -> bool {
+    names().members.contains_key(global)
+}
+
 /// True if some Node 22 builtin (export, class, prototype, `globalThis`, diagnostics channel or child IPC
 /// channel) has a string key `name`.
 pub fn is_node_method_name(name: &str) -> bool {
