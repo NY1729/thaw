@@ -855,6 +855,34 @@ fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
 }
 
 #[test]
+fn fallback_message_names_refused_packages_with_short_reasons() {
+    let refusals = vec![
+        ("rxjs".to_string(), "builtin:Symbol.observable, global:requestAnimationFrame".to_string()),
+        ("deepmerge".to_string(), "bundle uses unsupported features: method:customMerge".to_string()),
+        ("deepmerge".to_string(), "bundle uses unsupported features: method:other".to_string()),
+    ];
+    assert_eq!(
+        thaw_js_fallback_message("thaw-js routing needs QuickJS: site:quickjs:package_bundle", &refusals),
+        "thaw-js routing needs QuickJS: site:quickjs:package_bundle; refused: deepmerge (method:customMerge), rxjs (builtin:Symbol.observable)"
+    );
+    // no refusals: the error alone
+    assert_eq!(thaw_js_fallback_message("e", &[]), "e");
+    // more than 8 packages: the first 8 in sorted order, then `+N more`
+    let many: Vec<(String, String)> = (0..10).map(|i| (format!("p{i:02}"), "method:x".to_string())).collect();
+    let msg = thaw_js_fallback_message("e", &many);
+    assert!(
+        msg.ends_with(
+            "; refused: p00 (method:x), p01 (method:x), p02 (method:x), p03 (method:x), p04 (method:x), \
+             p05 (method:x), p06 (method:x), p07 (method:x), +2 more"
+        ),
+        "{msg}"
+    );
+    // a multi-line reason keeps its first line; a long one is capped at 80 chars
+    let long = ("big".to_string(), format!("{}\nsecond line", "x".repeat(100)));
+    assert_eq!(thaw_js_fallback_message("e", &[long]), format!("e; refused: big ({})", "x".repeat(80)));
+}
+
+#[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
     // A `node:async_hooks` createHook program that uses `finally` (not yet Node-identical on thaw-js) keeps that
     // module on QuickJS; the build falls back and the artifact reports the blocker.

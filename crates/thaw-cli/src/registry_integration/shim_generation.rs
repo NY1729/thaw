@@ -345,7 +345,7 @@ fn generate_registry_shims_pass(
 ) -> Result<(RegistryShims, ThawJsPackages), String> {
     let mut thaw_js_eligible = ThawJsPackages::new();
     // `THAW_JS_FALLBACK=warn|error`: every package thaw-js refuses in this pass (reported by `build` after the last pass).
-    let mut thaw_js_refusals: Vec<String> = Vec::new();
+    let mut thaw_js_refusals: Vec<(String, String)> = Vec::new();
     let observed_arities = observed_member_call_arities_named(user_source, user_source_name)?;
     let observed_constructor_arities =
         observed_constructor_arities_named(user_source, user_source_name)?;
@@ -2239,11 +2239,7 @@ fn generate_registry_shims_pass(
                     ) {
                         thaw_js_eligible.insert(pkg.name.clone());
                     } else if thaw_js_fallback_mode() != ThawJsFallbackMode::Silent {
-                        thaw_js_refusals.push(format!(
-                            "package `{}` stays on QuickJS: {}",
-                            pkg.name,
-                            thaw_js_package_refusal(&pkg.name)
-                        ));
+                        thaw_js_refusals.push((pkg.name.clone(), thaw_js_package_refusal(&pkg.name)));
                     }
                 }
                 bundles.push((
