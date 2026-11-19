@@ -113,8 +113,7 @@ return out;
 fn l_vm_nested() {
     // expected: node22
     assert_eq!(
-        // QuickJS: thaw-js parity gap, vm family (PR B).
-        p2c_run_qjs("l_vm_nested",r#####"const vm = require('node:vm');
+        p2c_run("l_vm_nested", r#####"const vm = require('node:vm');
 const out = {};
 const outer = vm.createContext({ vm, inner: vm.createContext({}) });
 out.nested = vm.runInContext('vm.runInContext("var deep = 1; deep + 1", inner)', outer);

@@ -518,12 +518,11 @@ pub fn reachable(parts: &BundleParts) -> BTreeSet<String> {
     seen
 }
 
-/// One `require(..)` call: its literal spec (`None` for a computed one), whether it is guarded, and whether its
-/// computed spec is unclassifiable (`unclassified`: a no-argument call, a spread, or a [`Fragments::Unclassified`]
-/// argument). A bare, prefix or suffix computed spec is not a blocker: [`reachable`] follows the entries it can name.
+/// One `require(..)` call: its literal spec (`None` for a computed one) and whether its computed spec is
+/// unclassifiable (`unclassified`: a no-argument call, a spread, or a [`Fragments::Unclassified`] argument). A
+/// bare, prefix or suffix computed spec is not a blocker: [`reachable`] follows the entries it can name.
 struct Require {
     spec: Option<String>,
-    guarded: bool,
     unclassified: bool,
 }
 
@@ -542,13 +541,13 @@ const NODE_BUILTIN_NAMES: &[&str] = &[
     "worker_threads", "zlib",
 ];
 
-/// `require(spec)` names an optional npm package: not a builtin (`node:` specs included), not a relative or
-/// absolute file of the package itself, not a native addon. Only such a require may be missing and guarded.
-fn is_optional_package_spec(spec: &str) -> bool {
+/// `require(spec)` of a spec the bundle does not map may stay unresolved: thaw-js `require_in` (host.rs) then throws
+/// `MODULE_NOT_FOUND` at the require site, as Node does for a module that is not installed. Not for `node:` or bare
+/// builtin names (thaw serves those by name, so a missing one is a missing feature) and not for a native addon
+/// (`.node`: dlopen is never served at run time).
+fn is_missing_loadable_spec(spec: &str) -> bool {
     !spec.is_empty()
         && !spec.starts_with("node:")
-        && !spec.starts_with('.')
-        && !spec.starts_with('/')
         && !spec.ends_with(".node")
         && !NODE_BUILTIN_NAMES.contains(&spec)
 }
@@ -602,18 +601,6 @@ pub(crate) const CALLSITE_METHODS: &[&str] = &[
     "toString",
 ];
 
-/// Finds a `throw` statement: a catch body containing one does not handle the failure it catches.
-#[derive(Default)]
-struct ThrowFinder {
-    found: bool,
-}
-
-impl Visit for ThrowFinder {
-    fn visit_throw_stmt(&mut self, _: &a::ThrowStmt) {
-        self.found = true;
-    }
-}
-
 #[derive(Default)]
 struct Walker {
     features: HashMap<String, usize>,
@@ -628,8 +615,6 @@ struct Walker {
     /// identifiers used only as the right operand of `instanceof`
     instance_refs: HashSet<String>,
     requires: Vec<Require>,
-    /// inside a try block whose catch handles the failure, in the same function (see `visit_try_stmt`)
-    guarded: bool,
     /// identifiers probed with `typeof X` (assumed guarded)
     probed: HashSet<String>,
     /// `globalThis.X` members tested only for presence
@@ -735,15 +720,12 @@ impl Visit for Walker {
         if n.is_generator {
             self.feature("generator");
         }
-        // a nested function runs when called, not inside an enclosing try
-        let guarded = std::mem::replace(&mut self.guarded, false);
         // a plain function rebinds `this`; a class method keeps its class's binding
         let this_class = self.this_class;
         if !std::mem::take(&mut self.method_fn) {
             self.this_class = None;
         }
         n.visit_children_with(self);
-        self.guarded = guarded;
         self.this_class = this_class;
     }
     fn visit_arrow_expr(&mut self, n: &a::ArrowExpr) {
@@ -753,23 +735,7 @@ impl Visit for Walker {
         if n.is_generator {
             self.feature("generator");
         }
-        let guarded = std::mem::replace(&mut self.guarded, false);
         n.visit_children_with(self);
-        self.guarded = guarded;
-    }
-    fn visit_try_stmt(&mut self, n: &a::TryStmt) {
-        let outer = self.guarded;
-        // a catch that does not rethrow handles the failure of a require in the try block
-        let handled = n.handler.as_ref().is_some_and(|h| {
-            let mut finder = ThrowFinder::default();
-            h.body.visit_with(&mut finder);
-            !finder.found
-        });
-        self.guarded = outer || handled;
-        n.block.visit_with(self);
-        self.guarded = outer;
-        n.handler.visit_with(self);
-        n.finalizer.visit_with(self);
     }
     fn visit_await_expr(&mut self, n: &a::AwaitExpr) {
         self.feature("await");
@@ -984,7 +950,6 @@ impl Visit for Walker {
                     };
                     self.requires.push(Require {
                         spec: lit,
-                        guarded: self.guarded,
                         unclassified,
                     });
                 }
@@ -1094,30 +1059,73 @@ fn is_node_or_host_internal(name: &str) -> bool {
 
 /// Scan a registry bundle.
 pub fn scan_bundle(source: &str) -> Result<Report, String> {
-    scan_bundle_with(source, false, &HashSet::new())
+    let empty = HashSet::new();
+    scan_bundle_with(
+        source,
+        false,
+        &ScanContext {
+            known_methods: &empty,
+            installed_packages: &empty,
+        },
+    )
 }
 
 /// Scan the bundle of a package that ships a native (`.node`) addon: the loader keys of
 /// [`addon_tolerated`] are accepted on top of [`scan_bundle`]'s rules. Only addon packages use it.
 pub fn scan_addon_bundle(source: &str) -> Result<Report, String> {
-    scan_bundle_with(source, true, &HashSet::new())
+    let empty = HashSet::new();
+    scan_bundle_with(
+        source,
+        true,
+        &ScanContext {
+            known_methods: &empty,
+            installed_packages: &empty,
+        },
+    )
 }
 
-/// [`scan_bundle`], where every name in `known` is a method thaw-js serves (the registry's JS builtins define
-/// it, see `thaw_registry::builtin_defined_names`): a call `.name(` is not flagged as `method:name`.
-pub fn scan_bundle_with_known(source: &str, known: &HashSet<String>) -> Result<Report, String> {
-    scan_bundle_with(source, false, known)
+/// What the scan knows about the host beyond the bundle itself.
+pub struct ScanContext<'a> {
+    /// method names thaw-js serves: the registry's JS builtins define them (`thaw_registry::builtin_defined_names`),
+    /// so a call `.name(` is not flagged as `method:name`
+    pub known_methods: &'a HashSet<String>,
+    /// packages installed in the registry. A require of a spec the bundle does not map is a blocker when the package
+    /// it names is installed (the bundler dropped it, or it was added after the bundle): thaw-js then could not
+    /// serve what Node resolves. A package that is not installed is a non-blocker: thaw-js throws MODULE_NOT_FOUND
+    /// at the require, as Node does for a module that is not installed.
+    pub installed_packages: &'a HashSet<String>,
 }
 
-/// [`scan_addon_bundle`] with the `known` method names of [`scan_bundle_with_known`].
-pub fn scan_addon_bundle_with_known(
-    source: &str,
-    known: &HashSet<String>,
-) -> Result<Report, String> {
-    scan_bundle_with(source, true, known)
+/// [`scan_bundle`] with the host knowledge of `ctx` (see [`ScanContext`]).
+pub fn scan_bundle_in(source: &str, ctx: &ScanContext) -> Result<Report, String> {
+    scan_bundle_with(source, false, ctx)
 }
 
-fn scan_bundle_with(source: &str, addon: bool, known: &HashSet<String>) -> Result<Report, String> {
+/// [`scan_addon_bundle`] with the host knowledge of `ctx` (see [`ScanContext`]).
+pub fn scan_addon_bundle_in(source: &str, ctx: &ScanContext) -> Result<Report, String> {
+    scan_bundle_with(source, true, ctx)
+}
+
+/// The package a bare require spec names: `@scope/name/sub` -> `@scope/name`, `name/sub` -> `name`.
+fn spec_package(spec: &str) -> &str {
+    let name_end = if spec.starts_with('@') {
+        spec.match_indices('/').nth(1).map(|(i, _)| i)
+    } else {
+        spec.find('/')
+    };
+    &spec[..name_end.unwrap_or(spec.len())]
+}
+
+/// A spec that names a file of the requiring package (`./x`, `../x`, `/x`), not a package.
+fn is_relative_spec(spec: &str) -> bool {
+    spec.starts_with("./")
+        || spec.starts_with("../")
+        || spec.starts_with('/')
+        || spec == "."
+        || spec == ".."
+}
+
+fn scan_bundle_with(source: &str, addon: bool, ctx: &ScanContext) -> Result<Report, String> {
     let parts = parse_bundle(source)?;
     let reach = reachable(&parts);
     let mut report = Report {
@@ -1136,8 +1144,8 @@ fn scan_bundle_with(source: &str, addon: bool, known: &HashSet<String>) -> Resul
     }
     let mut known_methods: HashSet<String> = interp.known_method_names().into_iter().collect();
     known_methods.extend(CALLSITE_METHODS.iter().map(|m| m.to_string()));
-    // R6: names the registry's JS builtins define are served by thaw-js (see `scan_bundle_with_known`)
-    known_methods.extend(known.iter().cloned());
+    // R6: names the registry's JS builtins define are served by thaw-js (see `ScanContext::known_methods`)
+    known_methods.extend(ctx.known_methods.iter().cloned());
     let params = [
         "module",
         "exports",
@@ -1253,9 +1261,14 @@ fn scan_bundle_with(source: &str, addon: bool, known: &HashSet<String>) -> Resul
         for r in &w.requires {
             match &r.spec {
                 Some(spec) if map.is_some_and(|m| m.contains_key(spec)) => {}
-                // an optional package that is not installed: the require throws MODULE_NOT_FOUND inside the
-                // handling try, as on Node (host.rs `require_in`), so the program's catch takes over
-                Some(spec) if r.guarded && is_optional_package_spec(spec) => {}
+                // absent from the map and not an installed package: thaw-js throws MODULE_NOT_FOUND at the require,
+                // as Node does for a module that is not installed (host.rs `require_in`); guarded or lazy, the
+                // program's code takes over. A relative spec names a file of the package: kept as a non-blocker
+                // (the scan cannot know whether the package ships it)
+                Some(spec)
+                    if is_missing_loadable_spec(spec)
+                        && (is_relative_spec(spec)
+                            || !ctx.installed_packages.contains(spec_package(spec))) => {}
                 Some(spec) => add(&mut report, format!("require:{spec}"), 1, key),
                 // a bare, prefix or suffix computed spec is followed by `reachable`; one it does not name throws
                 // MODULE_NOT_FOUND at run time (host.rs `require_in`), as on Node

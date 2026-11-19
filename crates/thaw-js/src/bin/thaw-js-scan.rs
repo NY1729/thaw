@@ -1,8 +1,29 @@
-//! `thaw-js-scan <bundle.js>...` : print, per bundle, the constructs thaw-js cannot run (tab separated).
+//! `thaw-js-scan [--installed=a,b,@s/c] <bundle.js>...` : print, per bundle, the constructs thaw-js cannot run
+//! (tab separated). `--installed` names the registry packages installed (see `ScanContext`); none by default.
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let installed: std::collections::HashSet<String> = match args
+        .first()
+        .and_then(|a| a.strip_prefix("--installed="))
+        .map(|list| {
+            list.split(',')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect()
+        }) {
+        Some(set) => {
+            args.remove(0);
+            set
+        }
+        None => Default::default(),
+    };
+    let known = std::collections::HashSet::new();
+    let ctx = thaw_js::scan::ScanContext {
+        known_methods: &known,
+        installed_packages: &installed,
+    };
     if args.is_empty() {
-        eprintln!("usage: thaw-js-scan <bundle.js>...");
+        eprintln!("usage: thaw-js-scan [--installed=a,b] <bundle.js>...");
         std::process::exit(2);
     }
     for path in args {
@@ -17,7 +38,7 @@ fn main() {
                 continue;
             }
         };
-        match thaw_js::scan::scan_bundle(&source) {
+        match thaw_js::scan::scan_bundle_in(&source, &ctx) {
             Ok(r) => {
                 println!(
                     "{name}\tmodules\t{}/{}\t{}",
