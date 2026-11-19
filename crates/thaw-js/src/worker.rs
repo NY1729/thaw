@@ -538,9 +538,24 @@ enum Item {
     Route(u64, Option<String>),
 }
 
+/// Whether a dispatch item is a port delivery (`port_item`): the only kind a synchronous read may take.
+fn is_port_item(json: &str) -> bool {
+    json.starts_with(r#"{"type":"port"#)
+}
+
 /// Pending worker events as a JSON array (`[]` when none): parent events carry a `handle`, worker events
 /// (`message` from the parent) do not. Joins and forgets a worker once its `exit` is delivered.
 pub(crate) fn poll(it: &mut Interp) -> String {
+    pump(it, false)
+}
+
+/// The port deliveries pending now (`[]` when none), for a synchronous receiveMessageOnPort. Every other event goes
+/// back to the local queue, so the next loop turn delivers it in its order.
+pub(crate) fn poll_ports(it: &mut Interp) -> String {
+    pump(it, true)
+}
+
+fn pump(it: &mut Interp, ports_only: bool) -> String {
     let mut items: Vec<Item> = it.worker.local.drain(..).map(Item::Json).collect();
     let mut exited_tokens = Vec::new();
     for (id, w) in it.worker.workers.iter_mut() {
@@ -660,6 +675,7 @@ pub(crate) fn poll(it: &mut Interp) -> String {
     let mut out = Vec::new();
     for item in items {
         match item {
+            Item::Json(json) if ports_only && !is_port_item(&json) => it.worker.local.push(json),
             Item::Json(json) => out.push(json),
             Item::Route(addr, wire) => out.extend(route_port(it, addr, wire)),
         }
@@ -887,6 +903,9 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_port_live", f, true);
+    // receiveMessageOnPort's sync read: the port deliveries already posted by the other threads (JSON, like poll)
+    let f = it.native(|it, _, _| Ok(Value::str(&poll_ports(it))));
+    g.declare("__thaw_worker_poll_ports", f, true);
 }
 
 #[cfg(test)]

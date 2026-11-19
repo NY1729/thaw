@@ -606,3 +606,85 @@ fn atomics_wait_async_dropped_realm_leaves_no_waiter_for_notify() {
         ["0"]
     );
 }
+
+/// Runs `src` as a main program with its event loop, on its own thread (Interp is built inside it); returns its lines.
+fn port_main_lines(src: &'static str) -> Vec<String> {
+    in_thread(move || {
+        let mut it = Interp::new();
+        match it.run_main(src) {
+            Ok(0) => {}
+            Ok(code) => panic!("exit code {code}"),
+            Err(Ctl::Throw(v)) => panic!("uncaught {}", it.to_str(&v)),
+            Err(_) => panic!("stray completion"),
+        }
+        std::mem::take(&mut it.out)
+    })
+}
+
+#[test]
+fn receive_message_on_port_takes_a_message_a_worker_posted_while_main_waited() {
+    // main blocks in Atomics.wait; the worker posts on the port it was handed, then notifies. Main's sync
+    // receiveMessageOnPort must see that post (Node: it dequeues what the other thread already sent).
+    let lines = port_main_lines(
+        "const { Worker, receiveMessageOnPort, MessageChannel } = globalThis.__thaw_worker_threads_exports;
+         const { port1, port2 } = new MessageChannel();
+         const sab = new SharedArrayBuffer(4);
+         const w = new Worker(
+           \"const { workerData } = require('node:worker_threads'); const i = new Int32Array(workerData.sab);\" +
+           \"workerData.port.postMessage({ hi: 1 }); Atomics.store(i, 0, 1); Atomics.notify(i, 0, 1);\",
+           { eval: true, workerData: { port: port2, sab }, transferList: [port2] });
+         const i = new Int32Array(sab);
+         console.log(Atomics.wait(i, 0, 0, 5000));
+         console.log(JSON.stringify(receiveMessageOnPort(port1)));
+         w.terminate();",
+    );
+    assert_eq!(lines, ["ok", r#"{"message":{"hi":1}}"#]);
+}
+
+#[test]
+fn receive_message_on_port_returns_queued_worker_messages_in_order_one_per_call() {
+    let lines = port_main_lines(
+        "const { Worker, receiveMessageOnPort, MessageChannel } = globalThis.__thaw_worker_threads_exports;
+         const { port1, port2 } = new MessageChannel();
+         const sab = new SharedArrayBuffer(4);
+         const w = new Worker(
+           \"const { workerData } = require('node:worker_threads'); const i = new Int32Array(workerData.sab);\" +
+           \"for (let n = 1; n <= 3; n++) workerData.port.postMessage(n); Atomics.store(i, 0, 1); Atomics.notify(i, 0, 1);\",
+           { eval: true, workerData: { port: port2, sab }, transferList: [port2] });
+         const i = new Int32Array(sab);
+         console.log(Atomics.wait(i, 0, 0, 5000));
+         for (let k = 0; k < 4; k++) console.log(JSON.stringify(receiveMessageOnPort(port1)));
+         w.terminate();",
+    );
+    assert_eq!(
+        lines,
+        [
+            "ok",
+            r#"{"message":1}"#,
+            r#"{"message":2}"#,
+            r#"{"message":3}"#,
+            "undefined",
+        ]
+    );
+}
+
+#[test]
+fn receive_message_on_port_pump_leaves_other_worker_events_for_the_loop() {
+    // the worker's `online` and `exit` are not port deliveries: the sync pump must not take them, so the loop
+    // still fires them after the synchronous read, in their order
+    let lines = port_main_lines(
+        "const { Worker, receiveMessageOnPort, MessageChannel } = globalThis.__thaw_worker_threads_exports;
+         const { port1, port2 } = new MessageChannel();
+         const sab = new SharedArrayBuffer(4);
+         const w = new Worker(
+           \"const { workerData } = require('node:worker_threads'); const i = new Int32Array(workerData.sab);\" +
+           \"workerData.port.postMessage('m'); Atomics.store(i, 0, 1); Atomics.notify(i, 0, 1);\",
+           { eval: true, workerData: { port: port2, sab }, transferList: [port2] });
+         w.on('online', () => console.log('online'));
+         w.on('exit', (code) => console.log('exit', code));
+         const i = new Int32Array(sab);
+         console.log(Atomics.wait(i, 0, 0, 5000));
+         console.log(JSON.stringify(receiveMessageOnPort(port1)));",
+    );
+    assert_eq!(lines, ["ok", r#"{"message":"m"}"#, "online", "exit 0"]);
+}
