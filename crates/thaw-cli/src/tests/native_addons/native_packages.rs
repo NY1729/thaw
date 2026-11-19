@@ -105,8 +105,8 @@ fn registry_add_fetches_and_runs_utf8_validate_when_enabled() {
     std::fs::write(
             &source,
             r#"function main(): void {
-                console.log(Boolean(isValidUTF8(JSON.parse("[{\"type\":\"Buffer\",\"data\":[240,144,128,128]}]"))));
-                console.log(Boolean(isValidUTF8(JSON.parse("[{\"type\":\"Buffer\",\"data\":[255]}]"))));
+                console.log(Boolean(isValidUTF8(Buffer.from([240,144,128,128]))));
+                console.log(Boolean(isValidUTF8(Buffer.from([255]))));
             }
             "#,
         )
