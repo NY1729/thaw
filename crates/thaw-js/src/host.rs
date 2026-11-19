@@ -298,6 +298,7 @@ impl Package {
         }
         let mut interp = Box::new(Interp::runtime());
         interp.share_process_state(crate::procstate::host_shared());
+        interp.enable_shared_globals();
         // console output goes straight to stdout: nothing in the host drains `Interp::out`
         interp.set_stream(true);
         if stack_bytes != 0 {
@@ -1330,6 +1331,7 @@ pub(crate) fn default_realm() -> usize {
     if PACKAGES.with(|ps| ps.borrow().is_empty()) {
         let mut interp = Box::new(Interp::runtime());
         interp.share_process_state(crate::procstate::host_shared());
+        interp.enable_shared_globals();
         // console output goes straight to stdout: nothing in the host drains `Interp::out`
         interp.set_stream(true);
         let stack = process_stack_bytes();
@@ -5791,6 +5793,16 @@ thread_local! {
     /// Packages currently running a call, by handle: a compiled callback may call back into the
     /// package that invoked it (nested `map` callbacks), which re-uses the running instance.
     static RUNNING: RefCell<HashMap<usize, *mut Package>> = RefCell::new(HashMap::new());
+}
+
+/// Tests only: registers `package` as a loaded realm (what `thaw_tjs_load` does) and returns its handle.
+#[cfg(test)]
+pub(crate) fn register_test_package(package: Package) -> usize {
+    PACKAGES.with(|ps| {
+        let mut ps = ps.borrow_mut();
+        ps.push(Some(package));
+        ps.len() - 1
+    })
 }
 
 /// Run `f` on package `handle`. The package is taken out of its slot meanwhile so a compiled

@@ -76,6 +76,7 @@ mod proxy;
 mod reflect;
 pub mod scan;
 pub mod scan_names;
+mod shared_globals;
 mod strict;
 mod symbol_table;
 mod sysio;
@@ -1326,6 +1327,9 @@ pub struct Interp {
     hint_stats: hints::HintStats,
     /// vm realms (`build(false)`) take their preludes from `run_shared`; host realms parse them each time.
     share_preludes: bool,
+    /// A registry-package realm: its user writes to the global object are published to every realm
+    /// (`shared_globals.rs`). Off for bare, vm and worker interpreters.
+    share_globals: bool,
     /// Oracle mode: every hinted read also runs the by-name lookup and asserts they agree.
     check_hints: bool,
     /// `THAW_JS_COMPILE` mode, `THAW_JS_COMPILE_AFTER` call threshold, `THAW_JS_COMPILE_STATS` report flag.
@@ -1510,6 +1514,7 @@ impl Interp {
             run_id: 0,
             ident_hints: vec![hints::HintSlot::default()],
             share_preludes: !host,
+            share_globals: false,
             hint_stats: hints::HintStats::from_env(),
             check_hints: cfg!(test) || std::env::var_os("THAW_JS_CHECK_HINTS").is_some(),
             // the env is applied at the end of `build`, after the preludes: they are never analysed or counted
@@ -1833,8 +1838,9 @@ impl Interp {
                 let set = a.set.map(|s| {
                     self.accessor_fn(s, 1.0, move |it, _, args| {
                         let v = args.first().cloned().unwrap_or(Value::Undefined);
-                        if let Some(b) = it.global.vars.borrow_mut().get_mut(name) {
-                            b.value = v;
+                        let wrote = it.global.vars.borrow_mut().get_mut(name).map(|b| b.value = v);
+                        if wrote.is_some() {
+                            it.publish_global(name);
                         }
                         Ok(Value::Undefined)
                     })
@@ -3349,12 +3355,14 @@ impl Interp {
             // Node's accessor globals are configurable, so `delete` removes them even as builtins
             Origin::Decl if NODE_ACCESSOR_GLOBALS.iter().any(|a| a.name == name) => {
                 g.vars.borrow_mut().remove(name);
+                self.unpublish_global(name);
                 Some(true)
             }
             Origin::Decl | Origin::Lexical => None,
             Origin::Var => Some(false),
             Origin::Prop => {
                 g.vars.borrow_mut().remove(name);
+                self.unpublish_global(name);
                 Some(true)
             }
         }
@@ -3418,7 +3426,12 @@ impl Interp {
                 b.mutable
             });
             match outcome {
-                Some(true) => return Ok(()),
+                Some(true) => {
+                    if std::ptr::eq(s, &*self.global) {
+                        self.publish_global(name);
+                    }
+                    return Ok(());
+                }
                 Some(false) => {
                     return self.throw_error("TypeError", "Assignment to constant variable.")
                 }
@@ -3431,6 +3444,7 @@ impl Interp {
         })?;
         self.global.declare(name, value, true);
         self.global.set_origin(name, Origin::Prop);
+        self.publish_global(name);
         Ok(())
     }
 
@@ -4622,17 +4636,22 @@ impl Interp {
             a::Expr::Update(u) => {
                 if let a::Expr::Ident(i) = &*u.arg {
                     let inc = matches!(u.op, a::UpdateOp::PlusPlus);
-                    let fast = with_binding_mut(scope, &i.sym, |b| {
-                        if !b.mutable {
-                            return None;
-                        }
-                        let Value::Number(old) = b.value else {
-                            return None;
-                        };
-                        let new = if inc { old + 1.0 } else { old - 1.0 };
-                        b.value = Value::Number(new);
-                        Some(if u.prefix { new } else { old })
-                    });
+                    // a global write is published (`assign_var`), so the in-place path leaves it to the generic one
+                    let fast = if self.global_write_publishes(&i.sym) {
+                        None
+                    } else {
+                        with_binding_mut(scope, &i.sym, |b| {
+                            if !b.mutable {
+                                return None;
+                            }
+                            let Value::Number(old) = b.value else {
+                                return None;
+                            };
+                            let new = if inc { old + 1.0 } else { old - 1.0 };
+                            b.value = Value::Number(new);
+                            Some(if u.prefix { new } else { old })
+                        })
+                    };
                     if let Some(v) = fast {
                         return Ok(Value::Number(v));
                     }
@@ -4894,6 +4913,10 @@ impl Interp {
     /// `x op= n` and `x = x op n` on a mutable number binding with a pure numeric `n`: one scope
     /// walk, no `binary()`. `None` leaves everything untouched for the generic path.
     fn ident_rmw_fast(&self, scope: &Rc<Scope>, name: &str, asg: &a::AssignExpr) -> Option<Value> {
+        // a global write is published (`assign_var`), so the in-place path leaves it to the generic one
+        if self.global_write_publishes(name) {
+            return None;
+        }
         use a::AssignOp as A;
         use a::BinaryOp as B;
         let (op, rhs) = match asg.op {
@@ -4985,6 +5008,8 @@ impl Interp {
                             | Value::Undefined
                             | Value::BigInt(_)
                     );
+                let append = append
+                    && !matches!(&loc, Loc::Ident(id) if self.global_write_publishes(&id.sym));
                 if let (true, Loc::Ident(id)) = (append, &loc) {
                     let rs = self.to_str(&rhs);
                     if let Some(v) = append_in_place(scope, &id.sym, &mut cur, &rs) {
@@ -6009,6 +6034,8 @@ mod costack_cap_tests;
 mod cross_interp_symbol_tests;
 #[cfg(test)]
 mod ipc_tests;
+#[cfg(test)]
+mod shared_globals_tests;
 #[cfg(test)]
 mod url_tests;
 #[cfg(test)]
