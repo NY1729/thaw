@@ -5352,6 +5352,30 @@
     "expect": "matched",
     "expectQuickjsLink": false,
     "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nimport * as http from 'node:http';\nconst als = new AsyncLocalStorage<string>();\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nfunction main(): void {\n  const srv = http.createServer((req: any, res: any): void => {\n    const id = String(req.url).slice(1);\n    als.run('req-' + id, async (): Promise<void> => {\n      await sleep(id === 'a' ? 4 : 1);\n      await sleep(1);\n      res.setHeader('x-store', String(als.getStore()));\n      res.end('ok');\n    });\n  });\n  srv.listen(0, '127.0.0.1', (): void => {\n    const port = (srv.address() as any).port;\n    const out: string[] = [];\n    for (const p of ['a', 'b']) {\n      http.get({ host: '127.0.0.1', port, path: '/' + p }, (res: any): void => {\n        res.on('data', (): void => {});\n        res.on('end', (): void => {\n          out.push(p + ':' + String(res.headers['x-store']));\n          if (out.length === 2) { console.log(out.sort().join(',')); srv.close(); }\n        });\n      });\n    }\n  });\n}\n"
+  },
+  {
+    "name": "symbol key via Object.defineProperty enumerable is readable through index, hasOwnProperty.call and descriptor",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = { a: 1 };\n  Object.defineProperty(o, S, { value: 5, enumerable: true, writable: true, configurable: true });\n  console.log(o[S]);\n  console.log(Object.prototype.hasOwnProperty.call(o, S));\n  const d: any = Object.getOwnPropertyDescriptor(o, S);\n  console.log(d.enumerable, d.value, d.writable);\n}"
+  },
+  {
+    "name": "non-enumerable symbol key from defineProperty and Reflect.defineProperty keeps its descriptor",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const S = Symbol('s');\n  const T = Symbol('t');\n  const o: any = { a: 1 };\n  Object.defineProperty(o, T, { value: 9, enumerable: false });\n  console.log(o[T], Object.prototype.hasOwnProperty.call(o, T), o.hasOwnProperty(T));\n  const d: any = Object.getOwnPropertyDescriptor(o, T);\n  console.log(d.enumerable, d.value, d.writable);\n  console.log(Reflect.defineProperty(o, S, { value: 3, enumerable: true }));\n  console.log(o[S], Object.prototype.hasOwnProperty.call(o, S));\n}"
+  },
+  {
+    "name": "non-enumerable symbol key is skipped by Object.assign, spread and rest",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const S = Symbol('s');\n  const T = Symbol('t');\n  const o: any = { a: 1, [S]: 2 };\n  Object.defineProperty(o, T, { value: 9, enumerable: false });\n  const c: any = Object.assign({}, o);\n  console.log(c[S], c[T], Object.getOwnPropertySymbols(c).length);\n  const sp: any = { ...o };\n  console.log(sp[S], sp[T], Object.getOwnPropertySymbols(sp).length);\n  const { a, ...rest }: any = o;\n  console.log(a, rest[S], rest[T], Object.getOwnPropertySymbols(rest).length);\n}"
+  },
+  {
+    "name": "getOwnPropertySymbols and Reflect.ownKeys count enumerable and non-enumerable symbol keys",
+    "expect": "matched",
+    "expectQuickjsLink": false,
+    "source": "function main(): void {\n  const S = Symbol('s');\n  const T = Symbol('t');\n  const o: any = { a: 1, [S]: 2 };\n  Object.defineProperty(o, T, { value: 9, enumerable: false });\n  console.log(Object.getOwnPropertySymbols(o).length, Reflect.ownKeys(o).length, Object.keys(o).length);\n  console.log(Object.getOwnPropertySymbols(o).length, Object.getOwnPropertySymbols(o).length === 2);\n}"
   }
 ]
 }

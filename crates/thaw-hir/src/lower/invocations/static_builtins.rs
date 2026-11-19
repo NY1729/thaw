@@ -1403,7 +1403,7 @@ impl<'a> FnLowerer<'a> {
                             let key = if self.infer_expr_type(key)? == HirType::JsValue {
                                 key.clone()
                             } else {
-                                self.coerce_to_declared(&HirType::Json, key.clone())?
+                                self.coerce_property_key_to_json(key.clone())?
                             };
                             let arguments = self.coerce_to_declared(
                                 &HirType::Json,
@@ -1969,16 +1969,17 @@ impl<'a> FnLowerer<'a> {
                                     );
                                     let (arguments, bindings) =
                                         self.lower_native_spread_values(&host_call_args, &label)?;
-                                    let json_arguments = arguments
-                                        .iter()
-                                        .map(|argument| {
-                                            if self.infer_expr_type(argument)? == HirType::JsValue {
-                                                Ok(argument.clone())
-                                            } else {
-                                                self.coerce_to_declared(&HirType::Json, argument.clone())
-                                            }
-                                        })
-                                        .collect::<Result<Vec<_>, String>>()?;
+                                    // Argument 1 is the property key (`[target, key, descriptor]`).
+                                    let mut json_arguments = Vec::with_capacity(arguments.len());
+                                    for (index, argument) in arguments.iter().enumerate() {
+                                        if self.infer_expr_type(argument)? == HirType::JsValue {
+                                            json_arguments.push(argument.clone());
+                                        } else if index == 1 {
+                                            json_arguments.push(self.coerce_property_key_to_json(argument.clone())?);
+                                        } else {
+                                            json_arguments.push(self.coerce_to_declared(&HirType::Json, argument.clone())?);
+                                        }
+                                    }
                                     let json_arguments = self.coerce_to_declared(
                                         &HirType::Json,
                                         HirExpr::ArrayLit(json_arguments),

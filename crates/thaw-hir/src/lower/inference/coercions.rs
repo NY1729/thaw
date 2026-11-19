@@ -916,6 +916,18 @@ impl<'a> FnLowerer<'a> {
             .map(Some)
     }
 
+    /// A property-key argument of a dynamic-object builtin (`Object.defineProperty`,
+    /// `Object.getOwnPropertyDescriptor`, `hasOwnProperty`). A symbol key becomes its
+    /// wire-text key (`__thaw_symbol_key`, the computed-key rule); anything else coerces
+    /// to `Json` as before. Only the key argument of these paths uses this helper.
+    pub(in crate::lower) fn coerce_property_key_to_json(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        if self.infer_expr_type(&value)? == HirType::Symbol {
+            let key = self.coerce_primitive_to_string(value)?;
+            return self.coerce_to_declared(&HirType::Json, key);
+        }
+        self.coerce_to_declared(&HirType::Json, value)
+    }
+
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
         // A live owner marker (`thaw_js_live_owner_argument`) is already the final thaw-js argument
         // and is typed as its owner's Object; re-coercing it here would wrap it in a decorator snapshot
