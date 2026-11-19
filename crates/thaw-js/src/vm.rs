@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::rc::Rc;
 
-use crate::{arg, find_own, Interp, Obj, Scope, Slot, Value, R};
+use crate::{arg, find_own, Interp, Obj, Scope, Slot, Value, R, SK_VMGLOBAL};
 
 /// Host globals a context must not see (`typeof` gives `undefined`; a bare read is `undefined` too).
 const HOST_ONLY: &[&str] = &[
@@ -82,6 +82,8 @@ pub(crate) struct VmRealm {
     n0: usize,
     /// Var and function names of earlier runs, and implicit globals already copied to the sandbox.
     vars: Vec<Rc<str>>,
+    /// let/const/class names of earlier runs (a later `var` or function of the same name is a redeclaration).
+    lets: Vec<Rc<str>>,
 }
 
 /// One context: `realm` is `None` until the first run, and taken out while the context runs.
@@ -142,6 +144,7 @@ fn run_in_sandbox(it: &mut Interp, realm: &mut VmRealm, sb: &Obj, code: &str) ->
         Some(script) => script.clone(),
         None => {
             let with = Scope::new_with(realm.interp.global.clone(), sb.clone());
+            with.kind.set(SK_VMGLOBAL);
             let script = Scope::new(Some(with));
             realm.n0 = realm.interp.global.vars.borrow().list.len();
             realm.script = Some(script.clone());
@@ -155,7 +158,9 @@ fn run_in_sandbox(it: &mut Interp, realm: &mut VmRealm, sb: &Obj, code: &str) ->
             }
         }
     }
-    let (r, names) = realm.interp.run_vm_script(code, &script, sb);
+    let (r, names) = realm
+        .interp
+        .run_vm_script(code, &script, sb, &mut realm.lets);
     let mut out: Vec<(Rc<str>, Value)> = Vec::new();
     {
         let vars = script.vars.borrow();
@@ -305,6 +310,7 @@ pub(crate) fn install(it: &mut Interp) {
                 script: None,
                 n0: 0,
                 vars: Vec::new(),
+                lets: Vec::new(),
             }),
         };
         // stack limits and depth follow the calling thread

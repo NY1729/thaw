@@ -392,3 +392,62 @@ fn vm_script_without_filename_keeps_the_plain_stack() {
     let src = r#"console.log(__thaw_vm_run(-1, 'new Error("plain").stack', undefined, 0));"#;
     assert_eq!(run_lines(src), vec!["Error: plain".to_string()]);
 }
+
+/// A bare call of a function the sandbox holds has no `this` of its own: a sloppy callee sees the context's global
+/// object, a strict one `undefined`. The sandbox is not the `this` (the `with` of the vm scope is not a user `with`).
+#[test]
+fn vm_bare_call_this_is_not_the_sandbox() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({ f() { return this === sb; }, sf: function () { "use strict"; return typeof this; } });
+console.log([runInContext('f()', sb), runInContext('sf()', sb), runInContext('(function () { "use strict"; return typeof this; })()', sb)].join(','));"##
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec!["false,undefined,undefined".to_string()]
+    );
+}
+
+/// A user `with` keeps its object as the `this` of a call it resolves, and a method call keeps its receiver.
+#[test]
+fn vm_user_with_and_method_call_keep_their_this() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({});
+console.log([runInContext('var wo = { k() { return this === wo; } }; var wr; with (wo) { wr = k(); } wr', sb), runInContext('const holder = { m() { return this === holder; } }; holder.m()', sb)].join(','));"##
+    );
+    assert_eq!(run_lines(&src), vec!["true,true".to_string()]);
+}
+
+/// `let`/`const`/`class` persist in a context's script scope. A later run that declares the same name with
+/// let/class throws a SyntaxError before any of its code runs; `var` redeclaration stays legal; a `let` conflicts with
+/// an earlier `var` or function of the name; the same name in two contexts is fine.
+#[test]
+fn vm_let_redeclaration_throws_before_the_script_runs() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const attempt = (code, c) => { try { runInContext(code, c); return 'ok'; } catch (e) { return e.name + ':' + e.message; } };
+const sb = createContext({ hits: 0 });
+console.log(attempt('hits = hits + 1; let dup = 1', sb), attempt('hits = hits + 1; let dup = 2', sb), sb.hits);
+console.log(attempt('var dup = 3', sb));
+const v = createContext({});
+console.log(attempt('var lv = 1; function fn1() { return 1 }', v), attempt('let lv = 2', v), attempt('let fn1 = 2', v));
+console.log(attempt('var vv = 1; function fv() { return 1 }', v), attempt('var vv = 2; function fv() { return 2 }', v), runInContext('vv + fv()', v));
+const a = createContext({}), b = createContext({});
+console.log(attempt('let same = 1', a), attempt('let same = 2', b), runInContext('same', b));
+console.log(attempt('class K1 {}', a), attempt('class K1 {}', a));
+console.log(attempt('const k = 5', a), attempt('k = 6', a));"##
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec![
+            "ok SyntaxError:Identifier 'dup' has already been declared 1".to_string(),
+            "SyntaxError:Identifier 'dup' has already been declared".to_string(),
+            "ok SyntaxError:Identifier 'lv' has already been declared SyntaxError:Identifier 'fn1' has already been declared".to_string(),
+            "ok ok 4".to_string(),
+            "ok ok 2".to_string(),
+            "ok SyntaxError:Identifier 'K1' has already been declared".to_string(),
+            "ok TypeError:Assignment to constant variable.".to_string(),
+        ]
+    );
+}

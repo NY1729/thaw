@@ -1,3 +1,14 @@
+/// A port the OS reports free right now (bind to 0, read it, release it). A pid-derived port collides with other
+/// listeners on a shared runner ("Address already in use"); the window between release and the program's own bind
+/// is tiny compared with that.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
 #[test]
 fn registry_runs_utf8_validate_prebuild_when_supplied() {
     let Ok(prebuild) = std::env::var("THAW_UTF8_VALIDATE_NODE") else {
@@ -437,6 +448,7 @@ fn registry_add_runs_a_real_ws_echo_when_enabled() {
     let registry = dir.join("modules");
     thaw_registry::add(&registry, "ws@8.18.3").unwrap();
 
+    let port = free_port();
     let source = dir.join("main.ts");
     let output = dir.join("app");
     std::fs::write(
@@ -456,17 +468,14 @@ async function main(): Promise<void> {
         });
     });
 }"#
-        .replace(
-            "__PORT__",
-            &(20_000 + std::process::id() % 20_000).to_string(),
-        ),
+        .replace("__PORT__", &port.to_string()),
     )
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
     let mut child = spawn_with_log(&mut Command::new(&output), &dir);
     use std::io::{Read, Write};
-    let address = format!("127.0.0.1:{}", 20_000 + std::process::id() % 20_000);
+    let address = format!("127.0.0.1:{port}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut stream = loop {
         match std::net::TcpStream::connect(&address) {
@@ -527,7 +536,7 @@ fn registry_add_runs_a_real_socket_io_echo_when_enabled() {
 
     let source = dir.join("main.ts");
     let output = dir.join("app");
-    let port = 20_000 + std::process::id() % 20_000;
+    let port = free_port();
     std::fs::write(
         &source,
 r#"import { Server } from "socket.io";
@@ -630,7 +639,7 @@ fn registry_add_runs_real_socket_io_client_ack_and_disconnect_when_enabled() {
     let registry = dir.join("modules");
     thaw_registry::add(&registry, "socket.io@4.8.1").unwrap();
     thaw_registry::add(&registry, "socket.io-client@4.8.1").unwrap();
-    let port = (20_000 + std::process::id() % 20_000) as u16;
+    let port = free_port();
     let server_source = dir.join("server.ts");
     let client_source = dir.join("client.ts");
     let server_output = dir.join("server");
