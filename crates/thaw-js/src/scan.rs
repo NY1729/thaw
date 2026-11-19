@@ -11,6 +11,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use swc_ecma_visit::{Visit, VisitWith};
 use thaw_parser::ast as a;
 
+use crate::scan_names::{
+    is_node_global, is_node_method_name, node_global_covered, node_global_has,
+};
+
 /// Per-package scan result.
 #[derive(Debug, Default, Clone)]
 pub struct Report {
@@ -333,7 +337,8 @@ fn is_nullish_literal(e: &a::Expr) -> bool {
 }
 
 /// The `CallSite` methods the engine implements (the `siteMethods` object of builtins.rs; a test pins the two lists
-/// together). A call of one of these names is not a missing method.
+/// together). A call of one of these names is not a missing method. Node-parity: the method rule (`method:X`) flags a
+/// call only when Node 22 has `X` (`scan_names::is_node_method_name`) and thaw-js does not know it.
 pub(crate) const CALLSITE_METHODS: &[&str] = &[
     "getThis",
     "getTypeName",
@@ -752,6 +757,9 @@ impl Visit for Walker {
 /// - axios: `AxiosHeaders` accessors are installed from a name list (`getContentType`, ...), `zlib.createZstdDecompress`
 ///   is feature-tested, `postMessage`/`send` sit behind `typeof` / XHR-only paths, `isDeepStrictEqual` is http2 session
 ///   reuse (http2 needs TLS, which thaw-js does not link), `onSocket` is `agent-base`'s `typeof` check.
+///
+/// Node-parity (R2/R4/R5): a member or global Node 22 lacks is no finding at all, so the `process.type|browser|__nwjs`
+/// entries below are inert now (Node lacks them too); only `allowedNodeEnvironmentFlags` (a Node member) still needs its entry.
 fn tolerated(feature: &str, key: &str) -> bool {
     const AXIOS_METHODS: &[&str] = &[
         "method:getContentType",
@@ -820,6 +828,19 @@ fn addon_tolerated(feature: &str, node_require: bool) -> bool {
         || (feature == "require:dynamic" && node_require)
         || feature == "global:__non_webpack_require__"
         || (feature.starts_with("method:") && feature != "method:dlopen")
+}
+
+/// A `__`-prefixed name: a host-internal or loader convention (`__thaw_*` natives, `__non_webpack_require__`), never a
+/// Node API name. The Node-parity relaxations of R4 (members) and R5 (globals) do not apply to it: it stays a blocker
+/// exactly as before the rules. R2 (method names) has no such carve-out: `__emitTokens` is a package-own method guarded
+/// by a probe and must stay clean.
+fn is_host_internal(name: &str) -> bool {
+    name.starts_with("__")
+}
+
+/// The R5 test for a free name: Node 22 defines it, or it is host-internal (see [`is_host_internal`]).
+fn is_node_or_host_internal(name: &str) -> bool {
+    is_node_global(name) || is_host_internal(name)
 }
 
 /// Scan a registry bundle.
@@ -912,6 +933,8 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
             // UMD wrappers fall back to `self` only when `globalThis` is missing
             let umd_self =
                 r == "self" && (w.refs.contains("globalThis") || w.probed.contains("globalThis"));
+            // Node-parity (R5): a free name Node 22 does not define is a ReferenceError on Node too, so it is no blocker.
+            // Carve-out: a `__`-prefixed name is host-internal or a loader convention, never a Node name: still a blocker.
             if !w.declared.contains(r)
                 && !umd_self
                 && !globals.contains(r)
@@ -919,6 +942,7 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
                 && !w.probed.contains(r)
                 // service-worker globals Node does not define either: a ReferenceError there, same here
                 && r != "addEventListener"
+                && is_node_or_host_internal(r)
             {
                 add(&mut report, format!("global:{r}"), 1, key);
             }
@@ -929,15 +953,20 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
                 && !w.declared.contains(r)
                 && !params.contains(&r.as_str())
                 && !w.probed.contains(r)
+                && is_node_or_host_internal(r)
             {
                 add(&mut report, format!("global:{r}"), 1, key);
             }
         }
         for (g, p) in &w.builtin_members {
+            // Node-parity (R4): a member Node 22 lacks is undefined on Node too. A root the Node data does not
+            // model (`Math`, `Array`, ...) keeps the old flag: the data cannot tell that Node lacks the member.
+            // Carve-out: a `__`-prefixed member (`globalThis.__thaw_*`) is host-internal, so it stays a blocker.
             if interp.is_builtin_global(g)
                 && g != "File"
                 && !w.declared.contains(g)
                 && !interp.builtin_member_exists(g, p)
+                && (!node_global_covered(g) || node_global_has(g, p) || is_host_internal(p))
                 // the package creates its own `globalThis.x` slot (`globalThis.x ??= {}`)
                 && !(g == "globalThis" && (defined.contains(p) || w.probed_members.contains(p)))
                 && !(module_loader && g == "globalThis" && p == "__thaw_bundle_create_require")
@@ -949,7 +978,9 @@ fn scan_bundle_with(source: &str, addon: bool) -> Result<Report, String> {
             // `util.styleText` calls `stream.hasColors()` only after `typeof stream.hasColors === 'function'`
             // `process.dlopen` is exported now (it throws ERR_DLOPEN_FAILED), but no addon loads at runtime, so
             // a bundle that calls it stays a blocker, as it was when the member was missing.
+            // Node-parity (R2): a name Node 22 does not have is the package's own method, never a missing one.
             if (!known_methods.contains(m) || m == "dlopen")
+                && is_node_method_name(m)
                 && !defined.contains(m)
                 && !w.probed_methods.contains(m)
                 && m != "hasColors"
