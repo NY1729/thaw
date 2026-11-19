@@ -133,7 +133,8 @@ fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R
         .require_maps
         .get(from)
         .and_then(|m| m.get(spec))
-        .cloned();
+        .cloned()
+        .or_else(|| builtin_key(loader, spec));
     match target {
         Some(key) if key.ends_with(".node") => addon_of(loader, it),
         Some(key) => load_module(loader, it, &key),
@@ -149,6 +150,14 @@ fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R
             Err(Ctl::Throw(err))
         }
     }
+}
+
+/// The module key of a node builtin the bundle serves for a spec the map does not name (`fs`, `node:fs`):
+/// the QuickJS lane's global `require(spec)` fallback. Builtins are the `node:<name>` factories.
+fn builtin_key(loader: &Loader, spec: &str) -> Option<String> {
+    let name = spec.strip_prefix("node:").unwrap_or(spec);
+    let key = format!("node:{name}");
+    (loader.factories.contains_key(&key) || key == "node:crypto").then_some(key)
 }
 
 fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
