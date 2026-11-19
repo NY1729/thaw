@@ -203,7 +203,13 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         };
         f = it.call(&f, &Value::Undefined, &[origin])?;
     }
-    let file = Value::str(key);
+    // The virtual file path and its directory mirror the QuickJS lane (`render.rs`, `__thaw_bundle_load`), so
+    // `import.meta.url` (`'file://' + __filename`) is an absolute `file:///thaw_modules/...` URL.
+    let file = format!("/thaw_modules/{key}");
+    let dir = match file.rfind('/') {
+        Some(slash) => file[..slash].to_string(),
+        None => ".".to_string(),
+    };
     it.call(
         &f,
         &exports,
@@ -212,8 +218,8 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
             exports.clone(),
             require.clone(),
             Value::Undefined,
-            file,
-            Value::str("/"),
+            Value::str(&file),
+            Value::str(&dir),
             require,
         ],
     )?;
@@ -8386,5 +8392,39 @@ var __thaw_bundle_entry_key = "dump-pkg/index.js";
             .expect("probe runs");
         let text = it.to_str(&out);
         assert_eq!(text, r#"[1,"own",2,5,false,false,"own,shadow,x,y"]"#.into());
+    }
+}
+
+#[cfg(test)]
+mod module_path_tests {
+    use super::*;
+
+    /// A factory reads its file names the way a package does: `import.meta.url` is `'file://' + __filename`,
+    /// and `__dirname` is the directory of `__filename`, under the same virtual `/thaw_modules/` root as the
+    /// QuickJS lane (`render.rs`).
+    const PATH_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"pkg/index.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {
+  exports.h = new URL('file://' + __filename).hostname;
+  exports.d = __dirname;
+  exports.f = __filename;
+},
+};
+var __thaw_bundle_require_maps = { "pkg/index.js": {}, };
+var __thaw_bundle_entry_key = "pkg/index.js";
+})(globalThis.require);"#;
+
+    #[test]
+    fn factory_file_names_are_absolute_virtual_paths() {
+        let mut pkg = Package::load(PATH_BUNDLE).expect("package loads");
+        assert_eq!(pkg.get("h").ok(), Some(Native::Str("".into())));
+        assert_eq!(
+            pkg.get("d").ok(),
+            Some(Native::Str("/thaw_modules/pkg".into()))
+        );
+        assert_eq!(
+            pkg.get("f").ok(),
+            Some(Native::Str("/thaw_modules/pkg/index.js".into()))
+        );
     }
 }
