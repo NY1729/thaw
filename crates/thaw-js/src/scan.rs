@@ -322,6 +322,16 @@ fn is_falsy_constant(e: &a::Expr) -> bool {
     }
 }
 
+/// `null`, `undefined` (possibly parenthesized): the other operand of an equality test against it is a presence probe.
+fn is_nullish_literal(e: &a::Expr) -> bool {
+    match e {
+        a::Expr::Paren(p) => is_nullish_literal(&p.expr),
+        a::Expr::Lit(a::Lit::Null(_)) => true,
+        a::Expr::Ident(i) => &*i.sym == "undefined",
+        _ => false,
+    }
+}
+
 /// The `CallSite` methods the engine implements (the `siteMethods` object of builtins.rs; a test pins the two lists
 /// together). A call of one of these names is not a missing method.
 pub(crate) const CALLSITE_METHODS: &[&str] = &[
@@ -382,11 +392,25 @@ struct Walker {
     /// `globalThis.X` members tested only for presence
     probed_members: HashSet<String>,
     probed_methods: HashSet<String>,
+    /// `this` binding of the innermost class body or method: `Some(true)` in a class without `extends`
+    /// (its methods are its own), `Some(false)` in a class that extends something, `None` outside classes
+    /// and in plain functions (which rebind `this`)
+    this_class: Option<bool>,
+    /// the next function visited is a class method, which keeps the class's `this` binding (set by `visit_class_method`)
+    method_fn: bool,
 }
 
 impl Walker {
     /// `globalThis.X` tested for truthiness / `typeof` is a feature probe, not a use.
     fn probe_member(&mut self, e: &a::Expr) {
+        // `!x.m` is the negated presence test of `x.m`
+        let mut e = e;
+        while let a::Expr::Unary(u) = e {
+            if u.op != a::UnaryOp::Bang {
+                break;
+            }
+            e = &u.arg;
+        }
         // `if (x.m) x.m()` / `x?.m ? x.m(..) : ..`: a method call guarded by a truthiness test of the same name
         let tested = match e {
             a::Expr::Member(m) => Some(m),
@@ -415,6 +439,17 @@ impl Walker {
 impl Visit for Walker {
     fn visit_class(&mut self, n: &a::Class) {
         self.feature("class");
+        // without `extends` the class has no host base, so `this.m()` in its body is its own method (see visit_call_expr)
+        let outer = self.this_class.replace(n.super_class.is_none());
+        n.visit_children_with(self);
+        self.this_class = outer;
+    }
+    fn visit_class_method(&mut self, n: &a::ClassMethod) {
+        self.method_fn = true;
+        n.visit_children_with(self);
+    }
+    fn visit_private_method(&mut self, n: &a::PrivateMethod) {
+        self.method_fn = true;
         n.visit_children_with(self);
     }
     fn visit_class_decl(&mut self, n: &a::ClassDecl) {
@@ -459,8 +494,14 @@ impl Visit for Walker {
         }
         // a nested function runs when called, not inside an enclosing try
         let guarded = std::mem::replace(&mut self.guarded, false);
+        // a plain function rebinds `this`; a class method keeps its class's binding
+        let this_class = self.this_class;
+        if !std::mem::take(&mut self.method_fn) {
+            self.this_class = None;
+        }
         n.visit_children_with(self);
         self.guarded = guarded;
+        self.this_class = this_class;
     }
     fn visit_arrow_expr(&mut self, n: &a::ArrowExpr) {
         if n.is_async {
@@ -585,6 +626,18 @@ impl Visit for Walker {
         if matches!(n.op, a::BinaryOp::LogicalAnd | a::BinaryOp::LogicalOr) {
             self.probe_member(&n.left);
         }
+        // `x.m == null`, `x.m !== undefined`: a presence test of `x.m`
+        if matches!(
+            n.op,
+            a::BinaryOp::EqEq | a::BinaryOp::NotEq | a::BinaryOp::EqEqEq | a::BinaryOp::NotEqEq
+        ) {
+            if is_nullish_literal(&n.right) {
+                self.probe_member(&n.left);
+            }
+            if is_nullish_literal(&n.left) {
+                self.probe_member(&n.right);
+            }
+        }
         if let (a::BinaryOp::InstanceOf, a::Expr::Ident(i)) = (n.op, &*n.right) {
             self.instance_refs.insert(i.sym.to_string());
             n.left.visit_with(self);
@@ -667,7 +720,10 @@ impl Visit for Walker {
                 a::Expr::Member(m) => {
                     // the ESM origin is `undefined` under this loader; its calls are guarded and dead
                     let origin = matches!(&*m.obj, a::Expr::Ident(o) if o.sym.starts_with("__thaw_esm_origin_"));
-                    if let (false, a::MemberProp::Ident(p)) = (origin, &m.prop) {
+                    // `this.m()` in a class without `extends` calls the class's own method, not a host one
+                    let own_method =
+                        self.this_class == Some(true) && matches!(&*m.obj, a::Expr::This(_));
+                    if let (false, false, a::MemberProp::Ident(p)) = (origin, own_method, &m.prop) {
                         self.called.insert(p.sym.to_string());
                     }
                 }
