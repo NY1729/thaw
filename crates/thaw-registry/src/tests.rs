@@ -19,6 +19,8 @@ include!("tests/network.rs");
 
 include!("tests/web_platform.rs");
 
+include!("tests/scan_build.rs");
+
 #[test]
 fn os_builtin_reports_real_host_shapes() {
     use std::ffi::{CStr, CString};

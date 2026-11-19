@@ -12,6 +12,8 @@ flate2 = "1.1"
 tar = "0.4"
 thaw-parser = { path = "../thaw-parser" }
 thaw-js-infer = { path = "../thaw-js-infer" }
+# the same features thaw-cli enables: the build's feature scan (`scan_bundle_for_build`) must see `Intl` and `WebAssembly`
+thaw-js = { path = "../thaw-js", features = ["intl", "wasm"] }
 swc_ecma_visit = "29.0.0"
 ureq = "3.4.0"
 
@@ -20,4 +22,3 @@ brotli = "8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 libc = "0.2"
 thaw-quickjs = { path = "../thaw-quickjs" }
-thaw-js = { path = "../thaw-js", features = ["intl", "wasm"] }

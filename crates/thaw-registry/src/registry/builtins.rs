@@ -70,6 +70,25 @@ pub fn builtin_defined_names() -> &'static std::collections::HashSet<String> {
     })
 }
 
+/// The thaw-js feature scan of a registry bundle as the build runs it (`thaw_js_package_eligible_in`): R6 excuses
+/// [`builtin_defined_names`], and a native addon's bundle is scanned in addon mode. `installed` is the registry's
+/// installed packages. `thaw-js-scan` calls this too, so its verdict is the build's.
+pub fn scan_bundle_for_build(
+    bundle_js: &str,
+    native_addon: bool,
+    installed: &std::collections::HashSet<String>,
+) -> Result<thaw_js::scan::Report, String> {
+    let ctx = thaw_js::scan::ScanContext {
+        known_methods: builtin_defined_names(),
+        installed_packages: installed,
+    };
+    if native_addon {
+        thaw_js::scan::scan_addon_bundle_in(bundle_js, &ctx)
+    } else {
+        thaw_js::scan::scan_bundle_in(bundle_js, &ctx)
+    }
+}
+
 /// Names too generic to excuse a call: a builtin defines `get`/`on`/`write`/... on its own objects, and a call
 /// `x.get(` on a host object thaw lacks would then pass the scan. They stay blockers as before. (The
 /// channel-specific names graphql and socket.io need, `publish`/`runStores`/`traceSync`/`unsubscribe`, are not here.)
