@@ -200,6 +200,8 @@ pub struct ObjData {
     lazy_proto: Cell<bool>,
     /// A closure from a prelude that Node implements natively: `toString` prints `[native code]`.
     native_text: Cell<bool>,
+    /// The `Error.prototype` of some realm: an object whose chain reaches one is an error (`is_error_instance`).
+    error_proto: Cell<bool>,
     proto: RefCell<Option<Obj>>,
     kind: RefCell<Kind>,
     frozen: Cell<bool>,
@@ -1202,6 +1204,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         raw_props: RefCell::new(Vec::new()),
         lazy_proto: Cell::new(false),
         native_text: Cell::new(false),
+        error_proto: Cell::new(false),
         proto: RefCell::new(proto),
         kind: RefCell::new(kind),
         frozen: Cell::new(false),
@@ -1374,9 +1377,6 @@ pub struct Interp {
     /// Lines written by `console.error` / `console.warn`.
     pub err: Vec<String>,
     pub(crate) rt: eventloop::Rt,
-    /// `node:vm` contexts by id (vm.rs).
-    pub(crate) vm: HashMap<u32, vm::VmSlot>,
-    pub(crate) vm_next: u32,
     /// Host objects a vm realm shares (`Intl`, ...): teardown leaves them alone, the host still owns them.
     pub(crate) vm_shared: Vec<Obj>,
     /// The sandbox of the `node:vm` run in progress, so `globalThis.x` / `this.x` reach it (vm.rs).
@@ -1544,8 +1544,6 @@ impl Interp {
             out: Vec::new(),
             err: Vec::new(),
             rt: Default::default(),
-            vm: HashMap::new(),
-            vm_next: 0,
             vm_shared: Vec::new(),
             vm_sandbox: None,
             deadline: None,
@@ -1584,6 +1582,7 @@ impl Interp {
         it.install_reflect();
         it.run_prelude(builtins::PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js prelude must evaluate"));
+        builtins::mark_error_proto(&mut it);
         it.capture_default_has_instance();
         it.install_legacy_function_props();
         it.run_promise_prelude();
@@ -6053,7 +6052,7 @@ impl Interp {
         crate::mem_trace::mem_trace_report("teardown-before");
         crate::mem_trace::mem_trace_census_report("census");
         // Contexts this realm made die with it; their script scopes are cleared, the sandboxes are the host's.
-        for slot in std::mem::take(&mut self.vm).values_mut() {
+        for slot in vm::take_owned(self.realm_id).iter_mut() {
             if let Some(r) = slot.realm_mut() {
                 r.interp.teardown();
                 if let Some(script) = r.script.take() {

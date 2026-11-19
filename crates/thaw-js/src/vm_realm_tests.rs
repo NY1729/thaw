@@ -265,14 +265,7 @@ fn interp_drop_frees_host_and_realm_global_objects() {
     ))
     .expect("context script runs");
     let host = weak(&it.global_object);
-    let slot = it.vm.values_mut().next().expect("one context");
-    let realm = weak(
-        &slot
-            .realm_mut()
-            .expect("context realm built")
-            .interp
-            .global_object,
-    );
+    let realm = weak(&vm::first_realm_global_object().expect("context realm built"));
     drop(it);
     assert!(host.upgrade().is_none(), "host global object survived drop");
     assert!(
@@ -295,4 +288,38 @@ fn vm_free_keeps_host_shared_globals_usable() {
     }
     assert!(r.is_ok(), "script failed");
     assert_eq!(it.out, vec!["function 8".to_string()]);
+}
+
+/// A closure of the host, called from inside context `outer`, runs `vm.runInContext` on `inner`: the nested run
+/// must find `inner` in the table even though it executes on `outer`'s realm.
+#[test]
+fn vm_nested_run_in_context_from_another_context() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"const inner = createContext({});
+const outer = createContext({ nest: (code) => runInContext(code, inner) });
+console.log(runInContext('[nest("var deep = 1; deep + 1"), typeof deep, nest("deep")].join(",")', outer));
+console.log(runInContext("1 + 1", outer));"#
+    );
+    let mut it = Interp::new();
+    if let Err(Ctl::Throw(v)) = it.run(&src) {
+        let m = it.get(&v, "message").unwrap_or(Value::Undefined);
+        panic!("script threw: {}", it.to_str(&m));
+    }
+    assert_eq!(it.out, vec!["2,undefined,1".to_string(), "2".to_string()]);
+}
+
+/// `Object.prototype.toString` tags an error made in a context as `[object Error]`, whatever its subclass.
+#[test]
+fn vm_context_errors_keep_the_error_tag() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r#"const ctx = createContext({});
+const tag = (code) => Object.prototype.toString.call(runInContext(code, ctx));
+console.log([tag('new Error("x")'), tag('new TypeError("y")'), tag('class E2 extends Error {}; new E2("z")'), tag('({ a: 1 })')].join(' '));"#
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec!["[object Error] [object Error] [object Error] [object Object]".to_string()]
+    );
 }

@@ -2,6 +2,9 @@
 //! A context is a separate `Interp` (its own intrinsics and global scope), built on its first run
 //! so that contexts which are only created cost nothing.
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::mem::ManuallyDrop;
 use std::rc::Rc;
 
 use crate::{arg, find_own, Interp, Obj, Scope, Slot, Value, R};
@@ -85,6 +88,45 @@ pub(crate) struct VmRealm {
 pub(crate) struct VmSlot {
     realm: Option<Box<VmRealm>>,
     busy: bool,
+    /// `realm_id` of the Interp that created the context; dropping that Interp drops the slot.
+    owner: usize,
+}
+
+thread_local! {
+    /// Every context on this thread, by id, shared by all realms. A context can be run from inside another
+    /// realm (a host closure called by a context calls `vm.runInContext`), and that run executes on the caller's
+    /// Interp, so a per-Interp table would not find it. Thread-local, not shared: an Interp holds `Rc`s and
+    /// never leaves its thread. `ManuallyDrop`: at thread exit the table is not dropped, so no realm is torn down
+    /// while other thread-locals are already gone; a context outlives its thread only if its owner was leaked.
+    static CONTEXTS: RefCell<ManuallyDrop<HashMap<u32, VmSlot>>> =
+        RefCell::new(ManuallyDrop::new(HashMap::new()));
+    static NEXT_ID: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Removes the slots `owner` created and returns them. The caller drops them after the borrow ends:
+/// dropping a realm drops its Interp, which comes back here.
+pub(crate) fn take_owned(owner: usize) -> Vec<VmSlot> {
+    let ids: Vec<u32> = CONTEXTS.with(|c| {
+        c.borrow()
+            .iter()
+            .filter(|(_, s)| s.owner == owner)
+            .map(|(id, _)| *id)
+            .collect()
+    });
+    CONTEXTS.with(|c| {
+        let mut c = c.borrow_mut();
+        ids.iter().filter_map(|id| c.remove(id)).collect()
+    })
+}
+
+/// The global object of the first context realm built on this thread (tests).
+#[cfg(test)]
+pub(crate) fn first_realm_global_object() -> Option<Obj> {
+    CONTEXTS.with(|c| {
+        c.borrow()
+            .values()
+            .find_map(|s| s.realm.as_ref().map(|r| r.interp.global_object.clone()))
+    })
 }
 
 impl VmSlot {
@@ -174,21 +216,29 @@ fn disarm(ip: &mut Interp) {
 pub(crate) fn install(it: &mut Interp) {
     let g = it.global.clone();
     let create = it.native(|it, _, _| {
-        it.vm_next += 1;
-        let id = it.vm_next;
-        it.vm.insert(
-            id,
-            VmSlot {
-                realm: None,
-                busy: false,
-            },
-        );
+        let id = NEXT_ID.with(|n| {
+            n.set(n.get() + 1);
+            n.get()
+        });
+        let owner = it.realm_id;
+        CONTEXTS.with(|c| {
+            c.borrow_mut().insert(
+                id,
+                VmSlot {
+                    realm: None,
+                    busy: false,
+                    owner,
+                },
+            )
+        });
         Ok(Value::Number(f64::from(id)))
     });
     g.declare("__thaw_vm_create", create, true);
     let free = it.native(|it, _, a| {
         let id = it.num(&arg(a, 0)) as u32;
-        it.vm.remove(&id);
+        // the slot (and its realm) drops after the borrow ends
+        let slot = CONTEXTS.with(|c| c.borrow_mut().remove(&id));
+        drop(slot);
         Ok(Value::Undefined)
     });
     g.declare("__thaw_vm_free", free, true);
@@ -211,17 +261,25 @@ pub(crate) fn install(it: &mut Interp) {
             _ => return it.throw_error("TypeError", "vm sandbox must be an object"),
         };
         let id = id as u32;
-        let Some(slot) = it.vm.get_mut(&id) else {
-            return it.throw_error("Error", "the vm context was released");
-        };
-        if slot.busy {
-            return it.throw_error("Error", "the vm context is busy");
+        // the realm is taken out of its slot while it runs, so a nested run of this context is refused
+        enum Claim {
+            Released,
+            Busy,
+            Taken(Option<Box<VmRealm>>),
         }
-        slot.busy = true;
-        let taken = slot.realm.take();
-        let mut realm = match taken {
-            Some(realm) => realm,
-            None => Box::new(VmRealm {
+        let claim = CONTEXTS.with(|c| match c.borrow_mut().get_mut(&id) {
+            None => Claim::Released,
+            Some(slot) if slot.busy => Claim::Busy,
+            Some(slot) => {
+                slot.busy = true;
+                Claim::Taken(slot.realm.take())
+            }
+        });
+        let mut realm = match claim {
+            Claim::Released => return it.throw_error("Error", "the vm context was released"),
+            Claim::Busy => return it.throw_error("Error", "the vm context is busy"),
+            Claim::Taken(Some(realm)) => realm,
+            Claim::Taken(None) => Box::new(VmRealm {
                 interp: new_realm(it),
                 script: None,
                 n0: 0,
@@ -238,10 +296,13 @@ pub(crate) fn install(it: &mut Interp) {
         };
         disarm(&mut realm.interp);
         realm.interp.vm_sandbox = None;
-        if let Some(slot) = it.vm.get_mut(&id) {
-            slot.realm = Some(realm);
-            slot.busy = false;
-        }
+        // put the realm back unless the context was freed while it ran (then it drops here, after the borrow)
+        CONTEXTS.with(|c| {
+            if let Some(slot) = c.borrow_mut().get_mut(&id) {
+                slot.realm = Some(realm);
+                slot.busy = false;
+            }
+        });
         r
     });
     g.declare("__thaw_vm_run", run, true);

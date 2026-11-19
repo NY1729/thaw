@@ -446,7 +446,7 @@ fn emit_event(it: &mut Interp, this: &Value, a: &[Value]) -> R<Value> {
         if &*key == "error" {
             let er = arg(a, 1);
             if let Value::Object(o) = &er {
-                if crate::builtins::is_error_instance(it, o) {
+                if crate::builtins::is_error_instance(o) {
                     return Err(Ctl::Throw(er));
                 }
             }
