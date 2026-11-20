@@ -753,3 +753,69 @@ fn substituted_worker_threads_factory_is_worker_side_in_a_worker() {
     );
     assert_eq!(run_main(&src), "worker [false,7] main true null");
 }
+
+#[test]
+fn worker_string_data_and_file_filenames_are_rejected_like_node() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+const tryCtor = (p) => { try { new wt.Worker(p); return 'constructed'; } catch (e) { return JSON.stringify([e.constructor.name, e.code, e.message]); } };
+console.log(tryCtor('data:text/javascript,' + encodeURIComponent('process.exitCode = 3;')));
+console.log(tryCtor('data:text/javascript;base64,cHJvY2Vzcy5leGl0Q29kZSA9IDM7'));
+console.log(tryCtor('data:application/javascript,' + encodeURIComponent('process.exitCode = 3;')));
+console.log(tryCtor('data:text/plain,1'));"#;
+    assert_eq!(
+        run_main(src),
+        r#"["TypeError","ERR_WORKER_PATH","The worker script or module filename must be an absolute path or a relative path starting with './' or '../'. Wrap data: URLs with `new URL`. Received \"data:text/javascript,process.exitCode%20%3D%203%3B\""]|["TypeError","ERR_WORKER_PATH","The worker script or module filename must be an absolute path or a relative path starting with './' or '../'. Wrap data: URLs with `new URL`. Received \"data:text/javascript;base64,cHJvY2Vzcy5leGl0Q29kZSA9IDM7\""]|["TypeError","ERR_WORKER_PATH","The worker script or module filename must be an absolute path or a relative path starting with './' or '../'. Received \"data:application/javascript,process.exitCode%20%3D%203%3B\""]|["TypeError","ERR_WORKER_PATH","The worker script or module filename must be an absolute path or a relative path starting with './' or '../'. Received \"data:text/plain,1\""]"#
+    );
+}
+
+#[test]
+fn worker_path_filenames_resolve_and_report_like_node() {
+    let src = r#"(async () => {
+const wt = __thaw_worker_threads_exports;
+const tryCtor = (p) => { try { new wt.Worker(p); return 'constructed'; } catch (e) { return JSON.stringify([e.constructor.name, e.code, e.message.split(process.cwd()).join('<cwd>')]); } };
+for (const p of ['file.js', 'file:///x/y.js', 'data:text/plain,1', 'data:text/javascript,1']) console.log(tryCtor(p));
+const run = (label, file) => new Promise((resolve) => {
+  const w = new wt.Worker(file);
+  w.on('error', (e) => { const p = e.message.split("'")[1]; console.log(label, 'error', e.code, e.constructor.name, 'absolute=' + p.startsWith('/'), 'normalized=' + !/(^|\/)\.{1,2}(\/|$)/.test(p), 'base=' + p.split('/').pop()); });
+  w.on('exit', (c) => { console.log(label, 'exit', c); resolve(); });
+});
+await run('rel', './nonexistent-rel.js');
+await run('parent', '../nonexistent-rel.js');
+await run('dotdot', '/nonexistent-dir/x/../y/file.js');
+})().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        r#"["TypeError","ERR_WORKER_PATH","The worker script or module filename must be an absolute path or a relative path starting with './' or '../'. Received \"file.js\""]|["TypeError","ERR_WORKER_PATH","The worker script or module filename must be an absolute path or a relative path starting with './' or '../'. Wrap file:// URLs with `new URL`. Received \"file:///x/y.js\""]|["TypeError","ERR_WORKER_PATH","The worker script or module filename must be an absolute path or a relative path starting with './' or '../'. Received \"data:text/plain,1\""]|["TypeError","ERR_WORKER_PATH","The worker script or module filename must be an absolute path or a relative path starting with './' or '../'. Wrap data: URLs with `new URL`. Received \"data:text/javascript,1\""]|rel error MODULE_NOT_FOUND Error absolute=true normalized=true base=nonexistent-rel.js|rel exit 1|parent error MODULE_NOT_FOUND Error absolute=true normalized=true base=nonexistent-rel.js|parent exit 1|dotdot error MODULE_NOT_FOUND Error absolute=true normalized=true base=file.js|dotdot exit 1"#
+    );
+}
+
+#[test]
+fn receive_message_on_port_accepts_broadcast_channel_and_worker_transfers_like_node() {
+    let src = r#"(async () => {
+const wt = __thaw_worker_threads_exports;
+const bc = new wt.BroadcastChannel('wk6-sync'), bc2 = new wt.BroadcastChannel('wk6-sync');
+bc.postMessage({ value: 5 });
+console.log('broadcast', JSON.stringify(wt.receiveMessageOnPort(bc2)), JSON.stringify(wt.receiveMessageOnPort(bc2)));
+bc.close(); bc2.close();
+try { wt.receiveMessageOnPort({}); } catch (e) { console.log('invalid', e.constructor.name, e.code, e.message); }
+const ch = new wt.MessageChannel(); const inner = new wt.MessageChannel();
+ch.port1.postMessage({ port: inner.port1 }, [inner.port1]);
+const moved = wt.receiveMessageOnPort(ch.port2);
+moved.message.port.postMessage('through');
+console.log('moved', JSON.stringify(wt.receiveMessageOnPort(inner.port2)), JSON.stringify(wt.receiveMessageOnPort(inner.port2)));
+const code = `const { parentPort, receiveMessageOnPort, BroadcastChannel } = require('node:worker_threads'); const a = new BroadcastChannel('wk6-worker'), b = new BroadcastChannel('wk6-worker'); a.postMessage('x'); const got = receiveMessageOnPort(b); parentPort.postMessage('bc ' + JSON.stringify(got)); a.close(); b.close(); parentPort.once('message', (m) => { const r = receiveMessageOnPort(m.port); parentPort.postMessage('port ' + (r === undefined ? 'undefined' : r.message)); parentPort.postMessage('done'); });`;
+const w = new wt.Worker(code, { eval: true });
+const out = [];
+const done = new Promise((resolve) => w.on('message', (v) => { out.push(v); if (v === 'done') resolve(); }));
+const inner2 = new wt.MessageChannel();
+inner2.port2.postMessage('queued');
+w.postMessage({ port: inner2.port1 }, [inner2.port1]);
+await done;
+console.log('worker ' + out.join('|'));
+await w.terminate();
+})().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        r#"broadcast {"message":{"value":5}} undefined|invalid TypeError ERR_INVALID_ARG_TYPE The "port" argument must be a MessagePort instance|moved {"message":"through"} undefined|worker bc {"message":"x"}|port queued|done"#
+    );
+}

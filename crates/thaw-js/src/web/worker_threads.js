@@ -52,6 +52,16 @@
   }
 
   const decode = wire => __thaw_worker_decode(wire);
+  // `path` as an absolute path: relative ones join the cwd, and `.` / `..` components are resolved
+  function absolutePath(path) {
+    const parts = [];
+    for (const part of (path.startsWith('/') ? path : process.cwd() + '/' + path).split('/')) {
+      if (part === '' || part === '.') continue;
+      if (part === '..') parts.pop();
+      else parts.push(part);
+    }
+    return '/' + parts.join('/');
+  }
   // `dest` is the port token of the realm the wire goes to (a port in it moves there); see worker.rs
   const encode = (value, transfer, dest = 0) => __thaw_worker_encode(value, transfer, dest);
   const { Readable, Writable, hexToBytes } = __thaw_worker_stream;
@@ -131,12 +141,16 @@
       let file;
       if (!options || !options.eval) {
         if (!code.startsWith('/') && !code.startsWith('./') && !code.startsWith('../')) {
-          const error = new Error('The worker script or module filename must be an absolute path or a relative path starting with ./ or ../. Received "' + code + '"');
+          // Node's TypeError (ERR_WORKER_PATH); a data: or file: string gets the hint to pass a URL object instead
+          const hint = code.startsWith('data:text/javascript') ? ' Wrap data: URLs with `new URL`.' : code.startsWith('file:') ? ' Wrap file:// URLs with `new URL`.' : '';
+          const error = new TypeError("The worker script or module filename must be an absolute path or a relative path starting with './' or '../'." + hint + ' Received "' + code + '"');
           error.code = 'ERR_WORKER_PATH';
           throw error;
         }
-        file = code;
-        code = 'globalThis.__thaw_run_main_file(' + JSON.stringify(code) + ')';
+        // the file as an absolute path with `.` and `..` resolved (Node resolves against the cwd), so a missing file
+        // is reported by its resolved path
+        file = absolutePath(code);
+        code = 'globalThis.__thaw_run_main_file(' + JSON.stringify(file) + ')';
       }
       const threadId = nextThreadId++;
       // the worker's port token: ports that move to it are routed by this (worker.rs), unlike the Node threadId
@@ -375,7 +389,8 @@
     BroadcastChannel: globalThis.BroadcastChannel,
     Worker,
     receiveMessageOnPort(port) {
-      if (!globalThis.__thaw_is_message_port(port)) {
+      // a MessagePort, or a BroadcastChannel (Node reads both through their handle)
+      if (!globalThis.__thaw_is_message_port(port) && !(port instanceof globalThis.BroadcastChannel)) {
         const error = new TypeError('The "port" argument must be a MessagePort instance');
         error.code = 'ERR_INVALID_ARG_TYPE';
         throw error;
