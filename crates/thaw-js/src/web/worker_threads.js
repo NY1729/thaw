@@ -219,14 +219,12 @@
       const state = states.get(this);
       state.refd = true;
       if (!state.exited) __thaw_worker_ref(state.handle, true);
-      return this;
     }
 
     unref() {
       const state = states.get(this);
       state.refd = false;
       if (!state.exited) __thaw_worker_ref(state.handle, false);
-      return this;
     }
 
     hasRef() { return states.get(this).refd; }
@@ -313,8 +311,8 @@
   class HandleWrap {
     close() { return movedPorts.get(this).port.close(); }
     hasRef() { return movedPorts.get(this).port.hasRef(); }
-    ref() { movedPorts.get(this).port.ref(); return this; }
-    unref() { movedPorts.get(this).port.unref(); return this; }
+    ref() { movedPorts.get(this).port.ref(); }
+    unref() { movedPorts.get(this).port.unref(); }
   }
   class MessagePort extends HandleWrap {
     postMessage(value, transferList) { return movedPorts.get(this).port.postMessage(value, transferList); }
