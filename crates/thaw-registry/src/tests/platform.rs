@@ -503,14 +503,8 @@ fn worker_threads_builtin_exchanges_cloned_messages() {
 }
 }
 
-// qjs_pending: fails on thaw-js: "ERROR: TypeError: require.resolve is not a function"
-mod qjs_pending_platform_bundled_commonjs_require_exposes_resolve {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn bundled_commonjs_require_exposes_resolve() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("commonjs_require_resolve");
     fs::write(
         dir.join("index.js"),
@@ -521,17 +515,12 @@ fn bundled_commonjs_require_exposes_resolve() {
     let node_modules = temp_registry("commonjs_require_resolve_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRequireResolve = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseRequireResolve").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
+    assert_eq!(
+        run_js(&bundle),
+        r#"[42,"function","/thaw_modules/pkg/dependency.js"]"#
     );
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
-    assert_eq!(result, r#"[42,"function","pkg/dependency.js"]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
-}
 }
 
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: (intermediate value).prependOnceListener is not a function"
