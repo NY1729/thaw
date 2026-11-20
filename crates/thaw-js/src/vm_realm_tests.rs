@@ -726,3 +726,70 @@ console.log(JSON.stringify([runInContext('acc = 5; acc', c), stored]));"##
     );
     assert_eq!(run_lines(&src), vec!["[10,5]".to_string()]);
 }
+
+/// The own-key operations on a context's `globalThis` read the sandbox: `Object.keys` lists its enumerable names,
+/// var and function names included (they are sandbox properties).
+#[test]
+fn vm_globalthis_own_keys_forward_to_sandbox() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({ a: 1 });
+runInContext('var b = 2; function fb() {}', sb);
+console.log(JSON.stringify([runInContext('Object.keys(globalThis).sort().join()', sb), runInContext('Object.getOwnPropertyNames(globalThis).includes("a") && Object.getOwnPropertyNames(globalThis).includes("fb")', sb)]));"##
+    );
+    assert_eq!(run_lines(&src), vec![r#"["a,b,fb",true]"#.to_string()]);
+}
+
+/// `in` and hasOwnProperty on `globalThis` answer for sandbox names and var/function names; a missing name is false, and
+/// a realm builtin (`Math`) is still an own property of the global.
+#[test]
+fn vm_globalthis_in_and_has_own_see_sandbox_and_vars() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({ a: 1 });
+runInContext('var b = 2; function fb() {}', sb);
+console.log(JSON.stringify(runInContext('[ "a" in globalThis, "b" in globalThis, "fb" in globalThis, globalThis.hasOwnProperty("b"), globalThis.hasOwnProperty("a"), globalThis.hasOwnProperty("fb"), "zz" in globalThis, globalThis.hasOwnProperty("zz"), globalThis.hasOwnProperty("Math") ]', sb)));"##
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec!["[true,true,true,true,true,true,false,false,true]".to_string()]
+    );
+}
+
+/// A descriptor of `globalThis` reads the sandbox, and `delete globalThis.x` deletes the sandbox property. A var or
+/// function name is non-configurable: its delete returns false and it stays bound.
+#[test]
+fn vm_globalthis_descriptor_and_delete_forward_to_sandbox() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({ a: 1 });
+console.log(JSON.stringify([runInContext('var b = 2; function fb() {} [Object.getOwnPropertyDescriptor(globalThis, "b").value, Object.getOwnPropertyDescriptor(globalThis, "a").value, delete globalThis.b, typeof b, delete globalThis.fb, typeof fb, delete globalThis.a, typeof a]', sb), 'a' in sb]));"##
+    );
+    assert_eq!(
+        run_lines(&src),
+        vec![r#"[[2,1,false,"number",false,"function",true,"undefined"],false]"#.to_string()]
+    );
+}
+
+/// A sandbox property named like a realm builtin shadows it for `globalThis.X`, as it does for a bare `X`.
+#[test]
+fn vm_globalthis_sandbox_overrides_realm_builtin() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({ Math: { random: () => 4 } });
+console.log(JSON.stringify(runInContext('[globalThis.Math.random(), Math.random(), globalThis.hasOwnProperty("Math")]', sb)));"##
+    );
+    assert_eq!(run_lines(&src), vec!["[4,4,true]".to_string()]);
+}
+
+/// Node 22 pins this: a `var` named like an inherited property (`toString`) is not defined again, so the name still
+/// reads the inherited value and the sandbox gets no own property.
+#[test]
+fn vm_var_named_like_inherited_property_is_not_redefined() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({});
+console.log(JSON.stringify([runInContext('var toString; typeof toString', sb), Object.prototype.hasOwnProperty.call(sb, 'toString')]));"##
+    );
+    assert_eq!(run_lines(&src), vec![r#"["function",false]"#.to_string()]);
+}

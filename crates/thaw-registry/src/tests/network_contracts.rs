@@ -31,28 +31,6 @@ fn p2c_run(label: &str, body: &str) -> String {
     result
 }
 
-/// QuickJS executor, kept only for the tests whose thaw-js parity gap is not fixed yet (see the comment at each call).
-fn p2c_run_qjs(label: &str, body: &str) -> String {
-    use std::ffi::{CStr, CString};
-    let dir = temp_registry(&format!("p2c_{label}"));
-    fs::write(dir.join("index.js"), format!("module.exports = async function () {{ {body}\n}};")).unwrap();
-    let empty_node_modules = temp_registry(&format!("p2c_{label}_modules"));
-    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let global = format!("p2cRun_{label}");
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.{global} = module.exports;");
-    let loaded = thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr());
-    let result = if loaded == 1 {
-        let name = CString::new(global).unwrap();
-        let pointer = thaw_quickjs::thaw_js_call(name.as_ptr(), c"[]".as_ptr());
-        unsafe { CStr::from_ptr(pointer) }.to_string_lossy().into_owned()
-    } else {
-        String::from("load failed")
-    };
-    let _ = fs::remove_dir_all(&dir);
-    let _ = fs::remove_dir_all(&empty_node_modules);
-    result
-}
-
 #[test]
 fn p2c_dgram_bind_state() {
     // expected: node22
