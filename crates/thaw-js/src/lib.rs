@@ -5936,9 +5936,19 @@ fn param_mask(names: &[Option<Rc<str>>]) -> u64 {
     names.iter().flatten().fold(0, |m, n| m | name_bit(n))
 }
 
-/// Whether `stmts` open with a `"use strict"` directive.
+/// Whether the directive prologue of `stmts` holds a Use Strict Directive: a leading string-literal
+/// statement whose raw source text (quotes included, no escapes) is exactly `'use strict'` or `"use strict"`.
 fn starts_with_use_strict(stmts: &[a::Stmt]) -> bool {
-    matches!(stmts.first(), Some(a::Stmt::Expr(e)) if matches!(&*e.expr, a::Expr::Lit(a::Lit::Str(x)) if x.value.as_str() == Some("use strict")))
+    for s in stmts {
+        let a::Stmt::Expr(e) = s else { return false };
+        let a::Expr::Lit(a::Lit::Str(x)) = &*e.expr else {
+            return false;
+        };
+        if matches!(x.raw.as_deref(), Some("'use strict'" | "\"use strict\"")) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether a call's callee is the plain identifier `eval` (parenthesized or not): a direct eval when
