@@ -2,7 +2,6 @@
 fn fs_async_file_operations_observe_abort_before_io_and_between_chunks() {
     // Unrun regression: pre-aborted and pre-dispatch signals cannot mutate
     // files, while an iterable write stops before its next chunk.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_async_abort");
     fs::write(dir.join("index.js"), r#"var fs = require('node:fs'), promises = require('node:fs/promises');
         module.exports = async function(root) {
@@ -65,11 +64,7 @@ fn fs_async_file_operations_observe_abort_before_io_and_between_chunks() {
         };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_fs_async_abort_node_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseAsyncAbort = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseAsyncAbort").unwrap().as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],"keep",["AbortError","ABORT_ERR","dispatch"],"ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE",true,"signal getter","signal getter",["AbortError","ABORT_ERR","scalar"],["AbortError","ABORT_ERR","iterable"],["AbortError","ABORT_ERR","read"],"keep",["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],true,["AbortError","ABORT_ERR","borrowed"],["AbortError","ABORT_ERR","descriptor"],[["AbortError","ABORT_ERR","read"],["AbortError","ABORT_ERR","scalar"],["AbortError","ABORT_ERR","iterable"]],"keep","keep",["AbortError","ABORT_ERR","between"],"A"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -79,7 +74,6 @@ fn fs_async_file_operations_observe_abort_before_io_and_between_chunks() {
 fn fs_promise_write_file_consumes_iterables_and_keeps_descriptor_ownership() {
     // Unrun regression: iterable chunks must be written in order through one
     // descriptor; an iterator failure rejects and closes only an opened path.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_write_iterable");
     fs::write(
         dir.join("index.js"),
@@ -120,14 +114,7 @@ fn fs_promise_write_file_consumes_iterables_and_keeps_descriptor_ownership() {
     let empty_node_modules = temp_registry("builtin_fs_write_iterable_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWriteIterable = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseWriteIterable").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"["abcdefg","AB",1,1,"XYZdefg","XYZdefg!",true,true,true,"iterator failed",0]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -135,7 +122,6 @@ fn fs_promise_write_file_consumes_iterables_and_keeps_descriptor_ownership() {
 
 #[test]
 fn fs_sync_and_promise_apis_operate_on_the_host_filesystem() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_promises");
     fs::write(
             dir.join("index.js"),
@@ -146,15 +132,7 @@ fn fs_sync_and_promise_apis_operate_on_the_host_filesystem() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsPromises = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseFsPromises").unwrap();
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         format!(
@@ -171,7 +149,6 @@ fn fs_sync_and_promise_apis_operate_on_the_host_filesystem() {
 fn fs_cp_finalizes_new_directory_modes_after_children_and_errors() {
     // Unrun regression: read-only source directories remain readable while
     // children are copied, then new destinations acquire the source mode.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_cp_directory_modes");
     fs::write(dir.join("index.js"), r#"var fs = require('node:fs'), promises = require('node:fs/promises');
         module.exports = async function(root) {
@@ -200,12 +177,8 @@ fn fs_cp_finalizes_new_directory_modes_after_children_and_errors() {
         };"#).unwrap();
     let modules = temp_registry("builtin_fs_cp_directory_modes_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCpDirectoryModes = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseCpDirectoryModes").unwrap();
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let parsed: serde_json::Value = serde_json::from_str(&unsafe { CStr::from_ptr(result) }.to_string_lossy()).unwrap();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(parsed[0], serde_json::json!([[488,365],[488,365],[488,365],[448,448],[488,365],[488,365],[488,365]]));
     assert_eq!(parsed[1], "copied");
     assert_eq!(parsed[2], "child failure");
@@ -217,7 +190,6 @@ fn fs_cp_finalizes_new_directory_modes_after_children_and_errors() {
 
 #[test]
 fn fs_copy_realpath_and_mkdtemp_work_across_api_styles() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_paths");
     fs::write(
             dir.join("index.js"),
@@ -228,17 +200,7 @@ fn fs_copy_realpath_and_mkdtemp_work_across_api_styles() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsPaths = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsPaths").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         r#"["copy-value","copied.txt","source.txt",true,false,"function"]"#
@@ -249,7 +211,6 @@ fn fs_copy_realpath_and_mkdtemp_work_across_api_styles() {
 
 #[test]
 fn fs_disposable_temporary_directories_remove_nested_contents_once() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_disposable_mkdtemp");
     fs::write(
             dir.join("index.js"),
@@ -260,17 +221,7 @@ fn fs_disposable_temporary_directories_remove_nested_contents_once() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDisposableMkdtemp = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseDisposableMkdtemp").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[true,false,true,true,true,false,true,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -278,7 +229,6 @@ fn fs_disposable_temporary_directories_remove_nested_contents_once() {
 
 #[test]
 fn fs_open_as_blob_exposes_blob_reads_and_detects_file_changes() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_open_as_blob");
     fs::write(
             dir.join("index.js"),
@@ -289,17 +239,7 @@ fn fs_open_as_blob_exposes_blob_reads_and_detects_file_changes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseOpenAsBlob = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseOpenAsBlob").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         r#"[true,6,"text/plain","abcdef",6,"abcdef",false,3,"application/x","ENOENT","NotReadableError","NotReadableError"]"#
@@ -310,7 +250,6 @@ fn fs_open_as_blob_exposes_blob_reads_and_detects_file_changes() {
 
 #[test]
 fn blob_streams_use_readable_stream_and_keep_file_verification() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_blob_streams");
     fs::write(
         dir.join("index.js"),
@@ -353,17 +292,7 @@ module.exports = async function (root) {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseBlobStreams = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseBlobStreams").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[true,true,false,"abc",false,["xy","xy"],["zz"],true,true,"abcdef",["abcdef"],["bcd","bcd"],"NotReadableError","NotReadableError"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -371,7 +300,6 @@ module.exports = async function (root) {
 
 #[test]
 fn fs_cp_recursively_copies_directories_across_api_styles() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_cp");
     fs::write(
             dir.join("index.js"),
@@ -382,17 +310,7 @@ fn fs_cp_recursively_copies_directories_across_api_styles() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsCp = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsCp").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[["ERR_FS_CP_EEXIST","ERR_FS_CP_EEXIST","ERR_FS_CP_EEXIST"],"kept","copied","copied","ERR_FS_CP_EEXIST"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -400,7 +318,6 @@ fn fs_cp_recursively_copies_directories_across_api_styles() {
 
 #[test]
 fn fs_cp_honors_filters_links_and_timestamp_options() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_cp_options");
     fs::write(
             dir.join("index.js"),
@@ -411,17 +328,7 @@ fn fs_cp_honors_filters_links_and_timestamp_options() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsCpOptions = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsCpOptions").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         r#"[true,false,"keep.txt",true,6,"keep",false,5,true,false,6,"ERR_FS_EISDIR","TypeError","ERR_FS_CP_EINVAL","ERR_FS_CP_EINVAL","keep"]"#
@@ -432,7 +339,6 @@ fn fs_cp_honors_filters_links_and_timestamp_options() {
 
 #[test]
 fn fs_promise_file_handles_manage_repeated_operations_and_streams() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_file_handle");
     fs::write(
             dir.join("index.js"),
@@ -443,16 +349,8 @@ fn fs_promise_file_handles_manage_repeated_operations_and_streams() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsFileHandle = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("handle.txt").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsFileHandle").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path)]);
     assert_eq!(
         result,
         r#"[true,9,"",[],true,true,-1,true,"EBADF","function"]"#
@@ -463,7 +361,6 @@ fn fs_promise_file_handles_manage_repeated_operations_and_streams() {
 
 #[test]
 fn fs_file_handles_support_positioned_buffer_reads_and_writes() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_file_handle_positions");
     fs::write(
             dir.join("index.js"),
@@ -474,18 +371,8 @@ fn fs_file_handles_support_positioned_buffer_reads_and_writes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsFileHandlePositions = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("positioned.txt").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsFileHandlePositions")
-            .unwrap()
-            .as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path)]);
     assert_eq!(result, r#"[2,".cd.",2,"XYZ",1,"!",0,"000000",""]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -493,7 +380,6 @@ fn fs_file_handles_support_positioned_buffer_reads_and_writes() {
 
 #[test]
 fn fs_directory_handles_support_reads_callbacks_and_async_iteration() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_directory_handles");
     fs::write(
             dir.join("index.js"),
@@ -504,17 +390,7 @@ fn fs_directory_handles_support_reads_callbacks_and_async_iteration() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsDirectoryHandles = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsDirectoryHandles").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         r#"[["a.txt","nested"],true,true,"ERR_DIR_CLOSED","string",[["a.txt",true,false],["nested",false,true]],true]"#
@@ -525,7 +401,6 @@ fn fs_directory_handles_support_reads_callbacks_and_async_iteration() {
 
 #[test]
 fn fs_links_and_permissions_use_host_filesystem_semantics() {
-    use std::ffi::{CStr, CString};
     use std::os::unix::fs::PermissionsExt;
     let dir = temp_registry("builtin_fs_links");
     fs::write(
@@ -537,17 +412,7 @@ fn fs_links_and_permissions_use_host_filesystem_semantics() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsLinks = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsLinks").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     let source_path = dir.join("source.txt").to_string_lossy().into_owned();
     assert_eq!(
         result,
@@ -567,7 +432,6 @@ fn fs_links_and_permissions_use_host_filesystem_semantics() {
 
 #[test]
 fn fs_stats_and_utimes_use_host_timestamps_across_api_styles() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_timestamps");
     fs::write(
             dir.join("index.js"),
@@ -578,16 +442,8 @@ fn fs_stats_and_utimes_use_host_timestamps_across_api_styles() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsTimestamps = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("timestamps.txt").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsTimestamps").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path)]);
     assert_eq!(
         result,
         r#"[100000,200000,100000,200000,true,true,300000,400000,700000,800000,700000,800000]"#
@@ -595,6 +451,9 @@ fn fs_stats_and_utimes_use_host_timestamps_across_api_styles() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+mod qjs_pending_filesystem_fs_ownership_apis_use_host_uid_and_gid {
+    use super::*;
 
 #[test]
 fn fs_ownership_apis_use_host_uid_and_gid() {
@@ -636,10 +495,10 @@ fn fs_ownership_apis_use_host_uid_and_gid() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+}
 
 #[test]
 fn fs_watch_file_reports_host_changes_and_stops_cleanly() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_watch_file");
     fs::write(
             dir.join("index.js"),
@@ -650,20 +509,15 @@ fn fs_watch_file_reports_host_changes_and_stops_cleanly() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWatchFile = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("watched.txt").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsWatchFile").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path)]);
     assert_eq!(result, r#"[[3,13,true,false,0],null,0]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+mod qjs_pending_filesystem_fs_watch_reports_directory_rename_and_change_events {
+    use super::*;
 
 #[test]
 fn fs_watch_reports_directory_rename_and_change_events() {
@@ -696,12 +550,12 @@ fn fs_watch_reports_directory_rename_and_change_events() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+}
 
 /// Deleting a watched file emits one `rename` with its basename and keeps the
 /// handle open (Node parity), instead of emitting 'error' and closing.
 #[test]
 fn fs_watch_file_deletion_emits_rename_without_error() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_watch_file_delete");
     fs::write(
             dir.join("index.js"),
@@ -712,17 +566,7 @@ fn fs_watch_file_deletion_emits_rename_without_error() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWatchFileDelete = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsWatchFileDelete").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[[["rename","gone.txt"]],0,false,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -732,7 +576,6 @@ fn fs_watch_file_deletion_emits_rename_without_error() {
 /// instead of tearing down the directory watcher with 'error'.
 #[test]
 fn fs_watch_directory_survives_entry_removed_between_readdir_and_stat() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_watch_entry_race");
     fs::write(
             dir.join("index.js"),
@@ -743,17 +586,7 @@ fn fs_watch_directory_survives_entry_removed_between_readdir_and_stat() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWatchEntryRace = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsWatchEntryRace").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[[["rename","value.txt"]],0,false]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -761,7 +594,6 @@ fn fs_watch_directory_survives_entry_removed_between_readdir_and_stat() {
 
 #[test]
 fn fs_glob_supports_patterns_exclusions_and_async_iteration() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_glob");
     fs::write(
             dir.join("index.js"),
@@ -772,17 +604,7 @@ fn fs_glob_supports_patterns_exclusions_and_async_iteration() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsGlob = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsGlob").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         r#"[["root.txt","src/nested/value.txt"],["root.txt","src/main.js"],["src","src/main.js","src/nested","src/nested/skip.txt","src/nested/value.txt"],[["main.js",true,false],["nested",false,true]]]"#
@@ -793,7 +615,6 @@ fn fs_glob_supports_patterns_exclusions_and_async_iteration() {
 
 #[test]
 fn fs_access_checks_host_permissions_across_api_styles() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_access");
     fs::write(
             dir.join("index.js"),
@@ -804,17 +625,7 @@ fn fs_access_checks_host_permissions_across_api_styles() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsAccess = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsAccess").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     let missing = dir.join("missing.txt").to_string_lossy().into_owned();
     assert_eq!(
         result,
@@ -829,7 +640,6 @@ fn fs_access_checks_host_permissions_across_api_styles() {
 
 #[test]
 fn fs_numeric_descriptors_support_sync_and_callback_io() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_numeric_descriptors");
     fs::write(
             dir.join("index.js"),
@@ -840,18 +650,8 @@ fn fs_numeric_descriptors_support_sync_and_callback_io() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsNumericDescriptors = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("descriptor.txt").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsNumericDescriptors")
-            .unwrap()
-            .as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path)]);
     assert_eq!(
         result,
         r#"[3,1,4,".bcd!.",3,"EBADF",[3,"XYZ",3,true,"XYZ",3],"XYZ"]"#
@@ -862,7 +662,6 @@ fn fs_numeric_descriptors_support_sync_and_callback_io() {
 
 #[test]
 fn fs_scatter_gather_io_works_across_api_styles() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_scatter_gather");
     fs::write(
             dir.join("index.js"),
@@ -873,16 +672,8 @@ fn fs_scatter_gather_io_works_across_api_styles() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsScatterGather = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("vectors.txt").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsScatterGather").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path)]);
     assert_eq!(
         result,
         r#"[4,4,"ab","cd",[2,true,6,true,"abc","def"],2,true,6,true,"aXY","def","aXYdef"]"#
@@ -893,7 +684,6 @@ fn fs_scatter_gather_io_works_across_api_styles() {
 
 #[test]
 fn fs_statfs_reports_host_capacity_across_api_styles() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_statfs");
     fs::write(
             dir.join("index.js"),
@@ -904,17 +694,7 @@ fn fs_statfs_reports_host_capacity_across_api_styles() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStatfs = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsStatfs").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     let values = parsed.as_array().unwrap();
     assert_eq!(
@@ -940,7 +720,6 @@ fn fs_statfs_reports_host_capacity_across_api_styles() {
 
 #[test]
 fn fs_lstat_and_dirents_identify_symbolic_links() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_lstat_symlinks");
     fs::write(
             dir.join("index.js"),
@@ -951,17 +730,7 @@ fn fs_lstat_and_dirents_identify_symbolic_links() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsLstatSymlinks = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsLstatSymlinks").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         r#"[true,false,false,true,true,true,true,true,false,true]"#
@@ -972,7 +741,6 @@ fn fs_lstat_and_dirents_identify_symbolic_links() {
 
 #[test]
 fn fs_lutimes_updates_links_without_touching_targets() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_lutimes");
     fs::write(
             dir.join("index.js"),
@@ -983,17 +751,7 @@ fn fs_lutimes_updates_links_without_touching_targets() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsLutimes = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsLutimes").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         r#"[300000,400000,500000,600000,700000,800000,100000,200000]"#
@@ -1004,7 +762,6 @@ fn fs_lutimes_updates_links_without_touching_targets() {
 
 #[test]
 fn fs_copy_exclusive_and_forced_removal_match_node_options() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_operation_options");
     fs::write(
             dir.join("index.js"),
@@ -1015,17 +772,7 @@ fn fs_copy_exclusive_and_forced_removal_match_node_options() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsOperationOptions = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsOperationOptions").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     let destination = dir.join("destination.txt").to_string_lossy().into_owned();
     assert_eq!(
         result,
@@ -1040,7 +787,6 @@ fn fs_copy_exclusive_and_forced_removal_match_node_options() {
 
 #[test]
 fn fs_readdir_supports_recursive_and_buffer_results() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_recursive_readdir");
     fs::write(
             dir.join("index.js"),
@@ -1051,17 +797,7 @@ fn fs_readdir_supports_recursive_and_buffer_results() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsRecursiveReaddir = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsRecursiveReaddir").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     let values = parsed.as_array().unwrap();
     assert_eq!(
@@ -1100,7 +836,6 @@ fn fs_readdir_supports_recursive_and_buffer_results() {
 
 #[test]
 fn fs_write_flags_honor_append_and_exclusive_creation() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_write_flags");
     fs::write(
             dir.join("index.js"),
@@ -1111,17 +846,7 @@ fn fs_write_flags_honor_append_and_exclusive_creation() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWriteFlags = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsWriteFlags").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     let path = dir.join("flags.txt").to_string_lossy().into_owned();
     let exclusive = dir.join("exclusive.txt").to_string_lossy().into_owned();
     assert_eq!(
@@ -1148,7 +873,6 @@ fn fs_numeric_open_flags_behave_like_their_string_equivalents() {
     // `O_TRUNC|O_CREAT|O_WRONLY` combination (577) rather than the
     // string `"w"`, so every extracted file's `WriteStream` threw
     // ENOENT statting a destination that legitimately doesn't exist yet.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_numeric_flags");
     fs::write(
             dir.join("index.js"),
@@ -1159,17 +883,7 @@ fn fs_numeric_open_flags_behave_like_their_string_equivalents() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsNumericFlags = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsNumericFlags").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"["hello",true,"one-two"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1179,7 +893,6 @@ fn fs_numeric_open_flags_behave_like_their_string_equivalents() {
 fn fs_open_and_file_options_preserve_independent_flags() {
     // Unrun regression: numeric O_CREAT must not imply O_TRUNC, and the
     // file APIs must honor the caller's flag without closing caller-owned fds.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_independent_open_flags");
     fs::write(
         dir.join("index.js"),
@@ -1190,15 +903,7 @@ fn fs_open_and_file_options_preserve_independent_flags() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsIndependentFlags = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsIndependentFlags").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"["abcdef","!Ycdef","TypeError","!Ycdef","!Ycdef","ENOENT",0,true,"Ycdef","","new"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1208,7 +913,6 @@ fn fs_open_and_file_options_preserve_independent_flags() {
 fn fs_stream_positions_reject_invalid_original_values_before_open() {
     // Unrun regression: constructor argument validation must happen before
     // default 'w' can truncate an existing file or create a new one.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_stream_positions");
     fs::write(
         dir.join("index.js"),
@@ -1219,21 +923,16 @@ fn fs_stream_positions_reject_invalid_original_values_before_open() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreamPositions = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsStreamPositions").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[["TypeError","TypeError","RangeError","RangeError","RangeError","RangeError","RangeError"],"TypeError",["TypeError","RangeError","TypeError","RangeError"],"abcdef",false,"TypeError",true,"abXYef","bXY"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
 #[cfg(unix)]
+mod qjs_pending_filesystem_fs_stat_no_entry_option_respects_sync_and_async_boundaries {
+    use super::*;
+
 #[test]
 fn fs_stat_no_entry_option_respects_sync_and_async_boundaries() {
     // Unrun regression: sync lstat suppresses only ENOENT; async lstat never
@@ -1262,6 +961,10 @@ fn fs_stat_no_entry_option_respects_sync_and_async_boundaries() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+}
+
+mod qjs_pending_filesystem_fs_creation_apis_honor_requested_modes {
+    use super::*;
 
 #[test]
 fn fs_creation_apis_honor_requested_modes() {
@@ -1291,10 +994,10 @@ fn fs_creation_apis_honor_requested_modes() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+}
 
 #[test]
 fn fs_truncate_and_file_handle_sync_methods_work() {
-    use std::ffi::{CStr, CString};
     use std::os::unix::fs::PermissionsExt;
     let dir = temp_registry("builtin_fs_truncate_sync");
     fs::write(
@@ -1306,18 +1009,8 @@ fn fs_truncate_and_file_handle_sync_methods_work() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsTruncateSync = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("truncate.txt");
-    let arguments =
-        CString::new(serde_json::to_string(&[path.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsTruncateSync").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[4,"61626300","EBADF","RangeError","61626300"]"#);
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -1329,7 +1022,6 @@ fn fs_truncate_and_file_handle_sync_methods_work() {
 
 #[test]
 fn fs_bigint_stats_include_host_identity_and_nanoseconds() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_bigint_stats");
     fs::write(
             dir.join("index.js"),
@@ -1340,16 +1032,8 @@ fn fs_bigint_stats_include_host_identity_and_nanoseconds() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsBigintStats = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("bigint.txt").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsBigintStats").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path)]);
     assert_eq!(
         result,
         r#"[["bigint","6","bigint",true,"bigint","bigint","bigint",true,true],true,true,true,true]"#
@@ -1360,7 +1044,6 @@ fn fs_bigint_stats_include_host_identity_and_nanoseconds() {
 
 #[test]
 fn fs_bigint_stats_keep_exact_wire_values_across_consumers() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_bigint_exact_wire");
     fs::write(
         dir.join("index.js"),
@@ -1370,14 +1053,8 @@ fn fs_bigint_stats_keep_exact_wire_values_across_consumers() {
     let empty_node_modules = temp_registry("builtin_fs_bigint_exact_wire_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsBigintExactWire = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("exact.txt").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
-    let function = CString::new("exerciseFsBigintExactWire").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path)]);
     assert_eq!(result, r#"[9007199254740992,"9007199254740993","9007199254740995","9007199254740997","-1","0","1000000000000000001","1000000000000","-1000001","-1","123456789","123",true,true,true,true,true,true,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1385,7 +1062,6 @@ fn fs_bigint_stats_keep_exact_wire_values_across_consumers() {
 
 #[test]
 fn fs_promises_watch_iterates_changes_and_honors_abort() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_promises_watch");
     fs::write(
             dir.join("index.js"),
@@ -1396,17 +1072,7 @@ fn fs_promises_watch_iterates_changes_and_honors_abort() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsPromisesWatch = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsPromisesWatch").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         r#"[false,"rename",true,"value.txt",true,true,"AbortError","reason"]"#
@@ -1418,7 +1084,6 @@ fn fs_promises_watch_iterates_changes_and_honors_abort() {
 
 #[test]
 fn fs_retained_descriptors_survive_rename_unlink_and_enforce_native_flags() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_retained_descriptors");
     fs::write(
         dir.join("index.js"),
@@ -1429,18 +1094,7 @@ fn fs_retained_descriptors_survive_rename_unlink_and_enforce_native_flags() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsRetainedDescriptors = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments = CString::new(
-        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
-    )
-    .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsRetainedDescriptors").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"["ab","cd","a","ef",6,true,"EBADF","EBADF","one!",false,false,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1448,7 +1102,6 @@ fn fs_retained_descriptors_survive_rename_unlink_and_enforce_native_flags() {
 
 #[test]
 fn fs_descriptor_vectors_stop_after_short_write_and_read_options_size_buffer() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_fd_short_vector");
     fs::write(
         dir.join("index.js"),
@@ -1459,16 +1112,8 @@ fn fs_descriptor_vectors_stop_after_short_write_and_read_options_size_buffer() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsFdShortVector = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("short-vector.txt").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsFdShortVector").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path)]);
     assert_eq!(result, r#"[4,6,"000061626364",0,3,1,1,"-1:616263"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1476,7 +1121,6 @@ fn fs_descriptor_vectors_stop_after_short_write_and_read_options_size_buffer() {
 
 #[test]
 fn fs_watchers_track_missing_bigint_and_timer_lifetime() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_watch_missing_bigint");
     fs::write(
         dir.join("index.js"),
@@ -1487,18 +1131,7 @@ fn fs_watchers_track_missing_bigint_and_timer_lifetime() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWatchMissing = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments = CString::new(
-        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
-    )
-    .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsWatchMissing").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     let events = parsed[0].as_array().unwrap();
     assert_eq!(events.len(), 4);
@@ -1523,7 +1156,6 @@ fn fs_watchers_track_missing_bigint_and_timer_lifetime() {
 
 #[test]
 fn fs_glob_parses_patterns_and_prunes_excluded_directories() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_glob_patterns");
     fs::write(
         dir.join("index.js"),
@@ -1535,18 +1167,7 @@ fn fs_glob_parses_patterns_and_prunes_excluded_directories() {
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     // index.js + node:fs + node:path, and node:fs itself needs node:stream + node:events (fs streams).
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsGlobPatterns = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments = CString::new(
-        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
-    )
-    .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsGlobPatterns").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     let two = serde_json::json!(["file1.js", "file2.js"]);
     for index in [0, 1, 2, 3, 10, 11] {
@@ -1573,6 +1194,9 @@ fn fs_glob_parses_patterns_and_prunes_excluded_directories() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+mod qjs_pending_filesystem_fs_recursive_mkdir_returns_first_created_path_across_api_styles {
+    use super::*;
 
 #[test]
 fn fs_recursive_mkdir_returns_first_created_path_across_api_styles() {
@@ -1614,11 +1238,11 @@ fn fs_recursive_mkdir_returns_first_created_path_across_api_styles() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+}
 
 #[cfg(unix)]
 #[test]
 fn fs_readdir_names_do_not_require_search_permission() {
-    use std::ffi::{CStr, CString};
     use std::os::unix::fs::PermissionsExt;
 
     let dir = temp_registry("builtin_fs_readdir_names_no_search");
@@ -1630,22 +1254,12 @@ fn fs_readdir_names_do_not_require_search_permission() {
     let empty_node_modules = temp_registry("builtin_fs_readdir_names_no_search_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsReaddirNames = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-
     let locked = dir.join("locked");
     fs::create_dir(&locked).unwrap();
     fs::write(locked.join("entry.txt"), "data").unwrap();
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o400)).unwrap();
-    let function = CString::new("exerciseFsReaddirNames").unwrap();
-    let arguments = CString::new(
-        serde_json::to_string(&[locked.to_string_lossy().into_owned()]).unwrap(),
-    )
-    .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(locked.to_string_lossy().into_owned())]);
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(parsed, serde_json::json!([["entry.txt"], ["entry.txt"], ["entry.txt"], ["entry.txt"], 1, 1]));
     let _ = fs::remove_dir_all(&dir);
@@ -1655,7 +1269,7 @@ fn fs_readdir_names_do_not_require_search_permission() {
 #[cfg(unix)]
 #[test]
 fn fs_raw_filename_bytes_survive_readdir_and_path_consumers() {
-    use std::ffi::{CStr, CString, OsString};
+    use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
     let dir = temp_registry("builtin_fs_raw_names");
     fs::write(
@@ -1672,18 +1286,7 @@ fn fs_raw_filename_bytes_survive_readdir_and_path_consumers() {
     fs::write(&raw_file, b"F").unwrap();
     fs::create_dir(&raw_directory).unwrap();
     fs::write(raw_directory.join(OsString::from_vec(vec![0xfd])), b"D").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRawNames = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments = CString::new(
-        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
-    )
-    .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseRawNames").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[["fe","ff"],["fe","ff"],["fe","fe2ffd","ff"],[["fe",false,true],["ff",true,false]],["fe","ff"],true,["fe","ff"],["fe","ff"],["fe","ff"],1,"F","fd","F","ff","ff",true,true,"ff","W","string","string","string"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1691,7 +1294,6 @@ fn fs_raw_filename_bytes_survive_readdir_and_path_consumers() {
 
 #[test]
 fn fs_second_path_file_urls_survive_sync_callback_and_promise_routes() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_second_file_urls");
     fs::write(
         dir.join("index.js"),
@@ -1702,18 +1304,7 @@ fn fs_second_path_file_urls_survive_sync_callback_and_promise_routes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseSecondFileUrls = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments = CString::new(
-        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
-    )
-    .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseSecondFileUrls").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[false,false,false,"data","data","data","data","data","data"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1722,7 +1313,6 @@ fn fs_second_path_file_urls_survive_sync_callback_and_promise_routes() {
 #[cfg(unix)]
 #[test]
 fn fs_invalid_byte_mkdtemp_disposables_remove_original_raw_paths() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_raw_disposable");
     fs::write(
         dir.join("index.js"),
@@ -1733,18 +1323,7 @@ fn fs_invalid_byte_mkdtemp_disposables_remove_original_raw_paths() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRawDisposable = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments = CString::new(
-        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
-    )
-    .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseRawDisposable").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"["string",true,true,"string",true,true,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1752,7 +1331,6 @@ fn fs_invalid_byte_mkdtemp_disposables_remove_original_raw_paths() {
 
 #[test]
 fn fs_deferred_buffer_paths_are_snapshotted() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_deferred_buffer_paths");
     fs::write(
         dir.join("index.js"),
@@ -1798,16 +1376,7 @@ fn fs_deferred_buffer_paths_are_snapshotted() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDeferredBufferPaths = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-        .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseDeferredBufferPaths").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"["original","original","original","string",true,"original",true,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1815,7 +1384,6 @@ fn fs_deferred_buffer_paths_are_snapshotted() {
 
 #[test]
 fn fs_directory_iterator_closes_on_early_exit() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_dir_early_exit");
     fs::write(dir.join("index.js"), r#"var fs = require('node:fs'); module.exports = async function(root) {
         fs.mkdirSync(root + '/entries'); fs.writeFileSync(root + '/entries/a', 'a');
@@ -1828,19 +1396,14 @@ fn fs_directory_iterator_closes_on_early_exit() {
     };"#).unwrap();
     let modules = temp_registry("builtin_fs_dir_early_exit_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; {bundle} globalThis.exerciseDirExit = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseDirExit").unwrap();
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,true]");
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
+    assert_eq!(result, "[true,true,true]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
 
 #[test]
 fn fs_bigint_statfs_keeps_exact_wire_values_across_consumers() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_statfs_bigint_exact_wire");
     fs::write(
         dir.join("index.js"),
@@ -1885,17 +1448,16 @@ fn fs_bigint_statfs_keeps_exact_wire_values_across_consumers() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStatfsExact = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseStatfsExact").unwrap();
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[9007199254740992,\"number\",true,true,true,true]");
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
+    assert_eq!(result, "[9007199254740992,\"number\",true,true,true,true]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
 
 #[cfg(unix)]
+mod qjs_pending_filesystem_fs_cp_rejects_canonical_aliases_before_removal_or_recursive_creation {
+    use super::*;
+
 #[test]
 fn fs_cp_rejects_canonical_aliases_before_removal_or_recursive_creation() {
     use std::ffi::{CStr, CString};
@@ -1960,12 +1522,12 @@ fn fs_cp_rejects_canonical_aliases_before_removal_or_recursive_creation() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+}
 
 #[test]
 fn fs_write_stream_uses_configured_default_encoding() {
     // Unrun regression: the shared Writable write/end path must use the
     // filesystem stream's default encoding, with explicit writes overriding it.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_write_stream_encoding");
     fs::write(dir.join("index.js"), r#"var fs = require('node:fs'); module.exports = async function(root) {
         var write = function(path, options, chunks) { return new Promise(function(resolve, reject) {
@@ -1986,15 +1548,7 @@ fn fs_write_stream_uses_configured_default_encoding() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWriteStreamEncoding = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseFsWriteStreamEncoding").unwrap();
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"["hi","6869","6869","y","hi"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -2003,7 +1557,6 @@ fn fs_write_stream_uses_configured_default_encoding() {
 #[test]
 fn fs_filehandle_close_waits_for_preceding_async_iterable_writes() {
     // Unrun regression: close must drain the whole iterable, not only its first await.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_filehandle_pending_close");
     fs::write(dir.join("index.js"), r#"var fs = require('node:fs'); module.exports = async function(root) {
         async function check(path, throughPromises) {
@@ -2037,13 +1590,7 @@ fn fs_filehandle_close_waits_for_preceding_async_iterable_writes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsFilehandleClose = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseFsFilehandleClose").unwrap();
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[["AB","write,close",true,"EBADF"],["AB","write,close",true,"EBADF"],["chunk failed","X",true]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -2052,7 +1599,6 @@ fn fs_filehandle_close_waits_for_preceding_async_iterable_writes() {
 #[test]
 fn fs_write_stream_close_callback_waits_for_native_close() {
     // Unrun regression: queued writes and finalization precede close callback.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_write_stream_close");
     fs::write(dir.join("index.js"), r#"var fs = require('node:fs'); module.exports = async function(root) {
         async function check(path, autoClose) {
@@ -2077,13 +1623,7 @@ fn fs_write_stream_close_callback_waits_for_native_close() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWriteStreamClose = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseFsWriteStreamClose").unwrap();
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[[null,"AB",true,true,null],[null,"AB",true,true,null],["ENOENT",true]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
