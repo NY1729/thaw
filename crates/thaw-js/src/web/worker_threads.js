@@ -170,11 +170,13 @@
       // the file a non-eval worker runs (a bundled module's virtual path runs from its bundle, worker.rs)
       let file;
       // a data: URL object is an ES-module entry (PR-3a; the string form stays ERR_WORKER_PATH, as in Node)
-      const esm = source instanceof URL && source.protocol === 'data:';
+      let esm = source instanceof URL && source.protocol === 'data:';
+      // a file: URL object names its path (PR-4); the path form then takes the same route as a string
+      const pathForm = source instanceof URL && source.protocol === 'file:' ? decodeURIComponent(source.pathname) : undefined;
       if (esm) {
         code = 'globalThis.__thaw_run_main_esm(' + JSON.stringify(source.href) + ')';
       } else if (!options || !options.eval) {
-        if (!code.startsWith('/') && !code.startsWith('./') && !code.startsWith('../')) {
+        if (pathForm === undefined && !code.startsWith('/') && !code.startsWith('./') && !code.startsWith('../')) {
           // Node's TypeError (ERR_WORKER_PATH); a data: or file: string gets the hint to pass a URL object instead
           const hint = code.startsWith('data:text/javascript') ? ' Wrap data: URLs with `new URL`.' : code.startsWith('file:') ? ' Wrap file:// URLs with `new URL`.' : '';
           const error = new TypeError("The worker script or module filename must be an absolute path or a relative path starting with './' or '../'." + hint + ' Received "' + code + '"');
@@ -183,8 +185,14 @@
         }
         // the file as an absolute path with `.` and `..` resolved (Node resolves against the cwd), so a missing file
         // is reported by its resolved path
-        file = absolutePath(code);
-        code = 'globalThis.__thaw_run_main_file(' + JSON.stringify(file) + ')';
+        file = absolutePath(pathForm === undefined ? code : pathForm);
+        // an ES-module file (.mjs, or .js in a "type": "module" package) runs through the module loader (worker_esm.js)
+        if (__thaw_path_is_esm(file)) {
+          esm = true;
+          code = 'globalThis.__thaw_run_main_esm(' + JSON.stringify(file) + ')';
+        } else {
+          code = 'globalThis.__thaw_run_main_file(' + JSON.stringify(file) + ')';
+        }
       }
       const threadId = nextThreadId++;
       // the worker's port token: ports that move to it are routed by this (worker.rs), unlike the Node threadId
