@@ -1,5 +1,7 @@
 use super::*;
 
+include!("tests/run_js.rs");
+
 include!("tests/resolution.rs");
 
 include!("tests/bundling.rs");
