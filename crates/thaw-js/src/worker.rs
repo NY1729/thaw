@@ -58,6 +58,16 @@ enum Evt {
     Port(u64, String),
     /// The peer of a port end this worker owns closed.
     PortClose(u64),
+    /// The answer to a `cpuUsage` request: its ack id, then the worker thread's user and system CPU microseconds.
+    Cpu(u32, u64, u64),
+}
+
+/// `worker.cpuUsage()` requests queued by the parent for the worker thread. The parent queues an ack and raises
+/// `requested`; the worker takes the queue in `serve_cpu`, from its interrupt check.
+#[derive(Default)]
+pub(crate) struct CpuProbe {
+    requested: AtomicBool,
+    acks: Mutex<Vec<u32>>,
 }
 
 struct Worker {
@@ -69,6 +79,7 @@ struct Worker {
     /// The worker's port token (its port routes name it as their owner).
     token: u64,
     join: Option<JoinHandle<()>>,
+    cpu: Arc<CpuProbe>,
 }
 
 struct Side {
@@ -80,6 +91,7 @@ struct Side {
     interrupt: Arc<AtomicBool>,
     /// The worker's parentPort has a referenced `message` listener (set by the bootstrap).
     alive: Arc<AtomicBool>,
+    cpu: Arc<CpuProbe>,
 }
 
 /// Per-`Interp` worker state: the workers this Interp spawned (`workers`, keyed by handle), and on a worker thread
@@ -395,6 +407,7 @@ fn spawn(
     let (tx, cmd_rx) = mpsc::channel();
     let (evt_tx, rx) = mpsc::channel();
     let interrupt = Arc::new(AtomicBool::new(false));
+    let cpu = Arc::new(CpuProbe::default());
     let stack = stack_bytes(stack_mb);
     let heap = heap_bytes(heap_mb);
     // a SHARE_ENV worker reads and writes the table of this realm; any other worker gets a table of its own
@@ -410,6 +423,7 @@ fn spawn(
         hub: tokens.1,
         interrupt: interrupt.clone(),
         alive: Arc::new(AtomicBool::new(false)),
+        cpu: cpu.clone(),
     };
     let join = std::thread::Builder::new()
         .name("thaw-js-worker".into())
@@ -428,9 +442,63 @@ fn spawn(
             exited: false,
             token: tokens.0,
             join: Some(join),
+            cpu,
         },
     );
     id
+}
+
+impl CpuProbe {
+    /// Parent side: queues `ack` and wakes the worker's next interrupt check.
+    fn request(&self, ack: u32) {
+        let mut acks = self.acks.lock().unwrap_or_else(|e| e.into_inner());
+        acks.push(ack);
+        self.requested.store(true, Ordering::Relaxed);
+    }
+}
+
+/// This thread's CPU time as (user, system) microseconds: getrusage(RUSAGE_THREAD) on Linux. Elsewhere the thread's
+/// total from CLOCK_THREAD_CPUTIME_ID, all of it counted as user time.
+fn thread_cpu_micros() -> (u64, u64) {
+    #[cfg(target_os = "linux")]
+    {
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut ru) };
+        let micros = |t: libc::timeval| t.tv_sec as u64 * 1_000_000 + t.tv_usec as u64;
+        (micros(ru.ru_utime), micros(ru.ru_stime))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+        (ts.tv_sec as u64 * 1_000_000 + ts.tv_nsec as u64 / 1_000, 0)
+    }
+}
+
+/// Worker side, from `Interp::check_interrupt`: answers the queued `cpuUsage` requests with this thread's CPU time.
+/// Costs one relaxed load when nothing is queued (and nothing at all on a non-worker Interp).
+#[inline]
+pub(crate) fn serve_cpu_if_requested(it: &Interp) {
+    if let Some(side) = &it.worker.side {
+        if side.cpu.requested.load(Ordering::Relaxed) {
+            serve_cpu(side);
+        }
+    }
+}
+
+fn serve_cpu(side: &Side) {
+    let acks = {
+        let mut acks = side.cpu.acks.lock().unwrap_or_else(|e| e.into_inner());
+        side.cpu.requested.store(false, Ordering::Relaxed);
+        std::mem::take(&mut *acks)
+    };
+    if acks.is_empty() {
+        return;
+    }
+    let (user, system) = thread_cpu_micros();
+    for ack in acks {
+        let _ = side.tx.send(Evt::Cpu(ack, user, system));
+    }
 }
 
 fn to_parent(it: &Interp, e: Evt) {
@@ -653,6 +721,9 @@ fn pump(it: &mut Interp, ports_only: bool) -> String {
                     items.push(Item::Route(addr, None));
                     continue;
                 }
+                Evt::Cpu(ack, user, system) => format!(
+                    r#"{{"handle":{id},"type":"cpu","ack":{ack},"user":{user},"system":{system}}}"#
+                ),
             };
             items.push(Item::Json(json));
         }
@@ -856,6 +927,19 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_terminate", f, true);
+    // worker.cpuUsage(): queues `ack` for the worker; false when the worker is gone (JS rejects ERR_WORKER_NOT_RUNNING)
+    let f = it.native(|it, _, a| {
+        let (h, ack) = (it.num(&arg(a, 0)) as u32, it.num(&arg(a, 1)) as u32);
+        let sent = match it.worker.workers.get(&h) {
+            Some(w) if !w.exited => {
+                w.cpu.request(ack);
+                true
+            }
+            _ => false,
+        };
+        Ok(Value::Bool(sent))
+    });
+    g.declare("__thaw_worker_cpu", f, true);
     let f = it.native(|it, _, a| {
         let (h, refd) = (it.num(&arg(a, 0)) as u32, arg(a, 1).truthy());
         if let Some(w) = it.worker.workers.get_mut(&h) {

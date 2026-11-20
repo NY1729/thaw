@@ -127,6 +127,37 @@
       else deliver(ack, wire);
     });
   }
+  // worker.cpuUsage(prev) (Node 22): the worker's CPU time, served by the worker itself (worker.rs serve_cpu). The
+  // argument is checked here, synchronously, with Node's messages; the subtraction is done here too.
+  const MAX_CPU_PREV = Number.MAX_SAFE_INTEGER;
+  // Node's "Received ..." tail of an argument error
+  function receivedValue(value) {
+    if (value === undefined || value === null) return `Received ${value}`;
+    if (typeof value === 'function') return `Received function ${value.name}`;
+    if (typeof value === 'object') return `Received an instance of ${value.constructor && value.constructor.name || 'Object'}`;
+    return `Received type ${typeof value} (${typeof value === 'string' ? `'${value}'` : String(value)})`;
+  }
+  // a large integer is shown with `_` every three digits (Node's addNumericalSeparator)
+  function receivedNumber(n) {
+    const text = String(n);
+    if (!Number.isInteger(n) || Math.abs(n) <= 2 ** 32) return text;
+    const start = text[0] === '-' ? 1 : 0;
+    let res = '';
+    let i = text.length;
+    for (; i >= start + 4; i -= 3) res = `_${text.slice(i - 3, i)}${res}`;
+    return `${text.slice(0, i)}${res}`;
+  }
+  function checkCpuPrev(prev) {
+    if (typeof prev !== 'object' || Array.isArray(prev)) {
+      throw threadError('ERR_INVALID_ARG_TYPE', `The "prev" argument must be of type object. ${receivedValue(prev)}`, undefined, TypeError);
+    }
+    for (const key of ['user', 'system']) {
+      const value = prev[key];
+      if (typeof value !== 'number') throw threadError('ERR_INVALID_ARG_TYPE', `The "prev.${key}" property must be of type number. ${receivedValue(value)}`, undefined, TypeError);
+      if (!(value >= 0 && value <= MAX_CPU_PREV)) throw threadError('ERR_OUT_OF_RANGE', `The value of "prev.${key}" is out of range. It must be >= 0 && <= ${MAX_CPU_PREV}. Received ${receivedNumber(value)}`, undefined, RangeError);
+    }
+  }
+  let nextCpuAck = 1;
   const mainRoute = target => {
     const state = liveThreads.get(target);
     return state === undefined ? undefined : (ack, wire) => __thaw_worker_thread_send(state.handle, 0, ack, wire);
@@ -203,6 +234,8 @@
         resourceLimits,
         exitPromise: new Promise(resolve => { resolveExit = resolve; }),
         resolveExit,
+        online: false,
+        cpuPending: new Map(),
       };
       states.set(this, state);
       liveThreads.set(threadId, state);
@@ -252,6 +285,26 @@
     }
 
     get resourceLimits() { return states.get(this).resourceLimits; }
+
+    // Node: resolves { user, system } (integer microseconds of the worker thread), minus `prev` when given. Rejects
+    // ERR_WORKER_NOT_RUNNING before 'online' and after exit, and any request still queued when the worker exits.
+    cpuUsage(prev) {
+      const state = states.get(this);
+      if (prev) checkCpuPrev(prev);
+      const base = prev ? { user: prev.user, system: prev.system } : undefined;
+      return new Promise((resolve, reject) => {
+        if (!state.online || state.exited) return reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+        const ack = nextCpuAck++;
+        state.cpuPending.set(ack, {
+          resolve: usage => resolve(base === undefined ? usage : { user: usage.user - base.user, system: usage.system - base.system }),
+          reject,
+        });
+        if (!__thaw_worker_cpu(state.handle, ack)) {
+          state.cpuPending.delete(ack);
+          reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+        }
+      });
+    }
   }
 
   // Events from the Rust poll (worker.rs `poll`), delivered by the event loop: [{handle, type, ...}].
@@ -264,7 +317,14 @@
       if (worker === undefined) continue;
       const state = states.get(worker);
       if (event.type === 'online') {
+        state.online = true;
         worker.emit('online');
+      } else if (event.type === 'cpu') {
+        const request = state.cpuPending.get(event.ack);
+        if (request !== undefined) {
+          state.cpuPending.delete(event.ack);
+          request.resolve({ user: event.user, system: event.system });
+        }
       } else if (event.type === 'message') {
         let value;
         try {
@@ -296,6 +356,8 @@
         state.exitCode = event.code;
         byHandle.delete(event.handle);
         liveThreads.delete(state.threadId);
+        for (const request of state.cpuPending.values()) request.reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+        state.cpuPending.clear();
         // stdio ends before 'exit', as in Node (the events share one channel, so the data came first)
         for (const stream of [worker.stdout, worker.stderr]) {
           stream.__thawEnd();

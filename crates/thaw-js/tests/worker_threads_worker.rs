@@ -819,3 +819,124 @@ await w.terminate();
         r#"broadcast {"message":{"value":5}} undefined|invalid TypeError ERR_INVALID_ARG_TYPE The "port" argument must be a MessagePort instance|moved {"message":"through"} undefined|worker bc {"message":"x"}|port queued|done"#
     );
 }
+
+// worker.cpuUsage() (Node 22.23.1 expectations recorded from `node` with the same program bodies)
+
+#[test]
+fn worker_cpu_usage_is_integer_user_and_system_and_rejects_when_not_running() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const w = new wt.Worker(`require('node:worker_threads').parentPort.on('message',()=>{});`, { eval: true });
+        const pre = await w.cpuUsage().then(() => 'resolved', (e) => e.code);
+        await new Promise((resolve) => w.once('online', resolve));
+        const p = w.cpuUsage();
+        const r = await p;
+        const r2 = await w.cpuUsage(r);
+        console.log(pre, p instanceof Promise, Object.keys(r).join(), Number.isInteger(r.user), Number.isInteger(r.system), r.user >= 0, r.system >= 0, Number.isInteger(r2.user));
+        await w.terminate();
+        console.log(await w.cpuUsage().then(() => 'resolved', (e) => e.code + ' ' + e.message));
+      })().catch((e) => { console.log('failed ' + e); w.terminate(); });";
+    assert_eq!(
+        run_main(src),
+        "ERR_WORKER_NOT_RUNNING true user,system true true true true true|ERR_WORKER_NOT_RUNNING Worker instance not running"
+    );
+}
+
+#[test]
+fn worker_cpu_usage_resolves_while_the_worker_is_busy() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      const log = [];
+      const w = new wt.Worker(`const { parentPort } = require('node:worker_threads'); parentPort.postMessage('go'); const t = Date.now(); while (Date.now() - t < 800) {} parentPort.postMessage('done');`, { eval: true });
+      w.on('message', (m) => {
+        if (m !== 'go') { log.push('msg ' + m); return; }
+        w.cpuUsage().then((r) => log.push('cpu ' + Number.isInteger(r.user) + ' ' + (r.system >= 0)), (e) => log.push('cpu ' + e.code));
+      });
+      w.on('exit', () => console.log(log.join(',')));";
+    assert_eq!(run_main(src), "cpu true true,msg done");
+}
+
+#[test]
+fn worker_cpu_usage_is_served_inside_an_infinite_loop_and_terminate_returns_the_exit_code() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      const w = new wt.Worker('while(true){}', { eval: true });
+      (async () => {
+        await new Promise((resolve) => w.once('online', resolve));
+        const r = await w.cpuUsage();
+        console.log('spin', Number.isInteger(r.user), Number.isInteger(r.system), r.user >= 0);
+        console.log('code', await w.terminate());
+      })().catch((e) => { console.log('failed ' + e); w.terminate(); });";
+    assert_eq!(run_main(src), "spin true true true|code 1");
+}
+
+#[test]
+fn worker_cpu_usage_subtracts_prev_client_side() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const w = new wt.Worker(`require('node:worker_threads').parentPort.on('message',()=>{});`, { eval: true });
+        await new Promise((resolve) => w.once('online', resolve));
+        // the worker's CPU time is far below 1e15 us, so subtracting it gives a negative number near -1e15
+        const d = await w.cpuUsage({ user: 1e15, system: 1e15 });
+        const z = await w.cpuUsage({ user: 0, system: 0 });
+        console.log(Object.keys(d).join(), d.user < 0, d.user + 1e15 >= 0, d.system + 1e15 >= 0, Number.isInteger(d.user), z.user >= 0, z.system >= 0);
+        await w.terminate();
+      })().catch((e) => { console.log('failed ' + e); w.terminate(); });";
+    assert_eq!(run_main(src), "user,system true true true true true true");
+}
+
+#[test]
+fn worker_cpu_usage_validates_prev_synchronously_like_node() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const w = new wt.Worker(`require('node:worker_threads').parentPort.on('message',()=>{});`, { eval: true });
+        await new Promise((resolve) => w.once('online', resolve));
+        for (const prev of ['x', { user: 'a', system: 1 }, { user: 1 }, { user: -1, system: 0 }, { user: 1, system: NaN }, [], 5]) {
+          try { w.cpuUsage(prev); console.log('returned'); }
+          catch (e) { console.log(e.name, e.code, e.message); }
+        }
+        const r = await w.cpuUsage(null);
+        console.log('null ok', Number.isInteger(r.user));
+        await w.terminate();
+      })().catch((e) => { console.log('failed ' + e); w.terminate(); });";
+    assert_eq!(
+        run_main(src),
+        "TypeError ERR_INVALID_ARG_TYPE The \"prev\" argument must be of type object. Received type string ('x')\
+|TypeError ERR_INVALID_ARG_TYPE The \"prev.user\" property must be of type number. Received type string ('a')\
+|TypeError ERR_INVALID_ARG_TYPE The \"prev.system\" property must be of type number. Received undefined\
+|RangeError ERR_OUT_OF_RANGE The value of \"prev.user\" is out of range. It must be >= 0 && <= 9007199254740991. Received -1\
+|RangeError ERR_OUT_OF_RANGE The value of \"prev.system\" is out of range. It must be >= 0 && <= 9007199254740991. Received NaN\
+|TypeError ERR_INVALID_ARG_TYPE The \"prev\" argument must be of type object. Received an instance of Array\
+|TypeError ERR_INVALID_ARG_TYPE The \"prev\" argument must be of type object. Received type number (5)\
+|null ok true"
+    );
+}
+
+#[test]
+fn worker_cpu_usage_then_terminate_on_an_idle_worker_still_resolves() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      const w = new wt.Worker(`require('node:worker_threads').parentPort.on('message',()=>{});`, { eval: true });
+      (async () => {
+        await new Promise((resolve) => w.once('online', resolve));
+        const p = w.cpuUsage();
+        const t = w.terminate();
+        const r = await p;
+        console.log('cpu', Number.isInteger(r.user), Number.isInteger(r.system));
+        console.log('exit', await t);
+      })().catch((e) => { console.log('failed ' + e); w.terminate(); });";
+    assert_eq!(run_main(src), "cpu true true|exit 1");
+}
+
+#[test]
+fn worker_cpu_usage_rejects_before_online_and_after_exit() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      const w = new wt.Worker(`require('node:worker_threads').parentPort.on('message',()=>{});`, { eval: true });
+      (async () => {
+        console.log('pre', await w.cpuUsage().then(() => 'resolved', (e) => e.code + ' ' + e.message));
+        await new Promise((resolve) => w.once('online', resolve));
+        await w.terminate();
+        console.log('post', await w.cpuUsage().then(() => 'resolved', (e) => e.code + ' ' + e.message));
+      })().catch((e) => { console.log('failed ' + e); w.terminate(); });";
+    assert_eq!(
+        run_main(src),
+        "pre ERR_WORKER_NOT_RUNNING Worker instance not running|post ERR_WORKER_NOT_RUNNING Worker instance not running"
+    );
+}
