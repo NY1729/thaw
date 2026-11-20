@@ -78,7 +78,7 @@ fn parent_port_close_keeps_pending_work_alive() {
         const code = await new Promise((resolve) => { worker.on('exit', (c) => resolve(c)); });
         console.log('exit ' + code);
       })().catch((e) => console.log('failed ' + e));";
-    assert_eq!(run_main(src), "exit 0");
+    assert_eq!(run_main(src), "timer ran|exit 0");
 }
 
 #[test]

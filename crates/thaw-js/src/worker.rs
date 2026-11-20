@@ -80,9 +80,6 @@ struct Side {
     interrupt: Arc<AtomicBool>,
     /// The worker's parentPort has a referenced `message` listener (set by the bootstrap).
     alive: Arc<AtomicBool>,
-    /// The parent passed `stdout: true` / `stderr: true`: console output goes to the parent, not the process fd.
-    capture_out: bool,
-    capture_err: bool,
 }
 
 /// Per-`Interp` worker state: the workers this Interp spawned (`workers`, keyed by handle), and on a worker thread
@@ -413,8 +410,6 @@ fn spawn(
         hub: tokens.1,
         interrupt: interrupt.clone(),
         alive: Arc::new(AtomicBool::new(false)),
-        capture_out: false,
-        capture_err: false,
     };
     let join = std::thread::Builder::new()
         .name("thaw-js-worker".into())
@@ -451,26 +446,20 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A console line (`text` with its newline) of a worker whose parent captures that fd: sent to the parent and true;
-/// false when it stays on the process's own fd (the default).
+/// A console line (`text` with its newline) of a worker: sent to the parent and true (false when not a worker).
 pub(crate) fn capture_line(it: &Interp, fd: u8, text: &str) -> bool {
     capture_bytes(it, fd, text.as_bytes())
 }
 
-/// The bytes of a worker's write to fd 1 or 2, sent to the parent exactly as given when the parent captures that fd.
+/// The bytes of a worker's write to fd 1 or 2, sent to the parent exactly as given. The parent routes them (to
+/// worker.stdout when it asked for capture, else to its own process.stdout / process.stderr). False only when this
+/// is not a worker, so the caller writes the process's own fd.
 pub(crate) fn capture_bytes(it: &Interp, fd: u8, bytes: &[u8]) -> bool {
-    let Some(side) = &it.worker.side else {
+    if it.worker.side.is_none() {
         return false;
-    };
-    let on = if fd == 1 {
-        side.capture_out
-    } else {
-        side.capture_err
-    };
-    if on {
-        to_parent(it, Evt::Stdio(fd, hex(bytes)));
     }
-    on
+    to_parent(it, Evt::Stdio(fd, hex(bytes)));
+    true
 }
 
 /// Runs on the worker thread: the script, then its event loop; always ends with an `Exit` event.
@@ -889,15 +878,6 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_set_alive", f, true);
-    let f = it.native(|it, _, a| {
-        let (out, err) = (arg(a, 0).truthy(), arg(a, 1).truthy());
-        if let Some(side) = &mut it.worker.side {
-            side.capture_out = out;
-            side.capture_err = err;
-        }
-        Ok(Value::Undefined)
-    });
-    g.declare("__thaw_worker_capture", f, true);
     // MessagePort ends across threads (messaging.js): a fresh address; the owner of an address; a move (the port end
     // `p` goes to thread `dest`, its peer `q` is this thread's when `local`); a landed (decoded) end; a send to an
     // address; a close (the peer is told unless `notify` is false); the loop-liveness of this realm's ports.

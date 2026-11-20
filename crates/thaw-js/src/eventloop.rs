@@ -2503,7 +2503,10 @@ impl Interp {
             self.set_native(&s, "write", move |it, _, a| {
                 // a typed array or ArrayBuffer carries bytes; anything else is text
                 let chunk = arg(a, 0);
-                let raw = Interp::view_bytes(&chunk).or_else(|| buffer_json_bytes(it, &chunk));
+                let raw = Interp::view_bytes(&chunk)
+                    .or_else(|| buffer_json_bytes(it, &chunk))
+                    .or_else(|| data_view_bytes(it, &chunk))
+                    .or_else(|| encoded_text_bytes(it, &chunk, &arg(a, 1)));
                 let text = match &raw {
                     Some(b) => String::from_utf8_lossy(b).into_owned(),
                     None => it.to_str(&chunk).to_string(),
@@ -2553,6 +2556,46 @@ impl Interp {
         }
         g.declare("process", Value::Object(p), true);
     }
+}
+
+/// A string written with a byte encoding ('hex', 'latin1' / 'binary') as its bytes; None for any other string or
+/// chunk. ponytail: hex stops at the first pair that is not two hex digits (as Node does), nothing else is checked.
+fn encoded_text_bytes(it: &mut Interp, chunk: &Value, encoding: &Value) -> Option<Vec<u8>> {
+    if !matches!(chunk, Value::Str(_)) || !matches!(encoding, Value::Str(_)) {
+        return None;
+    }
+    let text = it.to_str(chunk).to_string();
+    match it.to_str(encoding).to_string().to_lowercase().as_str() {
+        "hex" => Some(
+            text.as_bytes()
+                .chunks(2)
+                .take_while(|pair| pair.len() == 2 && pair.iter().all(u8::is_ascii_hexdigit))
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).unwrap_or("0"), 16).unwrap_or(0)
+                })
+                .collect(),
+        ),
+        "latin1" | "binary" => Some(text.chars().map(|c| c as u32 as u8).collect()),
+        _ => None,
+    }
+}
+
+/// The window of a DataView (a JS object over an ArrayBuffer, so `view_bytes` does not see it): `instanceof` the
+/// realm's DataView, then its buffer, byteOffset and byteLength.
+fn data_view_bytes(it: &mut Interp, v: &Value) -> Option<Vec<u8>> {
+    let global = it.global.clone();
+    let ctor = it.lookup(&global, "DataView")?;
+    if !crate::napi_ops::instance_of(it, v, &ctor).ok()? {
+        return None;
+    }
+    let buffer = it.get(v, "buffer").ok()?;
+    let off = it.get(v, "byteOffset").ok()?;
+    let off = it.num(&off) as usize;
+    let len = it.get(v, "byteLength").ok()?;
+    let len = it.num(&len) as usize;
+    let bytes = Interp::bytes_of_buffer(&buffer)?;
+    let bytes = bytes.borrow();
+    Some(bytes.get(off..off + len)?.to_vec())
 }
 
 /// `{"type":"Buffer","data":[0..255,...]}`: a Buffer inside a compiled `any`/Json comes back across the

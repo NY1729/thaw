@@ -184,6 +184,8 @@
         exited: false,
         exitCode: undefined,
         refd: true,
+        captureOut: options.stdout === true,
+        captureErr: options.stderr === true,
         resourceLimits,
         exitPromise: new Promise(resolve => { resolveExit = resolve; }),
         resolveExit,
@@ -265,9 +267,16 @@
       } else if (event.type === 'threadAck') {
         settleSend(event.ack, event.status, event.value);
       } else if (event.type === 'stdout' || event.type === 'stderr') {
-        const stream = event.type === 'stdout' ? worker.stdout : worker.stderr;
-        stream.__thawPush(hexToBytes(event.value));
-        stream.__thawFlush();
+        // stdio: captured output goes to worker.stdout / worker.stderr; the rest is written to this process's own
+        // stdout / stderr (its write, so a parent that overrode it sees the Buffers)
+        const bytes = hexToBytes(event.value);
+        if (event.type === 'stdout' ? state.captureOut : state.captureErr) {
+          const stream = event.type === 'stdout' ? worker.stdout : worker.stderr;
+          stream.__thawPush(bytes);
+          stream.__thawFlush();
+        } else {
+          (event.type === 'stdout' ? process.stdout : process.stderr).write(Buffer.from(bytes));
+        }
       } else if (event.type === 'exit') {
         state.exited = true;
         state.exitCode = event.code;

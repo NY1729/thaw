@@ -22,9 +22,8 @@
     throw error;
   };
 
-  // stdio (W5): console output goes to the parent only when it asked for it (capture is decided in Rust, then
-  // stdin bytes arrive as 'stdin' events). Without `stdin: true` the stream is ended from the start (no data).
-  __thaw_worker_capture(opts.stdout === true, opts.stderr === true);
+  // stdio (W5): console output is sent to the parent, which captures it or writes it to its own stdout/stderr (the
+  // parent decides). Without `stdin: true` the stream is ended from the start (no data).
   const stdin = new __thaw_worker_stream.Readable();
   if (opts.stdin !== true) stdin.__thawEnd();
   Object.defineProperty(process, 'stdin', { get: () => stdin, enumerable: true, configurable: true });
