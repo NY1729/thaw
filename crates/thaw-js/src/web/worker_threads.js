@@ -86,7 +86,7 @@
     clearTimeout(entry.timer);
     if (status === 'ok') entry.resolve(undefined);
     else if (status === 'timeout') entry.reject(threadError('ERR_WORKER_MESSAGING_TIMEOUT', 'Sending a message to another thread timed out'));
-    else if (status === 'error') entry.reject(threadError('ERR_WORKER_MESSAGING_ERRORED', 'The destination thread threw an error while processing the message', wire === '' ? undefined : decode(wire)));
+    else if (status === 'error') entry.reject(threadError('ERR_WORKER_MESSAGING_ERRORED', 'The destination thread threw an error while processing the message'));
     else entry.reject(threadError('ERR_WORKER_MESSAGING_FAILED', 'Cannot find the destination thread or listener'));
   }
   // The receiver's side: run this realm's 'workerMessage' listeners, then answer through reply(ack, status, wire).
@@ -95,9 +95,8 @@
     try {
       globalThis.process.emit('workerMessage', decode(wire), source);
     } catch (error) {
-      let cause = '';
-      try { cause = encode(error); } catch (_) { /* not cloneable: the error has no cause */ }
-      return reply(ack, 'error', cause);
+      // Node 22.23.1 sets no `cause` on ERRORED, so the thrown error is not sent back
+      return reply(ack, 'error', '');
     }
     return reply(ack, 'ok', '');
   }
