@@ -166,7 +166,8 @@
       }
     },
     receiveMessageOnPort(port) {
-      if (!globalThis.__thaw_is_message_port(port)) {
+      // a MessagePort, or a BroadcastChannel (Node reads both through their handle)
+      if (!globalThis.__thaw_is_message_port(port) && !(port instanceof globalThis.BroadcastChannel)) {
         const error = new TypeError('The "port" argument must be a MessagePort instance');
         error.code = 'ERR_INVALID_ARG_TYPE';
         throw error;
