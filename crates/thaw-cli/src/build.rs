@@ -486,6 +486,12 @@ fn build_with_thaw_js_routing(
 /// event-loop owner), so it is rebuilt with timers served by the build's engine (thaw-js or QuickJS).
 const NATIVE_TIMERS_NEED_ENGINE: &str = "native timers need engine-served timers";
 
+#[cfg(test)]
+thread_local! {
+    /// Errors of the native-timer build attempts on this thread (tests assert the retry happened or not).
+    pub(crate) static NATIVE_TIMER_RETRIES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Whether a routed build's failure falls back to the QuickJS build. A native-timers conflict is not a
 /// routing failure: the caller rebuilds the same routing with engine-served timers instead.
 fn routed_failure_falls_back(error: &str) -> bool {
@@ -546,10 +552,16 @@ fn build_with_thaw_js_routing_shared(
             Ok(()) => return Ok(()),
             // Logged, never failed: the engine-timer rebuild below is the designed retry, and a
             // lowering gap here is only a missing native fast path (see the plan's R2 risks).
-            Err(error) if error != NATIVE_TIMERS_NEED_ENGINE && thaw_js_fallback_mode() != ThawJsFallbackMode::Silent => {
-                eprintln!("FALLBACK: native timers retried on engine-served timers: {error}");
+            Err(error) => {
+                #[cfg(test)]
+                NATIVE_TIMER_RETRIES.with(|retries| retries.borrow_mut().push(error.clone()));
+                if error != NATIVE_TIMERS_NEED_ENGINE && thaw_js_fallback_mode() != ThawJsFallbackMode::Silent {
+                    // In error mode the attempt's error carries the routed "unsupported on thaw-js" wrapper;
+                    // this is a timer rebuild note, not a refusal, so drop that prefix.
+                    let reason = error.strip_prefix("unsupported on thaw-js: ").unwrap_or(&error);
+                    eprintln!("note: native timers rebuilt with engine timers: {reason}");
+                }
             }
-            Err(_) => {}
         }
     }
     build_with_thaw_js_routing_inner(

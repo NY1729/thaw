@@ -109,6 +109,52 @@ fn lowers_queue_microtask_onto_the_promise_queue() {
     );
 }
 
+/// Lowering with native timers on: the rendered HIR, or the lowering error.
+fn lower_with_native_timers(source: &str) -> Result<String, String> {
+    set_native_timers(true);
+    let module = thaw_parser::parse_typescript(source).expect("parse error");
+    let program = lower_module(&module);
+    set_native_timers(false);
+    program.map(|program| format!("{program:?}"))
+}
+
+#[test]
+fn native_timer_accepts_a_promise_resolve_callback_with_an_optional_parameter() {
+    // The timer calls the resolve function with no arguments, so its optional parameter is fine.
+    let hir = lower_with_native_timers(
+        r#"async function main(): Promise<void> {
+            await new Promise<void>(r => setTimeout(r, 1));
+            console.log("ok");
+        }"#,
+    )
+    .expect("native timer lowering");
+    assert!(hir.contains("__thaw_timer_set"), "{hir}");
+}
+
+#[test]
+fn native_timer_still_refuses_a_callback_with_a_required_parameter() {
+    let error = lower_with_native_timers(
+        r#"function show(x: string): void {
+            console.log(x);
+        }
+        function main(): void {
+            setTimeout(show, 1);
+        }"#,
+    )
+    .unwrap_err();
+    assert!(error.contains("native timer callback"), "{error}");
+}
+
+#[test]
+fn lowers_queue_microtask_with_a_promise_resolve_callback() {
+    lower(
+        r#"async function main(): Promise<void> {
+            await new Promise<void>(r => queueMicrotask(r));
+            console.log("ok");
+        }"#,
+    );
+}
+
 #[test]
 fn typed_quickjs_calls_are_resolved_at_the_dynamic_await_boundary() {
     let program = lower(

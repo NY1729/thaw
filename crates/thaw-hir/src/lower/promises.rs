@@ -624,7 +624,12 @@ impl<'a> FnLowerer<'a> {
         let accepts_callback_input = |actual: &HirType, supplied: &HirType| {
             actual == &HirType::Json || callback_param_compatible(supplied, actual)
         };
-        if contract_params.len() > parameter_types.len()
+        // Extra optional parameters are fine: the caller passes fewer arguments and they read as undefined.
+        let extra_params_optional = contract_rest.is_none()
+            && contract_params
+                .get(parameter_types.len()..)
+                .is_some_and(|extra| extra.iter().all(|ty| matches!(ty, HirType::Optional(_))));
+        if (contract_params.len() > parameter_types.len() && !extra_params_optional)
             || !contract_params.iter().zip(parameter_types).all(|(actual, supplied)| {
                 accepts_callback_input(actual, supplied)
                     || match actual {
@@ -731,6 +736,15 @@ impl<'a> FnLowerer<'a> {
         let arguments = (|| -> Result<Vec<HirExpr>, String> {
             let mut arguments = Vec::new();
             for (index, expected) in fixed.iter().enumerate() {
+                // An omitted optional parameter is passed absent (JS: undefined); the physical closure ABI
+                // still takes its slot, so it is not dropped.
+                if index >= supplied.len() {
+                    let HirType::Optional(payload) = expected else {
+                        return Err(format!("Promise callback omits required parameter {expected:?}"));
+                    };
+                    arguments.push(HirExpr::OptionalNone(payload.as_ref().clone()));
+                    continue;
+                }
                 let input = HirExpr::Var(input_names[index].clone());
                 // A live Error landing in a `string`/`: Error` slot keeps its Error identity
                 // (`JsonAsNative` decodes via the Error-aware string path, not `String(error)`).
