@@ -302,9 +302,17 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         it.set(&err, "code", Value::str("MODULE_NOT_FOUND"))?;
         return Err(Ctl::Throw(err));
     };
+    // The virtual file path and its directory mirror the QuickJS lane (`render.rs`, `__thaw_bundle_load`), so
+    // `import.meta.url` (`'file://' + __filename`) is an absolute `file:///thaw_modules/...` URL.
+    let file = format!("/thaw_modules/{key}");
+    let dir = match file.rfind('/') {
+        Some(slash) => file[..slash].to_string(),
+        None => ".".to_string(),
+    };
     let module = Value::Object(it.plain());
     let exports = Value::Object(it.plain());
     it.set(&module, "exports", exports.clone())?;
+    it.set(&module, "filename", Value::str(&file))?;
     loader
         .cache
         .borrow_mut()
@@ -314,6 +322,27 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         let spec = it.to_str(&crate::arg(args, 0));
         require_in(&l, it, &k, &spec)
     });
+    // `require.resolve` answers the mapped key's virtual path (`file` above), or a builtin's own id; no module runs
+    let (l, k) = (loader.clone(), key.to_string());
+    let resolve = it.native(move |it, _, args| {
+        let spec = it.to_str(&crate::arg(args, 0)).to_string();
+        match module_key(&l, &k, &spec) {
+            Some(found) if found.starts_with("node:") => Ok(Value::str(&found)),
+            Some(found) => Ok(Value::str(&format!("/thaw_modules/{found}"))),
+            None => {
+                let ctor = it
+                    .lookup(&it.global.clone(), "Error")
+                    .unwrap_or(Value::Undefined);
+                let err = it.construct(
+                    &ctor,
+                    &[Value::str(&format!("Cannot find module '{spec}'"))],
+                )?;
+                it.set(&err, "code", Value::str("MODULE_NOT_FOUND"))?;
+                Err(Ctl::Throw(err))
+            }
+        }
+    });
+    it.set(&require, "resolve", resolve)?;
     let require_async = {
         let (l, k) = (loader.clone(), key.to_string());
         it.native(move |it, _, args| {
@@ -337,13 +366,6 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         };
         f = it.call(&f, &Value::Undefined, &[origin])?;
     }
-    // The virtual file path and its directory mirror the QuickJS lane (`render.rs`, `__thaw_bundle_load`), so
-    // `import.meta.url` (`'file://' + __filename`) is an absolute `file:///thaw_modules/...` URL.
-    let file = format!("/thaw_modules/{key}");
-    let dir = match file.rfind('/') {
-        Some(slash) => file[..slash].to_string(),
-        None => ".".to_string(),
-    };
     // while the entry runs, its exports are what a peer `require` of this package name gets (a load-time cycle)
     let entry = key == loader.parts.entry.as_str() && !loader.package.is_empty();
     if entry {
@@ -8777,6 +8799,39 @@ var __thaw_bundle_entry_key = "p/index.js";
         assert_eq!(
             pkg.call("probe", &[]).unwrap(),
             Native::Str("MODULE_NOT_FOUND,MODULE_NOT_FOUND,continued".into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod factory_require_resolve_tests {
+    use super::*;
+
+    /// A factory's `require.resolve` answers the mapped key as the virtual path `module.filename` uses (Node answers
+    /// the absolute path), without running the target; an unmapped spec is MODULE_NOT_FOUND. `module.filename` is the
+    /// factory module's own path.
+    #[test]
+    fn factory_require_resolve_answers_the_mapped_path_without_loading_the_target() {
+        let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require) {
+  exports.probe = function () {
+    var missing;
+    try { require.resolve('./absent.js'); } catch (e) { missing = e.code; }
+    return [require.resolve('./dep.js'), module.filename, missing, globalThis.depRan === undefined].join('|');
+  };
+},
+"p/dep.js": function(module) { globalThis.depRan = true; },
+};
+var __thaw_bundle_require_maps = { "p/index.js": { "./dep.js": "p/dep.js" }, "p/dep.js": {}, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#;
+        let mut pkg = Package::load(bundle).expect("loads");
+        assert_eq!(
+            pkg.call("probe", &[]).unwrap(),
+            Native::Str(
+                "/thaw_modules/p/dep.js|/thaw_modules/p/index.js|MODULE_NOT_FOUND|true".into()
+            )
         );
     }
 }

@@ -1298,14 +1298,8 @@ fn worker_threads_native_runtime_transfers_structured_array_buffers() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
-// qjs_pending: fails on thaw-js: "ERROR: ReferenceError: __thaw_worker_bundle_source is not defined"
-mod qjs_pending_platform_bundler_embeds_static_file_url_worker_sources {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn bundler_embeds_static_file_url_worker_sources() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_file_url");
     fs::create_dir_all(dir.join("lib/sub")).unwrap();
     fs::write(
@@ -1347,27 +1341,13 @@ fn bundler_embeds_static_file_url_worker_sources() {
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 9);
     fs::remove_dir_all(&dir).unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFileWorker = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseFileWorker").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[42,0,22,0,10,0,6,0,4,0,14,0,16,0,18,0,20,0,"€",0]"#);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
-}
-
-// qjs_pending: fails on thaw-js: "ERROR: ReferenceError: __thaw_worker_bundle_source is not defined"
-mod qjs_pending_platform_bundled_worker_dynamic_import_converts_once_and_keeps_worker_module {
-    use super::*;
-    use ::thaw_quickjs;
 
 #[test]
 fn bundled_worker_dynamic_import_converts_once_and_keeps_worker_module() {
-    use std::ffi::{CStr, CString};
-
     // Unrun regression: the Worker entry's dynamic import helper must use
     // the same ToString boundary while preserving its local worker_threads.
     let dir = temp_registry("worker_dynamic_import_specifier");
@@ -1398,19 +1378,8 @@ fn bundled_worker_dynamic_import_converts_once_and_keeps_worker_module() {
         bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
     assert!(file_count >= 4);
     fs::remove_dir_all(&dir).unwrap();
-    let script = format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
-         globalThis.runWorkerDynamicSpecifier = module.exports;"
-    );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"runWorkerDynamicSpecifier".as_ptr(), c"[]".as_ptr());
-    assert_eq!(
-        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
-        "[[true,1,\"string\",42],0]"
-    );
+    assert_eq!(run_js(&bundle), "[[true,1,\"string\",42],0]");
     let _ = fs::remove_dir_all(modules);
-}
 }
 
 #[test]
@@ -1449,14 +1418,8 @@ fn worker_threads_broadcast_channel_clones_between_matching_names() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-// qjs_pending: fails on thaw-js: "ERROR: ReferenceError: __thaw_worker_bundle_source is not defined"
-mod qjs_pending_platform_worker_esm_star_diamond_uses_the_same_terminal_origin {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn worker_esm_star_diamond_uses_the_same_terminal_origin() {
-    use std::ffi::{CStr, CString};
     let package = temp_registry("worker-star-origin");
     let modules = temp_registry("worker-star-origin-modules");
     fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Promise(function(resolve, reject) { var worker = new Worker(new URL('./worker.js', import.meta.url)); worker.on('message', resolve); worker.on('error', reject); }); };").unwrap();
@@ -1465,36 +1428,22 @@ fn worker_esm_star_diamond_uses_the_same_terminal_origin() {
     fs::write(package.join("b.js"), "export * from './leaf.js';").unwrap();
     fs::write(package.join("leaf.js"), "export const value = 7;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "worker-origin-pkg", &package, "index.js").unwrap();
-    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.workerStarResult = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"workerStarResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "7");
+    assert_eq!(run_js(&bundle), "7");
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
 }
-}
-
-// qjs_pending: fails on thaw-js: "ERROR: ReferenceError: __thaw_worker_bundle_source is not defined"
-mod qjs_pending_platform_worker_esm_cycle_uses_one_cached_main_module_identity {
-    use super::*;
-    use ::thaw_quickjs;
 
 #[test]
 fn worker_esm_cycle_uses_one_cached_main_module_identity() {
-    use std::ffi::{CStr, CString};
     let package = temp_registry("worker-main-cycle-origin");
     let modules = temp_registry("worker-main-cycle-origin-modules");
     fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Promise(function(resolve, reject) { var worker = new Worker(new URL('./worker.js', import.meta.url)); worker.on('message', resolve); worker.on('error', reject); }); };").unwrap();
     fs::write(package.join("worker.js"), "import { parentPort } from 'node:worker_threads'; import { readMain } from './dep.js'; var __thaw_finish_worker_main_0 = 'user-finish'; var __thaw_worker_main_error_0 = 'user-error'; globalThis.workerMainRuns = (globalThis.workerMainRuns || 0) + 1; export const identity = {}; parentPort.postMessage([workerMainRuns, readMain() === module.exports.identity, module.filename, __thaw_finish_worker_main_0, __thaw_worker_main_error_0]); parentPort.close();").unwrap();
     fs::write(package.join("dep.js"), "import * as main from './worker.js'; export function readMain() { return main.identity; }").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "worker-origin-pkg", &package, "index.js").unwrap();
-    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.workerCycleResult = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"workerCycleResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,true,\"/thaw_modules/worker-origin-pkg/worker.js\",\"user-finish\",\"user-error\"]");
+    assert_eq!(run_js(&bundle), "[1,true,\"/thaw_modules/worker-origin-pkg/worker.js\",\"user-finish\",\"user-error\"]");
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
-}
 }
 
 // qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
@@ -1529,27 +1478,18 @@ fn worker_main_ready_rejects_every_falsy_thrown_value() {
     let _ = fs::remove_dir_all(modules);
 }
 }
-// qjs_pending: fails on thaw-js: "ERROR: ReferenceError: __thaw_worker_bundle_source is not defined"
-mod qjs_pending_platform_bundled_worker_entry_require_resolve_does_not_load_target {
-    use super::*;
-    use ::thaw_quickjs;
 
 #[test]
 fn bundled_worker_entry_require_resolve_does_not_load_target() {
-    use std::ffi::{CStr, CString};
     let package = temp_registry("worker_entry_require_resolve");
     let modules = temp_registry("worker_entry_require_resolve_modules");
     fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Promise(function(resolve, reject) { var worker = new Worker(new URL('./worker.js', import.meta.url)); worker.on('message', resolve); worker.on('error', reject); }); };").unwrap();
     fs::write(package.join("worker.js"), "var wt = require('node:worker_threads'); var present = require.resolve('./dep.js'), missing; try { require.resolve('./absent.js'); } catch (error) { missing = error.code; } wt.parentPort.postMessage([present, missing, globalThis.workerResolveDepRuns || 0]); wt.parentPort.close();").unwrap();
     fs::write(package.join("dep.js"), "globalThis.workerResolveDepRuns = (globalThis.workerResolveDepRuns || 0) + 1;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
-    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.workerResolveEntry = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"workerResolveEntry".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"pkg/dep.js\",\"MODULE_NOT_FOUND\",0]");
+    assert_eq!(run_js(&bundle), "[\"/thaw_modules/pkg/dep.js\",\"MODULE_NOT_FOUND\",0]");
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
-}
 }
 
 // qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
