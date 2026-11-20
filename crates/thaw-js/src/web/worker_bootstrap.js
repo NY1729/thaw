@@ -15,6 +15,13 @@
     Object.assign(process.env, opts.env);
   }
 
+  // Node: the cwd is shared by every thread, so a worker cannot change it
+  process.chdir = function chdir() {
+    const error = new TypeError('process.chdir() is not supported in workers');
+    error.code = 'ERR_WORKER_UNSUPPORTED_OPERATION';
+    throw error;
+  };
+
   // stdio (W5): console output goes to the parent only when it asked for it (capture is decided in Rust, then
   // stdin bytes arrive as 'stdin' events). Without `stdin: true` the stream is ended from the start (no data).
   __thaw_worker_capture(opts.stdout === true, opts.stderr === true);
