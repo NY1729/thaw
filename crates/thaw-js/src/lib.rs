@@ -1719,6 +1719,7 @@ impl Interp {
     /// Errors with `Ctl::Exit(1)` once the parent of this worker has asked it to terminate. Not catchable by JS.
     #[inline]
     pub(crate) fn check_interrupt(&self) -> R<()> {
+        worker::serve_cpu_if_requested(self);
         if let Some(flag) = &self.interrupt {
             if flag.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(Ctl::Exit(1));
