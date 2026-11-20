@@ -70,7 +70,7 @@
       this.ended = false;
       this.endEmitted = false;
       this.destroyed = false;
-      this.encoding = null;
+      this.readableEncoding = null;
       this.decoder = null;
       // ponytail: UTF-8 only; other encodings are treated as utf8
       this.onChange = null;
@@ -80,7 +80,7 @@
     get readableFlowing() { return this.flowing; }
     changed() { if (this.onChange) this.onChange(); }
     setEncoding(encoding) {
-      this.encoding = encoding;
+      this.readableEncoding = encoding;
       this.decoder = new TextDecoder('utf-8');
       return this;
     }
@@ -109,7 +109,7 @@
     read() {
       if (this.buf.length === 0) return null;
       const bytes = this.buf.shift();
-      return this.encoding ? this.decoder.decode(bytes, { stream: true }) : asBuffer(bytes);
+      return this.readableEncoding ? this.decoder.decode(bytes, { stream: true }) : asBuffer(bytes);
     }
     pipe(dest) {
       this.on('data', chunk => dest.write(chunk));
@@ -132,12 +132,12 @@
     __thawFlush() {
       while (this.flowing && this.buf.length > 0) {
         const bytes = this.buf.shift();
-        const chunk = this.encoding ? this.decoder.decode(bytes, { stream: true }) : asBuffer(bytes);
+        const chunk = this.readableEncoding ? this.decoder.decode(bytes, { stream: true }) : asBuffer(bytes);
         if (chunk.length !== 0) this.emit('data', chunk);
       }
       if (this.flowing && this.ended && this.buf.length === 0 && !this.endEmitted) {
         this.endEmitted = true;
-        const tail = this.encoding ? this.decoder.decode() : '';
+        const tail = this.readableEncoding ? this.decoder.decode() : '';
         if (tail.length !== 0) this.emit('data', tail);
         this.emit('end');
         this.emit('close');

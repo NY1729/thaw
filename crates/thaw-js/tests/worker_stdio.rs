@@ -121,6 +121,25 @@ fn worker_stdin_chunks_are_bytes_or_utf8_text() {
 }
 
 #[test]
+fn worker_stdin_set_encoding_leaves_encoding_unset_and_sets_readable_encoding() {
+    // Node 22.23.1: process.stdin.encoding is undefined (never set) before and after setEncoding, readableEncoding is null then "utf8"; split UTF-8 still decodes.
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const worker = new wt.Worker(`const { parentPort } = require('node:worker_threads'); const before = [typeof process.stdin.encoding, process.stdin.readableEncoding]; process.stdin.setEncoding('utf8'); const events = []; process.stdin.on('data', (c) => events.push(c)); process.stdin.on('end', () => { parentPort.postMessage(JSON.stringify([before, typeof process.stdin.encoding, process.stdin.readableEncoding, events])); });`, { eval: true, stdin: true });
+        let got = '';
+        worker.on('message', (v) => { got = String(v); });
+        worker.stdin.write(new Uint8Array([226, 130]));
+        worker.stdin.end(new Uint8Array([172]));
+        await new Promise((resolve) => { worker.on('exit', () => resolve()); });
+        console.log(got);
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        r#"[["undefined",null],"undefined","utf8",["€"]]"#
+    );
+}
+
+#[test]
 fn worker_stdin_is_null_without_the_option_and_writes_after_end_fail() {
     let src = r#"const wt = __thaw_worker_threads_exports;
       (async () => {
