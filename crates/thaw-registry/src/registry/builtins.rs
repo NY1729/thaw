@@ -72,21 +72,29 @@ pub fn builtin_defined_names() -> &'static std::collections::HashSet<String> {
 
 /// The thaw-js feature scan of a registry bundle as the build runs it (`thaw_js_package_eligible_in`): R6 excuses
 /// [`builtin_defined_names`], and a native addon's bundle is scanned in addon mode. `installed` is the registry's
-/// installed packages. `thaw-js-scan` calls this too, so its verdict is the build's.
+/// installed packages; `served` are the peers thaw-js serves in this build (`ScanContext::served_peers`; empty for
+/// `thaw-js-scan`, whose verdict is then the whole-bundle one).
 pub fn scan_bundle_for_build(
     bundle_js: &str,
     native_addon: bool,
     installed: &std::collections::HashSet<String>,
+    served: &std::collections::HashSet<String>,
 ) -> Result<thaw_js::scan::Report, String> {
     let ctx = thaw_js::scan::ScanContext {
         known_methods: builtin_defined_names(),
         installed_packages: installed,
+        served_peers: served,
     };
     if native_addon {
         thaw_js::scan::scan_addon_bundle_in(bundle_js, &ctx)
     } else {
         thaw_js::scan::scan_bundle_in(bundle_js, &ctx)
     }
+}
+
+/// The exact package names a bundle requires without mapping them: its peers (`thaw_js::scan::unmapped_peer_requires`).
+pub fn bundle_peer_requires(bundle_js: &str) -> Result<std::collections::BTreeSet<String>, String> {
+    thaw_js::scan::unmapped_peer_requires(bundle_js)
 }
 
 /// Names too generic to excuse a call: a builtin defines `get`/`on`/`write`/... on its own objects, and a call
