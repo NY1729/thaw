@@ -1206,7 +1206,7 @@ fn process_default_stdio_preserves_raw_buffer_bytes() {
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "tests::process_default_stdio_preserves_raw_buffer_bytes",
+            "tests::qjs_pending_platform_process_default_stdio_preserves_raw_buffer_bytes::process_default_stdio_preserves_raw_buffer_bytes",
             "--nocapture",
         ])
         .env(CHILD, "1")
