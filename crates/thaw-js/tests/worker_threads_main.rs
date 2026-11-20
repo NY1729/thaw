@@ -24,7 +24,9 @@ fn environment_data_is_cloned_and_undefined_deletes() {
       const stored = getEnvironmentData('k'); console.log(stored.value);
       stored.value = 9; console.log(getEnvironmentData('k').value);
       setEnvironmentData('k', undefined); console.log(typeof getEnvironmentData('k'));";
-    assert_eq!(run_loop(src), "42|42|undefined");
+    // Node 22 (verified): set clones the value, get returns the stored object itself, so a mutation through
+    // one get is visible to the next get.
+    assert_eq!(run_loop(src), "42|9|undefined");
 }
 
 #[test]

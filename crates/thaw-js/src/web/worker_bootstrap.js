@@ -82,6 +82,11 @@
     const reachable = target === 0;
     let wire;
     try { wire = __thaw_worker_encode(value, transfer, __thaw_port_hub()); } catch (error) { return Promise.reject(error); }
+    // a port in the list closed while the value was encoded (a getter in it): Node rejects and sends nothing
+    if (transfer.some(item => globalThis.__thaw_is_message_port(item) && item.__thawClosed)) {
+      __thaw_wire_release(wire);
+      return Promise.reject(new DOMException('MessagePort in transfer list is already detached', 'DataCloneError'));
+    }
     return new Promise((resolve, reject) => {
       const ack = nextAck++;
       const entry = { resolve, reject, timer: undefined };
@@ -146,7 +151,7 @@
     isMainThread: false,
     isInternalThread: false,
     threadId: opts.threadId === undefined ? 1 : opts.threadId,
-    threadName: '',
+    threadName: opts.name === undefined ? '' : opts.name,
     SHARE_ENV: Symbol.for('nodejs.worker_threads.SHARE_ENV'),
     workerData,
     parentPort,
@@ -184,8 +189,7 @@
       return globalThis.__thaw_worker_threads_exports.moveMessagePortToContext(port, context);
     },
     getEnvironmentData(key) {
-      const value = environmentData.get(key);
-      return value === undefined ? undefined : structuredClone(value);
+      return environmentData.get(key);
     },
     setEnvironmentData(key, value) {
       if (value === undefined) environmentData.delete(key);
