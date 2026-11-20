@@ -1680,6 +1680,49 @@ fn native_mixed_rewrite_uses_private_opaque_edge_and_origin_reads() {
     assert!(!rewritten.contains("export * from"), "{rewritten}");
 }
 
+#[test]
+fn native_opaque_export_from_forms_keep_their_bindings_in_rewritten_source() {
+    use std::collections::BTreeSet;
+    let specs = BTreeSet::from(["./legacy.cjs".to_owned()]);
+    let source_name = thaw_parser::common::FileName::Custom("entry.mjs".into());
+    let cases = [
+        ("export * as namespace from './legacy.cjs';", ".namespaceImport(\"./legacy.cjs\")", "as namespace }"),
+        ("export { default } from './legacy.cjs';", ".readDefault(\"./legacy.cjs\")", "as default }"),
+        ("export { default as dflt } from './legacy.cjs';", ".readDefault(\"./legacy.cjs\")", "as dflt }"),
+        ("export { value as indirect } from './legacy.cjs';", ".readImport(\"./legacy.cjs\", \"value\")", "as indirect }"),
+    ];
+    for (source, read, export_clause) in cases {
+        let rewritten = rewrite_native_opaque_edges_named(
+            source, &specs, "__thaw_private_origin_spec/test", &source_name,
+        ).expect("opaque export-from rewrites");
+        assert!(rewritten.contains("import \"./legacy.cjs\";"), "{source}: {rewritten}");
+        assert!(rewritten.contains(read), "{source}: {rewritten}");
+        assert!(rewritten.contains(export_clause), "{source}: {rewritten}");
+        assert!(!rewritten.contains("from './legacy.cjs'") && !rewritten.contains("from \"./legacy.cjs\""),
+            "{source}: {rewritten}");
+        assert!(thaw_parser::parse_javascript_with_source_map_named(&rewritten, source_name.clone()).is_ok(),
+            "{source}: rewritten source must stay valid ESM: {rewritten}");
+    }
+}
+
+#[test]
+fn native_opaque_export_from_namespace_and_default_reach_the_exports_object() {
+    // Real Node 22: `export * as namespace` of a CJS `module.exports = 9`
+    // is {default: 9}, and `export { default as dflt }` is 9.
+    let root = temp_registry("native-opaque-export-from");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-opaque-export-from-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"),
+        "export * as namespace from './legacy.cjs'; export { default as dflt } from './legacy.cjs'; export const value = 9;").unwrap();
+    fs::write(package.join("legacy.cjs"), "module.exports = 9;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-opaque-export-from-pkg", &package, "index.mjs").unwrap();
+    assert!(bundle.contains("__thaw_register_native_bundle"));
+    assert_eq!(run_js_get(&bundle, "namespace"), "{\"default\":9}");
+    assert_eq!(run_js_get(&bundle, "dflt"), "9");
+    let _ = fs::remove_dir_all(root);
+}
+
 // qjs_pending: fails on thaw-js: Package route ERROR: TypeError: requireAsync is not a function; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_native_mixed_cjs_dynamic_import_uses_bound_native_ready {
     use super::*;
