@@ -1,0 +1,27 @@
+// Empty needles and positions over multi-byte text: every UTF-16 unit boundary is a match point.
+const show = (f) => { try { return JSON.stringify(f()); } catch (e) { return 'THROW ' + e.constructor.name + ': ' + e.message; } };
+console.log(show(() => 'héllo'.replaceAll('', 1)));
+console.log(show(() => 'wörld'.replaceAll('', '|')));
+console.log(show(() => '日本語'.replaceAll('', '.')));
+console.log(show(() => 'a😀b'.replaceAll('', '.')));
+console.log(show(() => '\u{1F600}'.replaceAll('', '-')));
+console.log(show(() => 'héllo'.replace('', '1')));
+console.log(show(() => 'wörld'.replace('', '|')));
+console.log(show(() => 'héllo'.split('')));
+console.log(show(() => '😀a'.split('')));
+console.log(show(() => 'héllo'.indexOf('')));
+console.log(show(() => 'héllo'.indexOf('', 2)));
+console.log(show(() => 'héllo'.indexOf('', 99)));
+console.log(show(() => '😀a'.indexOf('', 1)));
+console.log(show(() => 'héllo'.indexOf('l', 2)));
+console.log(show(() => 'héllo'.lastIndexOf('')));
+console.log(show(() => '😀a😀'.lastIndexOf('')));
+console.log(show(() => 'héllo'.lastIndexOf('l', 2)));
+console.log(show(() => 'héllo'.lastIndexOf('l', -5)));
+console.log(show(() => 'héllo'.lastIndexOf('l', NaN)));
+console.log(show(() => [...'héllo'.matchAll(/(?:)/g)].map((m) => m.index)));
+console.log(show(() => 'é'.padStart(5, 'ö')));
+console.log(show(() => 'x'.padStart(4, '😀')));
+console.log(show(() => 'x'.padEnd(4, '😀')));
+console.log(show(() => 'é'.padStart(3, 'ö')));
+console.log(show(() => '😀é'.at(-1)));

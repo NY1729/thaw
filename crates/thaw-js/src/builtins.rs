@@ -521,6 +521,40 @@ pub(crate) fn byte_to_unit_with(s: &str, ascii: bool, bi: usize) -> usize {
     str_len_with(&s[..bi], false)
 }
 
+/// `s.indexOf(n, from)` in UTF-16 units. The search runs over units, so a start inside a surrogate
+/// pair is honoured (a byte offset there would snap to the pair's start).
+pub(crate) fn find_units(s: &str, n: &str, from: usize) -> Option<usize> {
+    if s.is_ascii() {
+        let from = from.min(s.len());
+        return s[from..].find(n).map(|i| i + from);
+    }
+    let (hay, needle) = (str_units(s), str_units(n));
+    let from = from.min(hay.len());
+    if needle.is_empty() {
+        return Some(from);
+    }
+    hay[from..]
+        .windows(needle.len())
+        .position(|w| w == needle.as_slice())
+        .map(|i| i + from)
+}
+
+/// `s.lastIndexOf(n, from)` in UTF-16 units: the last start at or before `from`.
+pub(crate) fn rfind_units(s: &str, n: &str, from: usize) -> Option<usize> {
+    if s.is_ascii() {
+        let end = from.saturating_add(n.len()).min(s.len());
+        return s[..end].rfind(n);
+    }
+    let (hay, needle) = (str_units(s), str_units(n));
+    if needle.len() > hay.len() {
+        return None;
+    }
+    let last = from.min(hay.len() - needle.len());
+    (0..=last)
+        .rev()
+        .find(|&i| hay[i..i + needle.len()] == needle[..])
+}
+
 /// `s.slice(a, b)` by UTF-16 unit indices (already clamped to `0..=len`).
 pub(crate) fn str_slice(s: &str, a: usize, b: usize) -> String {
     str_slice_with(s, crate::jsstr::scan_ascii(s), a, b)
@@ -965,20 +999,25 @@ impl Interp {
             }
         } else {
             let needle = self.to_str(&pattern);
-            let mut from = 0;
-            while let Some(pos) = s[from..].find(&*needle) {
-                let b = from + pos;
-                matches.push((
-                    byte_to_unit(&s, b),
-                    vec![Value::str(&needle)],
-                    Value::Undefined,
-                ));
-                if !all {
-                    break;
-                }
-                from = b + needle.len().max(1);
-                if from > s.len() {
-                    break;
+            if needle.is_empty() {
+                // an empty needle matches at every UTF-16 unit boundary (between the halves of a
+                // surrogate pair too); stepping by bytes would split a multi-byte char
+                let last = if all { str_len(&s) } else { 0 };
+                matches
+                    .extend((0..=last).map(|u| (u, vec![Value::str(&needle)], Value::Undefined)));
+            } else {
+                let mut from = 0;
+                while let Some(pos) = s[from..].find(&*needle) {
+                    let b = from + pos;
+                    matches.push((
+                        byte_to_unit(&s, b),
+                        vec![Value::str(&needle)],
+                        Value::Undefined,
+                    ));
+                    if !all {
+                        break;
+                    }
+                    from = b + needle.len();
                 }
             }
         }
@@ -2362,19 +2401,26 @@ impl Interp {
         });
         self.set_native(&sp, "indexOf", |it, this, args| {
             let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
-            let ascii = s.is_ascii_cached();
             let from = match arg(args, 1) {
                 Value::Undefined => 0,
-                v => unit_to_byte_with(&s, ascii, it.num(&v).max(0.0) as usize),
+                v => it.num(&v).max(0.0) as usize,
             };
-            Ok(Value::Number(s[from..].find(&*n).map_or(-1.0, |b| {
-                byte_to_unit_with(&s, ascii, from + b) as f64
-            })))
+            Ok(Value::Number(
+                find_units(&s, &n, from).map_or(-1.0, |u| u as f64),
+            ))
         });
         self.set_native(&sp, "lastIndexOf", |it, this, args| {
             let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
+            // a NaN position means "from the end" (+Infinity)
+            let from = match arg(args, 1) {
+                Value::Undefined => usize::MAX,
+                v => match it.num(&v) {
+                    p if p.is_nan() => usize::MAX,
+                    p => p.max(0.0) as usize,
+                },
+            };
             Ok(Value::Number(
-                s.rfind(&*n).map_or(-1.0, |b| byte_to_unit(&s, b) as f64),
+                rfind_units(&s, &n, from).map_or(-1.0, |u| u as f64),
             ))
         });
         self.set_native(&sp, "includes", |it, this, args| {
@@ -2436,15 +2482,19 @@ impl Interp {
                 if target <= len || fill.is_empty() {
                     return Ok(Value::Str(s));
                 }
-                let pad: String = fill.chars().cycle().take(target - len).collect();
-                Ok(Value::Str(
-                    if start {
-                        format!("{pad}{s}")
-                    } else {
-                        format!("{s}{pad}")
-                    }
-                    .into(),
-                ))
+                // counted in UTF-16 units: an astral filler char contributes both surrogate halves
+                let pad: Vec<u16> = str_units(&fill)
+                    .into_iter()
+                    .cycle()
+                    .take(target - len)
+                    .collect();
+                let body = str_units(&s);
+                let joined = if start {
+                    [pad, body].concat()
+                } else {
+                    [body, pad].concat()
+                };
+                Ok(Value::Str(units_str(&joined).into()))
             });
         }
         self.set_native(&sp, "slice", |it, this, args| {

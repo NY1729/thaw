@@ -703,6 +703,27 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   def(utilTypes, '__esModule', true);
   def(globalThis, '__thaw_util_types', utilTypes);
 
+  // ----- util.promisify.custom on setTimeout / setImmediate: Node 22 has an enumerable, non-configurable accessor
+  // whose getter returns the timers/promises function (setInterval has none). ponytail: the promise forms are a
+  // compact copy of node:timers/promises (value, AbortSignal, ref), not the registry's module object. -----
+  if (typeof setTimeout === 'function' && typeof setImmediate === 'function') {
+    const abortError = signal => { const e = new Error('The operation was aborted'); e.name = 'AbortError'; e.code = 'ABORT_ERR'; e.cause = signal.reason; return e; };
+    const timerPromise = (start, stop, value, options) => new Promise((resolve, reject) => {
+      const signal = options && options.signal;
+      if (signal && signal.aborted) { reject(abortError(signal)); return; }
+      const aborted = () => { stop(id); reject(abortError(signal)); };
+      const id = start(() => { if (signal) signal.removeEventListener('abort', aborted); resolve(value); });
+      if (options && options.ref === false) id.unref();
+      if (signal) signal.addEventListener('abort', aborted, { once: true });
+    });
+    const promisifiedTimeout = (delay, value, options) => timerPromise(f => setTimeout(f, delay), id => clearTimeout(id), value, options);
+    const promisifiedImmediate = (value, options) => timerPromise(f => setImmediate(f), id => clearImmediate(id), value, options);
+    const promisifyCustom = Symbol.for('nodejs.util.promisify.custom');
+    for (const [timer, promised] of [[setTimeout, promisifiedTimeout], [setImmediate, promisifiedImmediate]]) {
+      Object.defineProperty(timer, promisifyCustom, { enumerable: true, configurable: false, get: function () { return promised; } });
+    }
+  }
+
   // ----- Iterator global and iterator helpers. Iterator.prototype is the IterProto base of the
   // array/String/RegExp iterators (EXTRAS above), the prototype of generator objects and of the
   // native Map/Set iterators (collections.rs). -----
