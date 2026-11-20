@@ -3796,10 +3796,8 @@ fn scan_keeps_method_findings_when_an_owner_is_loaded_or_unknowable() {
             "exports.a = function () { return require('node:zlib').createZstdDecompress(); };",
             "method:createZstdDecompress",
         ),
-        (
-            "exports.a = function (x) { return require('node:util/types').isSharedArrayBuffer(x); };",
-            "method:isSharedArrayBuffer",
-        ),
+        // (`util.types.isSharedArrayBuffer` was in this list until the engine implemented it, #881: a name the engine
+        // implements is not a finding even when its owner module is loaded)
         (
             "exports.a = function (m) { process.dlopen(m, 'x'); };",
             "method:dlopen",
