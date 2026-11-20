@@ -472,6 +472,7 @@ fn template(g: &mut Gen, t: &a::Tpl) -> CG<Ex> {
             builtins::push_joined(&mut s, text);
             if let Some(e) = e {
                 let v = e(it, f)?;
+                it.reject_symbol_operand(&v)?;
                 builtins::push_joined(&mut s, &it.to_str(&v));
             }
         }

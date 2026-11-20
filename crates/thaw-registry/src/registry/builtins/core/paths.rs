@@ -1,6 +1,7 @@
 pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "path" => Some(r#"
+function pathArg(value) { if (typeof value !== 'string') { var error = new TypeError('The "path" argument must be of type string'); error.code = 'ERR_INVALID_ARG_TYPE'; throw error; } return value; }
 function posixNormalize(value) {
   var path = String(value); if (path === '') return '.';
   var absolute = path.charAt(0) === '/', trailing = path.length > 1 && path.charAt(path.length - 1) === '/';
@@ -14,13 +15,13 @@ function posixNormalize(value) {
   if (trailing && result !== '/') result += '/'; return result;
 }
 function posixResolve() {
-  var args = Array.prototype.map.call(arguments, String), path = '', absolute = false;
-  for (var i = args.length - 1; i >= 0 && !absolute; i--) { var part = args[i]; if (!part) continue; path = part + '/' + path; absolute = part.charAt(0) === '/'; }
+  var args = arguments, path = '', absolute = false;
+  for (var i = args.length - 1; i >= 0 && !absolute; i--) { var part = pathArg(args[i]); if (!part) continue; path = part + '/' + path; absolute = part.charAt(0) === '/'; }
   if (!absolute) path = (globalThis.process && process.cwd ? process.cwd() : '/') + '/' + path;
   path = posixNormalize(path); return path.length > 1 && path.charAt(path.length - 1) === '/' ? path.slice(0, -1) : path;
 }
 function posixJoin() {
-  var parts = []; for (var i = 0; i < arguments.length; i++) if (arguments[i] !== '') parts.push(arguments[i]);
+  var parts = []; for (var i = 0; i < arguments.length; i++) if (pathArg(arguments[i]) !== '') parts.push(arguments[i]);
   return posixNormalize(Array.prototype.join.call(parts, '/'));
 }
 function posixLex(path) {
@@ -82,16 +83,16 @@ function winNormalize(path) {
 }
 function winOutput(path) { return String(path).replace(/\//g, '\\'); }
 function winJoin() {
-  var parts = []; for (var i = 0; i < arguments.length; i++) { var part = String(arguments[i]); if (part !== '') parts.push(part); }
+  var parts = []; for (var i = 0; i < arguments.length; i++) { var part = pathArg(arguments[i]); if (part !== '') parts.push(part); }
   if (!parts.length) return '.';
   var preserveUnc = /^[\\/]{2}[^\\/]/.test(parts[0]), joined = parts.join('/').replace(/\\/g, '/');
   if (!preserveUnc) joined = joined.replace(/^\/{2,}/, '/');
   return winNormalize(joined);
 }
 function winResolve() {
-  var args = Array.prototype.map.call(arguments, String), device = '', absolute = false, tail = '';
+  var args = arguments, device = '', absolute = false, tail = '';
   for (var i = args.length - 1; i >= -1 && !(absolute && device); i--) {
-    var value = i >= 0 ? args[i] : '';
+    var value = i >= 0 ? pathArg(args[i]) : '';
     if (i < 0 || !value) {
       if (i < 0) {
         var cwd;
@@ -213,7 +214,7 @@ function winRelative(from, to) {
   if (toPath.charAt(toStart) === '\\') toStart++;
   return toPath.slice(toStart, toEnd);
 }
-var win32 = { resolve: winResolve, join: winJoin, dirname: winDirname, basename: winBasename, extname: winExtname, normalize: winNormalize, relative: winRelative, isAbsolute: winIsAbsolute, parse: winParse, format: function(value) { return String(formatPath(value, '\\')); }, toNamespacedPath: toNamespacedPath, sep: '\\', delimiter: ';' };
+var win32 = { resolve: winResolve, join: winJoin, dirname: winDirname, basename: winBasename, extname: winExtname, normalize: winNormalize, relative: winRelative, isAbsolute: winIsAbsolute, parse: winParse, format: function(value) { return formatPath(value, '\\'); }, toNamespacedPath: toNamespacedPath, sep: '\\', delimiter: ';' };
 posix.posix = posix; posix.win32 = win32; win32.posix = posix; win32.win32 = win32;
 module.exports = posix; module.exports.default = module.exports; module.exports.__esModule = true;
 "#),

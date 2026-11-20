@@ -202,6 +202,8 @@ pub struct ObjData {
     native_text: Cell<bool>,
     /// The `Error.prototype` of some realm: an object whose chain reaches one is an error (`is_error_instance`).
     error_proto: Cell<bool>,
+    /// Made by an Error constructor ([[ErrorData]]): stays an error after its prototype changes (`util.types`).
+    error_instance: Cell<bool>,
     proto: RefCell<Option<Obj>>,
     kind: RefCell<Kind>,
     frozen: Cell<bool>,
@@ -1216,6 +1218,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         lazy_proto: Cell::new(false),
         native_text: Cell::new(false),
         error_proto: Cell::new(false),
+        error_instance: Cell::new(false),
         proto: RefCell::new(proto),
         kind: RefCell::new(kind),
         frozen: Cell::new(false),
@@ -2145,6 +2148,14 @@ impl Interp {
         if let Some(addr) = self.walking.pop() {
             self.walking_set.remove(&addr);
         }
+    }
+
+    /// ToString for `+` and template literals: a Symbol throws there (`String(sym)` still gives `Symbol(desc)`).
+    pub(crate) fn reject_symbol_operand(&mut self, v: &Value) -> R<()> {
+        if matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Symbol { .. })) {
+            return self.throw_error("TypeError", "Cannot convert a Symbol value to a string");
+        }
+        Ok(())
     }
 
     /// `to_str`, fallible: a nested array recurses through `try_join`, and an exception thrown by a
@@ -4611,6 +4622,7 @@ impl Interp {
                     );
                     if let Some(e) = t.exprs.get(i) {
                         let v = self.eval(e, scope)?;
+                        self.reject_symbol_operand(&v)?;
                         let text = self.try_to_str(&v)?;
                         builtins::push_joined(&mut s, &text);
                     }
@@ -5290,6 +5302,11 @@ impl Interp {
 
     fn binary(&mut self, op: a::BinaryOp, l: &Value, r: &Value) -> R<Value> {
         use a::BinaryOp as B;
+        // `+` converts a Symbol operand before ToPrimitive could turn it into its `toString` text
+        if matches!(op, B::Add) {
+            self.reject_symbol_operand(l)?;
+            self.reject_symbol_operand(r)?;
+        }
         // objects take part in arithmetic / comparison through ToPrimitive
         let (lp0, rp0);
         let (l, r) = if matches!(l, Value::Object(_)) || matches!(r, Value::Object(_)) {
