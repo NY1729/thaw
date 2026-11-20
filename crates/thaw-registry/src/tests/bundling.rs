@@ -2207,30 +2207,20 @@ fn commonjs_first_require_preserves_pure_native_namespace_identity_and_live_bind
 }
 }
 
-// qjs_pending: needs in-context created-require calls after load; script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_commonjs_created_require_keeps_computed_native_query_instances_distinct {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn commonjs_created_require_keeps_computed_native_query_instances_distinct() {
-    // Unrun: this suffix is requested after collection, through the public
-    // created-require closure. It must not return the registered base module.
-    use std::ffi::{CStr, CString};
+    // Dynamic import with a `?query` suffix creates a distinct instance per
+    // query; the same query returns the same instance, and the base require stays separate.
     let root = temp_registry("cjs-first-native-query-instance");
     let modules = root.join("node_modules");
     let package = modules.join("query-instance-pkg");
     fs::create_dir_all(&package).unwrap();
-    fs::write(package.join("index.cjs"), "module.exports = require('./leaf.mjs');").unwrap();
+    fs::write(package.join("index.cjs"), "const base = require('./leaf.mjs');\nmodule.exports = { base, run: async () => { const one = await import('./leaf.mjs?one'), two = await import('./leaf.mjs?two'), again = await import('./leaf.mjs?one'); one.bump(); return [base === one, one === two, one === again, base.value, one.value, two.value, globalThis.queryInstanceRuns]; } };").unwrap();
     fs::write(package.join("leaf.mjs"), "globalThis.queryInstanceRuns = (globalThis.queryInstanceRuns || 0) + 1; export let value = 0; export function bump() { value++; }").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "query-instance-pkg", &package, "index.cjs").unwrap();
     assert!(bundle.contains("evalNativeSync"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.queryInstanceRuns = 0; {bundle} var base = module.exports, made = globalThis.__thaw_bundle_create_require('query-instance-pkg/index.cjs'), one = made('./leaf.mjs?one'), two = made('./leaf.mjs?two'); one.bump(); globalThis.queryInstanceResult = function() {{ return [base === one, one === two, one === made('./leaf.mjs?one'), base.value, one.value, two.value, queryInstanceRuns]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"queryInstanceResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,false,true,0,1,0,3]");
+    assert_eq!(run_js_probe(&bundle, "exports.run()"), "[false,false,true,0,1,0,3]");
     let _ = fs::remove_dir_all(root);
-}
 }
 
 // qjs_pending: needs in-context created-require calls after load; script route fails: __thaw_register_native_bundle is not a function
