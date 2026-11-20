@@ -1,31 +1,18 @@
-// qjs_pending: fails on thaw-js: util.types.isProxy(new Proxy({}, {})) is true, expected false (last element)
-mod qjs_pending_network_util_types_identifies_standard_and_typed_objects {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn util_types_identifies_standard_and_typed_objects() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_util_types");
     fs::write(dir.join("index.js"), "var types = require('node:util/types'); module.exports = async function () { return [types.isDate(new Date()), types.isRegExp(/x/), types.isMap(new Map()), types.isSet(new Set()), types.isWeakMap(new WeakMap()), types.isPromise(Promise.resolve()), types.isArrayBuffer(new ArrayBuffer(2)), types.isDataView(new DataView(new ArrayBuffer(2))), types.isTypedArray(new Uint8Array(2)), types.isUint8Array(Buffer.from('x')), types.isNativeError(new TypeError('x')), types.isBoxedPrimitive(Object(4)), types.isAsyncFunction(async function() {}), types.isGeneratorFunction(function*() {}), types.isProxy(new Proxy({}, {}))]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_util_types_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseUtilTypes = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseUtilTypes").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
-        r#"[true,true,true,true,true,true,true,true,true,true,true,true,true,true,false]"#
+        r#"[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
-}
 }
 
 #[test]
