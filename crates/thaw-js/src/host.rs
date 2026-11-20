@@ -138,18 +138,52 @@ fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R
     match target {
         Some(key) if key.ends_with(".node") => addon_of(loader, it),
         Some(key) => load_module(loader, it, &key),
-        None => {
-            let ctor = it
-                .lookup(&it.global.clone(), "Error")
-                .unwrap_or(Value::Undefined);
-            let err = it.construct(
-                &ctor,
-                &[Value::str(&format!("Cannot find module '{spec}'"))],
-            )?;
-            it.set(&err, "code", Value::str("MODULE_NOT_FOUND"))?;
-            Err(Ctl::Throw(err))
-        }
+        None => match peer_exports(it, spec)? {
+            Some(exports) => Ok(exports),
+            None => {
+                let ctor = it
+                    .lookup(&it.global.clone(), "Error")
+                    .unwrap_or(Value::Undefined);
+                let err = it.construct(
+                    &ctor,
+                    &[Value::str(&format!("Cannot find module '{spec}'"))],
+                )?;
+                it.set(&err, "code", Value::str("MODULE_NOT_FOUND"))?;
+                Err(Ctl::Throw(err))
+            }
+        },
     }
+}
+
+/// The peer fallback of `require_in`: a bare name the requiring bundle does not map resolves to the package
+/// registered under exactly that name (one version per name). A package still booting (a load-time cycle)
+/// gives its partial exports, as CommonJS does. A declared name (`thaw_tjs_declare`) that is not loaded yet is
+/// loaded now. `None` when no package has that name: the caller's MODULE_NOT_FOUND.
+// ponytail: a peer's load error is re-thrown as a new Error with its rendered text, not the original object;
+// keep the thrown value (boot would have to return it) if a caller needs `instanceof` on it.
+fn peer_exports(it: &mut Interp, spec: &str) -> R<Option<Value>> {
+    let booting = BOOTING.with(|b| {
+        b.borrow()
+            .iter()
+            .rev()
+            .find(|(name, _)| name == spec)
+            .map(|(_, exports)| exports.clone())
+    });
+    if booting.is_some() {
+        return Ok(booting);
+    }
+    if !BY_NAME.with(|m| m.borrow().contains_key(spec)) {
+        let Some(source) = PEER_SOURCES.with(|s| s.borrow().get(spec).cloned()) else {
+            return Ok(None);
+        };
+        register_bundle(spec.to_string(), &source).map_err(|e| js_error(it, &e.to_string()))?;
+    }
+    let Some((handle, path)) = resolve_export(spec, "") else {
+        return Ok(None);
+    };
+    with_package(handle, |p| p.exports_member(&path))
+        .map(Some)
+        .map_err(|e| js_error(it, &e.to_string()))
 }
 
 /// The module key of a node builtin the bundle serves for a spec the map does not name (`fs`, `node:fs`):
@@ -210,7 +244,15 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         Some(slash) => file[..slash].to_string(),
         None => ".".to_string(),
     };
-    it.call(
+    // while the entry runs, its exports are what a peer `require` of this package name gets (a load-time cycle)
+    let entry = key == loader.parts.entry.as_str() && !loader.package.is_empty();
+    if entry {
+        BOOTING.with(|b| {
+            b.borrow_mut()
+                .push((loader.package.clone(), exports.clone()))
+        });
+    }
+    let ran = it.call(
         &f,
         &exports,
         &[
@@ -222,7 +264,11 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
             Value::str(&dir),
             require,
         ],
-    )?;
+    );
+    if entry {
+        BOOTING.with(|b| b.borrow_mut().pop());
+    }
+    ran?;
     it.get(&module, "exports")
 }
 
@@ -5974,6 +6020,8 @@ struct HostTls {
     running: HashMap<usize, *mut Package>,
     by_name: HashMap<String, usize>,
     by_prefix: HashMap<String, String>,
+    peer_sources: HashMap<String, String>,
+    booting: Vec<(String, Value)>,
     last_package: usize,
     fetch_package: Option<usize>,
     handles: Vec<(usize, Value)>,
@@ -6005,6 +6053,8 @@ pub(crate) fn park_host_tls(key: usize) {
         running: RUNNING.with(|c| std::mem::take(&mut *c.borrow_mut())),
         by_name: BY_NAME.with(|c| std::mem::take(&mut *c.borrow_mut())),
         by_prefix: BY_PREFIX.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        peer_sources: PEER_SOURCES.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        booting: BOOTING.with(|c| std::mem::take(&mut *c.borrow_mut())),
         last_package: LAST_PACKAGE.with(|c| c.take()),
         fetch_package: FETCH_PACKAGE.with(|c| c.take()),
         handles: HANDLES.with(|c| std::mem::take(&mut *c.borrow_mut())),
@@ -6040,6 +6090,8 @@ pub(crate) fn adopt_host_tls(key: usize) {
         running,
         by_name,
         by_prefix,
+        peer_sources,
+        booting,
         last_package,
         fetch_package,
         handles,
@@ -6062,6 +6114,8 @@ pub(crate) fn adopt_host_tls(key: usize) {
     drop(RUNNING.with(|c| c.replace(running)));
     drop(BY_NAME.with(|c| c.replace(by_name)));
     drop(BY_PREFIX.with(|c| c.replace(by_prefix)));
+    drop(PEER_SOURCES.with(|c| c.replace(peer_sources)));
+    drop(BOOTING.with(|c| c.replace(booting)));
     LAST_PACKAGE.with(|c| c.set(last_package));
     FETCH_PACKAGE.with(|c| c.set(fetch_package));
     drop(HANDLES.with(|c| c.replace(handles)));
@@ -6574,6 +6628,10 @@ pub struct ThawResult {
 }
 
 thread_local! {
+    /// Bundles declared by `thaw_tjs_declare`, by package name: loaded by a peer `require` on first use.
+    static PEER_SOURCES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Entry modules still running (a load in progress), by package name, with their partial `module.exports`.
+    static BOOTING: RefCell<Vec<(String, Value)>> = const { RefCell::new(Vec::new()) };
     static BY_NAME: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
     /// The export-path prefix of a name whose bundle is a view of a shared realm (`__thaw_bundle_realm`):
     /// `path/posix` reads `posix.<path>` of the realm loaded as `node:path`. Names without a marker have none.
@@ -6633,41 +6691,63 @@ pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) 
     if std::env::var_os("THAW_JS_TRACE").is_some() {
         eprintln!("thaw-js: loading package `{name}`");
     }
-    let realm = bundle_realm(&src);
-    if let Some((key, member)) = &realm {
-        if let Some(handle) = BY_NAME.with(|m| m.borrow().get(key).copied()) {
-            alias_name(name, handle, member);
-            return 1;
-        }
-    }
-    // a realm's root bundle loads once, under its key; every spec of the family then aliases it
-    let load_name = realm.as_ref().map_or(name.clone(), |(key, _)| key.clone());
-    match Package::load_named(&load_name, &src, process_stack_bytes()) {
-        Ok(p) => {
-            PACKAGES.with(|ps| {
-                let mut ps = ps.borrow_mut();
-                note_fetch_package(&p, ps.len());
-                ps.push(Some(p));
-                let handle = ps.len() - 1;
-                match realm {
-                    Some((key, member)) => {
-                        alias_name(key, handle, "");
-                        alias_name(name, handle, &member);
-                    }
-                    None => {
-                        BY_NAME.with(|m| m.borrow_mut().insert(name.clone(), handle));
-                        BY_PREFIX.with(|m| m.borrow_mut().remove(&name));
-                    }
-                }
-            });
-            1
-        }
+    match register_bundle(name.clone(), &src) {
+        Ok(()) => 1,
         Err(e) => {
             eprintln!("thaw-js: failed to load package `{name}`: {e}");
             LAST_ERROR.with(|l| *l.borrow_mut() = e.to_string());
             0
         }
     }
+}
+
+/// Declare package `name` as bundle `bundle` without loading it. A bare `require(name)` from a package that
+/// is loaded then loads it on first use, whatever the registration order. Returns 1.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_declare(name: *const c_char, bundle: *const c_char) -> u8 {
+    let (Some(name), Some(src)) = (cstr(name), cstr(bundle)) else {
+        return 0;
+    };
+    PEER_SOURCES.with(|s| s.borrow_mut().insert(name, src));
+    1
+}
+
+/// Load `src` as package `name` and register it (the body of [`thaw_tjs_register`], also used by the peer
+/// fallback). A declared name that is already loaded keeps that instance: a peer's `require` and the
+/// program's own registration then share one module.
+fn register_bundle(name: String, src: &str) -> Result<(), HostError> {
+    let declared_and_loaded = PEER_SOURCES.with(|s| s.borrow().contains_key(&name))
+        && BY_NAME.with(|m| m.borrow().contains_key(&name));
+    if declared_and_loaded {
+        return Ok(());
+    }
+    let realm = bundle_realm(src);
+    if let Some((key, member)) = &realm {
+        if let Some(handle) = BY_NAME.with(|m| m.borrow().get(key).copied()) {
+            alias_name(name, handle, member);
+            return Ok(());
+        }
+    }
+    // a realm's root bundle loads once, under its key; every spec of the family then aliases it
+    let load_name = realm.as_ref().map_or(name.clone(), |(key, _)| key.clone());
+    let p = Package::load_named(&load_name, src, process_stack_bytes())?;
+    PACKAGES.with(|ps| {
+        let mut ps = ps.borrow_mut();
+        note_fetch_package(&p, ps.len());
+        ps.push(Some(p));
+        let handle = ps.len() - 1;
+        match realm {
+            Some((key, member)) => {
+                alias_name(key, handle, "");
+                alias_name(name, handle, &member);
+            }
+            None => {
+                BY_NAME.with(|m| m.borrow_mut().insert(name.clone(), handle));
+                BY_PREFIX.with(|m| m.borrow_mut().remove(&name));
+            }
+        }
+    });
+    Ok(())
 }
 
 /// Run a script (sloppy, global scope) in the default realm; 1 on success. The counterpart of
@@ -8452,6 +8532,159 @@ var __thaw_bundle_entry_key = "p/index.js";
             pkg.call("probe", &[]).unwrap(),
             Native::Str("MODULE_NOT_FOUND,MODULE_NOT_FOUND,continued".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod peer_require_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    /// A one-module registry bundle whose entry factory body is `body`.
+    fn bundle(body: &str) -> String {
+        format!(
+            r#"module.exports = (function(require){{
+var __thaw_bundle_factories = {{
+"p/index.js": function(module, exports, require) {{ {body} }}
+}};
+var __thaw_bundle_require_maps = {{ "p/index.js": {{}} }};
+var __thaw_bundle_entry_key = "p/index.js";
+}})(globalThis.require);"#
+        )
+    }
+
+    /// Registers `source` as package `name` (`thaw_tjs_register`) and returns its handle.
+    fn register(name: &str, source: &str) -> usize {
+        let (name_c, source_c) = (CString::new(name).unwrap(), CString::new(source).unwrap());
+        assert_eq!(
+            thaw_tjs_register(name_c.as_ptr(), source_c.as_ptr()),
+            1,
+            "register {name}"
+        );
+        BY_NAME.with(|m| m.borrow()[name])
+    }
+
+    /// Declares `source` as package `name` (`thaw_tjs_declare`), not loaded.
+    fn declare(name: &str, source: &str) {
+        let (name_c, source_c) = (CString::new(name).unwrap(), CString::new(source).unwrap());
+        assert_eq!(
+            thaw_tjs_declare(name_c.as_ptr(), source_c.as_ptr()),
+            1,
+            "declare {name}"
+        );
+    }
+
+    /// Calls export `path` of package `handle` with `args`, returning the raw value.
+    fn call_value(handle: usize, path: &str, args: &[Value]) -> Value {
+        with_package(handle, |p| {
+            let f = p.exports_member(path)?;
+            p.interp
+                .call(&f, &Value::Undefined, args)
+                .map_err(|c| classify(&mut p.interp, c))
+        })
+        .unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    /// Package `pgx`: a class and a check that a value is an instance of it.
+    const POOL_B: &str = "exports.Pool = function Pool() {}; exports.isPool = function (v) { return v instanceof exports.Pool; };";
+
+    /// Package `drizzle`: reaches `pgx` only inside a function, the way drizzle's node-postgres driver does.
+    const LAZY_A: &str = "exports.poolOf = function () { return require('pgx').Pool; }; exports.make = function () { return new (require('pgx').Pool)(); };";
+
+    /// Package `drizzle` that reads `pgx` at load time.
+    const EAGER_A: &str = "var P = require('pgx').Pool; exports.poolOf = function () { return P; }; exports.make = function () { return new P(); };";
+
+    /// Asserts that `drizzle` reaches the very `Pool` the host's `pgx` exports, and builds instances of it.
+    fn assert_one_pool_instance(drizzle: usize, pgx: usize) {
+        let pool = with_package(pgx, |p| p.exports_member("Pool")).unwrap();
+        let from_drizzle = call_value(drizzle, "poolOf", &[]);
+        assert!(crate::strict_equals(&from_drizzle, &pool), "Pool identity");
+        let made = call_value(drizzle, "make", &[]);
+        assert!(matches!(
+            call_value(pgx, "isPool", &[made]),
+            Value::Bool(true)
+        ));
+    }
+
+    #[test]
+    fn lazy_peer_require_loads_the_package_registered_after_the_requirer() {
+        let drizzle = register("drizzle", &bundle(LAZY_A));
+        let pgx = register("pgx", &bundle(POOL_B));
+        assert_one_pool_instance(drizzle, pgx);
+    }
+
+    #[test]
+    fn eager_peer_require_finds_the_package_registered_before_the_requirer() {
+        let pgx = register("pgx", &bundle(POOL_B));
+        let drizzle = register("drizzle", &bundle(EAGER_A));
+        assert_one_pool_instance(drizzle, pgx);
+    }
+
+    #[test]
+    fn declared_peer_loads_on_first_require_and_the_later_registration_keeps_it() {
+        declare("pgx", &bundle(POOL_B));
+        let drizzle = register("drizzle", &bundle(EAGER_A));
+        let pgx = register("pgx", &bundle(POOL_B));
+        assert_one_pool_instance(drizzle, pgx);
+    }
+
+    #[test]
+    fn load_time_cycle_between_peers_gets_partial_exports() {
+        declare(
+            "pgx-b",
+            &bundle("var a = require('drizzle'); exports.sawEarly = a.early; exports.sawReady = a.ready === true; exports.value = 'b-ok';"),
+        );
+        let drizzle = register(
+            "drizzle",
+            &bundle("exports.early = 1; var b = require('pgx-b'); exports.bValue = b.value; exports.ready = true;"),
+        );
+        assert_eq!(
+            with_package(drizzle, |p| p.get("bValue")).unwrap(),
+            Native::Str("b-ok".into())
+        );
+        let b = BY_NAME.with(|m| m.borrow()["pgx-b"]);
+        assert_eq!(
+            with_package(b, |p| p.get("sawEarly")).unwrap(),
+            Native::Number(1.0)
+        );
+        assert_eq!(
+            with_package(b, |p| p.get("sawReady")).unwrap(),
+            Native::Bool(false)
+        );
+    }
+
+    #[test]
+    fn subpath_and_unregistered_peer_names_stay_module_not_found() {
+        register("pgx", &bundle(POOL_B));
+        let drizzle = register(
+            "drizzle",
+            &bundle("exports.probe = function (spec) { try { require(spec); return 'loaded'; } catch (e) { return e.code + ' ' + e.message; } };"),
+        );
+        let probe = |spec: &str| {
+            with_package(drizzle, |p| p.call("probe", &[Native::Str(spec.into())])).unwrap()
+        };
+        assert_eq!(probe("pgx"), Native::Str("loaded".into()));
+        assert_eq!(
+            probe("pgx/lib/x"),
+            Native::Str("MODULE_NOT_FOUND Cannot find module 'pgx/lib/x'".into())
+        );
+        assert_eq!(
+            probe("nope"),
+            Native::Str("MODULE_NOT_FOUND Cannot find module 'nope'".into())
+        );
+    }
+
+    #[test]
+    fn error_thrown_by_a_peer_module_init_reaches_the_requirer() {
+        declare("pgx-bad", &bundle("throw new Error('boom from pgx-bad');"));
+        let drizzle = register(
+            "drizzle",
+            &bundle("exports.probe = function () { try { require('pgx-bad'); return 'no'; } catch (e) { return e.message; } };"),
+        );
+        let Native::Str(message) = with_package(drizzle, |p| p.call("probe", &[])).unwrap() else {
+            panic!("probe returns a string");
+        };
+        assert!(message.contains("boom from pgx-bad"), "{message}");
     }
 }
 
