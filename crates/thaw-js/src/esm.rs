@@ -146,13 +146,30 @@ fn export_name(n: &a::ModuleExportName) -> String {
 const ORIGIN_SPEC: &str = "__thaw_private_origin_spec/";
 
 // The getter is non-configurable, so a second define of the same name throws; the first definition wins.
-fn getter(name: &str, expr: &str) -> String {
+fn getter(exports: &str, name: &str, expr: &str) -> String {
     let mut quoted = String::new();
     json_quote(name, &mut quoted);
     format!(
-        "if (!Object.prototype.hasOwnProperty.call(exports, {quoted})) Object.defineProperty(exports, {quoted}, {{ enumerable: true, get: function () {{ return {expr}; }} }});\n"
+        "if (!Object.prototype.hasOwnProperty.call({exports}, {quoted})) Object.defineProperty({exports}, {quoted}, {{ enumerable: true, get: function () {{ return {expr}; }} }});\n"
     )
 }
+
+/// The identifiers a factory body uses for its CommonJS `require` and `exports`.
+struct Names {
+    require: &'static str,
+    exports: &'static str,
+}
+
+const BUNDLE_NAMES: Names = Names {
+    require: "require",
+    exports: "exports",
+};
+
+// An entry's factory takes these parameters, so user code's own `require` and `exports` stay unbound.
+const ENTRY_NAMES: Names = Names {
+    require: "__thaw_esm_require",
+    exports: "__thaw_esm_exports",
+};
 
 /// One module's CommonJS factory body, plus the specifiers it imports and the problems found.
 struct Converted {
@@ -199,10 +216,29 @@ fn convert(
     indirect: &[(String, String, String)],
 ) -> Result<Converted, String> {
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(source)?;
+    Ok(convert_module(
+        &module,
+        &cm,
+        public_specs,
+        indirect,
+        &BUNDLE_NAMES,
+    ))
+}
+
+/// `convert` for a parsed module, with the factory identifiers `names`.
+fn convert_module(
+    module: &a::Module,
+    cm: &thaw_parser::common::SourceMap,
+    public_specs: &[String],
+    indirect: &[(String, String, String)],
+    names: &Names,
+) -> Converted {
+    let (rq, ex) = (names.require, names.exports);
     let snippet = |span| cm.span_to_snippet(span).unwrap_or_default();
-    let mut head = String::from(
-        "\"use strict\";\nObject.defineProperty(exports, '__esModule', { value: true });\n\
-         function __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\n\
+    let mut head =
+        format!("\"use strict\";\nObject.defineProperty({ex}, '__esModule', {{ value: true }});\n");
+    head.push_str(
+        "function __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\n\
          function __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); \
          if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } \
          ns.default = m; return ns; }\n",
@@ -218,7 +254,7 @@ fn convert(
     let mut star = false;
     let mut counter = 0usize;
     let mut uses_origin = false;
-    let reassigned = reassigned_names(&module);
+    let reassigned = reassigned_names(module);
     fn tmp(counter: &mut usize) -> String {
         *counter += 1;
         format!("__thaw_esm_m{counter}")
@@ -240,7 +276,7 @@ fn convert(
                                 let mut q = String::new();
                                 json_quote(p, &mut q);
                                 specs.push(p.clone());
-                                format!("{q}: function () {{ return require({q}); }}")
+                                format!("{q}: function () {{ return {rq}({q}); }}")
                             })
                             .collect();
                         for sp in &i.specifiers {
@@ -259,7 +295,7 @@ fn convert(
                     json_quote(&spec, &mut q);
                     specs.push(spec);
                     let m = tmp(&mut counter);
-                    body.push_str(&format!("var {m} = require({q});\n"));
+                    body.push_str(&format!("var {m} = {rq}({q});\n"));
                     for sp in &i.specifiers {
                         match sp {
                             a::ImportSpecifier::Default(d) => body.push_str(&format!(
@@ -308,7 +344,7 @@ fn convert(
                         _ => problems.push("esm-declaration"),
                     }
                     for n in &names {
-                        head.push_str(&getter(n, n));
+                        head.push_str(&getter(ex, n, n));
                     }
                     body.push_str(&snippet(e.decl.span()));
                     body.push_str(";\n");
@@ -333,16 +369,13 @@ fn convert(
                             // a named declaration: keep it as such and export the binding
                             body.push_str(&text);
                             body.push_str(";\n");
-                            head.push_str(&getter("default", &n));
+                            head.push_str(&getter(ex, "default", &n));
                         }
-                        None => body.push_str(&format!("exports.default = ({text});\n")),
+                        None => body.push_str(&format!("{ex}.default = ({text});\n")),
                     }
                 }
                 a::ModuleDecl::ExportDefaultExpr(e) => {
-                    body.push_str(&format!(
-                        "exports.default = ({});\n",
-                        snippet(e.expr.span())
-                    ));
+                    body.push_str(&format!("{ex}.default = ({});\n", snippet(e.expr.span())));
                 }
                 a::ModuleDecl::ExportNamed(e) => {
                     let from = e.src.as_ref().map(|s| {
@@ -351,7 +384,7 @@ fn convert(
                         json_quote(&spec, &mut q);
                         specs.push(spec);
                         let m = tmp(&mut counter);
-                        body.push_str(&format!("var {m} = require({q});\n"));
+                        body.push_str(&format!("var {m} = {rq}({q});\n"));
                         m
                     });
                     for sp in &e.specifiers {
@@ -381,11 +414,12 @@ fn convert(
                                 if from.is_some() {
                                     reexported.insert(exported.clone());
                                 }
-                                head.push_str(&getter(&exported, &expr));
+                                head.push_str(&getter(ex, &exported, &expr));
                             }
                             a::ExportSpecifier::Namespace(n) => {
                                 if let Some(m) = &from {
                                     head.push_str(&getter(
+                                        ex,
                                         &export_name(&n.name),
                                         &format!("__thaw_esm_ns({m})"),
                                     ));
@@ -403,7 +437,7 @@ fn convert(
                     specs.push(spec);
                     let m = tmp(&mut counter);
                     body.push_str(&format!(
-                        "var {m} = require({q});\nObject.keys({m}).forEach(function (k) {{ if (k !== 'default' && k !== '__esModule' && !Object.prototype.hasOwnProperty.call(exports, k)) Object.defineProperty(exports, k, {{ enumerable: true, get: function () {{ return {m}[k]; }} }}); }});\n"
+                        "var {m} = {rq}({q});\nObject.keys({m}).forEach(function (k) {{ if (k !== 'default' && k !== '__esModule' && !Object.prototype.hasOwnProperty.call({ex}, k)) Object.defineProperty({ex}, k, {{ enumerable: true, get: function () {{ return {m}[k]; }} }}); }});\n"
                     ));
                 }
                 _ => problems.push("esm-declaration"),
@@ -420,11 +454,11 @@ fn convert(
         json_quote(spec, &mut qs);
         json_quote(remote, &mut qr);
         let expr = if remote == "default" {
-            format!("__thaw_esm_default(require({qs}))")
+            format!("__thaw_esm_default({rq}({qs}))")
         } else {
-            format!("require({qs})[{qr}]")
+            format!("{rq}({qs})[{qr}]")
         };
-        head.push_str(&getter(name, &expr));
+        head.push_str(&getter(ex, name, &expr));
     }
     if uses_origin {
         head.push_str(
@@ -434,14 +468,14 @@ fn convert(
              defaultImport: function (s, m) { return __thaw_esm_default(m); } }; }\n",
         );
     }
-    Ok(Converted {
+    Converted {
         body: format!("{head}{body}"),
         specs,
         problems,
         live,
         imported: pulled,
         star,
-    })
+    }
 }
 
 /// The factory text, the unsound-construct feature names, and whether the bundle is the pure native shape.
@@ -837,5 +871,314 @@ var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal
             { "key": "m/s.mjs", "source": "export * from \"./e.mjs\";\n", "imports": { "./e.mjs": "m/e.mjs" } }
         ]);
         assert_blocked(&bundle("m/e.mjs", modules, ""));
+    }
+}
+
+#[cfg(test)]
+mod convert_pin_tests {
+    use super::convert;
+
+    // Pins the bundle conversion byte for byte: `convert` (the registry bundle path) must not change
+    // when the entry path is added.
+    #[test]
+    fn bundle_conversion_is_byte_identical() {
+        let source = "import { a } from './x.js';\nexport const b = a + 1;\nexport default a;\n";
+        let indirect = [("c".to_string(), "./y.js".to_string(), "c".to_string())];
+        let converted = convert(source, &[], &indirect).expect("convert");
+        let expected = concat!(
+            "\"use strict\";\nObject.defineProperty(exports, '__esModule', { value: true });\n",
+            "function __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\n",
+            "function __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); ",
+            "if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } ",
+            "ns.default = m; return ns; }\n",
+            "if (!Object.prototype.hasOwnProperty.call(exports, \"b\")) Object.defineProperty(exports, \"b\", { enumerable: true, get: function () { return b; } });\n",
+            "if (!Object.prototype.hasOwnProperty.call(exports, \"c\")) Object.defineProperty(exports, \"c\", { enumerable: true, get: function () { return require(\"./y.js\")[\"c\"]; } });\n",
+            "var __thaw_esm_m1 = require(\"./x.js\");\n",
+            "var a = __thaw_esm_m1[\"a\"];\n",
+            "const b = a + 1;;\n",
+            "exports.default = (a);\n",
+        );
+        assert_eq!(converted.body, expected);
+        assert_eq!(converted.specs, vec!["./x.js".to_string()]);
+    }
+
+    // The other bundle shapes the rewrite touches: `export *`, a re-export, a namespace re-export and the origin object.
+    #[test]
+    fn bundle_reexport_shapes_are_byte_identical() {
+        let source = "import { __thaw_esm_origin_0 } from '__thaw_private_origin_spec/m/k';\n\
+            export * from './s.js';\nexport { q as r } from './t.js';\nexport * as ns from './u.js';\n\
+            export const v = __thaw_esm_origin_0.readDefault('node:os');\n";
+        let converted = convert(source, &["node:os".to_string()], &[]).expect("convert");
+        assert_eq!(converted.body, "\"use strict\";\nObject.defineProperty(exports, '__esModule', { value: true });\nfunction __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\nfunction __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } ns.default = m; return ns; }\nif (!Object.prototype.hasOwnProperty.call(exports, \"r\")) Object.defineProperty(exports, \"r\", { enumerable: true, get: function () { return __thaw_esm_m2[\"q\"]; } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"ns\")) Object.defineProperty(exports, \"ns\", { enumerable: true, get: function () { return __thaw_esm_ns(__thaw_esm_m3); } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"v\")) Object.defineProperty(exports, \"v\", { enumerable: true, get: function () { return v; } });\nfunction __thaw_esm_origin_obj(t) { return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); }, readImport: function (s, n) { return t[s]()[n]; }, namespaceImport: function (s) { return t[s](); }, defaultImport: function (s, m) { return __thaw_esm_default(m); } }; }\nvar __thaw_esm_origin_0 = __thaw_esm_origin_obj({ \"node:os\": function () { return require(\"node:os\"); } });\nvar __thaw_esm_m1 = require(\"./s.js\");\nObject.keys(__thaw_esm_m1).forEach(function (k) { if (k !== 'default' && k !== '__esModule' && !Object.prototype.hasOwnProperty.call(exports, k)) Object.defineProperty(exports, k, { enumerable: true, get: function () { return __thaw_esm_m1[k]; } }); });\nvar __thaw_esm_m2 = require(\"./t.js\");\nvar __thaw_esm_m3 = require(\"./u.js\");\nconst v = __thaw_esm_origin_0.readDefault('node:os');;\n");
+    }
+}
+
+/// A runtime ES-module entry as a CommonJS-style body: its helpers are `__thaw_esm_require` and
+/// `__thaw_esm_exports`, so user code's `require`/`exports` are never shadowed.
+#[derive(Debug, PartialEq)]
+pub(crate) struct EntryModule {
+    pub code: String,
+    pub tla: bool,
+    pub imports: Vec<String>,
+}
+
+/// Converts a runtime ES-module entry. Imports, re-exports and `export *` all count as static specifiers.
+pub(crate) fn convert_entry(source: &str) -> Result<EntryModule, String> {
+    let (module, cm) = thaw_parser::parse_javascript_module_located(source).map_err(|f| {
+        format!(
+            "failed to parse module: {} ({}:{})",
+            f.message, f.line, f.col
+        )
+    })?;
+    let converted = convert_module(&module, &cm, &[], &[], &ENTRY_NAMES);
+    if let Some(problem) = converted.problems.first() {
+        return Err(format!("unsupported module syntax: {problem}"));
+    }
+    Ok(EntryModule {
+        code: converted.body,
+        tla: has_top_level_await(&module),
+        imports: converted.specs,
+    })
+}
+
+/// Whether `module` awaits outside every function: a top-level `await` or `for await`.
+fn has_top_level_await(module: &a::Module) -> bool {
+    use swc_ecma_visit::{Visit, VisitWith};
+    #[derive(Default)]
+    struct Tla(bool);
+    impl Visit for Tla {
+        fn visit_await_expr(&mut self, _: &a::AwaitExpr) {
+            self.0 = true;
+        }
+        fn visit_for_of_stmt(&mut self, n: &a::ForOfStmt) {
+            self.0 |= n.is_await;
+            n.visit_children_with(self);
+        }
+        fn visit_function(&mut self, _: &a::Function) {}
+        fn visit_arrow_expr(&mut self, _: &a::ArrowExpr) {}
+    }
+    let mut v = Tla::default();
+    module.visit_with(&mut v);
+    v.0
+}
+
+/// `convert_entry` as the JSON text `{"code", "tla", "imports"}` that `__thaw_esm_convert` returns.
+pub(crate) fn convert_entry_json(source: &str) -> Result<String, String> {
+    let entry = convert_entry(source)?;
+    let mut code = String::new();
+    json_quote(&entry.code, &mut code);
+    let imports: Vec<String> = entry
+        .imports
+        .iter()
+        .map(|s| {
+            let mut q = String::new();
+            json_quote(s, &mut q);
+            q
+        })
+        .collect();
+    Ok(format!(
+        "{{\"code\":{code},\"tla\":{},\"imports\":[{}]}}",
+        entry.tla,
+        imports.join(",")
+    ))
+}
+
+impl crate::Interp {
+    /// Defines the native `__thaw_esm_convert(source)`: `convert_entry_json`, throwing a SyntaxError on failure.
+    pub(crate) fn install_esm_convert(&mut self) {
+        let convert = self.native(|it, _, a| {
+            let source = it.to_str(&crate::arg(a, 0)).to_string();
+            match convert_entry_json(&source) {
+                Ok(json) => Ok(crate::Value::str(&json)),
+                Err(msg) => it.throw_error("SyntaxError", &msg),
+            }
+        });
+        self.global.declare("__thaw_esm_convert", convert, true);
+    }
+}
+
+#[cfg(test)]
+mod entry_convert_tests {
+    use super::convert_entry;
+
+    // The generated code must use only the renamed helpers: no bare `require` or `exports` in the output.
+    fn assert_renamed(code: &str) {
+        assert!(
+            !code.replace("__thaw_esm_require", "").contains("require"),
+            "{code}"
+        );
+        assert!(
+            !code.replace("__thaw_esm_exports", "").contains("exports"),
+            "{code}"
+        );
+    }
+
+    fn entry(source: &str) -> super::EntryModule {
+        let m = convert_entry(source).expect("convert_entry");
+        assert_renamed(&m.code);
+        m
+    }
+
+    #[test]
+    fn entry_named_import_export_const_and_tla_use_renamed_helpers() {
+        let m = entry("import { a } from 'x';\nexport const b = a + 1;\nawait 0;\n");
+        assert!(m.code.contains("__thaw_esm_require(\"x\")"), "{}", m.code);
+        assert!(m.code.contains("__thaw_esm_exports"), "{}", m.code);
+        assert!(m.tla);
+        assert_eq!(m.imports, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn entry_export_default_expression_assigns_renamed_exports() {
+        let m = entry("export default 1 + 2;\n");
+        assert!(
+            m.code.contains("__thaw_esm_exports.default = (1 + 2)"),
+            "{}",
+            m.code
+        );
+        assert!(m.imports.is_empty());
+    }
+
+    #[test]
+    fn entry_export_named_alias_defines_the_alias_getter() {
+        let m = entry("const a = 3;\nexport { a as b };\n");
+        assert!(m.code.contains("\"b\""), "{}", m.code);
+        assert!(m.code.contains("return a;"), "{}", m.code);
+    }
+
+    #[test]
+    fn entry_export_namespace_from_requires_and_wraps_namespace() {
+        let m = entry("export * as ns from 'm';\n");
+        assert!(m.code.contains("__thaw_esm_require(\"m\")"), "{}", m.code);
+        assert!(m.code.contains("\"ns\""), "{}", m.code);
+        assert!(m.code.contains("__thaw_esm_ns("), "{}", m.code);
+        assert_eq!(m.imports, vec!["m".to_string()]);
+    }
+
+    #[test]
+    fn entry_export_star_copies_names_through_renamed_require() {
+        let m = entry("export * from 'm';\n");
+        assert!(m.code.contains("__thaw_esm_require(\"m\")"), "{}", m.code);
+        assert!(m.code.contains("Object.keys("), "{}", m.code);
+        assert_eq!(m.imports, vec!["m".to_string()]);
+    }
+
+    #[test]
+    fn entry_export_function_class_and_let_declarations_keep_their_bodies() {
+        let m = entry("export function f() { return 1; }\nexport class K {}\nexport let n = 0;\n");
+        assert!(m.code.contains("function f() { return 1; }"), "{}", m.code);
+        assert!(m.code.contains("class K {}"), "{}", m.code);
+        assert!(m.code.contains("let n = 0"), "{}", m.code);
+        assert!(
+            m.code.contains("\"f\"") && m.code.contains("\"K\"") && m.code.contains("\"n\""),
+            "{}",
+            m.code
+        );
+    }
+
+    #[test]
+    fn entry_default_namespace_and_side_effect_imports_all_require_their_module() {
+        let m = entry("import d, { e as f } from 'p';\nimport * as q from 'r';\nimport 's';\n");
+        assert_eq!(
+            m.imports,
+            vec!["p".to_string(), "r".to_string(), "s".to_string()]
+        );
+        assert!(m.code.contains("__thaw_esm_default("), "{}", m.code);
+        assert!(m.code.contains("__thaw_esm_ns("), "{}", m.code);
+    }
+
+    #[test]
+    fn entry_tla_is_false_when_await_is_only_inside_functions() {
+        let m = entry("export const q = 1;\nasync function g() { await 1; }\nconst h = async () => { await 2; };\n");
+        assert!(!m.tla);
+    }
+
+    #[test]
+    fn entry_for_await_at_top_level_is_tla() {
+        assert!(entry("for await (const x of []) {}\n").tla);
+    }
+
+    #[test]
+    fn entry_imports_are_listed_in_source_order() {
+        let m = entry("import './b.js';\nimport { a } from 'a.js';\nexport * from 'c.js';\nexport { z } from 'z.js';\n");
+        assert_eq!(
+            m.imports,
+            vec![
+                "./b.js".to_string(),
+                "a.js".to_string(),
+                "c.js".to_string(),
+                "z.js".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn entry_syntax_error_returns_a_clear_error_string() {
+        let Err(err) = convert_entry("const = ;\n") else {
+            panic!("a syntax error must not convert");
+        };
+        assert!(err.starts_with("failed to parse module"), "{err}");
+    }
+
+    // Runs the converted body with a fake `__thaw_esm_require` (every module is `{__esModule, default: 5, a: 10}`)
+    // and reports the exports as JSON.
+    #[test]
+    fn entry_body_evaluates_against_fake_require_and_exports() {
+        let source = "import d, { a as aa } from 'dep';\nimport * as ns from 'dep';\n\
+            export const x = aa + 1;\nexport default d;\nexport function f() { return x * 2; }\n\
+            export { x as y };\nexport * as whole from 'dep';\nexport const nsa = ns.a;\nexport class K {}\n";
+        let m = convert_entry(source).expect("convert_entry");
+        let program = format!(
+            "(function () {{ var __thaw_esm_require = function (s) {{ return {{ __esModule: true, default: 5, a: 10 }}; }}; \
+             return (function (__thaw_esm_require, __thaw_esm_exports) {{\n{}\n\
+             return JSON.stringify([__thaw_esm_exports.x, __thaw_esm_exports.y, __thaw_esm_exports.default, \
+             __thaw_esm_exports.f(), __thaw_esm_exports.nsa, __thaw_esm_exports.whole.a, typeof __thaw_esm_exports.K]); \
+             }})(__thaw_esm_require, {{}}); }})",
+            m.code
+        );
+        let mut it = crate::Interp::new();
+        let f = it.eval_function(&program).expect("compiles");
+        let out = it.call(&f, &crate::Value::Undefined, &[]).expect("runs");
+        assert_eq!(
+            it.to_str(&out).to_string(),
+            "[11,11,5,22,10,10,\"function\"]"
+        );
+    }
+}
+
+#[cfg(test)]
+mod entry_native_tests {
+    use crate::{Interp, Value};
+
+    // `__thaw_esm_convert` returns the JSON of `convert_entry`, and a failed conversion throws a SyntaxError.
+    #[test]
+    fn native_convert_returns_json_and_throws_syntax_error() {
+        let mut it = Interp::new();
+        let f = it
+            .eval_function(
+                "(function (s) { try { return __thaw_esm_convert(s); } catch (e) { return e.name + ':' + e.message; } })",
+            )
+            .expect("compiles");
+        let ok = it
+            .call(
+                &f,
+                &Value::Undefined,
+                &[Value::str("import 'a';\nawait 1;\n")],
+            )
+            .expect("runs");
+        let json = it.to_str(&ok).to_string();
+        assert!(json.starts_with("{\"code\":\""), "{json}");
+        assert!(
+            json.ends_with("\"tla\":true,\"imports\":[\"a\"]}"),
+            "{json}"
+        );
+        let bad = it
+            .call(&f, &Value::Undefined, &[Value::str("const = ;\n")])
+            .expect("runs");
+        let err = it.to_str(&bad).to_string();
+        assert!(
+            err.starts_with("SyntaxError:failed to parse module"),
+            "{err}"
+        );
     }
 }
