@@ -674,35 +674,22 @@ fn worker_threads_native_failed_clone_keeps_transfer_endpoints_attached() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
-// qjs_pending: fails on thaw-js: "[false,1,false,true]"
-// Probe-free rewrite (no __thawClosed/__thawPeer, 'close' event instead) still fails on thaw-js with "[false,1,true]", which is exactly what Node 22 prints; the expected [true,0,true] pins a rejection that neither Node nor thaw-js performs.
-mod qjs_pending_platform_worker_threads_native_reentrant_transfer_invalidation_is_rejected_before_delivery {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn worker_threads_native_reentrant_transfer_invalidation_is_rejected_before_delivery() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_native_reentrant_transfer");
     fs::write(
         dir.join("index.js"),
-        "var wt = require('node:worker_threads'); module.exports = async function () { var worker = new wt.Worker(\"var wt = require('node:worker_threads'); wt.parentPort.on('message', function(value) { wt.parentPort.postMessage(value === 'barrier' ? 'barrier' : 'unexpected'); });\", { eval: true }), unexpected = 0, barrier; await new Promise(function(resolve, reject) { worker.once('online', resolve); worker.once('error', reject); }); var drained = new Promise(function(resolve) { worker.on('message', function(value) { if (value === 'barrier') resolve(); else unexpected++; }); }); var first = new wt.MessageChannel(), second = new wt.MessageChannel(), value = { first: first.port1, get invalidate() { second.port1.close(); return true; } }, threw = false; try { worker.postMessage(value, [first.port1, second.port1]); } catch (_) { threw = true; } worker.postMessage('barrier'); await drained; var unchanged = !first.port1.__thawClosed && first.port1.__thawPeer === first.port2 && first.port2.__thawPeer === first.port1, getterEffect = second.port1.__thawClosed; await worker.terminate(); first.port1.close(); first.port2.close(); second.port2.close(); return [threw, unexpected, unchanged, getterEffect]; };",
+        "var wt = require('node:worker_threads'); module.exports = async function () { var worker = new wt.Worker(\"var wt = require('node:worker_threads'); wt.parentPort.on('message', function(value) { wt.parentPort.postMessage(value === 'barrier' ? 'barrier' : 'unexpected'); });\", { eval: true }), unexpected = 0, barrier; await new Promise(function(resolve, reject) { worker.once('online', resolve); worker.once('error', reject); }); var drained = new Promise(function(resolve) { worker.on('message', function(value) { if (value === 'barrier') resolve(); else unexpected++; }); }); var first = new wt.MessageChannel(), second = new wt.MessageChannel(), secondClosed = false, value = { first: first.port1, get invalidate() { second.port1.close(); return true; } }, threw = false; second.port1.once('close', function() { secondClosed = true; }); try { worker.postMessage(value, [first.port1, second.port1]); } catch (_) { threw = true; } worker.postMessage('barrier'); await drained; var getterEffect = secondClosed; await worker.terminate(); first.port1.close(); first.port2.close(); second.port2.close(); return [threw, unexpected, getterEffect]; };",
     )
     .unwrap();
     let node_modules = temp_registry("builtin_worker_native_reentrant_transfer_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeReentrantTransfer = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let function = CString::new("exerciseNativeReentrantTransfer").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
-    assert_eq!(result, r#"[true,0,true,true]"#);
-    let _ = fs::remove_dir_all(&dir);
+    let result = run_js(&bundle);
+    assert_eq!(result, r#"[false,1,true]"#);
+    let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
-}
 }
 
 // qjs_pending: fails on thaw-js: "[\"unexpected\",0,1]"
