@@ -172,8 +172,8 @@ if (typeof globalThis.MessageEvent !== 'function') {
         // Closing one end of a MessageChannel closes the entangled end too; host-owned worker ports manage their own peer.
         if (peer && this.__thawChannelPair && peer.__thawChannelPair && !peer.__thawClosed) peer.__thawCloseAfterDrain();
       }
-      ref() { this.__thawRefed = true; refreshPortLive(); return this; }
-      unref() { this.__thawRefed = false; refreshPortLive(); return this; }
+      ref() { this.__thawRefed = true; refreshPortLive(); }
+      unref() { this.__thawRefed = false; refreshPortLive(); }
       hasRef() { return this.__thawRefed; }
       on(name, listener) { const key = String(name); const list = this.__thawNodeListeners.get(key) || []; list.push(listener); this.__thawNodeListeners.set(key, list); if (key === 'message') this.start(); return this; }
       once(name, listener) { const wrapped = (...args) => { this.off(name, wrapped); listener.apply(this, args); }; wrapped.listener = listener; return this.on(name, wrapped); }

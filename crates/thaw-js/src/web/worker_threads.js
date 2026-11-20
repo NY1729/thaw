@@ -184,6 +184,8 @@
         exited: false,
         exitCode: undefined,
         refd: true,
+        captureOut: options.stdout === true,
+        captureErr: options.stderr === true,
         resourceLimits,
         exitPromise: new Promise(resolve => { resolveExit = resolve; }),
         resolveExit,
@@ -219,14 +221,12 @@
       const state = states.get(this);
       state.refd = true;
       if (!state.exited) __thaw_worker_ref(state.handle, true);
-      return this;
     }
 
     unref() {
       const state = states.get(this);
       state.refd = false;
       if (!state.exited) __thaw_worker_ref(state.handle, false);
-      return this;
     }
 
     hasRef() { return states.get(this).refd; }
@@ -267,9 +267,16 @@
       } else if (event.type === 'threadAck') {
         settleSend(event.ack, event.status, event.value);
       } else if (event.type === 'stdout' || event.type === 'stderr') {
-        const stream = event.type === 'stdout' ? worker.stdout : worker.stderr;
-        stream.__thawPush(hexToBytes(event.value));
-        stream.__thawFlush();
+        // stdio: captured output goes to worker.stdout / worker.stderr; the rest is written to this process's own
+        // stdout / stderr (its write, so a parent that overrode it sees the Buffers)
+        const bytes = hexToBytes(event.value);
+        if (event.type === 'stdout' ? state.captureOut : state.captureErr) {
+          const stream = event.type === 'stdout' ? worker.stdout : worker.stderr;
+          stream.__thawPush(bytes);
+          stream.__thawFlush();
+        } else {
+          (event.type === 'stdout' ? process.stdout : process.stderr).write(Buffer.from(bytes));
+        }
       } else if (event.type === 'exit') {
         state.exited = true;
         state.exitCode = event.code;
@@ -313,8 +320,8 @@
   class HandleWrap {
     close() { return movedPorts.get(this).port.close(); }
     hasRef() { return movedPorts.get(this).port.hasRef(); }
-    ref() { movedPorts.get(this).port.ref(); return this; }
-    unref() { movedPorts.get(this).port.unref(); return this; }
+    ref() { movedPorts.get(this).port.ref(); }
+    unref() { movedPorts.get(this).port.unref(); }
   }
   class MessagePort extends HandleWrap {
     postMessage(value, transferList) { return movedPorts.get(this).port.postMessage(value, transferList); }

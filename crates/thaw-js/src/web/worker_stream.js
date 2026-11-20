@@ -43,8 +43,23 @@
     for (let index = 0; index < bytes.length; index++) bytes[index] = parseInt(hex.slice(index * 2, index * 2 + 2), 16);
     return bytes;
   };
+  // a write's string as bytes in its encoding (the default is UTF-8); a byte chunk is returned as it is
+  // ponytail: hex is not validated (Node stops at the first bad pair), latin1 and binary take each char's low byte
+  const encodeChunk = (chunk, encoding) => {
+    if (typeof chunk !== 'string') return chunk;
+    const name = encoding === undefined || encoding === null ? 'utf8' : String(encoding).toLowerCase();
+    if (name === 'latin1' || name === 'binary') {
+      const bytes = new Uint8Array(chunk.length);
+      for (let index = 0; index < chunk.length; index++) bytes[index] = chunk.charCodeAt(index) & 0xff;
+      return bytes;
+    }
+    if (name === 'hex') return hexToBytes(chunk);
+    return new TextEncoder().encode(chunk);
+  };
+  // Node hands data chunks out as Buffers (a view of the same bytes)
+  const asBuffer = bytes => Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
-  // Readable: chunks are pushed by the owner (__thawPush / __thawEnd, then __thawFlush). Chunks are Uint8Array
+  // Readable: chunks are pushed by the owner (__thawPush / __thawEnd, then __thawFlush). Chunks are Buffers
   // unless setEncoding was called (then strings, decoded as UTF-8). `data` is delivered only while flowing and
   // re-checked per chunk, so a handler's pause() holds back the rest; `end` only after the buffer drains.
   class Readable extends Emitter {
@@ -55,7 +70,7 @@
       this.ended = false;
       this.endEmitted = false;
       this.destroyed = false;
-      this.encoding = null;
+      this.readableEncoding = null;
       this.decoder = null;
       // ponytail: UTF-8 only; other encodings are treated as utf8
       this.onChange = null;
@@ -65,7 +80,7 @@
     get readableFlowing() { return this.flowing; }
     changed() { if (this.onChange) this.onChange(); }
     setEncoding(encoding) {
-      this.encoding = encoding;
+      this.readableEncoding = encoding;
       this.decoder = new TextDecoder('utf-8');
       return this;
     }
@@ -94,7 +109,7 @@
     read() {
       if (this.buf.length === 0) return null;
       const bytes = this.buf.shift();
-      return this.encoding ? this.decoder.decode(bytes, { stream: true }) : bytes;
+      return this.readableEncoding ? this.decoder.decode(bytes, { stream: true }) : asBuffer(bytes);
     }
     pipe(dest) {
       this.on('data', chunk => dest.write(chunk));
@@ -117,12 +132,12 @@
     __thawFlush() {
       while (this.flowing && this.buf.length > 0) {
         const bytes = this.buf.shift();
-        const chunk = this.encoding ? this.decoder.decode(bytes, { stream: true }) : bytes;
+        const chunk = this.readableEncoding ? this.decoder.decode(bytes, { stream: true }) : asBuffer(bytes);
         if (chunk.length !== 0) this.emit('data', chunk);
       }
       if (this.flowing && this.ended && this.buf.length === 0 && !this.endEmitted) {
         this.endEmitted = true;
-        const tail = this.encoding ? this.decoder.decode() : '';
+        const tail = this.readableEncoding ? this.decoder.decode() : '';
         if (tail.length !== 0) this.emit('data', tail);
         this.emit('end');
         this.emit('close');
@@ -144,7 +159,7 @@
       this.destroyed = false;
     }
     write(chunk, encoding, callback) {
-      if (typeof encoding === 'function') callback = encoding;
+      if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
       if (this.writableEnded || this.destroyed) {
         const error = new Error('write after end');
         error.code = 'ERR_STREAM_WRITE_AFTER_END';
@@ -154,7 +169,7 @@
         });
         return false;
       }
-      const bytes = typeof chunk === 'string' ? new TextEncoder().encode(chunk) : chunk;
+      const bytes = encodeChunk(chunk, encoding);
       // a sink that throws, or returns false (the worker is gone), fails this write: the callback gets the error,
       // then 'error' is emitted once for the stream
       let error = null;
@@ -183,7 +198,10 @@
     }
     end(chunk, encoding, callback) {
       if (typeof chunk === 'function') callback = chunk;
-      else if (chunk !== undefined && chunk !== null) this.write(chunk, typeof encoding === 'function' ? undefined : encoding);
+      else {
+        if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+        if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
+      }
       if (!this.writableEnded && !this.destroyed) {
         this.writableEnded = true;
         this.writable = false;

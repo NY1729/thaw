@@ -32,7 +32,7 @@ pub(crate) fn prototype_of(it: &mut Interp, object: &Obj) -> R<Value> {
 
 /// `object instanceof constructor`: `Symbol.hasInstance` first, else the prototype chain walked with
 /// proxy `getPrototypeOf` traps honoured (the interpreter's own operator reads the raw chain).
-fn instance_of(it: &mut Interp, object: &Value, constructor: &Value) -> R<bool> {
+pub(crate) fn instance_of(it: &mut Interp, object: &Value, constructor: &Value) -> R<bool> {
     if !matches!(constructor, Value::Object(_)) {
         return it.throw_error(
             "TypeError",

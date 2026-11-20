@@ -481,7 +481,7 @@ fn fs_watch_file_reports_host_changes_and_stops_cleanly() {
     let dir = temp_registry("builtin_fs_watch_file");
     fs::write(
             dir.join("index.js"),
-            "var fs = require('node:fs'); module.exports = async function (path) { fs.writeFileSync(path, 'one'); var ignoredCalls = 0, ignored = function() { ignoredCalls++; }, watcher; var changed = new Promise(function(resolve) { watcher = fs.watchFile(path, { interval: 1, persistent: false }, function(current, previous) { fs.unwatchFile(path); resolve([previous.size, current.size, current.isFile(), watcher.hasRef(), ignoredCalls]); }); fs.watchFile(path, { interval: 1 }, ignored); fs.unwatchFile(path, ignored); }); setTimeout(function() { fs.writeFileSync(path, 'changed-value'); }, 3); var result = await changed; return [result, watcher._timer, watcher._listeners.length]; };",
+            "var fs = require('node:fs'); module.exports = async function (path) { fs.writeFileSync(path, 'one'); var ignoredCalls = 0, ignored = function() { ignoredCalls++; }, watcher; var changed = new Promise(function(resolve) { watcher = fs.watchFile(path, { interval: 1, persistent: false }, function(current, previous) { fs.unwatchFile(path); resolve([previous.size, current.size, current.isFile(), watcher.hasRef(), ignoredCalls]); }); fs.watchFile(path, { interval: 1 }, ignored); fs.unwatchFile(path, ignored); }); setTimeout(function() { fs.writeFileSync(path, 'changed-value'); }, 3); var keep = setTimeout(function(){}, 2000); var result = await changed; clearTimeout(keep); return [result, watcher._timer, watcher._listeners.length]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_fs_watch_file_node_modules");
