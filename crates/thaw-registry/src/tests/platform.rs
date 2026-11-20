@@ -888,100 +888,54 @@ fn worker_threads_data_url_worker_decodes_javascript() {
 }
 }
 
-// qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
-mod qjs_pending_platform_worker_threads_load_runtime_computed_absolute_paths {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn worker_threads_load_runtime_computed_absolute_paths() {
-    use std::ffi::{CStr, CString};
-    let dir = temp_registry("builtin_worker_runtime_path");
+    let dir = worker_fixture(
+        "worker_runtime_absolute_paths",
+        &[
+            (
+                "package.json",
+                r##"{"imports":{"#worker-tool":{"node":"./internal/tool.cjs","default":"./internal/wrong.cjs"},"#features/*":{"require":"./internal/features/*.js"},"#escape":"../outside.js"}}"##,
+            ),
+            ("internal/tool.cjs", "module.exports = 11;"),
+            ("internal/features/math.js", "module.exports = 12;"),
+            (
+                "workers/nested/dynamic-worker.js",
+                "var wt = require('node:worker_threads'); var hiddenCode; try { require('runtime-worker-dependency/hidden'); } catch (error) { hiddenCode = error.code; } var missingImportCode; try { require('#missing'); } catch (error) { missingImportCode = error.code; } var exportEscapeCode; try { require('runtime-worker-dependency/escape'); } catch (error) { exportEscapeCode = error.code; } var importEscapeCode; try { require('#escape'); } catch (error) { importEscapeCode = error.code; } wt.parentPort.postMessage([wt.workerData, __filename, __dirname, require('./worker-value'), require('runtime-worker-dependency'), require('runtime-worker-dependency/feature'), require('runtime-worker-dependency/features/math'), hiddenCode, require('#worker-tool'), require('#features/math'), missingImportCode, exportEscapeCode, importEscapeCode]); wt.parentPort.close();",
+            ),
+            ("workers/nested/worker-value.js", "module.exports = require('./worker-package') + 1;"),
+            ("workers/nested/worker-package/package.json", r#"{"main":"lib/value"}"#),
+            ("workers/nested/worker-package/lib/value.js", "module.exports = require('../worker-data.json').value;"),
+            ("workers/nested/worker-package/worker-data.json", r#"{"value":41}"#),
+            (
+                "node_modules/runtime-worker-dependency/package.json",
+                r#"{"main":"wrong.cjs","exports":{".":{"node":"./entry.cjs","default":"./wrong.cjs"},"./feature":{"require":"./feature.js"},"./features/*":{"require":"./dist/*.cjs"},"./escape":"../outside.js"}}"#,
+            ),
+            ("node_modules/runtime-worker-dependency/entry.cjs", "module.exports = 8;"),
+            ("node_modules/runtime-worker-dependency/feature.js", "module.exports = 9;"),
+            ("node_modules/runtime-worker-dependency/dist/math.cjs", "module.exports = 10;"),
+        ],
+    );
     let worker_dir = dir.join("workers/nested");
-    fs::create_dir_all(&worker_dir).unwrap();
-    fs::create_dir_all(dir.join("internal/features")).unwrap();
-    fs::write(
-            dir.join("package.json"),
-            r##"{"imports":{"#worker-tool":{"node":"./internal/tool.cjs","default":"./internal/wrong.cjs"},"#features/*":{"require":"./internal/features/*.js"},"#escape":"../outside.js"}}"##,
-        )
-        .unwrap();
-    fs::write(dir.join("internal/tool.cjs"), "module.exports = 11;").unwrap();
-    fs::write(
-        dir.join("internal/features/math.js"),
-        "module.exports = 12;",
-    )
-    .unwrap();
     let worker_path = worker_dir.join("dynamic-worker.js");
-    fs::write(
-        worker_dir.join("worker-value.js"),
-        "module.exports = require('./worker-package') + 1;",
-    )
-    .unwrap();
-    fs::create_dir_all(worker_dir.join("worker-package/lib")).unwrap();
-    fs::write(
-        worker_dir.join("worker-package/package.json"),
-        r#"{"main":"lib/value"}"#,
-    )
-    .unwrap();
-    fs::write(
-        worker_dir.join("worker-package/lib/value.cjs"),
-        "module.exports = require('../worker-data.json').value;",
-    )
-    .unwrap();
-    fs::write(
-        worker_dir.join("worker-package/worker-data.json"),
-        r#"{"value":41}"#,
-    )
-    .unwrap();
-    fs::create_dir_all(dir.join("node_modules/runtime-worker-dependency")).unwrap();
-    fs::write(
-            dir.join("node_modules/runtime-worker-dependency/package.json"),
-            r#"{"main":"wrong.cjs","exports":{".":{"node":"./entry.cjs","default":"./wrong.cjs"},"./feature":{"require":"./feature.js"},"./features/*":{"require":"./dist/*.cjs"},"./escape":"../outside.js"}}"#,
-        )
-        .unwrap();
-    fs::write(
-        dir.join("node_modules/runtime-worker-dependency/entry.cjs"),
-        "module.exports = 8;",
-    )
-    .unwrap();
-    fs::write(
-        dir.join("node_modules/runtime-worker-dependency/feature.js"),
-        "module.exports = 9;",
-    )
-    .unwrap();
-    fs::create_dir_all(dir.join("node_modules/runtime-worker-dependency/dist")).unwrap();
-    fs::write(
-        dir.join("node_modules/runtime-worker-dependency/dist/math.cjs"),
-        "module.exports = 10;",
-    )
-    .unwrap();
-    fs::write(
-            &worker_path,
-            "var wt = require('node:worker_threads'); var hiddenCode; try { require('runtime-worker-dependency/hidden'); } catch (error) { hiddenCode = error.code; } var missingImportCode; try { require('#missing'); } catch (error) { missingImportCode = error.code; } var exportEscapeCode; try { require('runtime-worker-dependency/escape'); } catch (error) { exportEscapeCode = error.code; } var importEscapeCode; try { require('#escape'); } catch (error) { importEscapeCode = error.code; } wt.parentPort.postMessage([wt.workerData, __filename, __dirname, typeof __thaw_worker_spawn, require('./worker-value'), require('runtime-worker-dependency'), require('runtime-worker-dependency/feature'), require('runtime-worker-dependency/features/math'), hiddenCode, require('#worker-tool'), require('#features/math'), missingImportCode, exportEscapeCode, importEscapeCode]); wt.parentPort.close();",
-        )
-        .unwrap();
-    fs::write(
-            dir.join("index.js"),
-            "var Worker = require('node:worker_threads').Worker; module.exports = async function (runtimePath) { var worker = new Worker(runtimePath, { workerData: 23 }); var exit = new Promise(function(resolve, reject) { worker.on('error', reject); worker.on('exit', resolve); }); var message = await new Promise(function(resolve) { worker.on('message', resolve); }); return [message, await exit, typeof worker._nativeHandle]; };",
-        )
-        .unwrap();
-    let node_modules = temp_registry("builtin_worker_runtime_path_node_modules");
-    let (bundle, _, file_count, _) =
-        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
-    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ if (String(name).startsWith('runtime-worker-dependency')) return {{}}; throw new Error(name); }}; {bundle} globalThis.exerciseRuntimeWorkerPath = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let function = CString::new("exerciseRuntimeWorkerPath").unwrap();
-    let path = worker_path.to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&vec![&path]).unwrap()).unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    let path = serde_json::to_string(worker_path.to_str().unwrap()).unwrap();
+    // Worker message plus exit code, as the QuickJS version returned them (its typeof probes are dropped).
+    let result = run_worker_fixture(
+        &dir,
+        &format!(
+            "var worker = new Worker({path}, {{ workerData: 23 }}), out = {{ messages: [], errors: [] }}; \
+             return new Promise(function (resolve) {{ \
+                 worker.on('message', function (value) {{ out.messages.push(value); }}); \
+                 worker.on('error', function (error) {{ out.errors.push(error.code || error.name); }}); \
+                 worker.on('exit', function (code) {{ resolve([out.messages[0], code, out.errors]); }}); \
+             }});"
+        ),
+    );
     let expected = serde_json::json!([
         [
             23,
-            path,
+            worker_path.to_string_lossy(),
             worker_dir.to_string_lossy(),
-            "function",
             42,
             8,
             9,
@@ -994,13 +948,11 @@ fn worker_threads_load_runtime_computed_absolute_paths() {
             "ERR_INVALID_PACKAGE_TARGET"
         ],
         0,
-        "number"
+        []
     ])
     .to_string();
     assert_eq!(result, expected);
     let _ = fs::remove_dir_all(dir);
-    let _ = fs::remove_dir_all(node_modules);
-}
 }
 
 // qjs_pending: fails on thaw-js: child leg 1 "{\"__thaw_error__\":\"...missing invalid chunk error\"}" (process.stdout.write(1, cb) does not error on thaw-js); later assertions not reached
