@@ -4697,7 +4697,13 @@ impl Interp {
                         let args = self.eval_args(&c.args, scope)?;
                         return self.super_call(&args, scope);
                     }
-                    return unsupported("import()");
+                    // `import(spec)` calls the in-scope `__thaw_esm_import` hook with the evaluated
+                    // arguments unchanged; without the binding it stays unsupported.
+                    let Some(hook) = self.lookup(scope, "__thaw_esm_import") else {
+                        return unsupported("import()");
+                    };
+                    let args = self.eval_args(&c.args, scope)?;
+                    return self.call(&hook, &Value::Undefined, &args);
                 };
                 let (f, this) = match &**callee {
                     a::Expr::SuperProp(_) => (self.eval(callee, scope)?, self.this_of(scope)),
@@ -4923,7 +4929,11 @@ impl Interp {
             a::Expr::MetaProp(m) if matches!(m.kind, a::MetaPropKind::NewTarget) => {
                 Ok(self.lookup(scope, "%newtarget").unwrap_or(Value::Undefined))
             }
-            a::Expr::MetaProp(_) => unsupported("import.meta"),
+            // `import.meta` reads the in-scope `__thaw_esm_meta` binding; without it, unsupported.
+            a::Expr::MetaProp(_) => match self.lookup(scope, "__thaw_esm_meta") {
+                Some(meta) => Ok(meta),
+                None => unsupported("import.meta"),
+            },
             a::Expr::Yield(y) => {
                 let v = match &y.arg {
                     Some(e) => self.eval(e, scope)?,
