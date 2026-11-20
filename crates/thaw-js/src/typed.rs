@@ -229,6 +229,11 @@ pub(crate) fn resize_bytes(b: &Bytes, n: usize) -> bool {
     true
 }
 
+/// Whether an ArrayBuffer's storage is a SharedArrayBuffer block (`util.types.isSharedArrayBuffer`).
+pub(crate) fn bytes_is_shared(b: &Bytes) -> bool {
+    b.sab.is_some()
+}
+
 #[cfg(feature = "wasm")]
 /// An attached storage over bytes the wasm engine owns (no copy; the same allocation as the engine's memory).
 pub(crate) fn shared_bytes(shared: Rc<RefCell<Vec<u8>>>) -> Bytes {

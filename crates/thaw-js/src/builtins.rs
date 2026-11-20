@@ -311,6 +311,81 @@ pub(crate) fn object_prototype_to_string(it: &mut Interp, this: &Value) -> R<Val
     }))
 }
 
+/// `__thaw_brand(v)`: the internal class of an object, read from its kind or its hidden slots (never from the
+/// prototype or `Symbol.toStringTag`), so `util.types` answers as V8's brand checks do for fakes and other realms.
+/// Undefined for a primitive.
+pub(crate) fn install_util_brand(it: &mut Interp) {
+    let brand = it.native(|_, _, args| {
+        let Value::Object(o) = arg(args, 0) else {
+            return Ok(Value::Undefined);
+        };
+        let fixed: Option<&'static str> = match &*o.kind.borrow() {
+            Kind::Plain
+            | Kind::Global
+            | Kind::RawJson(_)
+            | Kind::Proxy(_)
+            | Kind::Symbol { .. } => None,
+            Kind::Closure { def, .. } => Some(match (def.is_async, def.is_gen) {
+                (true, true) => "AsyncGeneratorFunction",
+                (true, false) => "AsyncFunction",
+                (false, true) => "GeneratorFunction",
+                (false, false) => "Function",
+            }),
+            Kind::Native(_) => Some("Function"),
+            Kind::Array(_) => Some("Array"),
+            Kind::RegExp(_) => Some("RegExp"),
+            Kind::Map(_) => Some("Map"),
+            Kind::Set(_) => Some("Set"),
+            Kind::CollIter(c) => Some(if c.is_map {
+                "MapIterator"
+            } else {
+                "SetIterator"
+            }),
+            Kind::Promise(_) => Some("Promise"),
+            Kind::Generator(_) => Some("Generator"),
+            Kind::ArrayBuffer(b) => Some(if typed::bytes_is_shared(b) {
+                "SharedArrayBuffer"
+            } else {
+                "ArrayBuffer"
+            }),
+            Kind::Typed(t) => Some(
+                t.ty.tag()
+                    .trim_start_matches("[object ")
+                    .trim_end_matches(']'),
+            ),
+            Kind::Wrapper(Value::Number(_)) => Some("Number"),
+            Kind::Wrapper(Value::Str(_)) => Some("String"),
+            Kind::Wrapper(Value::BigInt(_)) => Some("BigInt"),
+            Kind::Wrapper(_) => Some("Boolean"),
+        };
+        Ok(Value::str(fixed.unwrap_or_else(|| plain_brand(&o))))
+    });
+    it.global.declare("__thaw_brand", brand, true);
+}
+
+/// Brand of a plain object: the hidden (non-enumerable) own slots the builtins define. A user object cannot
+/// make one by assignment, and a fake (`Object.create(Date.prototype)`) has none.
+fn plain_brand(o: &Obj) -> &'static str {
+    let hidden = |k: &str| matches!(find_own(o, k), Some((_, false)));
+    if hidden("__time") {
+        return "Date";
+    }
+    if let Some((Slot::Data(Value::Object(s)), false)) = find_own(o, "__store") {
+        match &*s.kind.borrow() {
+            Kind::Map(_) => return "WeakMap",
+            Kind::Set(_) => return "WeakSet",
+            _ => {}
+        }
+    }
+    if hidden("__buf") {
+        return "DataView";
+    }
+    if hidden("stack") && is_error_instance(o) {
+        return "Error";
+    }
+    "Object"
+}
+
 pub(crate) fn now_ms() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

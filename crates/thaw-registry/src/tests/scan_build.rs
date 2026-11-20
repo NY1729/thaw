@@ -6,8 +6,11 @@ fn blockers_of(report: &thaw_js::scan::Report) -> Vec<String> {
 
 #[test]
 fn scan_build_excuses_a_method_a_served_builtin_defines() {
-    // `createScript` is defined by a served builtin (R6), so the build passes it; a bare scan blocks on it
-    let bundle = thaw_js::scan::script_as_bundle("module.exports = function (b) { return b.createScript('x'); };");
+    // `createScript` is defined by a served builtin (R6), so the build passes it; a bare scan blocks on it. The vm
+    // load is dynamic: createScript's owner is vm, and only a loaded owner makes the call a finding (the owner rule)
+    let bundle = thaw_js::scan::script_as_bundle(
+        "module.exports = function (b) { process.getBuiltinModule('node:vm'); return b.createScript('x'); };",
+    );
     let empty = std::collections::HashSet::new();
     let bare = thaw_js::scan::scan_bundle_in(
         &bundle,
