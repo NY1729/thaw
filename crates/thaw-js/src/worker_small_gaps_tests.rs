@@ -89,3 +89,31 @@ fn worker_thread_id_is_minus_one_after_exit() {
       })().catch((e) => console.log('failed ' + e));";
     assert_eq!(lines(src), ["before true", "after -1"]);
 }
+
+#[test]
+fn worker_and_port_ref_unref_return_undefined() {
+    // Node 22: Worker and MessagePort ref()/unref() resolve undefined (no chaining), even after the worker exits
+    let src = "const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const worker = new wt.Worker('setInterval(() => {}, 1000)', { eval: true });
+        console.log('worker ref', worker.ref() === undefined, worker.unref() === undefined);
+        worker.ref();
+        const exited = new Promise((resolve) => worker.on('exit', resolve));
+        worker.terminate();
+        await exited;
+        console.log('exited ref', worker.ref() === undefined, worker.unref() === undefined);
+        const { port1, port2 } = new wt.MessageChannel();
+        console.log('port ref', port1.ref() === undefined, port1.unref() === undefined, port1.hasRef());
+        console.log('port2 unref', port2.unref() === undefined);
+        port1.close(); port2.close();
+      })().catch((e) => console.log('failed ' + e));";
+    assert_eq!(
+        lines(src),
+        [
+            "worker ref true true",
+            "exited ref true true",
+            "port ref true true false",
+            "port2 unref true",
+        ]
+    );
+}
