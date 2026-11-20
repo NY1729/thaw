@@ -102,6 +102,7 @@ impl<'a> FnLowerer<'a> {
             || matches!(
             property,
             "charAt" | "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
+                | "trimLeft" | "trimRight"
                 | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "toExponential"
                 | "localeCompare"
                 | "normalize" | "split" | "replace" | "replaceAll" | "test" | "match" | "search"
@@ -826,7 +827,7 @@ impl<'a> FnLowerer<'a> {
             "replace" | "replaceAll" | "test" | "exec" | "match" | "matchAll" | "search" => {
                 self.lower_native_regex_method(member, property, call)
             }
-            "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd" | "repeat"
+            "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd" | "trimLeft" | "trimRight" | "repeat"
             | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "toExponential"
                             | "toLowerCase" | "toUpperCase" | "toLocaleLowerCase" | "toLocaleUpperCase"
                 | "isWellFormed" | "toWellFormed" => {

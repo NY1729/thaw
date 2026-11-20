@@ -1934,6 +1934,16 @@ fn compiles_ecmascript_string_trimming() {
 }
 
 #[test]
+fn compiles_string_trim_left_right_aliases() {
+    let source = r#"
+        function main(): void {
+            console.log("  a ".trimLeft() + "|" + "  a ".trimRight() + "|");
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "string_trim_left_right"), "a |  a|\n");
+}
+
+#[test]
 fn compiles_unicode_string_case_conversion() {
     let source = r#"
         async function delayed(): Promise<string> {

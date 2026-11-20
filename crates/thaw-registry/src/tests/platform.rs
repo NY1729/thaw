@@ -1617,248 +1617,130 @@ fn worker_saved_url_keeps_bundle_affinity_across_packages_and_nested_workers() {
 }
 }
 
-// qjs_pending: fails on thaw-js: "ERROR: SyntaxError: Expected ';', '}' or <eof>"
-mod qjs_pending_platform_file_worker_and_main_keep_root_dirname_for_entry_and_dependencies {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn file_worker_and_main_keep_root_dirname_for_entry_and_dependencies() {
-    use std::ffi::{CStr, CString};
-    let dir = temp_registry("worker_root_dirname");
-    let modules = temp_registry("worker_root_dirname_modules");
-    fs::write(dir.join("index.js"), r#"
-        var Worker = require('node:worker_threads').Worker;
-        module.exports = function () {
-            var originalRead = globalThis.__thaw_worker_read_source;
-            var originalSpawn = globalThis.__thaw_worker_spawn;
-            var captured, stop = {};
-            globalThis.__thaw_worker_read_source = function(path) {
-                if (path.endsWith('entry.js')) return "module.exports = [__dirname, require('./child.js')];";
-                if (path.endsWith('child.js')) return 'module.exports = __dirname;';
-                throw new Error('Unexpected read: ' + path);
-            };
-            globalThis.__thaw_worker_spawn = function(bundle, source) {
-                captured = source;
-                throw stop; // Capture generated source without starting a host worker.
-            };
-            try {
-                var workerValues = ['/entry.js', '/nested/entry.js', 'entry.js'].map(function(path) {
-                    captured = undefined;
-                    try { new Worker(path); } catch (error) { if (error !== stop) throw error; }
-                    if (captured === undefined) throw new Error('Missing generated Worker source');
-                    var childModule = { exports: {} };
-                    Function('require', 'module', 'exports', captured)(
-                        function(name) { throw new Error(name); }, childModule, childModule.exports);
-                    return childModule.exports;
-                });
-                var mainValues = ['/entry.js', '/nested/entry.js'].map(function(path) {
-                    return globalThis.__thaw_run_main_file(path);
-                });
-                return [workerValues, mainValues];
-            } finally {
-                globalThis.__thaw_worker_read_source = originalRead;
-                globalThis.__thaw_worker_spawn = originalSpawn;
-            }
-        };
-    "#).unwrap();
-    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
-         globalThis.exerciseWorkerRootDirname = module.exports;"
+    let dir = worker_fixture(
+        "worker_root_dirname",
+        &[
+            ("entry.js", "var wt = require('node:worker_threads'); wt.parentPort.postMessage([__dirname, require('./child.js')]); wt.parentPort.close();"),
+            ("child.js", "module.exports = __dirname;"),
+            ("nested/entry.js", "var wt = require('node:worker_threads'); wt.parentPort.postMessage([__dirname, require('./child.js')]); wt.parentPort.close();"),
+            ("nested/child.js", "module.exports = __dirname;"),
+        ],
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerRootDirname".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
-        "[[[\"/\",\"/\"],[\"/nested\",\"/nested\"],[\".\",\".\"]],[[\"/\",\"/\"],[\"/nested\",\"/nested\"]]]");
+    let entry = serde_json::to_string(dir.join("entry.js").to_str().unwrap()).unwrap();
+    let nested = serde_json::to_string(dir.join("nested/entry.js").to_str().unwrap()).unwrap();
+    let result = run_worker_fixture(
+        &dir,
+        &format!(
+            "var a = await runWorker({entry}), b = await runWorker({nested}), c = await runWorker('entry.js'); \
+             return [a.messages, b.messages, c.syncCode];"
+        ),
+    );
+    let root = dir.to_string_lossy().into_owned();
+    let nested_dir = dir.join("nested").to_string_lossy().into_owned();
+    assert_eq!(
+        result,
+        serde_json::json!([[[root, root]], [[nested_dir, nested_dir]], "ERR_WORKER_PATH"]).to_string()
+    );
     let _ = fs::remove_dir_all(dir);
-    let _ = fs::remove_dir_all(modules);
 }
-}
-
-// qjs_pending: fails on thaw-js: "ERROR: Error: The worker script or module filename must be an absolute path or a relative path starting with 
-mod qjs_pending_platform_file_worker_preserves_unresolved_parent_path_components {
-    use super::*;
-    use ::thaw_quickjs;
 
 #[test]
-fn file_worker_preserves_unresolved_parent_path_components() {
-    use std::ffi::{CStr, CString};
-    let dir = temp_registry("worker_parent_components");
-    let modules = temp_registry("worker_parent_components_modules");
-    fs::write(dir.join("index.js"), r#"
-        var Worker = require('node:worker_threads').Worker;
-        module.exports = function () {
-            var originalRead = globalThis.__thaw_worker_read_source;
-            var originalSpawn = globalThis.__thaw_worker_spawn;
-            var captured, stop = {};
-            globalThis.__thaw_worker_read_source = function(path) {
-                if (path.endsWith('entry.js')) return "module.exports = require('../child.js');";
-                if (path.endsWith('child.js')) return 'module.exports = __filename;';
-                throw new Error('Unexpected read: ' + path);
-            };
-            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
-            try {
-                var values = ['entry.js', '../entry.js', '../../entry.js', 'nested/entry.js',
-                              '/entry.js', '/nested/entry.js'].map(function(path) {
-                    captured = undefined;
-                    try { new Worker(path); } catch (error) { if (error !== stop) throw error; }
-                    if (captured === undefined) throw new Error('Missing generated Worker source');
-                    var childModule = { exports: {} };
-                    Function('require', 'module', 'exports', captured)(
-                        function(name) { throw new Error(name); }, childModule, childModule.exports);
-                    return childModule.exports;
-                });
-                values.push(globalThis.__thaw_run_main_file('/entry.js'));
-                values.push(globalThis.__thaw_run_main_file('/nested/entry.js'));
-                return values;
-            } finally {
-                globalThis.__thaw_worker_read_source = originalRead;
-                globalThis.__thaw_worker_spawn = originalSpawn;
-            }
-        };
-    "#).unwrap();
-    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
-         globalThis.exerciseWorkerParentComponents = module.exports;"
+fn file_worker_resolves_parent_components_and_rejects_bare_relative_paths() {
+    let dir = worker_fixture(
+        "worker_parent_components",
+        &[
+            ("a/entry.js", "var wt = require('node:worker_threads'); wt.parentPort.postMessage(require('../child.js')); wt.parentPort.close();"),
+            ("child.js", "module.exports = __filename;"),
+        ],
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerParentComponents".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
-        "[\"../child.js\",\"../../child.js\",\"../../../child.js\",\"child.js\",\"/child.js\",\"/child.js\",\"/child.js\",\"/child.js\"]");
+    let entry = serde_json::to_string(dir.join("a/entry.js").to_str().unwrap()).unwrap();
+    let unnormalised = serde_json::to_string(dir.join("a/../a/entry.js").to_str().unwrap()).unwrap();
+    let result = run_worker_fixture(
+        &dir,
+        &format!(
+            "var a = await runWorker({entry}), b = await runWorker({unnormalised}), \
+             c = await runWorker('entry.js'), d = await runWorker('nested/entry.js'), \
+             e = await runWorker('../entry.js'); return [a, b, c, d, e];"
+        ),
+    );
+    let child = dir.join("child.js").to_string_lossy().into_owned();
+    assert_eq!(
+        result,
+        serde_json::json!([
+            { "messages": [child], "errors": [] },
+            { "messages": [child], "errors": [] },
+            { "syncCode": "ERR_WORKER_PATH" },
+            { "syncCode": "ERR_WORKER_PATH" },
+            { "messages": [], "errors": ["MODULE_NOT_FOUND"] }
+        ])
+        .to_string()
+    );
     let _ = fs::remove_dir_all(dir);
-    let _ = fs::remove_dir_all(modules);
 }
-}
-
-// qjs_pending: fails on thaw-js: "ERROR: SyntaxError: Expected ';', '}' or <eof>"
-mod qjs_pending_platform_file_loaders_retry_failed_modules_and_bind_commonjs_this {
-    use super::*;
-    use ::thaw_quickjs;
 
 #[test]
 fn file_loaders_retry_failed_modules_and_bind_commonjs_this() {
-    use std::ffi::{CStr, CString};
-    let dir = temp_registry("worker_cache_lifecycle");
-    let modules = temp_registry("worker_cache_lifecycle_modules");
-    fs::write(dir.join("index.js"), r#"
-        var Worker = require('node:worker_threads').Worker;
-        module.exports = function () {
-            var originalRead = globalThis.__thaw_worker_read_source;
-            var originalSpawn = globalThis.__thaw_worker_spawn;
-            var captured, jsonReads, stop = {};
-            globalThis.__thaw_cache_control_failure = {};
-            globalThis.__thaw_worker_read_source = function(path) {
-                if (path.endsWith('entry.js')) return [
-                    "var caught = false; try { require('./child.js'); } catch (error) { caught = error === globalThis.__thaw_cache_control_failure; }",
-                    "var second = require('./child.js'), third = require('./child.js');",
-                    "var jsonFailed = false; try { require('./data.json'); } catch (error) { jsonFailed = error instanceof SyntaxError; }",
-                    "module.exports = [caught, second.cycle, second.published, second === third, globalThis.__thaw_cache_control_attempts, jsonFailed, require('./data.json').value];"
-                ].join(';');
-                if (path.endsWith('child.js')) return [
-                    "'use strict'; globalThis.__thaw_cache_control_attempts++;",
-                    "exports.started = true; this.published = 42;",
-                    "exports.cycle = require('./cycle.js');",
-                    "if (globalThis.__thaw_cache_control_attempts === 1) throw globalThis.__thaw_cache_control_failure;"
-                ].join(';');
-                if (path.endsWith('cycle.js')) return "module.exports = require('./child.js').started;";
-                if (path.endsWith('data.json')) return jsonReads++ === 0 ? '{broken' : '{"value":13}';
-                throw new Error('Unexpected read: ' + path);
-            };
-            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
-            try {
-                globalThis.__thaw_cache_control_attempts = 0; jsonReads = 0;
-                try { new Worker('/cache/entry.js'); } catch (error) { if (error !== stop) throw error; }
-                if (captured === undefined) throw new Error('Missing generated Worker source');
-                var childModule = { exports: {} };
-                Function('require', 'module', 'exports', captured)(
-                    function(name) { throw new Error(name); }, childModule, childModule.exports);
-                var workerValue = childModule.exports;
-                globalThis.__thaw_cache_control_attempts = 0; jsonReads = 0;
-                var mainValue = globalThis.__thaw_run_main_file('/cache/entry.js');
-                return [workerValue, mainValue];
-            } finally {
-                globalThis.__thaw_worker_read_source = originalRead;
-                globalThis.__thaw_worker_spawn = originalSpawn;
-                delete globalThis.__thaw_cache_control_attempts;
-                delete globalThis.__thaw_cache_control_failure;
-            }
-        };
-    "#).unwrap();
-    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
-         globalThis.exerciseWorkerCacheLifecycle = module.exports;"
+    let dir = worker_fixture(
+        "worker_cache_lifecycle",
+        &[
+            ("entry.js", "var wt = require('node:worker_threads');\n\
+                var caught = false; try { require('./child.js'); } catch (e) { caught = e && e.m === 1; }\n\
+                var second = require('./child.js'), third = require('./child.js');\n\
+                var jf = false; try { require('./data.json'); } catch (e) { jf = e instanceof SyntaxError; }\n\
+                wt.parentPort.postMessage('fix');\n\
+                wt.parentPort.once('message', function () {\n\
+                    wt.parentPort.postMessage([caught, second.cycle, second.published, second === third, globalThis.attempts, jf, require('./data.json').value]);\n\
+                    wt.parentPort.close();\n\
+                });"),
+            ("child.js", "'use strict'; globalThis.attempts = (globalThis.attempts || 0) + 1; exports.started = true; this.published = 42; exports.cycle = require('./cycle.js'); if (globalThis.attempts === 1) throw { m: 1 };"),
+            ("cycle.js", "module.exports = require('./child.js').started;"),
+            ("data.json", "{broken"),
+        ],
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerCacheLifecycle".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
-        "[[true,true,42,true,2,true,13],[true,true,42,true,2,true,13]]");
+    let entry = serde_json::to_string(dir.join("entry.js").to_str().unwrap()).unwrap();
+    let data = serde_json::to_string(dir.join("data.json").to_str().unwrap()).unwrap();
+    // The worker's first JSON read fails; the parent repairs data.json at the 'fix' handshake, then releases the worker.
+    let result = run_worker_fixture(
+        &dir,
+        &format!(
+            "var out = await runWorker({entry}, function (worker) {{ \
+                require('node:fs').writeFileSync({data}, '{{\"value\":13}}'); worker.postMessage('go'); \
+             }}); return [out.messages[0], out.errors];"
+        ),
+    );
+    assert_eq!(
+        result,
+        serde_json::json!([[true, true, 42, true, 2, true, 13], []]).to_string()
+    );
     let _ = fs::remove_dir_all(dir);
-    let _ = fs::remove_dir_all(modules);
 }
-}
-
-// qjs_pending: fails on thaw-js: "ERROR: SyntaxError: Expected ';', '}' or <eof>"
-mod qjs_pending_platform_file_loaders_accept_hashbangs_without_stripping_json_or_interior_text {
-    use super::*;
-    use ::thaw_quickjs;
 
 #[test]
 fn file_loaders_accept_hashbangs_without_stripping_json_or_interior_text() {
-    use std::ffi::{CStr, CString};
-    let dir = temp_registry("worker_hashbang_lines");
-    let modules = temp_registry("worker_hashbang_lines_modules");
-    fs::write(dir.join("index.js"), r##"
-        var Worker = require('node:worker_threads').Worker;
-        module.exports = function () {
-            var originalRead = globalThis.__thaw_worker_read_source;
-            var originalSpawn = globalThis.__thaw_worker_spawn;
-            var captured, stop = {};
-            globalThis.__thaw_worker_read_source = function(path) {
-                if (path.endsWith('entry.js')) return '#!/usr/bin/env node\n' +
-                    "var invalidJson = false; try { require('./invalid.json'); } catch (error) { invalidJson = error instanceof SyntaxError; }" +
-                    "module.exports = [require('./lf.js'), require('./crlf.cjs'), require('./ls.js'), require('./ps.js'), Object.keys(require('./empty.js')).length, require('./text.js'), invalidJson];";
-                if (path.endsWith('lf.js')) return '#!/usr/bin/env node\nmodule.exports = 1;';
-                if (path.endsWith('crlf.cjs')) return '#!/usr/bin/env node\r\nmodule.exports = 2;';
-                if (path.endsWith('ls.js')) return '#!/usr/bin/env node\u2028module.exports = 3;';
-                if (path.endsWith('ps.js')) return '#!/usr/bin/env node\u2029module.exports = 4;';
-                if (path.endsWith('empty.js')) return '#!/usr/bin/env node';
-                if (path.endsWith('text.js')) return 'module.exports = "#!kept";';
-                if (path.endsWith('invalid.json')) return '#!/usr/bin/env node\n{"value":1}';
-                throw new Error('Unexpected read: ' + path);
-            };
-            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
-            try {
-                try { new Worker('/hashbang/entry.js'); } catch (error) { if (error !== stop) throw error; }
-                if (captured === undefined) throw new Error('Missing generated Worker source');
-                var childModule = { exports: {} };
-                Function('require', 'module', 'exports', captured)(
-                    function(name) { throw new Error(name); }, childModule, childModule.exports);
-                return [childModule.exports, globalThis.__thaw_run_main_file('/hashbang/entry.js')];
-            } finally {
-                globalThis.__thaw_worker_read_source = originalRead;
-                globalThis.__thaw_worker_spawn = originalSpawn;
-            }
-        };
-    "##).unwrap();
-    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
-         globalThis.exerciseWorkerHashbangLines = module.exports;"
+    let dir = worker_fixture(
+        "worker_hashbang_lines",
+        &[
+            ("entry.js", "#!/usr/bin/env node\n\
+                var wt = require('node:worker_threads'); var inv = false; try { require('./invalid.json'); } catch (e) { inv = e instanceof SyntaxError; } \
+                wt.parentPort.postMessage([require('./lf.js'), require('./crlf.cjs'), require('./ls.js'), require('./ps.js'), Object.keys(require('./empty.js')).length, require('./text.js'), inv]); wt.parentPort.close();"),
+            ("lf.js", "#!/usr/bin/env node\nmodule.exports = 1;"),
+            ("crlf.cjs", "#!/usr/bin/env node\r\nmodule.exports = 2;"),
+            ("ls.js", "#!/usr/bin/env node\u{2028}module.exports = 3;"),
+            ("ps.js", "#!/usr/bin/env node\u{2029}module.exports = 4;"),
+            ("empty.js", "#!/usr/bin/env node"),
+            ("text.js", "module.exports = \"#!kept\";"),
+            ("invalid.json", "#!/usr/bin/env node\n{\"value\":1}"),
+        ],
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerHashbangLines".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
-        "[[1,2,3,4,0,\"#!kept\",true],[1,2,3,4,0,\"#!kept\",true]]");
+    let entry = serde_json::to_string(dir.join("entry.js").to_str().unwrap()).unwrap();
+    let result = run_worker_fixture(&dir, &format!("var out = await runWorker({entry}); return [out.messages[0], out.errors];"));
+    assert_eq!(
+        result,
+        serde_json::json!([[1, 2, 3, 4, 0, "#!kept", true], []]).to_string()
+    );
     let _ = fs::remove_dir_all(dir);
-    let _ = fs::remove_dir_all(modules);
-}
 }
 
 // qjs_pending: fails on thaw-js: "ERROR: SyntaxError: Expected ';', '}' or <eof>"
@@ -1992,79 +1874,40 @@ fn file_loaders_resolve_dotted_files_and_directories_in_file_first_order() {
 }
 }
 
-// qjs_pending: fails on thaw-js: "ERROR: SyntaxError: Expected ';', '}' or <eof>"
-mod qjs_pending_platform_file_worker_keeps_directives_and_fallback_scope_in_entry_wrapper {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn file_worker_keeps_directives_and_fallback_scope_in_entry_wrapper() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("worker_entry_directives");
     let modules = temp_registry("worker_entry_directives_modules");
-    fs::write(dir.join("index.js"), r#"
-        var Worker = require('node:worker_threads').Worker;
-        module.exports = async function () {
-            var originalRead = globalThis.__thaw_worker_read_source;
-            var originalSpawn = globalThis.__thaw_worker_spawn;
-            var captured, stop = {};
-            globalThis.__thaw_worker_read_source = function(path) {
-                if (path === '/scope/dep.js') return "'use strict'; module.exports = (function() { return this === undefined; })();";
-                var directive;
-                if (path === '/scope/strict.js') directive = "/* leading comment */ 'other directive'; 'use strict';";
-                else if (path === '/scope/sloppy.js') directive = '';
-                else if (path === '/scope/escaped.js') directive = "'use\\x20strict';";
-                else throw new Error('Unexpected read: ' + path);
-                return directive +
-                    "var object = {}; Object.defineProperty(object, 'fixed', { value: 1, writable: false });" +
-                    "var rejectedWrite = false; try { object.fixed = 2; } catch (error) { rejectedWrite = error instanceof TypeError; }" +
-                    "var values = [rejectedWrite, (function() { return this === undefined; })(), this === exports, require('./dep.js')];" +
-                    "module.exports = values; var port = require('node:worker_threads').parentPort; port.postMessage(values); port.close();";
-            };
-            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
-            try {
-                var capturedValues = ['/scope/strict.js', '/scope/sloppy.js', '/scope/escaped.js'].map(function(path) {
-                    captured = undefined;
-                    try { new Worker(path); } catch (error) { if (error !== stop) throw error; }
-                    if (captured === undefined) throw new Error('Missing generated Worker source');
-                    var childModule = { exports: {} }, posted;
-                    Function('require', 'module', 'exports', captured)(function(name) {
-                        if (name === 'node:worker_threads') return { parentPort: {
-                            postMessage: function(value) { posted = value; }, close: function() {}
-                        } };
-                        throw new Error(name);
-                    }, childModule, childModule.exports);
-                    if (posted !== childModule.exports) throw new Error('Entry lost its module exports');
-                    return posted;
-                });
-                globalThis.__thaw_worker_spawn = undefined;
-                var fallback = new Worker('/scope/strict.js');
-                var message = new Promise(function(resolve, reject) {
-                    fallback.on('message', resolve); fallback.on('error', reject);
-                });
-                var exit = new Promise(function(resolve, reject) {
-                    fallback.on('exit', resolve); fallback.on('error', reject);
-                });
-                return [capturedValues, await message, await exit];
-            } finally {
-                globalThis.__thaw_worker_read_source = originalRead;
-                globalThis.__thaw_worker_spawn = originalSpawn;
-            }
-        };
-    "#).unwrap();
+    let body = r#"var object = {}; Object.defineProperty(object, 'fixed', { value: 1, writable: false });
+var rejectedWrite = false; try { object.fixed = 2; } catch (error) { rejectedWrite = error instanceof TypeError; }
+var values = [rejectedWrite, (function() { return this === undefined; })(), this === exports, require('./dep.js')];
+var port = require('node:worker_threads').parentPort; port.postMessage(values); port.close();
+"#;
+    fs::write(dir.join("strict.js"), format!("/* leading comment */ 'other directive'; 'use strict';\n{body}")).unwrap();
+    fs::write(dir.join("sloppy.js"), format!("\n{body}")).unwrap();
+    fs::write(dir.join("escaped.js"), format!("'use\\x20strict';\n{body}")).unwrap();
+    fs::write(dir.join("dep.js"), "'use strict'; module.exports = (function() { return this === undefined; })();\n").unwrap();
+    let paths = ["strict.js", "sloppy.js", "escaped.js"]
+        .map(|f| format!("{:?}", dir.join(f).display().to_string()))
+        .join(", ");
+    fs::write(
+        dir.join("index.js"),
+        format!(
+            "var Worker = require('node:worker_threads').Worker; \
+             function runWorker(path) {{ return new Promise(function (resolve, reject) {{ var worker = new Worker(path), message; \
+             worker.on('message', function (value) {{ message = value; }}); worker.on('error', reject); \
+             worker.on('exit', function () {{ resolve(message); }}); }}); }} \
+             module.exports = async function () {{ var out = []; for (var f of [{paths}]) out.push(await runWorker(f)); return out; }};"
+        ),
+    )
+    .unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
-         globalThis.exerciseWorkerEntryDirectives = module.exports;"
+    assert_eq!(
+        run_js(&bundle),
+        "[[true,true,true,true],[false,false,true,true],[false,false,true,true]]"
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerEntryDirectives".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
-        "[[[true,true,true,true],[false,false,true,true],[false,false,true,true]],[true,true,true,true],0]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
-}
 }
 
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"

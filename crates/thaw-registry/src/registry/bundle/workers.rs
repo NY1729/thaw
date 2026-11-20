@@ -487,9 +487,18 @@ fn rewrite_static_worker_urls_named(
         // A saved URL must not use a later bundle's shared Worker helpers.
         // ponytail: Each URL duplicates the bundle source; use a registry only if
         // measured Worker URL size or memory becomes a problem.
+        // thaw-js swaps a marked region for "/thaw_modules/KEY" at load time.
+        // A key containing `*/` cannot sit inside a block comment, so it stays unmarked.
+        let marked = !worker_key.contains("*/");
+        if marked {
+            output.push_str(&format!("/*thaw-worker-url:{worker_key}*/"));
+        }
         output.push_str("(\"data:text/javascript;thaw-bundle,\" + encodeURIComponent(\"globalThis.__thaw_worker_bundle_source = \" + JSON.stringify(__thaw_worker_bundle_source) + \";\\n\" + __thaw_worker_bundle_source) + ");
         output.push_str(&encoded_tail);
         output.push(')');
+        if marked {
+            output.push_str("/*thaw-worker-url-end*/");
+        }
         cursor = hi;
         if !worker_requires.contains(&relative) {
             worker_requires.push(relative);
