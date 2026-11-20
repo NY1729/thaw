@@ -62,6 +62,9 @@ struct Loader {
     esm_keys: HashSet<String>,
     /// The CommonJS export names of each key (`__thaw_bundle_cjs_export_names`).
     cjs_names: HashMap<String, Vec<String>>,
+    /// Keys whose factory runs with `this` = its exports (`__thaw_bundle_commonjs_contexts`); `None` when the
+    /// bundle has no table. Every other factory runs with `this` undefined, as an ES module's top level does.
+    commonjs_contexts: Option<HashSet<String>>,
     /// The namespace object built for each CommonJS key, so every dynamic import gets the same one.
     namespaces: RefCell<HashMap<String, Value>>,
     /// Keys whose factory returned a promise (top-level await). `requireAsync` rejects them: G3 is not done.
@@ -374,9 +377,13 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
                 .push((loader.package.clone(), exports.clone()))
         });
     }
+    let this = match &loader.commonjs_contexts {
+        Some(keys) if !keys.contains(key) => Value::Undefined,
+        _ => exports.clone(),
+    };
     let ran = it.call(
         &f,
-        &exports,
+        &this,
         &[
             module.clone(),
             exports.clone(),
@@ -566,6 +573,8 @@ fn boot_bundle(
     let esm_keys = bundle_table(bundle_js, "__thaw_bundle_export_graphs")
         .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()))
         .unwrap_or_default();
+    let commonjs_contexts = bundle_table(bundle_js, "__thaw_bundle_commonjs_contexts")
+        .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()));
     let cjs_names = bundle_table(bundle_js, "__thaw_bundle_cjs_export_names")
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default()
@@ -591,6 +600,7 @@ fn boot_bundle(
         origins,
         esm_keys,
         cjs_names,
+        commonjs_contexts,
         namespaces: RefCell::new(HashMap::new()),
         async_keys: RefCell::new(HashSet::new()),
         promise_of,
@@ -9341,5 +9351,43 @@ var __thaw_bundle_entry_key = "p/index.js";
             .ok()
             .expect("settles with the value");
         assert_eq!(pkg.interp().to_str(&v).to_string(), "11");
+    }
+}
+
+#[cfg(test)]
+mod factory_this_tests {
+    use super::*;
+
+    // A CommonJS factory (listed in `__thaw_bundle_commonjs_contexts`) runs with `this` = its exports; an ESM
+    // factory (not listed) runs with `this` undefined, as a module's top level does.
+    const BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require) {
+  exports.esm = require('./n.js');
+  exports.cjs = require('./c.js');
+},
+"p/c.js": function(module, exports) { exports.cjsThis = (this === exports); },
+"p/n.js": function(module, exports) { "use strict"; exports.esmThis = (this === undefined); }
+};
+var __thaw_bundle_require_maps = { "p/index.js": { "./c.js": "p/c.js", "./n.js": "p/n.js" }, "p/c.js": {}, "p/n.js": {} };
+var __thaw_bundle_entry_key = "p/index.js";
+var __thaw_bundle_commonjs_contexts = JSON.parse("{\"p/index.js\":true,\"p/c.js\":true}");
+})(globalThis.require);"#;
+
+    #[test]
+    fn esm_factory_runs_with_undefined_this_and_commonjs_with_its_exports() {
+        let mut pkg = Package::load(BUNDLE).expect("loads");
+        let exports = pkg.exports();
+        let it = pkg.interp();
+        let read = |it: &mut Interp, path: &[&str]| {
+            let mut v = exports.clone();
+            for name in path {
+                v = it.get(&v, name).expect("property");
+            }
+            it.to_str(&v).to_string()
+        };
+        // Node 22: a .mjs top level has `this` undefined; a required .cjs has `this` === module.exports
+        assert_eq!(read(it, &["esm", "esmThis"]), "true");
+        assert_eq!(read(it, &["cjs", "cjsThis"]), "true");
     }
 }
