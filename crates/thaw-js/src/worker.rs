@@ -80,6 +80,8 @@ struct Side {
     interrupt: Arc<AtomicBool>,
     /// The worker's parentPort has a referenced `message` listener (set by the bootstrap).
     alive: Arc<AtomicBool>,
+    /// The entry is an ES module (`__thaw_run_main_esm`): it runs without the CommonJS globals.
+    esm: bool,
 }
 
 /// Per-`Interp` worker state: the workers this Interp spawned (`workers`, keyed by handle), and on a worker thread
@@ -391,6 +393,8 @@ fn spawn(
     tokens: (u64, u64),
     // the bundled module the worker runs as its main module instead of the disk loader's `source`
     main: Option<MainBundle>,
+    // the entry is an ES module
+    esm: bool,
 ) -> u32 {
     let (tx, cmd_rx) = mpsc::channel();
     let (evt_tx, rx) = mpsc::channel();
@@ -410,6 +414,7 @@ fn spawn(
         hub: tokens.1,
         interrupt: interrupt.clone(),
         alive: Arc::new(AtomicBool::new(false)),
+        esm,
     };
     let join = std::thread::Builder::new()
         .name("thaw-js-worker".into())
@@ -512,13 +517,18 @@ fn run_script(it: &mut Interp, source: &str, opts: &str, main: Option<MainBundle
     let exports = it
         .get(&global, "__thaw_worker_side_exports")
         .unwrap_or(Value::Undefined);
-    it.install_require(vec![
-        ("node:worker_threads".into(), exports.clone()),
-        ("worker_threads".into(), exports),
-    ]);
+    // an ES-module entry gets no global `require` (its own imports are resolved by the loader)
+    let esm = it.worker.side.as_ref().is_some_and(|side| side.esm);
+    if !esm {
+        it.install_require(vec![
+            ("node:worker_threads".into(), exports.clone()),
+            ("worker_threads".into(), exports),
+        ]);
+    }
     to_parent(it, Evt::Online);
     let entry = match &main {
         Some(m) => crate::host::run_bundle_main(it, &m.package, &m.text, &m.key),
+        None if esm => it.run(source),
         None => it.run_commonjs(source),
     };
     let r = entry.and_then(|_| it.run_event_loop());
@@ -761,6 +771,8 @@ pub(crate) fn install(it: &mut Interp) {
             v => Some(it.to_str(&v).to_string()),
         };
         let main = file.and_then(|f| main_bundle(it, &f));
+        // arg 7 is true for an ES-module entry (`__thaw_run_main_esm`), which runs without the CommonJS globals
+        let esm = arg(a, 7).truthy();
         Ok(Value::Number(f64::from(spawn(
             it,
             source,
@@ -770,6 +782,7 @@ pub(crate) fn install(it: &mut Interp) {
             share_env,
             (token, hub),
             main,
+            esm,
         ))))
     });
     g.declare("__thaw_worker_spawn", f, true);

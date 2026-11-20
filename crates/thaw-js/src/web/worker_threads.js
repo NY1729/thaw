@@ -139,7 +139,11 @@
       let code = String(source);
       // the file a non-eval worker runs (a bundled module's virtual path runs from its bundle, worker.rs)
       let file;
-      if (!options || !options.eval) {
+      // a data: URL object is an ES-module entry (PR-3a; the string form stays ERR_WORKER_PATH, as in Node)
+      const esm = source instanceof URL && source.protocol === 'data:';
+      if (esm) {
+        code = 'globalThis.__thaw_run_main_esm(' + JSON.stringify(source.href) + ')';
+      } else if (!options || !options.eval) {
         if (!code.startsWith('/') && !code.startsWith('./') && !code.startsWith('../')) {
           // Node's TypeError (ERR_WORKER_PATH); a data: or file: string gets the hint to pass a URL object instead
           const hint = code.startsWith('data:text/javascript') ? ' Wrap data: URLs with `new URL`.' : code.startsWith('file:') ? ' Wrap file:// URLs with `new URL`.' : '';
@@ -189,7 +193,7 @@
       };
       opts.resourceLimits = resourceLimits;
       // heap limit (MiB, -1 = none) and stack (MiB): the natives' numeric arguments
-      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb, shareEnv, token, file);
+      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb, shareEnv, token, file, esm);
       let resolveExit;
       const state = {
         handle,
