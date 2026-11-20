@@ -1140,6 +1140,7 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
         &ScanContext {
             known_methods: &empty,
             installed_packages: &empty,
+            served_peers: &empty,
         },
     )
 }
@@ -1154,6 +1155,7 @@ pub fn scan_addon_bundle(source: &str) -> Result<Report, String> {
         &ScanContext {
             known_methods: &empty,
             installed_packages: &empty,
+            served_peers: &empty,
         },
     )
 }
@@ -1168,6 +1170,10 @@ pub struct ScanContext<'a> {
     /// serve what Node resolves. A package that is not installed is a non-blocker: thaw-js throws MODULE_NOT_FOUND
     /// at the require, as Node does for a module that is not installed.
     pub installed_packages: &'a HashSet<String>,
+    /// packages thaw-js serves as peers (compiled in as thaw-js and registered): an unmapped require of exactly one
+    /// of them (`pg`, not `pg/lib/x`) is no blocker, since the runtime resolves it to that registered package
+    /// (host.rs `peer_exports`). Empty outside the build, so the whole-bundle scan is unchanged.
+    pub served_peers: &'a HashSet<String>,
 }
 
 /// [`scan_bundle`] with the host knowledge of `ctx` (see [`ScanContext`]).
@@ -1178,6 +1184,35 @@ pub fn scan_bundle_in(source: &str, ctx: &ScanContext) -> Result<Report, String>
 /// [`scan_addon_bundle`] with the host knowledge of `ctx` (see [`ScanContext`]).
 pub fn scan_addon_bundle_in(source: &str, ctx: &ScanContext) -> Result<Report, String> {
     scan_bundle_with(source, true, ctx)
+}
+
+/// The exact bare package names the reachable modules of `source` require without mapping them (`pg` for
+/// `require('pg')`): the peers the build must compile in for the runtime to resolve them by name (host.rs
+/// `peer_exports`). Relative specs, subpaths (`pg/lib/x`) and builtins are not listed.
+pub fn unmapped_peer_requires(source: &str) -> Result<BTreeSet<String>, String> {
+    let parts = parse_bundle(source)?;
+    let reach = reachable(&parts);
+    let mut names = BTreeSet::new();
+    for (key, func) in &parts.factories {
+        if !reach.contains(key) {
+            continue;
+        }
+        let mut w = Walker::default();
+        func.visit_with(&mut w);
+        let map = parts.require_maps.get(key);
+        for r in &w.requires {
+            if let Some(spec) = r.spec.as_deref() {
+                if !map.is_some_and(|m| m.contains_key(spec))
+                    && is_missing_loadable_spec(spec)
+                    && !is_relative_spec(spec)
+                    && spec_package(spec) == spec
+                {
+                    names.insert(spec.to_string());
+                }
+            }
+        }
+    }
+    Ok(names)
 }
 
 /// The package a bare require spec names: `@scope/name/sub` -> `@scope/name`, `name/sub` -> `name`.
@@ -1373,6 +1408,7 @@ fn scan_bundle_with(source: &str, addon: bool, ctx: &ScanContext) -> Result<Repo
                 Some(spec)
                     if is_missing_loadable_spec(spec)
                         && (is_relative_spec(spec)
+                            || ctx.served_peers.contains(spec)
                             || !ctx.installed_packages.contains(spec_package(spec))) => {}
                 Some(spec) => add(&mut report, format!("require:{spec}"), 1, key),
                 // a bare, prefix or suffix computed spec is followed by `reachable`; one it does not name throws

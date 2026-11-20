@@ -251,6 +251,44 @@ fn native_addon_path_component(name: &str) -> String {
 /// `thaw_js_package_eligible`), computed by a first generation pass.
 type ThawJsPackages = std::collections::HashSet<String>;
 
+/// A registration order that puts each item after the items it depends on (`deps[i]`: the indices item `i` needs),
+/// otherwise in the given order. An item on a dependency cycle keeps its place: edges between two cycle members are
+/// ignored (their members resolve each other when they run, not when they load). The rest is acyclic, so a
+/// depth-first walk in index order gives a valid order.
+fn peers_first_order(deps: &[Vec<usize>]) -> Vec<usize> {
+    fn reaches(deps: &[Vec<usize>], from: usize, to: usize) -> bool {
+        let mut seen = vec![false; deps.len()];
+        let mut stack = deps[from].clone();
+        while let Some(n) = stack.pop() {
+            if n == to {
+                return true;
+            }
+            if !std::mem::replace(&mut seen[n], true) {
+                stack.extend(&deps[n]);
+            }
+        }
+        false
+    }
+    fn visit(i: usize, deps: &[Vec<usize>], cyclic: &[bool], seen: &mut [bool], order: &mut Vec<usize>) {
+        if std::mem::replace(&mut seen[i], true) {
+            return;
+        }
+        for &j in &deps[i] {
+            if !(cyclic[i] && cyclic[j]) {
+                visit(j, deps, cyclic, seen, order);
+            }
+        }
+        order.push(i);
+    }
+    let cyclic: Vec<bool> = (0..deps.len()).map(|i| reaches(deps, i, i)).collect();
+    let mut seen = vec![false; deps.len()];
+    let mut order = Vec::with_capacity(deps.len());
+    for i in 0..deps.len() {
+        visit(i, deps, &cyclic, &mut seen, &mut order);
+    }
+    order
+}
+
 /// Resolves each `--use`d package against the local registry
 /// (thaw-registry; `registry_dir` defaults to `thaw_modules/`),
 /// generating its callable surface exactly like `generate_bridge_shims`
@@ -283,25 +321,39 @@ fn generate_registry_shims(
     forced_runtime_only: &std::collections::HashSet<String>,
     fetch_transport_bundles: &std::collections::HashSet<String>,
     thaw_js_routing: bool,
+    peers: &std::collections::HashSet<String>,
 ) -> Result<RegistryShims, String> {
     let routed = ThawJsPackages::new();
-    let (first, eligible) = generate_registry_shims_pass(
-        registry_dir,
-        use_packages,
-        runtime_packages,
-        static_packages,
-        dynamic_packages,
-        user_source,
-        user_source_name,
-        embed_native_addons,
-        output,
-        external_native_staging,
-        forced_jit_fallbacks,
-        forced_runtime_only,
-        fetch_transport_bundles,
-        thaw_js_routing,
-        &routed,
-    )?;
+    // A package's eligibility depends on which installed peers are served (compiled in as thaw-js). Start with all
+    // of them served and re-judge until the served peers are the eligible ones: a refused peer drops its dependents,
+    // and a cycle of eligible packages survives. Eligibility depends only on the peers, so the loop ends when they
+    // are unchanged.
+    let mut served: ThawJsPackages = peers.clone();
+    let (first, eligible) = loop {
+        let (first, eligible) = generate_registry_shims_pass(
+            registry_dir,
+            use_packages,
+            runtime_packages,
+            static_packages,
+            dynamic_packages,
+            user_source,
+            user_source_name,
+            embed_native_addons,
+            output,
+            external_native_staging,
+            forced_jit_fallbacks,
+            forced_runtime_only,
+            fetch_transport_bundles,
+            thaw_js_routing,
+            &routed,
+            &served,
+        )?;
+        let next: ThawJsPackages = eligible.intersection(peers).cloned().collect();
+        if !thaw_js_routing || next == served {
+            break (first, eligible);
+        }
+        served = next;
+    };
     if eligible.is_empty() {
         return Ok(first);
     }
@@ -321,6 +373,7 @@ fn generate_registry_shims(
         fetch_transport_bundles,
         thaw_js_routing,
         &eligible,
+        &served,
     )
     .map(|(second, _)| second)
 }
@@ -342,6 +395,7 @@ fn generate_registry_shims_pass(
     fetch_transport_bundles: &std::collections::HashSet<String>,
     thaw_js_routing: bool,
     thaw_js_routed: &ThawJsPackages,
+    thaw_js_served: &ThawJsPackages,
 ) -> Result<(RegistryShims, ThawJsPackages), String> {
     let mut thaw_js_eligible = ThawJsPackages::new();
     // the registry's packages as installed now (a require of one the bundle does not map blocks thaw-js routing)
@@ -2245,6 +2299,7 @@ fn generate_registry_shims_pass(
                         &typed_targets,
                         &shim[segment_start..segment_end],
                         &thaw_js_installed,
+                        thaw_js_served,
                     ) {
                         thaw_js_eligible.insert(pkg.name.clone());
                     } else if thaw_js_fallback_mode() != ThawJsFallbackMode::Silent {
@@ -2269,6 +2324,37 @@ fn generate_registry_shims_pass(
     }
     // judged by `build` after its last pass: an earlier pass can refuse what a forced-fallback pass accepts
     set_thaw_js_refusals(thaw_js_refusals);
+    // a thaw-js package registers after the peers its bundle requires by name (the runtime resolves them when it loads)
+    if thaw_js_routing {
+        let deps: Vec<Vec<usize>> = {
+            let index: std::collections::HashMap<&str, usize> = bundles
+                .iter()
+                .enumerate()
+                .filter(|(_, bundle)| thaw_js_routed.contains(&bundle.0))
+                .map(|(i, bundle)| (bundle.0.as_str(), i))
+                .collect();
+            bundles
+                .iter()
+                .enumerate()
+                .map(|(i, bundle)| {
+                    if !thaw_js_routed.contains(&bundle.0) {
+                        return Vec::new();
+                    }
+                    thaw_registry::bundle_peer_requires(&bundle.1)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|peer| index.get(peer.as_str()).copied())
+                        .filter(|&j| j != i)
+                        .collect()
+                })
+                .collect()
+        };
+        let mut slots: Vec<Option<_>> = std::mem::take(&mut bundles).into_iter().map(Some).collect();
+        bundles = peers_first_order(&deps)
+            .into_iter()
+            .map(|i| slots[i].take().expect("each bundle is ordered once"))
+            .collect();
+    }
 
     let module_bundles: Vec<thaw_bridge::ModuleBundle> = bundles
         .iter()

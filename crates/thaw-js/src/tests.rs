@@ -4107,6 +4107,59 @@ fn computed_require_of_a_spec_missing_from_the_map_throws_module_not_found() {
 }
 
 #[test]
+fn scan_serves_an_unmapped_require_of_a_served_peer_by_exact_name_only() {
+    // a peer the build compiles in as thaw-js is resolved by the runtime (host.rs `peer_exports`): an exact unmapped
+    // require of it is no blocker. A subpath of it and a dynamic require stay as they were; an installed package
+    // that is not served stays a blocker
+    use std::collections::{BTreeSet, HashSet};
+    let none = HashSet::new();
+    let installed: HashSet<String> = ["pgx".to_string()].into();
+    let served: HashSet<String> = ["pgx".to_string()].into();
+    let scan = |code: &str, installed: &HashSet<String>, served: &HashSet<String>| {
+        let ctx = crate::scan::ScanContext {
+            known_methods: &none,
+            installed_packages: installed,
+            served_peers: served,
+        };
+        crate::scan::scan_bundle_in(&one_module_bundle(code, ""), &ctx).unwrap()
+    };
+    let lazy = "exports.f = function () { return require('pgx'); };";
+    assert!(scan(lazy, &installed, &none)
+        .blockers
+        .contains_key("require:pgx"));
+    assert!(scan(lazy, &installed, &served).is_clean());
+    let sub = "exports.f = function () { return require('pgx/lib/x'); };";
+    assert!(scan(sub, &installed, &served)
+        .blockers
+        .contains_key("require:pgx/lib/x"));
+    let dynamic = "exports.f = function (n) { return require(n); };";
+    let keys = |r: crate::scan::Report| r.blockers.into_keys().collect::<Vec<_>>();
+    assert_eq!(
+        keys(scan(dynamic, &installed, &served)),
+        keys(scan(dynamic, &installed, &none))
+    );
+    // an installed package that is not served stays a blocker, whatever else is served
+    let other = "exports.f = function () { return require('pgx2'); };";
+    let installed2: HashSet<String> = ["pgx2".to_string()].into();
+    assert!(scan(other, &installed2, &served)
+        .blockers
+        .contains_key("require:pgx2"));
+    // the peers of a bundle: exact bare names it requires without mapping them
+    let peers = crate::scan::unmapped_peer_requires(&one_module_bundle(
+        "exports.a = require('pgx'); exports.b = require('pgx/lib/x'); exports.c = require('./rel'); exports.d = require('node:fs'); exports.e = require('@s/n');",
+        "",
+    ))
+    .unwrap();
+    assert_eq!(
+        peers,
+        ["@s/n", "pgx"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<BTreeSet<_>>()
+    );
+}
+
+#[test]
 fn scan_blocks_an_unmapped_require_only_of_an_installed_package() {
     use std::collections::HashSet;
     // drizzle's `drizzle-orm/neon-serverless` requires its peer `@neondatabase/serverless`: a non-blocker while the
@@ -4117,6 +4170,7 @@ fn scan_blocks_an_unmapped_require_only_of_an_installed_package() {
         let ctx = crate::scan::ScanContext {
             known_methods: &none,
             installed_packages: installed,
+            served_peers: &none,
         };
         crate::scan::scan_bundle_in(&one_module_bundle(code, map), &ctx).unwrap()
     };
@@ -11719,6 +11773,7 @@ exports.traceMixed = traceMixed;"#;
         let ctx = crate::scan::ScanContext {
             known_methods: extra,
             installed_packages: &HashSet::new(),
+            served_peers: &HashSet::new(),
         };
         crate::scan::scan_bundle_in(&one_module_bundle(src, ""), &ctx)
             .ok()
