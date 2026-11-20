@@ -118,8 +118,8 @@ fn take_c_string(pointer: *mut std::ffi::c_char) -> String {
     text
 }
 
-/// Test-only route for the QuickJS-era tests (`thaw_quickjs::thaw_js_load` / `thaw_js_call` / `eval_json` /
-/// `thaw_js_run_event_loop`). It shadows the `thaw_quickjs` extern crate name inside the tests module
+/// Test-only route for the QuickJS-era tests (`thaw_quickjs::thaw_js_load` / `thaw_js_call` / `eval_json`).
+/// It shadows the `thaw_quickjs` extern crate name inside the tests module
 /// (the glob import from `use super::*` wins over the extern prelude), so those tests run on thaw-js with no
 /// body edits. Script route: `thaw_js_load` runs the source as a sloppy script in thaw-js's default realm,
 /// `thaw_js_call` calls a global function by name (awaited), `eval_json` returns the completion value as JSON.
@@ -136,10 +136,6 @@ mod thaw_quickjs {
     extern "C" {
         fn thaw_tjs_eval_json(source: *const c_char) -> ThawResult;
         fn thaw_tjs_call_reference(context: *mut std::ffi::c_void, args: *const c_char) -> *const c_char;
-    }
-
-    pub fn thaw_js_run_event_loop() -> i32 {
-        thaw_js::host::thaw_tjs_run_event_loop()
     }
 
     pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {

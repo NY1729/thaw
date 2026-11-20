@@ -381,6 +381,7 @@ fn util_polyfill_actually_runs_through_quickjs() {
 
 mod qjs_pending_node_core_util_helpers {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn util_helpers_run_through_bundled_commonjs_require() {
@@ -1609,6 +1610,7 @@ fn node_test_runs_suites_hooks_mocks_and_reporters() {
 
 mod qjs_pending_node_core_node_wasi {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn node_wasi_runs_preview1_commands_and_reactors() {
@@ -2550,6 +2552,7 @@ module.exports = function() {
 
 mod qjs_pending_node_core_goaway {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn http2_goaway_admission_drain_reentry_and_hpack_boundaries() {
@@ -2752,6 +2755,7 @@ fn path_join_skips_empty_segments_before_normalizing() {
 
 mod qjs_pending_node_core_wasi_validates {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn wasi_validates_command_and_optional_reactor_entrypoints() {
@@ -2950,6 +2954,7 @@ module.exports = async function () {
 
 mod qjs_pending_node_core_root_hooks {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn node_test_root_hooks_finalize_without_run_and_replay_once() {
@@ -3351,6 +3356,7 @@ module.exports = function () {
 
 mod qjs_pending_node_core_child_startup {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn child_process_credentials_async_startup_failure_completes_callback_and_promise_once() {

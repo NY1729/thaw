@@ -1,6 +1,7 @@
 // qjs_pending: fails on thaw-js: "[true,true,\"value:2\\n{ ok: true }\\n\"]"
 mod qjs_pending_platform_console_builtin_shares_global_console_and_constructor {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn console_builtin_shares_global_console_and_constructor() {
@@ -85,6 +86,7 @@ fn perf_hooks_builtin_shares_the_performance_timeline() {
 // qjs_pending: fails on thaw-js: "[true,true,true,true,\"thaw\",42,true,true,true,1,true,0,false,0]"
 mod qjs_pending_platform_v8_builtin_serializes_graphs_and_exposes_runtime_statistics {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn v8_builtin_serializes_graphs_and_exposes_runtime_statistics() {
@@ -470,6 +472,7 @@ module.exports = async function() {
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: The \"port\" argument must be a MessagePort instance"
 mod qjs_pending_platform_worker_threads_builtin_exchanges_cloned_messages {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_builtin_exchanges_cloned_messages() {
@@ -503,6 +506,7 @@ fn worker_threads_builtin_exchanges_cloned_messages() {
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: require.resolve is not a function"
 mod qjs_pending_platform_bundled_commonjs_require_exposes_resolve {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn bundled_commonjs_require_exposes_resolve() {
@@ -533,6 +537,7 @@ fn bundled_commonjs_require_exposes_resolve() {
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: (intermediate value).prependOnceListener is not a function"
 mod qjs_pending_platform_worker_threads_eval_worker_isolates_state_and_exchanges_messages {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_eval_worker_isolates_state_and_exchanges_messages() {
@@ -567,6 +572,7 @@ fn worker_threads_eval_worker_isolates_state_and_exchanges_messages() {
 // qjs_pending: fails on thaw-js: "[\"parent\",\"worker\",\"second\",[\"undefined\",\"undefined\"]]"
 mod qjs_pending_platform_worker_threads_share_environment_across_native_workers {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_share_environment_across_native_workers() {
@@ -599,6 +605,7 @@ fn worker_threads_share_environment_across_native_workers() {
 // qjs_pending: fails on thaw-js: "[\"moved\",false,true,true]"
 mod qjs_pending_platform_worker_threads_moves_message_ports_to_vm_contexts {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_moves_message_ports_to_vm_contexts() {
@@ -628,6 +635,7 @@ fn worker_threads_moves_message_ports_to_vm_contexts() {
 // qjs_pending: fails on thaw-js: "[\"from-worker\",\"THROUGH\",0,true,\"undefined\"]"
 mod qjs_pending_platform_worker_threads_transfers_worker_data_message_ports {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_transfers_worker_data_message_ports() {
@@ -657,6 +665,7 @@ fn worker_threads_transfers_worker_data_message_ports() {
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: Cannot read properties of undefined (reading 'startsWith')"
 mod qjs_pending_platform_worker_threads_transfer_message_ports_from_native_workers {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_transfer_message_ports_from_native_workers() {
@@ -704,6 +713,7 @@ fn worker_threads_native_failed_clone_keeps_transfer_endpoints_attached() {
 // qjs_pending: fails on thaw-js: "[false,1,false,true]"
 mod qjs_pending_platform_worker_threads_native_reentrant_transfer_invalidation_is_rejected_before_delivery {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_native_reentrant_transfer_invalidation_is_rejected_before_delivery() {
@@ -733,6 +743,7 @@ fn worker_threads_native_reentrant_transfer_invalidation_is_rejected_before_deli
 // qjs_pending: fails on thaw-js: "[\"unexpected\",0,1]"
 mod qjs_pending_platform_worker_threads_child_direct_invalid_transfer_does_not_pin_worker_exit {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_child_direct_invalid_transfer_does_not_pin_worker_exit() {
@@ -780,6 +791,7 @@ fn worker_threads_native_direct_failed_clone_keeps_buffer_attached() {
 // qjs_pending: fails on thaw-js: "[\"pong\",true,\"undefined\",\"undefined\"]"
 mod qjs_pending_platform_worker_threads_transfers_native_ports_between_workers_in_both_directions {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_transfers_native_ports_between_workers_in_both_directions() {
@@ -809,6 +821,7 @@ fn worker_threads_transfers_native_ports_between_workers_in_both_directions() {
 // qjs_pending: fails on thaw-js: "[\"HELLO\",\"stdout hello\\n\",\"stderr hello\\n\",0,null,null,null,\"undefined\"]"
 mod qjs_pending_platform_worker_threads_redirects_stdin_stdout_and_stderr {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_redirects_stdin_stdout_and_stderr() {
@@ -841,6 +854,7 @@ fn worker_threads_redirects_stdin_stdout_and_stderr() {
 // qjs_pending: fails on thaw-js: "[true,1,1,1,[1],false]"
 mod qjs_pending_platform_worker_terminate_resolves_with_one_shared_exit_code {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_terminate_resolves_with_one_shared_exit_code() {
@@ -870,6 +884,7 @@ fn worker_terminate_resolves_with_one_shared_exit_code() {
 // qjs_pending: fails on thaw-js: "[7,[null],false]"
 mod qjs_pending_platform_worker_process_exit_and_chdir_are_worker_local {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_process_exit_and_chdir_are_worker_local() {
@@ -905,6 +920,7 @@ fn worker_process_exit_and_chdir_are_worker_local() {
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: worker.cpuUsage is not a function"
 mod qjs_pending_platform_worker_diagnostics_follow_running_state {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_diagnostics_follow_running_state() {
@@ -937,6 +953,7 @@ fn worker_diagnostics_follow_running_state() {
 // qjs_pending: fails on thaw-js: "ERROR: promise never settled"
 mod qjs_pending_platform_worker_threads_routes_messages_by_thread_id {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_routes_messages_by_thread_id() {
@@ -969,6 +986,7 @@ fn worker_threads_routes_messages_by_thread_id() {
 // qjs_pending: fails on thaw-js: "ERROR: Error: Cannot find the destination thread or listener"
 mod qjs_pending_platform_worker_threads_route_direct_messages_between_native_workers {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_route_direct_messages_between_native_workers() {
@@ -998,6 +1016,7 @@ fn worker_threads_route_direct_messages_between_native_workers() {
 // qjs_pending: fails on thaw-js: "ERROR: Error: The worker script or module filename must be an absolute path or a relative path starting with 
 mod qjs_pending_platform_worker_threads_data_url_worker_decodes_javascript {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_data_url_worker_decodes_javascript() {
@@ -1031,6 +1050,7 @@ fn worker_threads_data_url_worker_decodes_javascript() {
 // qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
 mod qjs_pending_platform_worker_threads_load_runtime_computed_absolute_paths {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_load_runtime_computed_absolute_paths() {
@@ -1145,6 +1165,7 @@ fn worker_threads_load_runtime_computed_absolute_paths() {
 // qjs_pending: stdout raw bytes not preserved: child stdout lacks [250,0,255,128,195,40,251]
 mod qjs_pending_platform_process_default_stdio_preserves_raw_buffer_bytes {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn process_default_stdio_preserves_raw_buffer_bytes() {
@@ -1210,6 +1231,7 @@ fn process_default_stdio_preserves_raw_buffer_bytes() {
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"
 mod qjs_pending_platform_worker_threads_native_stdio_defaults_to_parent_and_capture_stays_separate {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_native_stdio_defaults_to_parent_and_capture_stays_separate() {
@@ -1239,6 +1261,7 @@ fn worker_threads_native_stdio_defaults_to_parent_and_capture_stays_separate() {
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"
 mod qjs_pending_platform_worker_threads_native_stdin_transports_bytes_and_end_in_order {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_native_stdin_transports_bytes_and_end_in_order() {
@@ -1268,6 +1291,7 @@ fn worker_threads_native_stdin_transports_bytes_and_end_in_order() {
 // qjs_pending: hangs on thaw-js (120 s timeout, no result)
 mod qjs_pending_platform_worker_threads_native_stdin_reports_host_failures_once {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_native_stdin_reports_host_failures_once() {
@@ -1297,6 +1321,7 @@ fn worker_threads_native_stdin_reports_host_failures_once() {
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"
 mod qjs_pending_platform_worker_threads_native_stdin_string_decoder_handles_split_utf8 {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_native_stdin_string_decoder_handles_split_utf8() {
@@ -1326,6 +1351,7 @@ fn worker_threads_native_stdin_string_decoder_handles_split_utf8() {
 // qjs_pending: fails on thaw-js: "[42,false,0,\"undefined\"]"
 mod qjs_pending_platform_worker_threads_native_runtime_round_trips_parent_messages {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_native_runtime_round_trips_parent_messages() {
@@ -1358,6 +1384,7 @@ fn worker_threads_native_runtime_round_trips_parent_messages() {
 // qjs_pending: fails on thaw-js: "ERROR: ReferenceError: __thaw_worker_active is not defined"
 mod qjs_pending_platform_worker_threads_native_ref_unreffed_workers_follow_host_liveness {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_native_ref_unreffed_workers_follow_host_liveness() {
@@ -1387,6 +1414,7 @@ fn worker_threads_native_ref_unreffed_workers_follow_host_liveness() {
 // qjs_pending: fails on thaw-js: "[0,0,[1,2,3],[4,5],42,true,true,true,0,\"undefined\"]"
 mod qjs_pending_platform_worker_threads_native_runtime_transfers_structured_array_buffers {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_threads_native_runtime_transfers_structured_array_buffers() {
@@ -1419,6 +1447,7 @@ fn worker_threads_native_runtime_transfers_structured_array_buffers() {
 // qjs_pending: fails on thaw-js: "ERROR: ReferenceError: __thaw_worker_bundle_source is not defined"
 mod qjs_pending_platform_bundler_embeds_static_file_url_worker_sources {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn bundler_embeds_static_file_url_worker_sources() {
@@ -1479,6 +1508,7 @@ fn bundler_embeds_static_file_url_worker_sources() {
 // qjs_pending: fails on thaw-js: "ERROR: ReferenceError: __thaw_worker_bundle_source is not defined"
 mod qjs_pending_platform_bundled_worker_dynamic_import_converts_once_and_keeps_worker_module {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn bundled_worker_dynamic_import_converts_once_and_keeps_worker_module() {
@@ -1568,6 +1598,7 @@ fn worker_threads_broadcast_channel_clones_between_matching_names() {
 // qjs_pending: fails on thaw-js: "ERROR: ReferenceError: __thaw_worker_bundle_source is not defined"
 mod qjs_pending_platform_worker_esm_star_diamond_uses_the_same_terminal_origin {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_esm_star_diamond_uses_the_same_terminal_origin() {
@@ -1592,6 +1623,7 @@ fn worker_esm_star_diamond_uses_the_same_terminal_origin() {
 // qjs_pending: fails on thaw-js: "ERROR: ReferenceError: __thaw_worker_bundle_source is not defined"
 mod qjs_pending_platform_worker_esm_cycle_uses_one_cached_main_module_identity {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_esm_cycle_uses_one_cached_main_module_identity() {
@@ -1614,6 +1646,7 @@ fn worker_esm_cycle_uses_one_cached_main_module_identity() {
 // qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
 mod qjs_pending_platform_worker_main_ready_rejects_every_falsy_thrown_value {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_main_ready_rejects_every_falsy_thrown_value() {
@@ -1645,6 +1678,7 @@ fn worker_main_ready_rejects_every_falsy_thrown_value() {
 // qjs_pending: fails on thaw-js: "ERROR: ReferenceError: __thaw_worker_bundle_source is not defined"
 mod qjs_pending_platform_bundled_worker_entry_require_resolve_does_not_load_target {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn bundled_worker_entry_require_resolve_does_not_load_target() {
@@ -1667,6 +1701,7 @@ fn bundled_worker_entry_require_resolve_does_not_load_target() {
 // qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
 mod qjs_pending_platform_worker_saved_url_keeps_bundle_affinity_across_packages_and_nested_workers {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_saved_url_keeps_bundle_affinity_across_packages_and_nested_workers() {
@@ -1731,6 +1766,7 @@ fn worker_saved_url_keeps_bundle_affinity_across_packages_and_nested_workers() {
 // qjs_pending: fails on thaw-js: "ERROR: SyntaxError: Expected ';', '}' or <eof>"
 mod qjs_pending_platform_file_worker_and_main_keep_root_dirname_for_entry_and_dependencies {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn file_worker_and_main_keep_root_dirname_for_entry_and_dependencies() {
@@ -1790,6 +1826,7 @@ fn file_worker_and_main_keep_root_dirname_for_entry_and_dependencies() {
 // qjs_pending: fails on thaw-js: "ERROR: Error: The worker script or module filename must be an absolute path or a relative path starting with 
 mod qjs_pending_platform_file_worker_preserves_unresolved_parent_path_components {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn file_worker_preserves_unresolved_parent_path_components() {
@@ -1846,6 +1883,7 @@ fn file_worker_preserves_unresolved_parent_path_components() {
 // qjs_pending: fails on thaw-js: "ERROR: SyntaxError: Expected ';', '}' or <eof>"
 mod qjs_pending_platform_file_loaders_retry_failed_modules_and_bind_commonjs_this {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn file_loaders_retry_failed_modules_and_bind_commonjs_this() {
@@ -1914,6 +1952,7 @@ fn file_loaders_retry_failed_modules_and_bind_commonjs_this() {
 // qjs_pending: fails on thaw-js: "ERROR: SyntaxError: Expected ';', '}' or <eof>"
 mod qjs_pending_platform_file_loaders_accept_hashbangs_without_stripping_json_or_interior_text {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn file_loaders_accept_hashbangs_without_stripping_json_or_interior_text() {
@@ -1971,6 +2010,7 @@ fn file_loaders_accept_hashbangs_without_stripping_json_or_interior_text() {
 // qjs_pending: fails on thaw-js: "ERROR: SyntaxError: Expected ';', '}' or <eof>"
 mod qjs_pending_platform_file_worker_package_main_rethrows_initialization_and_syntax_errors {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn file_worker_package_main_rethrows_initialization_and_syntax_errors() {
@@ -2034,6 +2074,7 @@ fn file_worker_package_main_rethrows_initialization_and_syntax_errors() {
 // qjs_pending: fails on thaw-js: "ERROR: SyntaxError: Expected ';', '}' or <eof>"
 mod qjs_pending_platform_file_loaders_resolve_dotted_files_and_directories_in_file_first_order {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn file_loaders_resolve_dotted_files_and_directories_in_file_first_order() {
@@ -2100,6 +2141,7 @@ fn file_loaders_resolve_dotted_files_and_directories_in_file_first_order() {
 // qjs_pending: fails on thaw-js: "ERROR: SyntaxError: Expected ';', '}' or <eof>"
 mod qjs_pending_platform_file_worker_keeps_directives_and_fallback_scope_in_entry_wrapper {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn file_worker_keeps_directives_and_fallback_scope_in_entry_wrapper() {
@@ -2174,6 +2216,7 @@ fn file_worker_keeps_directives_and_fallback_scope_in_entry_wrapper() {
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"
 mod qjs_pending_platform_worker_thread_id_becomes_minus_one_after_routing_cleanup {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn worker_thread_id_becomes_minus_one_after_routing_cleanup() {
@@ -2252,6 +2295,7 @@ fn worker_thread_id_becomes_minus_one_after_routing_cleanup() {
 // qjs_pending: fails on thaw-js: "ERROR: Error: worker_threads Worker is not supported inside a worker yet"
 mod qjs_pending_platform_native_worker_can_run_a_fallback_nested_worker_until_exit {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_worker_can_run_a_fallback_nested_worker_until_exit() {
@@ -2296,6 +2340,7 @@ fn native_worker_can_run_a_fallback_nested_worker_until_exit() {
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"
 mod qjs_pending_platform_fallback_nested_workers_keep_their_parent_alive_and_release_it {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn fallback_nested_workers_keep_their_parent_alive_and_release_it() {
@@ -2360,6 +2405,7 @@ fn fallback_nested_workers_keep_their_parent_alive_and_release_it() {
 // qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"
 mod qjs_pending_platform_native_child_of_fallback_inherits_parent_environment_and_stdio {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_child_of_fallback_inherits_parent_environment_and_stdio() {

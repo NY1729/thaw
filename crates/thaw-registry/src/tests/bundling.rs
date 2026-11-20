@@ -1222,6 +1222,7 @@ fn esm_star_static_name_is_not_blocked_by_unloaded_named_native_reexport() {
 // qjs_pending: fails on thaw-js: route A ReferenceError: value is not defined; Package get("value") returns null
 mod qjs_pending_bundling_async_esm_star_diamond_keeps_the_terminal_binding {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn async_esm_star_diamond_keeps_the_terminal_binding() {
@@ -1428,6 +1429,7 @@ fn esm_star_diamond_coalesces_same_namespace_reexport() {
 // qjs_pending: fails on thaw-js: needs in-context globalThis.__thaw_bundle_create_require (not exposed by Package); script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_bundled_require_cache_and_commonjs_this_respect_module_format {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn bundled_require_cache_and_commonjs_this_respect_module_format() {
@@ -1467,6 +1469,7 @@ fn bundled_require_cache_and_commonjs_this_respect_module_format() {
 // qjs_pending: fails on thaw-js: ERROR: TypeError: requireAsync is not a function
 mod qjs_pending_bundling_async_commonjs_factory_keeps_top_level_this_after_await {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn async_commonjs_factory_keeps_top_level_this_after_await() {
@@ -1512,6 +1515,7 @@ fn bundled_require_resolve_finds_resolve_only_files_and_rejects_missing_modules(
 // qjs_pending: fails on thaw-js: Package route ERROR: unsupported: esm-cycle; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_native_esm_cycle_links_original_mjs_before_evaluation {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_esm_cycle_links_original_mjs_before_evaluation() {
@@ -1538,6 +1542,7 @@ fn native_esm_cycle_links_original_mjs_before_evaluation() {
 // qjs_pending: needs a JS global read after load (globalThis.__thaw_mixed_runs); script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order() {
@@ -1562,6 +1567,7 @@ fn native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order() {
 // qjs_pending: needs in-context helpers and namespace identity after load; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_mixed_pure_namespace_keeps_engine_identity {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_pure_namespace_keeps_engine_identity() {
@@ -1594,6 +1600,7 @@ fn native_mixed_pure_namespace_keeps_engine_identity() {
 // qjs_pending: needs JS globals read after load (__thaw_early_ns, __thaw_pure_runs); script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_mixed_namespace_anchor_reseeds_after_stripped_edge {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_namespace_anchor_reseeds_after_stripped_edge() {
@@ -1648,6 +1655,7 @@ fn native_mixed_rewrite_uses_private_opaque_edge_and_origin_reads() {
 // qjs_pending: fails on thaw-js: Package route ERROR: TypeError: requireAsync is not a function; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_native_mixed_cjs_dynamic_import_uses_bound_native_ready {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_cjs_dynamic_import_uses_bound_native_ready() {
@@ -1676,6 +1684,7 @@ fn native_mixed_cjs_dynamic_import_uses_bound_native_ready() {
 // qjs_pending: needs JS global read after load (__thaw_side_module_this); script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_mixed_side_effect_only_mjs_keeps_module_this {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_side_effect_only_mjs_keeps_module_this() {
@@ -1750,6 +1759,7 @@ fn native_mixed_removed_named_edges_fail_before_any_factory_runs() {
 // qjs_pending: fails on thaw-js: Package route ERROR: TypeError: requireAsync is not a function; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling() {
@@ -1777,6 +1787,7 @@ fn native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling() {
 // qjs_pending: needs in-context lazy-load helpers across calls; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_mixed_lazy_link_errors_wait_for_the_dynamic_entry {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_lazy_link_errors_wait_for_the_dynamic_entry() {
@@ -1830,19 +1841,32 @@ fn native_mixed_lazy_link_errors_wait_for_the_dynamic_entry() {
 }
 }
 
+// qjs_pending: not run on thaw-js: two loads into one QuickJS global context; converting it to run_js_get would be weaker (two bundles in one context needed; needs Package::join or a shared-context helper)
+mod qjs_pending_bundling_native_esm_bundle_name_is_fresh_for_same_key_new_source {
+    use super::*;
+    use ::thaw_quickjs;
+
 #[test]
 fn native_esm_bundle_name_is_fresh_for_same_key_new_source() {
+    use std::ffi::{CStr, CString};
     let root = temp_registry("native-esm-fresh-bundle");
     let modules = root.join("node_modules");
     let package = modules.join("native-fresh-pkg");
     fs::create_dir_all(&package).unwrap();
     fs::write(package.join("index.mjs"), "export const value = 1;").unwrap();
     let (first, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
-    assert_eq!(run_js_get(&first, "value"), "1");
+    let first_script = format!("globalThis.module = {{ exports: {{}} }}; {first} globalThis.firstNativeValue = function() {{ return module.exports.value; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(first_script).unwrap().as_ptr()), 1);
+    let one = thaw_quickjs::thaw_js_call(c"firstNativeValue".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(one) }.to_string_lossy(), "1");
     fs::write(package.join("index.mjs"), "export const value = 2;").unwrap();
     let (second, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
-    assert_eq!(run_js_get(&second, "value"), "2");
+    let second_script = format!("globalThis.module = {{ exports: {{}} }}; {second} globalThis.secondNativeValue = function() {{ return module.exports.value; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(second_script).unwrap().as_ptr()), 1);
+    let two = thaw_quickjs::thaw_js_call(c"secondNativeValue".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(two) }.to_string_lossy(), "2");
     let _ = fs::remove_dir_all(root);
+}
 }
 
 #[test]
@@ -1910,6 +1934,7 @@ fn native_esm_dynamic_global_capability_uses_legacy_bundle() {
 // qjs_pending: fails on thaw-js: Package route ERROR: bad bundle: await isn't allowed in non-async function; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_native_esm_dynamic_absolute_name_cannot_escape_its_bundle {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_esm_dynamic_absolute_name_cannot_escape_its_bundle() {
@@ -1939,6 +1964,7 @@ fn native_esm_dynamic_absolute_name_cannot_escape_its_bundle() {
 // qjs_pending: needs one realm across two loads with a global sequence reset; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_esm_bundle_sequence_ignores_mutable_global_reset {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_esm_bundle_sequence_ignores_mutable_global_reset() {
@@ -2081,6 +2107,7 @@ fn native_esm_failed_link_never_marks_source_linked() {
 // qjs_pending: fails on thaw-js: Package route ERROR: Cannot find module './native.mjs'; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports() {
@@ -2107,6 +2134,7 @@ fn commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports() 
 // qjs_pending: needs JS globals read after load (asyncFactoryRan, nativeTlaRan); script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_sync_require_rejects_async_factory_and_native_tla_before_side_effects {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn sync_require_rejects_async_factory_and_native_tla_before_side_effects() {
@@ -2148,6 +2176,7 @@ fn commonjs_first_native_route_keeps_worker_url_on_legacy_snapshot() {
 // qjs_pending: fails on thaw-js: Package route ERROR: unsupported: esm-live-binding; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_commonjs_first_require_preserves_pure_native_namespace_identity_and_live_binding {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn commonjs_first_require_preserves_pure_native_namespace_identity_and_live_binding() {
@@ -2173,6 +2202,7 @@ fn commonjs_first_require_preserves_pure_native_namespace_identity_and_live_bind
 // qjs_pending: needs in-context created-require calls after load; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_commonjs_created_require_keeps_computed_native_query_instances_distinct {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn commonjs_created_require_keeps_computed_native_query_instances_distinct() {
@@ -2198,6 +2228,7 @@ fn commonjs_created_require_keeps_computed_native_query_instances_distinct() {
 // qjs_pending: needs in-context created-require calls after load; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_commonjs_created_require_native_query_clones_private_opaque_edges {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn commonjs_created_require_native_query_clones_private_opaque_edges() {

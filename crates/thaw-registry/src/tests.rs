@@ -894,6 +894,7 @@ fn mixed_esm_bundle_supports_live_exports_cycles_imports_json_and_dynamic_import
 // qjs_pending: fails on thaw-js: TypeError: Cannot read properties of undefined (reading 'value') on the top-level-await export
 mod qjs_pending_tests_top_level_await_initializes_dependencies_before_export_binding {
     use super::*;
+    use ::thaw_quickjs;
 
     #[test]
     fn top_level_await_initializes_dependencies_before_export_binding() {
@@ -935,6 +936,7 @@ mod qjs_pending_tests_top_level_await_initializes_dependencies_before_export_bin
 // qjs_pending: fails on thaw-js: TypeError: Cannot read properties of undefined (reading 'value') on the top-level-for-await export
 mod qjs_pending_tests_top_level_for_await_initializes_dependencies_before_export_binding {
     use super::*;
+    use ::thaw_quickjs;
 
     #[test]
     fn top_level_for_await_initializes_dependencies_before_export_binding() {
@@ -1082,6 +1084,7 @@ fn validates_json_import_attributes_and_rejects_unsupported_types() {
 // qjs_pending: fails on thaw-js: ERROR: TypeError: requireAsync is not a function
 mod qjs_pending_tests_dynamic_import_coerces_specifier_once_outside_local_string_scope {
     use super::*;
+    use ::thaw_quickjs;
 
     #[test]
     fn dynamic_import_coerces_specifier_once_outside_local_string_scope() {
@@ -1152,6 +1155,7 @@ fn nested_dynamic_import_rewrites_without_overlapping_ranges() {
 // qjs_pending: fails on thaw-js: ERROR: TypeError: requireAsync is not a function
 mod qjs_pending_tests_dynamic_import_uses_final_exports_after_async_factory_and_keeps_rejections {
     use super::*;
+    use ::thaw_quickjs;
 
     #[test]
     fn dynamic_import_uses_final_exports_after_async_factory_and_keeps_rejections() {

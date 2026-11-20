@@ -532,6 +532,7 @@ module.exports = async function() {
 
 mod qjs_pending_stream_integrations {
     use super::*;
+    use ::thaw_quickjs;
 
     // thaw-js: the ported test fails ("ERROR: TypeError: `` is not a function": module.createRequire / bundled require.resolve contract); stays on QuickJS until that feature is implemented
     #[test]
