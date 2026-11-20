@@ -5985,6 +5985,7 @@ struct HostTls {
     watches: Vec<Watch>,
     heap: crate::heap_limit::State,
     contexts: std::mem::ManuallyDrop<HashMap<u32, crate::vm::VmSlot>>,
+    sandboxes: std::mem::ManuallyDrop<HashMap<usize, crate::Obj>>,
 }
 
 // SAFETY: the host thread and the coroutine thread strictly alternate (each hands control to the
@@ -6015,6 +6016,7 @@ pub(crate) fn park_host_tls(key: usize) {
         watches: WATCHES.with(|c| std::mem::take(&mut *c.borrow_mut())),
         heap: crate::heap_limit::take(),
         contexts: crate::vm::take_contexts(),
+        sandboxes: crate::vm::take_sandboxes(),
     };
     PARKED.lock().unwrap().push((key, SendHostTls(tls)));
 }
@@ -6049,10 +6051,12 @@ pub(crate) fn adopt_host_tls(key: usize) {
         watches,
         heap,
         contexts,
+        sandboxes,
     } = tls;
     crate::heap_limit::restore(heap);
     // the table it replaces is empty (the other thread parked it), so discarding it runs no code
     crate::vm::restore_contexts(contexts);
+    crate::vm::restore_sandboxes(sandboxes);
     // the replaced values are empty (the other thread parked them), so dropping them runs no code
     drop(PACKAGES.with(|c| c.replace(packages)));
     drop(RUNNING.with(|c| c.replace(running)));

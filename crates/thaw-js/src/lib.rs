@@ -1390,8 +1390,6 @@ pub struct Interp {
     pub(crate) rt: eventloop::Rt,
     /// Host objects a vm realm shares (`Intl`, ...): teardown leaves them alone, the host still owns them.
     pub(crate) vm_shared: Vec<Obj>,
-    /// The sandbox of the `node:vm` run in progress, so `globalThis.x` / `this.x` reach it (vm.rs).
-    pub(crate) vm_sandbox: Option<Obj>,
     /// The filename of the `node:vm` script running in this realm, set and restored around each run (vm.rs).
     /// Errors made meanwhile carry it in `stack`, and a SyntaxError gets the file header.
     pub(crate) script_filename: Option<Rc<str>>,
@@ -1559,7 +1557,6 @@ impl Interp {
             err: Vec::new(),
             rt: Default::default(),
             vm_shared: Vec::new(),
-            vm_sandbox: None,
             script_filename: None,
             deadline: None,
             dl_ms: 0,
@@ -2635,8 +2632,8 @@ impl Interp {
                         if let Some(v) = self.lookup(&self.global.clone(), key) {
                             return Ok(v);
                         }
-                        if let Some(sb) = &self.vm_sandbox {
-                            if let Some(Slot::Data(v)) = find_in_chain(sb, key) {
+                        if let Some(sb) = vm::sandbox_of(o) {
+                            if let Some(Slot::Data(v)) = find_in_chain(&sb, key) {
                                 return Ok(v);
                             }
                         }
@@ -2693,11 +2690,9 @@ impl Interp {
             return Ok(());
         }
         if matches!(&*o.kind.borrow(), Kind::Global) {
-            if let Some(sb) = &self.vm_sandbox {
-                if find_in_chain(sb, key).is_some() {
-                    put(sb, key, value);
-                    return Ok(());
-                }
+            // a context's global object: the write is a write of its sandbox, which holds the context's vars
+            if let Some(sb) = vm::sandbox_of(o) {
+                return self.set_impl(&Value::Object(sb), key, value, strict);
             }
             // a getter-only accessor global refuses the write here too, with the writer's strictness
             if self.global_refuses_writes(key) {
@@ -3421,6 +3416,8 @@ impl Interp {
     fn assign_var(&mut self, scope: &Rc<Scope>, name: &str, value: Value, strict: bool) -> R<()> {
         let bit = name_bit(name);
         let mut cur: Option<&Scope> = Some(scope);
+        // the sandbox of a vm context on the chain, where an implicit global of the run goes
+        let mut vm_sandbox: Option<&Obj> = None;
         while let Some(s) = cur {
             if s.mask.get() & bit == 0 {
                 cur = s.parent.as_deref();
@@ -3430,6 +3427,9 @@ impl Interp {
                 if self.with_has(o, name)? {
                     let o = Value::Object(o.clone());
                     return self.set_impl(&o, name, value, strict);
+                }
+                if s.kind.get() & SK_VMGLOBAL != 0 {
+                    vm_sandbox = Some(o);
                 }
                 cur = s.parent.as_deref();
                 continue;
@@ -3462,6 +3462,11 @@ impl Interp {
         self.strict_fail(strict, "ReferenceError", |_| {
             format!("{name} is not defined")
         })?;
+        if let Some(sb) = vm_sandbox {
+            // in a context, the implicit global is a property of its sandbox (a frozen sandbox ignores it, as sloppy code does)
+            let sb = Value::Object(sb.clone());
+            return self.set_impl(&sb, name, value, false);
+        }
         self.global.declare(name, value, true);
         self.global.set_origin(name, Origin::Prop);
         self.publish_global(name);
@@ -3710,13 +3715,6 @@ impl Interp {
         self.run_global(&shared.stmts, true)
     }
 
-    /// Hoists the functions of `stmts` into `scope`, then runs them; the value is that of the last
-    /// expression statement.
-    fn run_stmts(&mut self, stmts: &[a::Stmt], scope: &Rc<Scope>) -> R<Value> {
-        self.hoist_functions(stmts, scope)?;
-        self.run_hoisted(stmts, scope)
-    }
-
     /// Runs `stmts` whose functions are already hoisted; the value is that of the last expression
     /// statement.
     fn run_hoisted(&mut self, stmts: &[a::Stmt], scope: &Rc<Scope>) -> R<Value> {
@@ -3776,20 +3774,19 @@ impl Interp {
         Err(Ctl::Throw(err))
     }
 
-    /// A `node:vm` script run in a context whose scope chain is `scope -> with(sandbox) -> global`
-    /// (see vm.rs). Vars and functions are hoisted into `scope`, except names `sandbox` already has,
-    /// so those stay bound to the sandbox property. Returns the value and the hoisted names.
+    /// A `node:vm` script run in a context whose scope chain is `scope -> with(sandbox) -> global` (see vm.rs).
+    /// The script's vars and functions are properties of `sandbox`, so reads and writes reach it live; a frozen or
+    /// non-extensible sandbox refuses them, and they stay bindings of `scope`. `lets` and `vars` name the let/const/class
+    /// and var/function declarations of earlier runs.
     pub(crate) fn run_vm_script(
         &mut self,
         source: &str,
         scope: &Rc<Scope>,
         sandbox: &Obj,
         lets: &mut Vec<Rc<str>>,
-    ) -> (R<Value>, Vec<Rc<str>>) {
-        let mut module = match self.parse_vm_script(source) {
-            Ok(m) => m,
-            Err(e) => return (Err(e), Vec::new()),
-        };
+        vars: &mut Vec<Rc<str>>,
+    ) -> R<Value> {
+        let mut module = self.parse_vm_script(source)?;
         hints::annotate(&mut module, &mut self.ident_hints);
         self.run_id = next_run_id();
         self.sources.insert(self.run_id, Rc::from(source));
@@ -3797,21 +3794,22 @@ impl Interp {
         for item in module.body {
             match item {
                 a::ModuleItem::Stmt(s) => stmts.push(s),
-                a::ModuleItem::ModuleDecl(_) => return (unsupported("esm-syntax"), Vec::new()),
+                a::ModuleItem::ModuleDecl(_) => return unsupported("esm-syntax"),
             }
         }
         let names = hoisted_names(&stmts);
         let lexicals = lexical_names(&stmts);
         // Redeclaration is an early error: checked before any of the script runs. A let/const/class conflicts with
-        // any name the context's script scope holds; a var or function conflicts with an earlier let/const/class.
+        // any name the context's script scope or an earlier var/function holds; a var or function conflicts with an
+        // earlier let/const/class.
         // ponytail: a let vs a `var` the host put on the sandbox is not checked.
         let clash = lexicals
             .iter()
-            .find(|n| scope.vars.borrow().contains_key(n))
+            .find(|n| scope.vars.borrow().contains_key(n) || vars.contains(n))
             .or_else(|| names.iter().find(|n| lets.contains(n)));
         if let Some(name) = clash {
             let message = format!("Identifier '{name}' has already been declared");
-            return (self.throw_error("SyntaxError", &message), Vec::new());
+            return self.throw_error("SyntaxError", &message);
         }
         for name in lexicals {
             if !lets.contains(&name) {
@@ -3819,11 +3817,34 @@ impl Interp {
             }
         }
         for name in &names {
-            if find_in_chain(sandbox, name).is_none() {
+            if !vars.contains(name) {
+                vars.push(name.clone());
+            }
+            if find_in_chain(sandbox, name).is_some() {
+                continue;
+            }
+            // a frozen or non-extensible sandbox refuses the var: it stays a binding of the script scope
+            if sandbox.frozen.get() || sandbox.ext.get() != 0 {
                 scope.declare_if_absent(name);
+            } else {
+                put(sandbox, name, Value::Undefined);
             }
         }
-        (self.run_stmts(&stmts, scope), names)
+        // the functions are hoisted into `scope` and then moved to the sandbox, where they are read and written
+        self.hoist_functions(&stmts, scope)?;
+        for s in &stmts {
+            if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
+                let name = self.intern(&f.ident.sym);
+                if find_in_chain(sandbox, &name).is_some() {
+                    let value = scope.vars.borrow().get(&name).map(|b| b.value.clone());
+                    scope.vars.borrow_mut().remove(&name);
+                    if let Some(value) = value {
+                        self.set_impl(&Value::Object(sandbox.clone()), &name, value, false)?;
+                    }
+                }
+            }
+        }
+        self.run_hoisted(&stmts, scope)
     }
 
     /// Compile a function literal (`function (a, b) { ... }` expression source) in the global scope.
@@ -4071,6 +4092,18 @@ impl Interp {
                         if let Some(b) = outer.vars.borrow_mut().get_mut(&name) {
                             if b.mutable {
                                 b.value = func.clone();
+                            }
+                            break;
+                        }
+                        // a context's var of this name is a property of its sandbox
+                        if let Some(sb) = outer
+                            .with
+                            .as_ref()
+                            .filter(|_| outer.kind.get() & SK_VMGLOBAL != 0)
+                        {
+                            let sb = sb.clone();
+                            if self.with_has(&sb, &name)? {
+                                self.set_impl(&Value::Object(sb), &name, func.clone(), false)?;
                             }
                             break;
                         }
