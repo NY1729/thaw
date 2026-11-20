@@ -112,3 +112,52 @@ function main(): void {
         "4 true 3\n010203fa 1-2-3-250\nfa030201\nfa070201 7\n4 true 1,2,3,250\nTypeError Cannot read properties of null (reading 'includes')\nTypeError Cannot read properties of null (reading 'sort')\n"
     );
 }
+
+/// In-place mutators (`fill`, `reverse`, `copyWithin`) on an `any`-typed Buffer or Uint8Array
+/// receiver must mutate the bytes, not an f64 view of them. A typed Buffer is the control.
+/// Expected output from node 22.
+#[test]
+fn any_receiver_buffer_inplace_mutators_match_node() {
+    let source = r#"
+function main(): void {
+  const u: any = Buffer.from([1, 2, 3, 250]);
+  u.fill(7, 1, 2);
+  console.log(u.toString("hex"));
+  u.reverse();
+  console.log(u.toString("hex"));
+  u.copyWithin(0, 2);
+  console.log(u.toString("hex"));
+  const w: any = Buffer.from([1, 2, 3, 250]);
+  w.fill(7, 1);
+  console.log(w.toString("hex"));
+  const b = Buffer.from([1, 2, 3, 250]);
+  b.fill(7, 1, 2);
+  console.log(b.toString("hex"));
+  b.reverse();
+  console.log(b.toString("hex"));
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "any_receiver_buffer_inplace_mutators"),
+        "010703fa\nfa030701\n07010701\n01070707\n010703fa\nfa030701\n"
+    );
+}
+
+#[test]
+fn any_receiver_uint8array_inplace_mutators_match_node() {
+    let source = r#"
+function main(): void {
+  const v: any = new Uint8Array([1, 2, 3, 250]);
+  v.fill(7, 1, 2);
+  console.log(v.join(","));
+  v.reverse();
+  console.log(v.join(","));
+  v.copyWithin(0, 2);
+  console.log(v.join(","));
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "any_receiver_uint8array_inplace_mutators"),
+        "1,7,3,250\n250,3,7,1\n7,1,7,1\n"
+    );
+}

@@ -385,7 +385,7 @@ impl<'a> FnLowerer<'a> {
             type_args: None,
         };
         let property = swc_ecma_ast::IdentName::new(name.into(), span);
-        let typed = self.lower_native_instance_builtin_unchecked(&member, &property, &call)?;
+        let typed = self.lower_native_instance_builtin(&member, &property, &call)?;
         let typed_type = self.infer_expr_type(&typed)?;
         let json = HirExpr::Var(json_name.to_string());
         // A detached copy of the wrapper's `data`, as `Buffer.from(number[])` makes.
