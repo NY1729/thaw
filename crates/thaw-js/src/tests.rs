@@ -175,6 +175,70 @@ fn unsupported_constructs_name_the_feature() {
     assert_eq!(one("import x from 'y'"), "unsupported: esm-syntax");
 }
 
+/// Evaluates `src` as a global-script expression and returns its value. `eval_function` parses
+/// script goal, which rejects `import.meta`, so these tests go through `run`.
+fn esm_expr(it: &mut Interp, src: &str) -> Value {
+    it.run(&format!("var __esm_fn = {src};")).expect("runs");
+    let get = it
+        .eval_function("(function () { return __esm_fn; })")
+        .expect("compiles");
+    it.call(&get, &Value::Undefined, &[]).expect("getter")
+}
+
+#[test]
+fn esm_import_meta_and_import_read_in_scope_hooks() {
+    let mut it = Interp::new();
+    let meta = esm_expr(&mut it, "{ url: 'file:///a.mjs' }");
+    let import = esm_expr(&mut it, "function (s) { return Promise.resolve(s); }");
+    let f = esm_expr(
+        &mut it,
+        "function(__thaw_esm_meta, __thaw_esm_import){ return [import.meta.url, typeof import('x').then] }",
+    );
+    let v = it
+        .call(&f, &Value::Undefined, &[meta, import])
+        .expect("runs");
+    assert_eq!(it.to_str(&v).to_string(), "file:///a.mjs,function");
+}
+
+#[test]
+fn esm_hooks_absent_keep_the_unsupported_error() {
+    let mut it = Interp::new();
+    let meta = esm_expr(&mut it, "function () { return import.meta.url; }");
+    match it.call(&meta, &Value::Undefined, &[]) {
+        Err(Ctl::Unsupported(f)) => assert_eq!(f, "import.meta"),
+        other => panic!("{:?}", other.err()),
+    }
+    let dynamic = esm_expr(&mut it, "function () { return import('x'); }");
+    match it.call(&dynamic, &Value::Undefined, &[]) {
+        Err(Ctl::Unsupported(f)) => assert_eq!(f, "import()"),
+        other => panic!("{:?}", other.err()),
+    }
+}
+
+#[test]
+fn esm_import_meta_is_visible_from_nested_functions() {
+    let mut it = Interp::new();
+    let meta = esm_expr(&mut it, "{ url: 'file:///n.mjs' }");
+    let f = esm_expr(
+        &mut it,
+        "function(__thaw_esm_meta){ return (() => (function () { return import.meta.url; })())(); }",
+    );
+    let v = it.call(&f, &Value::Undefined, &[meta]).expect("runs");
+    assert_eq!(it.to_str(&v).to_string(), "file:///n.mjs");
+}
+
+#[test]
+fn esm_import_passes_the_specifier_through_unchanged() {
+    let mut it = Interp::new();
+    let hook = esm_expr(&mut it, "function (s) { return s; }");
+    let f = esm_expr(
+        &mut it,
+        "function(__thaw_esm_import){ var o = {}; var n = 0; var r = import(n++); return [r, n, import(o) === o].join() }",
+    );
+    let v = it.call(&f, &Value::Undefined, &[hook]).expect("runs");
+    assert_eq!(it.to_str(&v).to_string(), "0,1,true");
+}
+
 #[test]
 fn destructuring_spread_and_accessors() {
     assert_eq!(one("var {a, b: [c, d = 4], ...r} = {a: 1, b: [2], x: 5, y: 6}; console.log(a, c, d, Object.keys(r).join())"), "1 2 4 x,y");
