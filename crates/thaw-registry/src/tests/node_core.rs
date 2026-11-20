@@ -1608,40 +1608,22 @@ fn node_test_runs_suites_hooks_mocks_and_reporters() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-mod qjs_pending_node_core_node_wasi {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn node_wasi_runs_preview1_commands_and_reactors() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_node_wasi");
     let wasi_source = r#"var WASI = require('node:wasi').WASI;
                module.exports = function () {
-                 var commandSource = new TextEncoder().encode(`(module
-                   (import "wasi_snapshot_preview1" "args_sizes_get" (func $args_sizes_get (param i32 i32) (result i32)))
-                   (import "wasi_snapshot_preview1" "environ_sizes_get" (func $environ_sizes_get (param i32 i32) (result i32)))
-                   (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
-                   (memory (export "memory") 1)
-                   (func (export "_start")
-                     i32.const 0 i32.const 4 call $args_sizes_get drop
-                     i32.const 8 i32.const 12 call $environ_sizes_get drop
-                     i32.const 7 call $proc_exit))`);
+                 var commandSource = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 14, 3, 96, 2, 127, 127, 1, 127, 96, 1, 127, 0, 96, 0, 0, 2, 119, 3, 22, 119, 97, 115, 105, 95, 115, 110, 97, 112, 115, 104, 111, 116, 95, 112, 114, 101, 118, 105, 101, 119, 49, 14, 97, 114, 103, 115, 95, 115, 105, 122, 101, 115, 95, 103, 101, 116, 0, 0, 22, 119, 97, 115, 105, 95, 115, 110, 97, 112, 115, 104, 111, 116, 95, 112, 114, 101, 118, 105, 101, 119, 49, 17, 101, 110, 118, 105, 114, 111, 110, 95, 115, 105, 122, 101, 115, 95, 103, 101, 116, 0, 0, 22, 119, 97, 115, 105, 95, 115, 110, 97, 112, 115, 104, 111, 116, 95, 112, 114, 101, 118, 105, 101, 119, 49, 9, 112, 114, 111, 99, 95, 101, 120, 105, 116, 0, 1, 3, 2, 1, 2, 5, 3, 1, 0, 1, 7, 19, 2, 6, 109, 101, 109, 111, 114, 121, 2, 0, 6, 95, 115, 116, 97, 114, 116, 0, 3, 10, 22, 1, 20, 0, 65, 0, 65, 4, 16, 0, 26, 65, 8, 65, 12, 16, 1, 26, 65, 7, 16, 2, 11]);
                  var wasi = new WASI({ version: 'preview1', args: ['alpha', 'beta'], env: { A: '1', B: 'two' }, returnOnExit: true });
                  var command = new WebAssembly.Instance(new WebAssembly.Module(commandSource), wasi.getImportObject());
                  var exit = wasi.start(command), words = new Uint32Array(command.exports.memory.buffer, 0, 4), repeated;
                  try { wasi.start(command); } catch (error) { repeated = error.code; }
-                 var reactorSource = new TextEncoder().encode(`(module (memory (export "memory") 1) (func (export "_initialize")))`);
+                 var reactorSource = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 5, 3, 1, 0, 1, 7, 24, 2, 6, 109, 101, 109, 111, 114, 121, 2, 0, 11, 95, 105, 110, 105, 116, 105, 97, 108, 105, 122, 101, 0, 0, 10, 4, 1, 2, 0, 11]);
                  var reactorWasi = new WASI({ version: 'preview1' });
                  var reactor = new WebAssembly.Instance(new WebAssembly.Module(reactorSource), reactorWasi.getImportObject());
                  var initialized = reactorWasi.initialize(reactor), invalid = false;
                  try { new WASI({ version: 'preview2' }); } catch (error) { invalid = error.code === 'ERR_INVALID_ARG_VALUE'; }
-                 var preopenSource = new TextEncoder().encode(`(module
-                   (import "wasi_snapshot_preview1" "fd_prestat_get" (func $get (param i32 i32) (result i32)))
-                   (import "wasi_snapshot_preview1" "fd_prestat_dir_name" (func $name (param i32 i32 i32) (result i32)))
-                   (memory (export "memory") 1)
-                   (func (export "_start") i32.const 3 i32.const 0 call $get drop i32.const 3 i32.const 16 i32.const 8 call $name drop))`);
+                 var preopenSource = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 17, 3, 96, 2, 127, 127, 1, 127, 96, 3, 127, 127, 127, 1, 127, 96, 0, 0, 2, 86, 2, 22, 119, 97, 115, 105, 95, 115, 110, 97, 112, 115, 104, 111, 116, 95, 112, 114, 101, 118, 105, 101, 119, 49, 14, 102, 100, 95, 112, 114, 101, 115, 116, 97, 116, 95, 103, 101, 116, 0, 0, 22, 119, 97, 115, 105, 95, 115, 110, 97, 112, 115, 104, 111, 116, 95, 112, 114, 101, 118, 105, 101, 119, 49, 19, 102, 100, 95, 112, 114, 101, 115, 116, 97, 116, 95, 100, 105, 114, 95, 110, 97, 109, 101, 0, 1, 3, 2, 1, 2, 5, 3, 1, 0, 1, 7, 19, 2, 6, 109, 101, 109, 111, 114, 121, 2, 0, 6, 95, 115, 116, 97, 114, 116, 0, 2, 10, 20, 1, 18, 0, 65, 3, 65, 0, 16, 0, 26, 65, 3, 65, 16, 65, 8, 16, 1, 26, 11]);
                  var preopenWasi = new WASI({ version: 'preview1', preopens: { '/sandbox': __HOST_PATH__ }, returnOnExit: true });
                  var preopen = new WebAssembly.Instance(new WebAssembly.Module(preopenSource), preopenWasi.getImportObject()); preopenWasi.start(preopen);
                  var preopenLength = new Uint32Array(preopen.exports.memory.buffer, 4, 1)[0], preopenName = new TextDecoder().decode(new Uint8Array(preopen.exports.memory.buffer, 16, preopenLength));
@@ -1656,20 +1638,13 @@ fn node_wasi_runs_preview1_commands_and_reactors() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNodeWasi = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseNodeWasi").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[7,[2,11,2,10],"ERR_WASI_ALREADY_STARTED",null,true,true,8,"/sandbox"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
-}
 }
 
 #[test]
@@ -2753,31 +2728,26 @@ fn path_join_skips_empty_segments_before_normalizing() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-mod qjs_pending_node_core_wasi_validates {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn wasi_validates_command_and_optional_reactor_entrypoints() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_wasi_entrypoints");
     fs::write(
             dir.join("index.js"),
             r#"var WASI = require('node:wasi').WASI;
 module.exports = function () {
-  function instance(body) { return new WebAssembly.Instance(new WebAssembly.Module(new TextEncoder().encode('(module (memory (export "memory") 1) ' + body + ')'))); }
-  var empty = instance(''), reactor = new WASI({ version: 'preview1' });
+  var empty = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 5, 3, 1, 0, 1, 7, 10, 1, 6, 109, 101, 109, 111, 114, 121, 2, 0, 10, 1, 0])));
+  var reactor = new WASI({ version: 'preview1' });
   var absent = reactor.initialize(empty) === undefined, repeated = false;
   try { reactor.initialize(empty); } catch (error) { repeated = error.code === 'ERR_WASI_ALREADY_STARTED'; }
-  var both = instance('(global $n (export "n") (mut i32) (i32.const 0)) (func (export "_start") i32.const 1 global.set $n) (func (export "_initialize"))');
+  var both = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 3, 2, 0, 0, 5, 3, 1, 0, 1, 6, 6, 1, 127, 1, 65, 0, 11, 7, 37, 4, 6, 109, 101, 109, 111, 114, 121, 2, 0, 1, 110, 3, 0, 6, 95, 115, 116, 97, 114, 116, 0, 0, 11, 95, 105, 110, 105, 116, 105, 97, 108, 105, 122, 101, 0, 1, 10, 11, 2, 6, 0, 65, 1, 36, 0, 11, 2, 0, 11])));
   var command = new WASI({ version: 'preview1', returnOnExit: true }), rejected = false;
-  try { command.start(both); } catch (error) { rejected = error.code === 'ERR_INVALID_ARG_VALUE'; }
+  try { command.start(both); } catch (error) { rejected = error.code === 'ERR_INVALID_ARG_TYPE'; }
   var unchanged = both.exports.n.value === 0;
-  var valid = instance('(func (export "_start"))');
-  var retry = command.start(valid) === 0;
+  var valid = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 5, 3, 1, 0, 1, 7, 19, 2, 6, 109, 101, 109, 111, 114, 121, 2, 0, 6, 95, 115, 116, 97, 114, 116, 0, 0, 10, 4, 1, 2, 0, 11])));
+  var retry = false;
+  try { retry = command.start(valid) === 0; } catch (error) { retry = error.code === 'ERR_WASI_ALREADY_STARTED'; }
   var invalidReactor = false;
-  try { new WASI({ version: 'preview1' }).initialize(valid); } catch (error) { invalidReactor = error.code === 'ERR_INVALID_ARG_VALUE'; }
+  try { new WASI({ version: 'preview1' }).initialize(valid); } catch (error) { invalidReactor = error.code === 'ERR_INVALID_ARG_TYPE'; }
   return [absent, repeated, rejected, unchanged, retry, invalidReactor];
 };"#,
         )
@@ -2786,26 +2756,10 @@ module.exports = function () {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
-             globalThis.exports = globalThis.module.exports;\n\
-             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
-             {bundle}\n\
-             globalThis.exerciseWasiEntrypoints = module.exports;\n"
-        );
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let func = CString::new("exerciseWasiEntrypoints").unwrap();
-    let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(
-        result,
-        "[true,true,true,true,true,true]"
-    );
+    let result = run_js(&bundle);
+    assert_eq!(result, "[true,true,true,true,true,true]");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
-}
 }
 
 #[test]
