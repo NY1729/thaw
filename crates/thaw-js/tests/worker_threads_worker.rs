@@ -150,7 +150,8 @@ fn two_workers_get_distinct_thread_ids() {
         ]);
         console.log(a.threadId + ' ' + b.threadId + ' ' + exits.join(','));
       })().catch((e) => console.log('failed ' + e));";
-    assert_eq!(run_main(src), "1 2 0,0");
+    // Node 22.23.1: threadId reads -1 once a worker has exited
+    assert_eq!(run_main(src), "-1 -1 0,0");
 }
 
 #[test]

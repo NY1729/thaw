@@ -793,6 +793,7 @@ module.exports = async function () {
 
 mod qjs_pending_web_platform {
     use super::*;
+    use ::thaw_quickjs;
 
     // thaw-js: vm context host receiver contract (vm family): "vm host receiver unchanged"
     #[test]

@@ -89,8 +89,7 @@ fn bundles_package_imports_from_a_generated_nested_package_scope() {
 
 #[test]
 fn bundled_modules_receive_node_filename_and_dirname() {
-    use std::ffi::{CStr, CString};
-    let dir = temp_registry("bundle_module_paths");
+        let dir = temp_registry("bundle_module_paths");
     fs::create_dir_all(dir.join("lib")).unwrap();
     fs::write(
             dir.join("lib/index.js"),
@@ -105,15 +104,7 @@ fn bundled_modules_receive_node_filename_and_dirname() {
     let node_modules = temp_registry("bundle_module_paths_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "lib/index.js").unwrap();
-    let script = CString::new(format!(
-            "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.readModulePaths = module.exports;"
-        ))
-        .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let function = CString::new("readModulePaths").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["/thaw_modules/pkg/lib/index.js","/thaw_modules/pkg/lib",["/thaw_modules/pkg/lib/child.js","/thaw_modules/pkg/lib"]]"#
@@ -1228,6 +1219,11 @@ fn esm_star_static_name_is_not_blocked_by_unloaded_named_native_reexport() {
     let _ = fs::remove_dir_all(root);
 }
 
+// qjs_pending: fails on thaw-js: route A ReferenceError: value is not defined; Package get("value") returns null
+mod qjs_pending_bundling_async_esm_star_diamond_keeps_the_terminal_binding {
+    use super::*;
+    use ::thaw_quickjs;
+
 #[test]
 fn async_esm_star_diamond_keeps_the_terminal_binding() {
     use std::ffi::{CStr, CString};
@@ -1245,6 +1241,7 @@ fn async_esm_star_diamond_keeps_the_terminal_binding() {
     let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "9");
     let _ = fs::remove_dir_all(root);
+}
 }
 
 #[test]
@@ -1429,6 +1426,11 @@ fn esm_star_diamond_coalesces_same_namespace_reexport() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[7,true]");
     let _ = fs::remove_dir_all(root);
 }
+// qjs_pending: fails on thaw-js: needs in-context globalThis.__thaw_bundle_create_require (not exposed by Package); script route needs __thaw_register_native_bundle
+mod qjs_pending_bundling_bundled_require_cache_and_commonjs_this_respect_module_format {
+    use super::*;
+    use ::thaw_quickjs;
+
 #[test]
 fn bundled_require_cache_and_commonjs_this_respect_module_format() {
     use std::ffi::{CStr, CString};
@@ -1462,6 +1464,12 @@ fn bundled_require_cache_and_commonjs_this_respect_module_format() {
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
 }
+}
+
+// qjs_pending: fails on thaw-js: ERROR: TypeError: requireAsync is not a function
+mod qjs_pending_bundling_async_commonjs_factory_keeps_top_level_this_after_await {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn async_commonjs_factory_keeps_top_level_this_after_await() {
@@ -1479,6 +1487,7 @@ fn async_commonjs_factory_keeps_top_level_this_after_await() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
+}
 }
 #[test]
 fn bundled_require_resolve_finds_resolve_only_files_and_rejects_missing_modules() {
@@ -1503,6 +1512,11 @@ fn bundled_require_resolve_finds_resolve_only_files_and_rejects_missing_modules(
     let _ = fs::remove_dir_all(modules);
 }
 
+// qjs_pending: fails on thaw-js: Package route ERROR: unsupported: esm-cycle; script route needs __thaw_register_native_bundle
+mod qjs_pending_bundling_native_esm_cycle_links_original_mjs_before_evaluation {
+    use super::*;
+    use ::thaw_quickjs;
+
 #[test]
 fn native_esm_cycle_links_original_mjs_before_evaluation() {
     // Unrun regression: B evaluates first, observes A's hoisted function, and
@@ -1523,6 +1537,12 @@ fn native_esm_cycle_links_original_mjs_before_evaluation() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[\"function\",\"ReferenceError\"],7,3]");
     let _ = fs::remove_dir_all(root);
 }
+}
+
+// qjs_pending: needs a JS global read after load (globalThis.__thaw_mixed_runs); script route fails: __thaw_register_native_bundle is not a function
+mod qjs_pending_bundling_native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order() {
@@ -1542,6 +1562,12 @@ fn native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[9,9,9,1]");
     let _ = fs::remove_dir_all(root);
 }
+}
+
+// qjs_pending: needs in-context helpers and namespace identity after load; script route fails: __thaw_register_native_bundle is not a function
+mod qjs_pending_bundling_native_mixed_pure_namespace_keeps_engine_identity {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_pure_namespace_keeps_engine_identity() {
@@ -1569,6 +1595,12 @@ fn native_mixed_pure_namespace_keeps_engine_identity() {
     assert_eq!(unsafe { CStr::from_ptr(dynamic) }.to_string_lossy(), "[true,true,18,1]");
     let _ = fs::remove_dir_all(root);
 }
+}
+
+// qjs_pending: needs JS globals read after load (__thaw_early_ns, __thaw_pure_runs); script route fails: __thaw_register_native_bundle is not a function
+mod qjs_pending_bundling_native_mixed_namespace_anchor_reseeds_after_stripped_edge {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_namespace_anchor_reseeds_after_stripped_edge() {
@@ -1592,6 +1624,7 @@ fn native_mixed_namespace_anchor_reseeds_after_stripped_edge() {
     let result = thaw_quickjs::thaw_js_call(c"readAnchorReseed".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,17,1]");
     let _ = fs::remove_dir_all(root);
+}
 }
 
 #[test]
@@ -1619,6 +1652,11 @@ fn native_mixed_rewrite_uses_private_opaque_edge_and_origin_reads() {
     assert!(!rewritten.contains("export * from"), "{rewritten}");
 }
 
+// qjs_pending: fails on thaw-js: Package route ERROR: TypeError: requireAsync is not a function; script route needs __thaw_register_native_bundle
+mod qjs_pending_bundling_native_mixed_cjs_dynamic_import_uses_bound_native_ready {
+    use super::*;
+    use ::thaw_quickjs;
+
 #[test]
 fn native_mixed_cjs_dynamic_import_uses_bound_native_ready() {
     // Unrun regression: the CJS factory starts after its native importer
@@ -1641,6 +1679,12 @@ fn native_mixed_cjs_dynamic_import_uses_bound_native_ready() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[17,17,1]");
     let _ = fs::remove_dir_all(root);
 }
+}
+
+// qjs_pending: needs JS global read after load (__thaw_side_module_this); script route fails: __thaw_register_native_bundle is not a function
+mod qjs_pending_bundling_native_mixed_side_effect_only_mjs_keeps_module_this {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_side_effect_only_mjs_keeps_module_this() {
@@ -1662,6 +1706,7 @@ fn native_mixed_side_effect_only_mjs_keeps_module_this() {
     let result = thaw_quickjs::thaw_js_call(c"readNativeSideEffect".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[9,true]");
     let _ = fs::remove_dir_all(root);
+}
 }
 
 #[test]
@@ -1711,6 +1756,11 @@ fn native_mixed_removed_named_edges_fail_before_any_factory_runs() {
     }
 }
 
+// qjs_pending: fails on thaw-js: Package route ERROR: TypeError: requireAsync is not a function; script route needs __thaw_register_native_bundle
+mod qjs_pending_bundling_native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling {
+    use super::*;
+    use ::thaw_quickjs;
+
 #[test]
 fn native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling() {
     // Unrun regression: the loader already declared native.mjs for the
@@ -1732,6 +1782,12 @@ fn native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[17,17,1]");
     let _ = fs::remove_dir_all(root);
 }
+}
+
+// qjs_pending: needs in-context lazy-load helpers across calls; script route fails: __thaw_register_native_bundle is not a function
+mod qjs_pending_bundling_native_mixed_lazy_link_errors_wait_for_the_dynamic_entry {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_lazy_link_errors_wait_for_the_dynamic_entry() {
@@ -1783,6 +1839,12 @@ fn native_mixed_lazy_link_errors_wait_for_the_dynamic_entry() {
         let _ = fs::remove_dir_all(root);
     }
 }
+}
+
+// qjs_pending: not run on thaw-js: two loads into one QuickJS global context; converting it to run_js_get would be weaker (two bundles in one context needed; needs Package::join or a shared-context helper)
+mod qjs_pending_bundling_native_esm_bundle_name_is_fresh_for_same_key_new_source {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn native_esm_bundle_name_is_fresh_for_same_key_new_source() {
@@ -1805,10 +1867,10 @@ fn native_esm_bundle_name_is_fresh_for_same_key_new_source() {
     assert_eq!(unsafe { CStr::from_ptr(two) }.to_string_lossy(), "2");
     let _ = fs::remove_dir_all(root);
 }
+}
 
 #[test]
 fn native_esm_query_suffixes_retain_distinct_module_identity() {
-    use std::ffi::{CStr, CString};
     let root = temp_registry("native-esm-query-identity");
     let modules = root.join("node_modules");
     let package = modules.join("native-query-pkg");
@@ -1818,10 +1880,7 @@ fn native_esm_query_suffixes_retain_distinct_module_identity() {
     let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-query-pkg", &package, "index.mjs").unwrap();
     assert_eq!(count, 3);
     assert!(bundle.contains("__thaw_register_native_bundle"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.queryLeafRuns = 0; {bundle} globalThis.nativeQueryResult = function() {{ return module.exports.result; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"nativeQueryResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,2]");
+    assert_eq!(run_js_get(&bundle, "result"), "[false,2]");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1872,6 +1931,11 @@ fn native_esm_dynamic_global_capability_uses_legacy_bundle() {
     let _ = fs::remove_dir_all(root);
 }
 
+// qjs_pending: fails on thaw-js: Package route ERROR: bad bundle: await isn't allowed in non-async function; script route needs __thaw_register_native_bundle
+mod qjs_pending_bundling_native_esm_dynamic_absolute_name_cannot_escape_its_bundle {
+    use super::*;
+    use ::thaw_quickjs;
+
 #[test]
 fn native_esm_dynamic_absolute_name_cannot_escape_its_bundle() {
     // An isolated realm makes the first Rust-minted prefix deterministic.
@@ -1896,6 +1960,12 @@ fn native_esm_dynamic_absolute_name_cannot_escape_its_bundle() {
         let _ = fs::remove_dir_all(root);
     }).join().unwrap();
 }
+}
+// qjs_pending: needs one realm across two loads with a global sequence reset; script route fails: __thaw_register_native_bundle is not a function
+mod qjs_pending_bundling_native_esm_bundle_sequence_ignores_mutable_global_reset {
+    use super::*;
+    use ::thaw_quickjs;
+
 #[test]
 fn native_esm_bundle_sequence_ignores_mutable_global_reset() {
     std::thread::spawn(|| {
@@ -1919,6 +1989,10 @@ fn native_esm_bundle_sequence_ignores_mutable_global_reset() {
         let _ = fs::remove_dir_all(root);
     }).join().unwrap();
 }
+}
+// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (private entry reentry); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
+mod qjs_pending_bundling_native_esm_private_entry_reentry_and_intrinsic_then {
+
 #[test]
 fn native_esm_private_entry_reentry_and_intrinsic_then() {
     // Unrun: a bound evaluator, not a public token, owns this entry. The
@@ -1944,6 +2018,10 @@ fn native_esm_private_entry_reentry_and_intrinsic_then() {
         assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,true,\"undefined\",\"undefined\"]");
     }).join().unwrap();
 }
+}
+
+// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (private linked read); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
+mod qjs_pending_bundling_native_esm_private_linked_read_is_owner_scoped_and_live {
 
 #[test]
 fn native_esm_private_linked_read_is_owner_scoped_and_live() {
@@ -1999,6 +2077,10 @@ fn native_esm_private_linked_read_is_owner_scoped_and_live() {
         assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,7,true,9,3,true,true,true,true,true,true,true,true]");
     }).join().unwrap();
 }
+}
+
+// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (failedEntry.readNative); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
+mod qjs_pending_bundling_native_esm_failed_link_never_marks_source_linked {
 
 #[test]
 fn native_esm_failed_link_never_marks_source_linked() {
@@ -2020,6 +2102,12 @@ fn native_esm_failed_link_never_marks_source_linked() {
         assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
     }).join().unwrap();
 }
+}
+
+// qjs_pending: fails on thaw-js: Package route ERROR: Cannot find module './native.mjs'; script route needs __thaw_register_native_bundle
+mod qjs_pending_bundling_commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports() {
@@ -2041,6 +2129,12 @@ fn commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports() 
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,2]");
     let _ = fs::remove_dir_all(root);
 }
+}
+
+// qjs_pending: needs JS globals read after load (asyncFactoryRan, nativeTlaRan); script route fails: __thaw_register_native_bundle is not a function
+mod qjs_pending_bundling_sync_require_rejects_async_factory_and_native_tla_before_side_effects {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn sync_require_rejects_async_factory_and_native_tla_before_side_effects() {
@@ -2061,6 +2155,7 @@ fn sync_require_rejects_async_factory_and_native_tla_before_side_effects() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[true,true,true,true],true,true]");
     let _ = fs::remove_dir_all(root);
 }
+}
 
 #[test]
 fn commonjs_first_native_route_keeps_worker_url_on_legacy_snapshot() {
@@ -2077,6 +2172,11 @@ fn commonjs_first_native_route_keeps_worker_url_on_legacy_snapshot() {
     assert!(!bundle.contains("__thaw_register_native_bundle"));
     let _ = fs::remove_dir_all(root);
 }
+
+// qjs_pending: fails on thaw-js: Package route ERROR: unsupported: esm-live-binding; script route needs __thaw_register_native_bundle
+mod qjs_pending_bundling_commonjs_first_require_preserves_pure_native_namespace_identity_and_live_binding {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn commonjs_first_require_preserves_pure_native_namespace_identity_and_live_binding() {
@@ -2097,6 +2197,12 @@ fn commonjs_first_require_preserves_pure_native_namespace_identity_and_live_bind
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,1,2]");
     let _ = fs::remove_dir_all(root);
 }
+}
+
+// qjs_pending: needs in-context created-require calls after load; script route fails: __thaw_register_native_bundle is not a function
+mod qjs_pending_bundling_commonjs_created_require_keeps_computed_native_query_instances_distinct {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn commonjs_created_require_keeps_computed_native_query_instances_distinct() {
@@ -2117,6 +2223,12 @@ fn commonjs_created_require_keeps_computed_native_query_instances_distinct() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,false,true,0,1,0,3]");
     let _ = fs::remove_dir_all(root);
 }
+}
+
+// qjs_pending: needs in-context created-require calls after load; script route fails: __thaw_register_native_bundle is not a function
+mod qjs_pending_bundling_commonjs_created_require_native_query_clones_private_opaque_edges {
+    use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn commonjs_created_require_native_query_clones_private_opaque_edges() {
@@ -2136,4 +2248,5 @@ fn commonjs_created_require_native_query_clones_private_opaque_edges() {
     let result = thaw_quickjs::thaw_js_call(c"queryOpaqueResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[2,2,2,false,false,true,false,false,3,1]");
     let _ = fs::remove_dir_all(root);
+}
 }

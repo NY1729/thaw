@@ -537,7 +537,14 @@ fn run_script(it: &mut Interp, source: &str, opts: &str, main: Option<MainBundle
         return code;
     }
     match r {
-        Ok(code) | Err(Ctl::Exit(code)) => code,
+        Ok(code) => code,
+        // process.exit runs the worker's 'exit' listeners; terminate() (the interrupt's Exit) does not
+        Err(Ctl::Exit(code)) => {
+            if it.rt.shared.exit_requested.get() {
+                it.emit_exit_once(code);
+            }
+            code
+        }
         Err(e) => {
             let wire = match e {
                 Ctl::Throw(v) => wire_of(it, &v),
