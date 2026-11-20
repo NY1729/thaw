@@ -54,7 +54,9 @@ fn main() {
             }
         };
         let native_addon = addon.contains(&name);
-        match thaw_registry::scan_bundle_for_build(&source, native_addon, &installed) {
+        // no served peers: the verdict is the whole-bundle one
+        let served = std::collections::HashSet::new();
+        match thaw_registry::scan_bundle_for_build(&source, native_addon, &installed, &served) {
             Ok(r) => {
                 println!(
                     "{name}\tmodules\t{}/{}\t{}",
