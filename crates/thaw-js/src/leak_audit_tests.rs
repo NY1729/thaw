@@ -1457,3 +1457,128 @@ fn gc_edges_match_rc_clones_control_kinds() {
     assert!(!obj_edges(&s, &mut |_| {}), "a started generator is opaque");
     check_invariants().unwrap();
 }
+
+// ---- arena reclamation at event-loop turns: the thaw-js counterpart of the QuickJS turn reset ----
+
+thread_local! {
+    static TURN_PTR: Cell<usize> = const { Cell::new(0) };
+    static TURN_SEEN: Cell<bool> = const { Cell::new(false) };
+    static NESTED_PTR: Cell<usize> = const { Cell::new(0) };
+    static NESTED_SEEN: Cell<bool> = const { Cell::new(false) };
+    static OUTER_SEEN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Native that makes one unrooted arena block per call and remembers the first. `was_reclaimed` only reports the
+/// most recent reset, and a turn's reset runs before that turn's timers, so the latch catches the reclaim in time.
+fn turn_alloc_native(it: &Interp) -> Value {
+    it.native(|_, _, _| {
+        let p = thaw_arena::thaw_arena_alloc(8192, 8) as usize;
+        TURN_PTR.with(|first| {
+            if first.get() == 0 {
+                first.set(p);
+            }
+        });
+        if thaw_arena::was_reclaimed(TURN_PTR.with(Cell::get)) {
+            TURN_SEEN.with(|seen| seen.set(true));
+        }
+        Ok(Value::Undefined)
+    })
+}
+
+#[test]
+fn loop_turns_reclaim_unrooted_arena_allocations() {
+    std::thread::spawn(|| {
+        thaw_arena::thaw_arena_enable_tracing();
+        let mut it = Interp::new();
+        let alloc = turn_alloc_native(&it);
+        it.global.declare("__alloc", alloc, false);
+        ok(
+            it.run("var n = 0; function step() { __alloc(); if (++n < 300) setTimeout(step, 0); } setTimeout(step, 0);"),
+            "chain",
+        );
+        ok(it.run_event_loop(), "run_event_loop");
+        assert!(
+            TURN_SEEN.with(Cell::get),
+            "a loop turn reclaimed the unrooted block a previous turn made"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn loop_turns_without_tracing_reclaim_nothing() {
+    std::thread::spawn(|| {
+        assert!(!thaw_arena::is_tracing());
+        let mut it = Interp::new();
+        let alloc = turn_alloc_native(&it);
+        it.global.declare("__alloc", alloc, false);
+        ok(
+            it.run("var n = 0; function step() { __alloc(); if (++n < 300) setTimeout(step, 0); } setTimeout(step, 0);"),
+            "chain",
+        );
+        ok(it.run_event_loop(), "run_event_loop");
+        assert!(!TURN_SEEN.with(Cell::get), "untraced arena reclaims nothing");
+        assert_eq!(number(&run_script(&mut it, "n", "n")), 300.0);
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn nested_loop_does_not_reclaim_an_outer_callback_allocation() {
+    std::thread::spawn(|| {
+        thaw_arena::thaw_arena_enable_tracing();
+        let mut it = Interp::new();
+        // An outer timer callback makes a block, then runs a nested loop (as a native pump would) that makes
+        // enough garbage to cross the auto-reset threshold. The block must survive the nested turns.
+        let outer_alloc = it.native(|_, _, _| {
+            let p = thaw_arena::thaw_arena_alloc(8192, 8) as usize;
+            NESTED_PTR.with(|first| {
+                if first.get() == 0 {
+                    first.set(p);
+                }
+            });
+            if thaw_arena::was_reclaimed(NESTED_PTR.with(Cell::get)) {
+                OUTER_SEEN.with(|seen| seen.set(true));
+            }
+            Ok(Value::Undefined)
+        });
+        let inner_alloc = it.native(|_, _, _| {
+            thaw_arena::thaw_arena_alloc(8192, 8);
+            if thaw_arena::was_reclaimed(NESTED_PTR.with(Cell::get)) {
+                NESTED_SEEN.with(|seen| seen.set(true));
+            }
+            Ok(Value::Undefined)
+        });
+        let nested = it.native(|it, _, _| {
+            it.run_loop_only()?;
+            Ok(Value::Undefined)
+        });
+        it.global.declare("__outer_alloc", outer_alloc, false);
+        it.global.declare("__inner_alloc", inner_alloc, false);
+        it.global.declare("__nested", nested, false);
+        ok(
+            it.run(
+                "var on = 0, m = 0; \
+                 function inner() { __inner_alloc(); if (++m < 300) setTimeout(inner, 0); } \
+                 function outer() { __outer_alloc(); on++; \
+                   if (on === 1) { setTimeout(inner, 0); __nested(); } \
+                   if (on < 4) setTimeout(outer, 0); } \
+                 setTimeout(outer, 0);",
+            ),
+            "chain",
+        );
+        ok(it.run_event_loop(), "run_event_loop");
+        assert!(
+            !NESTED_SEEN.with(Cell::get),
+            "the nested loop reclaimed an allocation its outer callback still holds"
+        );
+        assert!(
+            OUTER_SEEN.with(Cell::get),
+            "the outermost loop reclaims it once the nested loop has returned"
+        );
+    })
+    .join()
+    .unwrap();
+}
