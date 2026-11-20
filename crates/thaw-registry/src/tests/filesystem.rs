@@ -523,7 +523,7 @@ fn fs_watch_file_deletion_emits_rename_without_error() {
     let dir = temp_registry("builtin_fs_watch_file_delete");
     fs::write(
             dir.join("index.js"),
-            "var fs = require('node:fs'); module.exports = async function (root) { var file = root + '/gone.txt'; fs.writeFileSync(file, 'a'); var events = [], errors = 0, watcher = fs.watch(file, { interval: 1, persistent: false }); watcher.on('error', function() { errors++; }); var first = new Promise(function(resolve) { watcher.on('change', function(type, name) { events.push([type, name]); resolve(); }); }); setTimeout(function() { fs.unlinkSync(file); }, 3); await first; var closedBefore = watcher.closed; watcher.close(); return [events, errors, closedBefore, watcher.closed]; };",
+            "var fs = require('node:fs'); module.exports = async function (root) { var file = root + '/gone.txt'; fs.writeFileSync(file, 'a'); var events = [], errors = 0, watcher = fs.watch(file, { interval: 1, persistent: false }); watcher.on('error', function() { errors++; }); var first = new Promise(function(resolve) { watcher.on('change', function(type, name) { events.push([type, name]); resolve(); }); }); setTimeout(function() { fs.unlinkSync(file); }, 3); var keep = setTimeout(function(){}, 2000); await first; clearTimeout(keep); var closedBefore = watcher.closed; watcher.close(); return [events, errors, closedBefore, watcher.closed]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_fs_watch_file_delete_node_modules");
