@@ -14,7 +14,10 @@
   class Emitter {
     constructor() {
       Object.defineProperty(this, '__thawListeners', { value: new Map() });
+      Object.defineProperty(this, '__thawMaxListeners', { value: 10, writable: true });
     }
+    setMaxListeners(n) { this.__thawMaxListeners = n; return this; }
+    getMaxListeners() { return this.__thawMaxListeners; }
     __thawList(name) {
       if (!this.__thawListeners.has(name)) this.__thawListeners.set(name, []);
       return this.__thawListeners.get(name);
@@ -22,6 +25,7 @@
     on(name, listener) { this.__thawList(name).push({ listener, once: false }); return this; }
     addListener(name, listener) { return this.on(name, listener); }
     prependListener(name, listener) { this.__thawList(name).unshift({ listener, once: false }); return this; }
+    prependOnceListener(name, listener) { this.__thawList(name).unshift({ listener, once: true }); return this; }
     once(name, listener) { this.__thawList(name).push({ listener, once: true }); return this; }
     off(name, listener) {
       const list = this.__thawList(name);
@@ -36,6 +40,7 @@
       return this;
     }
     listenerCount(name) { return this.__thawList(name).length; }
+    eventNames() { return [...this.__thawListeners.keys()].filter(name => this.__thawList(name).length > 0); }
     emit(name, ...args) {
       const list = this.__thawList(name);
       if (list.length === 0) {
@@ -68,8 +73,7 @@
 
   // postMessageToThread (W-D). The message runs the destination's 'workerMessage' listeners on its own loop, and the
   // ack that comes back settles the sender's promise. Ack ids are per realm: pendingSends is this realm's table.
-  // Only the main thread (0) and its workers are reachable: a worker's send to another worker is FAILED.
-  const liveThreads = new Map(); // threadId -> worker state, while the worker runs
+  // Any thread in the process-wide thread table (worker.rs THREADS) is reachable by its id, and so is the main thread (0).
   const pendingSends = new Map();
   let nextAck = 1;
   function threadError(code, message, cause, type = Error) {
@@ -100,8 +104,8 @@
     }
     return reply(ack, 'ok', '');
   }
-  // route(target) is the channel to a thread: deliver(ack, wire), or undefined when there is no such thread.
-  function postToThread(selfId, route, target, value, transferList, timeout) {
+  // unknownDetaches: a worker's send detaches its transfer list even when the target is unknown (the main thread's does not).
+  function postToThread(selfId, target, value, transferList, timeout, unknownDetaches) {
     if (timeout !== undefined && typeof timeout !== 'number') {
       const received = typeof timeout === 'string' ? `type string ('${timeout}')` : `type ${typeof timeout}`;
       return Promise.reject(threadError('ERR_INVALID_ARG_TYPE', `The "timeout" argument must be of type number. Received ${received}`, undefined, TypeError));
@@ -112,18 +116,19 @@
     if (target === selfId) return Promise.reject(threadError('ERR_WORKER_MESSAGING_SAME_THREAD', 'Cannot sent a message to the same thread'));
     let transfer;
     try { transfer = __thaw_transfer_of(transferList); } catch (error) { return Promise.reject(error); }
-    const deliver = route(target);
-    // an unknown thread keeps its buffers (Node moves them only for a thread that receives the message)
+    // the target's port token, or -1 when there is no such thread
+    // a thread id is a non-negative integer (anything else is no thread, as in Node)
+    const dest = Number.isInteger(target) && target >= 0 ? __thaw_thread_token(target) : -1;
     let wire;
-    try { wire = encode(value, deliver === undefined ? [] : transfer, deliver === undefined ? 0 : liveThreads.get(target).token); } catch (error) { return Promise.reject(error); }
+    try { wire = encode(value, dest === -1 && !unknownDetaches ? [] : transfer, dest === -1 ? 0 : dest); } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
       const ack = nextAck++;
       const entry = { resolve, reject, timer: undefined };
       pendingSends.set(ack, entry);
       if (timeout !== undefined) entry.timer = setTimeout(() => settleSend(ack, 'timeout', ''), timeout);
       // an unknown thread fails on a later turn than a zero timeout, so timeout 0 still times out first (as in Node)
-      if (deliver === undefined) setTimeout(() => settleSend(ack, 'failed', ''), 0);
-      else deliver(ack, wire);
+      if (dest === -1) { __thaw_wire_release(wire); setTimeout(() => settleSend(ack, 'failed', ''), 0); }
+      else if (!__thaw_thread_send(target, ack, wire)) setTimeout(() => settleSend(ack, 'failed', ''), 0);
     });
   }
   // worker.cpuUsage(prev) (Node 22): the worker's CPU time, served by the worker itself (worker.rs serve_cpu). The
@@ -157,10 +162,6 @@
     }
   }
   let nextCpuAck = 1;
-  const mainRoute = target => {
-    const state = liveThreads.get(target);
-    return state === undefined ? undefined : (ack, wire) => __thaw_worker_thread_send(state.handle, 0, ack, wire);
-  };
 
   class Worker extends Emitter {
     constructor(source, options = {}) {
@@ -216,6 +217,9 @@
       }
       if (options.argv !== undefined) opts.argv = Array.from(options.argv, String);
       if (options.execArgv !== undefined) opts.execArgv = Array.from(options.execArgv, String);
+      // Node: the thread name ('' when unnamed); the worker sees it as its threadName
+      const threadName = options.name === undefined ? '' : String(options.name);
+      if (threadName !== '') opts.name = threadName;
       // stdio (W5): the worker's console output reaches stdout/stderr only when asked for; stdin exists only when asked
       opts.stdin = options.stdin === true;
       opts.stdout = options.stdout === true;
@@ -231,7 +235,7 @@
       };
       opts.resourceLimits = resourceLimits;
       // heap limit (MiB, -1 = none) and stack (MiB): the natives' numeric arguments
-      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb, shareEnv, token, file, esm);
+      const handle = __thaw_worker_spawn(code, JSON.stringify(opts), resourceLimits.maxOldGenerationSizeMb, resourceLimits.stackSizeMb, shareEnv, token, file, esm, threadId);
       let resolveExit;
       const state = {
         handle,
@@ -243,13 +247,13 @@
         captureOut: options.stdout === true,
         captureErr: options.stderr === true,
         resourceLimits,
+        threadName,
         exitPromise: new Promise(resolve => { resolveExit = resolve; }),
         resolveExit,
         online: false,
         cpuPending: new Map(),
       };
       states.set(this, state);
-      liveThreads.set(threadId, state);
       byHandle.set(handle, this);
       this.stdin = options.stdin === true ? new Writable((hex, end) => __thaw_worker_stdin(handle, hex, end)) : null;
       // ponytail: always Readables (as in Node); they get data only when stdout/stderr were asked for
@@ -266,7 +270,7 @@
 
     terminate() {
       const state = states.get(this);
-      // Node: once the worker has exited, terminate() resolves undefined (not the exit code again)
+      // Node: once the worker has exited there is no thread to stop, and the promise resolves undefined
       if (state.exited) return Promise.resolve();
       __thaw_worker_terminate(state.handle);
       return state.exitPromise;
@@ -298,6 +302,9 @@
     }
 
     get resourceLimits() { return states.get(this).resourceLimits; }
+
+    // Node: the name while running, null once exited
+    get threadName() { const state = states.get(this); return state.exited ? null : state.threadName; }
 
     // Node: resolves { user, system } (integer microseconds of the worker thread), minus `prev` when given. Rejects
     // ERR_WORKER_NOT_RUNNING before 'online' and after exit, and any request still queued when the worker exits.
@@ -350,7 +357,7 @@
       } else if (event.type === 'error') {
         worker.emit('error', decode(event.value));
       } else if (event.type === 'thread') {
-        deliverThreadMessage(event.ack, state.threadId, event.value, (ack, status, wire) => __thaw_worker_thread_ack(state.handle, ack, status, wire));
+        deliverThreadMessage(event.ack, state.threadId, event.value, (ack, status, wire) => __thaw_thread_reply(state.threadId, ack, status, wire));
       } else if (event.type === 'threadAck') {
         settleSend(event.ack, event.status, event.value);
       } else if (event.type === 'stdout' || event.type === 'stderr') {
@@ -367,8 +374,9 @@
       } else if (event.type === 'exit') {
         state.exited = true;
         state.exitCode = event.code;
+        // Node: resourceLimits reads as an empty object after exit
+        state.resourceLimits = {};
         byHandle.delete(event.handle);
-        liveThreads.delete(state.threadId);
         for (const request of state.cpuPending.values()) request.reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
         state.cpuPending.clear();
         // stdio ends before 'exit', as in Node (the events share one channel, so the data came first)
@@ -453,7 +461,7 @@
     threadId: 0,
     threadName: '',
     postMessageToThread(target, value, transferList, timeout) {
-      return postToThread(0, mainRoute, target, value, transferList, timeout);
+      return postToThread(0, target, value, transferList, timeout, false);
     },
     workerData: null,
     parentPort: null,
@@ -483,8 +491,7 @@
     isMarkedAsUntransferable(value) { return isObjectLike(value) && globalThis.__thaw_clone_marks.untransferable.has(value); },
     markAsUncloneable(value) { if (isObjectLike(value)) globalThis.__thaw_clone_marks.uncloneable.add(value); },
     getEnvironmentData(key) {
-      const value = environmentData.get(key);
-      return value === undefined ? undefined : structuredClone(value);
+      return environmentData.get(key);
     },
     setEnvironmentData(key, value) {
       if (value === undefined) environmentData.delete(key);
