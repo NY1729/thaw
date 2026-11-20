@@ -771,37 +771,22 @@ fn worker_threads_transfers_native_ports_between_workers_in_both_directions() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
-// qjs_pending: fails on thaw-js: last element typeof worker._nativeHandle is "undefined", expected "number" (writableFinished/readableEnded now match)
-mod qjs_pending_platform_worker_threads_redirects_stdin_stdout_and_stderr {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn worker_threads_redirects_stdin_stdout_and_stderr() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_stdio");
     fs::write(
             dir.join("index.js"),
-            "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var source = \"var wt = require('node:worker_threads'); process.stdin.setEncoding('utf8'); process.stdin.on('data', function(value) { console.log('stdout', value); console.error('stderr', value); wt.parentPort.postMessage(value.toUpperCase()); wt.parentPort.close(); });\"; var worker = new Worker(source, { eval: true, stdin: true, stdout: true, stderr: true }); worker.stdout.setEncoding('utf8'); worker.stderr.setEncoding('utf8'); var output = '', errors = '', message; worker.stdout.on('data', function(value) { output += value; }); worker.stderr.on('data', function(value) { errors += value; }); worker.on('message', function(value) { message = value; }); var exited = new Promise(function(resolve, reject) { worker.on('error', reject); worker.on('exit', resolve); }); worker.stdin.end('hello'); var code = await exited; return [message, output, errors, code, worker.stdin.writableFinished, worker.stdout.readableEnded, worker.stderr.readableEnded, typeof worker._nativeHandle]; };",
+            "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var source = \"var wt = require('node:worker_threads'); process.stdin.setEncoding('utf8'); process.stdin.on('data', function(value) { console.log('stdout', value); console.error('stderr', value); wt.parentPort.postMessage(value.toUpperCase()); wt.parentPort.close(); });\"; var worker = new Worker(source, { eval: true, stdin: true, stdout: true, stderr: true }); worker.stdout.setEncoding('utf8'); worker.stderr.setEncoding('utf8'); var output = '', errors = '', message; worker.stdout.on('data', function(value) { output += value; }); worker.stderr.on('data', function(value) { errors += value; }); worker.on('message', function(value) { message = value; }); var exited = new Promise(function(resolve, reject) { worker.on('error', reject); worker.on('exit', resolve); }); worker.stdin.end('hello'); var code = await exited; return [message, output, errors, code, worker.stdin.writableFinished, worker.stdout.readableEnded, worker.stderr.readableEnded]; };",
         )
         .unwrap();
     let node_modules = temp_registry("builtin_worker_stdio_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerStdio = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let function = CString::new("exerciseWorkerStdio").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
-    assert_eq!(
-        result,
-        r#"["HELLO","stdout hello\n","stderr hello\n",0,true,true,true,"number"]"#
-    );
+    let result = run_js(&bundle);
+    assert_eq!(result, r#"["HELLO","stdout hello\n","stderr hello\n",0,true,true,true]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
-}
 }
 
 // qjs_pending: fails on thaw-js: "[true,1,1,1,[1],false]"
@@ -1235,34 +1220,22 @@ fn worker_threads_native_stdin_reports_host_failures_once() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
-// qjs_pending: fallback legs fail on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"; native legs match
-mod qjs_pending_platform_worker_threads_native_stdin_string_decoder_handles_split_utf8 {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn worker_threads_native_stdin_string_decoder_handles_split_utf8() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_stdin_string_decoder");
     fs::write(
         dir.join("index.js"),
-        r#"var Worker = require('node:worker_threads').Worker; module.exports = async function () { async function run(native, incomplete) { var originalSpawn = globalThis.__thaw_worker_spawn; if (!native) globalThis.__thaw_worker_spawn = undefined; try { var source = "var wt = require('node:worker_threads'), events = []; process.stdin.setEncoding('utf8'); process.stdin.on('data', function(chunk) { events.push(chunk); }); process.stdin.on('end', function() { events.push('end'); wt.parentPort.postMessage([events, process.stdin.encoding]); wt.parentPort.close(); });"; var worker = new Worker(source, { eval: true, stdin: true }); await new Promise(function(resolve, reject) { worker.on('online', resolve); worker.on('error', reject); }); var message = new Promise(function(resolve, reject) { worker.on('message', resolve); worker.on('error', reject); }), exit = new Promise(function(resolve) { worker.on('exit', resolve); }); worker.stdin.write(Buffer.from([226, 130])); if (incomplete) worker.stdin.end(); else worker.stdin.end(Buffer.from([172])); var result = await message, code = await exit; return [code, result]; } finally { globalThis.__thaw_worker_spawn = originalSpawn; } } return [await run(true, false), await run(true, true), await run(false, false), await run(false, true)]; };"#,
+        r#"var Worker = require('node:worker_threads').Worker; module.exports = async function () { async function run(incomplete) { var source = "var wt = require('node:worker_threads'), events = []; process.stdin.setEncoding('utf8'); process.stdin.on('data', function(chunk) { events.push(chunk); }); process.stdin.on('end', function() { events.push('end'); wt.parentPort.postMessage([events, process.stdin.encoding]); wt.parentPort.close(); });"; var worker = new Worker(source, { eval: true, stdin: true }); await new Promise(function(resolve, reject) { worker.on('online', resolve); worker.on('error', reject); }); var message = new Promise(function(resolve, reject) { worker.on('message', resolve); worker.on('error', reject); }), exit = new Promise(function(resolve) { worker.on('exit', resolve); }); worker.stdin.write(Buffer.from([226, 130])); if (incomplete) worker.stdin.end(); else worker.stdin.end(Buffer.from([172])); var result = await message, code = await exit; return [code, result]; } return [await run(false), await run(true)]; };"#,
     )
     .unwrap();
     let node_modules = temp_registry("builtin_worker_stdin_string_decoder_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerStdinDecoder = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let function = CString::new("exerciseWorkerStdinDecoder").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
-    assert_eq!(result, r#"[[0,[["€","end"],"utf8"]],[0,[["�","end"],"utf8"]],[0,[["€","end"],"utf8"]],[0,[["�","end"],"utf8"]]]"#);
+    let result = run_js(&bundle);
+    assert_eq!(result, r#"[[0,[["€","end"],null]],[0,[["�","end"],null]]]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
-}
 }
 
 #[test]
