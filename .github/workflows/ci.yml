@@ -651,6 +651,7 @@ jobs:
         run: |
           cargo test -p thaw-cli builds_and_serves_hono_react_prisma_postgres_when_enabled -- --nocapture
           cargo test -p thaw-cli registry_add_queries_postgres_with_real_pg_when_enabled -- --nocapture
+          THAW_RUN_NPM_INTEGRATION=1 THAW_JS_FALLBACK=error cargo test -p thaw-cli registry_add_runs_drizzle_execute_against_live_postgres_when_enabled -- --nocapture
       - name: Upload acceptance metrics
         if: always()
         uses: actions/upload-artifact@v4
