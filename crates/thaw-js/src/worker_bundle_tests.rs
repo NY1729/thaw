@@ -67,3 +67,13 @@ fn worker_file_on_disk_still_runs_as_a_main_file() {
     let _ = std::fs::remove_file(&path);
     assert_eq!(got, "message disk ran");
 }
+
+#[test]
+fn marked_classic_worker_url_is_rewritten_to_the_bundled_key_and_runs_that_module() {
+    // RED before the rewrite: the classic data URL is not a bundled key, so the disk loader cannot find it
+    let spawn = "/*thaw-worker-url:a/index.js*/('data:text/javascript;thaw-bundle,unused')/*thaw-worker-url-end*/";
+    assert_eq!(
+        run_parent(&parent_bundle(spawn)),
+        "message /thaw_modules/a/index.js"
+    );
+}

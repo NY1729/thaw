@@ -1017,6 +1017,34 @@ fn nested_worker_bootstrap_uses_its_package_instance_key() {
 }
 
 #[test]
+fn worker_url_sites_carry_thaw_js_markers_with_their_bundle_keys() {
+    let root = temp_registry("worker-url-markers");
+    let modules = root.join("node_modules");
+    let pkg = modules.join("pkg");
+    fs::create_dir_all(pkg.join("sub")).unwrap();
+    fs::write(
+        pkg.join("index.js"),
+        "var Worker = require('node:worker_threads').Worker; module.exports = [new Worker(new URL('./worker.js', import.meta.url)), new Worker(new URL('./sub/nested.js', import.meta.url))];",
+    )
+    .unwrap();
+    fs::write(pkg.join("worker.js"), "module.exports = 1;").unwrap();
+    fs::write(
+        pkg.join("sub/nested.js"),
+        "var Worker = require('node:worker_threads').Worker; module.exports = new Worker(new URL('./leaf.js', import.meta.url));",
+    )
+    .unwrap();
+    fs::write(pkg.join("sub/leaf.js"), "module.exports = 2;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &pkg, "index.js").unwrap();
+    for key in ["pkg/worker.js", "pkg/sub/nested.js", "pkg/sub/leaf.js"] {
+        assert!(bundle.contains(&format!("/*thaw-worker-url:{key}*/")), "missing marker for {key}");
+    }
+    assert_eq!(bundle.matches("/*thaw-worker-url-end*/").count(), 3);
+    // The classic payload stays: QuickJS evaluates the marked expression unchanged.
+    assert!(bundle.contains("data:text/javascript;thaw-bundle,"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn external_root_alias_collision_reports_both_files() {
     let root = temp_registry("external-root-key-collision");
     let modules = root.join("node_modules");

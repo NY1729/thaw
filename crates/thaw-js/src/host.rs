@@ -613,6 +613,19 @@ pub struct Package {
     roots: HashMap<String, Value>,
 }
 
+/// `bundle_js` with its worker-URL markers resolved against this bundle's own factory keys
+/// (`scan::worker_urls_to_keys`). Only a bundle that has a marker is parsed again; QuickJS never reaches this.
+fn with_worker_urls_resolved(bundle_js: &str) -> std::borrow::Cow<'_, str> {
+    if !bundle_js.contains(crate::scan::WORKER_URL_START) {
+        return bundle_js.into();
+    }
+    let Ok(parts) = parse_bundle(bundle_js) else {
+        return bundle_js.into();
+    };
+    let keys: HashSet<&str> = parts.factories.iter().map(|(k, _)| k.as_str()).collect();
+    crate::scan::worker_urls_to_keys(bundle_js, |k| keys.contains(k))
+}
+
 impl Package {
     /// Parse `bundle_js` (registry `bundle.js`) and evaluate its entry module.
     pub fn load(bundle_js: &str) -> Result<Package, HostError> {
@@ -632,6 +645,8 @@ impl Package {
         bundle_js: &str,
         stack_bytes: usize,
     ) -> Result<Package, HostError> {
+        let resolved = with_worker_urls_resolved(bundle_js);
+        let bundle_js: &str = &resolved;
         let parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
         if let Some(problem) = parts.esm_problems.iter().next() {
             return Err(HostError::Unsupported((*problem).to_string()));
@@ -659,6 +674,8 @@ impl Package {
     /// (see [`register_bundle`]). Its modules boot on this Interp, so they share its intrinsics and globals.
     // ponytail: a member whose boot fails leaves its factories in the shared realm; the realm stays loaded.
     fn join(&mut self, name: &str, bundle_js: &str) -> Result<(), HostError> {
+        let resolved = with_worker_urls_resolved(bundle_js);
+        let bundle_js: &str = &resolved;
         let parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
         if let Some(problem) = parts.esm_problems.iter().next() {
             return Err(HostError::Unsupported((*problem).to_string()));
