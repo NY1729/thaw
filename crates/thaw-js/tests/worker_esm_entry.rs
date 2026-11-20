@@ -299,3 +299,227 @@ fn esm_dependency_throwing_on_evaluation_is_an_error_event() {
         vec!["online | error:TypeError:undefined:dep-boom | exit:1"]
     );
 }
+
+// PR-5: dynamic `import()` and dependency top-level await. Each expected sequence is what Node 22.23.1 prints (probe
+// fixtures: thaw-tmp/tmp-run/pr5, harness.mjs / gen.mjs; `{DIR}` is the case directory).
+
+#[test]
+fn esm_dynamic_import_of_the_worker_threads_builtin_namespace() {
+    let src = "import { parentPort } from 'node:worker_threads'; const wt = await import('node:worker_threads'); parentPort.postMessage([typeof wt.parentPort, typeof wt.default.parentPort, wt.parentPort === parentPort, typeof wt.default.Worker]);";
+    assert_eq!(
+        run_modules(&[src]),
+        vec![r#"online | message:["object","object",true,"function"] | exit:0"#]
+    );
+}
+
+/// Node: `"function:function"`. Needs a `node:path` in the worker realm: a worker's builtins are only
+/// `node:worker_threads` today (worker_esm.js `builtinNames`), and the path shim lives in thaw-registry, which depends
+/// on thaw-js (so it cannot be read from here). A builtin-table decision is a follow-up.
+#[test]
+#[ignore = "needs node:path in the worker realm (builtin source table, follow-up)"]
+fn esm_dynamic_import_of_a_builtin_namespace() {
+    let src = "import { parentPort } from 'node:worker_threads'; const p = await import('node:path'); parentPort.postMessage(typeof p.join + ':' + typeof p.default.join);";
+    assert_eq!(
+        run_modules(&[src]),
+        vec![r#"online | message:"function:function" | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_dynamic_import_of_an_esm_file_returns_its_namespace() {
+    let files = [
+        ("dep.mjs", "export const a = 1;\nexport default function d() { return 'dflt'; }\n"),
+        (
+            "w.mjs",
+            "import { parentPort } from 'node:worker_threads';\nconst ns = await import('./dep.mjs');\nparentPort.postMessage({ a: ns.a, d: ns.default(), keys: Object.keys(ns) });\n",
+        ),
+    ];
+    assert_eq!(
+        run_file_worker("dyn-esm", &files, "w.mjs", false),
+        vec![r#"online | message:{"a":1,"d":"dflt","keys":["a","default"]} | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_dynamic_import_of_a_cjs_file_is_default_plus_names() {
+    let files = [
+        ("cjs.cjs", "exports.x = 7;\nmodule.exports.y = 8;\n"),
+        (
+            "w.mjs",
+            "import { parentPort } from 'node:worker_threads';\nconst ns = await import('./cjs.cjs');\nparentPort.postMessage({ x: ns.x, y: ns.y, def: ns.default });\n",
+        ),
+    ];
+    assert_eq!(
+        run_file_worker("dyn-cjs", &files, "w.mjs", false),
+        vec![r#"online | message:{"x":7,"y":8,"def":{"x":7,"y":8}} | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_dynamic_import_of_a_missing_file_uncaught_is_an_error_event() {
+    let files = [(
+        "w.mjs",
+        "import { parentPort } from 'node:worker_threads';\nawait import('./nope.mjs');\n",
+    )];
+    assert_eq!(
+        run_file_worker("dyn-missing", &files, "w.mjs", false),
+        vec!["online | error:Error:ERR_MODULE_NOT_FOUND:Cannot find module '{DIR}/nope.mjs' imported from {DIR}/w.mjs | exit:1"]
+    );
+}
+
+#[test]
+fn esm_dynamic_import_of_a_missing_file_caught_posts_the_code() {
+    let files = [(
+        "w.mjs",
+        "import { parentPort } from 'node:worker_threads';\ntry { await import('./nope.mjs'); parentPort.postMessage('no throw'); } catch (e) { parentPort.postMessage(e.code); }\n",
+    )];
+    assert_eq!(
+        run_file_worker("dyn-missing-caught", &files, "w.mjs", false),
+        vec![r#"online | message:"ERR_MODULE_NOT_FOUND" | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_dynamic_import_of_a_syntax_error_caught_posts_the_name() {
+    let files = [
+        ("bad.mjs", "export const = ;\n"),
+        (
+            "w.mjs",
+            "import { parentPort } from 'node:worker_threads';\ntry { await import('./bad.mjs'); parentPort.postMessage('no throw'); } catch (e) { parentPort.postMessage(e.name); }\n",
+        ),
+    ];
+    assert_eq!(
+        run_file_worker("dyn-syntax", &files, "w.mjs", false),
+        vec![r#"online | message:"SyntaxError" | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_dynamic_import_of_a_throwing_module_uncaught_is_an_error_event() {
+    let files = [
+        ("boom.mjs", "throw new TypeError('dep-boom');\n"),
+        (
+            "w.mjs",
+            "import { parentPort } from 'node:worker_threads';\nawait import('./boom.mjs');\n",
+        ),
+    ];
+    assert_eq!(
+        run_file_worker("dyn-throws", &files, "w.mjs", false),
+        vec!["online | error:TypeError:undefined:dep-boom | exit:1"]
+    );
+}
+
+#[test]
+fn esm_dynamic_import_of_a_module_in_the_static_graph_returns_the_same_namespace() {
+    let files = [
+        ("dep.mjs", "export const a = 1;\n"),
+        (
+            "w.mjs",
+            "import { parentPort } from 'node:worker_threads';\nimport * as s from './dep.mjs';\nconst d = await import('./dep.mjs');\nparentPort.postMessage(s === d);\n",
+        ),
+    ];
+    assert_eq!(
+        run_file_worker("dyn-same", &files, "w.mjs", false),
+        vec![r#"online | message:true | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_dependency_with_top_level_await_finishes_before_the_importer_body() {
+    let files = [
+        (
+            "tla.mjs",
+            "await new Promise((r) => setTimeout(r, 5));\nglobalThis.order = (globalThis.order || []).concat('dep');\nexport const v = 1;\n",
+        ),
+        (
+            "w.mjs",
+            "import { parentPort } from 'node:worker_threads';\nimport { v } from './tla.mjs';\nparentPort.postMessage({ v, order: globalThis.order.concat('body') });\n",
+        ),
+    ];
+    assert_eq!(
+        run_file_worker("tla-dep", &files, "w.mjs", false),
+        vec![r#"online | message:{"v":1,"order":["dep","body"]} | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_sibling_dependencies_with_top_level_await_keep_nodes_order() {
+    // Node evaluates async siblings concurrently: both start before either resumes, and the shorter timer finishes first
+    let files = [
+        (
+            "sa.mjs",
+            "globalThis.order = (globalThis.order || []).concat('a0');\nawait new Promise((r) => setTimeout(r, 20));\nglobalThis.order = globalThis.order.concat('a1');\nexport const n = 'a';\n",
+        ),
+        (
+            "sb.mjs",
+            "globalThis.order = (globalThis.order || []).concat('b0');\nawait new Promise((r) => setTimeout(r, 5));\nglobalThis.order = globalThis.order.concat('b1');\nexport const n = 'b';\n",
+        ),
+        (
+            "w.mjs",
+            "import { parentPort } from 'node:worker_threads';\nimport { n as na } from './sa.mjs';\nimport { n as nb } from './sb.mjs';\nparentPort.postMessage({ na, nb, order: globalThis.order });\n",
+        ),
+    ];
+    assert_eq!(
+        run_file_worker("tla-siblings", &files, "w.mjs", false),
+        vec![r#"online | message:{"na":"a","nb":"b","order":["a0","b0","b1","a1"]} | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_dynamic_import_of_a_top_level_await_dependency_sees_its_value() {
+    let files = [
+        (
+            "tla.mjs",
+            "await new Promise((r) => setTimeout(r, 5));\nexport const v = 1;\n",
+        ),
+        (
+            "w.mjs",
+            "import { parentPort } from 'node:worker_threads';\nimport { v } from './tla.mjs';\nconst d = await import('./tla.mjs');\nparentPort.postMessage([v, d.v]);\n",
+        ),
+    ];
+    assert_eq!(
+        run_file_worker("dyn-tla", &files, "w.mjs", false),
+        vec!["online | message:[1,1] | exit:0"]
+    );
+}
+
+/// Synchronous graphs keep depth-first source order (guards the sync path of the ordered evaluation).
+#[test]
+fn esm_sync_graph_evaluates_depth_first_in_source_order() {
+    let files = [
+        ("d1.mjs", "globalThis.order = (globalThis.order || []).concat('d1');\n"),
+        (
+            "m1.mjs",
+            "import './d1.mjs';\nglobalThis.order = globalThis.order.concat('m1');\n",
+        ),
+        ("m2.mjs", "globalThis.order = (globalThis.order || []).concat('m2');\n"),
+        (
+            "w.mjs",
+            "import { parentPort } from 'node:worker_threads';\nimport './m1.mjs';\nimport './m2.mjs';\nparentPort.postMessage(globalThis.order);\n",
+        ),
+    ];
+    assert_eq!(
+        run_file_worker("sync-dfs", &files, "w.mjs", false),
+        vec![r#"online | message:["d1","m1","m2"] | exit:0"#]
+    );
+}
+
+/// A synchronous sibling runs while an async sibling awaits; the importer body runs after both.
+#[test]
+fn esm_sync_sibling_runs_while_an_async_sibling_awaits() {
+    let files = [
+        (
+            "sa.mjs",
+            "globalThis.order = (globalThis.order || []).concat('a0');\nawait new Promise((r) => setTimeout(r, 20));\nglobalThis.order = globalThis.order.concat('a1');\n",
+        ),
+        ("sc.mjs", "globalThis.order = (globalThis.order || []).concat('c');\n"),
+        (
+            "w.mjs",
+            "import { parentPort } from 'node:worker_threads';\nimport './sa.mjs';\nimport './sc.mjs';\nglobalThis.order = globalThis.order.concat('body');\nparentPort.postMessage(globalThis.order);\n",
+        ),
+    ];
+    assert_eq!(
+        run_file_worker("sync-behind-async", &files, "w.mjs", false),
+        vec![r#"online | message:["a0","c","a1","body"] | exit:0"#]
+    );
+}

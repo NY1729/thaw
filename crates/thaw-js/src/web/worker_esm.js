@@ -1,7 +1,8 @@
 // ES-module loader for a worker entry and its file graph. `__thaw_run_main_esm(spec)` takes a `data:` or `file:` href,
 // or an absolute path, and returns the evaluation promise of the entry. Each module is converted (`__thaw_esm_convert`,
-// esm.rs convert_entry) into an async factory compiled by `__thaw_esm_compile` with the module goal, so `import.meta`
-// reads `__thaw_esm_meta`. A CommonJS file runs through the disk loader (main_file.js) at its evaluation.
+// esm.rs convert_entry) into a factory compiled by `__thaw_esm_compile` with the module goal, so `import.meta` reads
+// `__thaw_esm_meta` and `import(spec)` calls `__thaw_esm_import`, which resolves against the importing module and
+// settles with its namespace. A CommonJS file runs through the disk loader (main_file.js) at its evaluation.
 // `__thaw_path_is_esm(path)` tells the spawner which loader an entry path takes.
 (() => {
   const read = path => globalThis.__thaw_worker_read_source(path);
@@ -16,6 +17,10 @@
     error.code = code;
     return error;
   };
+  // the factory of a converted module: async only when it awaits at its top level (`tla`), so a module without
+  // awaits runs its body synchronously when it is evaluated
+  const compileFactory = converted => __thaw_esm_compile((converted.tla ? '(async function' : '(function') +
+    ' (__thaw_esm_require, __thaw_esm_exports, __thaw_esm_meta, __thaw_esm_import) {\n' + converted.code + '\n})');
   // the `type` of the nearest package.json (undefined when there is none)
   const packageType = path => {
     for (let dir = dirOf(path); ; dir = dirOf(dir)) {
@@ -65,7 +70,7 @@
   };
   const records = new Map();
   // a record: { url, path, kind ('esm' | 'cjs' | 'builtin'), specs, deps, linked, exports, meta, factory, state (0 new, 1
-  // evaluating, 2 done), promise }; `deps` maps each specifier to its record
+  // evaluating, 2 done), promise, namespace }; `deps` maps each specifier to its record
   const load = (url, parent) => {
     const known = records.get(url);
     if (known !== undefined) return known;
@@ -85,7 +90,7 @@
         record = { url, path, kind: 'cjs', specs: [], deps: new Map(), linked: false, exports: undefined, state: 0, promise: undefined };
       } else {
         const converted = JSON.parse(__thaw_esm_convert(source));
-        const factory = __thaw_esm_compile('(async function (__thaw_esm_require, __thaw_esm_exports, __thaw_esm_meta, __thaw_esm_import) {\n' + converted.code + '\n})');
+        const factory = compileFactory(converted);
         const meta = Object.create(null);
         meta.url = url;
         meta.filename = path;
@@ -106,7 +111,7 @@
       const payload = decodeURIComponent(url.slice(comma + 1));
       const source = head.slice(1).some(p => p.trim().toLowerCase() === 'base64') ? Buffer.from(payload, 'base64').toString('utf8') : payload;
       const converted = JSON.parse(__thaw_esm_convert(source));
-      const factory = __thaw_esm_compile('(async function (__thaw_esm_require, __thaw_esm_exports, __thaw_esm_meta, __thaw_esm_import) {\n' + converted.code + '\n})');
+      const factory = compileFactory(converted);
       const meta = Object.create(null);
       meta.url = url;
       record = { url, kind: 'esm', specs: converted.imports, deps: new Map(), linked: false, exports: {}, meta, factory, state: 0, promise: undefined };
@@ -123,34 +128,90 @@
     }
     return record;
   };
-  const evaluate = record => {
-    if (record.promise === undefined) record.promise = run(record);
+  // Evaluates `record` after its dependencies, as Node's async module graph does: sibling dependencies start in source
+  // order and may overlap while they await, and the record's body runs once all of them are done. `chain` holds the
+  // records being evaluated above this one: a dependency found there is a cycle and is not waited for. Returns undefined
+  // when the record finished synchronously (nothing awaited below it), else a promise (pending, or rejected).
+  const evaluate = (record, chain) => {
+    if (record.state !== 0) return record.promise;
+    record.state = 1;
+    const inner = chain.concat([record]);
+    const waits = [];
+    for (const dep of record.deps.values()) {
+      if (inner.includes(dep)) continue;
+      const pending = evaluate(dep, inner);
+      if (pending !== undefined) waits.push(pending);
+    }
+    const done = () => {
+      record.state = 2;
+    };
+    if (waits.length === 0) {
+      try {
+        const pending = body(record);
+        if (pending === undefined) return done();
+        record.promise = pending.then(done, error => {
+          done();
+          throw error;
+        });
+      } catch (error) {
+        done();
+        record.promise = Promise.reject(error);
+      }
+      return record.promise;
+    }
+    record.promise = Promise.all(waits).then(() => body(record)).then(done, error => {
+      done();
+      throw error;
+    });
     return record.promise;
   };
-  const run = async record => {
-    record.state = 1;
-    try {
-      // a dependency still evaluating is a cycle: its exports are read as they are now
-      for (const dep of record.deps.values()) {
-        if (dep.state !== 1) await evaluate(dep);
-      }
-      if (record.kind === 'cjs') record.exports = runCjs(record.path);
-      else if (record.kind === 'esm') {
-        // `this` is undefined: the body's "use strict" makes the factory strict
-        const deps = record.deps;
-        await record.factory.call(undefined, spec => deps.get(spec).exports, record.exports, record.meta, undefined);
-      }
-    } finally {
-      record.state = 2;
+  // runs one record's own code: a CommonJS module's body, or an ES-module factory (its promise when it awaits)
+  const body = record => {
+    if (record.kind === 'cjs') {
+      record.exports = runCjs(record.path);
+      return undefined;
     }
+    if (record.kind === 'esm') {
+      // `this` is undefined: the body's "use strict" makes the factory strict
+      const deps = record.deps;
+      return record.factory.call(undefined, spec => deps.get(spec).exports, record.exports, record.meta, spec => importFrom(record.url, spec));
+    }
+    return undefined;
   };
+  // the namespace object `import()` settles with: an ES module's exports, or for CommonJS and builtins
+  // `{ default: module.exports, ...names }` (null prototype, built once so every import sees one object)
+  const namespaceOf = record => {
+    if (record.kind === 'esm') return record.exports;
+    if (record.namespace === undefined) {
+      const ns = Object.create(null);
+      const exports = record.exports;
+      ns.default = exports;
+      if (exports !== null && (typeof exports === 'object' || typeof exports === 'function')) {
+        for (const key of Object.keys(exports)) if (key !== 'default') ns[key] = exports[key];
+      }
+      record.namespace = ns;
+    }
+    return record.namespace;
+  };
+  // `import(spec)` from the module at `parentUrl`: resolves and links, evaluates the target, and settles with its
+  // namespace. It starts after a microtask, so the target never evaluates re-entrantly inside the importer's body.
+  const importFrom = (parentUrl, spec) => (async () => {
+    await undefined;
+    const record = link(resolve(String(spec), parentUrl), parentUrl);
+    const pending = evaluate(record, []);
+    if (pending !== undefined) await pending;
+    return namespaceOf(record);
+  })();
   Object.defineProperty(globalThis, '__thaw_run_main_esm', {
     writable: true,
     configurable: true,
     value: spec => {
       const text = String(spec);
       const url = text.startsWith('/') ? hrefOf(text) : text;
-      return (async () => evaluate(link(url, undefined)))();
+      return (async () => {
+        const pending = evaluate(link(url, undefined), []);
+        if (pending !== undefined) await pending;
+      })();
     },
   });
 })();
