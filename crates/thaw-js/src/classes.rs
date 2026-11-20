@@ -353,6 +353,13 @@ impl Interp {
             // a native base constructor (Set, Map, Array, Promise, ...) builds its own object:
             // move its internal state into the pre-allocated `this`, keeping `this` identity and prototype
             if let (Value::Object(t), Value::Object(n)) = (this, &r) {
+                // a Date base keeps its time in a hidden slot on a plain object (builtins.rs): move that too
+                if let (false, Some((Slot::Data(time), false))) =
+                    (Rc::ptr_eq(t, n), find_own(n, "__time"))
+                {
+                    put_hidden(t, "__time", time);
+                    return Ok(this.clone());
+                }
                 if !Rc::ptr_eq(t, n)
                     && matches!(&*co.kind.borrow(), Kind::Native(_))
                     && matches!(&*t.kind.borrow(), Kind::Plain)
