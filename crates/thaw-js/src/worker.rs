@@ -70,6 +70,19 @@ pub(crate) struct CpuProbe {
     acks: Mutex<Vec<u32>>,
 }
 
+/// A worker that can receive a `postMessageToThread`: its command channel, and its port token (a port moved to it is
+/// routed by that token).
+struct ThreadEntry {
+    tx: Sender<Cmd>,
+    token: u64,
+}
+
+/// The process-wide thread table of `postMessageToThread`, keyed by (hub token, thread id). The hub is the main thread's
+/// port token (a worker's spawner), so the ids of two Interps in one process never meet. The main thread (0) has no
+/// entry: a worker reaches it through its parent channel. Removal and the queue drain happen under this lock (run_worker),
+/// so a send either queues before the drain or finds no thread.
+static THREADS: Mutex<BTreeMap<(u64, u32), ThreadEntry>> = Mutex::new(BTreeMap::new());
+
 struct Worker {
     tx: Sender<Cmd>,
     rx: Receiver<Evt>,
@@ -88,6 +101,8 @@ struct Side {
     /// This worker's port token, and the port token of the main thread that spawned it (the hub).
     token: u64,
     hub: u64,
+    /// This worker's thread id (its `threadId`, the key of its THREADS entry).
+    thread_id: u32,
     interrupt: Arc<AtomicBool>,
     /// The worker's parentPort has a referenced `message` listener (set by the bootstrap).
     alive: Arc<AtomicBool>,
@@ -372,6 +387,58 @@ fn send_cmd(w: &Worker, cmd: Cmd) {
     }
 }
 
+/// This Interp's hub: the main thread's port token (the main thread itself, or the one that spawned this worker).
+fn hub_of(it: &mut Interp) -> u64 {
+    match it.worker.side.as_ref().map(|side| side.hub) {
+        Some(hub) => hub,
+        None => realm_token(it),
+    }
+}
+
+/// The `postMessageToThread` source id of this Interp: a worker's thread id, or 0 for the main thread.
+fn thread_id_of(it: &Interp) -> u32 {
+    it.worker.side.as_ref().map_or(0, |side| side.thread_id)
+}
+
+/// Sends a `postMessageToThread` to thread `target`, from this Interp. A worker's send to 0 goes to the main thread
+/// through its parent channel. False when the thread is not there (it never existed, or has left): the wire is released
+/// and the sender settles FAILED.
+fn thread_send(it: &mut Interp, target: u32, ack: u32, wire: String) -> bool {
+    if target == 0 && is_worker(it) {
+        to_parent(it, Evt::Thread(ack, wire));
+        return true;
+    }
+    let key = (hub_of(it), target);
+    let source = thread_id_of(it);
+    let sent = match locked(&THREADS).get(&key) {
+        Some(entry) => entry
+            .tx
+            .send(Cmd::Thread(source, ack, wire))
+            .map_err(|mpsc::SendError(cmd)| cmd),
+        None => Err(Cmd::Thread(source, ack, wire)),
+    };
+    match sent {
+        Ok(()) => true,
+        Err(cmd) => {
+            release_cmd(&cmd);
+            false
+        }
+    }
+}
+
+/// Answers a `postMessageToThread` that came from thread `source`: the main thread (0) through the parent channel, or the
+/// sending worker by its entry. A sender that has left is not answered.
+fn thread_reply(it: &mut Interp, source: u32, ack: u32, status: String, wire: String) {
+    if source == 0 {
+        to_parent(it, Evt::ThreadAck(ack, status, wire));
+        return;
+    }
+    let key = (hub_of(it), source);
+    if let Some(entry) = locked(&THREADS).get(&key) {
+        let _ = entry.tx.send(Cmd::ThreadAck(ack, status, wire));
+    }
+}
+
 fn quoted(s: &str) -> String {
     let mut out = String::new();
     json_quote(s, &mut out);
@@ -403,6 +470,8 @@ fn spawn(
     share_env: bool,
     // (the worker's port token, the spawning realm's port token: the hub its ports route through)
     tokens: (u64, u64),
+    // the worker's thread id (its `threadId`)
+    thread_id: u32,
     // the bundled module the worker runs as its main module instead of the disk loader's `source`
     main: Option<MainBundle>,
     // the entry is an ES module
@@ -420,11 +489,20 @@ fn spawn(
     } else {
         private_env_table()
     };
+    // registered before the thread starts, so a send from now on is queued for it (or fails once it has left)
+    locked(&THREADS).insert(
+        (tokens.1, thread_id),
+        ThreadEntry {
+            tx: tx.clone(),
+            token: tokens.0,
+        },
+    );
     let side = Side {
         rx: cmd_rx,
         tx: evt_tx,
         token: tokens.0,
         hub: tokens.1,
+        thread_id,
         interrupt: interrupt.clone(),
         alive: Arc::new(AtomicBool::new(false)),
         cpu: cpu.clone(),
@@ -546,6 +624,7 @@ fn run_worker(
     main: Option<MainBundle>,
 ) {
     let exit_tx = side.tx.clone();
+    let key = (side.hub, side.thread_id);
     let code = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut it = Box::new(Interp::runtime());
         // the limit counts what the script allocates, not the runtime built above
@@ -558,17 +637,26 @@ fn run_worker(
         it.worker.side = Some(side);
         it.worker.env_table = Some(env);
         let code = run_script(&mut it, source, opts, main);
-        // messages the parent sent that this worker never read still carry their blocks; so does a workerData the
-        // bootstrap never reached (its wire is inside the spawn options)
-        if let Some(side) = &it.worker.side {
-            while let Ok(cmd) = side.rx.try_recv() {
-                release_cmd(&cmd);
-            }
+        // leaving the thread table and taking the queue happen under one lock: a send either queued before this (its
+        // wire is released here) or finds no thread. Messages the parent sent that this worker never read still carry
+        // their blocks; so does a workerData the bootstrap never reached (its wire is inside the spawn options)
+        let unread: Vec<Cmd> = {
+            let mut threads = locked(&THREADS);
+            threads.remove(&key);
+            it.worker
+                .side
+                .as_ref()
+                .map_or_else(Vec::new, |side| side.rx.try_iter().collect())
+        };
+        for cmd in &unread {
+            release_cmd(cmd);
         }
         release_wire(opts);
         code
     }))
     .unwrap_or(1);
+    // a panicked worker leaves the table too (its queue went with its channel)
+    locked(&THREADS).remove(&key);
     let _ = exit_tx.send(Evt::Exit(code));
 }
 
@@ -844,6 +932,8 @@ pub(crate) fn install(it: &mut Interp) {
         let main = file.and_then(|f| main_bundle(it, &f));
         // arg 7 is true for an ES-module entry (`__thaw_run_main_esm`), which runs without the CommonJS globals
         let esm = arg(a, 7).truthy();
+        // arg 8 is the worker's thread id (its `threadId`): its key in the thread table
+        let thread_id = it.num(&arg(a, 8)) as u32;
         Ok(Value::Number(f64::from(spawn(
             it,
             source,
@@ -852,6 +942,7 @@ pub(crate) fn install(it: &mut Interp) {
             heap_mb,
             share_env,
             (token, hub),
+            thread_id,
             main,
             esm,
         ))))
@@ -881,39 +972,37 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Bool(sent))
     });
     g.declare("__thaw_worker_stdin", f, true);
-    // postMessageToThread (W-D): the parent sends to a worker (`source` is the sender's thread id) and answers a
-    // worker's send (`ack` names the worker's pending send); a worker sends to the parent and answers a parent's send.
+    // postMessageToThread (W-D), by thread id: a send from this thread (`target` 0 is the main thread) queues on the
+    // target's channel, or reports false (the wire is released; the shim settles FAILED). `__thaw_thread_token` is the
+    // target's port token (ports in the message are routed by it), or -1 when there is no such thread.
     let f = it.native(|it, _, a| {
-        let h = it.num(&arg(a, 0)) as u32;
-        let (source, ack) = (it.num(&arg(a, 1)) as u32, it.num(&arg(a, 2)) as u32);
-        let wire = it.to_str(&arg(a, 3)).to_string();
-        match it.worker.workers.get(&h) {
-            Some(w) => send_cmd(w, Cmd::Thread(source, ack, wire)),
-            None => release_wire(&wire),
-        }
-        Ok(Value::Undefined)
+        let target = it.num(&arg(a, 0)) as u32;
+        let token = if target == 0 && is_worker(it) {
+            Some(hub_of(it))
+        } else {
+            let key = (hub_of(it), target);
+            locked(&THREADS).get(&key).map(|entry| entry.token)
+        };
+        Ok(Value::Number(token.map_or(-1.0, |t| t as f64)))
     });
-    g.declare("__thaw_worker_thread_send", f, true);
+    g.declare("__thaw_thread_token", f, true);
     let f = it.native(|it, _, a| {
-        let h = it.num(&arg(a, 0)) as u32;
-        let ack = it.num(&arg(a, 1)) as u32;
+        let (target, ack) = (it.num(&arg(a, 0)) as u32, it.num(&arg(a, 1)) as u32);
+        let wire = it.to_str(&arg(a, 2)).to_string();
+        Ok(Value::Bool(thread_send(it, target, ack, wire)))
+    });
+    g.declare("__thaw_thread_send", f, true);
+    // answers a send that came from thread `source` (the `threadId` the receiver got with it)
+    let f = it.native(|it, _, a| {
+        let (source, ack) = (it.num(&arg(a, 0)) as u32, it.num(&arg(a, 1)) as u32);
         let (status, wire) = (
             it.to_str(&arg(a, 2)).to_string(),
             it.to_str(&arg(a, 3)).to_string(),
         );
-        if let Some(w) = it.worker.workers.get(&h) {
-            let _ = w.tx.send(Cmd::ThreadAck(ack, status, wire));
-        }
+        thread_reply(it, source, ack, status, wire);
         Ok(Value::Undefined)
     });
-    g.declare("__thaw_worker_thread_ack", f, true);
-    let f = it.native(|it, _, a| {
-        let ack = it.num(&arg(a, 0)) as u32;
-        let wire = it.to_str(&arg(a, 1)).to_string();
-        to_parent(it, Evt::Thread(ack, wire));
-        Ok(Value::Undefined)
-    });
-    g.declare("__thaw_worker_thread_to_parent", f, true);
+    g.declare("__thaw_thread_reply", f, true);
     // a wire that will not be sent (a send to a thread the worker cannot reach): its moved bytes are released
     let f = it.native(|it, _, a| {
         let wire = it.to_str(&arg(a, 0)).to_string();
@@ -921,16 +1010,6 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_wire_release", f, true);
-    let f = it.native(|it, _, a| {
-        let ack = it.num(&arg(a, 0)) as u32;
-        let (status, wire) = (
-            it.to_str(&arg(a, 1)).to_string(),
-            it.to_str(&arg(a, 2)).to_string(),
-        );
-        to_parent(it, Evt::ThreadAck(ack, status, wire));
-        Ok(Value::Undefined)
-    });
-    g.declare("__thaw_worker_thread_reply", f, true);
     let f = it.native(|it, _, a| {
         let h = it.num(&arg(a, 0)) as u32;
         if let Some(w) = it.worker.workers.get(&h) {
