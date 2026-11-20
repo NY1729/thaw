@@ -2145,12 +2145,15 @@ impl Interp {
         }
     }
 
-    /// `to_str` for an array element, fallible: a nested array recurses through `try_join`.
+    /// `to_str`, fallible: a nested array recurses through `try_join`, and an exception thrown by a
+    /// user `toString` / `valueOf` / `@@toPrimitive` propagates (ToString(object) in Node).
     pub(crate) fn try_to_str(&mut self, v: &Value) -> R<JsStr> {
         if let Value::Object(o) = v {
             if matches!(&*o.kind.borrow(), Kind::Array(_)) {
                 return self.try_join(v, ",");
             }
+            let p = self.primitive_of(v, extras::Hint::String)?;
+            return Ok(self.to_str(&p));
         }
         Ok(self.to_str(v))
     }
@@ -4593,7 +4596,8 @@ impl Interp {
                     );
                     if let Some(e) = t.exprs.get(i) {
                         let v = self.eval(e, scope)?;
-                        builtins::push_joined(&mut s, &self.to_str(&v));
+                        let text = self.try_to_str(&v)?;
+                        builtins::push_joined(&mut s, &text);
                     }
                 }
                 Ok(Value::Str(s.into()))
@@ -6157,6 +6161,8 @@ mod str_cursor_tests;
 mod str_unit_tests;
 #[cfg(test)]
 mod strict_mode_tests;
+#[cfg(test)]
+mod string_conversion_tests;
 #[cfg(test)]
 mod structured_clone_tests;
 #[cfg(test)]
