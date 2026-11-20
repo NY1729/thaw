@@ -394,6 +394,27 @@ fn post_message_to_thread_rejects_with_the_node_messaging_codes() {
 }
 
 #[test]
+fn post_message_to_thread_errored_has_no_cause_like_node() {
+    // Node 22.23.1: a listener that throws rejects the sender with ERR_WORKER_MESSAGING_ERRORED and no `cause`
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const thrower = new wt.Worker(`
+          const wt = require('node:worker_threads');
+          process.on('workerMessage', () => { throw new Error('boom'); });
+          setTimeout(() => {}, 400);
+          wt.parentPort.postMessage('thrower ready');
+        `, { eval: true });
+        await new Promise((resolve) => thrower.on('message', resolve));
+        await wt.postMessageToThread(thrower.threadId, 'x').then(() => console.log('resolved'), (e) => console.log('errored', e.code, 'cause', e.cause === undefined, JSON.stringify(Object.keys(e))));
+        console.log('done');
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        "errored ERR_WORKER_MESSAGING_ERRORED cause true [\"code\"]|done"
+    );
+}
+
+#[test]
 fn is_internal_thread_is_false_and_argument_errors_are_async() {
     let src = r#"const wt = __thaw_worker_threads_exports;
       const settle = (label, p) => p.then((v) => console.log(label, 'resolved', v), (e) => console.log(label, e.name, e.code, JSON.stringify(e.message)));
