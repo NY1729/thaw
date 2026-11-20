@@ -88,7 +88,7 @@ fn worker_output_is_not_captured_without_the_option() {
         log.push('exit ' + code);
         console.log(JSON.stringify(text) + '|' + log.join(','));
       })().catch((e) => console.log('failed ' + e));"#;
-    assert_eq!(run_main(src), r#"""|end,exit 0"#);
+    assert_eq!(run_main(src), r#"hi|""|end,exit 0"#);
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn worker_stdout_false_still_exits_normally() {
         const code = await new Promise((resolve) => { worker.on('exit', (c) => resolve(c)); });
         console.log('exit ' + code);
       })().catch((e) => console.log('failed ' + e));"#;
-    assert_eq!(run_main(src), "exit 0");
+    assert_eq!(run_main(src), "hi|exit 0");
 }
 
 #[test]
@@ -253,4 +253,79 @@ fn worker_stdio_process_write_is_byte_exact_when_captured() {
         console.log(out + ' ' + err);
       })().catch((e) => console.log('failed ' + e));"#;
     assert_eq!(run_main(src), "fa00ff80c328fb610a fb28c380ff00fa");
+}
+
+// Node 22.23.1 (scratch: thaw-tmp/tmp-run/wk4/item1.js): unpiped worker output goes to the parent's process.stdout /
+// process.stderr write (Buffers), captured output stays on worker.stdout / worker.stderr.
+#[test]
+fn worker_stdio_unpiped_output_reaches_parent_write() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      const log = [];
+      const origOut = process.stdout.write;
+      const origErr = process.stderr.write;
+      process.stdout.write = function (v, enc, cb) { if (typeof enc === 'function') cb = enc; log.push('out:' + Buffer.from(v).toString('hex') + ':' + Buffer.isBuffer(v)); if (cb) queueMicrotask(cb); return true; };
+      process.stderr.write = function (v, enc, cb) { if (typeof enc === 'function') cb = enc; log.push('err:' + Buffer.from(v).toString('hex') + ':' + Buffer.isBuffer(v)); if (cb) queueMicrotask(cb); return true; };
+      (async () => {
+        const w = new wt.Worker("var wt = require('node:worker_threads'), out = Buffer.from([99, 0, 255, 128, 100]); process.stdout.write(out.subarray(1, 4)); process.stderr.write('01fe81', 'hex'); wt.parentPort.close();", { eval: true });
+        const types = [w.stdout === null, w.stderr === null];
+        await new Promise((resolve) => { w.on('exit', resolve); });
+        const cap = new wt.Worker("var wt = require('node:worker_threads'), out = new Uint8Array([99, 2, 253, 130, 100]); process.stdout.write(new DataView(out.buffer, 1, 3)); process.stderr.write('03fc83', 'hex'); wt.parentPort.close();", { eval: true, stdout: true, stderr: true });
+        let co = '';
+        let ce = '';
+        cap.stdout.on('data', (v) => { co += Buffer.from(v).toString('hex'); });
+        cap.stderr.on('data', (v) => { ce += Buffer.from(v).toString('hex'); });
+        await new Promise((resolve) => { cap.on('exit', resolve); });
+        process.stdout.write = origOut;
+        process.stderr.write = origErr;
+        console.log(JSON.stringify({ types, log, co, ce, end: [cap.stdout.readableEnded, cap.stderr.readableEnded] }));
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        r#"{"types":[false,false],"log":["out:00ff80:true","err:01fe81:true"],"co":"02fd82","ce":"03fc83","end":[true,true]}"#
+    );
+}
+
+// Node 22.23.1: a DataView written by an unpiped worker reaches the parent's write as its bytes.
+#[test]
+fn worker_stdio_dataview_write_reaches_parent_as_bytes() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      const log = [];
+      const origOut = process.stdout.write;
+      process.stdout.write = function (v, enc, cb) { if (typeof enc === 'function') cb = enc; log.push(Buffer.from(v).toString('hex') + ':' + Buffer.isBuffer(v)); if (cb) queueMicrotask(cb); return true; };
+      (async () => {
+        const w = new wt.Worker("var out = new Uint8Array([99, 2, 253, 130, 100]); process.stdout.write(new DataView(out.buffer, 1, 3));", { eval: true });
+        await new Promise((resolve) => { w.on('exit', resolve); });
+        process.stdout.write = origOut;
+        console.log(log.join(','));
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(run_main(src), "02fd82:true");
+}
+
+// Node 22.23.1 (scratch: thaw-tmp/tmp-run/wk4/item3.js): worker process.stdin chunks are Buffers, a string written with
+// 'latin1' is encoded as latin1 ('Aÿ' -> 41ff), and end(chunk, callback) fires its callback once with 'finish' once.
+#[test]
+fn worker_stdin_buffers_latin1_and_end_callback_fire_once() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const worker = new wt.Worker(`const wt = require('node:worker_threads'), received = []; process.stdin.on('data', (chunk) => { received.push([Buffer.isBuffer(chunk), Buffer.from(chunk).toString('hex')]); }); process.stdin.on('end', () => { wt.parentPort.postMessage(received); wt.parentPort.close(); });`, { eval: true, stdin: true });
+        let writes = 0;
+        let ends = 0;
+        let finishes = 0;
+        const backing = Buffer.from([99, 0, 255, 88]);
+        const finalBacking = Buffer.from([77, 128, 66]);
+        worker.stdin.on('finish', () => { finishes++; });
+        const messages = new Promise((resolve) => { worker.on('message', resolve); });
+        const exit = new Promise((resolve) => { worker.on('exit', resolve); });
+        worker.stdin.write(backing.subarray(1, 3), (e) => { if (e) throw e; writes++; });
+        worker.stdin.write('Aÿ', 'latin1', (e) => { if (e) throw e; writes++; });
+        worker.stdin.end(finalBacking.subarray(1, 2), (e) => { if (e) throw e; ends++; });
+        const m = await messages;
+        const code = await exit;
+        await new Promise((resolve) => setImmediate(resolve));
+        console.log(JSON.stringify([code, writes, ends, finishes, m]));
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        r#"[0,2,1,1,[[true,"00ff"],[true,"41ff"],[true,"80"]]]"#
+    );
 }
