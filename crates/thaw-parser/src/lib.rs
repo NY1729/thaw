@@ -278,6 +278,42 @@ pub fn parse_javascript_eval(source: &str, cx: EvalContext) -> Result<Module, St
     parse_javascript_eval_located(source, cx).map_err(|f| f.message)
 }
 
+/// [`parse_javascript_with_source_map`] for an ES module, with the failure's message and position.
+/// Diagnostics go to a sink, not stderr: the caller reports the failure itself.
+pub fn parse_javascript_module_located(
+    source: &str,
+) -> Result<(Module, Lrc<SourceMap>), SyntaxFailure> {
+    let cm: Lrc<SourceMap> = Default::default();
+    let handler = Handler::with_emitter_writer(Box::new(std::io::sink()), Some(cm.clone()));
+    let fm = cm.new_source_file(
+        Lrc::new(FileName::Custom("input.js".into())),
+        source.to_string(),
+    );
+    let lexer = Lexer::new(
+        Syntax::Es(EsSyntax::default()),
+        Default::default(),
+        StringInput::from(&*fm),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+    let failure = |cm: &SourceMap, span: Span, message: String| {
+        let (line, col) = cm
+            .try_lookup_char_pos(span.lo)
+            .map(|loc| (loc.line as u32, loc.col.0 as u32 + 1))
+            .unwrap_or((1, 1));
+        SyntaxFailure { message, line, col }
+    };
+    let module = parser.parse_module().map_err(|err| {
+        let at = failure(&cm, err.span(), err.kind().msg().into_owned());
+        err.into_diagnostic(&handler).emit();
+        at
+    })?;
+    match parser.take_errors().first() {
+        None => Ok((module, cm)),
+        Some(err) => Err(failure(&cm, err.span(), err.kind().msg().into_owned())),
+    }
+}
+
 /// [`parse_javascript_eval`] with the failure's position. Diagnostics go to a sink, not stderr: the caller throws
 /// the SyntaxError and prints nothing itself.
 pub fn parse_javascript_eval_located(

@@ -1603,6 +1603,7 @@ impl Interp {
         it.run_promise_prelude();
         if host {
             it.install_main_file_loader();
+            it.install_esm_convert();
         }
         crate::mem_trace::mem_trace_report("after-core-preludes");
         it.run_prelude(extras::EXTRAS).unwrap_or_else(|e| {
