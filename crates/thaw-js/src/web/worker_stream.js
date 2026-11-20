@@ -59,6 +59,7 @@
       this.onChange = null;
     }
     get readable() { return !this.endEmitted && !this.destroyed; }
+    get readableEnded() { return this.endEmitted; }
     get readableFlowing() { return this.flowing; }
     changed() { if (this.onChange) this.onChange(); }
     setEncoding(encoding) {
@@ -134,8 +135,10 @@
     constructor(sink) {
       super();
       this.sink = sink;
+      this.errored = false;
       this.writable = true;
       this.writableEnded = false;
+      this.writableFinished = false;
       this.destroyed = false;
     }
     write(chunk, encoding, callback) {
@@ -150,7 +153,29 @@
         return false;
       }
       const bytes = typeof chunk === 'string' ? new TextEncoder().encode(chunk) : chunk;
-      this.sink(bytesToHex(bytes), false);
+      // a sink that throws, or returns false (the worker is gone), fails this write: the callback gets the error,
+      // then 'error' is emitted once for the stream
+      let error = null;
+      let accepted = true;
+      try {
+        accepted = this.sink(bytesToHex(bytes), false) !== false;
+      } catch (thrown) {
+        error = thrown;
+      }
+      if (error === null && !accepted) {
+        error = new Error('Worker stdin is not available');
+        error.code = 'ERR_WORKER_NOT_RUNNING';
+      }
+      if (error !== null) {
+        queueMicrotask(() => {
+          if (typeof callback === 'function') callback(error);
+          if (!this.errored) {
+            this.errored = true;
+            this.emit('error', error);
+          }
+        });
+        return false;
+      }
       if (typeof callback === 'function') queueMicrotask(callback);
       return true;
     }
@@ -162,6 +187,7 @@
         this.writable = false;
         this.sink('', true);
         queueMicrotask(() => {
+          this.writableFinished = true;
           this.emit('finish');
           this.emit('close');
           if (typeof callback === 'function') callback();
