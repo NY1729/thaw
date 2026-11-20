@@ -14,6 +14,8 @@
     on(name, listener) { this.__thawList(name).push({ listener, once: false }); return this; }
     addListener(name, listener) { return this.on(name, listener); }
     once(name, listener) { this.__thawList(name).push({ listener, once: true }); return this; }
+    prependListener(name, listener) { this.__thawList(name).unshift({ listener, once: false }); return this; }
+    prependOnceListener(name, listener) { this.__thawList(name).unshift({ listener, once: true }); return this; }
     off(name, listener) {
       const list = this.__thawList(name);
       const index = list.findIndex(entry => entry.listener === listener);

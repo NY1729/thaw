@@ -191,7 +191,6 @@
       states.set(this, state);
       liveThreads.set(threadId, state);
       byHandle.set(handle, this);
-      Object.defineProperty(this, 'threadId', { value: threadId, enumerable: true });
       this.stdin = options.stdin === true ? new Writable((hex, end) => __thaw_worker_stdin(handle, hex, end)) : null;
       // ponytail: always Readables (as in Node); they get data only when stdout/stderr were asked for
       this.stdout = new Readable();
@@ -211,6 +210,11 @@
       return state.exitPromise;
     }
 
+    // Node: a separate method that awaits terminate() (resolves undefined, not the exit code)
+    async [Symbol.asyncDispose]() {
+      await this.terminate();
+    }
+
     ref() {
       const state = states.get(this);
       state.refd = true;
@@ -226,6 +230,12 @@
     }
 
     hasRef() { return states.get(this).refd; }
+
+    // Node: a prototype getter, -1 once the worker has exited
+    get threadId() {
+      const state = states.get(this);
+      return state.exited ? -1 : state.threadId;
+    }
 
     get resourceLimits() { return states.get(this).resourceLimits; }
   }
@@ -253,7 +263,7 @@
       } else if (event.type === 'error') {
         worker.emit('error', decode(event.value));
       } else if (event.type === 'thread') {
-        deliverThreadMessage(event.ack, worker.threadId, event.value, (ack, status, wire) => __thaw_worker_thread_ack(state.handle, ack, status, wire));
+        deliverThreadMessage(event.ack, state.threadId, event.value, (ack, status, wire) => __thaw_worker_thread_ack(state.handle, ack, status, wire));
       } else if (event.type === 'threadAck') {
         settleSend(event.ack, event.status, event.value);
       } else if (event.type === 'stdout' || event.type === 'stderr') {
@@ -264,7 +274,7 @@
         state.exited = true;
         state.exitCode = event.code;
         byHandle.delete(event.handle);
-        liveThreads.delete(worker.threadId);
+        liveThreads.delete(state.threadId);
         // stdio ends before 'exit', as in Node (the events share one channel, so the data came first)
         for (const stream of [worker.stdout, worker.stderr]) {
           stream.__thawEnd();
