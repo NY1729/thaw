@@ -1072,6 +1072,52 @@ fn thaw_js_path_bundle(root_bundle: &str, builtin: &str) -> String {
     )
 }
 
+/// The peer-group key of each routed bundle (`names[i]`; `deps[i]` = the routed bundles `i` requires by name): the
+/// least name of its connected component in the peer-require graph, `None` for a singleton (it runs in its own realm).
+pub(crate) fn thaw_js_peer_group_keys(names: &[&str], deps: &[Vec<usize>]) -> Vec<Option<String>> {
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut parent: Vec<usize> = (0..deps.len()).collect();
+    for (i, requires) in deps.iter().enumerate() {
+        for &j in requires {
+            let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+            parent[a] = b;
+        }
+    }
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); deps.len()];
+    for i in 0..deps.len() {
+        let r = root(&mut parent, i);
+        members[r].push(i);
+    }
+    let mut keys = vec![None; deps.len()];
+    for group in members.iter().filter(|group| group.len() > 1) {
+        let key = group.iter().map(|&i| names[i]).min().expect("a group has members");
+        for &i in group {
+            keys[i] = Some(key.to_string());
+        }
+    }
+    keys
+}
+
+/// `js` with `var __thaw_bundle_group = "<key>";` right after its entry-key statement: the scan reads the marker from
+/// the wrapper body, next to the entry key. A bundle without that statement is returned unchanged.
+fn thaw_js_with_group_marker(js: &str, key: &str) -> String {
+    const ENTRY: &str = "var __thaw_bundle_entry_key = ";
+    let Some(start) = js.find(ENTRY) else {
+        return js.to_string();
+    };
+    let Some(semicolon) = js[start..].find(';') else {
+        return js.to_string();
+    };
+    let at = start + semicolon + 1;
+    format!("{}\nvar __thaw_bundle_group = \"{key}\";{}", &js[..at], &js[at..])
+}
+
 /// A `createHook` program that uses promise forms whose hook trace is not yet Node-identical on thaw-js
 /// (`finally` trigger ids, Promise combinators): the module stays on QuickJS for those. `then`, `new Promise`
 /// and resolve/reject are served by thaw-js, and so is AsyncLocalStorage (reaction contexts reach native awaits).
@@ -1546,5 +1592,37 @@ fn thaw_js_class_accessor_lines_are_class_members_like_methods() {
     // a constructor is not a member
     let ctor = thaw_js_test_decl("$new$p::C$arity0", "(): JsValue;");
     assert_eq!(thaw_js_class_member(&ctor), None);
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_peer_pair_gets_one_group_key_and_an_unrelated_package_none() {
+    // index 1 (`pg`) is required by index 0 (`drizzle-orm`); index 2 (`zod`) has no peer edge
+    let deps = vec![vec![1], vec![], vec![]];
+    let keys = thaw_js_peer_group_keys(&["drizzle-orm", "pg", "zod"], &deps);
+    assert_eq!(keys, vec![Some("drizzle-orm".to_string()), Some("drizzle-orm".to_string()), None]);
+}
+
+#[test]
+fn thaw_js_peer_group_key_is_the_least_member_name_whatever_the_order() {
+    // the same pair listed the other way round, and a transitive chain a -> b -> c: one key each
+    let pair = thaw_js_peer_group_keys(&["pg", "drizzle-orm"], &[vec![1], vec![]]);
+    assert_eq!(pair, vec![Some("drizzle-orm".to_string()); 2]);
+    let chain = thaw_js_peer_group_keys(&["c", "b", "a"], &[vec![1], vec![2], vec![]]);
+    assert_eq!(chain, vec![Some("a".to_string()); 3]);
+}
+
+#[test]
+fn thaw_js_group_marker_goes_after_the_entry_key_statement() {
+    let js = "module.exports = (function(require){ var __thaw_bundle_factories = {\"pg/index.js\": function(module, exports, require) {}}; \
+              var __thaw_bundle_require_maps = {\"pg/index.js\": {}}; var __thaw_bundle_entry_key = \"pg/index.js\";\n\
+              var x = 1; })(globalThis.require);";
+    let marked = thaw_js_with_group_marker(js, "drizzle-orm");
+    assert!(
+        marked.contains("var __thaw_bundle_entry_key = \"pg/index.js\";\nvar __thaw_bundle_group = \"drizzle-orm\";\nvar x = 1;"),
+        "{marked}"
+    );
+    let parts = thaw_js::scan::parse_bundle(&marked).unwrap();
+    assert_eq!(parts.group.as_deref(), Some("drizzle-orm"));
 }
 

@@ -2779,3 +2779,33 @@ fn thaw_js_tagged_template_rest_with_no_values() {
     let stdout = thaw_js_tagged_rest_fixture("tagged-rest-zero", "console.log(tag`abc`);");
     assert_eq!(stdout, "{\"s\":[\"abc\"],\"v\":[]}\n");
 }
+
+#[test]
+fn thaw_js_peer_pair_bundles_share_one_group_marker_and_an_unrelated_package_has_none() {
+    // `tjs-peer-a` and `tjs-peer-b` are one peer component: both bundles carry the same group key (the least
+    // member name); `tjs-unrelated` has no peer edge, so its bundle is a singleton with no marker
+    let unrelated = (
+        "tjs-unrelated",
+        "export declare function ping(): number;\n",
+        "exports.ping = function () { return 1; };\n",
+    );
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "peer-group",
+        "import { make } from 'tjs-peer-a';\n\
+         import { isB } from 'tjs-peer-b';\n\
+         import { ping } from 'tjs-unrelated';\n\
+         function main(): void {\n\
+           console.log(String(isB(make())), String(ping()));\n\
+         }\n",
+        &[TJS_PEER_A, TJS_PEER_B, unrelated],
+    );
+    let output = dir.join("app");
+    thaw_js_peer_build(&entry, &output, &registry).unwrap();
+    let bytes = std::fs::read(&output).unwrap();
+    let count = |text: &str| bytes.windows(text.len()).filter(|w| *w == text.as_bytes()).count();
+    assert_eq!(count("var __thaw_bundle_group = \"tjs-peer-a\";"), 2);
+    assert_eq!(count("var __thaw_bundle_group = \"tjs-unrelated\";"), 0);
+    assert_eq!(count("var __thaw_bundle_group = "), 2);
+    assert_eq!(thaw_js_run_guarded(&output), "true 1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

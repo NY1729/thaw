@@ -2349,6 +2349,16 @@ fn generate_registry_shims_pass(
                 })
                 .collect()
         };
+        // a peer component of two or more packages shares one realm: its members carry the same group marker
+        let keys = {
+            let names: Vec<&str> = bundles.iter().map(|bundle| bundle.0.as_str()).collect();
+            thaw_js_peer_group_keys(&names, &deps)
+        };
+        for (bundle, key) in bundles.iter_mut().zip(keys) {
+            if let Some(key) = key {
+                bundle.1 = thaw_js_with_group_marker(&bundle.1, &key);
+            }
+        }
         let mut slots: Vec<Option<_>> = std::mem::take(&mut bundles).into_iter().map(Some).collect();
         bundles = peers_first_order(&deps)
             .into_iter()
