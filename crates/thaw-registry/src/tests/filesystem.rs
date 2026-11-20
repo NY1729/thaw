@@ -516,40 +516,25 @@ fn fs_watch_file_reports_host_changes_and_stops_cleanly() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-mod qjs_pending_filesystem_fs_watch_reports_directory_rename_and_change_events {
-    use super::*;
-
 #[test]
 fn fs_watch_reports_directory_rename_and_change_events() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_watch");
     fs::write(
             dir.join("index.js"),
-            "var fs = require('node:fs'); module.exports = async function (root) { var work = root + '/watched'; fs.mkdirSync(work); var events = [], closeCount = 0, watcher; var completed = new Promise(function(resolve) { watcher = fs.watch(work, { interval: 1, persistent: false }, function(type, name) { events.push([type, name]); if (events.length === 2) { watcher.close(); resolve(); } }); watcher.once('close', function() { closeCount++; }); }); setTimeout(function() { fs.writeFileSync(work + '/value.txt', 'a'); }, 3); setTimeout(function() { fs.writeFileSync(work + '/value.txt', 'expanded'); }, 12); await completed; var controller = new AbortController(), aborted = fs.watch(work, { interval: 1, signal: controller.signal, encoding: 'buffer' }); controller.abort(); return [watcher instanceof fs.FSWatcher, events, watcher.closed, watcher._timer, watcher.hasRef(), closeCount, aborted.closed, aborted._timer]; };",
+            "var fs = require('node:fs'); module.exports = async function (root) { var work = root + '/watched'; fs.mkdirSync(work); var events = [], closeCount = 0, watcher; var completed = new Promise(function(resolve) { watcher = fs.watch(work, { interval: 1, persistent: false }, function(type, name) { events.push([type, name]); if (events.length === 2) { watcher.close(); resolve(); } }); watcher.once('close', function() { closeCount++; }); }); setTimeout(function() { fs.writeFileSync(work + '/value.txt', 'a'); }, 3); setTimeout(function() { fs.writeFileSync(work + '/value.txt', 'expanded'); }, 12); var keep=setTimeout(function(){},2000); await completed; clearTimeout(keep); var controller = new AbortController(), aborted = fs.watch(work, { interval: 1, signal: controller.signal, encoding: 'buffer' }); controller.abort(); return [watcher instanceof fs.FSWatcher, events, watcher.closed, watcher._timer, watcher.hasRef(), closeCount, aborted.closed, aborted._timer]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_fs_watch_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWatch = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsWatch").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         r#"[true,[["rename","value.txt"],["change","value.txt"]],true,null,false,1,true,null]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
-}
 }
 
 /// Deleting a watched file emits one `rename` with its basename and keeps the
