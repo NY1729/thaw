@@ -1180,6 +1180,7 @@ fn thaw_js_node_net_single_arg_functions_get_no_bare_alias() {
         &thaw_parser::common::FileName::Custom("node net.ts".into()),
         false, &dir.join("app"), Some(&dir.join("staging")),
         &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &routed,
+        &std::collections::HashSet::new(),
     ).unwrap();
     assert!(
         !shims.0.lines().any(|line| line.starts_with("function createServer(")),
@@ -1515,6 +1516,7 @@ fn thaw_js_class_value_handle_only_for_bare_value_uses() {
             &thaw_parser::common::FileName::Custom("class value.ts".into()),
             false, &dir.join("app"), Some(&dir.join("staging")),
             &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &routed,
+            &std::collections::HashSet::new(),
         ).unwrap();
         shims.0
     };
@@ -1552,6 +1554,7 @@ fn random_fill_sync_declaration_keeps_bytes_only_when_thaw_js_routes_node_crypto
             &thaw_parser::common::FileName::Custom("random fill.ts".into()),
             false, &dir.join("app"), Some(&dir.join("staging")),
             &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, routed,
+            &std::collections::HashSet::new(),
         ).unwrap();
         shims.0.lines()
             .find(|line| thaw_js_declared_function(line, "node:crypto").as_deref() == Some("randomFillSync"))
@@ -1578,6 +1581,7 @@ fn imported_buffer_stays_native_when_thaw_js_routes_node_buffer() {
             &thaw_parser::common::FileName::Custom("imported buffer.ts".into()),
             false, &dir.join("app"), Some(&dir.join("staging")),
             &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, routed,
+            &std::collections::HashSet::new(),
         ).unwrap();
         shims.0
     };
@@ -1618,6 +1622,7 @@ fn thaw_js_routes_node_http_when_the_program_calls_native_create_server() {
         &thaw_parser::common::FileName::Custom("http eligible.ts".into()),
         false, &dir.join("app"), Some(&dir.join("staging")),
         &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &ThawJsPackages::new(),
+        &std::collections::HashSet::new(),
     ).unwrap();
     assert!(eligible.contains("node:http"), "{eligible:?}");
     let _ = std::fs::remove_dir_all(dir);
@@ -1635,6 +1640,7 @@ fn routed_node_http_keeps_the_native_create_server_declaration() {
         &thaw_parser::common::FileName::Custom("http decl.ts".into()),
         false, &dir.join("app"), Some(&dir.join("staging")),
         &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &packages.iter().cloned().collect(),
+        &std::collections::HashSet::new(),
     ).unwrap();
     let shim = shims.0;
     assert!(shim.contains("declare function createServer("), "{shim}");
@@ -2440,14 +2446,132 @@ fn unmapped_require_of_an_installed_peer_keeps_a_package_on_quickjs() {
     );
     let absent = registry_installed_packages(&registry);
     assert!(!absent.contains("@neondatabase/serverless"));
-    assert!(thaw_js_package_eligible_in(&pkg, &bundle, "", &Default::default(), "", &absent));
+    assert!(thaw_js_package_eligible_in(&pkg, &bundle, "", &Default::default(), "", &absent, &Default::default()));
     let peer = registry.join("@neondatabase").join("serverless");
     std::fs::create_dir_all(&peer).unwrap();
     std::fs::write(peer.join("package.d.ts"), "export {};\n").unwrap();
     let installed = registry_installed_packages(&registry);
     assert!(installed.contains("@neondatabase/serverless") && installed.contains("drizzle-orm"));
-    assert!(!thaw_js_package_eligible_in(&pkg, &bundle, "", &Default::default(), "", &installed));
+    assert!(!thaw_js_package_eligible_in(&pkg, &bundle, "", &Default::default(), "", &installed, &Default::default()));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `tjs-peer-a` reaches its peer `tjs-peer-b` by name, lazily (only when `make` runs), as drizzle reaches `pg`.
+const TJS_PEER_A: (&str, &str, &str) = (
+    "tjs-peer-a",
+    "export declare function make(): any;\n",
+    "exports.make = function () { return new (require('tjs-peer-b').B)(); };\n",
+);
+
+/// `tjs-peer-b`: a class `B`, and `isB` (its own identity check).
+const TJS_PEER_B: (&str, &str, &str) = (
+    "tjs-peer-b",
+    "export declare function isB(x: any): boolean;\n",
+    "class B {}\nexports.B = B;\nexports.isB = function (x) { return x instanceof B; };\n",
+);
+
+/// Builds `entry` over `registry` under error fallback (thaw-js routed, a QuickJS link is a build error).
+fn thaw_js_peer_build(entry: &Path, output: &Path, registry: &Path) -> Result<(), String> {
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        entry, output, &[], &[], &[], registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    result
+}
+
+#[test]
+fn thaw_js_peer_package_builds_under_error_mode_and_reaches_its_peer() {
+    // a require of an installed, unmapped peer is served once the peer is compiled in as thaw-js (`served_peers`)
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "peer-served",
+        "import { make } from 'tjs-peer-a';\n\
+         import { isB } from 'tjs-peer-b';\n\
+         function main(): void {\n\
+           console.log(String(isB(make())));\n\
+         }\n",
+        &[TJS_PEER_A, TJS_PEER_B],
+    );
+    let output = dir.join("app");
+    thaw_js_peer_build(&entry, &output, &registry).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run_guarded(&output), "true\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_implicit_peer_is_compiled_in_for_a_program_that_only_imports_its_user() {
+    // the program never imports `tjs-peer-b`: the build adds the installed peer its bundle requires
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "peer-implicit",
+        "import { make } from 'tjs-peer-a';\n\
+         function main(): void {\n\
+           make();\n\
+           console.log('made');\n\
+         }\n",
+        &[TJS_PEER_A, TJS_PEER_B],
+    );
+    let output = dir.join("app");
+    thaw_js_peer_build(&entry, &output, &registry).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run_guarded(&output), "made\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_refused_peer_refuses_its_dependent_and_the_error_names_both() {
+    // `tjs-peer-b` calls process.dlopen (refused): `tjs-peer-a` cannot be served either, so the build fails
+    let peer_b_refused = (
+        "tjs-peer-b",
+        "export declare function isB(x: any): boolean;\n",
+        "class B {}\nexports.B = B;\nexports.isB = function (x) { return x instanceof B; };\nexports.load = function (m) { return process.dlopen(m, 'x.node'); };\n",
+    );
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "peer-refused",
+        "import { make } from 'tjs-peer-a';\n\
+         function main(): void {\n\
+           make();\n\
+         }\n",
+        &[TJS_PEER_A, peer_b_refused],
+    );
+    let output = dir.join("app");
+    let error = thaw_js_peer_build(&entry, &output, &registry).unwrap_err();
+    assert!(error.contains("tjs-peer-a") && error.contains("tjs-peer-b"), "{error}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_subpath_of_a_served_peer_stays_refused() {
+    // `tjs-peer-b/lib/x` is no package the registry serves: only the exact name of a served peer is resolved
+    let peer_a_subpath = (
+        "tjs-peer-a",
+        "export declare function make(): any;\n",
+        "exports.make = function () { return new (require('tjs-peer-b/lib/x').B)(); };\n",
+    );
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        "peer-subpath",
+        "import { make } from 'tjs-peer-a';\n\
+         function main(): void {\n\
+           make();\n\
+         }\n",
+        &[peer_a_subpath, TJS_PEER_B],
+    );
+    let output = dir.join("app");
+    let error = thaw_js_peer_build(&entry, &output, &registry).unwrap_err();
+    assert!(error.contains("tjs-peer-a") && error.contains("tjs-peer-b/lib/x"), "{error}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_peers_register_before_the_packages_that_require_them() {
+    // the registration order: a requirer after its peer, the rest in the given order, a cycle as given
+    assert_eq!(peers_first_order(&[vec![1], vec![]]), vec![1, 0]);
+    assert_eq!(peers_first_order(&[vec![2], vec![], vec![]]), vec![2, 0, 1]);
+    assert_eq!(peers_first_order(&[vec![1], vec![2], vec![]]), vec![2, 1, 0]);
+    assert_eq!(peers_first_order(&[vec![], vec![], vec![]]), vec![0, 1, 2]);
+    assert_eq!(peers_first_order(&[vec![1], vec![0], vec![]]), vec![0, 1, 2]);
 }
 
 #[test]
@@ -2514,4 +2638,61 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), EXPECTED);
     assert_eq!(stderr.matches("ExperimentalWarning: SQLite is an experimental feature").count(), 1, "{stderr}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A tagged template on an imported thaw-js function with a rest parameter (`tag(strings, ...params: any[])`,
+/// drizzle's `sql` shape) must pass every interpolated value, in order, not just the strings array.
+/// Builds the program with the named values and checks the output against what Node prints.
+fn thaw_js_tagged_rest_fixture(name: &str, main_body: &str) -> String {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        name,
+        &format!(
+            "import {{ tag }} from 'tjs-tag';\n\
+             function main(): void {{\n\
+               {main_body}\n\
+             }}\n"
+        ),
+        &[(
+            "tjs-tag",
+            "export declare function tag(strings: TemplateStringsArray, ...params: any[]): string;\n",
+            "exports.tag = function tag(strings, ...vals) { return JSON.stringify({ s: Array.from(strings), v: vals }); };\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &["tjs-tag".to_string()], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    let stdout = thaw_js_run(&output);
+    let _ = std::fs::remove_dir_all(dir);
+    stdout
+}
+
+#[test]
+fn thaw_js_tagged_template_rest_passes_every_interpolated_value_in_order() {
+    let stdout = thaw_js_tagged_rest_fixture(
+        "tagged-rest-many",
+        "console.log(tag`a${1}b${\"x\"}c`);",
+    );
+    // Same text real Node prints for the equivalent JavaScript.
+    assert_eq!(stdout, "{\"s\":[\"a\",\"b\",\"c\"],\"v\":[1,\"x\"]}\n");
+}
+
+#[test]
+fn thaw_js_tagged_template_rest_with_one_value() {
+    let stdout = thaw_js_tagged_rest_fixture("tagged-rest-one", "console.log(tag`a${1}b`);");
+    assert_eq!(stdout, "{\"s\":[\"a\",\"b\"],\"v\":[1]}\n");
+}
+
+#[test]
+fn thaw_js_tagged_template_rest_with_no_values() {
+    let stdout = thaw_js_tagged_rest_fixture("tagged-rest-zero", "console.log(tag`abc`);");
+    assert_eq!(stdout, "{\"s\":[\"abc\"],\"v\":[]}\n");
 }
