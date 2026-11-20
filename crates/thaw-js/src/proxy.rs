@@ -109,6 +109,12 @@ impl Interp {
         }
         let is_index = matches!(&*o.kind.borrow(), Kind::Array(items) if key == "length" || array_index(key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))));
         if matches!(&*o.kind.borrow(), Kind::Global) {
+            // a context's global: the sandbox's chain answers first (its vars, its names, Object.prototype)
+            if let Some(sb) = crate::vm::sandbox_of(o) {
+                if self.has_property(&Value::Object(sb), key)? {
+                    return Ok(true);
+                }
+            }
             if crate::hidden_global_name(key) {
                 return Ok(false);
             }
