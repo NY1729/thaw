@@ -2410,8 +2410,12 @@ fn builtin_defined_methods_make_graphql_and_socket_io_shaped_packages_eligible()
     );
     assert!(thaw_js_package_eligible(&pkg, &graphql, "", &Default::default(), ""));
     assert!(thaw_js_package_eligible(&pkg, &socket, "", &Default::default(), ""));
-    // a method that no builtin defines is still refused
-    let heap = one_package_bundle("exports.h = (p) => p.writeHeapSnapshot();");
+    // a method that no builtin defines is still refused once the bundle can reach a module that owns the name
+    // (`writeHeapSnapshot` is a `node:v8` export; a bundle that loads no owner cannot have made a Node call: the
+    // owner-module rule)
+    let heap = one_package_bundle(
+        "exports.h = (p) => (process.getBuiltinModule('node:v8'), p.writeHeapSnapshot());",
+    );
     assert!(!thaw_js_package_eligible(&pkg, &heap, "", &Default::default(), ""));
     let dlopen = one_package_bundle("exports.d = (m) => process.dlopen(m, 'x.node');");
     assert!(!thaw_js_package_eligible(&pkg, &dlopen, "", &Default::default(), ""));

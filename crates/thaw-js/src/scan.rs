@@ -12,7 +12,7 @@ use swc_ecma_visit::{Visit, VisitWith};
 use thaw_parser::ast as a;
 
 use crate::scan_names::{
-    is_node_global, is_node_method_name, node_global_covered, node_global_has,
+    is_node_global, is_node_method_name, method_owners, node_global_covered, node_global_has,
 };
 
 /// Per-package scan result.
@@ -658,6 +658,16 @@ struct Walker {
     this_class: Option<bool>,
     /// the next function visited is a class method, which keeps the class's `this` binding (set by `visit_class_method`)
     method_fn: bool,
+    /// R7: the builtin modules named by a literal `require`-family call (`node:` stripped), see [`scan_bundle_with`]
+    loads: HashSet<String>,
+    /// R7: uses of a `require`-family name (`require`, `__thaw_require`, `module.require`, ...), literal calls included
+    require_uses: usize,
+    /// R7: literal `require`-family calls (each also counts one of `require_uses`)
+    literal_loads: usize,
+    /// R7: a load the scan cannot name (a computed spec, `import()`)
+    loads_dynamic: bool,
+    /// R7: a `stdin`/`stdout`/`stderr` member is read: on `process` these are the net/tty streams
+    stdio: bool,
 }
 
 impl Walker {
@@ -910,6 +920,9 @@ impl Visit for Walker {
         match &*n.sym {
             "arguments" => self.feature("arguments"),
             name => {
+                if name.contains("require") {
+                    self.require_uses += 1;
+                }
                 self.refs.insert(name.to_string());
             }
         }
@@ -953,9 +966,38 @@ impl Visit for Walker {
             self.builtin_members
                 .insert((o.sym.to_string(), p.sym.to_string()));
         }
+        if let a::MemberProp::Ident(p) = &n.prop {
+            match &*p.sym {
+                "require" | "createRequire" | "getBuiltinModule" => self.require_uses += 1,
+                "stdin" | "stdout" | "stderr" => self.stdio = true,
+                _ => {}
+            }
+        }
         n.visit_children_with(self);
     }
     fn visit_call_expr(&mut self, n: &a::CallExpr) {
+        match &n.callee {
+            a::Callee::Import(_) => self.loads_dynamic = true,
+            a::Callee::Expr(c) => {
+                if let a::Expr::Ident(i) = &**c {
+                    if i.sym.contains("require") {
+                        match n.args.first().map(|x| (x.spread.is_some(), &*x.expr)) {
+                            Some((false, a::Expr::Lit(a::Lit::Str(s)))) => match s.value.as_str() {
+                                Some(spec) => {
+                                    self.loads.insert(
+                                        spec.strip_prefix("node:").unwrap_or(spec).to_string(),
+                                    );
+                                    self.literal_loads += 1;
+                                }
+                                None => self.loads_dynamic = true,
+                            },
+                            _ => self.loads_dynamic = true,
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
         if let a::Callee::Expr(c) = &n.callee {
             match &**c {
                 a::Expr::Member(m) => {
@@ -1226,6 +1268,35 @@ fn scan_bundle_with(source: &str, addon: bool, ctx: &ScanContext) -> Result<Repo
         .iter()
         .flat_map(|(_, w)| w.defined.iter().cloned())
         .collect();
+    // R7 (owner-module reachability): a Node object reaches the package only through a builtin the bundle loads
+    // (a literal require, or a factory that is a builtin) or through a global. `loaded` names the loaded builtins;
+    // `loads_dynamic` is set when a load cannot be named, which keeps every method finding. `process` is loaded
+    // when a stdio stream is read (`process.stdin` is a net/tty object, and the scan does not walk getters).
+    let mut loaded: HashSet<String> = walkers
+        .iter()
+        .flat_map(|(_, w)| w.loads.iter().cloned())
+        .collect();
+    loaded.extend(
+        reach
+            .iter()
+            .filter_map(|k| k.strip_prefix("node:").map(str::to_string)),
+    );
+    if walkers.iter().any(|(_, w)| w.stdio) {
+        loaded.insert("process".to_string());
+    }
+    let loads_dynamic = walkers
+        .iter()
+        .any(|(_, w)| w.loads_dynamic || w.require_uses > w.literal_loads);
+    let may_be_loaded = |m: &str| -> bool {
+        if loads_dynamic {
+            return true;
+        }
+        match method_owners(m) {
+            // no owner line: the name is not a module's export, so the caller may hold Node's object
+            None => true,
+            Some(owners) => owners.iter().any(|o| *o == "*" || loaded.contains(*o)),
+        }
+    };
     for (key, w) in &walkers {
         for (f, n) in &w.features {
             add(&mut report, f.clone(), *n, key);
@@ -1285,6 +1356,8 @@ fn scan_bundle_with(source: &str, addon: bool, ctx: &ScanContext) -> Result<Repo
                 // a probe of `dlopen` proves nothing: thaw-js has the member and it throws, so the probe is true
                 && (m == "dlopen" || !w.probed_methods.contains(m))
                 && m != "hasColors"
+                // R7: `dlopen` is always a finding (above); any other name needs an owner the bundle can load
+                && (m == "dlopen" || may_be_loaded(m))
             {
                 add(&mut report, format!("method:{m}"), 1, key);
             }
