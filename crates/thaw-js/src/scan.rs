@@ -75,6 +75,57 @@ pub fn script_as_bundle(source: &str) -> std::borrow::Cow<'_, str> {
     .into()
 }
 
+/// Start and end of a worker-URL region the bundler writes around a classic `data:` worker expression
+/// (`/*thaw-worker-url:KEY*/(<expression>)/*thaw-worker-url-end*/`). KEY is a JSON string body.
+pub const WORKER_URL_START: &str = "/*thaw-worker-url:";
+pub const WORKER_URL_END: &str = "/*thaw-worker-url-end*/";
+
+/// Rewrites each worker-URL region whose KEY `is_loaded_key` accepts to the string literal `"/thaw_modules/KEY"`
+/// (the virtual `__filename` of that bundled module, which `Worker` runs through the loaded bundle).
+/// Regions with an unknown, malformed or unterminated KEY are left unchanged. Text without a region is returned
+/// borrowed, byte-identical. Rewrites are textual: a marker inside a string or comment is treated like any other.
+/// The region body is the first `WORKER_URL_END` after the KEY, so the body must not contain that token.
+pub fn worker_urls_to_keys<'a>(
+    text: &'a str,
+    is_loaded_key: impl Fn(&str) -> bool,
+) -> std::borrow::Cow<'a, str> {
+    if !text.contains(WORKER_URL_START) {
+        return text.into();
+    }
+    let mut out = String::new();
+    let (mut copied, mut pos) = (0, 0);
+    while let Some(off) = text[pos..].find(WORKER_URL_START) {
+        let start = pos + off;
+        let key_begin = start + WORKER_URL_START.len();
+        let Some(key_len) = text[key_begin..].find("*/") else {
+            break;
+        };
+        let body_begin = key_begin + key_len + 2;
+        let Some(end_off) = text[body_begin..].find(WORKER_URL_END) else {
+            break;
+        };
+        let end = body_begin + end_off + WORKER_URL_END.len();
+        let raw = format!("\"{}\"", &text[key_begin..key_begin + key_len]);
+        match serde_json::from_str::<String>(&raw) {
+            Ok(key) if is_loaded_key(&key) => {
+                // a JSON string is also a valid JS string literal
+                let path = serde_json::to_string(&format!("/thaw_modules/{key}"))
+                    .expect("a string always serializes");
+                out.push_str(&text[copied..start]);
+                out.push_str(&path);
+                copied = end;
+                pos = end;
+            }
+            _ => pos = key_begin,
+        }
+    }
+    if copied == 0 {
+        return text.into();
+    }
+    out.push_str(&text[copied..]);
+    out.into()
+}
+
 /// The thaw-js form of `node:worker_threads`: the main-thread module the thaw-js prelude exports
 /// (`web/worker_threads.js`). Package bundles embed the QuickJS form of that builtin (natives that exist
 /// only in thaw-quickjs), so [`parse_bundle`] substitutes this one for every such embedded factory.
@@ -1429,4 +1480,109 @@ fn scan_bundle_with(source: &str, addon: bool, ctx: &ScanContext) -> Result<Repo
         }
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod worker_url_tests {
+    use super::{worker_urls_to_keys, WORKER_URL_END, WORKER_URL_START};
+    use std::borrow::Cow;
+
+    fn marked(key: &str, expr: &str) -> String {
+        format!("{WORKER_URL_START}{key}*/({expr}){WORKER_URL_END}")
+    }
+
+    fn loaded(k: &str) -> bool {
+        k == "a/index.js" || k == "a/two.js"
+    }
+
+    #[test]
+    fn marked_region_with_loaded_key_becomes_the_bundled_module_path() {
+        let text = format!(
+            "new Worker({}, {{ eval: false }})",
+            marked("a/index.js", "'data:text/javascript;thaw-bundle,x'")
+        );
+        assert_eq!(
+            worker_urls_to_keys(&text, loaded),
+            r#"new Worker("/thaw_modules/a/index.js", { eval: false })"#
+        );
+    }
+
+    #[test]
+    fn text_without_a_marker_is_returned_byte_identical_and_borrowed() {
+        let text = "new Worker('/x/y.js'); // no marker here";
+        let out = worker_urls_to_keys(text, loaded);
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert!(std::ptr::eq(out.as_ptr(), text.as_ptr()));
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn unknown_key_region_is_left_unchanged() {
+        let text = format!(
+            "new Worker({})",
+            marked("b/other.js", "'data:text/javascript;thaw-bundle,x'")
+        );
+        assert_eq!(worker_urls_to_keys(&text, loaded), text);
+    }
+
+    #[test]
+    fn two_markers_are_both_rewritten_and_text_between_is_kept() {
+        let text = format!(
+            "f({}, {}, 'tail')",
+            marked("a/index.js", "'d1'"),
+            marked("a/two.js", "'d2'")
+        );
+        assert_eq!(
+            worker_urls_to_keys(&text, loaded),
+            r#"f("/thaw_modules/a/index.js", "/thaw_modules/a/two.js", 'tail')"#
+        );
+    }
+
+    #[test]
+    fn only_the_known_marker_of_two_is_rewritten() {
+        let text = format!(
+            "{} {}",
+            marked("zz/none.js", "'d1'"),
+            marked("a/two.js", "'d2'")
+        );
+        assert_eq!(
+            worker_urls_to_keys(&text, loaded),
+            format!(
+                "{} \"/thaw_modules/a/two.js\"",
+                marked("zz/none.js", "'d1'")
+            )
+        );
+    }
+
+    #[test]
+    fn nested_parentheses_in_the_expression_are_inside_the_region() {
+        let text = format!("new Worker({})", marked("a/index.js", "('a' + (f(1)(2)))"));
+        assert_eq!(
+            worker_urls_to_keys(&text, loaded),
+            r#"new Worker("/thaw_modules/a/index.js")"#
+        );
+    }
+
+    #[test]
+    fn malformed_key_is_left_unchanged() {
+        // an unescaped quote is not a JSON string body
+        let text = format!("x{}", marked("a/\"bad", "'d'"));
+        assert_eq!(worker_urls_to_keys(&text, loaded), text);
+    }
+
+    #[test]
+    fn unterminated_region_is_left_unchanged() {
+        let text = format!("new Worker({WORKER_URL_START}a/index.js*/('d')");
+        assert_eq!(worker_urls_to_keys(&text, loaded), text);
+    }
+
+    #[test]
+    fn a_marker_after_a_left_alone_one_is_still_rewritten() {
+        let unknown = format!("{WORKER_URL_START}b/no.js*/('d1')");
+        let text = format!("{unknown} {}", marked("a/index.js", "'d2'"));
+        assert_eq!(
+            worker_urls_to_keys(&text, loaded),
+            format!("{unknown} \"/thaw_modules/a/index.js\"")
+        );
+    }
 }
