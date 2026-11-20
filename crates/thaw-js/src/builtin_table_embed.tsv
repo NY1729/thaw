@@ -79,6 +79,7 @@ owner	key	kind	flags	vtype	length	name	hasPrototype	alias	tag
 %TypedArray%.prototype	toSorted	data	w-c	function	1	toSorted	0	-	-
 %TypedArray%.prototype	toString	data	w-c	function	0	toString	0	10	-
 %TypedArray%.prototype	values	data	w-c	function	0	values	0	8	-
+%TypedArray%.prototype	with	data	w-c	function	2	with	0	-	-
 %TypedArray%.prototype.@@iterator	length	data	--c	number	0	-	-	-	-
 %TypedArray%.prototype.@@iterator	name	data	--c	string	-	values	-	-	-
 %TypedArray%.prototype.at	length	data	--c	number	1	-	-	-	-
@@ -137,6 +138,8 @@ owner	key	kind	flags	vtype	length	name	hasPrototype	alias	tag
 %TypedArray%.prototype.toReversed	name	data	--c	string	-	toReversed	-	-	-
 %TypedArray%.prototype.toSorted	length	data	--c	number	1	-	-	-	-
 %TypedArray%.prototype.toSorted	name	data	--c	string	-	toSorted	-	-	-
+%TypedArray%.prototype.with	length	data	--c	number	2	-	-	-	-
+%TypedArray%.prototype.with	name	data	--c	string	-	with	-	-	-
 AbortController	length	data	--c	number	0	-	-	-	-
 AbortController	name	data	--c	string	-	AbortController	-	-	-
 AbortController	prototype	data	---	object	-	-	-	-	-

@@ -288,6 +288,45 @@ fn regexp_string_index_ascii_and_non_ascii_subjects() {
 }
 
 #[test]
+fn replace_all_empty_needle_multibyte() {
+    // an empty needle matches at every UTF-16 unit boundary (no byte-stepping into a char)
+    assert_eq!(one("console.log('héllo'.replaceAll('', 1))"), "1h1é1l1l1o1");
+    assert_eq!(
+        one("console.log('日本'.replaceAll('', '.'), 'héllo'.replace('', '1'))"),
+        ".日.本. 1héllo"
+    );
+    // an astral char: the replacement goes between the surrogate halves
+    assert_eq!(
+        one("console.log(JSON.stringify('\\u{1F600}'.replaceAll('', '-')))"),
+        "\"-\\ud83d-\\ude00-\""
+    );
+}
+
+#[test]
+fn split_empty_separator_astral() {
+    assert_eq!(
+        one("console.log(JSON.stringify('😀a'.split('')), 'héllo'.split('').join('|'))"),
+        "[\"\\ud83d\",\"\\ude00\",\"a\"] h|é|l|l|o"
+    );
+}
+
+#[test]
+fn index_of_empty_needle_and_position_inside_pair() {
+    assert_eq!(one("console.log('héllo'.indexOf(''), 'héllo'.indexOf('', 2), 'héllo'.indexOf('', 99), '😀a'.indexOf('', 1), '😀a'.indexOf('a', 1))"), "0 2 5 1 2");
+}
+
+#[test]
+fn last_index_of_honours_position() {
+    assert_eq!(one("console.log('héllo'.lastIndexOf(''), '😀a😀'.lastIndexOf(''), 'héllo'.lastIndexOf('l', 2), 'héllo'.lastIndexOf('l', -5), 'héllo'.lastIndexOf('l', NaN))"), "5 5 2 -1 3");
+}
+
+#[test]
+fn pad_start_multibyte_filler() {
+    // padding is counted in UTF-16 units, so an astral filler contributes its surrogate halves
+    assert_eq!(one("console.log(JSON.stringify('x'.padStart(4, '😀')), 'é'.padStart(5, 'ö'), 'é'.padStart(3, 'ö'))"), "\"😀\\ud83dx\" ööööé ööé");
+}
+
+#[test]
 fn ascii_flag_cache_tracks_the_subject() {
     let ascii: crate::JsStr = "a".repeat(300).into();
     assert!(ascii.is_ascii_cached());
@@ -1079,6 +1118,20 @@ fn typed_arrays_wrap_values_and_share_their_buffer() {
              console.log(u8.join(), c.join(), new Int8Array([200])[0], u8.subarray(1, 3).length, u8.buffer === b, Buffer.from('hi').toString('hex'), new TextDecoder().decode(new TextEncoder().encode('é')))"),
         "4,3,2,1 255,0,2 -56 2 true 6869 é"
     );
+}
+
+#[test]
+fn typed_array_with_returns_a_new_array_of_the_same_kind() {
+    assert_eq!(one("console.log(new Float64Array([1.5, 2, NaN]).with(0, 2).join(), new Float64Array([1.5, 2, NaN]).with(-1, 7)[2], new Uint8Array(2).with(0, 300)[0])"), "2,2,NaN 7 44");
+    // the original is untouched, and a Buffer gives a plain Uint8Array (TypedArrayCreateSameType)
+    assert_eq!(one("var a = new Uint8Array([1, 2]), b = a.with(0, 9); console.log(a[0], b[0], b !== a, b.buffer === a.buffer, Buffer.from([1, 2, 3]).with(-1, 9).constructor.name)"), "1 9 true false Uint8Array");
+}
+
+#[test]
+fn typed_array_with_range_and_coercion() {
+    assert_eq!(one("try { new Uint8Array(2).with(5, 1) } catch (e) { console.log(e.name + ': ' + e.message) }"), "RangeError: Invalid typed array index");
+    assert_eq!(one("try { new BigInt64Array(2).with(5, 5) } catch (e) { console.log(e.name + ': ' + e.message) }"), "TypeError: Cannot convert 5 to a BigInt");
+    assert_eq!(one("console.log(new BigInt64Array([1n, 2n]).with(-1, '5')[1], new Uint8Array(2).with(1.7, 9)[1])"), "5n 9");
 }
 
 #[test]

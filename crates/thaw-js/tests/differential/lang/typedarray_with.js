@@ -1,0 +1,45 @@
+// TypedArray.prototype.with: a new array of the same kind, index and value coerced first.
+const fmt = (r) => r.constructor.name + ' [' + Array.from(r, (x) => (typeof x === 'bigint' ? x + 'n' : String(x))).join(',') + ']';
+const show = (f) => { try { return fmt(f()); } catch (e) { return 'THROW ' + e.constructor.name + ': ' + e.message; } };
+console.log(show(() => new Float64Array([1.5, 2, NaN]).with(0, 2)));
+console.log(show(() => new Float64Array([1.5, 2, NaN]).with(-1, 7)));
+console.log(show(() => new Float64Array([1.5, 2, NaN]).with(-3, 7)));
+console.log(show(() => new Float64Array([1.5, 2, NaN]).with(-4, 7)));
+console.log(show(() => new Uint8Array(2).with(5, 1)));
+console.log(show(() => new Uint8Array(2).with(-3, 1)));
+console.log(show(() => new Uint8Array(2).with(1.7, 9)));
+console.log(show(() => new Uint8Array(2).with('1', 300)));
+console.log(show(() => new Uint8Array(2).with(NaN, 3)));
+console.log(show(() => new Uint8Array(2).with(undefined, 3)));
+console.log(show(() => new Uint8Array(2).with(Infinity, 3)));
+console.log(show(() => new Uint8Array(2).with(-Infinity, 3)));
+console.log(show(() => new Uint8Array(2).with(0, 'x')));
+console.log(show(() => new Uint8Array(2).with(0, '7')));
+console.log(show(() => new Uint8Array(2).with(0, { valueOf() { return 4; } })));
+console.log(show(() => new Int8Array([1, 2]).with(0, 200)));
+console.log(show(() => new Uint8ClampedArray([1, 2]).with(0, 300)));
+console.log(show(() => new Float32Array([1, 2]).with(1, 0.1)));
+console.log(show(() => new Uint16Array(3).with(0, 2 ** 17 + 5)));
+console.log(show(() => new Int32Array([1, 2, 3]).with(2, -1)));
+console.log(show(() => new Uint8Array([1, 2, 3]).with(1, 1.9)));
+console.log(show(() => new Float64Array([]).with(0, 1)));
+console.log(show(() => new Float64Array([1, 2]).with(0, '4.5')));
+console.log(show(() => new Float64Array([1, 2]).with(0, null)));
+console.log(show(() => new BigInt64Array([1n, 2n]).with(0, 5n)));
+console.log(show(() => new BigInt64Array([1n, 2n]).with(-1, '5')));
+console.log(show(() => new BigInt64Array([1n, 2n]).with(0, 5)));
+console.log(show(() => new BigInt64Array([1n, 2n]).with(5, 5)));
+console.log(show(() => new BigInt64Array([1n, 2n]).with(5, 'abc')));
+console.log(show(() => new BigUint64Array([1n, 2n]).with(-1, 5n)));
+console.log(show(() => new BigUint64Array([1n, 2n]).with(5, 5n)));
+console.log(show(() => Buffer.from([1, 2, 3]).with(0, 9)));
+console.log(show(() => Buffer.from([1, 2, 3]).with(-1, 9)));
+console.log(show(() => new Uint8Array(2).with(5, 1)));
+console.log(show(() => new Uint8Array(0).with(0, 1)));
+console.log(show(() => new Uint8Array(0).with(-1, 1)));
+console.log(show(() => Uint8Array.prototype.with.call([1, 2], 0, 1)));
+console.log(show(() => Uint8Array.prototype.with.call(new Uint8Array(2), 0)));
+console.log(show(() => new Uint8Array(2).with()));
+{ const a = new Uint8Array([1, 2]); const b = a.with(0, 9); console.log(a[0], b[0], b !== a, b.buffer === a.buffer); }
+{ const a = new Uint8Array([1, 2, 3, 4]).subarray(1, 3); const b = a.with(1, 9); console.log(Array.from(b), Array.from(a), b.buffer === a.buffer, b.byteOffset); }
+console.log(Uint8Array.prototype.with.length, Uint8Array.prototype.with.name, Object.prototype.toString.call(new Uint8Array(2).with(0, 1)));
