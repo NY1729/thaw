@@ -7506,6 +7506,93 @@ fn main_file_loader_walks_node_modules_up_the_tree() {
     assert_eq!(it.out, vec!["pkg:sub".to_string()]);
 }
 
+#[test]
+fn main_file_loader_resolves_package_exports_with_conditions_and_patterns() {
+    let dir = main_file_fixture("exports");
+    std::fs::create_dir_all(dir.join("node_modules/ex/dist")).unwrap();
+    std::fs::write(
+        dir.join("node_modules/ex/package.json"),
+        r#"{"main":"wrong.js","exports":{".":{"import":"./esm.js","node":"./entry.js","default":"./wrong.js"},"./feature":{"require":"./feature.js"},"./features/*":{"require":"./dist/*.js"},"./escape":"../outside.js","./sync":{"module-sync":"./feature.js","default":"./wrong.js"},"./hidden-null":null}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("node_modules/ex/entry.js"),
+        "module.exports = 'entry';\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("node_modules/ex/feature.js"),
+        "module.exports = 'feature';\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("node_modules/ex/dist/math.js"),
+        "module.exports = 'math';\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.js"),
+        "for (const r of ['ex', 'ex/feature', 'ex/features/math', 'ex/hidden', 'ex/escape', 'ex/hidden-null', 'ex/sync']) { try { console.log(require(r)); } catch (e) { console.log(e.code); } }\n",
+    )
+    .unwrap();
+    let mut it = Interp::new();
+    assert_eq!(
+        it.run_main_file(&dir.join("main.js").display().to_string())
+            .ok(),
+        Some(0)
+    );
+    assert_eq!(
+        it.out,
+        vec![
+            "entry".to_string(),
+            "feature".to_string(),
+            "math".to_string(),
+            "ERR_PACKAGE_PATH_NOT_EXPORTED".to_string(),
+            "ERR_INVALID_PACKAGE_TARGET".to_string(),
+            "ERR_PACKAGE_PATH_NOT_EXPORTED".to_string(),
+            "feature".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn main_file_loader_resolves_package_imports_for_the_nearest_scope() {
+    let dir = main_file_fixture("imports");
+    std::fs::create_dir_all(dir.join("internal/features")).unwrap();
+    std::fs::create_dir_all(dir.join("workers")).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r##"{"imports":{"#tool":{"node":"./internal/tool.js","default":"./wrong.js"},"#features/*":"./internal/features/*.js","#escape":"../outside.js"}}"##,
+    )
+    .unwrap();
+    std::fs::write(dir.join("internal/tool.js"), "module.exports = 11;\n").unwrap();
+    std::fs::write(
+        dir.join("internal/features/math.js"),
+        "module.exports = 12;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("workers/main.js"),
+        "for (const r of ['#tool', '#features/math', '#missing', '#escape']) { try { console.log(require(r)); } catch (e) { console.log(e.code); } }\n",
+    )
+    .unwrap();
+    let mut it = Interp::new();
+    assert_eq!(
+        it.run_main_file(&dir.join("workers/main.js").display().to_string())
+            .ok(),
+        Some(0)
+    );
+    assert_eq!(
+        it.out,
+        vec![
+            "11".to_string(),
+            "12".to_string(),
+            "ERR_PACKAGE_IMPORT_NOT_DEFINED".to_string(),
+            "ERR_INVALID_PACKAGE_TARGET".to_string(),
+        ]
+    );
+}
+
 const PROBE_BUNDLE: &str = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
 "tpa/index.js": function(module, exports, require) {
