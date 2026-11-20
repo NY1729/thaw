@@ -1670,3 +1670,75 @@ async function main(): Promise<void> {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// drizzle-orm over node-postgres against a live Postgres: `db.execute` with
+/// a literal `sql` template and a parameterised one. The expected stdout is
+/// what real Node prints for the same program with drizzle-orm@0.45.4 and
+/// pg@8.16.3.
+#[test]
+fn registry_add_runs_drizzle_execute_against_live_postgres_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let Some(database_url) = std::env::var("THAW_POSTGRES_URL").ok() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-drizzle-pg-execute-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "drizzle-orm@0.45.4").unwrap();
+    thaw_registry::add(&registry, "pg@8.16.3").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { drizzle } from "drizzle-orm/node-postgres";
+import { sql } from "drizzle-orm";
+import { Pool } from "pg";
+async function main(): Promise<void> {
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+    const db = drizzle(pool);
+    const plain: JsValue = await db.execute(sql`select 1 as value`);
+    console.log(plain.rows[0].value);
+    const param: JsValue = await db.execute(sql`select ${42}::int as n`);
+    console.log(param.rows[0].n);
+    await pool.end();
+}"#,
+    )
+    .unwrap();
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let built = build_with_thaw_js_routing(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["drizzle-orm".into(), "pg".into()],
+        false,
+        None,
+        true,
+        false,
+        false,
+        true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    built.unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    let result = Command::new(&output)
+        .env("DATABASE_URL", database_url)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
