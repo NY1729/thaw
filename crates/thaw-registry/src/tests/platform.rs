@@ -1028,7 +1028,7 @@ fn worker_threads_data_url_worker_decodes_javascript() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS-only global probe or custom require shim, not a module export
+// qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
 mod qjs_pending_platform_worker_threads_load_runtime_computed_absolute_paths {
     use super::*;
 
@@ -1142,7 +1142,7 @@ fn worker_threads_load_runtime_computed_absolute_paths() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS-only global probe or custom require shim, not a module export
+// qjs_pending: stdout raw bytes not preserved: child stdout lacks [250,0,255,128,195,40,251]
 mod qjs_pending_platform_process_default_stdio_preserves_raw_buffer_bytes {
     use super::*;
 
@@ -1611,7 +1611,7 @@ fn worker_esm_cycle_uses_one_cached_main_module_identity() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS-only global probe or custom require shim, not a module export
+// qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
 mod qjs_pending_platform_worker_main_ready_rejects_every_falsy_thrown_value {
     use super::*;
 
@@ -1664,7 +1664,7 @@ fn bundled_worker_entry_require_resolve_does_not_load_target() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS-only global probe or custom require shim, not a module export
+// qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
 mod qjs_pending_platform_worker_saved_url_keeps_bundle_affinity_across_packages_and_nested_workers {
     use super::*;
 

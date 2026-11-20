@@ -130,16 +130,12 @@ fn os_network_interfaces_reports_more_than_loopback_with_real_shapes() {
 /// polyfills actually run together through real QuickJS-NG and that
 /// `fs.readdirSync` failing is silently absorbed exactly the way real
 /// Node's `ENOENT` would be, rather than crashing the whole load.
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_tests_path_os_fs_polyfills_actually_run_through_quickjs {
-    use super::*;
+#[test]
+fn path_os_fs_polyfills_actually_run_through_quickjs() {
+    use std::ffi::{CStr, CString};
 
-    #[test]
-    fn path_os_fs_polyfills_actually_run_through_quickjs() {
-        use std::ffi::{CStr, CString};
-
-        let dir = temp_registry("builtin_addon_chase");
-        fs::write(
+    let dir = temp_registry("builtin_addon_chase");
+    fs::write(
             dir.join("index.js"),
             "var fs = require('fs');\n\
              var path = require('path');\n\
@@ -152,16 +148,16 @@ mod qjs_pending_tests_path_os_fs_polyfills_actually_run_through_quickjs {
              };",
         )
         .unwrap();
-        let empty_node_modules = temp_registry("builtin_addon_chase_node_modules");
+    let empty_node_modules = temp_registry("builtin_addon_chase_node_modules");
 
-        let (bundle, _, file_count, _) =
-            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(
-            file_count, 6,
-            "pkg's index.js + fs/path/os/stream/events polyfills"
-        );
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(
+        file_count, 6,
+        "pkg's index.js + fs/path/os/stream/events polyfills"
+    );
 
-        let script = format!(
+    let script = format!(
             "globalThis.module = {{ exports: {{}} }};\n\
              globalThis.exports = globalThis.module.exports;\n\
              globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
@@ -169,24 +165,23 @@ mod qjs_pending_tests_path_os_fs_polyfills_actually_run_through_quickjs {
              {bundle}\n\
              globalThis.locate = module.exports;\n"
         );
-        let source = CString::new(script).unwrap();
-        assert_eq!(
-            thaw_quickjs::thaw_js_load(source.as_ptr()),
-            1,
-            "bundle failed to load"
-        );
+    let source = CString::new(script).unwrap();
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        1,
+        "bundle failed to load"
+    );
 
-        let func = CString::new("locate").unwrap();
-        let args = CString::new("[]").unwrap();
-        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(result, "\"linux/x64//thaw_modules/0\"");
+    let func = CString::new("locate").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(result, "\"linux/x64//thaw_modules/0\"");
 
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&empty_node_modules);
-    }
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
 #[test]
@@ -203,124 +198,107 @@ fn rewrites_default_export_to_module_exports_default() {
     assert!(rewritten.contains("module.exports.__esModule = true;"));
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_tests_named_default_declarations_remain_local_bindings {
-    use super::*;
+#[test]
+fn named_default_declarations_remain_local_bindings() {
+    use std::ffi::{CStr, CString};
 
-    #[test]
-    fn named_default_declarations_remain_local_bindings() {
-        use std::ffi::{CStr, CString};
-
-        // Unrun regression: both declaration kinds are visible to later code in
-        // their own module; anonymous defaults retain the expression path.
-        let anonymous =
-            rewrite_esm_to_commonjs("export default function () { return 1; }").unwrap();
-        assert!(anonymous.contains("module.exports.default = function () { return 1; }"));
-        // Separate modules: ESM permits only one default export per module.
-        let cases = [
+    // Unrun regression: both declaration kinds are visible to later code in
+    // their own module; anonymous defaults retain the expression path.
+    let anonymous = rewrite_esm_to_commonjs("export default function () { return 1; }").unwrap();
+    assert!(anonymous.contains("module.exports.default = function () { return 1; }"));
+    // Separate modules: ESM permits only one default export per module.
+    let cases = [
         ("export default function greet() { return 'hi'; } export function call() { return greet(); }",
          "[\"hi\",\"hi\"]", "[module.exports.default(),module.exports.call()]"),
         ("export default class Greeting { value() { return 4; } } export function call() { return new Greeting().value(); }",
          "[4,4]", "[(new module.exports.default()).value(),module.exports.call()]"),
     ];
-        for (source, expected, expression) in cases {
-            let rewritten = rewrite_esm_to_commonjs(source).unwrap();
-            let script = format!(
-                "globalThis.__thaw_named_default = (function() {{ \
+    for (source, expected, expression) in cases {
+        let rewritten = rewrite_esm_to_commonjs(source).unwrap();
+        let script = format!(
+            "globalThis.__thaw_named_default = (function() {{ \
             var module = {{ exports: {{}} }}, exports = module.exports; \
             {rewritten} return function() {{ return {expression}; }}; }})();"
-            );
-            assert_eq!(
-                thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
-                1
-            );
-            let result = thaw_quickjs::thaw_js_call(
-                CString::new("__thaw_named_default").unwrap().as_ptr(),
-                CString::new("[]").unwrap().as_ptr(),
-            );
-            assert_eq!(
-                unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
-                expected
-            );
-        }
-    }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_tests_export_star_does_not_redefine_explicit_local_or_reexported_names {
-    use super::*;
-
-    #[test]
-    fn export_star_does_not_redefine_explicit_local_or_reexported_names() {
-        use std::ffi::{CStr, CString};
-
-        // Unrun regression: explicit bindings take priority even when they are
-        // declared after the star. Destructuring and named reexports are explicit.
-        let source = "export * from './a'; \
-        export { remote as chosen } from './c'; export const local = 7; \
-        export const { value: destructured } = { value: 11 };";
-        for await_imports in [false, true] {
-            let rewritten = rewrite_esm_to_commonjs_mode(source, await_imports).unwrap();
-            assert!(rewritten.contains(".track(exports)"), "{rewritten}");
-            assert_eq!(rewritten.contains("await requireAsync"), await_imports);
-        }
-        let dir = temp_registry("star_explicit_priority");
-        let node_modules = temp_registry("star_explicit_priority_modules");
-        fs::write(dir.join("index.js"), source).unwrap();
-        fs::write(
-            dir.join("a.js"),
-            "module.exports = { local: 1, chosen: 2, destructured: 3, starOnly: 4 };",
-        )
-        .unwrap();
-        fs::write(dir.join("c.js"), "module.exports = { remote: 10 };").unwrap();
-        let (bundle, _, _, _) =
-            bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.__thaw_star_explicit_case = function() {{ return [module.exports.local, module.exports.destructured, module.exports.chosen, module.exports.starOnly]; }};");
+        );
         assert_eq!(
             thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
             1
         );
         let result = thaw_quickjs::thaw_js_call(
-            CString::new("__thaw_star_explicit_case").unwrap().as_ptr(),
+            CString::new("__thaw_named_default").unwrap().as_ptr(),
             CString::new("[]").unwrap().as_ptr(),
         );
         assert_eq!(
             unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
-            "[7,11,10,4]"
+            expected
         );
-        let _ = fs::remove_dir_all(dir);
-        let _ = fs::remove_dir_all(node_modules);
     }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_tests_star_rewrite_uses_the_bundle_origin_graph {
-    use super::*;
+#[test]
+fn export_star_does_not_redefine_explicit_local_or_reexported_names() {
+    use std::ffi::{CStr, CString};
 
-    #[test]
-    fn star_rewrite_uses_the_bundle_origin_graph() {
-        use std::ffi::{CStr, CString};
-        let source =
-            "import { x } from './dep.js'; export * from './dep.js'; export const y = x + 1;";
-        // A standalone source string cannot distinguish an export diamond from
-        // two different bindings with the same value.
-        assert!(rewrite_esm_to_commonjs(source).is_none());
-        let dir = temp_registry("star_import_origin");
-        let node_modules = temp_registry("star_import_origin_modules");
-        fs::write(dir.join("index.js"), source).unwrap();
-        fs::write(dir.join("dep.js"), "export const x = 4;").unwrap();
-        let (bundle, _, _, _) =
-            bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.__thaw_star_import = function() {{ return [module.exports.x, module.exports.y]; }};");
-        assert_eq!(
-            thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
-            1
-        );
-        let result = thaw_quickjs::thaw_js_call(c"__thaw_star_import".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[4,5]");
-        let _ = fs::remove_dir_all(dir);
-        let _ = fs::remove_dir_all(node_modules);
+    // Unrun regression: explicit bindings take priority even when they are
+    // declared after the star. Destructuring and named reexports are explicit.
+    let source = "export * from './a'; \
+        export { remote as chosen } from './c'; export const local = 7; \
+        export const { value: destructured } = { value: 11 };";
+    for await_imports in [false, true] {
+        let rewritten = rewrite_esm_to_commonjs_mode(source, await_imports).unwrap();
+        assert!(rewritten.contains(".track(exports)"), "{rewritten}");
+        assert_eq!(rewritten.contains("await requireAsync"), await_imports);
     }
+    let dir = temp_registry("star_explicit_priority");
+    let node_modules = temp_registry("star_explicit_priority_modules");
+    fs::write(dir.join("index.js"), source).unwrap();
+    fs::write(
+        dir.join("a.js"),
+        "module.exports = { local: 1, chosen: 2, destructured: 3, starOnly: 4 };",
+    )
+    .unwrap();
+    fs::write(dir.join("c.js"), "module.exports = { remote: 10 };").unwrap();
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.__thaw_star_explicit_case = function() {{ return [module.exports.local, module.exports.destructured, module.exports.chosen, module.exports.starOnly]; }};");
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("__thaw_star_explicit_case").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+        "[7,11,10,4]"
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn star_rewrite_uses_the_bundle_origin_graph() {
+    use std::ffi::{CStr, CString};
+    let source = "import { x } from './dep.js'; export * from './dep.js'; export const y = x + 1;";
+    // A standalone source string cannot distinguish an export diamond from
+    // two different bindings with the same value.
+    assert!(rewrite_esm_to_commonjs(source).is_none());
+    let dir = temp_registry("star_import_origin");
+    let node_modules = temp_registry("star_import_origin_modules");
+    fs::write(dir.join("index.js"), source).unwrap();
+    fs::write(dir.join("dep.js"), "export const x = 4;").unwrap();
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.__thaw_star_import = function() {{ return [module.exports.x, module.exports.y]; }};");
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
+    let result = thaw_quickjs::thaw_js_call(c"__thaw_star_import".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[4,5]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
 }
 
 #[test]
@@ -380,26 +358,22 @@ fn named_import_calls_and_tags_detach_the_module_receiver() {
     );
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_tests_named_import_calls_keep_unbound_this_and_live_export_values {
-    use super::*;
+#[test]
+fn named_import_calls_keep_unbound_this_and_live_export_values() {
+    use std::ffi::{CStr, CString};
 
-    #[test]
-    fn named_import_calls_keep_unbound_this_and_live_export_values() {
-        use std::ffi::{CStr, CString};
-
-        // Unrun bundle regression: both the receiver and a later export update
-        // must be visible through the generated import reference.
-        let dir = temp_registry("named_import_receiver");
-        let node_modules = temp_registry("named_import_receiver_modules");
-        fs::write(
+    // Unrun bundle regression: both the receiver and a later export update
+    // must be visible through the generated import reference.
+    let dir = temp_registry("named_import_receiver");
+    let node_modules = temp_registry("named_import_receiver_modules");
+    fs::write(
         dir.join("dep.js"),
         "export let fn = function() { 'use strict'; return this === undefined ? 1 : -1; }; \
          export function change() { fn = function() { 'use strict'; return this === undefined ? 2 : -2; }; } \
          export function tag(strings) { 'use strict'; return this === undefined ? strings[0] : 'bound'; }",
     )
     .unwrap();
-        fs::write(
+    fs::write(
         dir.join("index.js"),
         "import { fn, tag, change } from './dep.js'; \
          export function run() { const first = fn(); const tagged = tag`ok`; const optional = fn?.(); \
@@ -407,31 +381,30 @@ mod qjs_pending_tests_named_import_calls_keep_unbound_this_and_live_export_value
          return [first, tagged, optional, fn(), (fn)(), shadow(function() { 'use strict'; return this === undefined ? 3 : -3; })]; }",
     )
     .unwrap();
-        let (bundle, _, file_count, _) =
-            bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 2);
-        let script = format!(
-            "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
          globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
          globalThis.__thaw_named_import_receiver = module.exports.run;"
-        );
-        assert_eq!(
-            thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
-            1
-        );
-        let result = thaw_quickjs::thaw_js_call(
-            CString::new("__thaw_named_import_receiver")
-                .unwrap()
-                .as_ptr(),
-            CString::new("[]").unwrap().as_ptr(),
-        );
-        assert_eq!(
-            unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
-            "[1,\"ok\",1,2,2,3]"
-        );
-        let _ = fs::remove_dir_all(dir);
-        let _ = fs::remove_dir_all(node_modules);
-    }
+    );
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("__thaw_named_import_receiver")
+            .unwrap()
+            .as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+        "[1,\"ok\",1,2,2,3]"
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
 }
 
 #[test]
@@ -588,46 +561,41 @@ fn rewrites_bare_import_meta_expression_statement_without_export_syntax() {
     );
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_tests_import_meta_is_one_mutable_object_without_a_generated_name_collision {
-    use super::*;
+#[test]
+fn import_meta_is_one_mutable_object_without_a_generated_name_collision() {
+    use std::ffi::{CStr, CString};
 
-    #[test]
-    fn import_meta_is_one_mutable_object_without_a_generated_name_collision() {
-        use std::ffi::{CStr, CString};
-
-        // Unrun regression: the source owns one plain and one escaped
-        // candidate name. Both must be distinct from the generated slot.
-        let rewritten = rewrite_esm_to_commonjs(
+    // Unrun regression: the source owns one plain and one escaped
+    // candidate name. Both must be distinct from the generated slot.
+    let rewritten = rewrite_esm_to_commonjs(
         "const __thaw_import_meta_0 = 17, __thaw_import_meta_\\u0031 = 19; \
          export function check() { const first = import.meta; first.extra = 1; \
          return [first === import.meta, import.meta.extra, __thaw_import_meta_0, __thaw_import_meta_\\u0031]; }",
     )
     .unwrap();
-        assert!(
-            rewritten.contains("var __thaw_import_meta_2;"),
-            "{rewritten}"
-        );
-        let script = format!(
-            "globalThis.__thaw_import_meta_identity_case = (function() {{ \
+    assert!(
+        rewritten.contains("var __thaw_import_meta_2;"),
+        "{rewritten}"
+    );
+    let script = format!(
+        "globalThis.__thaw_import_meta_identity_case = (function() {{ \
          var module = {{ exports: {{}} }}, exports = module.exports, __filename = '/module.js'; \
          {rewritten} return module.exports.check; }})();"
-        );
-        assert_eq!(
-            thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
-            1
-        );
-        let result = thaw_quickjs::thaw_js_call(
-            CString::new("__thaw_import_meta_identity_case")
-                .unwrap()
-                .as_ptr(),
-            CString::new("[]").unwrap().as_ptr(),
-        );
-        assert_eq!(
-            unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
-            "[true,1,17,19]"
-        );
-    }
+    );
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("__thaw_import_meta_identity_case")
+            .unwrap()
+            .as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+        "[true,1,17,19]"
+    );
 }
 
 #[test]
@@ -814,75 +782,66 @@ fn live_import_rewrite_updates_destructured_parameter_defaults() {
 /// importing from an ESM sibling file must actually run correctly
 /// through the real QuickJS-NG engine, exactly like the equivalent
 /// CommonJS package already does (`bundle_actually_runs_through_quickjs`).
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_tests_esm_bundle_actually_runs_through_quickjs {
-    use super::*;
+#[test]
+fn esm_bundle_actually_runs_through_quickjs() {
+    use std::ffi::{CStr, CString};
 
-    #[test]
-    fn esm_bundle_actually_runs_through_quickjs() {
-        use std::ffi::{CStr, CString};
-
-        let dir = temp_registry("esm_bundle_runs_through_quickjs");
-        fs::write(
+    let dir = temp_registry("esm_bundle_runs_through_quickjs");
+    fs::write(
             dir.join("index.js"),
             "import { double } from './double.js';\nexport default function run(n) { return double(n); }",
         )
         .unwrap();
-        fs::write(
-            dir.join("double.js"),
-            "export function double(n) { return n * 2; }",
-        )
-        .unwrap();
+    fs::write(
+        dir.join("double.js"),
+        "export function double(n) { return n * 2; }",
+    )
+    .unwrap();
 
-        let empty_node_modules = temp_registry("esm_bundle_node_modules");
-        let (bundle, _, file_count, _) =
-            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 2, "index.js + double.js");
+    let empty_node_modules = temp_registry("esm_bundle_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2, "index.js + double.js");
 
-        let script = format!(
+    let script = format!(
             "globalThis.module = {{ exports: {{}} }};\n\
              globalThis.exports = globalThis.module.exports;\n\
              globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
              {bundle}\n\
              globalThis.run = module.exports.default;\n"
         );
-        let source = CString::new(script).unwrap();
-        assert_eq!(
-            thaw_quickjs::thaw_js_load(source.as_ptr()),
-            1,
-            "ESM bundle failed to load"
-        );
+    let source = CString::new(script).unwrap();
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        1,
+        "ESM bundle failed to load"
+    );
 
-        let func = CString::new("run").unwrap();
-        let args = CString::new("[21]").unwrap();
-        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(result, "42");
+    let func = CString::new("run").unwrap();
+    let args = CString::new("[21]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(result, "42");
 
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&empty_node_modules);
-    }
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_tests_mixed_esm_bundle_supports_live_exports_cycles_imports_json_and_dynamic_import {
-    use super::*;
+#[test]
+fn mixed_esm_bundle_supports_live_exports_cycles_imports_json_and_dynamic_import() {
+    use std::ffi::{CStr, CString};
 
-    #[test]
-    fn mixed_esm_bundle_supports_live_exports_cycles_imports_json_and_dynamic_import() {
-        use std::ffi::{CStr, CString};
-
-        let dir = temp_registry("esm_mixed_graph");
-        fs::write(
-            dir.join("package.json"),
-            r##"{"imports":{"#counter":{"node":"./counter.js","default":"./wrong.js"}}}"##,
-        )
-        .unwrap();
-        fs::write(
-            dir.join("index.js"),
-            "import { increment, value } from '#counter';\n\
+    let dir = temp_registry("esm_mixed_graph");
+    fs::write(
+        dir.join("package.json"),
+        r##"{"imports":{"#counter":{"node":"./counter.js","default":"./wrong.js"}}}"##,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("index.js"),
+        "import { increment, value } from '#counter';\n\
              import data from './data.json?payload' with { type: 'json' };\n\
              import { fromA } from './a.js';\n\
              export default async function run() {\n\
@@ -890,50 +849,49 @@ mod qjs_pending_tests_mixed_esm_bundle_supports_live_exports_cycles_imports_json
                const dynamic = await import('./dynamic.js');\n\
                return value + dynamic.extra + data.base + (fromA() === 'b' ? 10 : 0);\n\
              }",
-        )
-        .unwrap();
-        fs::write(
-            dir.join("counter.js"),
-            "export let value = 1; export function increment() { value++; }",
-        )
-        .unwrap();
-        fs::write(
+    )
+    .unwrap();
+    fs::write(
+        dir.join("counter.js"),
+        "export let value = 1; export function increment() { value++; }",
+    )
+    .unwrap();
+    fs::write(
             dir.join("a.js"),
             "import * as b from './b.js'; export function fromA() { return b.name; } export const name = 'a';",
         )
         .unwrap();
-        fs::write(
+    fs::write(
             dir.join("b.js"),
             "import * as a from './a.js'; export const name = 'b'; export function fromB() { return a.name; }",
         )
         .unwrap();
-        fs::write(dir.join("dynamic.js"), "export const extra = 10;").unwrap();
-        fs::write(dir.join("data.json"), r#"{"base":20}"#).unwrap();
+    fs::write(dir.join("dynamic.js"), "export const extra = 10;").unwrap();
+    fs::write(dir.join("data.json"), r#"{"base":20}"#).unwrap();
 
-        let empty_node_modules = temp_registry("esm_mixed_graph_modules");
-        let (bundle, _, file_count, _) =
-            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 6, "{bundle}");
-        let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
+    let empty_node_modules = temp_registry("esm_mixed_graph_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 6, "{bundle}");
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }};\n\
              globalThis.exports = globalThis.module.exports;\n\
              globalThis.require = function(name) {{ throw new Error(name); }};\n\
              {bundle}\n\
              globalThis.runMixed = module.exports.default;\n"
-        );
-        let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-        let function = CString::new("runMixed").unwrap();
-        let args = CString::new("[]").unwrap();
-        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("runMixed").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
 
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&empty_node_modules);
-    }
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: fails on thaw-js: TypeError: Cannot read properties of undefined (reading 'value') on the top-level-await export
 mod qjs_pending_tests_top_level_await_initializes_dependencies_before_export_binding {
     use super::*;
 
@@ -974,7 +932,7 @@ mod qjs_pending_tests_top_level_await_initializes_dependencies_before_export_bin
     }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: fails on thaw-js: TypeError: Cannot read properties of undefined (reading 'value') on the top-level-for-await export
 mod qjs_pending_tests_top_level_for_await_initializes_dependencies_before_export_binding {
     use super::*;
 
@@ -1230,58 +1188,49 @@ mod qjs_pending_tests_dynamic_import_uses_final_exports_after_async_factory_and_
     }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_tests_nonliteral_dynamic_import_resolves_candidates_and_reuses_namespace {
-    use super::*;
+#[test]
+fn nonliteral_dynamic_import_resolves_candidates_and_reuses_namespace() {
+    use std::ffi::{CStr, CString};
 
-    #[test]
-    fn nonliteral_dynamic_import_resolves_candidates_and_reuses_namespace() {
-        use std::ffi::{CStr, CString};
-
-        let dir = temp_registry("runtime_dynamic_import");
-        fs::write(
-            dir.join("index.js"),
-            "export default async function run() {\n\
+    let dir = temp_registry("runtime_dynamic_import");
+    fs::write(
+        dir.join("index.js"),
+        "export default async function run() {\n\
                const name = 'feature';\n\
                const first = await import('./' + name + '.js');\n\
                const second = await import(`./${name}.js`);\n\
                return first === second ? first.value : 0;\n\
              }",
-        )
-        .unwrap();
-        fs::write(dir.join("feature.js"), "export const value = 42;").unwrap();
-        let empty_node_modules = temp_registry("runtime_dynamic_import_modules");
-        let (bundle, _, file_count, _) =
-            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 2);
-        let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
+    )
+    .unwrap();
+    fs::write(dir.join("feature.js"), "export const value = 42;").unwrap();
+    let empty_node_modules = temp_registry("runtime_dynamic_import_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }};\n\
              globalThis.exports = globalThis.module.exports;\n\
              globalThis.require = function(name) {{ throw new Error(name); }};\n\
              {bundle}\n\
              globalThis.runRuntimeImport = module.exports.default;\n"
-        );
-        let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-        let function = CString::new("runRuntimeImport").unwrap();
-        let args = CString::new("[]").unwrap();
-        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&empty_node_modules);
-    }
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("runRuntimeImport").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_tests_module_query_and_fragment_are_part_of_cache_identity {
-    use super::*;
+#[test]
+fn module_query_and_fragment_are_part_of_cache_identity() {
+    use std::ffi::{CStr, CString};
 
-    #[test]
-    fn module_query_and_fragment_are_part_of_cache_identity() {
-        use std::ffi::{CStr, CString};
-
-        let dir = temp_registry("module_url_identity");
-        fs::write(
+    let dir = temp_registry("module_url_identity");
+    fs::write(
             dir.join("index.js"),
             "export default async function run() {
                const first = await import('./feature.js?one');
@@ -1291,121 +1240,115 @@ mod qjs_pending_tests_module_query_and_fragment_are_part_of_cache_identity {
              }",
         )
         .unwrap();
-        fs::write(
+    fs::write(
             dir.join("feature.js"),
             "globalThis.__thawModuleIdentity = (globalThis.__thawModuleIdentity || 0) + 1; export const value = globalThis.__thawModuleIdentity;",
         )
         .unwrap();
-        let empty_node_modules = temp_registry("module_url_identity_modules");
-        let (bundle, _, file_count, _) =
-            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 3);
-        let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
+    let empty_node_modules = temp_registry("module_url_identity_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }};\n\
              globalThis.exports = globalThis.module.exports;\n\
              globalThis.require = function(name) {{ throw new Error(name); }};\n\
              {bundle}\n\
              globalThis.runModuleIdentity = module.exports.default;\n"
-        );
-        let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-        let function = CString::new("runModuleIdentity").unwrap();
-        let args = CString::new("[]").unwrap();
-        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&empty_node_modules);
-    }
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("runModuleIdentity").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_tests_runtime_dynamic_import_resolves_declared_external_packages {
-    use super::*;
+#[test]
+fn runtime_dynamic_import_resolves_declared_external_packages() {
+    use std::ffi::{CStr, CString};
 
-    #[test]
-    fn runtime_dynamic_import_resolves_declared_external_packages() {
-        use std::ffi::{CStr, CString};
-
-        let dir = temp_registry("constant_external_dynamic_import");
-        fs::write(
+    let dir = temp_registry("constant_external_dynamic_import");
+    fs::write(
             dir.join("index.js"),
             "export default async function run(name) { const dep = await import(name); return dep.value; }",
         )
         .unwrap();
-        fs::write(
+    fs::write(
             dir.join("package.json"),
             r#"{"name":"pkg","version":"1.0.0","dependencies":{"dep-a":"1.0.0"},"optionalDependencies":{"dep-b":"1.0.0"}}"#,
         )
         .unwrap();
-        let node_modules = temp_registry("constant_external_dynamic_modules");
-        for (name, value) in [("dep-a", 41), ("dep-b", 42)] {
-            let dependency = node_modules.join(name);
-            fs::create_dir_all(&dependency).unwrap();
-            let exports = if name == "dep-a" {
-                r#", "exports":{".":"./index.js","./feature":"./feature.js","./features/*":"./features/*.js"}"#
-            } else {
-                ""
-            };
+    let node_modules = temp_registry("constant_external_dynamic_modules");
+    for (name, value) in [("dep-a", 41), ("dep-b", 42)] {
+        let dependency = node_modules.join(name);
+        fs::create_dir_all(&dependency).unwrap();
+        let exports = if name == "dep-a" {
+            r#", "exports":{".":"./index.js","./feature":"./feature.js","./features/*":"./features/*.js"}"#
+        } else {
+            ""
+        };
+        fs::write(
+            dependency.join("package.json"),
+            format!(r#"{{"name":"{name}","version":"1.0.0","main":"index.js"{exports}}}"#),
+        )
+        .unwrap();
+        fs::write(
+            dependency.join("index.js"),
+            format!("exports.value = {value};"),
+        )
+        .unwrap();
+        if name == "dep-a" {
+            fs::create_dir_all(dependency.join("features")).unwrap();
+            fs::write(dependency.join("feature.js"), "exports.value = 43;").unwrap();
+            fs::write(dependency.join("features/math.js"), "exports.value = 44;").unwrap();
+        } else {
+            fs::create_dir_all(dependency.join("lib/tools")).unwrap();
             fs::write(
-                dependency.join("package.json"),
-                format!(r#"{{"name":"{name}","version":"1.0.0","main":"index.js"{exports}}}"#),
-            )
-            .unwrap();
-            fs::write(
-                dependency.join("index.js"),
-                format!("exports.value = {value};"),
-            )
-            .unwrap();
-            if name == "dep-a" {
-                fs::create_dir_all(dependency.join("features")).unwrap();
-                fs::write(dependency.join("feature.js"), "exports.value = 43;").unwrap();
-                fs::write(dependency.join("features/math.js"), "exports.value = 44;").unwrap();
-            } else {
-                fs::create_dir_all(dependency.join("lib/tools")).unwrap();
-                fs::write(
                     dependency.join("lib/tool.js"),
                     "globalThis.__thawDeepIdentity = (globalThis.__thawDeepIdentity || 44) + 1; exports.value = globalThis.__thawDeepIdentity;",
                 )
                 .unwrap();
-                fs::write(dependency.join("lib/tools/index.js"), "exports.value = 46;").unwrap();
-            }
+            fs::write(dependency.join("lib/tools/index.js"), "exports.value = 46;").unwrap();
         }
-        let (bundle, _, file_count, versions) =
-            bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 9);
-        assert_eq!(versions.get("dep-a").map(String::as_str), Some("1.0.0"));
-        assert_eq!(versions.get("dep-b").map(String::as_str), Some("1.0.0"));
-        let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
+    }
+    let (bundle, _, file_count, versions) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 9);
+    assert_eq!(versions.get("dep-a").map(String::as_str), Some("1.0.0"));
+    assert_eq!(versions.get("dep-b").map(String::as_str), Some("1.0.0"));
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }};\n\
              globalThis.exports = globalThis.module.exports;\n\
              globalThis.require = function(name) {{ throw new Error(name); }};\n\
              {bundle}\n\
              globalThis.runConstantExternalImport = module.exports.default;\n"
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("runConstantExternalImport").unwrap();
+    for (args, expected) in [
+        (r#"["dep-a"]"#, "41"),
+        (r#"["dep-b"]"#, "42"),
+        (r#"["dep-a/feature"]"#, "43"),
+        (r#"["dep-a/features/math"]"#, "44"),
+        (r#"["dep-b/lib/tool"]"#, "45"),
+        (r#"["dep-b/lib/tool?raw"]"#, "46"),
+        (r#"["dep-b/lib/tool?raw"]"#, "46"),
+        (r#"["dep-b/lib/tool#part"]"#, "47"),
+        (r#"["dep-b/lib/tools"]"#, "46"),
+    ] {
+        let args = CString::new(args).unwrap();
+        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+        assert_eq!(
+            unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+            expected
         );
-        let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-        let function = CString::new("runConstantExternalImport").unwrap();
-        for (args, expected) in [
-            (r#"["dep-a"]"#, "41"),
-            (r#"["dep-b"]"#, "42"),
-            (r#"["dep-a/feature"]"#, "43"),
-            (r#"["dep-a/features/math"]"#, "44"),
-            (r#"["dep-b/lib/tool"]"#, "45"),
-            (r#"["dep-b/lib/tool?raw"]"#, "46"),
-            (r#"["dep-b/lib/tool?raw"]"#, "46"),
-            (r#"["dep-b/lib/tool#part"]"#, "47"),
-            (r#"["dep-b/lib/tools"]"#, "46"),
-        ] {
-            let args = CString::new(args).unwrap();
-            let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
-            assert_eq!(
-                unsafe { CStr::from_ptr(result) }.to_string_lossy(),
-                expected
-            );
-        }
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&node_modules);
     }
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&node_modules);
 }
 
 #[test]

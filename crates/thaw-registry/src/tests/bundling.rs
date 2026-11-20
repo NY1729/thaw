@@ -1,7 +1,3 @@
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_bundled_json_preserves_proto_keys_and_other_json_values {
-    use super::*;
-
 #[test]
 fn bundled_json_preserves_proto_keys_and_other_json_values() {
     use std::ffi::{CStr, CString};
@@ -20,7 +16,6 @@ fn bundled_json_preserves_proto_keys_and_other_json_values() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,true,7,true,true,2,\"inner\",42,true,1,true,\"item\"]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
-}
 }
 
 /// The exact shape found in a real npm package (`qs`): `main` requires
@@ -256,10 +251,6 @@ fn unresolvable_relative_require_does_not_abort_bundling() {
 /// immediately, same as `is-odd`'s real `require('is-number')`
 /// (already covered by this session's end-to-end verification); this
 /// test is specifically about what *does* resolve.
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_bundle_actually_runs_through_quickjs {
-    use super::*;
-
 #[test]
 fn bundle_actually_runs_through_quickjs() {
     use std::ffi::{CStr, CString};
@@ -332,7 +323,6 @@ fn bundle_actually_runs_through_quickjs() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&node_modules_dir);
 }
-}
 
 #[test]
 fn bare_parent_directory_require_stays_inside_its_package() {
@@ -372,10 +362,6 @@ fn bare_parent_directory_require_stays_inside_its_package() {
 /// cached by then), but package A's *lazy* internal require (deferred
 /// inside a function body, only actually called after B has loaded)
 /// would then resolve against B's module map instead of its own.
-// qjs_pending: not run on thaw-js: eval_json on the QuickJS global context
-mod qjs_pending_bundling_multiple_bundled_packages_dont_stomp_each_others_module_state {
-    use super::*;
-
 #[test]
 fn multiple_bundled_packages_dont_stomp_each_others_module_state() {
     use std::ffi::{CStr, CString};
@@ -453,11 +439,6 @@ fn multiple_bundled_packages_dont_stomp_each_others_module_state() {
     let _ = fs::remove_dir_all(&dir_b);
     let _ = fs::remove_dir_all(&node_modules_dir);
 }
-}
-
-// qjs_pending: not run on thaw-js: eval_json on the QuickJS global context
-mod qjs_pending_bundling_bundle_exports_self_contained_worker_runtime_source {
-    use super::*;
 
 #[test]
 fn bundle_exports_self_contained_worker_runtime_source() {
@@ -508,7 +489,6 @@ fn bundle_exports_self_contained_worker_runtime_source() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules_dir);
 }
-}
 
 /// The exact shape found in `qs`'s real dependency chain:
 /// `object-inspect` (pulled in transitively) does
@@ -535,10 +515,6 @@ fn bundles_the_util_builtin_polyfill_when_required() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_bundled_bindings_require_uses_the_loaded_addon {
-    use super::*;
-
 #[test]
 fn bundled_bindings_require_uses_the_loaded_addon() {
     use std::ffi::{CStr, CString};
@@ -567,11 +543,6 @@ fn bundled_bindings_require_uses_the_loaded_addon() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_delayed_native_require_keeps_each_bundles_addon {
-    use super::*;
 
 #[test]
 fn delayed_native_require_keeps_each_bundles_addon() {
@@ -610,11 +581,6 @@ fn delayed_native_require_keeps_each_bundles_addon() {
     let _ = fs::remove_dir_all(second);
     let _ = fs::remove_dir_all(empty_node_modules);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_bundled_node_gyp_build_uses_the_loaded_addon {
-    use super::*;
 
 #[test]
 fn bundled_node_gyp_build_uses_the_loaded_addon() {
@@ -652,11 +618,6 @@ fn bundled_node_gyp_build_uses_the_loaded_addon() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
     let _ = fs::remove_dir_all(node_modules);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_bundled_direct_node_require_uses_the_loaded_addon {
-    use super::*;
 
 #[test]
 fn bundled_direct_node_require_uses_the_loaded_addon() {
@@ -695,7 +656,6 @@ fn bundled_direct_node_require_uses_the_loaded_addon() {
     );
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
     let _ = fs::remove_dir_all(node_modules);
-}
 }
 
 /// A package may ship binary assets (a versioned shared library such as
@@ -1010,10 +970,6 @@ fn bare_requests_use_calling_file_but_package_import_targets_use_manifest_root()
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: not run on thaw-js: eval_json on the QuickJS global context
-mod qjs_pending_bundling_create_require_uses_the_longest_nested_instance_owner {
-    use super::*;
-
 #[test]
 fn create_require_uses_the_longest_nested_instance_owner() {
     use std::ffi::CString;
@@ -1039,7 +995,6 @@ fn create_require_uses_the_longest_nested_instance_owner() {
     let result = thaw_quickjs::eval_json("__thaw_bundle_create_require('/thaw_modules/left/node_modules/shared/index.js').resolve('./other')").unwrap();
     assert_eq!(result.as_deref(), Some("\"left/node_modules/shared/other.js\""));
     let _ = fs::remove_dir_all(root);
-}
 }
 
 #[test]
@@ -1154,10 +1109,6 @@ fn package_imports_external_targets_use_nested_dependency_and_selected_pattern()
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_diamond_tracks_terminal_binding_and_live_value {
-    use super::*;
-
 #[test]
 fn esm_star_diamond_tracks_terminal_binding_and_live_value() {
     use std::ffi::{CStr, CString};
@@ -1176,11 +1127,6 @@ fn esm_star_diamond_tracks_terminal_binding_and_live_value() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,2,1,false,false]");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_equal_values_from_distinct_bindings_are_ambiguous {
-    use super::*;
 
 #[test]
 fn esm_star_equal_values_from_distinct_bindings_are_ambiguous() {
@@ -1199,11 +1145,6 @@ fn esm_star_equal_values_from_distinct_bindings_are_ambiguous() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,-1]");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_cycle_discovers_late_leaf_name {
-    use super::*;
 
 #[test]
 fn esm_star_cycle_discovers_late_leaf_name() {
@@ -1222,11 +1163,6 @@ fn esm_star_cycle_discovers_late_leaf_name() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[7,true,7,true]");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_cycle_exposes_static_name_before_late_module_evaluates {
-    use super::*;
 
 #[test]
 fn esm_star_cycle_exposes_static_name_before_late_module_evaluates() {
@@ -1245,11 +1181,6 @@ fn esm_star_cycle_exposes_static_name_before_late_module_evaluates() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,\"\",\"C\",7]");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_cycle_keeps_hoisted_function_readable {
-    use super::*;
 
 #[test]
 fn esm_star_cycle_keeps_hoisted_function_readable() {
@@ -1268,11 +1199,6 @@ fn esm_star_cycle_keeps_hoisted_function_readable() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"function\",7]");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_static_name_is_not_blocked_by_unloaded_named_native_reexport {
-    use super::*;
 
 #[test]
 fn esm_star_static_name_is_not_blocked_by_unloaded_named_native_reexport() {
@@ -1292,9 +1218,8 @@ fn esm_star_static_name_is_not_blocked_by_unloaded_named_native_reexport() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,\"\",\"ReferenceError\",\"C,N\",7,9,9]");
     let _ = fs::remove_dir_all(root);
 }
-}
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: fails on thaw-js: route A ReferenceError: value is not defined; Package get("value") returns null
 mod qjs_pending_bundling_async_esm_star_diamond_keeps_the_terminal_binding {
     use super::*;
 
@@ -1318,10 +1243,6 @@ fn async_esm_star_diamond_keeps_the_terminal_binding() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_proto_named_binding_is_data_not_graph_prototype {
-    use super::*;
-
 #[test]
 fn esm_star_proto_named_binding_is_data_not_graph_prototype() {
     use std::ffi::{CStr, CString};
@@ -1338,11 +1259,6 @@ fn esm_star_proto_named_binding_is_data_not_graph_prototype() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,3]");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_nested_ambiguous_star_does_not_revive_from_later_valid_star {
-    use super::*;
 
 #[test]
 fn esm_nested_ambiguous_star_does_not_revive_from_later_valid_star() {
@@ -1363,11 +1279,6 @@ fn esm_nested_ambiguous_star_does_not_revive_from_later_valid_star() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "false");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_distinct_cjs_modules_sharing_exports_object_remain_ambiguous {
-    use super::*;
 
 #[test]
 fn esm_star_distinct_cjs_modules_sharing_exports_object_remain_ambiguous() {
@@ -1387,11 +1298,6 @@ fn esm_star_distinct_cjs_modules_sharing_exports_object_remain_ambiguous() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "false");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_reexported_cjs_default_uses_existing_interop_value {
-    use super::*;
 
 #[test]
 fn esm_star_reexported_cjs_default_uses_existing_interop_value() {
@@ -1411,11 +1317,6 @@ fn esm_star_reexported_cjs_default_uses_existing_interop_value() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"function\",7]");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_native_addon_uses_the_original_loaded_exports_snapshot {
-    use super::*;
 
 #[test]
 fn esm_star_native_addon_uses_the_original_loaded_exports_snapshot() {
@@ -1433,11 +1334,6 @@ fn esm_star_native_addon_uses_the_original_loaded_exports_snapshot() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,1]");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_cjs_inherited_enumerable_key_is_not_a_synthetic_export {
-    use super::*;
 
 #[test]
 fn esm_star_cjs_inherited_enumerable_key_is_not_a_synthetic_export() {
@@ -1455,12 +1351,7 @@ fn esm_star_cjs_inherited_enumerable_key_is_not_a_synthetic_export() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,false]");
     let _ = fs::remove_dir_all(root);
 }
-}
 
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_cycle_defers_unloaded_native_edge_without_reordering_body {
-    use super::*;
 
 #[test]
 fn esm_star_cycle_defers_unloaded_native_edge_without_reordering_body() {
@@ -1479,11 +1370,6 @@ fn esm_star_cycle_defers_unloaded_native_edge_without_reordering_body() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"B,N\",1,1,1]");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_keeps_explicit_false_esmodule_binding_and_default_import {
-    use super::*;
 
 #[test]
 fn esm_star_keeps_explicit_false_esmodule_binding_and_default_import() {
@@ -1502,11 +1388,6 @@ fn esm_star_keeps_explicit_false_esmodule_binding_and_default_import() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,7,99,3,\"function\"]");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_explicit_namespace_reexport_precedes_competing_star {
-    use super::*;
 
 #[test]
 fn esm_explicit_namespace_reexport_precedes_competing_star() {
@@ -1525,11 +1406,6 @@ fn esm_explicit_namespace_reexport_precedes_competing_star() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,true]");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_esm_star_diamond_coalesces_same_namespace_reexport {
-    use super::*;
 
 #[test]
 fn esm_star_diamond_coalesces_same_namespace_reexport() {
@@ -1549,8 +1425,7 @@ fn esm_star_diamond_coalesces_same_namespace_reexport() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[7,true]");
     let _ = fs::remove_dir_all(root);
 }
-}
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: fails on thaw-js: needs in-context globalThis.__thaw_bundle_create_require (not exposed by Package); script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_bundled_require_cache_and_commonjs_this_respect_module_format {
     use super::*;
 
@@ -1611,10 +1486,6 @@ fn async_commonjs_factory_keeps_top_level_this_after_await() {
     let _ = fs::remove_dir_all(modules);
 }
 }
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_bundled_require_resolve_finds_resolve_only_files_and_rejects_missing_modules {
-    use super::*;
-
 #[test]
 fn bundled_require_resolve_finds_resolve_only_files_and_rejects_missing_modules() {
     use std::ffi::{CStr, CString};
@@ -1637,9 +1508,8 @@ fn bundled_require_resolve_finds_resolve_only_files_and_rejects_missing_modules(
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
 }
-}
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: fails on thaw-js: Package route ERROR: unsupported: esm-cycle; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_native_esm_cycle_links_original_mjs_before_evaluation {
     use super::*;
 
@@ -1665,7 +1535,7 @@ fn native_esm_cycle_links_original_mjs_before_evaluation() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: needs a JS global read after load (globalThis.__thaw_mixed_runs); script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order {
     use super::*;
 
@@ -1689,7 +1559,7 @@ fn native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: needs in-context helpers and namespace identity after load; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_mixed_pure_namespace_keeps_engine_identity {
     use super::*;
 
@@ -1721,7 +1591,7 @@ fn native_mixed_pure_namespace_keeps_engine_identity() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: needs JS globals read after load (__thaw_early_ns, __thaw_pure_runs); script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_mixed_namespace_anchor_reseeds_after_stripped_edge {
     use super::*;
 
@@ -1775,7 +1645,7 @@ fn native_mixed_rewrite_uses_private_opaque_edge_and_origin_reads() {
     assert!(!rewritten.contains("export * from"), "{rewritten}");
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: fails on thaw-js: Package route ERROR: TypeError: requireAsync is not a function; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_native_mixed_cjs_dynamic_import_uses_bound_native_ready {
     use super::*;
 
@@ -1803,7 +1673,7 @@ fn native_mixed_cjs_dynamic_import_uses_bound_native_ready() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: needs JS global read after load (__thaw_side_module_this); script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_mixed_side_effect_only_mjs_keeps_module_this {
     use super::*;
 
@@ -1846,10 +1716,6 @@ fn native_mixed_async_opaque_back_edge_keeps_legacy_bridge() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_native_mixed_removed_named_edges_fail_before_any_factory_runs {
-    use super::*;
-
 #[test]
 fn native_mixed_removed_named_edges_fail_before_any_factory_runs() {
     // Unrun regression: rewriting an unused named import to an opaque shell
@@ -1880,9 +1746,8 @@ fn native_mixed_removed_named_edges_fail_before_any_factory_runs() {
         let _ = fs::remove_dir_all(root);
     }
 }
-}
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: fails on thaw-js: Package route ERROR: TypeError: requireAsync is not a function; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling {
     use super::*;
 
@@ -1909,7 +1774,7 @@ fn native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: needs in-context lazy-load helpers across calls; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_mixed_lazy_link_errors_wait_for_the_dynamic_entry {
     use super::*;
 
@@ -1965,40 +1830,23 @@ fn native_mixed_lazy_link_errors_wait_for_the_dynamic_entry() {
 }
 }
 
-// qjs_pending: not run on thaw-js: two loads into one QuickJS global context
-mod qjs_pending_bundling_native_esm_bundle_name_is_fresh_for_same_key_new_source {
-    use super::*;
-
 #[test]
 fn native_esm_bundle_name_is_fresh_for_same_key_new_source() {
-    use std::ffi::{CStr, CString};
     let root = temp_registry("native-esm-fresh-bundle");
     let modules = root.join("node_modules");
     let package = modules.join("native-fresh-pkg");
     fs::create_dir_all(&package).unwrap();
     fs::write(package.join("index.mjs"), "export const value = 1;").unwrap();
     let (first, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
-    let first_script = format!("globalThis.module = {{ exports: {{}} }}; {first} globalThis.firstNativeValue = function() {{ return module.exports.value; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(first_script).unwrap().as_ptr()), 1);
-    let one = thaw_quickjs::thaw_js_call(c"firstNativeValue".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(one) }.to_string_lossy(), "1");
+    assert_eq!(run_js_get(&first, "value"), "1");
     fs::write(package.join("index.mjs"), "export const value = 2;").unwrap();
     let (second, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
-    let second_script = format!("globalThis.module = {{ exports: {{}} }}; {second} globalThis.secondNativeValue = function() {{ return module.exports.value; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(second_script).unwrap().as_ptr()), 1);
-    let two = thaw_quickjs::thaw_js_call(c"secondNativeValue".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(two) }.to_string_lossy(), "2");
+    assert_eq!(run_js_get(&second, "value"), "2");
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
-mod qjs_pending_bundling_native_esm_query_suffixes_retain_distinct_module_identity {
-    use super::*;
 
 #[test]
 fn native_esm_query_suffixes_retain_distinct_module_identity() {
-    use std::ffi::{CStr, CString};
     let root = temp_registry("native-esm-query-identity");
     let modules = root.join("node_modules");
     let package = modules.join("native-query-pkg");
@@ -2008,12 +1856,8 @@ fn native_esm_query_suffixes_retain_distinct_module_identity() {
     let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-query-pkg", &package, "index.mjs").unwrap();
     assert_eq!(count, 3);
     assert!(bundle.contains("__thaw_register_native_bundle"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.queryLeafRuns = 0; {bundle} globalThis.nativeQueryResult = function() {{ return module.exports.result; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"nativeQueryResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,2]");
+    assert_eq!(run_js_get(&bundle, "result"), "[false,2]");
     let _ = fs::remove_dir_all(root);
-}
 }
 
 #[test]
@@ -2063,7 +1907,7 @@ fn native_esm_dynamic_global_capability_uses_legacy_bundle() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: not run on thaw-js: two loads into one QuickJS global context
+// qjs_pending: fails on thaw-js: Package route ERROR: bad bundle: await isn't allowed in non-async function; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_native_esm_dynamic_absolute_name_cannot_escape_its_bundle {
     use super::*;
 
@@ -2092,7 +1936,7 @@ fn native_esm_dynamic_absolute_name_cannot_escape_its_bundle() {
     }).join().unwrap();
 }
 }
-// qjs_pending: not run on thaw-js: two loads into one QuickJS global context
+// qjs_pending: needs one realm across two loads with a global sequence reset; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_esm_bundle_sequence_ignores_mutable_global_reset {
     use super::*;
 
@@ -2120,7 +1964,7 @@ fn native_esm_bundle_sequence_ignores_mutable_global_reset() {
     }).join().unwrap();
 }
 }
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (private entry reentry); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
 mod qjs_pending_bundling_native_esm_private_entry_reentry_and_intrinsic_then {
 
 #[test]
@@ -2150,7 +1994,7 @@ fn native_esm_private_entry_reentry_and_intrinsic_then() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (private linked read); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
 mod qjs_pending_bundling_native_esm_private_linked_read_is_owner_scoped_and_live {
 
 #[test]
@@ -2209,7 +2053,7 @@ fn native_esm_private_linked_read_is_owner_scoped_and_live() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (failedEntry.readNative); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
 mod qjs_pending_bundling_native_esm_failed_link_never_marks_source_linked {
 
 #[test]
@@ -2234,7 +2078,7 @@ fn native_esm_failed_link_never_marks_source_linked() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: fails on thaw-js: Package route ERROR: Cannot find module './native.mjs'; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports {
     use super::*;
 
@@ -2260,7 +2104,7 @@ fn commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports() 
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: needs JS globals read after load (asyncFactoryRan, nativeTlaRan); script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_sync_require_rejects_async_factory_and_native_tla_before_side_effects {
     use super::*;
 
@@ -2301,7 +2145,7 @@ fn commonjs_first_native_route_keeps_worker_url_on_legacy_snapshot() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: fails on thaw-js: Package route ERROR: unsupported: esm-live-binding; script route needs __thaw_register_native_bundle
 mod qjs_pending_bundling_commonjs_first_require_preserves_pure_native_namespace_identity_and_live_binding {
     use super::*;
 
@@ -2326,7 +2170,7 @@ fn commonjs_first_require_preserves_pure_native_namespace_identity_and_live_bind
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: needs in-context created-require calls after load; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_commonjs_created_require_keeps_computed_native_query_instances_distinct {
     use super::*;
 
@@ -2351,7 +2195,7 @@ fn commonjs_created_require_keeps_computed_native_query_instances_distinct() {
 }
 }
 
-// qjs_pending: not run on thaw-js: QuickJS global probe (globalThis function called after load, no module export)
+// qjs_pending: needs in-context created-require calls after load; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_commonjs_created_require_native_query_clones_private_opaque_edges {
     use super::*;
 
