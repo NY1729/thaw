@@ -771,7 +771,7 @@ fn worker_threads_transfers_native_ports_between_workers_in_both_directions() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
-// qjs_pending: fails on thaw-js: "[\"HELLO\",\"stdout hello\\n\",\"stderr hello\\n\",0,null,null,null,\"undefined\"]"
+// qjs_pending: fails on thaw-js: last element typeof worker._nativeHandle is "undefined", expected "number" (writableFinished/readableEnded now match)
 mod qjs_pending_platform_worker_threads_redirects_stdin_stdout_and_stderr {
     use super::*;
     use ::thaw_quickjs;
@@ -1115,7 +1115,7 @@ fn worker_threads_load_runtime_computed_absolute_paths() {
 }
 }
 
-// qjs_pending: stdout raw bytes not preserved: child stdout lacks [250,0,255,128,195,40,251]
+// qjs_pending: fails on thaw-js: child leg 1 "{\"__thaw_error__\":\"...missing invalid chunk error\"}" (process.stdout.write(1, cb) does not error on thaw-js); later assertions not reached
 mod qjs_pending_platform_process_default_stdio_preserves_raw_buffer_bytes {
     use super::*;
     use ::thaw_quickjs;
@@ -1181,7 +1181,7 @@ fn process_default_stdio_preserves_raw_buffer_bytes() {
 }
 }
 
-// qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"
+// qjs_pending: fallback leg fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"; native leg alone also differs (worker.stdout not null, parent process.stdout gets no bytes, DataView written as text)
 mod qjs_pending_platform_worker_threads_native_stdio_defaults_to_parent_and_capture_stays_separate {
     use super::*;
     use ::thaw_quickjs;
@@ -1211,7 +1211,7 @@ fn worker_threads_native_stdio_defaults_to_parent_and_capture_stays_separate() {
 }
 }
 
-// qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"
+// qjs_pending: fallback leg fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"; native leg alone differs (Buffer.isBuffer false, latin1 write encoded as UTF-8, end callback not fired)
 mod qjs_pending_platform_worker_threads_native_stdin_transports_bytes_and_end_in_order {
     use super::*;
     use ::thaw_quickjs;
@@ -1241,14 +1241,8 @@ fn worker_threads_native_stdin_transports_bytes_and_end_in_order() {
 }
 }
 
-// qjs_pending: hangs on thaw-js (120 s timeout, no result)
-mod qjs_pending_platform_worker_threads_native_stdin_reports_host_failures_once {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn worker_threads_native_stdin_reports_host_failures_once() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_stdin_host_failure");
     fs::write(
         dir.join("index.js"),
@@ -1259,19 +1253,13 @@ fn worker_threads_native_stdin_reports_host_failures_once() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerStdinFailures = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let function = CString::new("exerciseWorkerStdinFailures").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[[1,["ERR_WORKER_NOT_RUNNING","Worker stdin is not available"],1,"Worker stdin is not available",1],[1,["","host stdin failure"],1,"host stdin failure",1]]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
-}
 
-// qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"
+// qjs_pending: fallback legs fail on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"; native legs match
 mod qjs_pending_platform_worker_threads_native_stdin_string_decoder_handles_split_utf8 {
     use super::*;
     use ::thaw_quickjs;
