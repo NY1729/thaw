@@ -1,6 +1,5 @@
 #[test]
 fn fs_read_and_write_streams_integrate_with_node_streams() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_streams");
     fs::write(
             dir.join("index.js"),
@@ -11,16 +10,8 @@ fn fs_read_and_write_streams_integrate_with_node_streams() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreams = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("stream.txt").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsStreams").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path)]);
     assert_eq!(
         result,
         r#"[true,true,6,["open","ready","close"],true,true,4,["bc","de"],["open","ready","close"],"abcdef!"]"#
@@ -31,7 +22,6 @@ fn fs_read_and_write_streams_integrate_with_node_streams() {
 
 #[test]
 fn fs_streams_use_incremental_positioned_host_io() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_incremental_streams");
     fs::write(
             dir.join("index.js"),
@@ -42,18 +32,8 @@ fn fs_streams_use_incremental_positioned_host_io() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseIncrementalFsStreams = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let path = dir.join("stream.txt").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseIncrementalFsStreams")
-            .unwrap()
-            .as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(path)]);
     assert_eq!(
         result,
         r#"["abXYef","abXYZf",3,["ab","WX","YZ"],6,"abWXYZ"]"#
@@ -64,7 +44,6 @@ fn fs_streams_use_incremental_positioned_host_io() {
 
 #[test]
 fn fs_write_streams_apply_backpressure_and_serialize_callbacks() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_stream_backpressure");
     fs::write(
             dir.join("index.js"),
@@ -75,19 +54,7 @@ fn fs_write_streams_apply_backpressure_and_serialize_callbacks() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreamBackpressure = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsStreamBackpressure")
-            .unwrap()
-            .as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         // Node 22.22.2 (same script): the file is opened asynchronously, so the synchronous read right
@@ -100,8 +67,6 @@ fn fs_write_streams_apply_backpressure_and_serialize_callbacks() {
 
 #[test]
 fn stream_builtin_pipes_transforms_and_finishes() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_stream");
     fs::write(
             dir.join("index.js"),
@@ -123,19 +88,7 @@ fn stream_builtin_pipes_transforms_and_finishes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 3);
-    let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
-             globalThis.exports = globalThis.module.exports;\n\
-             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
-             {bundle}\n\
-             globalThis.exerciseStream = module.exports;\n"
-        );
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let func = CString::new("exerciseStream").unwrap();
-    let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["AB",true,true,"leftright","pass",true,"promise",true,"AbortError","ABORT_ERR","The operation was aborted","stop"]"#
@@ -146,7 +99,6 @@ fn stream_builtin_pipes_transforms_and_finishes() {
 
 #[test]
 fn stream_compose_and_duplex_from_bridge_supported_sources() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_compose");
     fs::write(
             dir.join("index.js"),
@@ -157,14 +109,7 @@ fn stream_compose_and_duplex_from_bridge_supported_sources() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamCompose = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamCompose").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[true,"A!B!",true,["x","y"],["z"],"output",["input"],"FUNCTION"]"#
@@ -175,7 +120,6 @@ fn stream_compose_and_duplex_from_bridge_supported_sources() {
 
 #[test]
 fn stream_compose_bridges_function_stages_and_abort_signals() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_compose_functions");
     fs::write(
             dir.join("index.js"),
@@ -186,16 +130,7 @@ fn stream_compose_bridges_function_stages_and_abort_signals() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamComposeFunctions = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamComposeFunctions")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"["A!B!",[true,true],true,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -203,7 +138,6 @@ fn stream_compose_bridges_function_stages_and_abort_signals() {
 
 #[test]
 fn stream_abort_signals_use_node_abort_errors() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_abort_errors");
     fs::write(
             dir.join("index.js"),
@@ -214,14 +148,7 @@ fn stream_abort_signals_use_node_abort_errors() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamAbortErrors = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamAbortErrors").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["AbortError","ABORT_ERR",true,"AbortError","ABORT_ERR",true,true,true,true,true,"ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE"]"#
@@ -232,7 +159,6 @@ fn stream_abort_signals_use_node_abort_errors() {
 
 #[test]
 fn stream_abort_signals_error_locked_web_streams() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_web_abort");
     fs::write(
             dir.join("index.js"),
@@ -243,14 +169,7 @@ fn stream_abort_signals_error_locked_web_streams() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamWebAbort = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamWebAbort").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["AbortError","ABORT_ERR",true,false,true,true,"AbortError","ABORT_ERR",true,false,true,"AbortError","ABORT_ERR",true]"#
@@ -261,7 +180,6 @@ fn stream_abort_signals_error_locked_web_streams() {
 
 #[test]
 fn web_writable_serializes_abort_behind_pending_writes() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_writable_abort_order");
     fs::write(
             dir.join("index.js"),
@@ -272,14 +190,7 @@ fn web_writable_serializes_abort_behind_pending_writes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebWritableAbort = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseWebWritableAbort").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["ERR_INVALID_STATE","ERR_INVALID_STATE",[],["write-start","write-end",["abort",true],"write-resolve","abort-resolve"],true,true,null]"#
@@ -290,7 +201,6 @@ fn web_writable_serializes_abort_behind_pending_writes() {
 
 #[test]
 fn web_writable_tracks_strategy_backpressure_and_ready() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_writable_backpressure");
     fs::write(
             dir.join("index.js"),
@@ -301,16 +211,7 @@ fn web_writable_tracks_strategy_backpressure_and_ready() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebWritableBackpressure = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseWebWritableBackpressure")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[2,1,true,-1,true,[0,false],[2,true],[1,2],true,0,"ERR_INVALID_ARG_VALUE","RangeError","ERR_INVALID_ARG_VALUE",true,true]"#
@@ -321,7 +222,6 @@ fn web_writable_tracks_strategy_backpressure_and_ready() {
 
 #[test]
 fn web_stream_locks_can_be_released_and_reacquired() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_stream_release_locks");
     fs::write(
             dir.join("index.js"),
@@ -332,14 +232,7 @@ fn web_stream_locks_can_be_released_and_reacquired() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebStreamLocks = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseWebStreamLocks").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["ERR_INVALID_STATE","ERR_INVALID_STATE","ERR_INVALID_STATE",true,{"value":"value","done":false},"ERR_INVALID_STATE","ERR_INVALID_STATE","ERR_INVALID_STATE",true,true]"#
@@ -350,7 +243,6 @@ fn web_stream_locks_can_be_released_and_reacquired() {
 
 #[test]
 fn readable_stream_tee_branches_and_aggregates_cancellation() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_readable_stream_tee");
     fs::write(
             dir.join("index.js"),
@@ -361,14 +253,7 @@ fn readable_stream_tee_branches_and_aggregates_cancellation() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseReadableStreamTee = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseReadableStreamTee").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[2,true,true,true,true,true,true,true,true,["left","right"],true,true,true,true,"ERR_INVALID_STATE"]"#
@@ -379,7 +264,6 @@ fn readable_stream_tee_branches_and_aggregates_cancellation() {
 
 #[test]
 fn readable_byte_streams_support_byob_readers() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_readable_stream_byob");
     fs::write(
             dir.join("index.js"),
@@ -390,14 +274,7 @@ fn readable_byte_streams_support_byob_readers() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseReadableStreamByob = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseReadableStreamByob").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[true,true,0,[65,66],false,0,true,[1,2],[3],0,true,[9],true,[1,2,3,4],4,[7],[5,6],[5,6],true,"ERR_INVALID_ARG_VALUE","ERR_INVALID_ARG_VALUE",true,true]"#
@@ -408,7 +285,6 @@ fn readable_byte_streams_support_byob_readers() {
 
 #[test]
 fn byob_supports_dataview_alignment_and_request_lifecycle() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_readable_stream_byob_views");
     fs::write(
             dir.join("index.js"),
@@ -419,16 +295,7 @@ fn byob_supports_dataview_alignment_and_request_lifecycle() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseReadableStreamByobViews = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseReadableStreamByobViews")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[["Uint8Array",4],"DataView",1,3,2,"Uint16Array",1,[1,2],"ERR_INVALID_ARG_VALUE","ERR_INVALID_STATE","ERR_INVALID_STATE","ERR_INVALID_STATE"]"#
@@ -439,7 +306,6 @@ fn byob_supports_dataview_alignment_and_request_lifecycle() {
 
 #[test]
 fn web_stream_default_controllers_manage_errors_and_termination() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_stream_controllers");
     fs::write(
             dir.join("index.js"),
@@ -450,16 +316,7 @@ fn web_stream_default_controllers_manage_errors_and_termination() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebStreamControllers = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseWebStreamControllers")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[true,false,true,true,true,true,true,true,true,null,2,true,"TypeError","ERR_INVALID_STATE",true,true,true]"#
@@ -470,7 +327,6 @@ fn web_stream_default_controllers_manage_errors_and_termination() {
 
 #[test]
 fn web_stream_state_errors_match_node_codes() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_stream_state_errors");
     fs::write(
             dir.join("index.js"),
@@ -481,16 +337,7 @@ fn web_stream_state_errors_match_node_codes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebStreamStateErrors = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseWebStreamStateErrors")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[["TypeError","ERR_INVALID_STATE"],["TypeError","ERR_INVALID_STATE"],["TypeError","ERR_INVALID_STATE"],["resolved"],["resolved"],["TypeError","ERR_INVALID_STATE"],["TypeError","ERR_INVALID_STATE"],["resolved"],["TypeError","ERR_INVALID_STATE"],null,true,["resolved"]]"#
@@ -501,7 +348,6 @@ fn web_stream_state_errors_match_node_codes() {
 
 #[test]
 fn transform_stream_applies_readable_backpressure_and_strategies() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_transform_stream_backpressure");
     fs::write(
             dir.join("index.js"),
@@ -512,16 +358,7 @@ fn transform_stream_applies_readable_backpressure_and_strategies() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTransformStreamBackpressure = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseTransformStreamBackpressure")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[["transform1","write1"],["transform1","write1"],1,["transform1","write1","transform2","write2"],2,3,[],["transform","write"],[["w","x"],["r","x"]],[4,1],"x",5,true,true]"#
@@ -532,7 +369,6 @@ fn transform_stream_applies_readable_backpressure_and_strategies() {
 
 #[test]
 fn readable_stream_from_adapts_sync_and_async_iterables() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_readable_stream_from");
     fs::write(
             dir.join("index.js"),
@@ -543,14 +379,7 @@ fn readable_stream_from_adapts_sync_and_async_iterables() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseReadableStreamFrom = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseReadableStreamFrom").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[[1,2],["async"],2,["stop"],true,"source",true,"first",true,["TypeError","ERR_ARG_NOT_ITERABLE"],true]"#
@@ -561,7 +390,6 @@ fn readable_stream_from_adapts_sync_and_async_iterables() {
 
 #[test]
 fn web_readable_tracks_strategy_pull_and_delayed_close() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_readable_strategy");
     fs::write(
             dir.join("index.js"),
@@ -572,16 +400,7 @@ fn web_readable_tracks_strategy_pull_and_delayed_close() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebReadableStrategy = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseWebReadableStrategy")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[["a","bb"],1,false,"a",false,"bb",true,1,2,2,1,1,2,1,[1],2,"ERR_INVALID_ARG_VALUE","ERR_INVALID_ARG_VALUE"]"#
@@ -592,7 +411,6 @@ fn web_readable_tracks_strategy_pull_and_delayed_close() {
 
 #[test]
 fn web_queuing_strategies_validate_and_feed_stream_sizes() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_queuing_strategies");
     fs::write(
             dir.join("index.js"),
@@ -603,16 +421,7 @@ fn web_queuing_strategies_validate_and_feed_stream_sizes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebQueuingStrategies = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseWebQueuingStrategies")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[4,2,3,5,1,[],["highWaterMark","size"],1,0,false,false,["TypeError","ERR_INVALID_ARG_TYPE"],["TypeError","ERR_MISSING_OPTION"],["RangeError","ERR_INVALID_ARG_VALUE"],["TypeError",null],true]"#
@@ -623,7 +432,6 @@ fn web_queuing_strategies_validate_and_feed_stream_sizes() {
 
 #[test]
 fn web_pipe_to_propagates_completion_errors_and_abort() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_pipe_to_options");
     fs::write(
             dir.join("index.js"),
@@ -634,14 +442,7 @@ fn web_pipe_to_propagates_completion_errors_and_abort() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebPipeTo = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseWebPipeTo").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[["a","b"],false,true,true,true,true,true,true,true,true,true,true,true,true,true,true,false,false,true,true]"#
@@ -652,7 +453,6 @@ fn web_pipe_to_propagates_completion_errors_and_abort() {
 
 #[test]
 fn web_pipe_through_validates_locks_and_propagates_errors() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_pipe_through");
     fs::write(
             dir.join("index.js"),
@@ -663,14 +463,7 @@ fn web_pipe_through_validates_locks_and_propagates_errors() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebPipeThrough = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseWebPipeThrough").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["ERR_INVALID_STATE","ERR_INVALID_STATE",["A","B"],true,true,true,true,true]"#
@@ -681,7 +474,6 @@ fn web_pipe_through_validates_locks_and_propagates_errors() {
 
 #[test]
 fn stream_web_adapters_retain_locks_and_await_teardown() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_web_adapter_locks");
     fs::write(
             dir.join("index.js"),
@@ -692,14 +484,7 @@ fn stream_web_adapters_retain_locks_and_await_teardown() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebAdapterLocks = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseWebAdapterLocks").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[true,true,[true,["cancel"]],["cancel","error","close"],true,true,[true,["abort"]],["abort","error","close"],true,true]"#
@@ -710,7 +495,6 @@ fn stream_web_adapters_retain_locks_and_await_teardown() {
 
 #[test]
 fn readable_to_web_applies_backpressure_and_awaits_cancel() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_readable_to_web_backpressure");
     fs::write(
             dir.join("index.js"),
@@ -721,16 +505,7 @@ fn readable_to_web_applies_backpressure_and_awaits_cancel() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseReadableToWebBackpressure = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseReadableToWebBackpressure")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[true,[true,2],"a",[true,0],"b",true,[],[["error",true],["close"],["cancelled"]],true,true]"#
@@ -741,7 +516,6 @@ fn readable_to_web_applies_backpressure_and_awaits_cancel() {
 
 #[test]
 fn duplex_from_body_functions_are_writable_sinks() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_duplex_from_functions");
     fs::write(
             dir.join("index.js"),
@@ -752,16 +526,7 @@ fn duplex_from_body_functions_are_writable_sinks() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDuplexFromFunctions = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseDuplexFromFunctions")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[false,true,["a","b"],true,"ERR_INVALID_RETURN_VALUE"]"#
@@ -772,7 +537,6 @@ fn duplex_from_body_functions_are_writable_sinks() {
 
 #[test]
 fn stream_compose_waits_for_functional_sinks() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_compose_sink");
     fs::write(
             dir.join("index.js"),
@@ -783,14 +547,7 @@ fn stream_compose_waits_for_functional_sinks() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamComposeSink = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamComposeSink").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[false,true,["a","b"],["sink","finish"],true,true,true]"#
@@ -801,7 +558,6 @@ fn stream_compose_waits_for_functional_sinks() {
 
 #[test]
 fn stream_compose_and_duplex_from_validate_sources() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_compose_validation");
     fs::write(
             dir.join("index.js"),
@@ -812,16 +568,7 @@ fn stream_compose_and_duplex_from_validate_sources() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamComposeValidation = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamComposeValidation")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["ERR_MISSING_ARGS","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_VALUE","ERR_INVALID_ARG_VALUE","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE",true,true,true,false,true,false]"#
@@ -832,7 +579,6 @@ fn stream_compose_and_duplex_from_validate_sources() {
 
 #[test]
 fn duplex_from_normalizes_scalar_chunks_and_null_values() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_duplex_from_chunks");
     fs::write(
             dir.join("index.js"),
@@ -843,14 +589,7 @@ fn duplex_from_normalizes_scalar_chunks_and_null_values() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDuplexFromChunks = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseDuplexFromChunks").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[[["string:abc"],true,true],[["buffer:abc"],true,true],[["number:97","number:98","number:99"],true,true],[["string:abc"],true,true],[[],true,true],"ERR_STREAM_NULL_VALUES"]"#
@@ -861,7 +600,6 @@ fn duplex_from_normalizes_scalar_chunks_and_null_values() {
 
 #[test]
 fn duplex_from_destroy_closes_the_source_iterator() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_duplex_from_iterator_cleanup");
     fs::write(
             dir.join("index.js"),
@@ -872,16 +610,7 @@ fn duplex_from_destroy_closes_the_source_iterator() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDuplexIteratorCleanup = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseDuplexIteratorCleanup")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[["first"],true,true,true,1]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -889,7 +618,6 @@ fn duplex_from_destroy_closes_the_source_iterator() {
 
 #[test]
 fn stream_compose_propagates_premature_stage_close() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_compose_close");
     fs::write(
             dir.join("index.js"),
@@ -900,14 +628,7 @@ fn stream_compose_propagates_premature_stage_close() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamComposeClose = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamComposeClose").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[[[["last","ERR_STREAM_PREMATURE_CLOSE"],["composed","ERR_STREAM_PREMATURE_CLOSE"]],true,true,true,"ERR_STREAM_PREMATURE_CLOSE"],[[["first","ERR_STREAM_PREMATURE_CLOSE"],["composed","ERR_STREAM_PREMATURE_CLOSE"]],true,true,true,"ERR_STREAM_PREMATURE_CLOSE"]]"#
@@ -918,7 +639,6 @@ fn stream_compose_propagates_premature_stage_close() {
 
 #[test]
 fn stream_state_predicates_track_lifecycle() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_state");
     fs::write(
             dir.join("index.js"),
@@ -929,14 +649,7 @@ fn stream_state_predicates_track_lifecycle() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamState = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamState").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[[true,true,false,false,false,false],true,false,true,true,true,false]"#
@@ -947,7 +660,6 @@ fn stream_state_predicates_track_lifecycle() {
 
 #[test]
 fn stream_extended_state_unshift_wrap_and_default_encoding_work() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_extended_state");
     fs::write(
             dir.join("index.js"),
@@ -958,16 +670,7 @@ fn stream_extended_state_unshift_wrap_and_default_encoding_work() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamExtendedState = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamExtendedState")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["ab",["wrapped"],true,false,true,false,[["hi","buffer"]],true,true,true,true,false,false]"#
@@ -978,7 +681,6 @@ fn stream_extended_state_unshift_wrap_and_default_encoding_work() {
 
 #[test]
 fn stream_indexed_pairs_static_checks_and_half_open_control_work() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_remaining_lifecycle");
     fs::write(
             dir.join("index.js"),
@@ -989,16 +691,7 @@ fn stream_indexed_pairs_static_checks_and_half_open_control_work() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamRemainingLifecycle = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamRemainingLifecycle")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[[[0,"a"],[1,"b"]],[false,false,true,false],true,false,true,true,true,true,false]"#
@@ -1009,7 +702,6 @@ fn stream_indexed_pairs_static_checks_and_half_open_control_work() {
 
 #[test]
 fn stream_destroy_hooks_finish_error_and_close_once() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_destroy_hooks");
     fs::write(
             dir.join("index.js"),
@@ -1020,14 +712,7 @@ fn stream_destroy_hooks_finish_error_and_close_once() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamDestroyHooks = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamDestroyHooks").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[[true,false,true],[["hook","original"],["error","replacement"],["close"]],true,true,"writable-original",true,"hook-threw",true]"#
@@ -1038,7 +723,6 @@ fn stream_destroy_hooks_finish_error_and_close_once() {
 
 #[test]
 fn stream_construct_hooks_gate_io_and_propagate_failures() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_construct_hooks");
     fs::write(
             dir.join("index.js"),
@@ -1049,16 +733,7 @@ fn stream_construct_hooks_gate_io_and_propagate_failures() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamConstructHooks = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseStreamConstructHooks")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[[],["construct","constructed","write:value","final","finish"],["construct","read"],["data"],["destroy:construct-failed","error:construct-failed"],true,true,true]"#
@@ -1073,7 +748,6 @@ fn stream_construct_hooks_gate_io_and_propagate_failures() {
 #[test]
 fn readable_stream_from_keeps_iterator_method_and_async_chunk_identity() {
     // Unrun: an async iterator's unresolved Promise must remain a chunk.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("stream_from_iterator_identity");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       var invalid = [], syncLookups = 0;
@@ -1087,10 +761,7 @@ fn readable_stream_from_keeps_iterator_method_and_async_chunk_identity() {
     };"#).unwrap();
     let modules = temp_registry("stream_from_iterator_identity_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseIteratorIdentity = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseIteratorIdentity").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[["TypeError","TypeError","TypeError"],0,1,true,true,true,7]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
@@ -1100,7 +771,6 @@ fn readable_stream_from_keeps_iterator_method_and_async_chunk_identity() {
 #[test]
 fn text_decoder_stream_exposes_the_settings_acquired_by_its_decoder() {
     // Unrun regression: changing getters must be read once, and fatal decoding must agree.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("decoder_stream_option_getters");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       var fatalReads = 0, bomReads = 0, decoder = new TextDecoderStream('utf-8', {
@@ -1111,10 +781,7 @@ fn text_decoder_stream_exposes_the_settings_acquired_by_its_decoder() {
     };"#).unwrap();
     let modules = temp_registry("decoder_stream_option_getters_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDecoderSettings = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseDecoderSettings").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[1,1,true,true,[["rejected","TypeError"],["rejected","TypeError"]]]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
@@ -1124,7 +791,6 @@ fn text_decoder_stream_exposes_the_settings_acquired_by_its_decoder() {
 #[test]
 fn stream_size_strategies_validate_and_capture_the_size_function_once() {
     // Unrun regression for both consumers of the shared size validation.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("stream_size_validation");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       var errors = []; for (var constructor of [ReadableStream, WritableStream]) for (var size of [null, 0, false, 'size']) { try { new constructor({}, { size: size }); } catch (error) { errors.push(error.name); } }
@@ -1136,10 +802,7 @@ fn stream_size_strategies_validate_and_capture_the_size_function_once() {
     };"#).unwrap();
     let modules = temp_registry("stream_size_validation_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseSizeValidation = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseSizeValidation").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"],1,1,2,[3]]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
@@ -1148,7 +811,6 @@ fn stream_size_strategies_validate_and_capture_the_size_function_once() {
 #[test]
 fn binary_transform_streams_enforce_buffer_sources() {
     // Unrun: pending reads let transform errors reach both sides without backpressure.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("binary_transform_buffer_sources");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       async function reject(stream, chunk) {
@@ -1171,35 +833,8 @@ fn binary_transform_streams_enforce_buffer_sources() {
     };"#).unwrap();
     let modules = temp_registry("binary_transform_buffer_sources_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseBinaryTransforms = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseBinaryTransforms").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert!(result == r#"[[[true,true],[true,true],[true,true]],"AB",null]"# || result == r#"[[[true,true],[true,true],[true,true]],"AB",["CD",[true,true],[true,true]]]"#, "{result}");
-    let _ = fs::remove_dir_all(dir);
-    let _ = fs::remove_dir_all(modules);
-}
-
-#[test]
-fn text_encoders_reject_symbols_and_use_string_conversion_hint() {
-    // Unrun regression for all public text encoder conversion boundaries.
-    use std::ffi::{CStr, CString};
-    let dir = temp_registry("text_encoder_symbol_conversion");
-    fs::write(dir.join("index.js"), r#"module.exports = async function () {
-      var encoder = new TextEncoder(), errors = [];
-      for (var invoke of [function () { encoder.encode(Symbol('x')); }, function () { encoder.encodeInto(Symbol('x'), new Uint8Array(10)); }, function () { encoder.encode(Object(Symbol('x'))); }]) { try { invoke(); } catch (error) { errors.push(error.name); } }
-      var hints = [], value = { [Symbol.toPrimitive](hint) { hints.push(hint); return 'A'; } }, bytes = encoder.encode(value), into = new Uint8Array(1); encoder.encodeInto(value, into);
-      var stream = new TextEncoderStream(), reader = stream.readable.getReader(), writer = stream.writable.getWriter(), read = reader.read();
-      var outcomes = await Promise.allSettled([writer.write(Symbol('x')), read]);
-      return [errors, hints, Array.from(bytes), Array.from(into), outcomes.map(function (outcome) { return outcome.status === 'rejected' && outcome.reason.name === 'TypeError'; })];
-    };"#).unwrap();
-    let modules = temp_registry("text_encoder_symbol_conversion_modules");
-    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseEncoderConversion = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseEncoderConversion").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[["TypeError","TypeError","TypeError"],["string","string"],[65],[65],[true,true]]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
@@ -1207,7 +842,6 @@ fn text_encoders_reject_symbols_and_use_string_conversion_hint() {
 #[test]
 fn transform_stream_preserves_inherited_readable_size_strategy() {
     // Unrun regression: inherited size counts bytes instead of chunks.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("transform_inherited_size");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       var controller, stream = new TransformStream({ start(value) { controller = value; } }, {}, new ByteLengthQueuingStrategy({ highWaterMark: 4 })), writer = stream.writable.getWriter();
@@ -1219,10 +853,7 @@ fn transform_stream_preserves_inherited_readable_size_strategy() {
     };"#).unwrap();
     let modules = temp_registry("transform_inherited_size_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseInheritedSize = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseInheritedSize").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, "[1,2,1,1]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
@@ -1231,7 +862,6 @@ fn transform_stream_preserves_inherited_readable_size_strategy() {
 #[test]
 fn readable_stream_from_advances_only_for_read_requests() {
     // Unrun regression for construction and post-read prefetch.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("stream_from_demand");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       var calls = 0, iterator = { next() { calls++; return { value: calls, done: false }; }, [Symbol.iterator]() { return this; } }, stream = ReadableStream.from(iterator);
@@ -1242,10 +872,7 @@ fn readable_stream_from_advances_only_for_read_requests() {
     };"#).unwrap();
     let modules = temp_registry("stream_from_demand_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamDemand = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseStreamDemand").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, "[0,1,1,2,2]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
@@ -1254,7 +881,6 @@ fn readable_stream_from_advances_only_for_read_requests() {
 #[test]
 fn stream_async_iterator_releases_locks_and_forwards_return_reason() {
     // Unrun regression for normal/error/cancel-error/preventCancel endings.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("stream_iterator_release");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       var normal = new ReadableStream({ start(c) { c.enqueue(1); c.close(); } }), it = normal.values();
@@ -1269,10 +895,7 @@ fn stream_async_iterator_releases_locks_and_forwards_return_reason() {
     };"#).unwrap();
     let modules = temp_registry("stream_iterator_release_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseIteratorRelease = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseIteratorRelease").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, "[1,true,true,false,true,false,true,true,false,true,true,true,2,0]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
@@ -1281,7 +904,6 @@ fn stream_async_iterator_releases_locks_and_forwards_return_reason() {
 #[test]
 fn readable_cancellation_closes_before_source_failure() {
     // Unrun regression for synchronous throws and rejected cancellation.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("readable_cancel_failure");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       var results = [];
@@ -1297,10 +919,7 @@ fn readable_cancellation_closes_before_source_failure() {
     };"#).unwrap();
     let modules = temp_registry("readable_cancel_failure_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCancelFailure = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseCancelFailure").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[["fulfilled",true,"fulfilled","rejected",true,true,true,true],["fulfilled",true,"fulfilled","rejected",true,true,true,true]]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
@@ -1309,7 +928,6 @@ fn readable_cancellation_closes_before_source_failure() {
 #[test]
 fn web_writer_write_discards_sink_fulfillment_values() {
     // Unrun regression: both immediate and asynchronous sink values are private.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("web_write_result");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       var seen = [], results = [];
@@ -1322,10 +940,7 @@ fn web_writer_write_discards_sink_fulfillment_values() {
     };"#).unwrap();
     let modules = temp_registry("web_write_result_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWriteResult = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseWriteResult").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[[true,true],["chunk","chunk"]]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
@@ -1334,7 +949,6 @@ fn web_writer_write_discards_sink_fulfillment_values() {
 #[test]
 fn web_pipe_through_respects_prevent_abort() {
     // Unrun regression: pipeThrough observes failure without changing the output.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("web_pipe_through_prevent_abort");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       var failure = new Error('source'), source = new ReadableStream({ start(controller) { controller.error(failure); } }), transform = new TransformStream();
@@ -1351,10 +965,7 @@ fn web_pipe_through_respects_prevent_abort() {
     };"#).unwrap();
     let modules = temp_registry("web_pipe_through_prevent_abort_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exercisePipeThroughOptions = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exercisePipeThroughOptions").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[true,"fulfilled",true]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
@@ -1363,7 +974,6 @@ fn web_pipe_through_respects_prevent_abort() {
 #[test]
 fn transform_start_errors_reach_both_streams() {
     // Unrun regression: start sees a controller attached to both streams.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("transform_start_binding");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       var results = [];
@@ -1378,11 +988,37 @@ fn transform_start_errors_reach_both_streams() {
     };"#).unwrap();
     let modules = temp_registry("transform_start_binding_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTransformStart = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseTransformStart").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[["rejected",true,"rejected","rejected",true],["fulfilled",true,"rejected","rejected",true]]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
+}
+
+mod qjs_pending_stream_web {
+    use super::*;
+
+    // thaw-js: no TypeError for a Symbol argument (TextEncoder symbol conversion)
+    #[test]
+    fn text_encoders_reject_symbols_and_use_string_conversion_hint() {
+        // Unrun regression for all public text encoder conversion boundaries.
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("text_encoder_symbol_conversion");
+        fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var encoder = new TextEncoder(), errors = [];
+      for (var invoke of [function () { encoder.encode(Symbol('x')); }, function () { encoder.encodeInto(Symbol('x'), new Uint8Array(10)); }, function () { encoder.encode(Object(Symbol('x'))); }]) { try { invoke(); } catch (error) { errors.push(error.name); } }
+      var hints = [], value = { [Symbol.toPrimitive](hint) { hints.push(hint); return 'A'; } }, bytes = encoder.encode(value), into = new Uint8Array(1); encoder.encodeInto(value, into);
+      var stream = new TextEncoderStream(), reader = stream.readable.getReader(), writer = stream.writable.getWriter(), read = reader.read();
+      var outcomes = await Promise.allSettled([writer.write(Symbol('x')), read]);
+      return [errors, hints, Array.from(bytes), Array.from(into), outcomes.map(function (outcome) { return outcome.status === 'rejected' && outcome.reason.name === 'TypeError'; })];
+    };"#).unwrap();
+        let modules = temp_registry("text_encoder_symbol_conversion_modules");
+        let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+        let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseEncoderConversion = module.exports;")).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseEncoderConversion").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(result, r#"[["TypeError","TypeError","TypeError"],["string","string"],[65],[65],[true,true]]"#);
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(modules);
+    }
 }
