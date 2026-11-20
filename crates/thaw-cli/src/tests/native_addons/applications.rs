@@ -897,11 +897,16 @@ fn process_rss_kb(pid: u32) -> u64 {
 
 /// Requests before the mid-run RSS sample. Warm-up (lazy init, about 65 MB in a debug build) grows RSS by about
 /// 3 KiB/request before this point, so the slope is measured only after it.
-#[cfg(target_os = "linux")]
 const SOAK_MID_REQUESTS: usize = 10_000;
-/// Fewest requests between the mid and end samples for the slope to mean anything; fewer skips the slope check.
+/// Fewest requests between the mid and end samples for the slope to mean anything. The soak loops run at least
+/// this far past the mid sample, so the slope check is skipped only when a hard cap is hit.
+const SOAK_MIN_WINDOW: usize = 8_000;
+/// Hard caps on a soak loop: requests and wall clock, whichever comes first.
+const SOAK_MAX_REQUESTS: usize = 25_000;
+const SOAK_MAX_WALL: Duration = Duration::from_secs(120);
+/// RSS is sampled this often (requests) after the mid sample, so a one-off step can be told apart from a ramp.
 #[cfg(target_os = "linux")]
-const SOAK_MIN_SLOPE_REQUESTS: usize = 2_000;
+const SOAK_SAMPLE_EVERY: usize = 500;
 /// A per-request leak above this slope fails. The arena-reset fix leaves fastify at about 0.31 KiB/request
 /// (express about 0.22); the unfixed leak measured 1.1.
 // ponytail: 0.4 KiB/request tolerates ~0.3 KiB/request of residual fastify growth (measured 0.307 to 0.322; the unfixed
@@ -912,22 +917,48 @@ const SOAK_MAX_KIB_PER_REQUEST: f64 = 0.4;
 #[cfg(target_os = "linux")]
 const SOAK_BACKSTOP_KIB: u64 = 256 * 1024;
 
-/// Takes the mid-run RSS sample (RSS in KiB, request count) the first time `requests` reaches `SOAK_MID_REQUESTS`.
+/// Keeps a soak loop going: until the wall-clock deadline, but never short of `SOAK_MID_REQUESTS + SOAK_MIN_WINDOW`
+/// requests, and never past the hard caps.
+fn soak_keep_going(deadline: Instant, hard_stop: Instant, requests: usize) -> bool {
+    let now = Instant::now();
+    requests < SOAK_MAX_REQUESTS
+        && now < hard_stop
+        && (now < deadline || requests < SOAK_MID_REQUESTS + SOAK_MIN_WINDOW)
+}
+
+/// Records (RSS in KiB, request count): the mid sample at `SOAK_MID_REQUESTS`, then one every `SOAK_SAMPLE_EVERY`.
 #[cfg(target_os = "linux")]
-fn soak_mid_sample(pid: u32, requests: usize, mid: &mut Option<(u64, usize)>) {
-    if mid.is_none() && requests >= SOAK_MID_REQUESTS {
-        *mid = Some((process_rss_kb(pid), requests));
+fn soak_mid_sample(pid: u32, requests: usize, series: &mut Vec<(u64, usize)>) {
+    if requests >= SOAK_MID_REQUESTS && (series.is_empty() || requests.is_multiple_of(SOAK_SAMPLE_EVERY)) {
+        series.push((process_rss_kb(pid), requests));
     }
 }
 
-/// Judges a soak run by slope, not total: RSS after the mid sample grows by at most `SOAK_MAX_KIB_PER_REQUEST`
-/// per request. A run too short for a usable slope skips only that check, and says so.
+/// Per-request RSS growth (KiB/request) over a series of (RSS KiB, request count) samples, needing at least two.
+/// The single largest interval jump is removed from both growth and window, so one discrete event (a Vec or arena
+/// doubling) does not count as a leak; a smooth leak loses only one interval's share of its growth.
+#[cfg(target_os = "linux")]
+fn soak_slope(series: &[(u64, usize)]) -> f64 {
+    assert!(series.len() >= 2, "a slope needs two samples");
+    let (first, last) = (series[0], series[series.len() - 1]);
+    let grown = last.0 as i64 - first.0 as i64;
+    let between = (last.1 - first.1) as i64;
+    let (jump, jump_requests) = series
+        .windows(2)
+        .map(|pair| (pair[1].0 as i64 - pair[0].0 as i64, (pair[1].1 - pair[0].1) as i64))
+        .max_by_key(|&(kib, _)| kib)
+        .unwrap();
+    (grown - jump) as f64 / (between - jump_requests) as f64
+}
+
+/// Judges a soak run by slope, not total (see `soak_slope`). A run too short for a usable window skips only that
+/// check, and says so.
 #[cfg(target_os = "linux")]
 fn assert_soak_rss(
     name: &str,
     pid: u32,
     initial_rss: u64,
-    mid: Option<(u64, usize)>,
+    mut series: Vec<(u64, usize)>,
     requests: usize,
 ) {
     let end = process_rss_kb(pid);
@@ -937,28 +968,83 @@ fn assert_soak_rss(
         growth <= SOAK_BACKSTOP_KIB,
         "{name} RSS grew by {growth} KiB over {requests} requests"
     );
-    let Some((mid_rss, mid_requests)) = mid else {
+    let Some(&(_, mid_requests)) = series.first() else {
         eprintln!(
             "{name} soak: slope check skipped, the run made {requests} requests (fewer than {SOAK_MID_REQUESTS} before the mid sample)"
         );
         return;
     };
     let between = requests - mid_requests;
-    if between < SOAK_MIN_SLOPE_REQUESTS {
+    if between < SOAK_MIN_WINDOW {
         eprintln!(
-            "{name} soak: slope check skipped, only {between} requests after the mid sample (fewer than {SOAK_MIN_SLOPE_REQUESTS})"
+            "{name} soak: slope check skipped, only {between} requests after the mid sample (fewer than {SOAK_MIN_WINDOW})"
         );
         return;
     }
-    let grown = end.saturating_sub(mid_rss);
-    let slope = grown as f64 / between as f64;
+    match series.last_mut() {
+        Some(last) if last.1 == requests => *last = (end, requests),
+        _ => series.push((end, requests)),
+    }
+    let slope = soak_slope(&series);
     eprintln!(
-        "{name} soak: slope {slope:.3} KiB/request (RSS +{grown} KiB over {between} requests after {mid_requests})"
+        "{name} soak: slope {slope:.3} KiB/request over {between} requests after {mid_requests}; (requests, RSS KiB) series: {series:?}"
     );
     assert!(
         slope <= SOAK_MAX_KIB_PER_REQUEST,
-        "{name} RSS slope {slope:.3} KiB/request over {between} requests (limit {SOAK_MAX_KIB_PER_REQUEST} KiB/request)"
+        "{name} RSS slope {slope:.3} KiB/request over {between} requests (limit {SOAK_MAX_KIB_PER_REQUEST} KiB/request); series (requests, RSS KiB): {series:?}"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn soak_slope_ignores_a_lone_step() {
+    // Flat RSS, then one 1188 KiB jump at request 13000: a discrete event, not a leak.
+    let series = soak_synthetic_series(0.0, Some((13_000, 1188)));
+    let slope = soak_slope(&series);
+    assert!(slope.abs() < 1e-9, "lone step slope {slope}");
+    assert!(slope <= SOAK_MAX_KIB_PER_REQUEST);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn soak_slope_fails_a_half_kib_per_request_ramp() {
+    let slope = soak_slope(&soak_synthetic_series(0.5, None));
+    assert!((slope - 0.5).abs() < 1e-9, "ramp slope {slope}");
+    assert!(slope > SOAK_MAX_KIB_PER_REQUEST);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn soak_slope_passes_a_three_tenths_ramp() {
+    let slope = soak_slope(&soak_synthetic_series(0.3, None));
+    assert!((slope - 0.3).abs() < 1e-9, "ramp slope {slope}");
+    assert!(slope <= SOAK_MAX_KIB_PER_REQUEST);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn soak_slope_passes_a_residual_ramp_plus_a_step() {
+    // The residual fastify/express growth (0.22 KiB/request) plus a 1188 KiB step: the step is removed.
+    let slope = soak_slope(&soak_synthetic_series(0.22, Some((13_000, 1188))));
+    assert!((slope - 0.22).abs() < 1e-9, "residual plus step slope {slope}");
+    assert!(slope <= SOAK_MAX_KIB_PER_REQUEST);
+}
+
+/// RSS (KiB) sampled like the soak loop: every `SOAK_SAMPLE_EVERY` requests from `SOAK_MID_REQUESTS` to a full window.
+#[cfg(target_os = "linux")]
+fn soak_synthetic_series(per_request_kib: f64, step: Option<(usize, u64)>) -> Vec<(u64, usize)> {
+    let base = 60_000u64;
+    (SOAK_MID_REQUESTS..=SOAK_MID_REQUESTS + SOAK_MIN_WINDOW)
+        .step_by(SOAK_SAMPLE_EVERY)
+        .map(|requests| {
+            let ramp = (per_request_kib * (requests - SOAK_MID_REQUESTS) as f64).round() as u64;
+            let jump = match step {
+                Some((at, kib)) if requests >= at => kib,
+                _ => 0,
+            };
+            (base + ramp + jump, requests)
+        })
+        .collect()
 }
 
 fn soak_duration() -> Duration {
@@ -1036,12 +1122,13 @@ async function main(): Promise<void> {
     #[cfg(target_os = "linux")]
     let initial_rss = process_rss_kb(child.id());
     #[cfg(target_os = "linux")]
-    let mut mid = None;
+    let mut series = Vec::new();
     let deadline = Instant::now() + soak_duration();
+    let hard_stop = Instant::now() + SOAK_MAX_WALL;
     let mut count = 0usize;
     // ponytail: the server arena currently grows by about 2 KiB/request;
     // remove this cap when long-lived servers gain per-request arena resets.
-    while Instant::now() < deadline && count < 25_000 {
+    while soak_keep_going(deadline, hard_stop, count) {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let response = exchange_http_request(
             &mut stream,
@@ -1057,11 +1144,11 @@ async function main(): Promise<void> {
         assert!(child.try_wait().unwrap().is_none(), "Fastify server died during the soak run");
         count += 1;
         #[cfg(target_os = "linux")]
-        soak_mid_sample(child.id(), count, &mut mid);
+        soak_mid_sample(child.id(), count, &mut series);
     }
     assert!(count > 5, "expected several requests in the soak window, only got {count}");
     #[cfg(target_os = "linux")]
-    assert_soak_rss("Fastify", child.id(), initial_rss, mid, count);
+    assert_soak_rss("Fastify", child.id(), initial_rss, series, count);
     assert!(Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
@@ -1149,10 +1236,11 @@ async function main(): Promise<void> {
     #[cfg(target_os = "linux")]
     let initial_rss = process_rss_kb(child.id());
     #[cfg(target_os = "linux")]
-    let mut mid = None;
+    let mut series = Vec::new();
     let deadline = Instant::now() + soak_duration();
+    let hard_stop = Instant::now() + SOAK_MAX_WALL;
     let mut count = 0usize;
-    while Instant::now() < deadline {
+    while soak_keep_going(deadline, hard_stop, count) {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let response = exchange_http_request(
             &mut stream,
@@ -1168,11 +1256,11 @@ async function main(): Promise<void> {
         assert!(child.try_wait().unwrap().is_none(), "Express server died during the soak run");
         count += 1;
         #[cfg(target_os = "linux")]
-        soak_mid_sample(child.id(), count, &mut mid);
+        soak_mid_sample(child.id(), count, &mut series);
     }
     assert!(count > 5, "expected several requests in the soak window, only got {count}");
     #[cfg(target_os = "linux")]
-    assert_soak_rss("Express", child.id(), initial_rss, mid, count);
+    assert_soak_rss("Express", child.id(), initial_rss, series, count);
     assert!(Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
