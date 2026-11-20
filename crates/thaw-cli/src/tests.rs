@@ -733,7 +733,7 @@ fn compiled_app_runs_a_worker_file_with_process_identity() {
     std::fs::create_dir_all(&directory).unwrap();
     let input = directory.join("main.ts");
     let worker = directory.join("worker.js");
-    let helper = directory.join("helper.cjs");
+    let helper = directory.join("helper.js");
     let output = directory.join("app");
     std::fs::write(
         &input,

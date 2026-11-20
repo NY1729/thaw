@@ -7410,6 +7410,102 @@ fn main_file_loader_strips_shebang_and_binds_this_to_exports() {
     assert_eq!(it.out, vec!["object true".to_string()]);
 }
 
+#[test]
+fn main_file_loader_resolves_package_main_for_directories() {
+    let dir = main_file_fixture("package-main");
+    std::fs::create_dir_all(dir.join("a/lib")).unwrap();
+    std::fs::create_dir_all(dir.join("b/dist")).unwrap();
+    std::fs::create_dir_all(dir.join("c")).unwrap();
+    std::fs::write(
+        dir.join("main.js"),
+        "console.log([require('./a'), require('./b'), require('./c')].join(','));\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("a/package.json"), r#"{"main":"lib/value"}"#).unwrap();
+    std::fs::write(
+        dir.join("a/lib/value.js"),
+        "module.exports = 'extensionless';\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("b/package.json"), r#"{"main":"dist"}"#).unwrap();
+    std::fs::write(
+        dir.join("b/dist/index.js"),
+        "module.exports = 'dir-main';\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("c/package.json"), r#"{"main":"missing.js"}"#).unwrap();
+    std::fs::write(
+        dir.join("c/index.js"),
+        "module.exports = 'index-fallback';\n",
+    )
+    .unwrap();
+    let mut it = Interp::new();
+    assert_eq!(
+        it.run_main_file(&dir.join("main.js").display().to_string())
+            .ok(),
+        Some(0)
+    );
+    assert_eq!(
+        it.out,
+        vec!["extensionless,dir-main,index-fallback".to_string()]
+    );
+}
+
+#[test]
+fn main_file_loader_does_not_resolve_cjs_candidates() {
+    let dir = main_file_fixture("no-cjs");
+    std::fs::create_dir_all(dir.join("d")).unwrap();
+    std::fs::write(
+        dir.join("main.js"),
+        "for (const r of ['./c', './d']) { try { console.log(require(r)); } catch (e) { console.log(e.code); } }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("c.cjs"), "module.exports = 'cjs';\n").unwrap();
+    std::fs::write(dir.join("d/index.cjs"), "module.exports = 'index-cjs';\n").unwrap();
+    let mut it = Interp::new();
+    assert_eq!(
+        it.run_main_file(&dir.join("main.js").display().to_string())
+            .ok(),
+        Some(0)
+    );
+    assert_eq!(
+        it.out,
+        vec![
+            "MODULE_NOT_FOUND".to_string(),
+            "MODULE_NOT_FOUND".to_string()
+        ]
+    );
+}
+
+#[test]
+fn main_file_loader_walks_node_modules_up_the_tree() {
+    let dir = main_file_fixture("node-modules");
+    std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+    std::fs::create_dir_all(dir.join("x/y")).unwrap();
+    std::fs::write(
+        dir.join("x/y/main.js"),
+        "console.log(require('pkg') + ':' + require('pkg/sub'));\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("node_modules/pkg/index.js"),
+        "module.exports = 'pkg';\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("node_modules/pkg/sub.js"),
+        "module.exports = 'sub';\n",
+    )
+    .unwrap();
+    let mut it = Interp::new();
+    assert_eq!(
+        it.run_main_file(&dir.join("x/y/main.js").display().to_string())
+            .ok(),
+        Some(0)
+    );
+    assert_eq!(it.out, vec!["pkg:sub".to_string()]);
+}
+
 const PROBE_BUNDLE: &str = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
 "tpa/index.js": function(module, exports, require) {

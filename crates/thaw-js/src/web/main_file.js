@@ -27,22 +27,47 @@ Object.defineProperty(globalThis, '__thaw_run_main_file', {
       error.code = 'MODULE_NOT_FOUND';
       return error;
     };
+    const readFile = path => {
+      try { return { path, source: globalThis.__thaw_worker_read_source(path) }; } catch (_) { return undefined; }
+    };
+    const loadFile = path => readFile(path) || readFile(path + '.js') || readFile(path + '.json');
+    const loadIndex = path => readFile(path + '/index.js') || readFile(path + '/index.json');
+    const loadDirectory = path => {
+      const manifest = readFile(path + '/package.json');
+      const main = manifest && JSON.parse(manifest.source).main;
+      if (typeof main === 'string') {
+        const target = normalize(path + '/' + main);
+        return loadFile(target) || loadIndex(target) || loadIndex(path);
+      }
+      return loadIndex(path);
+    };
     const find = (base, request) => {
       const target = normalize(request.startsWith('/') ? request : base + '/' + request);
-      const candidates = [target, target + '.js', target + '.cjs', target + '.json', target + '/index.js', target + '/index.cjs', target + '/index.json'];
-      for (const candidate of candidates) {
-        try { return { path: candidate, source: globalThis.__thaw_worker_read_source(candidate) }; } catch (_) {}
-      }
-      return undefined;
+      return loadFile(target) || loadDirectory(target);
     };
+    const isPath = request => request.startsWith('./') || request.startsWith('../') || request.startsWith('/') || request === '.' || request === '..';
+    const findInNodeModules = (base, request) => {
+      const start = request.startsWith('@') ? request.indexOf('/') + 1 : 0;
+      const slash = request.indexOf('/', start);
+      const name = slash < 0 ? request : request.slice(0, slash);
+      const subpath = slash < 0 ? '.' : request.slice(slash + 1);
+      for (let dir = base; ; dir = dirOf(dir)) {
+        if (dir.split('/').pop() !== 'node_modules') {
+          const found = find(normalize(dir + '/node_modules/' + name), subpath);
+          if (found) return found;
+        }
+        if (dir === '/') return undefined;
+      }
+    };
+    const resolveRequest = (base, request) => isPath(request) ? find(base, request) : findInNodeModules(base, request);
     const load = (base, parent, request) => {
       request = String(request);
-      if (!request.startsWith('./') && !request.startsWith('../') && !request.startsWith('/')) {
+      if (!isPath(request)) {
+        // Builtins first, as Node does; a missing builtin falls through to node_modules.
         const builtinRequire = globalThis.require;
-        if (typeof builtinRequire !== 'function') throw notFound(request);
-        return builtinRequire(request);
+        if (typeof builtinRequire === 'function') { try { return builtinRequire(request); } catch (_) {} }
       }
-      const found = find(base, request);
+      const found = resolveRequest(base, request);
       if (!found) throw notFound(request);
       if (cache[found.path]) return cache[found.path].exports;
       const module = { id: found.path, filename: found.path, path: dirOf(found.path), exports: {}, loaded: false, children: [], parent };
@@ -57,7 +82,7 @@ Object.defineProperty(globalThis, '__thaw_run_main_file', {
         else {
           const require = name => load(module.path, module, name);
           require.resolve = name => {
-            const resolved = find(module.path, String(name));
+            const resolved = resolveRequest(module.path, String(name));
             if (!resolved) throw notFound(name);
             return resolved.path;
           };
