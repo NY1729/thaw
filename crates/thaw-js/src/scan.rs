@@ -44,6 +44,9 @@ pub struct BundleParts {
     /// `__thaw_bundle_realm = {key, member}`: this bundle is a view of the realm `key` (a `node:path`
     /// family spec); `member` is the export path of the view (`posix`, `win32`, or empty for the root).
     pub realm: Option<(String, String)>,
+    /// `__thaw_bundle_group = "<key>"`: this bundle runs in the one realm shared by every bundle of group `key`
+    /// (peer-linked packages), instead of its own Interp.
+    pub group: Option<String>,
 }
 
 fn prop_key(p: &a::PropName) -> Option<String> {
@@ -123,6 +126,7 @@ fn substitute_builtin_factory(
         .require_maps
         .insert(key.to_string(), HashMap::new());
     combined.realm = parts.realm.take();
+    combined.group = parts.group.take();
     *parts = combined;
     Ok(())
 }
@@ -161,6 +165,7 @@ fn stub_cheerio_undici(parts: &mut BundleParts) -> Result<(), String> {
     combined.esm_problems = std::mem::take(&mut parts.esm_problems);
     combined.require_maps = std::mem::take(&mut parts.require_maps);
     combined.realm = parts.realm.take();
+    combined.group = parts.group.take();
     *parts = combined;
     Ok(())
 }
@@ -194,6 +199,7 @@ fn parse_factories(source: &str) -> Result<BundleParts, String> {
     let module = thaw_parser::parse_javascript(source)?;
     let (mut entry, mut factories, mut require_maps) = (String::new(), Vec::new(), HashMap::new());
     let mut realm = None;
+    let mut group = None;
     // The wrapper is `module.exports = (function(require){ ... })(globalThis.require);`.
     let mut stmts: Vec<&a::Stmt> = Vec::new();
     fn collect<'a>(e: &'a a::Expr, out: &mut Vec<&'a a::Stmt>) {
@@ -229,6 +235,9 @@ fn parse_factories(source: &str) -> Result<BundleParts, String> {
             match (&*id.id.sym, &**init) {
                 ("__thaw_bundle_entry_key", a::Expr::Lit(a::Lit::Str(s))) => {
                     entry = s.value.as_str().unwrap_or("").to_string()
+                }
+                ("__thaw_bundle_group", a::Expr::Lit(a::Lit::Str(s))) => {
+                    group = Some(s.value.as_str().unwrap_or("").to_string())
                 }
                 ("__thaw_bundle_realm", a::Expr::Object(o)) => {
                     let str_prop = |name: &str| {
@@ -313,6 +322,7 @@ fn parse_factories(source: &str) -> Result<BundleParts, String> {
         factories,
         require_maps,
         realm,
+        group,
     })
 }
 
