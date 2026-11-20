@@ -36,6 +36,12 @@ fn list_from(it: &mut Interp, v: &Value) -> R<Vec<Value>> {
 /// frozen object has nothing writable.
 fn own_prop(it: &Interp, o: &Obj, key: &str) -> Option<(Slot, bool)> {
     if matches!(&*o.kind.borrow(), Kind::Global) {
+        // a context's global: the sandbox's own properties first, then the realm builtins
+        if let Some(sb) = crate::vm::sandbox_of(o) {
+            if let Some(found) = own_prop(it, &sb, key) {
+                return Some(found);
+            }
+        }
         if let Some(p) = it.global_prop(key) {
             return Some((p.slot, p.writable));
         }
@@ -249,6 +255,11 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
         return Ok(it.proxy_delete(o, key)?.unwrap_or(true));
     }
     if matches!(&*o.kind.borrow(), Kind::Global) {
+        if let Some(sb) = crate::vm::sandbox_of(o) {
+            if own_prop(it, &sb, key).is_some() {
+                return delete_own(it, &sb, key);
+            }
+        }
         if let Some(deleted) = it.delete_global_binding(key) {
             return Ok(deleted);
         }

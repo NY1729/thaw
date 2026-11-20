@@ -1,7 +1,5 @@
 #[test]
 fn diagnostics_channels_publish_bind_stores_and_trace() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_diagnostics_channel");
     fs::write(
             dir.join("index.js"),
@@ -21,19 +19,7 @@ fn diagnostics_channels_publish_bind_stores_and_trace() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
-             globalThis.exports = globalThis.module.exports;\n\
-             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
-             {bundle}\n\
-             globalThis.exerciseDiagnostics = module.exports;\n"
-        );
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let func = CString::new("exerciseDiagnostics").unwrap();
-    let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[true,7,true,true,5,6,"bad",["store:4","work:2","work:2","work:5","work:5","work:6","start:","end:5","start:","end:","asyncStart:6","asyncEnd:6","start:","error:bad","end:bad"]]"#
@@ -44,8 +30,6 @@ fn diagnostics_channels_publish_bind_stores_and_trace() {
 
 #[test]
 fn async_hooks_preserve_storage_and_resource_scope() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_async_hooks");
     fs::write(
             dir.join("index.js"),
@@ -63,19 +47,7 @@ fn async_hooks_preserve_storage_and_resource_scope() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
-             globalThis.exports = globalThis.module.exports;\n\
-             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
-             {bundle}\n\
-             globalThis.exerciseAsyncHooks = module.exports;\n"
-        );
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let func = CString::new("exerciseAsyncHooks").unwrap();
-    let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[["default","outer:4","outer","inner:outer","undefined:outer"],"done","outer!","outer",true,1,[2,1,true,5],2,2,1,true,"function"]"#
@@ -86,8 +58,6 @@ fn async_hooks_preserve_storage_and_resource_scope() {
 
 #[test]
 fn async_hooks_disable_releases_registration_and_run_reactivates_it() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_async_hooks_disable");
     fs::write(
         dir.join("index.js"),
@@ -158,16 +128,8 @@ fn async_hooks_disable_releases_registration_and_run_reactivates_it() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!(
-        "globalThis.module = {{ exports: {{}} }};\n\
-         globalThis.exports = globalThis.module.exports;\n\
-         globalThis.require = function(name) {{ throw new Error('unexpected require ' + name); }};\n\
-         {bundle}\n\
-         globalThis.exerciseAsyncHooksDisable = module.exports;\n"
-    );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"exerciseAsyncHooksDisable".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+    let result = run_js(&bundle);
+    assert_eq!(result,
         r#"[true,true,true,[true,"run","default"],true,true,"enter","changed",true,true,true,["fresh","default"],["two","one",null]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -177,7 +139,6 @@ fn async_hooks_disable_releases_registration_and_run_reactivates_it() {
 fn async_hooks_capture_reactions_and_host_callbacks_without_shared_store_state() {
     // Source-only regression: registration context, not settlement context,
     // owns pending reactions and internal await continuations.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_async_hooks_continuations");
     fs::write(dir.join("index.js"), r#"
         var hooks = require('node:async_hooks');
@@ -234,10 +195,8 @@ fn async_hooks_capture_reactions_and_host_callbacks_without_shared_store_state()
     "#).unwrap();
     let empty_node_modules = temp_registry("builtin_async_hooks_continuations_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseAsyncHooksContinuations = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"exerciseAsyncHooksContinuations".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+    let result = run_js(&bundle);
+    assert_eq!(result,
         r#"["default",["A","B"],["captured","captured","captured"],["first","replacement-999"],true,["timer","tick"],"default","new"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -245,8 +204,6 @@ fn async_hooks_capture_reactions_and_host_callbacks_without_shared_store_state()
 
 #[test]
 fn tty_builtin_reports_capabilities_and_emits_ansi_sequences() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_tty");
     fs::write(
             dir.join("index.js"),
@@ -262,19 +219,7 @@ fn tty_builtin_reports_capabilities_and_emits_ansi_sequences() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
-             globalThis.exports = globalThis.module.exports;\n\
-             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
-             {bundle}\n\
-             globalThis.exerciseTty = module.exports;\n"
-        );
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let func = CString::new("exerciseTty").unwrap();
-    let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     // tty.isatty(1) reflects the test process's own stdout, so derive it rather than assuming a pipe.
     let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     assert_eq!(
@@ -286,51 +231,8 @@ fn tty_builtin_reports_capabilities_and_emits_ansi_sequences() {
 }
 
 #[test]
-fn module_create_require_loads_relative_and_builtin_dependencies() {
-    use std::ffi::{CStr, CString};
-
-    let dir = temp_registry("builtin_module_create_require");
-    fs::write(
-            dir.join("index.js"),
-            "import { createRequire, isBuiltin, builtinModules, registerHooks } from 'node:module';\n\
-             const localRequire = createRequire('pkg/index.js');\n\
-             export default function () {\n\
-             \x20 const dependency = localRequire('./dependency'); const path = localRequire('node:path'); const hooks = registerHooks({}); hooks.deregister();\n\
-             \x20 return [dependency.value, path.basename('/tmp/file.txt'), localRequire.resolve('./dependency'), Object.keys(localRequire.cache).length >= 3, isBuiltin('node:path'), isBuiltin('missing'), builtinModules.includes('stream'), isBuiltin('child_process'), isBuiltin('node:https'), builtinModules.includes('child_process'), builtinModules.includes('https'), hooks.active];\n\
-             }",
-        )
-        .unwrap();
-    fs::write(dir.join("dependency.js"), "module.exports = { value: 42 };").unwrap();
-    let empty_node_modules = temp_registry("builtin_module_create_require_node_modules");
-    let (bundle, _, file_count, _) =
-        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
-    let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
-             globalThis.exports = globalThis.module.exports;\n\
-             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
-             {bundle}\n\
-             globalThis.exerciseModule = module.exports.default;\n"
-        );
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let func = CString::new("exerciseModule").unwrap();
-    let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(
-        result,
-        r#"[42,"file.txt","pkg/dependency.js",true,true,false,true,true,true,true,true,false]"#
-    );
-    let _ = fs::remove_dir_all(&dir);
-    let _ = fs::remove_dir_all(&empty_node_modules);
-}
-
-#[test]
 fn child_process_exec_custom_promisify_preserves_child_and_outputs() {
     std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-
         let dir = temp_registry("builtin_child_process_promisify");
         fs::write(
             dir.join("index.js"),
@@ -425,18 +327,8 @@ module.exports = async function() {
         let empty_node_modules = temp_registry("builtin_child_process_promisify_node_modules");
         let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildPromisify = module.exports;");
-        let source = CString::new(script).unwrap();
-        let loaded = thaw_quickjs::thaw_js_load(source.as_ptr()) == 1;
-        let result = if loaded {
-            let result_ptr = thaw_quickjs::thaw_js_call(
-                CString::new("exerciseChildPromisify").unwrap().as_ptr(),
-                CString::new("[]").unwrap().as_ptr(),
-            );
-            Some(unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned())
-        } else {
-            None
-        };
+        let result = Some(run_js(&bundle));
+        let loaded = result.as_deref().is_some_and(|value| !value.starts_with("ERROR: "));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
         assert_eq!(file_count, 7);
@@ -450,8 +342,6 @@ module.exports = async function() {
 #[test]
 fn child_process_sync_max_buffer_counts_native_output_bytes() {
     std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-
         let dir = temp_registry("builtin_child_process_max_buffer_bytes");
         fs::write(
             dir.join("index.js"),
@@ -497,18 +387,8 @@ module.exports = function() {
         let empty_node_modules = temp_registry("builtin_child_process_max_buffer_bytes_node_modules");
         let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildMaxBufferBytes = module.exports;");
-        let source = CString::new(script).unwrap();
-        let loaded = thaw_quickjs::thaw_js_load(source.as_ptr()) == 1;
-        let result = if loaded {
-            let result_ptr = thaw_quickjs::thaw_js_call(
-                CString::new("exerciseChildMaxBufferBytes").unwrap().as_ptr(),
-                CString::new("[]").unwrap().as_ptr(),
-            );
-            Some(unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned())
-        } else {
-            None
-        };
+        let result = Some(run_js(&bundle));
+        let loaded = result.as_deref().is_some_and(|value| !value.starts_with("ERROR: "));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
         assert_eq!(file_count, 6);
@@ -525,8 +405,6 @@ module.exports = function() {
 #[test]
 fn child_process_async_exec_limits_each_pipe_and_preserves_null_encoding() {
     std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-
         let dir = temp_registry("builtin_child_process_async_output_contract");
         fs::write(
             dir.join("index.js"),
@@ -637,18 +515,8 @@ module.exports = async function() {
         let empty_node_modules = temp_registry("builtin_child_process_async_output_contract_node_modules");
         let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildAsyncOutput = module.exports;");
-        let source = CString::new(script).unwrap();
-        let loaded = thaw_quickjs::thaw_js_load(source.as_ptr()) == 1;
-        let result = if loaded {
-            let result_ptr = thaw_quickjs::thaw_js_call(
-                CString::new("exerciseChildAsyncOutput").unwrap().as_ptr(),
-                CString::new("[]").unwrap().as_ptr(),
-            );
-            Some(unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned())
-        } else {
-            None
-        };
+        let result = Some(run_js(&bundle));
+        let loaded = result.as_deref().is_some_and(|value| !value.starts_with("ERROR: "));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
         assert_eq!(file_count, 7);
@@ -660,4 +528,50 @@ module.exports = async function() {
     })
     .join()
     .unwrap();
+}
+
+mod qjs_pending_stream_integrations {
+    use super::*;
+
+    // thaw-js: the ported test fails ("ERROR: TypeError: `` is not a function": module.createRequire / bundled require.resolve contract); stays on QuickJS until that feature is implemented
+    #[test]
+    fn module_create_require_loads_relative_and_builtin_dependencies() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_module_create_require");
+        fs::write(
+                dir.join("index.js"),
+                "import { createRequire, isBuiltin, builtinModules, registerHooks } from 'node:module';\n\
+                 const localRequire = createRequire('pkg/index.js');\n\
+                 export default function () {\n\
+                 \x20 const dependency = localRequire('./dependency'); const path = localRequire('node:path'); const hooks = registerHooks({}); hooks.deregister();\n\
+                 \x20 return [dependency.value, path.basename('/tmp/file.txt'), localRequire.resolve('./dependency'), Object.keys(localRequire.cache).length >= 3, isBuiltin('node:path'), isBuiltin('missing'), builtinModules.includes('stream'), isBuiltin('child_process'), isBuiltin('node:https'), builtinModules.includes('child_process'), builtinModules.includes('https'), hooks.active];\n\
+                 }",
+            )
+            .unwrap();
+        fs::write(dir.join("dependency.js"), "module.exports = { value: 42 };").unwrap();
+        let empty_node_modules = temp_registry("builtin_module_create_require_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 4);
+        let script = format!(
+                "globalThis.module = {{ exports: {{}} }};\n\
+                 globalThis.exports = globalThis.module.exports;\n\
+                 globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+                 {bundle}\n\
+                 globalThis.exerciseModule = module.exports.default;\n"
+            );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseModule").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[42,"file.txt","pkg/dependency.js",true,true,false,true,true,true,true,true,false]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
 }

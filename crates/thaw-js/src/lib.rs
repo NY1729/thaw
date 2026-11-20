@@ -2450,6 +2450,10 @@ impl Interp {
         match v {
             Value::Object(o) => {
                 if matches!(&*o.kind.borrow(), Kind::Global) {
+                    // a context's global: its enumerable names are the sandbox's
+                    if let Some(sb) = vm::sandbox_of(o) {
+                        return self.own_keys(&Value::Object(sb));
+                    }
                     return self.global_own_names(true);
                 }
                 if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
@@ -2630,13 +2634,14 @@ impl Interp {
                 match fast {
                     Fast::Hit(v) => return Ok(v),
                     Fast::Global => {
+                        // the sandbox wins over a realm builtin of the same name, as in Node
+                        if let Some(sb) = vm::sandbox_of(o) {
+                            if find_in_chain(&sb, key).is_some() {
+                                return self.get(&Value::Object(sb), key);
+                            }
+                        }
                         if let Some(v) = self.lookup(&self.global.clone(), key) {
                             return Ok(v);
-                        }
-                        if let Some(sb) = vm::sandbox_of(o) {
-                            if let Some(Slot::Data(v)) = find_in_chain(&sb, key) {
-                                return Ok(v);
-                            }
                         }
                     }
                     Fast::Proxy => {
@@ -3829,6 +3834,10 @@ impl Interp {
                 scope.declare_if_absent(name);
             } else {
                 put(sandbox, name, Value::Undefined);
+                // a script-level var is non-configurable: `delete` of it returns false
+                if let Some(i) = sandbox.position(name) {
+                    sandbox.raw_props.borrow_mut()[i].configurable = false;
+                }
             }
         }
         // the functions are hoisted into `scope` and then moved to the sandbox, where they are read and written

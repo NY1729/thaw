@@ -1,43 +1,12 @@
 #[test]
-fn vm_builtin_runs_scripts_in_contexts_and_compiles_functions() {
-    use std::ffi::{CStr, CString};
-    let dir = temp_registry("builtin_vm");
-    fs::write(dir.join("index.js"), "var vm = require('node:vm'); module.exports = async function () { var receiverSandbox = { marker: 17 }, receiverContext = vm.createContext(receiverSandbox); if (vm.runInContext('this === globalThis', receiverContext) !== true) throw new Error('vm context receiver'); if (vm.runInContext(\"'use strict'; this === globalThis\", receiverContext) !== true) throw new Error('vm strict context receiver'); if (vm.runInContext('(() => this === globalThis)()', receiverContext) !== true) throw new Error('vm lexical context receiver'); if (vm.runInContext('this.marker += 1; this.marker', receiverContext) !== 18 || receiverSandbox.marker !== 18) throw new Error('vm receiver property'); if (new vm.Script('this === globalThis').runInContext(receiverContext) !== true) throw new Error('vm Script receiver'); if (vm.runInNewContext('this === globalThis', {}) !== true || new vm.Script('this === globalThis').runInNewContext({}) !== true) throw new Error('vm fresh receiver'); if (vm.runInThisContext('this === globalThis') !== true) throw new Error('vm host receiver unchanged'); var invalidContext; try { vm.runInContext('1', {}); } catch (error) { invalidContext = error; } if (!(invalidContext instanceof TypeError)) throw new Error('vm context validation unchanged'); var sandbox = { value: 3 }; var context = vm.createContext(sandbox); var script = new vm.Script('value *= 4; created = value + 1; value', { filename: 'sample.js' }); var contextual = script.runInContext(context); var fresh = vm.runInNewContext('input + 2', { input: 5 }); var current = vm.runInThisContext('6 * 7'); var add = vm.compileFunction('return left + right;', ['left', 'right'], { filename: 'add.js' }); var memory = await vm.measureMemory(); var cached = script.createCachedData(); return [contextual, sandbox.value, sandbox.created, fresh, current, add(8, 9), vm.isContext(context), vm.isContext({}), cached.toString().includes('value *= 4'), script.cachedDataRejected, memory.total.jsMemoryEstimate > 0, vm.getDefaultContext() === globalThis, typeof vm.constants.DONT_CONTEXTIFY]; };").unwrap();
-    let empty_node_modules = temp_registry("builtin_vm_node_modules");
-    let (bundle, _, file_count, _) =
-        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseVm = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseVm").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(
-        result,
-        r#"[12,12,13,7,42,17,true,false,true,null,true,true,"symbol"]"#
-    );
-    let _ = fs::remove_dir_all(&dir);
-    let _ = fs::remove_dir_all(&empty_node_modules);
-}
-
-#[test]
 fn punycode_builtin_converts_unicode_labels_and_code_points() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_punycode");
     fs::write(dir.join("index.js"), "var punycode = require('node:punycode'); module.exports = function () { var encoded = punycode.encode('mañana'); var snowman = punycode.encode('☃-⌘'); var points = punycode.ucs2.decode('A😀Z'); return [encoded, punycode.decode(encoded), snowman, punycode.decode(snowman), punycode.toASCII('mañana.com'), punycode.toUnicode('xn--bcher-kva.example'), points, punycode.ucs2.encode(points), punycode.toASCII('user@bücher.example'), punycode.version]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_punycode_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exercisePunycode = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exercisePunycode").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["maana-pta","mañana","--dqo34k","☃-⌘","xn--maana-pta.com","bücher.example",[65,128512,90],"A😀Z","user@xn--bcher-kva.example","2.1.0"]"#
@@ -48,7 +17,6 @@ fn punycode_builtin_converts_unicode_labels_and_code_points() {
 
 #[test]
 fn dgram_socket_exchanges_real_udp_datagrams() {
-    use std::ffi::{CStr, CString};
     use std::net::UdpSocket;
     use std::time::Duration;
 
@@ -74,13 +42,7 @@ fn dgram_socket_exchanges_real_udp_datagrams() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDgram = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseDgram").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(
         result,
         format!(
@@ -94,8 +56,6 @@ fn dgram_socket_exchanges_real_udp_datagrams() {
 
 #[test]
 fn dgram_receives_multiple_packets_after_send_auto_bind_without_blocking_timers() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_dgram_lifecycle");
     fs::write(dir.join("index.js"), r#"
         var dgram = require('node:dgram');
@@ -144,13 +104,7 @@ fn dgram_receives_multiple_packets_after_send_auto_bind_without_blocking_timers(
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDgramLifecycle = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseDgramLifecycle").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[["first","second"],["timer","reply1","reply2"],1,true,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -158,8 +112,6 @@ fn dgram_receives_multiple_packets_after_send_auto_bind_without_blocking_timers(
 
 #[test]
 fn dgram_bind_retry_and_connect_errors_settle_once_with_native_codes() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_dgram_errors");
     fs::write(dir.join("index.js"), r#"
         var dgram = require('node:dgram');
@@ -214,13 +166,7 @@ fn dgram_bind_retry_and_connect_errors_settle_once_with_native_codes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDgramErrors = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseDgramErrors").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[0,1,1,0,["EADDRINUSE","EAFNOSUPPORT"],"EADDRNOTAVAIL"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -228,20 +174,13 @@ fn dgram_bind_retry_and_connect_errors_settle_once_with_native_codes() {
 
 #[test]
 fn stream_consumers_collect_streams_and_async_iterables() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_consumers");
     fs::write(dir.join("index.js"), "var stream = require('node:stream'); var consumers = require('node:stream/consumers'); function consume(method, value) { var input = new stream.PassThrough(); var result = consumers[method](input); input.end(value); return result; } module.exports = async function () { var text = await consume('text', 'hello'); var object = await consume('json', '{\"answer\":42}'); var bytes = await consume('buffer', 'abc'); var array = new Uint8Array(await consume('arrayBuffer', 'xy')); var blob = await consume('blob', 'blob'); var iterable = { async *[Symbol.asyncIterator]() { yield 'one'; yield Buffer.from('two'); } }; var joined = await consumers.text(iterable); var sliced = blob.slice(1, 3, 'text/plain'); return [text, object.answer, bytes.toString('hex'), Array.from(array), blob instanceof Blob, blob.size, await blob.text(), sliced.type, await sliced.text(), joined, new File(['x'], 'a.txt', { lastModified: 7 }).name]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_stream_consumers_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 3);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseConsumers = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseConsumers").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["hello",42,"616263",[120,121],true,4,"blob","text/plain","lo","onetwo","a.txt"]"#
@@ -252,20 +191,13 @@ fn stream_consumers_collect_streams_and_async_iterables() {
 
 #[test]
 fn stream_web_pipes_transforms_and_exposes_readers_and_writers() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_web");
     fs::write(dir.join("index.js"), "var web = require('node:stream/web'); var consumers = require('node:stream/consumers'); module.exports = async function () { var source = new web.ReadableStream({ start: function(controller) { controller.enqueue('one'); controller.enqueue('two'); controller.close(); } }); var upper = new web.TransformStream({ transform: function(chunk, controller) { controller.enqueue(chunk.toUpperCase()); } }); var transformed = await consumers.text(source.pipeThrough(upper)); var writes = []; var writable = new web.WritableStream({ write: function(chunk) { writes.push(chunk); }, close: function() { writes.push('closed'); } }); var writer = writable.getWriter(); await writer.write('value'); await writer.close(); writer.releaseLock(); var encodedSource = new web.ReadableStream({ start: function(controller) { controller.enqueue('hé'); controller.close(); } }); var decoded = await consumers.text(encodedSource.pipeThrough(new web.TextEncoderStream()).pipeThrough(new web.TextDecoderStream())); var readerSource = new web.ReadableStream({ pull: function(controller) { controller.enqueue(7); controller.close(); } }); var reader = readerSource.getReader(); var first = await reader.read(); var done = await reader.read(); reader.releaseLock(); var byteStrategy = new web.ByteLengthQueuingStrategy({ highWaterMark: 8 }); var countStrategy = new web.CountQueuingStrategy({ highWaterMark: 3 }); return [web.ReadableStream === globalThis.ReadableStream, transformed, writes, decoded, first, done.done, readerSource.locked, byteStrategy.highWaterMark, byteStrategy.size(new Uint8Array(4)), countStrategy.highWaterMark, countStrategy.size('x')]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_stream_web_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 3);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamWeb = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseStreamWeb").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[true,"ONETWO",["value","closed"],"hé",{"value":7,"done":false},true,false,8,4,3,1]"#
@@ -276,7 +208,6 @@ fn stream_web_pipes_transforms_and_exposes_readers_and_writers() {
 
 #[test]
 fn global_headers_normalize_duplicate_and_cookie_values() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_global_headers");
     fs::write(
             dir.join("index.js"),
@@ -287,14 +218,7 @@ fn global_headers_normalize_duplicate_and_cookie_values() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHeaders = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseHeaders").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[[["set-cookie","a=1"],["set-cookie","b=2"],["x-a","a"],["x-b","one, two"]],"one, two",["a=1","b=2"],["set-cookie","set-cookie","x-a","x-b"],["a=1","b=2","a","one, two"],true,null,[["set-cookie","a=1",true],["set-cookie","b=2",true],["x-a","a",true],["x-b","one, two",true]],[["set-cookie","a=1"],["set-cookie","b=2"],["x-a","a"],["x-b","one, two"]],[["a","x,y"],["z","1"]],[],["append","delete","get","has","set","getSetCookie","keys","values","entries","forEach"],"[object Headers]",["TypeError",null],["TypeError",null],["TypeError",null]]"#
@@ -305,7 +229,6 @@ fn global_headers_normalize_duplicate_and_cookie_values() {
 
 #[test]
 fn global_response_consumes_clones_and_constructs_bodies() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_global_response");
     fs::write(
             dir.join("index.js"),
@@ -316,14 +239,7 @@ fn global_response_consumes_clones_and_constructs_bodies() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseResponse = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseResponse").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[[200,"",true,"default","",false,"text/plain;charset=UTF-8","ReadableStream",false],"hello",true,"application/x-www-form-urlencoded;charset=UTF-8","two words",[1,2,3],["clone","clone"],"",false,["application/json","{\"a\":1}"],307,"https://example.com/a",0,"error",false,null,"TypeError","RangeError","TypeError","text/custom","blob","[object Response]"]"#
@@ -334,7 +250,6 @@ fn global_response_consumes_clones_and_constructs_bodies() {
 
 #[test]
 fn global_request_normalizes_inherits_and_clones_bodies() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_global_request");
     fs::write(
             dir.join("index.js"),
@@ -345,14 +260,7 @@ fn global_request_normalizes_inherits_and_clones_bodies() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRequest = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseRequest").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[["https://example.com/a?x=1","POST",[["content-type","text/plain;charset=UTF-8"],["x","y"]],"ReadableStream",false,"default","same-origin","","",false,"cors","follow","about:client","","half",false],"hello",true,"PUT","https://example.com/a?x=1",[["z","1"]],"hello",true,true,"stop",true,"stream","b","[object Request]","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]"#
@@ -363,7 +271,6 @@ fn global_request_normalizes_inherits_and_clones_bodies() {
 
 #[test]
 fn text_decoder_stream_decodes_incrementally_and_flushes_errors() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_text_decoder_streaming");
     fs::write(
             dir.join("index.js"),
@@ -374,16 +281,7 @@ fn text_decoder_stream_decodes_incrementally_and_flushes_errors() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTextDecoderStreaming = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseTextDecoderStreaming")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[true,"😀A",true,true,true,true,"utf-8",false,false]"#
@@ -394,7 +292,6 @@ fn text_decoder_stream_decodes_incrementally_and_flushes_errors() {
 
 #[test]
 fn text_encoder_stream_preserves_split_surrogate_pairs() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_text_encoder_surrogates");
     fs::write(
             dir.join("index.js"),
@@ -405,16 +302,7 @@ fn text_encoder_stream_preserves_split_surrogate_pairs() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTextEncoderSurrogates = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseTextEncoderSurrogates")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[[239,191,189],[239,191,189],{"read":2,"written":4},[239,191,189,65],[[240,159,152,128,65]],[[88],[239,191,189]],[[239,191,189,66]]]"#
@@ -425,20 +313,13 @@ fn text_encoder_stream_preserves_split_surrogate_pairs() {
 
 #[test]
 fn web_compression_streams_round_trip_supported_formats() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_compression");
     fs::write(dir.join("index.js"), "var web = require('node:stream/web'); var consumers = require('node:stream/consumers'); async function roundTrip(format) { var source = new web.ReadableStream({ start: function(controller) { controller.enqueue(new TextEncoder().encode('thaw ')); controller.enqueue(new TextEncoder().encode('compression')); controller.close(); } }); return consumers.text(source.pipeThrough(new web.CompressionStream(format)).pipeThrough(new web.DecompressionStream(format)).pipeThrough(new web.TextDecoderStream())); } module.exports = async function () { var gzipSource = new web.ReadableStream({ start: function(controller) { controller.enqueue(new TextEncoder().encode('header')); controller.close(); } }); var gzip = await consumers.buffer(gzipSource.pipeThrough(new CompressionStream('gzip'))); var unsupported = false; try { new CompressionStream('br'); } catch (error) { unsupported = error instanceof TypeError; } var decompressionUnsupported = false; try { new DecompressionStream('br'); } catch (error) { decompressionUnsupported = error instanceof TypeError; } unsupported = unsupported && decompressionUnsupported; return [await roundTrip('gzip'), await roundTrip('deflate'), await roundTrip('deflate-raw'), await roundTrip('brotli'), gzip[0], gzip[1], web.CompressionStream === globalThis.CompressionStream, unsupported]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_web_compression_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 3);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCompressionStreams = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseCompressionStreams").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["thaw compression","thaw compression","thaw compression","thaw compression",31,139,true,true]"#
@@ -449,7 +330,6 @@ fn web_compression_streams_round_trip_supported_formats() {
 
 #[test]
 fn web_compression_streams_emit_and_decode_incrementally() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_compression_incremental");
     fs::write(
             dir.join("index.js"),
@@ -460,16 +340,7 @@ fn web_compression_streams_emit_and_decode_incrementally() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 1);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCompressionIncremental = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseCompressionIncremental")
-            .unwrap()
-            .as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[true,true,true,"hello world",true,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -480,7 +351,6 @@ fn tls_client_verifies_custom_ca_and_exchanges_encrypted_bytes() {
     use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
     use rustls::server::WebPkiClientVerifier;
     use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::process::Command;
@@ -649,16 +519,15 @@ fn tls_client_verifies_custom_ca_and_exchanges_encrypted_bytes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTls = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseTls").unwrap();
-    let arguments = CString::new(format!(
-        "[{port},\"{ca_hex}\",\"{client_cert_hex}\",\"{client_key_hex}\"]"
-    ))
-    .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(
+        &bundle,
+        vec![
+            thaw_js::host::Native::Number(port as f64),
+            thaw_js::host::Native::Str(ca_hex),
+            thaw_js::host::Native::Str(client_cert_hex),
+            thaw_js::host::Native::Str(client_key_hex),
+        ],
+    );
     assert_eq!(
         result,
         r#"[["connect","secureConnect","data:pong","end","close:false"],true,null,true,"h2","TLSv1.3","TLSv1.3",4,4,3,"TLSv1.2",true,true,true,"localhost","localhost","thaw-client",true,true,true,"accepted",false,"UNABLE_TO_VERIFY_LEAF_SIGNATURE"]"#
@@ -673,7 +542,6 @@ fn tls_client_verifies_custom_ca_and_exchanges_encrypted_bytes() {
 fn tls_server_accepts_verified_clients_and_exchanges_encrypted_bytes() {
     use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
     use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::process::Command;
@@ -826,16 +694,15 @@ fn tls_server_accepts_verified_clients_and_exchanges_encrypted_bytes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsServer = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseTlsServer").unwrap();
-    let arguments = CString::new(format!(
-        "[{port},\"{cert_hex}\",\"{key_hex}\",\"{client_ca_hex}\"]"
-    ))
-    .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(
+        &bundle,
+        vec![
+            thaw_js::host::Native::Number(port as f64),
+            thaw_js::host::Native::Str(cert_hex),
+            thaw_js::host::Native::Str(key_hex),
+            thaw_js::host::Native::Str(client_ca_hex),
+        ],
+    );
     assert_eq!(
         result,
         format!(
@@ -853,17 +720,11 @@ fn tls_server_accepts_verified_clients_and_exchanges_encrypted_bytes() {
 #[test]
 fn file_urls_resolve_relative_paths_from_current_working_directory() {
     // Unrun regression: use a deterministic cwd without changing host process state.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_file_url_cwd");
     fs::write(dir.join("index.js"), "var url = require('node:url'); module.exports = function () { var original = process.cwd; process.cwd = function () { return '/work/current'; }; try { return [url.pathToFileURL('file.txt').href, url.pathToFileURL('../a b#%.txt').href, url.pathToFileURL('').href, url.pathToFileURL('/absolute/a b').href, url.fileURLToPath(url.pathToFileURL('./a b#%.txt')), url.pathToFileURL('directory/').href]; } finally { process.cwd = original; } };").unwrap();
     let empty_node_modules = temp_registry("builtin_file_url_cwd_node_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFileUrl = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseFileUrl").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"["file:///work/current/file.txt","file:///work/a%20b%23%25.txt","file:///work/current","file:///absolute/a%20b","/work/current/a b#%.txt","file:///work/current/directory/"]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
@@ -873,7 +734,6 @@ fn file_urls_resolve_relative_paths_from_current_working_directory() {
 #[test]
 fn form_data_preserves_file_metadata_and_utf8_multipart_parameters() {
     // Unrun regression for the shared append/set storage and body decoder.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("form_data_file_metadata");
     fs::write(dir.join("index.js"), r#"module.exports = async function () {
       var form = new FormData(), blob = new Blob([new Uint8Array([0, 255, 13])], { type: 'application/custom' });
@@ -888,10 +748,7 @@ fn form_data_preserves_file_metadata_and_utf8_multipart_parameters() {
     };"#).unwrap();
     let modules = temp_registry("form_data_file_metadata_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFormData = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseFormData").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[[true,"日本語.bin","blob","変更.bin",1,true,42,"日本語.bin"],"日本語.bin","application/custom",[0,255,13],"text/plain","hello"]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
@@ -899,7 +756,6 @@ fn form_data_preserves_file_metadata_and_utf8_multipart_parameters() {
 
 #[test]
 fn node_util_text_encoding_exports_and_web_callers_share_fixed_utf8_paths() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("util_text_encoding_contracts");
     fs::write(
         dir.join("index.js"),
@@ -926,20 +782,40 @@ module.exports = async function () {
     let empty_node_modules = temp_registry("util_text_encoding_contracts_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseUtilText = module.exports;"
-    );
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseUtilText").unwrap().as_ptr(),
-        CString::new("[]").unwrap().as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[true,true,{"read":3,"written":5},[65,240,159,152,128],"TypeError",true,"B","Blob","Response","Request",65279,"€","😀A"]"#
     );
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+mod qjs_pending_web_platform {
+    use super::*;
+
+    // thaw-js: vm context host receiver contract (vm family): "vm host receiver unchanged"
+    #[test]
+    fn vm_builtin_runs_scripts_in_contexts_and_compiles_functions() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_vm");
+        fs::write(dir.join("index.js"), "var vm = require('node:vm'); module.exports = async function () { var receiverSandbox = { marker: 17 }, receiverContext = vm.createContext(receiverSandbox); if (vm.runInContext('this === globalThis', receiverContext) !== true) throw new Error('vm context receiver'); if (vm.runInContext(\"'use strict'; this === globalThis\", receiverContext) !== true) throw new Error('vm strict context receiver'); if (vm.runInContext('(() => this === globalThis)()', receiverContext) !== true) throw new Error('vm lexical context receiver'); if (vm.runInContext('this.marker += 1; this.marker', receiverContext) !== 18 || receiverSandbox.marker !== 18) throw new Error('vm receiver property'); if (new vm.Script('this === globalThis').runInContext(receiverContext) !== true) throw new Error('vm Script receiver'); if (vm.runInNewContext('this === globalThis', {}) !== true || new vm.Script('this === globalThis').runInNewContext({}) !== true) throw new Error('vm fresh receiver'); if (vm.runInThisContext('this === globalThis') !== true) throw new Error('vm host receiver unchanged'); var invalidContext; try { vm.runInContext('1', {}); } catch (error) { invalidContext = error; } if (!(invalidContext instanceof TypeError)) throw new Error('vm context validation unchanged'); var sandbox = { value: 3 }; var context = vm.createContext(sandbox); var script = new vm.Script('value *= 4; created = value + 1; value', { filename: 'sample.js' }); var contextual = script.runInContext(context); var fresh = vm.runInNewContext('input + 2', { input: 5 }); var current = vm.runInThisContext('6 * 7'); var add = vm.compileFunction('return left + right;', ['left', 'right'], { filename: 'add.js' }); var memory = await vm.measureMemory(); var cached = script.createCachedData(); return [contextual, sandbox.value, sandbox.created, fresh, current, add(8, 9), vm.isContext(context), vm.isContext({}), cached.toString().includes('value *= 4'), script.cachedDataRejected, memory.total.jsMemoryEstimate > 0, vm.getDefaultContext() === globalThis, typeof vm.constants.DONT_CONTEXTIFY]; };").unwrap();
+        let empty_node_modules = temp_registry("builtin_vm_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseVm = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseVm").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[12,12,13,7,42,17,true,false,true,null,true,true,"symbol"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
 }

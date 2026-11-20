@@ -47,8 +47,7 @@ return out;
 fn l_vm_objects() {
     // expected: node22
     assert_eq!(
-        // QuickJS: thaw-js parity gap, vm family (PR B).
-        p2c_run_qjs("l_vm_objects",r#####"const vm = require('node:vm');
+        p2c_run("l_vm_objects",r#####"const vm = require('node:vm');
 const out = {};
 const proto = { inherited: 'p' };
 const sb = Object.create(proto);
