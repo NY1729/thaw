@@ -1596,6 +1596,7 @@ impl Interp {
         it.install_bigint();
         it.install_numfmt();
         it.install_proxy();
+        builtins::install_util_brand(&mut it);
         it.install_reflect();
         it.run_prelude(builtins::PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js prelude must evaluate"));

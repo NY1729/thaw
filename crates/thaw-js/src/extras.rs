@@ -184,7 +184,8 @@ pub(crate) const EXTRAS: &str = r#"
   function weakCollection(name, isMap) {
     var C = function (iterable) {
       if (!(this instanceof C)) throw new TypeError("Constructor " + name + " requires 'new'");
-      def(this, '__store', new Map());
+      // the store's kind is the brand `util.types.isWeakMap` / `isWeakSet` read (builtins.rs plain_brand)
+      def(this, '__store', isMap ? new Map() : new Set());
       if (iterable !== undefined && iterable !== null) {
         var items = Array.isArray(iterable) ? iterable : Array.from(iterable);
         for (var i = 0; i < items.length; i++) {
@@ -203,7 +204,7 @@ pub(crate) const EXTRAS: &str = r#"
       def(P, 'set', function set(k, v) { if (!isObject(k)) throw new TypeError(bad); this.__store.set(k, v); return this; });
       def(P, 'get', function get(k) { return this.__store.get(k); });
     } else {
-      def(P, 'add', function add(k) { if (!isObject(k)) throw new TypeError(bad); this.__store.set(k, true); return this; });
+      def(P, 'add', function add(k) { if (!isObject(k)) throw new TypeError(bad); this.__store.add(k); return this; });
     }
     def(P, 'has', function has(k) { return this.__store.has(k); });
     def(P, 'delete', function (k) { return this.__store['delete'](k); });
@@ -643,50 +644,63 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   };
 
   // ----- util.types (the registry's node:util polyfill reads globalThis.__thaw_util_types) -----
-  var tag = function (v) { return Object.prototype.toString.call(v); };
+  // Each check is a brand check on the internal class (`__thaw_brand`, builtins.rs), so fakes and other realms
+  // answer as in Node. Not representable yet, so always false: isSymbolObject (a boxed Symbol is the symbol
+  // itself here), isArgumentsObject (arguments is an Array), isExternal, isModuleNamespaceObject, isKeyObject,
+  // isCryptoKey (no KeyObject / CryptoKey in thaw-js), isFloat16Array (no Float16Array).
+  var brand = __thaw_brand;
+  function one(name) { return function (v) { return brand(v) === name; }; }
+  function any(names) { return function (v) { return names.indexOf(brand(v)) !== -1; }; }
+  var TYPED = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'];
+  var never = function () { return false; };
   var utilTypes = {
-    isDate: function (v) { return v instanceof Date; },
-    isRegExp: function (v) { return v instanceof RegExp; },
-    isMap: function (v) { return v instanceof Map; },
-    isSet: function (v) { return v instanceof Set; },
-    isWeakMap: function (v) { return v instanceof WeakMap; },
-    isWeakSet: function (v) { return v instanceof WeakSet; },
-    isPromise: function (v) { return v instanceof Promise; },
-    isArrayBuffer: function (v) { return v instanceof ArrayBuffer; },
-    isAnyArrayBuffer: function (v) { return v instanceof ArrayBuffer || v instanceof SharedArrayBuffer; },
-    isArrayBufferView: function (v) { return ArrayBuffer.isView(v); },
-    isDataView: function (v) { return v instanceof DataView; },
-    isTypedArray: function (v) { return ArrayBuffer.isView(v) && !(v instanceof DataView); },
-    isUint8Array: function (v) { return v instanceof Uint8Array; },
-    isUint8ClampedArray: function (v) { return v instanceof Uint8ClampedArray; },
-    isUint16Array: function (v) { return v instanceof Uint16Array; },
-    isUint32Array: function (v) { return v instanceof Uint32Array; },
-    isInt8Array: function (v) { return v instanceof Int8Array; },
-    isInt16Array: function (v) { return v instanceof Int16Array; },
-    isInt32Array: function (v) { return v instanceof Int32Array; },
-    isFloat32Array: function (v) { return v instanceof Float32Array; },
-    isFloat64Array: function (v) { return v instanceof Float64Array; },
-    isBigInt64Array: function (v) { return v instanceof BigInt64Array; },
-    isBigUint64Array: function (v) { return v instanceof BigUint64Array; },
-    isNativeError: function (v) { return v instanceof Error; },
-    isArgumentsObject: function (v) { return tag(v) === '[object Arguments]'; },
-    isNumberObject: function (v) { return tag(v) === '[object Number]' && typeof v === 'object'; },
-    isStringObject: function (v) { return tag(v) === '[object String]' && typeof v === 'object'; },
-    isBooleanObject: function (v) { return tag(v) === '[object Boolean]' && typeof v === 'object'; },
-    isBigIntObject: function (v) { return tag(v) === '[object BigInt]' && typeof v === 'object'; },
-    isSymbolObject: function (v) { return tag(v) === '[object Symbol]' && typeof v === 'object'; },
-    isBoxedPrimitive: function () { return false; },
-    isAsyncFunction: function (v) { return tag(v) === '[object AsyncFunction]'; },
-    isGeneratorFunction: function (v) { return tag(v) === '[object GeneratorFunction]'; },
-    isGeneratorObject: function (v) { return tag(v) === '[object Generator]'; },
-    isExternal: function () { return false; },
+    isDate: one('Date'),
+    isRegExp: one('RegExp'),
+    isMap: one('Map'),
+    isSet: one('Set'),
+    isWeakMap: one('WeakMap'),
+    isWeakSet: one('WeakSet'),
+    isPromise: one('Promise'),
+    isArrayBuffer: one('ArrayBuffer'),
+    isSharedArrayBuffer: one('SharedArrayBuffer'),
+    isAnyArrayBuffer: any(['ArrayBuffer', 'SharedArrayBuffer']),
+    isArrayBufferView: any(TYPED.concat(['DataView'])),
+    isDataView: one('DataView'),
+    isTypedArray: any(TYPED),
+    isUint8Array: one('Uint8Array'),
+    isUint8ClampedArray: one('Uint8ClampedArray'),
+    isUint16Array: one('Uint16Array'),
+    isUint32Array: one('Uint32Array'),
+    isInt8Array: one('Int8Array'),
+    isInt16Array: one('Int16Array'),
+    isInt32Array: one('Int32Array'),
+    isFloat16Array: never,
+    isFloat32Array: one('Float32Array'),
+    isFloat64Array: one('Float64Array'),
+    isBigInt64Array: one('BigInt64Array'),
+    isBigUint64Array: one('BigUint64Array'),
+    isNativeError: one('Error'),
+    isArgumentsObject: never,
+    isNumberObject: one('Number'),
+    isStringObject: one('String'),
+    isBooleanObject: one('Boolean'),
+    isBigIntObject: one('BigInt'),
+    isSymbolObject: never,
+    isBoxedPrimitive: any(['Number', 'String', 'Boolean', 'BigInt']),
+    isAsyncFunction: any(['AsyncFunction', 'AsyncGeneratorFunction']),
+    isGeneratorFunction: any(['GeneratorFunction', 'AsyncGeneratorFunction']),
+    isGeneratorObject: one('Generator'),
+    isMapIterator: one('MapIterator'),
+    isSetIterator: one('SetIterator'),
+    isExternal: never,
     isProxy: function (v) { return __thaw_is_proxy(v); },
-    isModuleNamespaceObject: function () { return false; },
-    isKeyObject: function () { return false; },
-    isCryptoKey: function () { return false; }
+    isModuleNamespaceObject: never,
+    isKeyObject: never,
+    isCryptoKey: never
   };
-  utilTypes.default = utilTypes;
-  utilTypes.__esModule = true;
+  // Not enumerable (Node's util.types has no default / __esModule); the registry's util polyfill assigns them again.
+  def(utilTypes, 'default', utilTypes);
+  def(utilTypes, '__esModule', true);
   def(globalThis, '__thaw_util_types', utilTypes);
 
   // ----- Iterator global and iterator helpers. Iterator.prototype is the IterProto base of the
