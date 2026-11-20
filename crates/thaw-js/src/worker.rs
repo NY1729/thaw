@@ -454,6 +454,11 @@ fn hex(bytes: &[u8]) -> String {
 /// A console line (`text` with its newline) of a worker whose parent captures that fd: sent to the parent and true;
 /// false when it stays on the process's own fd (the default).
 pub(crate) fn capture_line(it: &Interp, fd: u8, text: &str) -> bool {
+    capture_bytes(it, fd, text.as_bytes())
+}
+
+/// The bytes of a worker's write to fd 1 or 2, sent to the parent exactly as given when the parent captures that fd.
+pub(crate) fn capture_bytes(it: &Interp, fd: u8, bytes: &[u8]) -> bool {
     let Some(side) = &it.worker.side else {
         return false;
     };
@@ -463,7 +468,7 @@ pub(crate) fn capture_line(it: &Interp, fd: u8, text: &str) -> bool {
         side.capture_err
     };
     if on {
-        to_parent(it, Evt::Stdio(fd, hex(text.as_bytes())));
+        to_parent(it, Evt::Stdio(fd, hex(bytes)));
     }
     on
 }
@@ -795,10 +800,12 @@ pub(crate) fn install(it: &mut Interp) {
             it.to_str(&arg(a, 1)).to_string(),
             arg(a, 2).truthy(),
         );
-        if let Some(w) = it.worker.workers.get(&h) {
-            let _ = w.tx.send(Cmd::Stdin(hex, end));
-        }
-        Ok(Value::Undefined)
+        // false when the worker is gone (exited or its thread dropped the channel): the shim fails the write
+        let sent = match it.worker.workers.get(&h) {
+            Some(w) if !w.exited => w.tx.send(Cmd::Stdin(hex, end)).is_ok(),
+            _ => false,
+        };
+        Ok(Value::Bool(sent))
     });
     g.declare("__thaw_worker_stdin", f, true);
     // postMessageToThread (W-D): the parent sends to a worker (`source` is the sender's thread id) and answers a

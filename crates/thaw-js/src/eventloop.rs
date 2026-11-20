@@ -418,6 +418,24 @@ impl Interp {
             .and_then(|()| std::io::Write::flush(&mut out));
     }
 
+    /// `process.stdout/stderr.write` in a worker: the bytes as written (no line split, no added newline), to the parent
+    /// when it captures this fd, else to the process's own fd.
+    pub(crate) fn emit_worker_raw(&mut self, fd: u8, bytes: &[u8]) {
+        self.flush_partial();
+        if crate::worker::capture_bytes(self, fd, bytes) {
+            return;
+        }
+        if fd == 1 {
+            let mut out = std::io::stdout().lock();
+            let _ = std::io::Write::write_all(&mut out, bytes)
+                .and_then(|()| std::io::Write::flush(&mut out));
+        } else {
+            let mut err = std::io::stderr().lock();
+            let _ = std::io::Write::write_all(&mut err, bytes)
+                .and_then(|()| std::io::Write::flush(&mut err));
+        }
+    }
+
     /// Makes `shared` this realm's process state (`process.exitCode`, the exit request). Call before any script runs.
     pub(crate) fn share_process_state(
         &mut self,
@@ -2492,7 +2510,10 @@ impl Interp {
                 };
                 // a main-thread stream writes its bytes as they come; a worker's output is captured by its parent
                 let direct = it.rt.stream && !crate::worker::is_worker(it);
-                if is_err {
+                if crate::worker::is_worker(it) {
+                    let bytes = raw.clone().unwrap_or_else(|| text.as_bytes().to_vec());
+                    it.emit_worker_raw(if is_err { 2 } else { 1 }, &bytes);
+                } else if is_err {
                     if direct {
                         it.emit_err_raw(raw.as_deref().unwrap_or(text.as_bytes()));
                     } else {

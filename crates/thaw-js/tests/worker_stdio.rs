@@ -169,3 +169,88 @@ fn worker_stream_shim_is_scan_clean_and_present() {
         "function function true"
     );
 }
+
+#[test]
+fn worker_stdio_stream_finished_and_ended_flags() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const worker = new wt.Worker(`process.stdin.resume(); process.stdin.on('end', () => { process.stdout.write('done'); });`, { eval: true, stdin: true, stdout: true, stderr: true });
+        const log = [];
+        log.push(worker.stdin.writableFinished, worker.stdout.readableEnded, worker.stderr.readableEnded);
+        worker.stdout.resume();
+        worker.stderr.resume();
+        worker.stdin.end('x');
+        log.push(worker.stdin.writableFinished);
+        await new Promise((resolve) => { worker.on('exit', () => resolve()); });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        log.push(worker.stdin.writableFinished, worker.stdout.readableEnded, worker.stderr.readableEnded);
+        console.log(log.join(','));
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(run_main(src), "false,false,false,false,true,true,true");
+}
+
+#[test]
+fn worker_stdio_stdin_write_errors_surface_once() {
+    // Not checked against Node: Node has no host sink to make fail. The expectations are the W5 error contract: a
+    // throwing sink and a sink that reports the worker as gone each fail the write once, with the write callback and
+    // one 'error' event.
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const original = globalThis.__thaw_worker_stdin;
+        const run = async (sink) => {
+          const worker = new wt.Worker(`require('node:worker_threads').parentPort.on('message', function() {});`, { eval: true, stdin: true });
+          await new Promise((resolve) => worker.on('online', resolve));
+          let errors = 0;
+          let emitted = '';
+          worker.stdin.on('error', (e) => { errors++; emitted = e.message; });
+          globalThis.__thaw_worker_stdin = sink;
+          const callback = await new Promise((resolve) => {
+            worker.stdin.write(new Uint8Array([1]), (e) => resolve(e ? (e.code || 'error') + ':' + e.message : 'ok'));
+          });
+          globalThis.__thaw_worker_stdin = original;
+          const exited = new Promise((resolve) => { worker.on('exit', resolve); });
+          await worker.terminate();
+          const code = await exited;
+          return [callback, errors, emitted, code].join('|');
+        };
+        const thrown = await run(() => { throw new Error('host stdin failure'); });
+        const gone = await run(() => false);
+        console.log(thrown + ' || ' + gone);
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(
+        run_main(src),
+        "error:host stdin failure|1|host stdin failure|1 || ERR_WORKER_NOT_RUNNING:Worker stdin is not available|1|Worker stdin is not available|1"
+    );
+}
+
+#[test]
+fn worker_stdio_stdout_set_encoding_joins_split_utf8() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const worker = new wt.Worker(`process.stdout.write(Buffer.from([226, 130])); process.stdout.write(Buffer.from([172]));`, { eval: true, stdout: true });
+        const events = [];
+        worker.stdout.setEncoding('utf8');
+        worker.stdout.on('data', (c) => events.push(JSON.stringify(c)));
+        worker.stdout.on('end', () => events.push('end'));
+        await new Promise((resolve) => { worker.on('exit', (c) => resolve(c)); });
+        console.log(events.join(',') + ',' + worker.stdout.readableEnded);
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(run_main(src), r#""€",end,true"#);
+}
+
+#[test]
+fn worker_stdio_process_write_is_byte_exact_when_captured() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const worker = new wt.Worker("process.stdout.write(Buffer.from([250, 0, 255, 128, 195, 40, 251])); process.stderr.write(Buffer.from([251, 40, 195, 128, 255, 0, 250])); process.stdout.write('a'); process.stdout.write(Buffer.from([10]));", { eval: true, stdout: true, stderr: true });
+        const hex = (c) => Array.from(c, (b) => b.toString(16).padStart(2, '0')).join('');
+        let out = '';
+        let err = '';
+        worker.stdout.on('data', (c) => { out += hex(c); });
+        worker.stderr.on('data', (c) => { err += hex(c); });
+        await new Promise((resolve) => { worker.on('exit', (c) => resolve(c)); });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        console.log(out + ' ' + err);
+      })().catch((e) => console.log('failed ' + e));"#;
+    assert_eq!(run_main(src), "fa00ff80c328fb610a fb28c380ff00fa");
+}
