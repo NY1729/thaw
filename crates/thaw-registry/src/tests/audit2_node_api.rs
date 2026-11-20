@@ -1,7 +1,6 @@
 // Contract tests for the Node API surface fixes (audit2 group E). Expected values are real Node 22 output.
 
 fn run_node_api_js(tag: &str, body: &str) -> String {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry(tag);
     fs::write(
         dir.join("index.js"),
@@ -11,17 +10,7 @@ fn run_node_api_js(tag: &str, body: &str) -> String {
     let empty_node_modules = temp_registry(&format!("{tag}_node_modules"));
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNodeApi = module.exports;"
-    );
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseNodeApi").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }
-        .to_string_lossy()
-        .into_owned();
+    let result = run_js(&bundle);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
     result
