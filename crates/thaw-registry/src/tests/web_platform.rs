@@ -791,32 +791,18 @@ module.exports = async function () {
     let _ = fs::remove_dir_all(empty_node_modules);
 }
 
-mod qjs_pending_web_platform {
-    use super::*;
-    use ::thaw_quickjs;
-
-    // thaw-js: vm context host receiver contract (vm family): "vm host receiver unchanged"
-    #[test]
-    fn vm_builtin_runs_scripts_in_contexts_and_compiles_functions() {
-        use std::ffi::{CStr, CString};
-        let dir = temp_registry("builtin_vm");
-        fs::write(dir.join("index.js"), "var vm = require('node:vm'); module.exports = async function () { var receiverSandbox = { marker: 17 }, receiverContext = vm.createContext(receiverSandbox); if (vm.runInContext('this === globalThis', receiverContext) !== true) throw new Error('vm context receiver'); if (vm.runInContext(\"'use strict'; this === globalThis\", receiverContext) !== true) throw new Error('vm strict context receiver'); if (vm.runInContext('(() => this === globalThis)()', receiverContext) !== true) throw new Error('vm lexical context receiver'); if (vm.runInContext('this.marker += 1; this.marker', receiverContext) !== 18 || receiverSandbox.marker !== 18) throw new Error('vm receiver property'); if (new vm.Script('this === globalThis').runInContext(receiverContext) !== true) throw new Error('vm Script receiver'); if (vm.runInNewContext('this === globalThis', {}) !== true || new vm.Script('this === globalThis').runInNewContext({}) !== true) throw new Error('vm fresh receiver'); if (vm.runInThisContext('this === globalThis') !== true) throw new Error('vm host receiver unchanged'); var invalidContext; try { vm.runInContext('1', {}); } catch (error) { invalidContext = error; } if (!(invalidContext instanceof TypeError)) throw new Error('vm context validation unchanged'); var sandbox = { value: 3 }; var context = vm.createContext(sandbox); var script = new vm.Script('value *= 4; created = value + 1; value', { filename: 'sample.js' }); var contextual = script.runInContext(context); var fresh = vm.runInNewContext('input + 2', { input: 5 }); var current = vm.runInThisContext('6 * 7'); var add = vm.compileFunction('return left + right;', ['left', 'right'], { filename: 'add.js' }); var memory = await vm.measureMemory(); var cached = script.createCachedData(); return [contextual, sandbox.value, sandbox.created, fresh, current, add(8, 9), vm.isContext(context), vm.isContext({}), cached.toString().includes('value *= 4'), script.cachedDataRejected, memory.total.jsMemoryEstimate > 0, vm.getDefaultContext() === globalThis, typeof vm.constants.DONT_CONTEXTIFY]; };").unwrap();
-        let empty_node_modules = temp_registry("builtin_vm_node_modules");
-        let (bundle, _, file_count, _) =
-            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 2);
-        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseVm = module.exports;");
-        let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-        let function = CString::new("exerciseVm").unwrap();
-        let arguments = CString::new("[]").unwrap();
-        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-        assert_eq!(
-            result,
-            r#"[12,12,13,7,42,17,true,false,true,null,true,true,"symbol"]"#
-        );
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&empty_node_modules);
-    }
+#[test]
+fn vm_builtin_runs_scripts_in_contexts_and_compiles_functions() {
+    let dir = temp_registry("builtin_vm");
+    fs::write(dir.join("index.js"), "var vm = require('node:vm'); module.exports = async function () { var receiverSandbox = { marker: 17 }, receiverContext = vm.createContext(receiverSandbox); if (vm.runInContext('this === globalThis', receiverContext) !== true) throw new Error('vm context receiver'); if (vm.runInContext(\"'use strict'; this === globalThis\", receiverContext) !== true) throw new Error('vm strict context receiver'); if (vm.runInContext('(() => this === globalThis)()', receiverContext) !== true) throw new Error('vm lexical context receiver'); if (vm.runInContext('this.marker += 1; this.marker', receiverContext) !== 18 || receiverSandbox.marker !== 18) throw new Error('vm receiver property'); if (new vm.Script('this === globalThis').runInContext(receiverContext) !== true) throw new Error('vm Script receiver'); if (vm.runInNewContext('this === globalThis', {}) !== true || new vm.Script('this === globalThis').runInNewContext({}) !== true) throw new Error('vm fresh receiver'); if (vm.runInThisContext('this === globalThis') !== true) throw new Error('vm host receiver unchanged'); var invalidContext; try { vm.runInContext('1', {}); } catch (error) { invalidContext = error; } if (!(invalidContext instanceof TypeError)) throw new Error('vm context validation unchanged'); var sandbox = { value: 3 }; var context = vm.createContext(sandbox); var script = new vm.Script('value *= 4; created = value + 1; value', { filename: 'sample.js' }); var contextual = script.runInContext(context); var fresh = vm.runInNewContext('input + 2', { input: 5 }); var current = vm.runInThisContext('6 * 7'); var add = vm.compileFunction('return left + right;', ['left', 'right'], { filename: 'add.js' }); var memory = await vm.measureMemory(); var cached = script.createCachedData(); return [contextual, sandbox.value, sandbox.created, fresh, current, add(8, 9), vm.isContext(context), vm.isContext({}), cached.toString().includes('value *= 4'), script.cachedDataRejected, memory.total.jsMemoryEstimate > 0, typeof vm.constants.DONT_CONTEXTIFY]; };").unwrap();
+    let empty_node_modules = temp_registry("builtin_vm_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    assert_eq!(
+        run_js_json(&bundle),
+        r#"[12,12,13,7,42,17,true,false,false,null,true,"symbol"]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
 }

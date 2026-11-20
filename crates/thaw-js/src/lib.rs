@@ -1578,6 +1578,8 @@ impl Interp {
             eval_completion: None,
         };
         it.global.kind.set(SK_VAR);
+        // a top-level script's `this` is globalThis (vm realms do the same in `vm::sub_realm`)
+        it.global.set_this(Value::Object(it.global_object.clone()));
         it.global_accessors = it.node_accessor_slots();
         it.install_builtins();
         it.install_call_frames();
