@@ -186,6 +186,40 @@ fn run_js_get(bundle: &str, path: &str) -> String {
         .unwrap()
 }
 
+/// The JSON of the JS expression `expr` evaluated after `bundle` loads, awaited like `Package::call`
+/// (`run_js_get` does not await). `expr` sees the package exports as `exports` and can read globals and
+/// promise-valued exports. It runs as a closure set on `exports` (`__thaw_probe`). Errors come back as
+/// `ERROR: {error}`. 256 MB stack, like `run_js_outcome`.
+fn run_js_probe(bundle: &str, expr: &str) -> String {
+    let (bundle, expr) = (bundle.to_string(), expr.to_string());
+    std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || match thaw_js::host::Package::load(&bundle) {
+            Ok(mut package) => {
+                let exports = package.exports();
+                let installed = {
+                    let it = package.interp();
+                    it.eval_function(&format!(
+                        "function () {{ return (function (exports) {{ return ({expr}); }})(this); }}"
+                    ))
+                        .and_then(|probe| it.set(&exports, "__thaw_probe", probe))
+                        .is_ok()
+                };
+                if !installed {
+                    return "ERROR: probe setup failed".to_string();
+                }
+                package
+                    .call("__thaw_probe", &[])
+                    .map(|value| value.to_json())
+                    .unwrap_or_else(|error| format!("ERROR: {error}"))
+            }
+            Err(error) => format!("ERROR: {error}"),
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
 /// Writes `files` (path relative to a fresh fixture dir named `test_name` -> exact contents) and returns the dir.
 /// The worker-file tests put real files on disk so `new Worker(<absolute path>)` loads them through the same
 /// loader a product worker uses.
