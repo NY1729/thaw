@@ -314,6 +314,33 @@ thread_local! {
     static LOOP_IDLE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
 }
 
+thread_local! {
+    // live `loop_inner` calls on this thread: a loop entered from a native callback nests inside the outer one
+    static LOOP_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// One live `loop_inner` on this thread. `outermost` is true for the first, the only one that may reclaim the arena.
+struct LoopDepth {
+    outermost: bool,
+}
+
+impl LoopDepth {
+    fn enter() -> Self {
+        let outermost = LOOP_DEPTH.with(|depth| {
+            let outer = depth.get() == 0;
+            depth.set(depth.get() + 1);
+            outer
+        });
+        LoopDepth { outermost }
+    }
+}
+
+impl Drop for LoopDepth {
+    fn drop(&mut self) {
+        let _ = LOOP_DEPTH.try_with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
 fn mark_loop_started() {
     LOOP_START.with(|s| {
         if s.get().is_none() {
@@ -1578,11 +1605,17 @@ impl Interp {
 
     fn loop_inner(&mut self) -> R<()> {
         mark_loop_started();
+        let depth = LoopDepth::enter();
         self.run_jobs()?;
         let mut first = true;
         while self.loop_alive() {
             if crate::gc_registry::due() {
                 self.gc_safe_point();
+            }
+            // Reclaim per-turn garbage, as the QuickJS loop does at its turn boundary. Only the outermost loop does:
+            // a nested loop runs inside a native callback whose frame may hold arena pointers no root covers.
+            if depth.outermost {
+                thaw_arena::thaw_arena_reset_if_grown();
             }
             self.check_interrupt()?;
             // ponytail: wall-clock slice, taken only at an iteration boundary so timer/immediate order within this
