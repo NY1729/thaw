@@ -6035,3 +6035,30 @@ fn array_buffer_is_view_json_operand_checks_buffer_shape_and_live_handles() {
     assert!(body.contains("__thaw_json_is_buffer"), "{body}");
     assert!(body.contains("__thaw_js_handle_id__"), "{body}");
 }
+
+// Pins (passing before and after the fix): a tag with a rest parameter receives every substitution,
+// packed after the strings array, and a fixed-parameter tag still takes only its declared count.
+#[test]
+fn tagged_template_passes_every_value_to_a_rest_parameter_tag() {
+    let program = lower(
+        r#"function tag(strings: TemplateStringsArray, ...params: any[]): string { return String(params.length); }
+        function main(): void { console.log(tag`a${1}b${"x"}c`); }"#,
+    );
+    let main = program.functions.iter().find(|f| f.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("ArrayLit([Call("), "{body}");
+    assert!(body.contains("Lit(F64(1.0))") && body.contains("Lit(Str(\"x\"))"), "{body}");
+    assert!(!body.contains("__thaw_template_arg_"), "{body}");
+}
+
+#[test]
+fn tagged_template_with_fixed_parameters_keeps_the_declared_count() {
+    let program = lower(
+        r#"function tag(strings: TemplateStringsArray, value: number): string { return String(value); }
+        function main(): void { console.log(tag`a${21}b${1}c`); }"#,
+    );
+    let main = program.functions.iter().find(|f| f.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("Let(\"__thaw_template_arg_"), "{body}");
+    assert!(body.contains("Var(\"__thaw_template_arg_"), "{body}");
+}

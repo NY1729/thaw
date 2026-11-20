@@ -1599,11 +1599,18 @@ impl Interp {
                     }
                 }
                 if matches!(&t, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Global)) {
-                    let names = it
-                        .global_own_names(false)
-                        .into_iter()
-                        .map(|k| Value::Str(k.into()))
-                        .collect();
+                    // the realm's builtins, then the sandbox's own names that are not already listed
+                    let mut keys = it.global_own_names(false);
+                    if let Value::Object(g) = &t {
+                        if let Some(sb) = crate::vm::sandbox_of(g) {
+                            for p in sb.raw_props.borrow().iter() {
+                                if !p.key.starts_with("@@") && !keys.contains(&p.key) {
+                                    keys.push(p.key.clone());
+                                }
+                            }
+                        }
+                    }
+                    let names = keys.into_iter().map(|k| Value::Str(k.into())).collect();
                     return Ok(it.array(names));
                 }
                 // Insertion order over all own string keys, enumerable or not (V8 order). Array and
@@ -1699,6 +1706,18 @@ impl Interp {
                     };
                 }
                 o.force_key(&key);
+                // a context's global: a descriptor of a sandbox property is the sandbox's
+                let o = match crate::vm::sandbox_of(&o) {
+                    Some(sb)
+                        if it.has_own_property(
+                            &Value::Object(sb.clone()),
+                            &Value::Str(key.clone().into()),
+                        )? =>
+                    {
+                        sb
+                    }
+                    _ => o,
+                };
                 if matches!(&*o.kind.borrow(), Kind::Global) {
                     if let Some(g) = it.global_prop(&key) {
                         let d = it.plain();
@@ -3305,6 +3324,13 @@ impl Interp {
                 self.proxy_own_descriptor(target, key)?,
                 Value::Undefined
             ));
+        }
+        if let Value::Object(g) = target {
+            if let Some(sb) = crate::vm::sandbox_of(g) {
+                if self.has_own_property(&Value::Object(sb), key)? {
+                    return Ok(true);
+                }
+            }
         }
         let key = self.key_of(key);
         if matches!(target, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Global))

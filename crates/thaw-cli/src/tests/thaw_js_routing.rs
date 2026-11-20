@@ -992,6 +992,89 @@ fn thaw_js_fallback_error_mode_fails_only_when_the_build_links_quickjs() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Builds `main` under `THAW_JS_FALLBACK=error` on thaw-js; returns the build dir and the output path.
+/// Asserts the native-timer pass succeeded (no retry was recorded) unless `expect_retry`.
+fn native_timer_program_builds(name: &str, main: &str, expect_retry: bool) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-native-timer-{name}-{}", std::process::id()));
+    let registry = dir.join("modules");
+    std::fs::create_dir_all(&registry).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, main).unwrap();
+    let output = dir.join("app");
+    NATIVE_TIMER_RETRIES.with(|retries| retries.borrow_mut().clear());
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let retries = NATIVE_TIMER_RETRIES.with(|retries| retries.borrow().clone());
+    assert_eq!(retries.is_empty(), !expect_retry, "native timer retries: {retries:?}");
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    (dir, output)
+}
+
+#[test]
+fn thaw_js_native_timer_resolve_callback_builds_natively_under_error_mode() {
+    let (dir, output) = native_timer_program_builds(
+        "native-timer-resolve",
+        "async function main(){ await new Promise<void>(r => setTimeout(r, 1)); console.log(\"ok\"); }\n",
+        false,
+    );
+    assert_eq!(thaw_js_run(&output), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_native_timer_microtask_and_immediate_resolve_callbacks_build_natively() {
+    let (dir, output) = native_timer_program_builds(
+        "native-timer-microtask",
+        "async function main(): Promise<void> { await new Promise<void>(r => queueMicrotask(r)); console.log(\"ok\"); }\n",
+        false,
+    );
+    assert_eq!(thaw_js_run(&output), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+    let (dir, output) = native_timer_program_builds(
+        "native-timer-immediate",
+        "async function main(): Promise<void> { await new Promise<void>(r => setImmediate(r)); console.log(\"ok\"); }\n",
+        false,
+    );
+    assert_eq!(thaw_js_run(&output), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_native_timer_sleep_helper_builds_natively() {
+    let (dir, output) = native_timer_program_builds(
+        "native-timer-sleep",
+        "const sleep = (ms: number): Promise<void> => new Promise<void>(r => setTimeout(r, ms));\n\
+         async function main(): Promise<void> { await sleep(5); console.log(\"ok\"); }\n",
+        false,
+    );
+    assert_eq!(thaw_js_run(&output), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_native_timer_race_with_rejecting_timeout_builds_and_runs() {
+    // `setTimeout(rej, 5)` keeps a required reason parameter, so the native pass still retries.
+    let (dir, output) = native_timer_program_builds(
+        "native-timer-race",
+        "async function main(): Promise<void> {\n\
+           const p = new Promise<number>(r => setTimeout(() => r(1), 50));\n\
+           const x = await Promise.race([p, new Promise<number>((_, rej) => setTimeout(rej, 5))]).catch(() => -1);\n\
+           console.log(\"ok\", x);\n\
+         }\n",
+        true,
+    );
+    assert_eq!(thaw_js_run(&output), "ok -1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `tjs-factory` (a function returning a callable, like nanoid's `customAlphabet`) and `tjs-template`
 /// (a function returning a union of two callables, like ejs's `compile`), both kept off the JIT by `Map`.
 fn thaw_js_callable_result_fixture(name: &str, main: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -2638,4 +2721,61 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), EXPECTED);
     assert_eq!(stderr.matches("ExperimentalWarning: SQLite is an experimental feature").count(), 1, "{stderr}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A tagged template on an imported thaw-js function with a rest parameter (`tag(strings, ...params: any[])`,
+/// drizzle's `sql` shape) must pass every interpolated value, in order, not just the strings array.
+/// Builds the program with the named values and checks the output against what Node prints.
+fn thaw_js_tagged_rest_fixture(name: &str, main_body: &str) -> String {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        name,
+        &format!(
+            "import {{ tag }} from 'tjs-tag';\n\
+             function main(): void {{\n\
+               {main_body}\n\
+             }}\n"
+        ),
+        &[(
+            "tjs-tag",
+            "export declare function tag(strings: TemplateStringsArray, ...params: any[]): string;\n",
+            "exports.tag = function tag(strings, ...vals) { return JSON.stringify({ s: Array.from(strings), v: vals }); };\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &["tjs-tag".to_string()], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    let stdout = thaw_js_run(&output);
+    let _ = std::fs::remove_dir_all(dir);
+    stdout
+}
+
+#[test]
+fn thaw_js_tagged_template_rest_passes_every_interpolated_value_in_order() {
+    let stdout = thaw_js_tagged_rest_fixture(
+        "tagged-rest-many",
+        "console.log(tag`a${1}b${\"x\"}c`);",
+    );
+    // Same text real Node prints for the equivalent JavaScript.
+    assert_eq!(stdout, "{\"s\":[\"a\",\"b\",\"c\"],\"v\":[1,\"x\"]}\n");
+}
+
+#[test]
+fn thaw_js_tagged_template_rest_with_one_value() {
+    let stdout = thaw_js_tagged_rest_fixture("tagged-rest-one", "console.log(tag`a${1}b`);");
+    assert_eq!(stdout, "{\"s\":[\"a\",\"b\"],\"v\":[1]}\n");
+}
+
+#[test]
+fn thaw_js_tagged_template_rest_with_no_values() {
+    let stdout = thaw_js_tagged_rest_fixture("tagged-rest-zero", "console.log(tag`abc`);");
+    assert_eq!(stdout, "{\"s\":[\"abc\"],\"v\":[]}\n");
 }

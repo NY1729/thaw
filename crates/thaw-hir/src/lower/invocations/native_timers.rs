@@ -91,12 +91,19 @@ impl<'a> FnLowerer<'a> {
             Expr::Arrow(arrow) => self.lower_contextual_arrow(arrow, &[], None)?,
             other => self.lower_expr(other)?,
         };
-        match self.infer_expr_type(&callback)? {
-            HirType::Function(params, ret)
-                if params.is_empty()
-                    && matches!(*ret, HirType::Void | HirType::F64 | HirType::Bool | HirType::Undefined) => {}
+        let returns_timer_value = |ret: &HirType| matches!(ret, HirType::Void | HirType::F64 | HirType::Bool | HirType::Undefined);
+        // The timer calls its callback with no arguments, so an all-optional callable (a Promise
+        // resolve function) is adapted to the plain zero-argument ABI.
+        let callback = match self.infer_expr_type(&callback)? {
+            HirType::Function(params, ret) if params.is_empty() && returns_timer_value(&ret) => callback,
+            HirType::CallableFunction(params, _, None, ret)
+                if params.iter().all(|ty| matches!(ty, HirType::Optional(_)))
+                    && returns_timer_value(&ret) =>
+            {
+                self.normalize_promise_callback(callback, &[])?
+            }
             other => return Err(format!("native timer callback has type {other:?}")),
-        }
+        };
         let delay = match call.args.get(1) {
             Some(argument) => {
                 let delay = self.lower_expr_with_expected_type(&argument.expr, Some(&HirType::F64))?;
