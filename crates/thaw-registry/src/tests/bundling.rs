@@ -1699,32 +1699,22 @@ fn native_mixed_cjs_dynamic_import_uses_bound_native_ready() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: needs JS global read after load (__thaw_side_module_this); script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_native_mixed_side_effect_only_mjs_keeps_module_this {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn native_mixed_side_effect_only_mjs_keeps_module_this() {
     // Unrun regression: an imported .mjs with no import/export declaration
     // still has native ESM top-level-this semantics in a mixed package.
-    use std::ffi::{CStr, CString};
     let root = temp_registry("native-mixed-sideeffect-mjs");
     let modules = root.join("node_modules");
     let package = modules.join("native-mixed-sideeffect-pkg");
     fs::create_dir_all(&package).unwrap();
     fs::write(package.join("index.mjs"), "import './side.mjs'; import legacy from './legacy.cjs'; export const value = legacy;").unwrap();
-    fs::write(package.join("side.mjs"), "globalThis.__thaw_side_module_this = (this === undefined);").unwrap();
+    fs::write(package.join("side.mjs"), "globalThis.sideModuleThis = (this === undefined);").unwrap();
     fs::write(package.join("legacy.cjs"), "module.exports = 9;").unwrap();
     let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-mixed-sideeffect-pkg", &package, "index.mjs").unwrap();
     assert_eq!(count, 3);
     assert!(bundle.contains("__thaw_register_native_bundle"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.readNativeSideEffect = function() {{ return [module.exports.value, globalThis.__thaw_side_module_this]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"readNativeSideEffect".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[9,true]");
+    assert_eq!(run_js_probe(&bundle, "[exports.value, globalThis.sideModuleThis]"), "[9,true]");
     let _ = fs::remove_dir_all(root);
-}
 }
 
 #[test]
@@ -1969,6 +1959,34 @@ fn native_esm_dynamic_absolute_name_cannot_escape_its_bundle() {
     }).join().unwrap();
 }
 }
+#[test]
+fn native_esm_bundle_name_is_fresh_for_same_key_new_source_on_thaw_js() {
+    // Replacement for the pending QuickJS test above, Node-visible only: two sequential loads of the same
+    // package key from different source each show their own value (no stale per-key bundle is reused). Node 22: 1 then 2.
+    let root = temp_registry("native-esm-fresh-bundle-thawjs");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-fresh-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "export const value = 1;").unwrap();
+    let (first, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
+    fs::write(package.join("index.mjs"), "export const value = 2;").unwrap();
+    let (second, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
+    let values = std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || {
+            let read = |bundle: &str| {
+                let mut loaded = thaw_js::host::Package::load(bundle).expect("loads");
+                loaded.get("value").expect("value").to_json()
+            };
+            (read(&first), read(&second))
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(values, ("1".to_string(), "2".to_string()));
+    let _ = fs::remove_dir_all(root);
+}
+
 // qjs_pending: needs one realm across two loads with a global sequence reset; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_esm_bundle_sequence_ignores_mutable_global_reset {
     use super::*;
@@ -2181,16 +2199,10 @@ fn commonjs_first_native_route_keeps_worker_url_on_legacy_snapshot() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: fails on thaw-js: Package route ERROR: unsupported: esm-live-binding; script route needs __thaw_register_native_bundle
-mod qjs_pending_bundling_commonjs_first_require_preserves_pure_native_namespace_identity_and_live_binding {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn commonjs_first_require_preserves_pure_native_namespace_identity_and_live_binding() {
     // Unrun: a pure ESM dependency keeps its engine namespace identity across
     // synchronous require calls, and a mutable export stays live.
-    use std::ffi::{CStr, CString};
     let root = temp_registry("cjs-first-pure-namespace");
     let modules = root.join("node_modules");
     let package = modules.join("cjs-first-pure-pkg");
@@ -2199,12 +2211,8 @@ fn commonjs_first_require_preserves_pure_native_namespace_identity_and_live_bind
     fs::write(package.join("pure.mjs"), "export let value = 1; export function bump() { value++; }").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-first-pure-pkg", &package, "index.cjs").unwrap();
     assert!(bundle.contains("evalNativeSync"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.pureNamespaceResult = function() {{ return module.exports; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"pureNamespaceResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,1,2]");
+    assert_eq!(run_js_get(&bundle, ""), "[true,1,2]");
     let _ = fs::remove_dir_all(root);
-}
 }
 
 // qjs_pending: needs in-context created-require calls after load; script route fails: __thaw_register_native_bundle is not a function
