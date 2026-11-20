@@ -3328,7 +3328,7 @@ fn os_tty_process_and_fs_host_functions() {
     );
     assert_eq!(
         run(&src).join("|"),
-        "true true|true 68690a|true false 3 string|true|68690a true EBADF|ENOENT ENOSYS|true false"
+        "true true|true 68690a|true false 3 string|true|68690a true EBADF|ENOENT EINVAL|true false"
     );
 }
 
@@ -11816,4 +11816,82 @@ exports.traceMixed = traceMixed;"#;
     // a Node method that no builtin defines, and a process.dlopen call, stay blocked with the set
     assert_eq!(blockers(heap, &known), ["method:getHeapSnapshot"]);
     assert_eq!(blockers(dlopen, &known), ["method:dlopen"]);
+}
+
+/// Fresh scratch directory for the host-fs unit tests below.
+#[cfg(unix)]
+fn fs_unit_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("thaw-js-fs-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[cfg(unix)]
+#[test]
+fn fs_mkdir_mode_is_applied_to_the_new_directory() {
+    use std::os::unix::fs::MetadataExt;
+    let made = fs_unit_dir("mkdir-mode").join("owner-only");
+    let r = crate::sysio::host_fs("mkdir_mode", &made.to_string_lossy(), "448", false);
+    assert!(r.starts_with("{\"ok\":true"), "{r}");
+    // 0o700 under umask 022 keeps the owner bits (group/other bits are masked, not owner's)
+    assert_eq!(std::fs::metadata(&made).unwrap().mode() & 0o777, 0o700);
+}
+
+#[cfg(unix)]
+#[test]
+fn fs_recursive_mkdir_reports_first_created_directory() {
+    let dir = fs_unit_dir("mkdir-first");
+    let deep = dir.join("a").join("one").join("two");
+    let first = dir.join("a");
+    let r = crate::sysio::host_fs("mkdir", &deep.to_string_lossy(), "", true);
+    assert!(
+        r.contains(&format!("\"created\":\"{}\"", first.display())),
+        "{r}"
+    );
+    assert!(deep.is_dir());
+    // nothing created on a second call
+    assert_eq!(
+        crate::sysio::host_fs("mkdir", &deep.to_string_lossy(), "", true),
+        "{\"ok\":true,\"created\":null,\"createdHex\":null}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fs_chown_to_own_ids_succeeds_and_empty_owner_is_einval() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = fs_unit_dir("chown");
+    let file = dir.join("f.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let link = dir.join("l.txt");
+    std::os::unix::fs::symlink(&file, &link).unwrap();
+    let meta = std::fs::metadata(&file).unwrap();
+    let owner = format!("{},{}", meta.uid(), meta.gid());
+    let (f, l) = (
+        file.to_string_lossy().into_owned(),
+        link.to_string_lossy().into_owned(),
+    );
+    assert_eq!(
+        crate::sysio::host_fs("chown", &f, &owner, false),
+        "{\"ok\":true}"
+    );
+    assert_eq!(
+        crate::sysio::host_fs("lchown", &l, &owner, false),
+        "{\"ok\":true}"
+    );
+    assert!(crate::sysio::host_fs("chown", &f, "", false).contains("\"code\":\"EINVAL\""));
+    let opened = crate::sysio::host_fs("fd_open", &f, "r,438", false);
+    let fd = serde_json::from_str::<serde_json::Value>(&opened).unwrap()["fd"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        crate::sysio::host_fs("fd_chown", &fd, &owner, false),
+        "{\"ok\":true}"
+    );
+    assert_eq!(
+        crate::sysio::host_fs("fd_close", &fd, "", false),
+        "{\"ok\":true}"
+    );
 }

@@ -517,10 +517,9 @@ impl Interp {
 // ----- `globalThis.__thaw_fs(operation, path, value, recursive)` -----
 // The synchronous subset of the QuickJS host's filesystem bridge that the registry's `node:fs`
 // shim needs for whole-file reads/writes, directory listing and stat. Descriptor operations
-// (string- and numeric-flag `fd_open`, read/write/stat/sync/truncate/tell/chmod/utimes/statfs) and
-// chown/lchown answer ENOSYS where not ported.
-// ponytail: add the rest when a package needs them; chown/lchown stay ENOSYS until the pinned test
-// `os_tty_process_and_fs_host_functions` is updated (it asserts ENOSYS for chown).
+// (string- and numeric-flag `fd_open`, read/write/stat/sync/truncate/tell/chmod/utimes/statfs/chown) answer
+// ENOSYS where not ported.
+// ponytail: add the rest when a package needs them.
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -1010,7 +1009,6 @@ fn open_numeric_flags(_: &std::path::Path, _: &str, _: u32) -> std::io::Result<s
 
 /// `fd_open` (string flags: `r`, `w`, `a+`, `wx`, ...; numeric `#bits[,mode]`) and the `fd_*` operations
 /// on the files it opened.
-// ponytail: fd_chown is not ported (chown stays ENOSYS, see below)
 fn fd_op(op: &str, p: &std::path::Path, path: &str, value: &str) -> std::io::Result<String> {
     use std::io::{Read, Seek, SeekFrom};
     let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, m.to_string());
@@ -1148,6 +1146,16 @@ fn fd_op(op: &str, p: &std::path::Path, path: &str, value: &str) -> std::io::Res
             }
         }
         #[cfg(unix)]
+        "fd_chown" => {
+            use std::os::fd::AsRawFd;
+            let (uid, gid) = fs_owner_ids(value)?;
+            if unsafe { libc::fchown(file.as_raw_fd(), uid, gid) } == 0 {
+                Ok("{\"ok\":true}".into())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        }
+        #[cfg(unix)]
         "fd_statfs" => {
             use std::os::fd::AsRawFd;
             let fd = file.as_raw_fd();
@@ -1179,6 +1187,88 @@ fn fs_parse_mode(value: &str) -> std::io::Result<u32> {
         Ok(mode) if mode <= 0o7777 => Ok(mode),
         _ => Err(fs_invalid("invalid file mode")),
     }
+}
+
+/// `"uid,gid"`; -1 leaves that id unchanged.
+#[cfg(unix)]
+fn fs_owner_ids(value: &str) -> std::io::Result<(libc::uid_t, libc::gid_t)> {
+    let mut parts = value.split(',');
+    let id = |part: Option<&str>| -> std::io::Result<u32> {
+        let n = part
+            .ok_or_else(|| fs_invalid("missing owner ID"))?
+            .parse::<i64>()
+            .map_err(|_| fs_invalid("invalid owner ID"))?;
+        if n == -1 {
+            Ok(u32::MAX)
+        } else {
+            u32::try_from(n).map_err(|_| fs_invalid("invalid owner ID"))
+        }
+    };
+    let uid = id(parts.next())?;
+    let gid = id(parts.next())?;
+    Ok((uid as libc::uid_t, gid as libc::gid_t))
+}
+
+#[cfg(unix)]
+fn fs_chown(p: &std::path::Path, value: &str, follow: bool) -> std::io::Result<()> {
+    let (uid, gid) = fs_owner_ids(value)?;
+    let c = fs_c_path(p)?;
+    let r = unsafe {
+        if follow {
+            libc::chown(c.as_ptr(), uid, gid)
+        } else {
+            libc::lchown(c.as_ptr(), uid, gid)
+        }
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn fs_create_dir_mode(p: &std::path::Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(mode).create(p)
+}
+
+/// Creates `p` and any missing parents, each with `mode`; returns the first directory actually created.
+#[cfg(unix)]
+fn fs_mkdir_recursive(
+    p: &std::path::Path,
+    mode: u32,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    match fs_create_dir_mode(p, mode) {
+        Ok(()) => Ok(Some(p.to_path_buf())),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && p.is_dir() => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let parent = p
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .ok_or(e)?;
+            let first = fs_mkdir_recursive(parent, mode)?;
+            match fs_create_dir_mode(p, mode) {
+                Ok(()) => Ok(first.or_else(|| Some(p.to_path_buf()))),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && p.is_dir() => Ok(first),
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
+fn fs_mkdir_with_mode(
+    p: &std::path::Path,
+    mode: u32,
+    recursive: bool,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    if !recursive {
+        fs_create_dir_mode(p, mode)?;
+        return Ok(None);
+    }
+    fs_mkdir_recursive(p, mode)
 }
 
 #[cfg(unix)]
@@ -1538,24 +1628,22 @@ pub(crate) fn host_fs(op: &str, path: &str, value: &str, recursive: bool) -> Str
             .open(&p)
             .and_then(|mut f| f.write_all(&unhex(value).unwrap_or_default()))),
         "mkdir" | "mkdir_mode" => {
-            let existed = p.exists();
-            let r = if recursive {
-                std::fs::create_dir_all(&p)
+            let mode = if op == "mkdir" {
+                Ok(0o777)
             } else {
-                std::fs::create_dir(&p)
+                fs_parse_mode(value)
             };
-            r.map(|()| {
-                if existed {
-                    "{\"ok\":true,\"created\":null,\"createdHex\":null}".to_string()
-                } else {
-                    format!(
+            mode.and_then(|mode| fs_mkdir_with_mode(&p, mode, recursive))
+                .map(|created| match created {
+                    Some(c) => format!(
                         "{{\"ok\":true,\"created\":{},\"createdHex\":\"{}\"}}",
-                        q(&p.to_string_lossy()),
-                        hex(&name_bytes(p.as_os_str()))
-                    )
-                }
-            })
+                        q(&c.to_string_lossy()),
+                        hex(&name_bytes(c.as_os_str()))
+                    ),
+                    None => "{\"ok\":true,\"created\":null,\"createdHex\":null}".to_string(),
+                })
         }
+        "chown" | "lchown" => ok(fs_chown(&p, value, op == "chown")),
         "readdir" => readdir_json(&p, value == "typed", recursive),
         "stat" => std::fs::metadata(&p).map(|m| stat_json(&m)),
         "lstat" => std::fs::symlink_metadata(&p).map(|m| stat_json(&m)),
