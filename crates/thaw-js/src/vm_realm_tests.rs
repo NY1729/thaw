@@ -648,3 +648,81 @@ console.log(attempt('const k = 5', a), attempt('k = 6', a));"##
         ]
     );
 }
+
+/// l_vm_objects `hostMutatesDeclared`: the var of a context is a property of its sandbox, so a host write is seen by
+/// the context's function, and that function's write is seen by the host.
+#[test]
+fn vm_host_write_to_declared_var_is_seen_by_context_function() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const c = createContext({});
+runInContext('var counter = 0; function bump() { return ++counter }', c);
+c.counter = 10;
+const r = [runInContext('counter', c)];
+c.bump();
+r.push(c.counter);
+console.log(JSON.stringify(r));"##
+    );
+    assert_eq!(run_lines(&src), vec!["[10,11]".to_string()]);
+}
+
+/// l_vm_async `bump`: a context function called from the host writes its sandbox's var.
+#[test]
+fn vm_function_called_from_host_updates_sandbox_var() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({});
+runInContext('var fnCalls = 0; function bump() { return ++fnCalls }', sb);
+console.log(JSON.stringify([sb.bump(), sb.bump(), sb.fnCalls]));"##
+    );
+    assert_eq!(run_lines(&src), vec!["[1,2,2]".to_string()]);
+}
+
+/// An assignment to an undeclared name in a run creates a property of the sandbox, seen by the host and by the next run.
+#[test]
+fn vm_implicit_global_lands_on_sandbox() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({});
+runInContext('x = 5', sb);
+console.log(JSON.stringify([sb.x, runInContext('x + 1', sb)]));"##
+    );
+    assert_eq!(run_lines(&src), vec!["[5,6]".to_string()]);
+}
+
+/// A second `var d;` (no initializer) keeps the one binding of the sandbox, value and function included.
+#[test]
+fn vm_var_redeclaration_keeps_one_binding() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const sb = createContext({});
+const r = [runInContext('var d = 1; function dget() { return d }', sb), runInContext('var d; d', sb), runInContext('dget()', sb), Object.keys(sb).filter((k) => k === 'd').length];
+console.log(JSON.stringify(r));"##
+    );
+    assert_eq!(run_lines(&src), vec!["[null,1,1,1]".to_string()]);
+}
+
+/// A frozen sandbox refuses the var, so the var stays local to the context's script scope: the run does not throw, the
+/// value is readable in the context, and the sandbox gets no property.
+#[test]
+fn vm_frozen_sandbox_var_is_script_local() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"const f = createContext(Object.freeze({ fz: 1 }));
+const attempt = (code) => { try { runInContext(code, f); return 'ok'; } catch (e) { return e.name + ':' + e.message; } };
+console.log(JSON.stringify([attempt('var y = 1; function fy() { return y + 1 }'), runInContext('y', f), runInContext('fy()', f), 'y' in f]));"##
+    );
+    assert_eq!(run_lines(&src), vec![r#"["ok",1,2,false]"#.to_string()]);
+}
+
+/// A sandbox accessor is read through its getter and written through its setter, from inside a run.
+#[test]
+fn vm_sandbox_accessor_goes_through_get_and_set() {
+    let src = format!(
+        "{VM_PRELUDE}\n{}",
+        r##"let stored = 0;
+const c = createContext({ get acc() { return stored * 2 }, set acc(v) { stored = v } });
+console.log(JSON.stringify([runInContext('acc = 5; acc', c), stored]));"##
+    );
+    assert_eq!(run_lines(&src), vec!["[10,5]".to_string()]);
+}

@@ -156,8 +156,7 @@ return out;
 fn l_vm_async() {
     // expected: node22
     assert_eq!(
-        // QuickJS: thaw-js parity gap, vm family (PR B).
-        p2c_run_qjs("l_vm_async",r#####"const vm = require('node:vm');
+        p2c_run("l_vm_async", r#####"const vm = require('node:vm');
 const out = {};
 const sb = vm.createContext({ log: [] });
 const p = vm.runInContext('(async () => { await null; log.push("a"); return 5; })()', sb);

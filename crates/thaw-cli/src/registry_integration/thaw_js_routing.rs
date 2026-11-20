@@ -1114,6 +1114,47 @@ pub(crate) fn registry_installed_packages(registry_dir: &std::path::Path) -> std
     installed
 }
 
+/// The implicit peers of the build's packages: every installed package a bundle requires by an unmapped exact name
+/// (`pg` for drizzle's `require('pg')`) is compiled in with the program, since the runtime resolves that name to the
+/// registered package. Repeats for the peers' own peers. Returns the installed names the bundles require (the
+/// candidates for served peers, see `ScanContext::served_peers`).
+pub(crate) fn add_implicit_peers(
+    registry_dir: &std::path::Path,
+    resolved_packages: &mut Vec<String>,
+    runtime_packages: &mut std::collections::HashSet<String>,
+    static_packages: &mut std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    let installed = registry_installed_packages(registry_dir);
+    let mut peers = std::collections::HashSet::new();
+    let mut pending: Vec<String> = resolved_packages
+        .iter()
+        .filter(|package| runtime_packages.contains(*package))
+        .cloned()
+        .collect();
+    while let Some(name) = pending.pop() {
+        // a builtin or an unknown name does not resolve from the registry: it has no registry peers
+        let Ok(package) = thaw_registry::resolve(registry_dir, &name) else {
+            continue;
+        };
+        let Some(bundle_js) = package.bundle_js else {
+            continue;
+        };
+        let Ok(required) = thaw_registry::bundle_peer_requires(&bundle_js) else {
+            continue;
+        };
+        for peer in required.into_iter().filter(|peer| installed.contains(peer)) {
+            peers.insert(peer.clone());
+            if !resolved_packages.contains(&peer) {
+                resolved_packages.push(peer.clone());
+                runtime_packages.insert(peer.clone());
+                static_packages.insert(peer.clone());
+                pending.push(peer);
+            }
+        }
+    }
+    peers
+}
+
 /// [`thaw_js_package_eligible_in`] with no installed packages (every unmapped bare require is a non-blocker).
 #[cfg(test)]
 fn thaw_js_package_eligible(
@@ -1130,6 +1171,7 @@ fn thaw_js_package_eligible(
         typed_targets,
         segment,
         &std::collections::HashSet::new(),
+        &std::collections::HashSet::new(),
     )
 }
 
@@ -1138,7 +1180,8 @@ fn thaw_js_package_eligible(
 /// every function the program mentions is a typed call whose declaration only carries plain data, or
 /// a native FastPath function (which keeps its own declaration and has no typed target).
 /// `segment` is the package's slice of the generated shim. `installed` is the registry's installed packages
-/// ([`registry_installed_packages`]): a require of one the bundle does not map blocks the package.
+/// ([`registry_installed_packages`]): a require of one the bundle does not map blocks the package, unless `served`
+/// (the peers this build compiles in as thaw-js, see `ScanContext::served_peers`) names it.
 fn thaw_js_package_eligible_in(
     pkg: &ResolvedPackage,
     bundle_js: &str,
@@ -1146,6 +1189,7 @@ fn thaw_js_package_eligible_in(
     typed_targets: &std::collections::HashMap<(String, String), String>,
     segment: &str,
     installed: &std::collections::HashSet<String>,
+    served: &std::collections::HashSet<String>,
 ) -> bool {
     let mentions = |name: &str| thaw_js_mentions(user_source, name);
     let debug = std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1");
@@ -1191,8 +1235,12 @@ fn thaw_js_package_eligible_in(
         }
     }
     // R6 and addon mode: `thaw_registry::scan_bundle_for_build` (shared with `thaw-js-scan`)
-    let scanned =
-        thaw_registry::scan_bundle_for_build(bundle_js, pkg.native_addon.is_some(), installed);
+    let scanned = thaw_registry::scan_bundle_for_build(
+        bundle_js,
+        pkg.native_addon.is_some(),
+        installed,
+        served,
+    );
     match scanned {
         Ok(report) if report.is_clean() => {}
         Ok(report) => {

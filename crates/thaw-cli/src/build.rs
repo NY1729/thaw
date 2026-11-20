@@ -775,6 +775,17 @@ fn build_with_native_mode_routed(
             );
         }
     }
+    // thaw-js: the installed packages the bundles require by name are compiled in too (they are the served peers)
+    let served_peers = if thaw_js_routing {
+        add_implicit_peers(
+            registry_dir,
+            &mut resolved_packages,
+            &mut runtime_packages,
+            &mut static_packages,
+        )
+    } else {
+        Default::default()
+    };
     let mut native_addons = resolved_packages
         .iter()
         .filter(|package| runtime_packages.contains(*package))
@@ -826,6 +837,7 @@ fn build_with_native_mode_routed(
             &forced_runtime_only,
             &fetch_transport_bundles,
             thaw_js_routing,
+            &served_peers,
         )?;
         let external_resolutions =
             registry_import_meta_resolutions(registry_dir, &resolved_packages);

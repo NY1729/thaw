@@ -1041,6 +1041,10 @@ impl Interp {
     /// `[[DefineOwnProperty]]` with `ValidateAndApplyPropertyDescriptor`: `Ok(false)` refuses the
     /// descriptor and applies nothing. `Reflect.defineProperty` returns this directly.
     pub(crate) fn try_define(&mut self, o: &Obj, key: &str, desc: &Value) -> R<bool> {
+        // a vm context's realm global is backed by its sandbox: the property lives on the sandbox object
+        if let Some(sb) = crate::vm::sandbox_of(o) {
+            return self.try_define(&sb, key, desc);
+        }
         let has = |it: &mut Interp, k: &str| -> R<Option<Value>> {
             if let Value::Object(d) = desc {
                 if find_in_chain(d, k).is_some() {
