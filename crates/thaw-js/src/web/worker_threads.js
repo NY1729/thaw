@@ -14,7 +14,10 @@
   class Emitter {
     constructor() {
       Object.defineProperty(this, '__thawListeners', { value: new Map() });
+      Object.defineProperty(this, '__thawMaxListeners', { value: 10, writable: true });
     }
+    setMaxListeners(n) { this.__thawMaxListeners = n; return this; }
+    getMaxListeners() { return this.__thawMaxListeners; }
     __thawList(name) {
       if (!this.__thawListeners.has(name)) this.__thawListeners.set(name, []);
       return this.__thawListeners.get(name);
@@ -22,6 +25,7 @@
     on(name, listener) { this.__thawList(name).push({ listener, once: false }); return this; }
     addListener(name, listener) { return this.on(name, listener); }
     prependListener(name, listener) { this.__thawList(name).unshift({ listener, once: false }); return this; }
+    prependOnceListener(name, listener) { this.__thawList(name).unshift({ listener, once: true }); return this; }
     once(name, listener) { this.__thawList(name).push({ listener, once: true }); return this; }
     off(name, listener) {
       const list = this.__thawList(name);
@@ -36,6 +40,7 @@
       return this;
     }
     listenerCount(name) { return this.__thawList(name).length; }
+    eventNames() { return [...this.__thawListeners.keys()].filter(name => this.__thawList(name).length > 0); }
     emit(name, ...args) {
       const list = this.__thawList(name);
       if (list.length === 0) {
@@ -212,6 +217,9 @@
       }
       if (options.argv !== undefined) opts.argv = Array.from(options.argv, String);
       if (options.execArgv !== undefined) opts.execArgv = Array.from(options.execArgv, String);
+      // Node: the thread name ('' when unnamed); the worker sees it as its threadName
+      const threadName = options.name === undefined ? '' : String(options.name);
+      if (threadName !== '') opts.name = threadName;
       // stdio (W5): the worker's console output reaches stdout/stderr only when asked for; stdin exists only when asked
       opts.stdin = options.stdin === true;
       opts.stdout = options.stdout === true;
@@ -239,6 +247,7 @@
         captureOut: options.stdout === true,
         captureErr: options.stderr === true,
         resourceLimits,
+        threadName,
         exitPromise: new Promise(resolve => { resolveExit = resolve; }),
         resolveExit,
         online: false,
@@ -261,7 +270,9 @@
 
     terminate() {
       const state = states.get(this);
-      if (!state.exited) __thaw_worker_terminate(state.handle);
+      // Node: once the worker has exited there is no thread to stop, and the promise resolves undefined
+      if (state.exited) return Promise.resolve();
+      __thaw_worker_terminate(state.handle);
       return state.exitPromise;
     }
 
@@ -291,6 +302,9 @@
     }
 
     get resourceLimits() { return states.get(this).resourceLimits; }
+
+    // Node: the name while running, null once exited
+    get threadName() { const state = states.get(this); return state.exited ? null : state.threadName; }
 
     // Node: resolves { user, system } (integer microseconds of the worker thread), minus `prev` when given. Rejects
     // ERR_WORKER_NOT_RUNNING before 'online' and after exit, and any request still queued when the worker exits.
@@ -360,6 +374,8 @@
       } else if (event.type === 'exit') {
         state.exited = true;
         state.exitCode = event.code;
+        // Node: resourceLimits reads as an empty object after exit
+        state.resourceLimits = {};
         byHandle.delete(event.handle);
         for (const request of state.cpuPending.values()) request.reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
         state.cpuPending.clear();
@@ -475,8 +491,7 @@
     isMarkedAsUntransferable(value) { return isObjectLike(value) && globalThis.__thaw_clone_marks.untransferable.has(value); },
     markAsUncloneable(value) { if (isObjectLike(value)) globalThis.__thaw_clone_marks.uncloneable.add(value); },
     getEnvironmentData(key) {
-      const value = environmentData.get(key);
-      return value === undefined ? undefined : structuredClone(value);
+      return environmentData.get(key);
     },
     setEnvironmentData(key, value) {
       if (value === undefined) environmentData.delete(key);

@@ -1211,3 +1211,51 @@ fn worker_cpu_usage_rejects_before_online_and_after_exit() {
         "pre ERR_WORKER_NOT_RUNNING Worker instance not running|post ERR_WORKER_NOT_RUNNING Worker instance not running"
     );
 }
+
+#[test]
+fn worker_prepend_once_listener_runs_first_and_only_once() {
+    // Node 22 (verified): `first,regular,regular 1 function true 10 true`
+    let src = "const wt = __thaw_worker_threads_exports;
+      const worker = new wt.Worker('void 0;', { eval: true });
+      const order = [];
+      worker.on('probe', () => order.push('regular'));
+      worker.prependOnceListener('probe', () => order.push('first'));
+      worker.emit('probe'); worker.emit('probe');
+      console.log(order.join(',') + ' ' + worker.listenerCount('probe') + ' ' + typeof worker.prependOnceListener + ' ' + worker.eventNames().includes('probe') + ' ' + worker.getMaxListeners() + ' ' + (worker.setMaxListeners(20) === worker));
+      worker.terminate();";
+    assert_eq!(
+        run_main(src),
+        "first,regular,regular 1 function true 10 true"
+    );
+}
+
+#[test]
+fn worker_name_and_post_exit_accessors_follow_node() {
+    // Node 22 (verified): `name alpha` / `null {} true`
+    let src = "const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const worker = new wt.Worker(`const { parentPort, threadName } = require('node:worker_threads'); parentPort.postMessage(threadName);`, { eval: true, name: 'alpha' });
+        const message = await new Promise((resolve) => worker.on('message', resolve));
+        console.log('name ' + message);
+        await new Promise((resolve) => worker.on('exit', resolve));
+        console.log(worker.threadName + ' ' + JSON.stringify(worker.resourceLimits) + ' ' + ((await worker.terminate()) === undefined));
+      })().catch((e) => console.log('failed ' + e));";
+    assert_eq!(run_main(src), "name alpha|null {} true");
+}
+
+#[test]
+fn worker_post_message_to_thread_rejects_a_transfer_port_closed_by_a_getter() {
+    // Node 22 (verified): `rejected 0 0` (a main-thread workerMessage listener is installed, as in the registry test)
+    let src = "const wt = __thaw_worker_threads_exports;
+      let delivered = 0; process.on('workerMessage', () => { delivered++; });
+      (async () => {
+        const worker = new wt.Worker(`const wt = require('node:worker_threads');
+          const first = new wt.MessageChannel(), second = new wt.MessageChannel();
+          wt.postMessageToThread(0, { first: first.port1, get invalidate() { second.port1.close(); return true; } }, [first.port1, second.port1])
+            .then(() => wt.parentPort.postMessage('unexpected'), () => wt.parentPort.postMessage('rejected'));`, { eval: true });
+        const message = await new Promise((resolve) => worker.once('message', resolve));
+        const code = await new Promise((resolve) => worker.once('exit', resolve));
+        console.log(message + ' ' + code + ' ' + delivered);
+      })().catch((e) => console.log('failed ' + e));";
+    assert_eq!(run_main(src), "rejected 0 0");
+}
