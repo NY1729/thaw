@@ -1187,6 +1187,38 @@ impl Interp {
             }
             Ok(out)
         });
+        // Same kind as the receiver (TypedArrayCreateSameType: the intrinsic prototype, so a Buffer
+        // gives a Uint8Array). The value converts before the index is range-checked; `set_value` at
+        // an out-of-range index is that conversion alone.
+        self.set_native(&ta_proto, "with", |it, this, a| {
+            let Some(t) = Self::typed_of(this) else {
+                return it.throw_error("TypeError", "this is not a typed array.");
+            };
+            if t.gone() {
+                return it.throw_error(
+                    "TypeError",
+                    "Cannot perform %TypedArray%.prototype.with on a detached ArrayBuffer",
+                );
+            }
+            let n = t.cur_len();
+            let rel = match it.num(&arg(a, 0)).trunc() {
+                x if x.is_nan() => 0.0,
+                x => x,
+            };
+            let idx = if rel < 0.0 { n as f64 + rel } else { rel };
+            let in_range = idx >= 0.0 && idx < n as f64;
+            let at = if in_range { idx as usize } else { n };
+            let out = it.typed_with_len(t.ty, n);
+            let o = Self::typed_of(&out).unwrap();
+            let size = t.ty.size();
+            let bytes = n * size;
+            o.data.borrow_mut()[..bytes].copy_from_slice(&t.data.borrow()[t.off..t.off + bytes]);
+            o.set_value(it, at, &arg(a, 1))?;
+            if !in_range {
+                return it.throw_error("RangeError", "Invalid typed array index");
+            }
+            Ok(out)
+        });
         self.run_builtin(TYPED_PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js typed array prelude must evaluate"));
     }

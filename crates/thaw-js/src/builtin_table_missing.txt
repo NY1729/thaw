@@ -5,9 +5,6 @@
 # Regenerate it with BUILTIN_TABLE_WRITE_MISSING=1 on the builtin_table_tests test, then run
 # node tools/parity/filter_builtin_table.js (the embed is this table minus these rows). Never edit by hand.
 %TypedArray%	@@species
-%TypedArray%.prototype	with
-%TypedArray%.prototype.with	length
-%TypedArray%.prototype.with	name
 AbortController	@@kMakeTransferable
 AbortController.@@kMakeTransferable	length
 AbortController.@@kMakeTransferable	name
