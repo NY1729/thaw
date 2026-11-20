@@ -1,0 +1,12 @@
+String caught Error:a
+template caught Error:b
+toPrimitive caught Error:c
+valueOf-fallback caught Error:d
+concat caught Error:e
+join caught Error:f
+nullproto caught TypeError:Cannot convert object to primitive value
+plain ok "[object Object]"
+template-plain ok "[object Object]"
+custom ok "ok"
+nested-array ok "a1,b"
+array ok "1,2,3"
