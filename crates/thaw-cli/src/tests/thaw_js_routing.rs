@@ -2515,3 +2515,60 @@ function main(): void {
     assert_eq!(stderr.matches("ExperimentalWarning: SQLite is an experimental feature").count(), 1, "{stderr}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A tagged template on an imported thaw-js function with a rest parameter (`tag(strings, ...params: any[])`,
+/// drizzle's `sql` shape) must pass every interpolated value, in order, not just the strings array.
+/// Builds the program with the named values and checks the output against what Node prints.
+fn thaw_js_tagged_rest_fixture(name: &str, main_body: &str) -> String {
+    let (dir, registry, entry) = thaw_js_package_fixture(
+        name,
+        &format!(
+            "import {{ tag }} from 'tjs-tag';\n\
+             function main(): void {{\n\
+               {main_body}\n\
+             }}\n"
+        ),
+        &[(
+            "tjs-tag",
+            "export declare function tag(strings: TemplateStringsArray, ...params: any[]): string;\n",
+            "exports.tag = function tag(strings, ...vals) { return JSON.stringify({ s: Array.from(strings), v: vals }); };\n",
+        )],
+    );
+    let output = dir.join("app");
+    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
+    let result = build_with_thaw_js_routing(
+        &entry, &output, &[], &[], &[], &registry, &["tjs-tag".to_string()], false, None, true, false, false, true,
+    );
+    set_thaw_js_fallback_mode_override(None);
+    if let Err(error) = &result {
+        eprintln!("build error: {error}");
+    }
+    result.unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    let stdout = thaw_js_run(&output);
+    let _ = std::fs::remove_dir_all(dir);
+    stdout
+}
+
+#[test]
+fn thaw_js_tagged_template_rest_passes_every_interpolated_value_in_order() {
+    let stdout = thaw_js_tagged_rest_fixture(
+        "tagged-rest-many",
+        "console.log(tag`a${1}b${\"x\"}c`);",
+    );
+    // Same text real Node prints for the equivalent JavaScript.
+    assert_eq!(stdout, "{\"s\":[\"a\",\"b\",\"c\"],\"v\":[1,\"x\"]}\n");
+}
+
+#[test]
+fn thaw_js_tagged_template_rest_with_one_value() {
+    let stdout = thaw_js_tagged_rest_fixture("tagged-rest-one", "console.log(tag`a${1}b`);");
+    assert_eq!(stdout, "{\"s\":[\"a\",\"b\"],\"v\":[1]}\n");
+}
+
+#[test]
+fn thaw_js_tagged_template_rest_with_no_values() {
+    let stdout = thaw_js_tagged_rest_fixture("tagged-rest-zero", "console.log(tag`abc`);");
+    assert_eq!(stdout, "{\"s\":[\"abc\"],\"v\":[]}\n");
+}

@@ -1043,7 +1043,7 @@ fn observed_member_call_arities_named(
     source_name: &thaw_parser::common::FileName,
 ) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
     use swc_ecma_visit::{Visit, VisitWith};
-    use thaw_parser::ast::{CallExpr, Callee, Expr, MemberProp};
+    use thaw_parser::ast::{CallExpr, Callee, Expr, MemberProp, TaggedTpl};
 
     #[derive(Default)]
     struct Finder {
@@ -1064,6 +1064,19 @@ fn observed_member_call_arities_named(
             }
             call.visit_children_with(self);
         }
+
+        // A tagged template is a call too: the strings array, then one argument per substitution.
+        fn visit_tagged_tpl(&mut self, tagged: &TaggedTpl) {
+            if let Expr::Member(member) = tagged.tag.as_ref() {
+                if let MemberProp::Ident(method) = &member.prop {
+                    self.arities
+                        .entry(method.sym.to_string())
+                        .or_default()
+                        .insert(1 + tagged.tpl.exprs.len());
+                }
+            }
+            tagged.visit_children_with(self);
+        }
     }
 
     let (module, _) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
@@ -1083,7 +1096,7 @@ fn observed_identifier_call_arities_named(
     source_name: &thaw_parser::common::FileName,
 ) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
     use swc_ecma_visit::{Visit, VisitWith};
-    use thaw_parser::ast::{CallExpr, Callee, Expr};
+    use thaw_parser::ast::{CallExpr, Callee, Expr, TaggedTpl};
 
     #[derive(Default)]
     struct Finder {
@@ -1101,6 +1114,17 @@ fn observed_identifier_call_arities_named(
                 }
             }
             call.visit_children_with(self);
+        }
+
+        // A tagged template is a call too: the strings array, then one argument per substitution.
+        fn visit_tagged_tpl(&mut self, tagged: &TaggedTpl) {
+            if let Expr::Ident(name) = tagged.tag.as_ref() {
+                self.arities
+                    .entry(name.sym.to_string())
+                    .or_default()
+                    .insert(1 + tagged.tpl.exprs.len());
+            }
+            tagged.visit_children_with(self);
         }
     }
 
