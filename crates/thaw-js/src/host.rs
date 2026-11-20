@@ -6,7 +6,7 @@
 //! views (`Json` / native class instances, design.md section 2) are milestone M4.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 use std::rc::{Rc, Weak};
@@ -376,7 +376,8 @@ fn install_module_loader(it: &mut Interp, loader: &Rc<Loader>, bundle_js: &str) 
           function nameOf(spec) {{ spec = String(spec); return spec.indexOf('node:') === 0 ? spec.slice(5) : spec; }}
           function missing(spec) {{ var e = new Error("Cannot find module '" + spec + "'"); e.code = 'MODULE_NOT_FOUND'; return e; }}
           globalThis.__thaw_bundle_builtin_names = names;
-          globalThis.__thaw_bundle_create_require = function (base) {{
+          // first wins: a group's later member shares the realm and keeps the first loader's builtins
+          if (!globalThis.__thaw_bundle_create_require) globalThis.__thaw_bundle_create_require = function (base) {{
             var created = function (spec) {{
               var n = nameOf(spec);
               if (names.indexOf(n) < 0 || keys.indexOf('node:' + n) < 0) throw missing(spec);
@@ -402,7 +403,8 @@ fn install_fetch_transport(it: &mut Interp, loader: &Rc<Loader>) -> R<()> {
         load_module(&l, it, &format!("node:{name}"))
     });
     let install = it.eval_function(
-        "function (load) { globalThis.__thaw_fetch_transport = function (name) { return load(name); }; }",
+        // first wins, as `install_module_loader`: a group's later member keeps the first realm's transport
+        "function (load) { if (!globalThis.__thaw_fetch_transport) globalThis.__thaw_fetch_transport = function (name) { return load(name); }; }",
     )?;
     it.call(&install, &Value::Undefined, &[load])?;
     Ok(())
@@ -455,11 +457,13 @@ pub(crate) fn run_bundle_main(it: &mut Interp, name: &str, bundle_js: &str, key:
     boot_bundle(it, parts, bundle_js, name, key)
 }
 
-/// A loaded package: one interpreter, the bundle's modules, and its entry exports.
+/// A loaded realm: one interpreter, the bundles' modules, and the entry exports of its first package (`exports`)
+/// and of every package joined into it by [`Package::join`] (`roots`, by name).
 pub struct Package {
     /// Boxed: async functions hold its address while suspended.
     pub(crate) interp: Box<Interp>,
     exports: Value,
+    roots: HashMap<String, Value>,
 }
 
 impl Package {
@@ -497,7 +501,42 @@ impl Package {
         let entry = parts.entry.clone();
         let exports = boot_bundle(&mut interp, parts, bundle_js, name, &entry)
             .map_err(|c| classify(&mut interp, c))?;
-        Ok(Package { interp, exports })
+        Ok(Package {
+            interp,
+            exports,
+            roots: HashMap::new(),
+        })
+    }
+
+    /// Load `bundle_js` as package `name` into this realm: a member of the group whose root is this realm
+    /// (see [`register_bundle`]). Its modules boot on this Interp, so they share its intrinsics and globals.
+    // ponytail: a member whose boot fails leaves its factories in the shared realm; the realm stays loaded.
+    fn join(&mut self, name: &str, bundle_js: &str) -> Result<(), HostError> {
+        let parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
+        if let Some(problem) = parts.esm_problems.iter().next() {
+            return Err(HostError::Unsupported((*problem).to_string()));
+        }
+        crate::worker::register_bundle(&mut self.interp, name, bundle_js, &parts);
+        let entry = parts.entry.clone();
+        let exports = boot_bundle(&mut self.interp, parts, bundle_js, name, &entry)
+            .map_err(|c| classify(&mut self.interp, c))?;
+        self.roots.insert(name.to_string(), exports);
+        Ok(())
+    }
+
+    /// The export root a path addresses and the path under it. A `\u{0}name\u{0}` prefix (see `export_path`)
+    /// selects the entry exports of member `name`; the first package's own exports are the fallback.
+    fn select_root<'a>(&self, path: &'a str) -> (Value, &'a str) {
+        let Some(rest) = path.strip_prefix('\u{0}') else {
+            return (self.exports.clone(), path);
+        };
+        let (name, body) = rest.split_once('\u{0}').unwrap_or((rest, ""));
+        let root = self
+            .roots
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| self.exports.clone());
+        (root, body)
     }
 
     /// Call `path` (`"name"` or `"a.b"`) on the package exports with plain-data arguments.
@@ -545,23 +584,22 @@ impl Package {
         export_fallback: bool,
         pending_ok: bool,
     ) -> Result<Value, HostError> {
+        let (root, path) = self.select_root(path);
         let it = &mut self.interp;
-        let mut this = self.exports.clone();
+        let mut this = root.clone();
         let mut f = this.clone();
         for part in path.split('.').filter(|p| !p.is_empty()) {
             this = f.clone();
             f = it.get(&this, part).map_err(|c| classify(it, c))?;
         }
         if export_fallback && matches!(f, Value::Undefined) {
-            let default = it
-                .get(&self.exports, "default")
-                .map_err(|c| classify(it, c))?;
+            let default = it.get(&root, "default").map_err(|c| classify(it, c))?;
             f = if default.is_callable() {
                 default
             } else {
-                self.exports.clone()
+                root.clone()
             };
-            this = self.exports.clone();
+            this = root.clone();
         }
         let r = match args {
             Some(args) => {
@@ -584,8 +622,9 @@ impl Package {
     /// A member of the entry exports by (possibly dotted) path, with the same fallbacks as
     /// [`Package::call_export`] for a package whose `module.exports` is the value itself.
     fn exports_member(&mut self, path: &str) -> Result<Value, HostError> {
+        let (root, path) = self.select_root(path);
         let it = &mut self.interp;
-        let mut value = self.exports.clone();
+        let mut value = root.clone();
         let parts = path
             .split('.')
             .filter(|p| !p.is_empty())
@@ -601,16 +640,14 @@ impl Package {
             };
         }
         if parts.len() == 1 && matches!(value, Value::Undefined) {
-            let default = it
-                .get(&self.exports, "default")
-                .map_err(|c| classify(it, c))?;
+            let default = it.get(&root, "default").map_err(|c| classify(it, c))?;
             value = if default.is_callable() {
                 default
-            } else if matches!(it.get(&self.exports, "__esModule"), Ok(Value::Bool(true))) {
+            } else if matches!(it.get(&root, "__esModule"), Ok(Value::Bool(true))) {
                 // an ES module has no such member: undefined, never the (possibly cyclic) module object
                 Value::Undefined
             } else {
-                self.exports.clone()
+                root.clone()
             };
         }
         Ok(value)
@@ -1502,6 +1539,7 @@ pub(crate) fn default_realm() -> usize {
         let package = Package {
             interp,
             exports: Value::Undefined,
+            roots: HashMap::new(),
         };
         PACKAGES.with(|ps| ps.borrow_mut().push(Some(package)));
         LAST_PACKAGE.with(|l| l.set(0));
@@ -6020,6 +6058,8 @@ struct HostTls {
     running: HashMap<usize, *mut Package>,
     by_name: HashMap<String, usize>,
     by_prefix: HashMap<String, String>,
+    group_realm: HashMap<String, usize>,
+    grouped: HashSet<String>,
     peer_sources: HashMap<String, String>,
     booting: Vec<(String, Value)>,
     last_package: usize,
@@ -6053,6 +6093,8 @@ pub(crate) fn park_host_tls(key: usize) {
         running: RUNNING.with(|c| std::mem::take(&mut *c.borrow_mut())),
         by_name: BY_NAME.with(|c| std::mem::take(&mut *c.borrow_mut())),
         by_prefix: BY_PREFIX.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        group_realm: GROUP_REALM.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        grouped: GROUPED.with(|c| std::mem::take(&mut *c.borrow_mut())),
         peer_sources: PEER_SOURCES.with(|c| std::mem::take(&mut *c.borrow_mut())),
         booting: BOOTING.with(|c| std::mem::take(&mut *c.borrow_mut())),
         last_package: LAST_PACKAGE.with(|c| c.take()),
@@ -6090,6 +6132,8 @@ pub(crate) fn adopt_host_tls(key: usize) {
         running,
         by_name,
         by_prefix,
+        group_realm,
+        grouped,
         peer_sources,
         booting,
         last_package,
@@ -6114,6 +6158,8 @@ pub(crate) fn adopt_host_tls(key: usize) {
     drop(RUNNING.with(|c| c.replace(running)));
     drop(BY_NAME.with(|c| c.replace(by_name)));
     drop(BY_PREFIX.with(|c| c.replace(by_prefix)));
+    drop(GROUP_REALM.with(|c| c.replace(group_realm)));
+    drop(GROUPED.with(|c| c.replace(grouped)));
     drop(PEER_SOURCES.with(|c| c.replace(peer_sources)));
     drop(BOOTING.with(|c| c.replace(booting)));
     LAST_PACKAGE.with(|c| c.set(last_package));
@@ -6636,16 +6682,26 @@ thread_local! {
     /// The export-path prefix of a name whose bundle is a view of a shared realm (`__thaw_bundle_realm`):
     /// `path/posix` reads `posix.<path>` of the realm loaded as `node:path`. Names without a marker have none.
     static BY_PREFIX: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// The realm of each group (`__thaw_bundle_group`), by group key: the handle its first member loaded into.
+    /// Kept apart from `BY_NAME`, so a package whose name equals a key is not read as an alias.
+    static GROUP_REALM: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+    /// The names that are members of a group realm: their export paths carry a `\u{0}name\u{0}` root selector.
+    static GROUPED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
 /// The export path `path` of loaded name `name`, with the name's realm-view prefix (`posix` for `path/posix`).
+/// A group member's path also names its root (`Package::select_root`), since the realm holds several packages.
 fn export_path(name: &str, path: &str) -> String {
     let member = BY_PREFIX.with(|m| m.borrow().get(name).cloned().unwrap_or_default());
-    match (member.is_empty(), path) {
+    let body = match (member.is_empty(), path) {
         (true, _) => path.to_string(),
         (false, "" | "default") => member,
         (false, _) => format!("{member}.{path}"),
+    };
+    if GROUPED.with(|g| g.borrow().contains(name)) {
+        return format!("\u{0}{name}\u{0}{body}");
     }
+    body
 }
 
 /// The realm handle of loaded name `name` and the export path to read from it (see [`export_path`]).
@@ -6661,6 +6717,18 @@ fn bundle_realm(source: &str) -> Option<(String, String)> {
         return None;
     }
     parse_bundle(source).ok()?.realm
+}
+
+/// The group key of a bundle that carries the `__thaw_bundle_group` marker. Only a bundle that names the marker
+/// is parsed for it, so an ordinary bundle is loaded exactly as before.
+fn bundle_group(source: &str) -> Option<String> {
+    if !source.contains("__thaw_bundle_group") {
+        return None;
+    }
+    parse_bundle(source)
+        .ok()?
+        .group
+        .filter(|key| !key.is_empty())
 }
 
 /// Name `name` as a view of the realm at `handle`, reading `member` of it.
@@ -6721,6 +6789,16 @@ fn register_bundle(name: String, src: &str) -> Result<(), HostError> {
     if declared_and_loaded {
         return Ok(());
     }
+    // a member of a group whose realm is loaded joins that realm: one Interp for the whole group
+    let group = bundle_group(src);
+    if let Some(key) = &group {
+        if let Some(handle) = GROUP_REALM.with(|m| m.borrow().get(key).copied()) {
+            with_package(handle, |p| p.join(&name, src))?;
+            GROUPED.with(|g| g.borrow_mut().insert(name.clone()));
+            alias_name(name, handle, "");
+            return Ok(());
+        }
+    }
     let realm = bundle_realm(src);
     if let Some((key, member)) = &realm {
         if let Some(handle) = BY_NAME.with(|m| m.borrow().get(key).copied()) {
@@ -6736,6 +6814,10 @@ fn register_bundle(name: String, src: &str) -> Result<(), HostError> {
         note_fetch_package(&p, ps.len());
         ps.push(Some(p));
         let handle = ps.len() - 1;
+        if let Some(key) = group {
+            GROUP_REALM.with(|m| m.borrow_mut().insert(key, handle));
+            GROUPED.with(|g| g.borrow_mut().insert(name.clone()));
+        }
         match realm {
             Some((key, member)) => {
                 alias_name(key, handle, "");
@@ -8685,6 +8767,174 @@ var __thaw_bundle_entry_key = "p/index.js";
             panic!("probe returns a string");
         };
         assert!(message.contains("boom from pgx-bad"), "{message}");
+    }
+
+    /// A one-module registry bundle of group `group` (`__thaw_bundle_group`), entry factory body `body`.
+    fn grouped(group: &str, body: &str) -> String {
+        format!(
+            r#"module.exports = (function(require){{
+var __thaw_bundle_factories = {{
+"p/index.js": function(module, exports, require) {{ {body} }}
+}};
+var __thaw_bundle_require_maps = {{ "p/index.js": {{}} }};
+var __thaw_bundle_entry_key = "p/index.js";
+var __thaw_bundle_group = "{group}";
+}})(globalThis.require);"#
+        )
+    }
+
+    /// Package `pgz`: a peer whose function tests whether the `ArrayBuffer` of a buffer it built is its own global.
+    const PEER_INTRINSICS: &str =
+        "exports.t6 = function () { return new Uint8Array(4).buffer instanceof ArrayBuffer; };";
+
+    /// Package `drz` (requirer): calls export `n` of `pgz`.
+    const REQUIRER_GO: &str = "exports.go = function (n) { return require('pgz')[n](); };";
+
+    #[test]
+    fn grouped_peer_function_sees_the_requirers_intrinsics() {
+        declare("pgz", &grouped("g", PEER_INTRINSICS));
+        let drz = register("drz", &grouped("g", REQUIRER_GO));
+        assert!(matches!(
+            call_value(drz, "go", &[Value::str("t6")]),
+            Value::Bool(true)
+        ));
+        let pgz = BY_NAME.with(|m| m.borrow()["pgz"]);
+        assert_eq!(pgz, drz, "one realm for the group");
+    }
+
+    #[test]
+    fn grouped_peer_registered_first_shares_the_realm_too() {
+        register("pgz", &grouped("g", PEER_INTRINSICS));
+        let drz = register("drz", &grouped("g", REQUIRER_GO));
+        // a joined member is addressed by name (as the typed calls do): a plain path reads the realm's first package
+        assert!(matches!(
+            call_value(drz, &export_path("drz", "go"), &[Value::str("t6")]),
+            Value::Bool(true)
+        ));
+    }
+
+    #[test]
+    fn grouped_peers_share_promises_and_timers() {
+        declare(
+            "pgz",
+            &grouped(
+                "g",
+                "exports.isPromise = function () { return Promise.resolve() instanceof Promise; }; \
+                 exports.later = function () { return new Promise(function (resolve) { setTimeout(function () { resolve('fired'); }, 1); }); };",
+            ),
+        );
+        let drz = register("drz", &grouped("g", REQUIRER_GO));
+        assert!(matches!(
+            call_value(drz, "go", &[Value::str("isPromise")]),
+            Value::Bool(true)
+        ));
+        assert_eq!(
+            with_package(drz, |p| p.call("go", &[Native::Str("later".into())])).unwrap(),
+            Native::Str("fired".into())
+        );
+    }
+
+    #[test]
+    fn grouped_peer_require_returns_the_joined_packages_exports() {
+        declare(
+            "pgz",
+            &grouped("g", "exports.t6 = function () { return 1; };"),
+        );
+        let drz = register(
+            "drz",
+            &grouped(
+                "g",
+                "exports.same = function () { return require('pgz'); };",
+            ),
+        );
+        let got = call_value(drz, "same", &[]);
+        let pgz = BY_NAME.with(|m| m.borrow()["pgz"]);
+        let expected = with_package(pgz, |p| p.exports_member(&export_path("pgz", ""))).unwrap();
+        assert!(
+            crate::strict_equals(&got, &expected),
+            "pgz exports identity"
+        );
+        let own = with_package(drz, |p| p.exports_member("")).unwrap();
+        assert!(
+            !crate::strict_equals(&own, &expected),
+            "drz has its own exports"
+        );
+    }
+
+    #[test]
+    fn ungrouped_peer_still_loads_and_calls() {
+        // ponytail: plain return, not `new Uint8Array(4)`: a peer's intrinsics across separate realms are the bug
+        // this group work fixes, and the un-grouped path must not be pinned to them either way.
+        declare(
+            "pgz",
+            &bundle("exports.t6 = function () { return 'plain'; };"),
+        );
+        let drz = register("drz", &bundle(REQUIRER_GO));
+        assert_eq!(
+            with_package(drz, |p| p.call("go", &[Native::Str("t6".into())])).unwrap(),
+            Native::Str("plain".into())
+        );
+    }
+
+    #[test]
+    fn group_member_registered_first_hosts_later_declared_members() {
+        register("pgz", &grouped("g", PEER_INTRINSICS));
+        declare("drz", &grouped("g", REQUIRER_GO));
+        let top = register(
+            "top",
+            &grouped(
+                "g",
+                "exports.via = function (n) { return require('drz').go(n); };",
+            ),
+        );
+        assert!(matches!(
+            call_value(top, &export_path("top", "via"), &[Value::str("t6")]),
+            Value::Bool(true)
+        ));
+        let drz = BY_NAME.with(|m| m.borrow()["drz"]);
+        assert_eq!(drz, top, "declared member joins the realm");
+    }
+
+    #[test]
+    fn three_member_group_chains_into_one_realm() {
+        declare("tri-c", &grouped("g", PEER_INTRINSICS));
+        declare(
+            "tri-b",
+            &grouped(
+                "g",
+                "exports.viaC = function () { return require('tri-c').t6(); };",
+            ),
+        );
+        let a = register(
+            "tri-a",
+            &grouped(
+                "g",
+                "exports.go = function () { return require('tri-b').viaC(); };",
+            ),
+        );
+        assert!(matches!(call_value(a, "go", &[]), Value::Bool(true)));
+        let b = BY_NAME.with(|m| m.borrow()["tri-b"]);
+        let c = BY_NAME.with(|m| m.borrow()["tri-c"]);
+        assert_eq!((a, b), (c, c), "one realm for the three members");
+    }
+
+    #[test]
+    fn grouped_peer_joins_and_is_called_from_an_async_body() {
+        declare(
+            "pgz",
+            &grouped("g", "exports.t6 = async function () { await null; return new Uint8Array(4).buffer instanceof ArrayBuffer; };"),
+        );
+        let drz = register(
+            "drz",
+            &grouped(
+                "g",
+                "exports.go = async function () { await null; return require('pgz').t6(); };",
+            ),
+        );
+        assert_eq!(
+            with_package(drz, |p| p.call("go", &[])).unwrap(),
+            Native::Bool(true)
+        );
     }
 }
 
