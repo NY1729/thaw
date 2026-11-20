@@ -159,6 +159,11 @@ struct Converted {
     body: String,
     specs: Vec<String>,
     problems: Vec<&'static str>,
+    // mutable exports (`export let x`, reassigned here) and remote names of this module's named imports
+    live: Vec<String>,
+    imported: Vec<String>,
+    // `export * from`: copies every name of its source, so any live export of the bundle may be copied
+    star: bool,
 }
 
 /// Names assigned or updated anywhere in the module (`x = ..`, `x += ..`, `x++`).
@@ -207,6 +212,10 @@ fn convert(
     // names this source re-exports itself (`export { X } from`); the export graph repeats them as indirect entries
     let mut reexported: BTreeSet<String> = BTreeSet::new();
     let mut problems: Vec<&'static str> = Vec::new();
+    let mut live: Vec<String> = Vec::new();
+    // remote names this module reads from another module (imports, re-exports, indirect entries)
+    let mut pulled: Vec<String> = Vec::new();
+    let mut star = false;
     let mut counter = 0usize;
     let mut uses_origin = false;
     let reassigned = reassigned_names(&module);
@@ -271,6 +280,7 @@ fn convert(
                                         n.local.sym
                                     ));
                                 } else {
+                                    pulled.push(imported.clone());
                                     let mut qi = String::new();
                                     json_quote(&imported, &mut qi);
                                     body.push_str(&format!("var {} = {m}[{qi}];\n", n.local.sym));
@@ -288,11 +298,11 @@ fn convert(
                             for d in &v.decls {
                                 binding_names(&d.name, &mut names);
                             }
-                            // a mutable export only is a live binding when something reassigns it
-                            if !matches!(v.kind, a::VarDeclKind::Const)
-                                && names.iter().any(|n| reassigned.contains(n))
-                            {
-                                problems.push("esm-live-binding");
+                            // a mutable export is a live getter; it only goes stale in an importer that copies it
+                            if !matches!(v.kind, a::VarDeclKind::Const) {
+                                live.extend(
+                                    names.iter().filter(|n| reassigned.contains(*n)).cloned(),
+                                );
                             }
                         }
                         _ => problems.push("esm-declaration"),
@@ -348,6 +358,9 @@ fn convert(
                         match sp {
                             a::ExportSpecifier::Named(n) => {
                                 let local = export_name(&n.orig);
+                                if from.is_some() {
+                                    pulled.push(local.clone());
+                                }
                                 let exported = n
                                     .exported
                                     .as_ref()
@@ -383,6 +396,7 @@ fn convert(
                     }
                 }
                 a::ModuleDecl::ExportAll(e) => {
+                    star = true;
                     let spec = e.src.value.to_string_lossy().into_owned();
                     let mut q = String::new();
                     json_quote(&spec, &mut q);
@@ -398,6 +412,7 @@ fn convert(
     }
     // Indirect getters go in the head so an `export *` in the body skips their names.
     for (name, spec, remote) in indirect {
+        pulled.push(remote.clone());
         if reexported.contains(name) {
             continue;
         }
@@ -423,6 +438,9 @@ fn convert(
         body: format!("{head}{body}"),
         specs,
         problems,
+        live,
+        imported: pulled,
+        star,
     })
 }
 
@@ -470,6 +488,8 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
     let mut maps = String::new();
     let mut problems: BTreeSet<&'static str> = BTreeSet::new();
     let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let (mut live_exports, mut imported_names) = (BTreeSet::new(), BTreeSet::new());
+    let mut any_star = false;
     let indirects = indirect_exports(source);
     for m in modules {
         let Native::Object(fields) = m else { continue };
@@ -494,6 +514,9 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
         let indirect = indirects.get(&key).map(Vec::as_slice).unwrap_or(&[]);
         let converted = convert(src, &public, indirect)?;
         problems.extend(converted.problems);
+        live_exports.extend(converted.live);
+        imported_names.extend(converted.imported);
+        any_star |= converted.star;
         graph.insert(
             key.clone(),
             imports
@@ -518,6 +541,14 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
             })
             .collect();
         maps.push_str(&format!("{qk}: {{ {} }},\n", entries.join(", ")));
+    }
+    // a mutable export goes stale when a module copies it. Matched by name over every pulled name
+    // (imports, re-exports, indirect entries); an `export *` may copy any name, so it blocks too.
+    // ponytail: name match over-blocks same-named unrelated bindings; add per-module export tracking when it bites.
+    if live_exports.intersection(&imported_names).next().is_some()
+        || (any_star && !live_exports.is_empty())
+    {
+        problems.insert("esm-live-binding");
     }
     // an import cycle would observe half-initialised bindings under the snapshot rewrite
     fn cyclic(
@@ -723,5 +754,88 @@ export { replaceOption } from './e.js';\n";
             p.call("probe", &[]).unwrap(),
             Native::Str("function".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod live_binding_tests {
+    use crate::builtins::json_quote;
+    use crate::host::{HostError, Native, Package};
+
+    // A mixed bundle: the native `modules` (`key`, `source`, `imports`) with main `main`, and the CommonJS
+    // entry `m/index.js` whose body is `index` (same shape as export_getter_tests::load_entry).
+    fn bundle(main: &str, modules: serde_json::Value, index: &str) -> String {
+        let payload =
+            serde_json::json!({ "main": main, "modules": modules, "opaqueEdges": [] }).to_string();
+        let mut literal = String::new();
+        json_quote(&payload, &mut literal);
+        format!(
+            r#"module.exports = (function(require) {{
+var __thaw_bundle_factories = {{
+"m/index.js": function(module, exports, require) {{ {index} }},
+"m/e.mjs": function() {{ throw new TypeError('Native ESM must be loaded by its registered entry'); }},
+}};
+var __thaw_bundle_require_maps = {{ "m/index.js": {{"./e.mjs": "m/e.mjs"}}, "m/e.mjs": {{}}, }};
+var __thaw_bundle_entry_key = "m/index.js";
+var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal});
+}})(globalThis.require);"#
+        )
+    }
+
+    // (a) no importer copies `value`: the CommonJS consumer reads the mutable export live through its getter.
+    #[test]
+    fn mutable_export_without_snapshot_importer_is_live_for_commonjs() {
+        let modules = serde_json::json!([{
+            "key": "m/e.mjs",
+            "source": "export let value = 0;\nexport function bump() { value++; }\n",
+            "imports": {}
+        }]);
+        let index = r#"var e = require("./e.mjs"); exports.run = function () { e.bump(); e.bump(); return e.value; };"#;
+        let mut p = Package::load(&bundle("m/e.mjs", modules, index)).expect("loads");
+        assert_eq!(p.call("run", &[]).unwrap(), Native::Number(2.0));
+    }
+
+    // (b) an in-bundle importer copies `value` (`var value = m["value"]`): the blocker stays.
+    #[test]
+    fn mutable_export_copied_by_in_bundle_importer_still_blocks() {
+        let modules = serde_json::json!([
+            { "key": "m/e.mjs", "source": "export let value = 0;\nexport function bump() { value++; }\n", "imports": {} },
+            { "key": "m/i.mjs", "source": "import { value } from \"./e.mjs\";\nexport const seen = value;\n",
+              "imports": { "./e.mjs": "m/e.mjs" } }
+        ]);
+        let err = Package::load(&bundle("m/e.mjs", modules, "")).err();
+        assert!(
+            matches!(&err, Some(HostError::Unsupported(f)) if f == "esm-live-binding"),
+            "{err:?}"
+        );
+    }
+
+    fn assert_blocked(src: &str) {
+        let err = Package::load(src).err();
+        assert!(
+            matches!(&err, Some(HostError::Unsupported(f)) if f == "esm-live-binding"),
+            "{err:?}"
+        );
+    }
+
+    // (c) renamed re-export chain: B re-exports the mutable `value` as `v`, C copies it (`var v = B["v"]`).
+    #[test]
+    fn mutable_export_renamed_through_reexport_chain_still_blocks() {
+        let modules = serde_json::json!([
+            { "key": "m/e.mjs", "source": "export let value = 0;\nexport function bump() { value++; }\n", "imports": {} },
+            { "key": "m/b.mjs", "source": "export { value as v } from \"./e.mjs\";\n", "imports": { "./e.mjs": "m/e.mjs" } },
+            { "key": "m/c.mjs", "source": "import { v } from \"./b.mjs\";\nexport const seen = v;\n", "imports": { "./b.mjs": "m/b.mjs" } }
+        ]);
+        assert_blocked(&bundle("m/e.mjs", modules, ""));
+    }
+
+    // (d) `export *` of a module with a mutable live export: the star re-export copies its names, so it blocks.
+    #[test]
+    fn mutable_export_through_export_star_still_blocks() {
+        let modules = serde_json::json!([
+            { "key": "m/e.mjs", "source": "export let value = 0;\nexport function bump() { value++; }\n", "imports": {} },
+            { "key": "m/s.mjs", "source": "export * from \"./e.mjs\";\n", "imports": { "./e.mjs": "m/e.mjs" } }
+        ]);
+        assert_blocked(&bundle("m/e.mjs", modules, ""));
     }
 }
