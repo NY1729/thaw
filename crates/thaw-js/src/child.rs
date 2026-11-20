@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -178,7 +178,104 @@ fn stdio_for(mode: &str) -> Stdio {
     }
 }
 
-fn pump(mut pipe: impl Read + Send + 'static, tx: Sender<Ev>, stderr: bool) {
+/// One child output pipe: its read end, its fd for `poll(2)`, and whether it is stderr.
+#[cfg(unix)]
+struct Pipe {
+    reader: Box<dyn Read + Send>,
+    fd: libc::c_int,
+    stderr: bool,
+}
+
+/// Starts the reader for a child's stdout/stderr and returns how many pipes must each send one `Eof`.
+#[cfg(unix)]
+fn pump(stdout: Option<ChildStdout>, stderr: Option<ChildStderr>, tx: Sender<Ev>) -> u8 {
+    use std::os::unix::io::AsRawFd;
+    let mut pipes = vec![];
+    if let Some(p) = stdout {
+        pipes.push(Pipe {
+            fd: p.as_raw_fd(),
+            reader: Box::new(p),
+            stderr: false,
+        });
+    }
+    if let Some(p) = stderr {
+        pipes.push(Pipe {
+            fd: p.as_raw_fd(),
+            reader: Box::new(p),
+            stderr: true,
+        });
+    }
+    let n = pipes.len() as u8;
+    std::thread::spawn(move || read_pipes(pipes, &tx));
+    n
+}
+
+/// One thread polls every pipe. When several are readable, stdout is read first (as libuv does), so
+/// cross-pipe order no longer depends on which reader thread the OS schedules first.
+#[cfg(unix)]
+fn read_pipes(mut pipes: Vec<Pipe>, tx: &Sender<Ev>) {
+    let mut buf = [0u8; 8192];
+    while !pipes.is_empty() {
+        let mut fds: Vec<libc::pollfd> = pipes
+            .iter()
+            .map(|p| libc::pollfd {
+                fd: p.fd,
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        // SAFETY: `fds` is a live array of `fds.len()` pollfd structs.
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break; // leftover pipes still owe their Eof below
+        }
+        let mut closed = vec![false; pipes.len()];
+        for (i, p) in pipes.iter_mut().enumerate() {
+            if fds[i].revents == 0 {
+                continue;
+            }
+            match p.reader.read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    let v = buf[..n].to_vec();
+                    let ev = if p.stderr { Ev::Err(v) } else { Ev::Out(v) };
+                    if tx.send(ev).is_err() {
+                        return;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                _ => {
+                    closed[i] = true;
+                    let _ = tx.send(Ev::Eof);
+                }
+            }
+        }
+        let mut keep = closed.into_iter().map(|c| !c);
+        pipes.retain(|_| keep.next().unwrap_or(true));
+    }
+    for _ in pipes {
+        let _ = tx.send(Ev::Eof);
+    }
+}
+
+/// Non-unix fallback: one blocking reader thread per pipe.
+#[cfg(not(unix))]
+fn pump(stdout: Option<ChildStdout>, stderr: Option<ChildStderr>, tx: Sender<Ev>) -> u8 {
+    let mut n = 0;
+    if let Some(p) = stdout {
+        pump_thread(p, tx.clone(), false);
+        n += 1;
+    }
+    if let Some(p) = stderr {
+        pump_thread(p, tx, true);
+        n += 1;
+    }
+    n
+}
+
+#[cfg(not(unix))]
+fn pump_thread(mut pipe: impl Read + Send + 'static, tx: Sender<Ev>, stderr: bool) {
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
@@ -245,15 +342,7 @@ fn spawn(cmd: &str, args: &str, options: &str) -> u32 {
         }),
         Ok(mut child) => {
             let (tx, rx) = mpsc::channel();
-            let mut open_pipes = 0;
-            if let Some(p) = child.stdout.take() {
-                pump(p, tx.clone(), false);
-                open_pipes += 1;
-            }
-            if let Some(p) = child.stderr.take() {
-                pump(p, tx.clone(), true);
-                open_pipes += 1;
-            }
+            let open_pipes = pump(child.stdout.take(), child.stderr.take(), tx);
             // Writes go through their own thread: a child that stops reading must not block the loop.
             let stdin = child.stdin.take().map(|mut pipe| {
                 let (s, r) = mpsc::channel::<Vec<u8>>();
@@ -547,5 +636,83 @@ impl Interp {
         g.declare("__thaw_child_process_stdin", f, true);
         let f = self.native(|_, _, _| Ok(Value::str(&poll())));
         g.declare("__thaw_child_process_poll", f, true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs `sh -c script` through `spawn`/`poll`; returns output chunks as (is_stderr, bytes) in delivery order.
+    fn run_sh(script: &str) -> Vec<(bool, Vec<u8>)> {
+        spawn("/bin/sh", &format!("[\"-c\",{}]", q(script)), "{}");
+        let mut got = vec![];
+        let start = Instant::now();
+        loop {
+            let Native::Array(events) = parse_native(&poll()).expect("poll json") else {
+                panic!("poll returns an array");
+            };
+            for e in &events {
+                match opt_str(e, "type") {
+                    Some("stdout") => got.push((false, unhex(opt_str(e, "value").unwrap_or("")))),
+                    Some("stderr") => got.push((true, unhex(opt_str(e, "value").unwrap_or("")))),
+                    Some("exit") => return got,
+                    _ => {}
+                }
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "child did not exit"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn earlier_stderr_is_delivered_before_later_stdout() {
+        let got = run_sh("printf x >&2; sleep 0.3; printf abcd");
+        assert_eq!(got, vec![(true, b"x".to_vec()), (false, b"abcd".to_vec())]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn readable_pipes_are_delivered_stdout_first() {
+        use std::os::unix::io::FromRawFd;
+        // Both pipes already hold data and are closed, so the first poll sees both readable at once.
+        let pipe_with = |data: &[u8]| {
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            unsafe { std::fs::File::from_raw_fd(fds[1]) }
+                .write_all(data)
+                .unwrap();
+            fds[0]
+        };
+        let err = pipe_with(b"x");
+        let out = pipe_with(b"abcd");
+        let file = |fd| unsafe { std::fs::File::from_raw_fd(fd) };
+        let pipes = vec![
+            Pipe {
+                fd: out,
+                reader: Box::new(file(out)),
+                stderr: false,
+            },
+            Pipe {
+                fd: err,
+                reader: Box::new(file(err)),
+                stderr: true,
+            },
+        ];
+        let (tx, rx) = mpsc::channel();
+        read_pipes(pipes, &tx);
+        let got: Vec<String> = rx
+            .try_iter()
+            .map(|e| match e {
+                Ev::Out(v) => format!("out {}", String::from_utf8_lossy(&v)),
+                Ev::Err(v) => format!("err {}", String::from_utf8_lossy(&v)),
+                Ev::Eof => "eof".into(),
+            })
+            .collect();
+        assert_eq!(got, ["out abcd", "err x", "eof", "eof"]);
     }
 }
