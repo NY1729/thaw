@@ -1566,7 +1566,7 @@ pub(crate) fn host_fs(op: &str, path: &str, value: &str, recursive: bool) -> Str
             std::fs::remove_dir(&p)
         }),
         "rename" => ok(std::fs::rename(&p, &v)),
-        "copy" => std::fs::copy(&p, &v).map(|n| format!("{{\"ok\":true,\"length\":{n}}}")),
+        "copy" => fs_copy_file(&p, &v).map(|n| format!("{{\"ok\":true,\"length\":{n}}}")),
         "realpath" | "readlink" => (if op == "realpath" {
             std::fs::canonicalize(&p)
         } else {
