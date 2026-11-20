@@ -1567,29 +1567,19 @@ fn native_esm_cycle_links_original_mjs_before_evaluation() {
 }
 }
 
-// qjs_pending: needs a JS global read after load (globalThis.__thaw_mixed_runs); script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order() {
-    use std::ffi::{CStr, CString};
     let root = temp_registry("native-esm-mixed-fallback");
     let modules = root.join("node_modules");
     let package = modules.join("native-mixed-pkg");
     fs::create_dir_all(&package).unwrap();
     fs::write(package.join("index.mjs"), "import legacy from './legacy.cjs'; export const value = legacy; export { default as again } from './legacy.cjs'; export * as namespace from './legacy.cjs';").unwrap();
-    fs::write(package.join("legacy.cjs"), "globalThis.__thaw_mixed_runs = (globalThis.__thaw_mixed_runs || 0) + 1; module.exports = 9;").unwrap();
+    fs::write(package.join("legacy.cjs"), "globalThis.mixedRuns = (globalThis.mixedRuns || 0) + 1; module.exports = 9;").unwrap();
     let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-mixed-pkg", &package, "index.mjs").unwrap();
     assert_eq!(count, 2);
     assert!(bundle.contains("__thaw_register_native_bundle"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.mixedOriginValue = function() {{ return [module.exports.value, module.exports.again, module.exports.namespace, globalThis.__thaw_mixed_runs]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"mixedOriginValue".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[9,9,9,1]");
+    assert_eq!(run_js_probe(&bundle, "[exports.value, exports.again, exports.namespace, globalThis.mixedRuns]"), "[9,9,{\"default\":9},1]");
     let _ = fs::remove_dir_all(root);
-}
 }
 
 // qjs_pending: needs in-context helpers and namespace identity after load; script route fails: __thaw_register_native_bundle is not a function
