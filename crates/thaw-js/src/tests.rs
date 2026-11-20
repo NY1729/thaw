@@ -12012,3 +12012,43 @@ fn fs_chown_to_own_ids_succeeds_and_empty_owner_is_einval() {
         "{\"ok\":true}"
     );
 }
+
+// Use Strict Directive: a directive of the leading prologue whose raw text is exactly `use strict`.
+// Expected values are Node 22 output (`new Function(body)()`). Top-level script prologues are not covered:
+// `run_global` never makes the script scope strict.
+
+/// Whether a plain call of a function whose body is `body` runs strict (`this` is `undefined`).
+fn fn_body_strict(body: &str) -> String {
+    one(&format!(
+        "function f() {{ {body} return this === undefined; }} console.log(f());"
+    ))
+}
+
+#[test]
+fn use_strict_directive_first_in_body_is_strict() {
+    assert_eq!(fn_body_strict("'use strict';"), "true");
+    assert_eq!(fn_body_strict("\"use strict\";"), "true");
+}
+
+#[test]
+fn use_strict_directive_after_other_directives_is_strict() {
+    assert_eq!(fn_body_strict("'other'; 'use strict';"), "true");
+    assert_eq!(fn_body_strict("\"other\"; \"use strict\";"), "true");
+    assert_eq!(fn_body_strict("'a'; 'b'; 'use strict';"), "true");
+    assert_eq!(fn_body_strict("/* c */ 'other'; 'use strict';"), "true");
+}
+
+#[test]
+fn escaped_use_strict_is_not_a_use_strict_directive() {
+    assert_eq!(fn_body_strict("'use\\x20strict';"), "false");
+    assert_eq!(fn_body_strict("\"use\\x20strict\";"), "false");
+    assert_eq!(fn_body_strict("\"use\\u0020strict\";"), "false");
+    assert_eq!(fn_body_strict("'use \\\nstrict';"), "false");
+}
+
+#[test]
+fn non_directive_before_use_strict_ends_the_prologue() {
+    assert_eq!(fn_body_strict("1; 'use strict';"), "false");
+    assert_eq!(fn_body_strict("'a' + 'b'; 'use strict';"), "false");
+    assert_eq!(fn_body_strict("('use strict');"), "false");
+}
