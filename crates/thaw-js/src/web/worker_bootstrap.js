@@ -35,8 +35,8 @@
     return true;
   };
 
-  // postMessageToThread (W-D), this realm's copy of worker_threads.js's: the parent is the only thread a worker reaches.
-  // The worker stays alive while a send is pending, so the ack can arrive (as the sender's promise needs it).
+  // postMessageToThread (W-D), this realm's copy of worker_threads.js's: any thread by id (the main thread is 0). The
+  // worker stays alive while a send is pending, so the ack can arrive (as the sender's promise needs it).
   const pendingSends = new Map();
   let nextAck = 1;
   function threadError(code, message, cause, type = Error) {
@@ -77,11 +77,13 @@
     if (target === opts.threadId) return Promise.reject(threadError('ERR_WORKER_MESSAGING_SAME_THREAD', 'Cannot sent a message to the same thread'));
     let transfer;
     try { transfer = __thaw_transfer_of(transferList); } catch (error) { return Promise.reject(error); }
-    // only the parent (0) is reachable from a worker. Node detaches the buffers even for another id (FAILED on a later
-    // turn), so the wire is encoded with them; that wire is released here, since nothing will decode it.
-    const reachable = target === 0;
+    // the target's port token, or -1 when there is no such thread. Node detaches the buffers even for an unknown id
+    // (FAILED on a later turn), so the wire is encoded with them; the wire of an unknown thread is released here, since
+    // nothing will decode it.
+    // a thread id is a non-negative integer (anything else is no thread, as in Node)
+    const dest = Number.isInteger(target) && target >= 0 ? __thaw_thread_token(target) : -1;
     let wire;
-    try { wire = __thaw_worker_encode(value, transfer, __thaw_port_hub()); } catch (error) { return Promise.reject(error); }
+    try { wire = __thaw_worker_encode(value, transfer, dest === -1 ? __thaw_port_hub() : dest); } catch (error) { return Promise.reject(error); }
     // a port in the list closed while the value was encoded (a getter in it): Node rejects and sends nothing
     if (transfer.some(item => globalThis.__thaw_is_message_port(item) && item.__thawClosed)) {
       __thaw_wire_release(wire);
@@ -93,9 +95,9 @@
       pendingSends.set(ack, entry);
       sync();
       if (timeout !== undefined) entry.timer = setTimeout(() => settleSend(ack, 'timeout', ''), timeout);
-      // any other id is FAILED on a later turn than a zero timeout
-      if (reachable) __thaw_worker_thread_to_parent(ack, wire);
-      else { __thaw_wire_release(wire); setTimeout(() => settleSend(ack, 'failed', ''), 0); }
+      // an unknown thread is FAILED on a later turn than a zero timeout
+      if (dest === -1) { __thaw_wire_release(wire); setTimeout(() => settleSend(ack, 'failed', ''), 0); }
+      else if (!__thaw_thread_send(target, ack, wire)) setTimeout(() => settleSend(ack, 'failed', ''), 0);
     });
   }
 
@@ -138,7 +140,7 @@
         if (event.end) stdin.__thawEnd();
         stdin.__thawFlush();
       } else if (event.type === 'thread') {
-        deliverThreadMessage(event.ack, event.source, event.value, (ack, status, wire) => __thaw_worker_thread_reply(ack, status, wire));
+        deliverThreadMessage(event.ack, event.source, event.value, (ack, status, wire) => __thaw_thread_reply(event.source, ack, status, wire));
       } else if (event.type === 'threadAck') {
         settleSend(event.ack, event.status, event.value);
       }
