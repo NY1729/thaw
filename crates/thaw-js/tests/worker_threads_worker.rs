@@ -415,6 +415,256 @@ fn post_message_to_thread_errored_has_no_cause_like_node() {
 }
 
 #[test]
+fn post_message_to_thread_delivers_between_workers_by_thread_id() {
+    let src = r##"const wt = __thaw_worker_threads_exports;
+(async () => {
+  const inbox = [];
+  let wake = () => {};
+  const watch = (w) => w.on('message', (m) => { inbox.push(m); wake(); });
+  const take = async (prefix) => {
+    for (;;) {
+      const i = inbox.findIndex((m) => m.startsWith(prefix));
+      if (i >= 0) { const [m] = inbox.splice(i, 1); console.log(m); return m; }
+      await new Promise((resolve) => { wake = resolve; });
+    }
+  };
+  const flag = new Int32Array(new SharedArrayBuffer(4));
+  const b = new wt.Worker(`const wt = require('node:worker_threads');
+    process.on('workerMessage', (value, source) => {
+      Atomics.add(wt.workerData, 0, 1);
+      wt.parentPort.postMessage('B got ' + value + ' from ' + source);
+    });
+    wt.parentPort.on('message', (aId) => {
+      wt.postMessageToThread(aId, 'pong').then(() => wt.parentPort.postMessage('B reply acked'), (e) => wt.parentPort.postMessage('B reply ' + e.code));
+    });
+    wt.parentPort.postMessage('B ready');`, { eval: true, workerData: flag });
+  watch(b);
+  const a = new wt.Worker(`const wt = require('node:worker_threads');
+    process.on('workerMessage', (value, source) => {
+      wt.parentPort.postMessage('A got ' + value + ' from ' + source);
+    });
+    wt.parentPort.on('message', (bId) => {
+      wt.postMessageToThread(bId, 'ping').then(() => wt.parentPort.postMessage('A ack ' + Atomics.load(wt.workerData, 0)), (e) => wt.parentPort.postMessage('A ' + e.code));
+    });
+    wt.parentPort.postMessage('A ready');`, { eval: true, workerData: flag });
+  watch(a);
+  await take('B ready');
+  await take('A ready');
+  a.postMessage(b.threadId);
+  await take('B got ping from ' + a.threadId);
+  await take('A ack 1');
+  b.postMessage(a.threadId);
+  await take('A got pong from ' + b.threadId);
+  await take('B reply acked');
+  await a.terminate();
+  await b.terminate();
+  console.log('done');
+})().catch((e) => console.log('failed ' + e));"##;
+    assert_eq!(
+        run_main(src),
+        "B ready|A ready|B got ping from 2|A ack 1|A got pong from 1|B reply acked|done"
+    );
+}
+
+#[test]
+fn post_message_to_thread_fails_for_an_exited_or_unknown_thread() {
+    let src = r##"const wt = __thaw_worker_threads_exports;
+const settle = (label, p) => p.then((v) => console.log(label, 'resolved', v), (e) => console.log(label, e.name, e.code));
+(async () => {
+  const inbox = [];
+  let wake = () => {};
+  const watch = (w) => w.on('message', (m) => { inbox.push(m); wake(); });
+  const take = async (prefix) => {
+    for (;;) {
+      const i = inbox.findIndex((m) => m.startsWith(prefix));
+      if (i >= 0) { const [m] = inbox.splice(i, 1); console.log(m); return m; }
+      await new Promise((resolve) => { wake = resolve; });
+    }
+  };
+  const gone = new wt.Worker('1 + 1', { eval: true });
+  const goneId = gone.threadId;
+  await new Promise((resolve) => gone.once('exit', resolve));
+  await settle('main gone', wt.postMessageToThread(goneId, 1));
+  const a = new wt.Worker(`const wt = require('node:worker_threads');
+    wt.parentPort.on('message', async (ids) => {
+      for (const id of ids) {
+        await wt.postMessageToThread(id, 'x').then(() => wt.parentPort.postMessage('resolved'), (e) => wt.parentPort.postMessage(e.code + ' ' + e.name));
+      }
+      wt.parentPort.postMessage('A finished');
+    });
+    wt.parentPort.postMessage('A ready');`, { eval: true });
+  watch(a);
+  const live = new wt.Worker(`const wt = require('node:worker_threads');
+    process.on('workerMessage', (value, source) => { wt.parentPort.postMessage('L got ' + value + ' from ' + source); });
+    wt.parentPort.on('message', () => {});
+    wt.parentPort.postMessage('L ready');`, { eval: true });
+  watch(live);
+  await take('L ready');
+  await take('A ready');
+  a.postMessage([goneId, 12345, live.threadId]);
+  await take('ERR_WORKER_MESSAGING_FAILED Error');
+  await take('ERR_WORKER_MESSAGING_FAILED Error');
+  await take('L got x from ' + a.threadId);
+  await take('resolved');
+  await take('A finished');
+  await live.terminate();
+  await a.terminate();
+  console.log('done');
+})().catch((e) => console.log('failed ' + e));"##;
+    assert_eq!(
+        run_main(src),
+        "main gone Error ERR_WORKER_MESSAGING_FAILED|L ready|A ready|ERR_WORKER_MESSAGING_FAILED Error|ERR_WORKER_MESSAGING_FAILED Error|L got x from 2|resolved|A finished|done"
+    );
+}
+
+#[test]
+fn post_message_to_thread_moves_a_transfer_list_between_workers() {
+    let src = r##"const wt = __thaw_worker_threads_exports;
+(async () => {
+  const inbox = [];
+  let wake = () => {};
+  const watch = (w) => w.on('message', (m) => { inbox.push(m); wake(); });
+  const take = async (prefix) => {
+    for (;;) {
+      const i = inbox.findIndex((m) => m.startsWith(prefix));
+      if (i >= 0) { const [m] = inbox.splice(i, 1); console.log(m); return m; }
+      await new Promise((resolve) => { wake = resolve; });
+    }
+  };
+  const b = new wt.Worker(`const wt = require('node:worker_threads');
+    process.on('workerMessage', (value, source) => {
+      wt.parentPort.postMessage('B got ' + value.ab.byteLength + ' ' + new Uint8Array(value.ab)[0] + ' from ' + source);
+    });
+    wt.parentPort.on('message', () => {});
+    wt.parentPort.postMessage('B ready');`, { eval: true });
+  watch(b);
+  await take('B ready');
+  const a = new wt.Worker(`const wt = require('node:worker_threads');
+    wt.parentPort.on('message', (bId) => {
+      const ab = new ArrayBuffer(8);
+      new Uint8Array(ab)[0] = 5;
+      const sent = wt.postMessageToThread(bId, { ab }, [ab]);
+      wt.parentPort.postMessage('A sync ' + ab.byteLength + ' ' + ab.detached);
+      sent.then(() => wt.parentPort.postMessage('A acked ' + ab.byteLength + ' ' + ab.detached));
+    });
+    wt.parentPort.postMessage('A ready');`, { eval: true });
+  watch(a);
+  await take('A ready');
+  a.postMessage(b.threadId);
+  await take('A sync 0 true');
+  await take('B got 8 5 from ' + a.threadId);
+  await take('A acked 0 true');
+  await a.terminate();
+  await b.terminate();
+  console.log('done');
+})().catch((e) => console.log('failed ' + e));"##;
+    assert_eq!(
+        run_main(src),
+        "B ready|A ready|A sync 0 true|B got 8 5 from 2|A acked 0 true|done"
+    );
+}
+
+#[test]
+fn post_message_to_thread_worker_same_thread_and_no_listener() {
+    let src = r##"const wt = __thaw_worker_threads_exports;
+(async () => {
+  const inbox = [];
+  let wake = () => {};
+  const watch = (w) => w.on('message', (m) => { inbox.push(m); wake(); });
+  const take = async (prefix) => {
+    for (;;) {
+      const i = inbox.findIndex((m) => m.startsWith(prefix));
+      if (i >= 0) { const [m] = inbox.splice(i, 1); console.log(m); return m; }
+      await new Promise((resolve) => { wake = resolve; });
+    }
+  };
+  const b = new wt.Worker(`const wt = require('node:worker_threads');
+    wt.parentPort.postMessage('bare ready');
+    setTimeout(() => {}, 400);`, { eval: true });
+  watch(b);
+  await take('bare ready');
+  const a = new wt.Worker(`const wt = require('node:worker_threads');
+    wt.parentPort.on('message', async (ids) => {
+      await wt.postMessageToThread(wt.threadId, 1).then(() => wt.parentPort.postMessage('resolved'), (e) => wt.parentPort.postMessage('self ' + e.name + ' ' + e.code));
+      await wt.postMessageToThread(undefined, 1).then(() => wt.parentPort.postMessage('resolved'), (e) => wt.parentPort.postMessage('bad id ' + e.name + ' ' + e.code));
+      await wt.postMessageToThread(ids[0], 1).then(() => wt.parentPort.postMessage('resolved'), (e) => wt.parentPort.postMessage('no listener ' + e.name + ' ' + e.code));
+      await wt.postMessageToThread(ids[1], 'x').then(() => wt.parentPort.postMessage('resolved'), (e) => wt.parentPort.postMessage('live ' + e.code));
+      wt.parentPort.postMessage('A finished');
+    });
+    wt.parentPort.postMessage('A ready');`, { eval: true });
+  watch(a);
+  const c = new wt.Worker(`const wt = require('node:worker_threads');
+    process.on('workerMessage', (value, source) => { wt.parentPort.postMessage('C got ' + value + ' from ' + source); });
+    wt.parentPort.on('message', () => {});
+    wt.parentPort.postMessage('C ready');`, { eval: true });
+  watch(c);
+  await take('C ready');
+  await take('A ready');
+  a.postMessage([b.threadId, c.threadId]);
+  await take('self Error ERR_WORKER_MESSAGING_SAME_THREAD');
+  await take('bad id Error ERR_WORKER_MESSAGING_FAILED');
+  await take('no listener Error ERR_WORKER_MESSAGING_FAILED');
+  await take('C got x from ' + a.threadId);
+  await take('resolved');
+  await take('A finished');
+  await a.terminate();
+  await b.terminate();
+  await c.terminate();
+  console.log('done');
+})().catch((e) => console.log('failed ' + e));"##;
+    assert_eq!(
+        run_main(src),
+        "bare ready|C ready|A ready|self Error ERR_WORKER_MESSAGING_SAME_THREAD|bad id Error ERR_WORKER_MESSAGING_FAILED|no listener Error ERR_WORKER_MESSAGING_FAILED|C got x from 2|resolved|A finished|done"
+    );
+}
+
+#[test]
+fn post_message_to_thread_worker_times_out_on_a_busy_thread() {
+    let src = r##"const wt = __thaw_worker_threads_exports;
+(async () => {
+  const inbox = [];
+  let wake = () => {};
+  const watch = (w) => w.on('message', (m) => { inbox.push(m); wake(); });
+  const take = async (prefix) => {
+    for (;;) {
+      const i = inbox.findIndex((m) => m.startsWith(prefix));
+      if (i >= 0) { const [m] = inbox.splice(i, 1); console.log(m); return m; }
+      await new Promise((resolve) => { wake = resolve; });
+    }
+  };
+  const b = new wt.Worker(`const wt = require('node:worker_threads');
+    process.on('workerMessage', () => { wt.parentPort.postMessage('B listener ran'); });
+    wt.parentPort.on('message', () => {
+      wt.parentPort.postMessage('B busy');
+      const end = Date.now() + 400; while (Date.now() < end) {}
+    });
+    wt.parentPort.postMessage('B ready');`, { eval: true });
+  watch(b);
+  await take('B ready');
+  const a = new wt.Worker(`const wt = require('node:worker_threads');
+    wt.parentPort.on('message', (bId) => {
+      const start = Date.now();
+      wt.postMessageToThread(bId, 'x', [], 50).then(() => wt.parentPort.postMessage('A ok'), (e) => wt.parentPort.postMessage('A ' + e.code + ' ms>=45:' + (Date.now() - start >= 45)));
+    });
+    wt.parentPort.postMessage('A ready');`, { eval: true });
+  watch(a);
+  await take('A ready');
+  b.postMessage('busy');
+  await take('B busy');
+  a.postMessage(b.threadId);
+  await take('A ERR_WORKER_MESSAGING_TIMEOUT ms>=45:true');
+  await take('B listener ran');
+  await a.terminate();
+  await b.terminate();
+  console.log('done');
+})().catch((e) => console.log('failed ' + e));"##;
+    assert_eq!(
+        run_main(src),
+        "B ready|A ready|B busy|A ERR_WORKER_MESSAGING_TIMEOUT ms>=45:true|B listener ran|done"
+    );
+}
+
+#[test]
 fn is_internal_thread_is_false_and_argument_errors_are_async() {
     let src = r#"const wt = __thaw_worker_threads_exports;
       const settle = (label, p) => p.then((v) => console.log(label, 'resolved', v), (e) => console.log(label, e.name, e.code, JSON.stringify(e.message)));
