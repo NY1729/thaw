@@ -185,3 +185,45 @@ fn run_js_get(bundle: &str, path: &str) -> String {
         .join()
         .unwrap()
 }
+
+/// Writes `files` (path relative to a fresh fixture dir named `test_name` -> exact contents) and returns the dir.
+/// The worker-file tests put real files on disk so `new Worker(<absolute path>)` loads them through the same
+/// loader a product worker uses.
+fn worker_fixture(test_name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = temp_registry(test_name);
+    for (relative, contents) in files {
+        let path = dir.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    dir
+}
+
+/// Parent-side helper for `run_worker_fixture` bodies: `runWorker(file, onFix)` resolves `{messages, errors}` once the
+/// worker exits (a `'fix'` message goes to `onFix` instead of `messages`), or `{syncCode}` when `new Worker(file)` throws.
+const WORKER_RUNNER_JS: &str = "var Worker = require('node:worker_threads').Worker; \
+    function runWorker(file, onFix) { return new Promise(function (resolve) { \
+        var out = { messages: [], errors: [] }, worker; \
+        try { worker = new Worker(file); } catch (error) { resolve({ syncCode: error.code }); return; } \
+        worker.on('message', function (value) { if (value === 'fix' && onFix) onFix(worker); else out.messages.push(value); }); \
+        worker.on('error', function (error) { out.errors.push(error.code || error.name); }); \
+        worker.on('exit', function () { resolve(out); }); \
+    }); }";
+
+/// Bundles `body` as the async entry of a package whose `index.js` is `WORKER_RUNNER_JS` plus `body` (`runWorker`
+/// is in scope), runs it on thaw-js, and returns the result JSON. `dir` holds the worker files and must exist.
+fn run_worker_fixture(dir: &Path, body: &str) -> String {
+    fs::write(
+        dir.join("index.js"),
+        format!("{WORKER_RUNNER_JS} module.exports = async function () {{ {body} }};"),
+    )
+    .unwrap();
+    let node_modules = temp_registry(&format!(
+        "{}_node_modules",
+        dir.file_name().unwrap().to_string_lossy()
+    ));
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", dir, "index.js").unwrap();
+    let result = run_js(&bundle);
+    let _ = fs::remove_dir_all(node_modules);
+    result
+}
