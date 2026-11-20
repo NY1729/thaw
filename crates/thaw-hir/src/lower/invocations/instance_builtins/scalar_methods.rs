@@ -277,7 +277,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
-                if matches!(property.sym.as_ref(), "trim" | "trimStart" | "trimEnd") {
+                if matches!(property.sym.as_ref(), "trim" | "trimStart" | "trimEnd" | "trimLeft" | "trimRight") {
                     if !call.args.is_empty() {
                         return Err(format!("native `.{}()` expects no arguments", property.sym));
                     }
@@ -285,8 +285,8 @@ impl<'a> FnLowerer<'a> {
                     self.expect_type(&HirType::Str, &receiver, "string trim receiver")?;
                     let suffix = match property.sym.as_ref() {
                         "trim" => "trim",
-                        "trimStart" => "trim_start",
-                        "trimEnd" => "trim_end",
+                        "trimStart" | "trimLeft" => "trim_start",
+                        "trimEnd" | "trimRight" => "trim_end",
                         _ => unreachable!(),
                     };
                     return Ok(HirExpr::Call(
