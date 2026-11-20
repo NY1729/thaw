@@ -68,6 +68,8 @@ struct Loader {
     async_keys: RefCell<HashSet<String>>,
     /// [`PROMISE_OF`]: wraps a thunk in a promise, so `requireAsync` rejects instead of throwing.
     promise_of: Value,
+    /// [`CJS_NAMESPACE`]: builds a CommonJS module's namespace object.
+    cjs_namespace: Value,
 }
 
 /// `thunk()` settled as a promise: a throw inside the executor becomes the rejection.
@@ -201,7 +203,7 @@ fn require_async_namespace(
         Some(key) if !key.ends_with(".node") => key,
         _ => {
             let exports = require_in(loader, it, from, spec)?;
-            return namespace_of(it, exports, Some(Vec::new()));
+            return namespace_of(it, loader, exports, Some(Vec::new()));
         }
     };
     let exports = load_module(loader, it, &key)?;
@@ -223,18 +225,23 @@ fn require_async_namespace(
         None if key.starts_with("node:") => None,
         None => Some(Vec::new()),
     };
-    let ns = namespace_of(it, exports, names)?;
+    let ns = namespace_of(it, loader, exports, names)?;
     loader.namespaces.borrow_mut().insert(key, ns.clone());
     Ok(ns)
 }
 
-fn namespace_of(it: &mut Interp, exports: Value, names: Option<Vec<String>>) -> R<Value> {
-    let make = it.eval_function(CJS_NAMESPACE)?;
+fn namespace_of(
+    it: &mut Interp,
+    loader: &Loader,
+    exports: Value,
+    names: Option<Vec<String>>,
+) -> R<Value> {
+    let make = &loader.cjs_namespace;
     let names = match names {
         Some(names) => it.array(names.iter().map(|n| Value::str(n)).collect()),
         None => Value::Undefined,
     };
-    it.call(&make, &Value::Undefined, &[exports, names])
+    it.call(make, &Value::Undefined, &[exports, names])
 }
 
 /// The peer fallback of `require_in`: a bare name the requiring bundle does not map resolves to the package
@@ -517,6 +524,10 @@ fn boot_bundle(
     name: &str,
     key: &str,
 ) -> R<Value> {
+    // Evaluated before `run_id` is set and before any factory exists: a later eval perturbs the interpreter
+    // state the factories rely on. Helpers are stored in `Loader`, so no eval runs mid-module.
+    let promise_of = it.eval_function(PROMISE_OF)?;
+    let cjs_namespace = it.eval_function(CJS_NAMESPACE)?;
     it.run_id = crate::next_run_id(); // factory spans come from this one parse
     it.sources
         .insert(it.run_id, std::rc::Rc::from(parts.source.as_str()));
@@ -530,7 +541,6 @@ fn boot_bundle(
         factories.insert(k.clone(), f);
     }
     let origins = star_origins(it, bundle_js)?;
-    let promise_of = it.eval_function(PROMISE_OF)?;
     let esm_keys = bundle_table(bundle_js, "__thaw_bundle_export_graphs")
         .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()))
         .unwrap_or_default();
@@ -562,6 +572,7 @@ fn boot_bundle(
         namespaces: RefCell::new(HashMap::new()),
         async_keys: RefCell::new(HashSet::new()),
         promise_of,
+        cjs_namespace,
     });
     if loader.parts.entry == "node:module" || loader.factories.contains_key("node:module") {
         install_module_loader(it, &loader, bundle_js)?;
@@ -9232,5 +9243,31 @@ var __thaw_bundle_export_graphs = JSON.parse("{\"p/n.js\":{\"local\":{},\"indire
             text(&mut pkg, "messageOf", &[reason]),
             "async module factories are not supported yet: p/a.js"
         );
+    }
+
+    /// A builtin-style bundle (no ESM or CJS name tables): `run` starts `requireAsync` first, then awaits a timer.
+    const TIMER_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require, requireAsync) {
+  exports.run = async function () {
+    var loaded = requireAsync('./c.js');
+    await new Promise(function (resolve) { setTimeout(function () { resolve(); }, 1); });
+    var ns = await loaded;
+    return 10 + ns.default.a;
+  };
+},
+"p/c.js": function(module, exports) { exports.a = 1; }
+};
+var __thaw_bundle_require_maps = { "p/index.js": { "./c.js": "p/c.js" }, "p/c.js": {} };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#;
+
+    #[test]
+    fn require_async_settles_when_a_timer_resolves_after_the_call() {
+        let mut pkg = Package::load(TIMER_BUNDLE).expect("loads");
+        let v = settled(&mut pkg, "run", &[])
+            .ok()
+            .expect("settles with the value");
+        assert_eq!(pkg.interp().to_str(&v).to_string(), "11");
     }
 }
