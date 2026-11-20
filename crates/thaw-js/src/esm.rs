@@ -57,11 +57,14 @@ fn string_literal_at(rest: &str) -> Option<&str> {
 /// The JS string literal of a registry bundle's `var __thaw_bundle_export_graphs = JSON.parse("...")`
 /// (quotes included): the JSON text of every ES module's export graph, keyed by module key.
 pub(crate) fn export_graphs_literal(source: &str) -> Option<&str> {
-    const VAR: &str = "var __thaw_bundle_export_graphs = JSON.parse(";
-    source
-        .find(VAR)
-        .and_then(|at| source.get(at + VAR.len()..))
-        .and_then(string_literal_at)
+    json_table_literal(source, "__thaw_bundle_export_graphs")
+}
+
+/// The string literal (quotes included) of `var <name> = JSON.parse(<literal>)` in a registry bundle.
+pub(crate) fn json_table_literal<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    let head = format!("var {name} = JSON.parse(");
+    let at = source.find(&head)? + head.len();
+    string_literal_at(source.get(at..)?)
 }
 
 fn indirect_exports(source: &str) -> BTreeMap<String, Vec<(String, String, String)>> {

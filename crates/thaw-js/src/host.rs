@@ -58,7 +58,36 @@ struct Loader {
     package: String,
     /// `make(key)` of [`STAR_ORIGIN_RUNTIME`]: the per-module origin object for a registry bundle's export graph.
     origins: Option<Value>,
+    /// Keys of the ESM-converted modules (those with an export graph); every other key is CommonJS.
+    esm_keys: HashSet<String>,
+    /// The CommonJS export names of each key (`__thaw_bundle_cjs_export_names`).
+    cjs_names: HashMap<String, Vec<String>>,
+    /// The namespace object built for each CommonJS key, so every dynamic import gets the same one.
+    namespaces: RefCell<HashMap<String, Value>>,
+    /// Keys whose factory returned a promise (top-level await). `requireAsync` rejects them: G3 is not done.
+    async_keys: RefCell<HashSet<String>>,
+    /// [`PROMISE_OF`]: wraps a thunk in a promise, so `requireAsync` rejects instead of throwing.
+    promise_of: Value,
+    /// [`CJS_NAMESPACE`]: builds a CommonJS module's namespace object.
+    cjs_namespace: Value,
 }
+
+/// `thunk()` settled as a promise: a throw inside the executor becomes the rejection.
+const PROMISE_OF: &str =
+    "function (thunk) { return new Promise(function (resolve) { resolve(thunk()); }); }";
+
+/// A CommonJS module's namespace, as the registry renders it (`__thaw_bundle_cjs_namespace`): `default` is the
+/// exports and each name is a snapshot of its property; keys are sorted, the object is null-prototype, sealed,
+/// tagged `Module`. `names` undefined (a builtin with no name table) takes the exports' own keys.
+const CJS_NAMESPACE: &str = r#"function (exports, names) {
+  var own = Object.prototype.hasOwnProperty, ns = Object.create(null);
+  var keys = (names || (exports == null ? [] : Object.keys(exports))).concat('default').sort();
+  keys.forEach(function (name) {
+    if (!own.call(ns, name)) Object.defineProperty(ns, name, { enumerable: true, value: name === 'default' ? exports : (exports == null ? undefined : exports[name]) });
+  });
+  Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module' });
+  return Object.preventExtensions(ns);
+}"#;
 
 /// Builds the addon object from the napi proxy layer globals: one function per export, routed to
 /// `construct` under `new` and to `call` otherwise (the QuickJS prelude's `__thaw_install_native` shape).
@@ -128,14 +157,7 @@ fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R
     if spec.ends_with(".node") {
         return addon_of(loader, it);
     }
-    let target = loader
-        .parts
-        .require_maps
-        .get(from)
-        .and_then(|m| m.get(spec))
-        .cloned()
-        .or_else(|| builtin_key(loader, spec));
-    match target {
+    match module_key(loader, from, spec) {
         Some(key) if key.ends_with(".node") => addon_of(loader, it),
         Some(key) => load_module(loader, it, &key),
         None => match peer_exports(it, spec)? {
@@ -153,6 +175,73 @@ fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R
             }
         },
     }
+}
+
+/// The module key `spec` names when required from `from`: the bundle's require map, then the builtin table.
+/// `None` when neither names it (the peer fallback or MODULE_NOT_FOUND of `require_in`).
+fn module_key(loader: &Loader, from: &str, spec: &str) -> Option<String> {
+    loader
+        .parts
+        .require_maps
+        .get(from)
+        .and_then(|m| m.get(spec))
+        .cloned()
+        .or_else(|| builtin_key(loader, spec))
+}
+
+/// The `requireAsync(spec)` thunk of module `from` (`load_module`): the namespace dynamic `import()` gives.
+/// A CommonJS module is `{default, ...names}`, built once per key; an ESM-converted module is its exports object,
+/// which is the same object every time because the module body runs once through the cache. Addons, peers and
+/// unmapped specs get the `require` result as a CommonJS namespace. An async factory is refused (G3).
+fn require_async_namespace(
+    loader: &Rc<Loader>,
+    it: &mut Interp,
+    from: &str,
+    spec: &str,
+) -> R<Value> {
+    let key = match module_key(loader, from, spec) {
+        Some(key) if !key.ends_with(".node") => key,
+        _ => {
+            let exports = require_in(loader, it, from, spec)?;
+            return namespace_of(it, loader, exports, Some(Vec::new()));
+        }
+    };
+    let exports = load_module(loader, it, &key)?;
+    if loader.async_keys.borrow().contains(&key) {
+        return Err(js_error(
+            it,
+            &format!("async module factories are not supported yet: {key}"),
+        ));
+    }
+    if loader.esm_keys.contains(&key) {
+        return Ok(exports);
+    }
+    if let Some(ns) = loader.namespaces.borrow().get(&key).cloned() {
+        return Ok(ns);
+    }
+    // a builtin with no name table takes its own keys, as the registry's fallback namespace does
+    let names = match loader.cjs_names.get(&key) {
+        Some(names) => Some(names.clone()),
+        None if key.starts_with("node:") => None,
+        None => Some(Vec::new()),
+    };
+    let ns = namespace_of(it, loader, exports, names)?;
+    loader.namespaces.borrow_mut().insert(key, ns.clone());
+    Ok(ns)
+}
+
+fn namespace_of(
+    it: &mut Interp,
+    loader: &Loader,
+    exports: Value,
+    names: Option<Vec<String>>,
+) -> R<Value> {
+    let make = &loader.cjs_namespace;
+    let names = match names {
+        Some(names) => it.array(names.iter().map(|n| Value::str(n)).collect()),
+        None => Value::Undefined,
+    };
+    it.call(make, &Value::Undefined, &[exports, names])
 }
 
 /// The peer fallback of `require_in`: a bare name the requiring bundle does not map resolves to the package
@@ -225,6 +314,17 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         let spec = it.to_str(&crate::arg(args, 0));
         require_in(&l, it, &k, &spec)
     });
+    let require_async = {
+        let (l, k) = (loader.clone(), key.to_string());
+        it.native(move |it, _, args| {
+            // the specifier is coerced once here; the thunk and every lookup below use this string
+            let spec = it.to_str(&crate::arg(args, 0)).to_string();
+            let (l2, k2) = (l.clone(), k.clone());
+            let thunk = it.native(move |it, _, _| require_async_namespace(&l2, it, &k2, &spec));
+            let promise_of = l.promise_of.clone();
+            it.call(&promise_of, &Value::Undefined, &[thunk])
+        })
+    };
     let l = loader.clone();
     let addon = it.native(move |it, _, _| addon_of(&l, it));
     it.set(&require, "addon", addon)?;
@@ -259,12 +359,17 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
             module.clone(),
             exports.clone(),
             require.clone(),
-            Value::Undefined,
+            require_async,
             Value::str(&file),
             Value::str(&dir),
             require,
         ],
     );
+    if let Ok(result) = &ran {
+        if it.is_promise(result) {
+            loader.async_keys.borrow_mut().insert(key.to_string());
+        }
+    }
     if entry {
         BOOTING.with(|b| b.borrow_mut().pop());
     }
@@ -419,6 +524,10 @@ fn boot_bundle(
     name: &str,
     key: &str,
 ) -> R<Value> {
+    // Evaluated before `run_id` is set and before any factory exists: a later eval perturbs the interpreter
+    // state the factories rely on. Helpers are stored in `Loader`, so no eval runs mid-module.
+    let promise_of = it.eval_function(PROMISE_OF)?;
+    let cjs_namespace = it.eval_function(CJS_NAMESPACE)?;
     it.run_id = crate::next_run_id(); // factory spans come from this one parse
     it.sources
         .insert(it.run_id, std::rc::Rc::from(parts.source.as_str()));
@@ -432,6 +541,25 @@ fn boot_bundle(
         factories.insert(k.clone(), f);
     }
     let origins = star_origins(it, bundle_js)?;
+    let esm_keys = bundle_table(bundle_js, "__thaw_bundle_export_graphs")
+        .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()))
+        .unwrap_or_default();
+    let cjs_names = bundle_table(bundle_js, "__thaw_bundle_cjs_export_names")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, names)| {
+            let names = names
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|n| n.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (key, names)
+        })
+        .collect();
     let loader = Rc::new(Loader {
         parts,
         factories,
@@ -439,6 +567,12 @@ fn boot_bundle(
         addon: RefCell::new(None),
         package: name.to_string(),
         origins,
+        esm_keys,
+        cjs_names,
+        namespaces: RefCell::new(HashMap::new()),
+        async_keys: RefCell::new(HashSet::new()),
+        promise_of,
+        cjs_namespace,
     });
     if loader.parts.entry == "node:module" || loader.factories.contains_key("node:module") {
         install_module_loader(it, &loader, bundle_js)?;
@@ -447,6 +581,19 @@ fn boot_bundle(
         install_fetch_transport(it, &loader)?;
     }
     load_module(&loader, it, key)
+}
+
+/// The JSON value of the table `var <name> = JSON.parse(...)` of a registry bundle, `None` when it has none.
+fn bundle_table(bundle_js: &str, name: &str) -> Option<serde_json::Value> {
+    let literal = crate::esm::json_table_literal(bundle_js, name)?;
+    let Native::Array(mut wrapped) = crate::json::parse_native(&format!("[{literal}]")).ok()?
+    else {
+        return None;
+    };
+    let Some(Native::Str(json)) = wrapped.pop() else {
+        return None;
+    };
+    serde_json::from_str(&json).ok()
 }
 
 /// Runs module `key` of the registry bundle `bundle_js` (package `name`) as the main module of `it`, a worker
@@ -8969,5 +9116,158 @@ var __thaw_bundle_entry_key = "pkg/index.js";
             pkg.get("f").ok(),
             Some(Native::Str("/thaw_modules/pkg/index.js".into()))
         );
+    }
+}
+
+#[cfg(test)]
+mod require_async_tests {
+    use super::*;
+
+    /// Entry `p/index.js` exposes `load(spec)` (returns `requireAsync(spec)`) and helpers that read the
+    /// settled namespace. `p/c.js` is CommonJS (names from `__thaw_bundle_cjs_export_names`), `p/n.js` is
+    /// ESM-converted (an export graph), `p/a.js` is an async factory (top-level await).
+    const BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require, requireAsync) {
+  exports.load = function (spec) { return requireAsync(spec); };
+  exports.describe = function (ns) {
+    return Object.keys(ns).join(',') + '|' + ns.default.a + '|' + ns.a + '|' + Object.prototype.toString.call(ns) + '|' + (Object.getPrototypeOf(ns) === null);
+  };
+  exports.same = function (a, b) { return a === b; };
+  exports.syncNative = function () { return require('./n.js'); };
+  exports.codeOf = function (e) { return e && e.code; };
+  exports.messageOf = function (e) { return String(e && e.message); };
+  exports.coerce = function () {
+    var n = 0, spec = { toString: function () { n++; return './c.js'; } };
+    return requireAsync(spec).then(function () { return n; });
+  };
+},
+"p/c.js": function(module, exports) { exports.a = 1; exports.b = 2; },
+"p/n.js": function(module, exports) { exports.v = 7; },
+"p/a.js": async function(module, exports) { await null; exports.late = 1; }
+};
+var __thaw_bundle_require_maps = { "p/index.js": { "./c.js": "p/c.js", "./n.js": "p/n.js", "./a.js": "p/a.js" }, "p/c.js": {}, "p/n.js": {}, "p/a.js": {} };
+var __thaw_bundle_entry_key = "p/index.js";
+var __thaw_bundle_cjs_export_names = JSON.parse("{\"p/c.js\":[\"a\",\"b\"]}");
+var __thaw_bundle_export_graphs = JSON.parse("{\"p/n.js\":{\"local\":{},\"indirect\":{},\"stars\":[]}}");
+})(globalThis.require);"#;
+
+    /// Calls entry export `name` with `args` and drains the jobs until its result settles: `Ok(value)` or
+    /// `Err(reason)` (a rejection).
+    fn settled(pkg: &mut Package, name: &str, args: &[Value]) -> Result<Value, Value> {
+        let exports = pkg.exports();
+        let it = pkg.interp();
+        let f = it.get(&exports, name).expect("export");
+        let v = it
+            .call(&f, &Value::Undefined, args)
+            .expect("call did not throw");
+        match it.await_settled(&v).expect("settles") {
+            Some(result) => result,
+            None => panic!("{name} still pending"),
+        }
+    }
+
+    /// Calls entry export `name` with `args` and returns its plain result as text.
+    fn text(pkg: &mut Package, name: &str, args: &[Value]) -> String {
+        let exports = pkg.exports();
+        let it = pkg.interp();
+        let f = it.get(&exports, name).expect("export");
+        let v = it.call(&f, &Value::Undefined, args).expect("call");
+        it.to_str(&v).to_string()
+    }
+
+    #[test]
+    fn dynamic_import_of_commonjs_gives_default_and_named_namespace() {
+        let mut pkg = Package::load(BUNDLE).expect("loads");
+        let ns = settled(&mut pkg, "load", &[Value::str("./c.js")])
+            .ok()
+            .expect("resolves");
+        let shape = text(&mut pkg, "describe", &[ns]);
+        // Node 22: `import('./c.cjs')` -> keys a, b, default (sorted); default is module.exports; [object Module]
+        assert_eq!(shape, "a,b,default|1|1|[object Module]|true");
+    }
+
+    #[test]
+    fn dynamic_import_returns_the_same_namespace_object_on_every_call() {
+        let mut pkg = Package::load(BUNDLE).expect("loads");
+        let first = settled(&mut pkg, "load", &[Value::str("./c.js")])
+            .ok()
+            .expect("resolves");
+        let second = settled(&mut pkg, "load", &[Value::str("./c.js")])
+            .ok()
+            .expect("resolves");
+        assert_eq!(
+            text(&mut pkg, "same", &[first.clone(), second.clone()]),
+            "true"
+        );
+        // an ESM-converted module's namespace is its exports object, the one a sync require gets
+        let native = settled(&mut pkg, "load", &[Value::str("./n.js")])
+            .ok()
+            .expect("resolves");
+        let again = settled(&mut pkg, "load", &[Value::str("./n.js")])
+            .ok()
+            .expect("resolves");
+        let sync = {
+            let exports = pkg.exports();
+            let it = pkg.interp();
+            let f = it.get(&exports, "syncNative").expect("export");
+            it.call(&f, &Value::Undefined, &[]).expect("sync require")
+        };
+        assert_eq!(text(&mut pkg, "same", &[native.clone(), again]), "true");
+        assert_eq!(text(&mut pkg, "same", &[native, sync]), "true");
+    }
+
+    #[test]
+    fn dynamic_import_of_a_missing_module_rejects_with_module_not_found() {
+        let mut pkg = Package::load(BUNDLE).expect("loads");
+        let reason = settled(&mut pkg, "load", &[Value::str("./missing.js")])
+            .err()
+            .expect("rejects, not a synchronous throw");
+        assert_eq!(text(&mut pkg, "codeOf", &[reason]), "MODULE_NOT_FOUND");
+    }
+
+    #[test]
+    fn dynamic_import_coerces_the_specifier_exactly_once() {
+        let mut pkg = Package::load(BUNDLE).expect("loads");
+        let count = settled(&mut pkg, "coerce", &[]).ok().expect("resolves");
+        assert_eq!(text(&mut pkg, "same", &[count, Value::Number(1.0)]), "true");
+    }
+
+    #[test]
+    fn dynamic_import_of_an_async_factory_rejects_loudly() {
+        let mut pkg = Package::load(BUNDLE).expect("loads");
+        let reason = settled(&mut pkg, "load", &[Value::str("./a.js")])
+            .err()
+            .expect("async factories are unsupported until G3");
+        assert_eq!(
+            text(&mut pkg, "messageOf", &[reason]),
+            "async module factories are not supported yet: p/a.js"
+        );
+    }
+
+    /// A builtin-style bundle (no ESM or CJS name tables): `run` starts `requireAsync` first, then awaits a timer.
+    const TIMER_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require, requireAsync) {
+  exports.run = async function () {
+    var loaded = requireAsync('./c.js');
+    await new Promise(function (resolve) { setTimeout(function () { resolve(); }, 1); });
+    var ns = await loaded;
+    return 10 + ns.default.a;
+  };
+},
+"p/c.js": function(module, exports) { exports.a = 1; }
+};
+var __thaw_bundle_require_maps = { "p/index.js": { "./c.js": "p/c.js" }, "p/c.js": {} };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#;
+
+    #[test]
+    fn require_async_settles_when_a_timer_resolves_after_the_call() {
+        let mut pkg = Package::load(TIMER_BUNDLE).expect("loads");
+        let v = settled(&mut pkg, "run", &[])
+            .ok()
+            .expect("settles with the value");
+        assert_eq!(pkg.interp().to_str(&v).to_string(), "11");
     }
 }
