@@ -266,7 +266,9 @@
 
     terminate() {
       const state = states.get(this);
-      if (!state.exited) __thaw_worker_terminate(state.handle);
+      // Node: once the worker has exited, terminate() resolves undefined (not the exit code again)
+      if (state.exited) return Promise.resolve();
+      __thaw_worker_terminate(state.handle);
       return state.exitPromise;
     }
 

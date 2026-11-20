@@ -6769,6 +6769,16 @@ fn pending_timer_does_not_delay_worker_message() {
     it.run_event_loop().unwrap_or_else(|_| panic!("loop ends"));
 }
 
+#[test]
+fn terminate_after_exit_resolves_undefined_like_node() {
+    // Node 22 (recorded with v22.23.1): the first terminate() resolves the exit code; once the worker
+    // has exited, a repeated terminate() resolves undefined.
+    let mut it = Interp::new();
+    it.run_main("const Worker = globalThis.__thaw_worker_threads_exports.Worker; (async () => { const w = new Worker('void 0;', { eval: true }); const first = await w.terminate(); const again = await w.terminate(); console.log(typeof first, again === undefined); })();")
+        .unwrap_or_else(|_| panic!("program runs"));
+    assert_eq!(it.out.join("|"), "number true");
+}
+
 thread_local! {
     static FAKE_READY: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
