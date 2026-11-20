@@ -1087,7 +1087,7 @@ fn rewrite_native_opaque_edges_named(
     source: &str, opaque_specs: &std::collections::BTreeSet<String>, helper_spec: &str,
     source_name: &thaw_parser::common::FileName,
 ) -> Option<String> {
-    use thaw_parser::ast::{ExportSpecifier, ImportSpecifier, ModuleDecl, ModuleItem};
+    use thaw_parser::ast::{ExportSpecifier, ImportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
     use thaw_parser::common::{SourceMapper, Spanned};
     let offset = esm_synthetic_offset_named(source, source_name)?;
     let origin_name = format!("__thaw_esm_origin_{offset}");
@@ -1117,9 +1117,46 @@ fn rewrite_native_opaque_edges_named(
             ModuleItem::ModuleDecl(ModuleDecl::Import(import))
                 if opaque_specs.contains(import.src.value.to_string_lossy().as_ref()) =>
                 Some(format!("import {};", js_string_literal(&import.src.value.to_string_lossy()))),
+            // Same live reads as the opaque ImportDecl path: the shell import
+            // keeps evaluation order, and each re-exported name is a local const
+            // bound from the private origin, then exported under its own name.
             ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export))
-                if export.src.as_ref().is_some_and(|src| opaque_specs.contains(src.value.to_string_lossy().as_ref())) =>
-                Some(format!("import {};", js_string_literal(&export.src.as_ref()?.value.to_string_lossy()))),
+                if export.src.as_ref().is_some_and(|src| opaque_specs.contains(src.value.to_string_lossy().as_ref())) => {
+                let spec = js_string_literal(&export.src.as_ref()?.value.to_string_lossy());
+                let mut text = format!("import {spec};");
+                if !export.type_only {
+                    let raw = |name: &ModuleExportName| match name {
+                        ModuleExportName::Ident(id) => id.sym.to_string(),
+                        ModuleExportName::Str(value) => value.value.to_string_lossy().into_owned(),
+                    };
+                    let clause = |name: &ModuleExportName| match name {
+                        ModuleExportName::Ident(id) => id.sym.to_string(),
+                        ModuleExportName::Str(value) => js_string_literal(&value.value.to_string_lossy()),
+                    };
+                    for (index, specifier) in export.specifiers.iter().enumerate() {
+                        let (read, exported) = match specifier {
+                            ExportSpecifier::Named(named) if !named.is_type_only => {
+                                let orig = raw(&named.orig);
+                                let read = if orig == "default" {
+                                    format!("{origin_name}.readDefault({spec})")
+                                } else {
+                                    format!("{origin_name}.readImport({spec}, {})", js_string_literal(&orig))
+                                };
+                                (read, named.exported.as_ref().map(clause).unwrap_or_else(|| clause(&named.orig)))
+                            }
+                            // Node's namespace of a CJS module: `default` is module.exports,
+                            // plus its own enumerable names (the origin hands back the raw value).
+                            ExportSpecifier::Namespace(namespace) => (format!(
+                                "((m) => {{ var ns = {{}}; if (m !== null && (typeof m === 'object' || typeof m === 'function')) Object.keys(m).forEach(function (k) {{ if (k !== 'default') ns[k] = m[k]; }}); ns.default = m; return ns; }})({origin_name}.namespaceImport({spec}))"),
+                                clause(&namespace.name)),
+                            _ => continue,
+                        };
+                        let local = format!("__thaw_esm_export_{offset}_{}_{index}", item.span().lo.0);
+                        text.push_str(&format!(" const {local} = {read}; export {{ {local} as {exported} }};"));
+                    }
+                }
+                Some(text)
+            }
             ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export))
                 if opaque_specs.contains(export.src.value.to_string_lossy().as_ref()) =>
                 Some(format!("import {};", js_string_literal(&export.src.value.to_string_lossy()))),
