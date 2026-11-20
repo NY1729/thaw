@@ -240,6 +240,19 @@ fn fs_cp_recursive_and_single_file() {
     assert_eq!(std::fs::read(&single).unwrap(), b"beta");
 }
 
+#[test]
+fn fs_copy_same_inode_hardlink_keeps_content() {
+    let d = scratch("copy-same-inode");
+    let src = d.join("src.txt");
+    let link = d.join("link.txt");
+    std::fs::write(&src, b"precious").unwrap();
+    std::fs::hard_link(&src, &link).unwrap();
+    // Same inode: must not truncate either name (copyFileSync is a no-op here).
+    let _ = call("copy", &src, link.to_str().unwrap());
+    assert_eq!(std::fs::read(&src).unwrap(), b"precious");
+    assert_eq!(std::fs::read(&link).unwrap(), b"precious");
+}
+
 // Replays, at host level, the exact op sequence the JS shim issues for
 // `open(path,'w') -> writeFile -> stat -> close -> open(path,'r') -> readFile`.
 fn fd_call(op: &str, fd: &str, value: &str) -> serde_json::Value {
