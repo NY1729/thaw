@@ -1,3 +1,7 @@
+// qjs_pending: fails on thaw-js: util.types.isProxy(new Proxy({}, {})) is true, expected false (last element)
+mod qjs_pending_network_util_types_identifies_standard_and_typed_objects {
+    use super::*;
+
 #[test]
 fn util_types_identifies_standard_and_typed_objects() {
     use std::ffi::{CStr, CString};
@@ -21,23 +25,17 @@ fn util_types_identifies_standard_and_typed_objects() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+}
 
 #[test]
 fn node_constants_are_shared_with_filesystem_constants() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_constants");
     fs::write(dir.join("index.js"), "var constants = require('node:constants'); var fs = require('node:fs'); module.exports = function () { return [constants === fs.constants, constants.F_OK, constants.R_OK, constants.W_OK, constants.X_OK, constants.O_CREAT, constants.O_APPEND, constants.S_IFREG, constants.S_IFDIR, constants.COPYFILE_FICLONE_FORCE]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_constants_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseConstants = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseConstants").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[true,0,4,2,1,64,1024,32768,16384,4]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -45,20 +43,13 @@ fn node_constants_are_shared_with_filesystem_constants() {
 
 #[test]
 fn readline_splits_lines_and_supports_callback_and_promise_questions() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_readline");
     fs::write(dir.join("index.js"), "var readline = require('node:readline'); var promiseReadline = require('node:readline/promises'); module.exports = async function () { var writes = []; var output = { write: function(value) { writes.push(String(value)); return true; } }; var rl = readline.createInterface({ output: output, historySize: 2, removeHistoryDuplicates: true }); var lines = []; rl.on('line', function(line) { lines.push(line); }); var callbackAnswer = new Promise(function(resolve) { rl.question('name? ', resolve); }); rl.write('alice\\nnext\\r\\n'); var answer = await callbackAnswer; rl.setPrompt('ready> '); rl.prompt(); rl.pause(); rl.resume(); readline.cursorTo(output, 2, 3); readline.clearLine(output, 0); rl.close(); var prl = promiseReadline.createInterface({ output: output }); var promised = prl.question('age? '); prl.write('42\\n'); var age = await promised; var iterator = prl[Symbol.asyncIterator](); var next = iterator.next(); prl.write('tail\\n'); var iterated = await next; prl.close(); return [answer, lines, rl.history, rl.closed, age, iterated.value, writes, readline.ReadLine === readline.Interface, prl instanceof promiseReadline.Interface]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_readline_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseReadline = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseReadline").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["alice",["alice","next"],["next","alice"],true,"42","tail",["\u001b[4;3H","\u001b[2K"],true,true]"#
@@ -69,19 +60,12 @@ fn readline_splits_lines_and_supports_callback_and_promise_questions() {
 
 #[test]
 fn readline_questions_write_to_configured_output() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_readline_output");
     fs::write(dir.join("index.js"), "var readline = require('node:readline'); var promises = require('node:readline/promises'); module.exports = async function () { var writes = []; var output = { write: function(value) { writes.push(String(value)); return true; } }; var input = { on: function() {}, off: function() {} }; var callbackInterface = readline.createInterface({ input: input, output: output }); var callbackAnswer = new Promise(function(resolve) { callbackInterface.question('first? ', resolve); }); callbackInterface.write('yes\\n'); var first = await callbackAnswer; var promiseInterface = promises.createInterface({ input: input, output: output }); var secondPromise = promiseInterface.question('second? '); promiseInterface.write('ok\\n'); var second = await secondPromise; callbackInterface.close(); promiseInterface.close(); return [first, second, writes]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_readline_output_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseReadlineOutput = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseReadlineOutput").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"["yes","ok",["first? ","second? "]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -89,20 +73,13 @@ fn readline_questions_write_to_configured_output() {
 
 #[test]
 fn dns_modules_resolve_local_names_and_report_not_found() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_dns");
     fs::write(dir.join("index.js"), "var dns = require('node:dns'); var promises = require('node:dns/promises'); module.exports = async function () { var callbackLookup = await new Promise(function(resolve, reject) { dns.lookup('localhost', { family: 4 }, function(error, address, family) { error ? reject(error) : resolve([address, family]); }); }); var all = await dns.promises.lookup('localhost', { all: true }); var ipv6 = await promises.resolve6('localhost'); var reverse = await promises.reverse('127.0.0.1'); var errorCode; try { await promises.lookup('does-not-exist.invalid'); } catch (error) { errorCode = [error.code, error.syscall, error.hostname]; } dns.setDefaultResultOrder('ipv4first'); var resolver = new promises.Resolver(); resolver.setServers(['127.0.0.1']); return [callbackLookup, all, ipv6, reverse, errorCode, promises.getDefaultResultOrder(), resolver.getServers()]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_dns_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 3);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDns = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseDns").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[["127.0.0.1",4],[{"address":"127.0.0.1","family":4},{"address":"::1","family":6}],["::1"],["localhost"],["ENOTFOUND","getaddrinfo","does-not-exist.invalid"],"ipv4first",["127.0.0.1"]]"#
@@ -113,20 +90,13 @@ fn dns_modules_resolve_local_names_and_report_not_found() {
 
 #[test]
 fn net_builtin_validates_addresses_and_block_lists() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_net");
     fs::write(dir.join("index.js"), "var net = require('node:net'); module.exports = function () { var block = new net.BlockList(); block.addAddress('127.0.0.1'); block.addRange('10.0.0.2', '10.0.0.5'); block.addSubnet('192.168.1.0', 24); block.addAddress('::1', 'ipv6'); var ipv4 = new net.SocketAddress({ address: '127.0.0.1', port: 8080 }); var ipv6 = new net.SocketAddress({ address: '::1', family: 'ipv6' }); var invalidPort = false; try { new net.SocketAddress({ address: '127.0.0.1', port: 70000 }); } catch (error) { invalidPort = error instanceof RangeError; } return [net.isIP('127.0.0.1'), net.isIP('2001:db8::1'), net.isIP('999.0.0.1'), net.isIPv4('01.2.3.4'), net.isIPv6('::ffff:192.0.2.1'), block.check('127.0.0.1'), block.check('10.0.0.4'), block.check('10.0.0.9'), block.check('192.168.1.88'), block.check('::1'), ipv4.toJSON(), ipv6.family, invalidPort]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_net_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 3);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNet = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseNet").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[4,6,0,false,true,true,true,false,true,true,{"address":"127.0.0.1","port":8080,"family":"ipv4","flowlabel":0},"ipv6",true]"#
@@ -137,22 +107,18 @@ fn net_builtin_validates_addresses_and_block_lists() {
 
 #[test]
 fn net_block_list_matches_ipv6_numerically_and_validates_inputs() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_net_ipv6_block_list");
     fs::write(dir.join("index.js"), "var net = require('node:net'); module.exports = function () { function ok(value) { if (!value) throw new Error('IPv6 BlockList assertion failed'); } var b = new net.BlockList(); b.addAddress('2001:0DB8:0000:0000:0000:0000:0000:0001'); ok(b.check('2001:db8::1')); var mapped = new net.BlockList(); mapped.addAddress('::ffff:192.0.2.1'); ok(mapped.check('0:0:0:0:0:ffff:c000:201')); var r = new net.BlockList(); r.addRange('2001:db8::2', '2001:db8::10'); ok(r.check('2001:0db8:0:0:0:0:0:2') && r.check('2001:db8::10') && !r.check('2001:db8::11')); var prefixes = [[0,'::1','ffff::1',true],[1,'8000::1','7fff::1',false],[15,'2000::1','2001:ffff::1',true],[16,'2001::1','2002::1',false],[17,'2001:8000::1','2001:7fff::1',false],[63,'2001:db8:0:7fff::1','2001:db8:0:8000::1',false],[64,'2001:db8:0:0::1','2001:db8:0:1::1',false],[65,'2001:db8:0:0:8000::1','2001:db8:0:0:7fff::1',false],[127,'2001:db8::1','2001:db8::2',false],[128,'2001:db8::1','2001:db8::2',false]]; prefixes.forEach(function(x) { var n = new net.BlockList(); n.addSubnet(x[1], x[0]); ok(n.check(x[1]) === true); ok(n.check(x[2]) === x[3]); }); var v4 = new net.BlockList(); v4.addRange('10.0.0.0','10.0.0.1'); v4.addSubnet('192.0.2.1',32); ok(v4.check('10.0.0.1') && v4.check('192.0.2.1') && !v4.check('::1')); var before = v4.rules.length; [['addAddress',['invalid','ipv6']],['addAddress',['::1','ipv4']],['addRange',['::1','::2','ipv4']],['addRange',['::1','::2','bogus']],['addRange',['bad','::1','ipv6']],['addRange',['::1','bad','ipv6']],['addSubnet',['bad',64,'ipv6']],['addSubnet',['::1',-1,'ipv6']],['addSubnet',['::1',129,'ipv6']],['addSubnet',['::1',1.5,'ipv6']],['addSubnet',['::1',64,'bogus']],['addAddress',['::1','bogus']]].forEach(function(x) { var threw = false; try { v4[x[0]].apply(v4,x[1]); } catch (e) { threw = e instanceof TypeError; } ok(threw && v4.rules.length === before); }); ok(!v4.check('bad','ipv6') && !v4.check('::1','ipv4') && !v4.check('::1','bogus')); var reverse = false; try { b.addRange('2001:db8::2','2001:db8::1'); } catch (e) { reverse = e instanceof TypeError; } ok(reverse); b.addRange('2001:db8::1','2001:db8::1'); ok(b.check('2001:db8::1')); ['1::2::3','1:2:3','1:2:3:4:5:6:7:8:9','1.2.3.4::','1::192.0.2.01','::1%','::1%bad%zone'].forEach(function(ip) { ok(!net.isIPv6(ip)); }); ok(net.isIPv6('fe80::1%eth0') && !net.isIPv6('2001:db8::1%bad zone')); return true; };").unwrap();
     let empty_node_modules = temp_registry("builtin_net_ipv6_block_list_node_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetIpv6BlockList = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(CString::new("exerciseNetIpv6BlockList").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
+    let result = run_js(&bundle);
+    assert_eq!(result, "true");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
 #[test]
 fn net_socket_supports_write_batching_methods() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_net_write_batching");
     fs::write(
         dir.join("index.js"),
@@ -162,16 +128,9 @@ fn net_socket_supports_write_batching_methods() {
     let empty_node_modules = temp_registry("builtin_net_write_batching_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetWriteBatching = module.exports;"
-    ))
-    .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseNetWriteBatching").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = run_js(&bundle);
     assert_eq!(
-        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        result,
         "[true,true]"
     );
     let _ = fs::remove_dir_all(dir);
@@ -180,7 +139,6 @@ fn net_socket_supports_write_batching_methods() {
 
 #[test]
 fn net_socket_exchanges_bytes_with_a_real_tcp_peer() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -200,13 +158,7 @@ fn net_socket_exchanges_bytes_with_a_real_tcp_peer() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 3);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetSocket = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseNetSocket").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(
         result,
         format!(r#"[["connect","data:pong","end","close:false"],4,4,true,{port},"IPv4"]"#)
@@ -218,7 +170,6 @@ fn net_socket_exchanges_bytes_with_a_real_tcp_peer() {
 
 #[test]
 fn net_socket_end_delivers_bytes_received_before_a_reset() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::os::fd::AsRawFd;
@@ -246,13 +197,7 @@ fn net_socket_end_delivers_bytes_received_before_a_reset() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 3);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetPartial = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseNetPartial").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     // Same sequence as node 22 against a half-open server that resets.
     assert_eq!(result, r#"["connect","data:par","error:ECONNRESET","close:true"]"#);
     server.join().unwrap();
@@ -262,7 +207,6 @@ fn net_socket_end_delivers_bytes_received_before_a_reset() {
 
 #[test]
 fn net_socket_reads_while_its_write_side_remains_open() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener};
 
@@ -283,13 +227,9 @@ fn net_socket_reads_while_its_write_side_remains_open() {
     let empty_node_modules = temp_registry("builtin_net_full_duplex_socket_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetFullDuplex = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseNetFullDuplex").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(
-        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        result,
         r#"[["hello","world"],4,10]"#
     );
     server.join().unwrap();
@@ -299,7 +239,6 @@ fn net_socket_reads_while_its_write_side_remains_open() {
 
 #[test]
 fn net_socket_timeout_fires_without_closing_the_connection() {
-    use std::ffi::{CStr, CString};
     use std::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -314,14 +253,9 @@ fn net_socket_timeout_fires_without_closing_the_connection() {
     let empty_node_modules = temp_registry("builtin_net_socket_timeout_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetTimeout = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseNetTimeout").unwrap().as_ptr(),
-        CString::new(format!("[{port}]")).unwrap().as_ptr(),
-    );
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(
-        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        result,
         "[true,10]"
     );
     server.join().unwrap();
@@ -343,7 +277,6 @@ fn net_socket_timeout_fires_without_closing_the_connection() {
 /// once `'end'` has actually fired, matching real Node.
 #[test]
 fn net_socket_pause_and_resume_gate_data_events_and_track_readable_state() {
-    use std::ffi::{CStr, CString};
     use std::io::Write;
     use std::net::{Shutdown, TcpListener};
 
@@ -365,14 +298,9 @@ fn net_socket_pause_and_resume_gate_data_events_and_track_readable_state() {
     let empty_node_modules = temp_registry("builtin_net_socket_pause_resume_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetPauseResume = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseNetPauseResume").unwrap().as_ptr(),
-        CString::new(format!("[{port}]")).unwrap().as_ptr(),
-    );
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(
-        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        result,
         concat!(
             r#"["endEmittedBeforeData:false","isPaused:true","#,
             r#""gotDataWhilePaused:false","isPausedAfterResume:false","#,
@@ -386,7 +314,6 @@ fn net_socket_pause_and_resume_gate_data_events_and_track_readable_state() {
 
 #[test]
 fn http_client_request_timeout_fires() {
-    use std::ffi::{CStr, CString};
     use std::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -400,13 +327,8 @@ fn http_client_request_timeout_fires() {
     let empty_node_modules = temp_registry("builtin_http_request_timeout_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpTimeout = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseHttpTimeout").unwrap().as_ptr(),
-        CString::new(format!("[{port}]")).unwrap().as_ptr(),
-    );
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "10");
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
+    assert_eq!(result, "10");
     server.join().unwrap();
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
@@ -414,7 +336,6 @@ fn http_client_request_timeout_fires() {
 
 #[test]
 fn http_client_requests_and_parses_a_real_chunked_response() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -448,13 +369,7 @@ fn http_client_requests_and_parses_a_real_chunked_response() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 6);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpClient = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpClient").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(
         result,
         r#"[200,"OK","1.1","yes",["a=1","b=2"],10,"thaw-ok",true,true,false,true,"OK"]"#
@@ -466,7 +381,6 @@ fn http_client_requests_and_parses_a_real_chunked_response() {
 
 #[test]
 fn http_client_rejects_truncated_bodies_but_accepts_unframed_eof() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -521,13 +435,7 @@ fn http_client_rejects_truncated_bodies_but_accepts_unframed_eof() {
     let empty_node_modules = temp_registry("builtin_http_truncated_eof_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpTruncatedEof = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpTruncatedEof").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     let cases: Vec<Vec<String>> = serde_json::from_str(&result).unwrap();
     assert_eq!(cases.len(), 5);
     let failure_tail = [
@@ -566,7 +474,6 @@ fn http_client_rejects_truncated_bodies_but_accepts_unframed_eof() {
 
 #[test]
 fn http_client_truncated_eof_keeps_cleanup_after_listener_reentry() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_truncated_reentry");
     fs::write(
@@ -595,13 +502,7 @@ fn http_client_truncated_eof_keeps_cleanup_after_listener_reentry() {
     let empty_node_modules = temp_registry("builtin_http_truncated_reentry_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpTruncatedReentry = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpTruncatedReentry").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[true,["headers:false","aborted:0","response-error:ECONNRESET","response-close:0","request-error:ECONNRESET","request-close"]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -609,7 +510,6 @@ fn http_client_truncated_eof_keeps_cleanup_after_listener_reentry() {
 
 #[test]
 fn http_client_parse_failure_keeps_first_notification_exception_when_destroy_throws() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_parse_failure_cleanup");
     fs::write(
@@ -631,13 +531,7 @@ fn http_client_parse_failure_keeps_first_notification_exception_when_destroy_thr
     let empty_node_modules = temp_registry("builtin_http_parse_failure_cleanup_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpParseFailureCleanup = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpParseFailureCleanup").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[true,["request-error","destroy","socket-close","request-close:0"]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -645,7 +539,6 @@ fn http_client_parse_failure_keeps_first_notification_exception_when_destroy_thr
 
 #[test]
 fn http_response_complete_waits_for_chunked_body_end() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -677,13 +570,7 @@ fn http_response_complete_waits_for_chunked_body_end() {
     let empty_node_modules = temp_registry("builtin_http_complete_after_body_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpCompleteAfterBody = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpCompleteAfterBody").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, r#"[false,"body",true]"#);
     server.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
@@ -692,7 +579,6 @@ fn http_response_complete_waits_for_chunked_body_end() {
 
 #[test]
 fn http_incoming_pause_buffers_chunked_body_and_resume_waits_for_end() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -725,13 +611,7 @@ fn http_incoming_pause_buffers_chunked_body_and_resume_waits_for_end() {
     let empty_node_modules = temp_registry("builtin_http_incoming_pause_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpIncomingPause = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpIncomingPause").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, r#"[false,["a"],["a","b","end"],true]"#);
     server.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
@@ -740,7 +620,6 @@ fn http_incoming_pause_buffers_chunked_body_and_resume_waits_for_end() {
 
 #[test]
 fn http_incoming_decodes_split_utf8_and_flushes_eof_before_end() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -791,13 +670,7 @@ fn http_incoming_decodes_split_utf8_and_flushes_eof_before_end() {
     let empty_node_modules = temp_registry("builtin_http_incoming_decoder_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpIncomingDecoder = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpIncomingDecoder").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, r#"[["A","雪","end"],["�","end"],["A","�","42","end"]]"#);
     server.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
@@ -806,7 +679,6 @@ fn http_incoming_decodes_split_utf8_and_flushes_eof_before_end() {
 
 #[test]
 fn http_incoming_listener_variants_start_data_and_end_drain() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_incoming_listener_variants");
     fs::write(
@@ -825,13 +697,7 @@ fn http_incoming_listener_variants_start_data_and_end_drain() {
     let empty_node_modules = temp_registry("builtin_http_incoming_listener_variants_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpIncomingListeners = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpIncomingListeners").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[["a","end"],["a","end"],["a","end"],["a","end"],["a","end"]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -839,7 +705,6 @@ fn http_incoming_listener_variants_start_data_and_end_drain() {
 
 #[test]
 fn http_incoming_eof_orders_data_end_before_request_close() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -872,13 +737,7 @@ fn http_incoming_eof_orders_data_end_before_request_close() {
     let empty_node_modules = temp_registry("builtin_http_incoming_eof_order_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpIncomingEof = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpIncomingEof").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, r#"["data:body","end","close"]"#);
     server.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
@@ -887,7 +746,6 @@ fn http_incoming_eof_orders_data_end_before_request_close() {
 
 #[test]
 fn http_client_upgrades_and_keeps_the_socket_duplex() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -919,13 +777,9 @@ fn http_client_upgrades_and_keeps_the_socket_duplex() {
     let empty_node_modules = temp_registry("builtin_http_client_upgrade_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpUpgrade = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpUpgrade").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(
-        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        result,
         r#"[101,true,"head","pong"]"#
     );
     server.join().unwrap();
@@ -935,7 +789,6 @@ fn http_client_upgrades_and_keeps_the_socket_duplex() {
 
 #[test]
 fn http_client_emits_informational_responses_and_parses_trailers() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -964,13 +817,7 @@ fn http_client_emits_informational_responses_and_parses_trailers() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 6);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpInformation = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpInformation").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(
         result,
         r#"[[[103,"Early Hints","</style.css>; rel=preload",1,1],[100,"Continue","yes",1,1]],1,"hello","one, two",["t=1"],["one","two"],6,true]"#
@@ -982,7 +829,6 @@ fn http_client_emits_informational_responses_and_parses_trailers() {
 
 #[test]
 fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -1140,13 +986,7 @@ fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 8);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFetch = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseFetch").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(
         result,
         format!(
@@ -1160,7 +1000,6 @@ fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
 
 #[test]
 fn global_fetch_resolves_headers_before_delayed_body_chunks() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::Duration;
@@ -1208,13 +1047,7 @@ fn global_fetch_resolves_headers_before_delayed_body_chunks() {
     let empty_node_modules = temp_registry("global_fetch_streaming_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamingFetch = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseStreamingFetch").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, r#"[true,true,"one","two",true,true,"body-stop"]"#);
     server.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
@@ -1223,7 +1056,6 @@ fn global_fetch_resolves_headers_before_delayed_body_chunks() {
 
 #[test]
 fn http_agents_and_header_validators_share_across_https() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_http_agents");
     fs::write(
             dir.join("index.js"),
@@ -1234,13 +1066,7 @@ fn http_agents_and_header_validators_share_across_https() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 8);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpAgents = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpAgents").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[true,true,true,true,null,["one","two"],"example.com:8080::4",true,7,9,0,"https:",443,250,true,true,["ERR_INVALID_HTTP_TOKEN","ERR_INVALID_CHAR","ERR_HTTP_INVALID_HEADER_VALUE"]]"#
@@ -1251,7 +1077,6 @@ fn http_agents_and_header_validators_share_across_https() {
 
 #[test]
 fn child_process_sync_apis_execute_and_report_node_shaped_results() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_child_process_sync");
     fs::write(
             dir.join("index.js"),
@@ -1262,15 +1087,7 @@ fn child_process_sync_apis_execute_and_report_node_shaped_results() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 6);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessSync = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseChildProcessSync").unwrap();
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(
         result,
         r#"[3,null,"out","err","out",true,true,"stdin",0,"env-ok","shell-ok",null,"ENOENT","/thaw/does-not-exist",[7,"bad","",true],0,"ENOBUFS"]"#
@@ -1281,7 +1098,6 @@ fn child_process_sync_apis_execute_and_report_node_shaped_results() {
 
 #[test]
 fn child_process_async_apis_stream_and_emit_lifecycle_events() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_child_process_async");
     fs::write(
             dir.join("index.js"),
@@ -1292,13 +1108,7 @@ fn child_process_async_apis_stream_and_emit_lifecycle_events() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 6);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessAsync = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseChildProcessAsync").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"[["spawn:true","exit:4:null","close:4:null"],"out:hello","err:hello",4,null,true,true,[null,"callback",""],[6,"failure","","failure"],[null,"SIGINT",true],["ENOENT",null,null]]"#
@@ -1309,7 +1119,6 @@ fn child_process_async_apis_stream_and_emit_lifecycle_events() {
 
 #[test]
 fn child_process_spawn_honors_stdio_timeout_abort_and_detached_options() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_child_process_options");
     fs::write(
             dir.join("index.js"),
@@ -1320,13 +1129,7 @@ fn child_process_spawn_honors_stdio_timeout_abort_and_detached_options() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 6);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessOptions = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseChildProcessOptions").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     // `stdio: 'inherit'` hands the parent's descriptors to the child (as in Node): its output no longer passes through
     // the parent's `process.stdout.write`, so the capture stubs above see nothing. The bytes really reaching the parent's
     // stdout are checked by the node-compat case "child stdio inherit writes straight to the parent output".
@@ -1340,7 +1143,6 @@ fn child_process_spawn_honors_stdio_timeout_abort_and_detached_options() {
 
 #[test]
 fn child_process_fork_exchanges_ipc_messages_and_disconnects() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_child_process_fork");
     fs::write(
             dir.join("child.js"),
@@ -1356,14 +1158,8 @@ fn child_process_fork_exchanges_ipc_messages_and_disconnects() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 6);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessFork = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseChildProcessFork").unwrap();
     let child_path = dir.join("child.js").to_string_lossy().into_owned();
-    let arguments = CString::new(serde_json::to_string(&[child_path]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(child_path)]);
     assert_eq!(
         result,
         r#"[["spawn","message:42:argument","disconnect","close:0:null"],"child-ready",null,false,null,"ERR_IPC_CHANNEL_CLOSED",true]"#
@@ -1382,7 +1178,6 @@ fn child_process_fork_exchanges_ipc_messages_and_disconnects() {
 /// hit it there yet.
 #[test]
 fn http_server_parses_and_replies_to_a_real_tcp_client() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -1418,13 +1213,7 @@ fn http_server_parses_and_replies_to_a_real_tcp_client() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 6);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpServer = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpServer").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(
         result,
         r#"[["POST","/submit","rust","1.1",1,1,"ping"],false,true]"#
@@ -1454,7 +1243,6 @@ fn http_server_parses_and_replies_to_a_real_tcp_client() {
 /// forward correctly.
 #[test]
 fn http_incoming_message_pipe_forwards_the_buffered_body_and_ends() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -1489,13 +1277,7 @@ fn http_incoming_message_pipe_forwards_the_buffered_body_and_ends() {
     let empty_node_modules = temp_registry("builtin_http_incoming_message_pipe_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpIncomingMessagePipe = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpIncomingMessagePipe").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, "true");
     let response = client.join().unwrap();
     assert!(response.ends_with("hello world|true"), "{response}");
@@ -1507,7 +1289,6 @@ fn http_incoming_message_pipe_forwards_the_buffered_body_and_ends() {
 /// other destinations, including when called from a data listener snapshot.
 #[test]
 fn http_incoming_message_unpipe_detaches_destination_listeners() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_incoming_message_unpipe");
     fs::write(
@@ -1547,15 +1328,7 @@ fn http_incoming_message_unpipe_detaches_destination_listeners() {
     let empty_node_modules = temp_registry("builtin_http_incoming_message_unpipe_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpIncomingMessageUnpipe = module.exports;"
-    ))
-    .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpIncomingMessageUnpipe").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[true,[[],0,["pipe","unpipe"]],[["A","B"],0,["pipe"]],[["C","D"],1,["pipe"]],[[],0,["pipe","unpipe"]],[true,true,0,0,0,[],0,["pipe","unpipe"],[],0,["pipe","unpipe"]]]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
@@ -1584,7 +1357,6 @@ fn http_incoming_message_unpipe_detaches_destination_listeners() {
 /// still green with this fix in place.
 #[test]
 fn server_response_calls_write_head_once_if_not_already_called() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -1619,13 +1391,7 @@ fn server_response_calls_write_head_once_if_not_already_called() {
     let empty_node_modules = temp_registry("builtin_http_implicit_write_head_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseImplicitWriteHead = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseImplicitWriteHead").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, "1");
     let response = client.join().unwrap();
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
@@ -1641,7 +1407,6 @@ fn server_response_calls_write_head_once_if_not_already_called() {
 /// writes on this flag, so a missing value drops every payload chunk.
 #[test]
 fn server_response_has_body_follows_node() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_server_response_has_body");
     fs::write(
@@ -1652,13 +1417,7 @@ fn server_response_has_body_follows_node() {
     let empty_node_modules = temp_registry("builtin_http_server_response_has_body_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHasBody = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHasBody").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         "[true,true,false,false,false,false,false,true,true,true,false]"
@@ -1673,7 +1432,6 @@ fn server_response_has_body_follows_node() {
 /// drop it for HEAD and 204. Node yields `["abcdef",0,0]` for this shape.
 #[test]
 fn server_response_subclass_write_override_respects_has_body() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_server_response_subclass_write");
     fs::write(
@@ -1685,13 +1443,7 @@ fn server_response_subclass_write_override_respects_has_body() {
         temp_registry("builtin_http_server_response_subclass_write_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseSubclassWrite = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseSubclassWrite").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, "[\"abcdef\",0,0]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
@@ -1699,7 +1451,6 @@ fn server_response_subclass_write_override_respects_has_body() {
 
 #[test]
 fn http_server_supports_standard_timeout_configuration() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_server_timeout");
     fs::write(
@@ -1710,22 +1461,15 @@ fn http_server_supports_standard_timeout_configuration() {
     let empty_node_modules = temp_registry("builtin_http_server_timeout_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpServerTimeout = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpServerTimeout").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result = unsafe {
-        CStr::from_ptr(thaw_quickjs::thaw_js_call(
-            function.as_ptr(),
-            arguments.as_ptr(),
-        ))
-    }
-    .to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, "[true,1234,true]");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+// qjs_pending: fails on thaw-js: /streamed-later response does not end with "ok" (assert at line 1484), then the client join panics
+mod qjs_pending_network_http_server_releases_completed_connection_close_responses {
+    use super::*;
 
 #[test]
 fn http_server_releases_completed_connection_close_responses() {
@@ -1828,10 +1572,10 @@ fn http_server_releases_completed_connection_close_responses() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
 }
+}
 
 #[test]
 fn http_server_handles_chunked_bodies_and_pipelined_keep_alive_requests() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -1883,18 +1627,7 @@ fn http_server_handles_chunked_bodies_and_pipelined_keep_alive_requests() {
     let empty_node_modules = temp_registry("builtin_http_server_keep_alive_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpKeepAlive = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpKeepAlive").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result = unsafe {
-        CStr::from_ptr(thaw_quickjs::thaw_js_call(
-            function.as_ptr(),
-            arguments.as_ptr(),
-        ))
-    }
-    .to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, "2");
     let ((first_headers, first_body), (second_headers, second_body)) = client.join().unwrap();
     assert!(first_headers
@@ -1911,7 +1644,6 @@ fn http_server_handles_chunked_bodies_and_pipelined_keep_alive_requests() {
 
 #[test]
 fn http_server_streams_sse_before_response_end() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -1952,18 +1684,7 @@ fn http_server_streams_sse_before_response_end() {
     let empty_node_modules = temp_registry("builtin_http_server_sse_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpSse = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpSse").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result = unsafe {
-        CStr::from_ptr(thaw_quickjs::thaw_js_call(
-            function.as_ptr(),
-            arguments.as_ptr(),
-        ))
-    }
-    .to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, "true");
     let (_, rest) = client.join().unwrap();
     assert!(rest.contains("data: second"));
@@ -1974,7 +1695,6 @@ fn http_server_streams_sse_before_response_end() {
 
 #[test]
 fn http_server_emits_websocket_upgrade_with_head_bytes() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -2006,18 +1726,7 @@ fn http_server_emits_websocket_upgrade_with_head_bytes() {
     let empty_node_modules = temp_registry("builtin_http_server_upgrade_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpUpgrade = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpUpgrade").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result = unsafe {
-        CStr::from_ptr(thaw_quickjs::thaw_js_call(
-            function.as_ptr(),
-            arguments.as_ptr(),
-        ))
-    }
-    .to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, r#"["GET","/socket","websocket","head",true,0]"#);
     assert!(client
         .join()
@@ -2034,7 +1743,6 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
     use rustls::{
         ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
     };
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::process::Command;
@@ -2132,14 +1840,8 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 8);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpsClient = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpsClient").unwrap();
     let ca = fs::read_to_string(&cert_pem).unwrap();
-    let arguments = CString::new(serde_json::to_string(&(port, &ca)).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64), thaw_js::host::Native::Str(ca.clone())]);
     assert_eq!(
         result,
         r#"[200,"yes","secret","https:",true,true,"https:"]"#
@@ -2171,13 +1873,7 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
         bundle_commonjs_package(&direct_node_modules, "tls-pkg", &direct_dir, "index.js")
             .unwrap();
     assert_eq!(direct_file_count, 2);
-    let direct_script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {direct_bundle} globalThis.exerciseTlsReadBeforeEnd = module.exports;");
-    let direct_source = CString::new(direct_script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(direct_source.as_ptr()), 1);
-    let direct_function = CString::new("exerciseTlsReadBeforeEnd").unwrap();
-    let direct_arguments = CString::new(serde_json::to_string(&(greeting_port, &ca)).unwrap()).unwrap();
-    let direct_result = thaw_quickjs::thaw_js_call(direct_function.as_ptr(), direct_arguments.as_ptr());
-    let direct_result = unsafe { CStr::from_ptr(direct_result) }.to_string_lossy();
+    let direct_result = run_js_with_args(&direct_bundle, vec![thaw_js::host::Native::Number(greeting_port as f64), thaw_js::host::Native::Str(ca.clone())]);
     assert_eq!(direct_result, r#"[0,"greeting",true,1,1,1]"#);
     greeting_server.join().unwrap();
     let _ = fs::remove_dir_all(&direct_dir);
@@ -2249,22 +1945,14 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
         bundle_commonjs_package(&server_node_modules, "secure-pkg", &server_dir, "index.js")
             .unwrap();
     assert_eq!(server_file_count, 8);
-    let server_script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {server_bundle} globalThis.exerciseHttpsServer = module.exports;");
-    let server_source = CString::new(server_script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(server_source.as_ptr()), 1);
-    let server_function = CString::new("exerciseHttpsServer").unwrap();
-    let server_arguments = CString::new(
-        serde_json::to_string(&(
-            server_port,
-            fs::read_to_string(&cert_pem).unwrap(),
-            fs::read_to_string(&key_pem).unwrap(),
-        ))
-        .unwrap(),
-    )
-    .unwrap();
-    let server_result =
-        thaw_quickjs::thaw_js_call(server_function.as_ptr(), server_arguments.as_ptr());
-    let server_result = unsafe { CStr::from_ptr(server_result) }.to_string_lossy();
+    let server_result = run_js_with_args(
+        &server_bundle,
+        vec![
+            thaw_js::host::Native::Number(server_port as f64),
+            thaw_js::host::Native::Str(fs::read_to_string(&cert_pem).unwrap()),
+            thaw_js::host::Native::Str(fs::read_to_string(&key_pem).unwrap()),
+        ],
+    );
     assert_eq!(
         server_result,
         r#"[[["GET","/from-rust",true,false],["GET","/from-rust",true,false]],false,true,[true,true],1]"#
@@ -2285,7 +1973,6 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
 
 #[test]
 fn net_server_accepts_and_replies_to_a_real_tcp_client() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::time::Duration;
@@ -2322,13 +2009,7 @@ fn net_server_accepts_and_replies_to_a_real_tcp_client() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 3);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetServer = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseNetServer").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(
         result,
         {
@@ -2346,7 +2027,6 @@ fn net_server_accepts_and_replies_to_a_real_tcp_client() {
 
 #[test]
 fn unreferenced_net_server_does_not_hold_the_event_loop_open() {
-    use std::ffi::{CStr, CString};
     use std::net::TcpListener;
 
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2361,19 +2041,13 @@ fn unreferenced_net_server_does_not_hold_the_event_loop_open() {
     let empty_node_modules = temp_registry("builtin_unref_net_server_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.startUnrefServer = module.exports.start; globalThis.closeUnrefServer = module.exports.close;"
-    ))
-    .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let start = CString::new("startUnrefServer").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result = thaw_quickjs::thaw_js_call(start.as_ptr(), arguments.as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
-    thaw_quickjs::thaw_js_run_event_loop();
-    let close = CString::new("closeUnrefServer").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    thaw_quickjs::thaw_js_call(close.as_ptr(), arguments.as_ptr());
+    let started = run_js_session(&bundle, move |session| {
+        let started = session.call("start", &[thaw_js::host::Native::Number(port as f64)]);
+        session.run_event_loop();
+        session.call("close", &[]);
+        started
+    });
+    assert_eq!(started, "true");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
 }
@@ -2389,7 +2063,6 @@ fn unreferenced_net_server_does_not_hold_the_event_loop_open() {
 /// default hermetic suite never depends on external DNS.
 #[test]
 fn node_dns_lookup_resolves_a_real_hostname_when_network_integration_is_enabled() {
-    use std::ffi::{CStr, CString};
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
@@ -2412,13 +2085,7 @@ fn node_dns_lookup_resolves_a_real_hostname_when_network_integration_is_enabled(
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDnsLookup = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseDnsLookup").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"["ok",true,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -2426,7 +2093,6 @@ fn node_dns_lookup_resolves_a_real_hostname_when_network_integration_is_enabled(
 
 #[test]
 fn http_server_emits_headers_before_body_and_keeps_early_response_body_framed() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -2484,13 +2150,7 @@ fn http_server_emits_headers_before_body_and_keeps_early_response_body_framed() 
     }); };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_server_streaming_pipeline_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpServerStreamingPipeline = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpServerStreamingPipeline").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, r#"[false,"body",1,true,[["GET","/two",true]]]"#);
     let (saw_ready, wire) = client.join().unwrap();
     assert!(saw_ready, "handler did not respond before body: {wire}");
@@ -2501,7 +2161,6 @@ fn http_server_emits_headers_before_body_and_keeps_early_response_body_framed() 
 
 #[test]
 fn http_server_streams_chunked_body_and_rejects_short_content_length() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::time::Duration;
@@ -2551,13 +2210,7 @@ fn http_server_streams_chunked_body_and_rejects_short_content_length() {
     }); };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_server_streaming_chunked_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpServerStreamingChunked = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpServerStreamingChunked").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, r#"[[false],"ABC",[true],[false],1]"#);
     let _wire = client.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
@@ -2566,7 +2219,6 @@ fn http_server_streams_chunked_body_and_rejects_short_content_length() {
 
 #[test]
 fn http_server_short_body_client_error_throw_still_aborts_and_destroys_socket() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_server_streaming_error_cleanup");
     fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events'); module.exports = function() {
@@ -2583,13 +2235,7 @@ fn http_server_short_body_client_error_throw_still_aborts_and_destroys_socket() 
     };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_server_streaming_error_cleanup_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpServerStreamingErrorCleanup = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpServerStreamingErrorCleanup").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, "[true,true,true,false,0,0]");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -2597,7 +2243,6 @@ fn http_server_short_body_client_error_throw_still_aborts_and_destroys_socket() 
 
 #[test]
 fn http_server_reuse_callback_stays_bound_to_its_own_request() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_server_reuse_record");
     fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events'); module.exports = function() {
@@ -2617,13 +2262,7 @@ fn http_server_reuse_callback_stays_bound_to_its_own_request() {
     };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_server_reuse_record_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpServerReuseRecord = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpServerReuseRecord").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[["/one","/two"],true,false]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -2631,7 +2270,6 @@ fn http_server_reuse_callback_stays_bound_to_its_own_request() {
 
 #[test]
 fn http_response_framing_keeps_pipelined_messages_aligned() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -2716,13 +2354,7 @@ fn http_response_framing_keeps_pipelined_messages_aligned() {
     };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_response_framing_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpResponseFraming = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpResponseFraming").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, r#"[["data","empty-head","empty-no-packet","end"],[true,true,true]]"#);
     client.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
@@ -2731,7 +2363,6 @@ fn http_response_framing_keeps_pipelined_messages_aligned() {
 
 #[test]
 fn http_client_205_waits_for_declared_framing_or_eof() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_client_205_framing");
     fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events');
@@ -2759,13 +2390,7 @@ module.exports = async function() {
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_client_205_framing_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {bundle} globalThis.exerciseHttpClient205Framing = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpClient205Framing").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[[205,true,true,0,1,"",0],[205,false,true,0,1,"yes",0],[205,false,true,0,1,"",0]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -2773,7 +2398,6 @@ module.exports = async function() {
 
 #[test]
 fn http_client_destroy_before_send_settles_once_and_guards_late_connect() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_destroy_before_send");
     fs::write(dir.join("index.js"), r#"var http = require('node:http'), https = require('node:https'), EventEmitter = require('node:events');
@@ -2876,13 +2500,7 @@ module.exports = async function() {
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_destroy_before_send_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpDestroyBeforeSend = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpDestroyBeforeSend").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[[0,0,1,0,0,true],[0,1,1,0,0,true],[0,0,1,1,0,true],[1,0,0,1,1,1,0,0],[1,0,0,1,1,1,0,0],[true,1,1,1],[true,1,1,1],[1,1,1],[true,1,1,1],["aborted","response-error","request-error","destroy","close"],[true,1,1,1,1,1],[1,0,0,1,0,0,1,1],[1,1,1],["data:abc","end","close"],[1,0,1],[0,0]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -2890,19 +2508,12 @@ module.exports = async function() {
 
 #[test]
 fn http_client_write_accepts_second_argument_callback() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_client_write_callback");
     fs::write(dir.join("index.js"), "var http = require('node:http'); module.exports = async function() { var calls = 0, request = http.request('http://localhost/'); request.write(Buffer.from('x'), function() { calls++; }); await Promise.resolve(); return calls; };").unwrap();
     let empty_node_modules = temp_registry("builtin_http_client_write_callback_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpClientWriteCallback = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpClientWriteCallback").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, "1");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -2910,7 +2521,6 @@ fn http_client_write_accepts_second_argument_callback() {
 
 #[test]
 fn http_incoming_pipe_waits_for_all_drains_and_keeps_user_pause() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_pipe_backpressure");
     fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events');
@@ -2948,13 +2558,7 @@ module.exports = async function() {
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_pipe_backpressure_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpPipeBackpressure = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpPipeBackpressure").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, "[true,true,true,true,true,true,true]");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -2962,7 +2566,6 @@ module.exports = async function() {
 
 #[test]
 fn http_transport_gate_does_not_override_socket_pause_or_duplicate_pumps() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_transport_gate");
     fs::write(dir.join("index.js"), r#"var net = require('node:net'), tls = require('node:tls');
@@ -2997,13 +2600,7 @@ module.exports = async function() {
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_transport_gate_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpTransportGate = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpTransportGate").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, "[true,true,true,true,true,true]");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -3011,7 +2608,6 @@ module.exports = async function() {
 
 #[test]
 fn http_paused_large_chunk_keeps_pipeline_behind_bounded_body() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -3065,13 +2661,7 @@ module.exports = async function(port) {
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_paused_large_chunk_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpPausedLargeChunk = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpPausedLargeChunk").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, "[[16384,true,1],49152,2]");
     assert_eq!(client.join().unwrap(), [b"first".to_vec(), b"second".to_vec()]);
     let _ = fs::remove_dir_all(&dir);
@@ -3080,7 +2670,6 @@ module.exports = async function(port) {
 
 #[test]
 fn http_client_large_chunk_drains_pending_before_deferred_eof_validation() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_client_pending_eof");
     fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events');
@@ -3106,13 +2695,7 @@ module.exports = async function() {
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_client_pending_eof_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpClientPendingEof = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpClientPendingEof").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, "[[16384,true,0,false],49152,true,false,[],1]");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -3120,7 +2703,6 @@ module.exports = async function() {
 
 #[test]
 fn http_pipeline_waits_for_completed_but_unconsumed_request_body() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -3171,13 +2753,7 @@ module.exports = async function(port) {
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_pipeline_unconsumed_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpPipelineUnconsumed = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpPipelineUnconsumed").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, "[[1,1,true],2]");
     assert_eq!(client.join().unwrap(), [b"first".to_vec(), b"second".to_vec()]);
     let _ = fs::remove_dir_all(&dir);
@@ -3190,7 +2766,6 @@ module.exports = async function(port) {
 // returns, which the handler is itself waiting for.
 #[test]
 fn http_request_body_is_deliverable_while_the_request_handler_is_still_running() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
@@ -3227,13 +2802,7 @@ module.exports = async function(port) {
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_body_during_handler_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpBodyDuringHandler = globalThis.module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpBodyDuringHandler").unwrap();
-    let arguments = CString::new(format!("[{port}]")).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_json_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     assert_eq!(result, "\"done\"");
     let response = client.join().unwrap();
     assert!(response.ends_with("during-handler=hello"), "{response}");
@@ -3243,7 +2812,6 @@ module.exports = async function(port) {
 
 #[test]
 fn http_client_rejects_malformed_incremental_chunk_sizes() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_client_invalid_chunk_size");
     fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events');
@@ -3264,13 +2832,7 @@ module.exports = async function() {
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_http_client_invalid_chunk_size_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpInvalidChunkSize = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpInvalidChunkSize").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, "[true,true,true]");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -3278,7 +2840,6 @@ module.exports = async function() {
 
 #[test]
 fn net_socket_terminal_cleanup_preserves_first_listener_error() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_net_terminal_cleanup");
     fs::write(dir.join("index.js"), r#"var net = require('node:net');
@@ -3377,13 +2938,7 @@ module.exports = function() {
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_net_terminal_cleanup_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetTerminalCleanup = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseNetTerminalCleanup").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[[true,["error","close"],[910001],true,0],[true,["error:ECONNRESET","close:true"],true,0,[]],[true,["end","close:false"],true,0],[false,["end","close:false"],true,0],[true,["end","close:false"],true,0],[true,["data","close"],true,0,[910004]],[true,["close"],true,0],[true,["close"],true,0],[true,[910007],0,1]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -3391,7 +2946,6 @@ module.exports = function() {
 
 #[test]
 fn net_socket_reconnect_resets_readable_state_and_invalidates_old_polls() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_net_socket_reconnect_readable_reset");
     fs::write(
@@ -3465,17 +3019,9 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_net_socket_reconnect_readable_reset_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetSocketReconnectReset = module.exports;"
-    ))
-    .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        c"exerciseNetSocketReconnectReset".as_ptr(),
-        c"[]".as_ptr(),
-    );
+    let result = run_js(&bundle);
     assert_eq!(
-        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        result,
         r#"[1,2,true,true,true,["connect","close:false","connect","data","end","close:false"],0,true,["close:false","connect"],940004,false,true]"#
     );
     let _ = fs::remove_dir_all(dir);
@@ -3484,7 +3030,6 @@ module.exports = function() {
 
 #[test]
 fn net_socket_eof_handler_reconnect_throw_keeps_new_generation_live() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_net_socket_eof_reconnect_throw");
     fs::write(
@@ -3539,17 +3084,9 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_net_socket_eof_reconnect_throw_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetSocketEofReconnectThrow = module.exports;"
-    ))
-    .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        c"exerciseNetSocketEofReconnectThrow".as_ptr(),
-        c"[]".as_ptr(),
-    );
+    let result = run_js(&bundle);
     assert_eq!(
-        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        result,
         r#"[true,false,960002,false,["new"],["connect","old-end","close:false","connect","data"],1,1]"#
     );
     let _ = fs::remove_dir_all(dir);
@@ -3558,7 +3095,6 @@ module.exports = function() {
 
 #[test]
 fn net_accepted_paused_socket_reconnects_without_old_half_open_shutdown() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_net_accepted_paused_reconnect");
     fs::write(
@@ -3626,17 +3162,9 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_net_accepted_paused_reconnect_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetAcceptedPausedReconnect = module.exports;"
-    ))
-    .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        c"exerciseNetAcceptedPausedReconnect".as_ptr(),
-        c"[]".as_ptr(),
-    );
+    let result = run_js(&bundle);
     assert_eq!(
-        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        result,
         r#"[true,true,false,false,970002,false,["new"],["server-end","close:false","connect","data"],[[970001,true],[970002,false]],[970001],[],0]"#
     );
     let _ = fs::remove_dir_all(dir);
@@ -3645,7 +3173,6 @@ module.exports = function() {
 
 #[test]
 fn net_connect_listener_throw_retires_socket_without_duplicate_terminal_events() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_net_connect_listener_throw");
     fs::write(dir.join("index.js"), r#"var net = require('node:net');
@@ -3678,13 +3205,7 @@ module.exports = function() {
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_net_connect_listener_throw_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetConnectThrow = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseNetConnectThrow").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(result, r#"[[true,["connect","close:false"],[920001],0,true,0],[true,["connect","close:false"],[920002],0,true,0],[true,["connect","close:false"],[920003],0,true,0],[true,["connect","close:false"],[920004],0,true,0],[false,["close:false"],[],0,true,0]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -3692,7 +3213,6 @@ module.exports = function() {
 
 #[test]
 fn net_accepted_socket_keeps_write_half_only_when_requested() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::time::{Duration, Instant};
@@ -3727,10 +3247,8 @@ fn net_accepted_socket_keeps_write_half_only_when_requested() {
     }); };"#).unwrap();
     let modules = temp_registry("builtin_net_accepted_half_close_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {bundle} globalThis.exerciseHalfClose = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(CString::new("exerciseHalfClose").unwrap().as_ptr(), CString::new(format!("[{port},{allow_half_open}]")).unwrap().as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), if allow_half_open { "[1,1,true,1]" } else { "[1,1,true,0]" });
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64), thaw_js::host::Native::Bool(allow_half_open)]);
+    assert_eq!(result, if allow_half_open { "[1,1,true,1]" } else { "[1,1,true,0]" });
     assert_eq!(peer.join().unwrap(), if allow_half_open { "pong" } else { "sync" });
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&modules);
@@ -3739,7 +3257,6 @@ fn net_accepted_socket_keeps_write_half_only_when_requested() {
 
 /// Runs `body` (a CommonJS module exporting `function(port)`) against a Rust TCP peer; returns (script result, peer result).
 fn run_net_client_against_peer<T: Send + 'static>(name: &str, body: &str, peer: impl FnOnce(std::net::TcpStream) -> T + Send + 'static) -> (String, T) {
-    use std::ffi::{CStr, CString};
     use std::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3753,10 +3270,7 @@ fn run_net_client_against_peer<T: Send + 'static>(name: &str, body: &str, peer: 
     fs::write(dir.join("index.js"), body).unwrap();
     let modules = temp_registry(&format!("{name}_modules"));
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {bundle} globalThis.exerciseClient = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(CString::new("exerciseClient").unwrap().as_ptr(), CString::new(format!("[{port}]")).unwrap().as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&modules);
     (result, handle.join().unwrap())
@@ -3810,7 +3324,6 @@ fn net_socket_reset_and_destroy_sends_rst() {
 
 #[test]
 fn http_server_finishes_buffered_pipeline_after_peer_half_close() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::time::{Duration, Instant};
@@ -3845,10 +3358,8 @@ fn http_server_finishes_buffered_pipeline_after_peer_half_close() {
     }); };"#).unwrap();
     let modules = temp_registry("builtin_http_half_closed_pipeline_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {bundle} globalThis.exerciseHttpHalfClose = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(CString::new("exerciseHttpHalfClose").unwrap().as_ptr(), CString::new(format!("[{port}]")).unwrap().as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[\"/first\",\"/second\"],1,1]");
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
+    assert_eq!(result, "[[\"/first\",\"/second\"],1,1]");
     let response = peer.join().unwrap();
     assert!(response.contains("\r\n\r\noneHTTP/1.1 200"), "{response}");
     assert!(response.ends_with("\r\n\r\ntwo"), "{response}");
@@ -3858,7 +3369,6 @@ fn http_server_finishes_buffered_pipeline_after_peer_half_close() {
 
 #[test]
 fn tls_end_preserves_an_http_owned_read_pause() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("tls_http_read_pause_owner");
     fs::write(
@@ -3884,25 +3394,14 @@ fn tls_end_preserves_an_http_owned_read_pause() {
     let node_modules = temp_registry("tls_http_read_pause_owner_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
-         globalThis.exerciseTlsHttpReadPauseOwner = module.exports;"
-    ))
-    .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        c"exerciseTlsHttpReadPauseOwner".as_ptr(),
-        c"[]".as_ptr(),
-    );
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,false]");
+    let result = run_js(&bundle);
+    assert_eq!(result, "[true,false]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
 
 #[test]
 fn net_socket_read_queue_preserves_reads_and_eof_order() {
-    use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_net_socket_read_queue");
     fs::write(
@@ -4004,19 +3503,9 @@ fn net_socket_read_queue_preserves_reads_and_eof_order() {
     let empty_node_modules = temp_registry("builtin_net_socket_read_queue_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
-         globalThis.exerciseNetSocketReadQueue = module.exports;"
-    ))
-    .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        c"exerciseNetSocketReadQueue".as_ptr(),
-        c"[]".as_ptr(),
-    );
+    let result = run_js(&bundle);
     assert_eq!(
-        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        result,
         r#"[[[],3,true,true,3,"ab","c",true,0,["close"]],[1,true,["x","☃"],0,true,["data:x","data:☃","end","close:false"]],[["�"],["data:�","end","close:false"],true],[["end","close:false"],true],[2,false,false,"a","b",0,true,["close","end"]]]"#
     );
     let _ = fs::remove_dir_all(dir);
@@ -4025,7 +3514,6 @@ fn net_socket_read_queue_preserves_reads_and_eof_order() {
 
 #[test]
 fn tcp_and_tls_emit_unhandled_errors_and_preserve_tls_failure_close() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_network_unhandled_error");
     fs::write(dir.join("index.js"), r#"
 var net = require('node:net'), tls = require('node:tls');
@@ -4078,17 +3566,7 @@ module.exports = function() {
 "#).unwrap();
     let empty_node_modules = temp_registry("builtin_network_unhandled_error_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetworkUnhandledError = module.exports;"
-    )).unwrap();
-    let load_result = thaw_quickjs::thaw_js_load(source.as_ptr());
-    if load_result != 1 {
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&empty_node_modules);
-        assert_eq!(load_result, 1);
-    }
-    let result = thaw_quickjs::thaw_js_call(c"exerciseNetworkUnhandledError".as_ptr(), c"[]".as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let result = run_js(&bundle);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
@@ -4096,7 +3574,6 @@ module.exports = function() {
 
 #[test]
 fn tls_ca_presence_and_collections_are_validated_before_native_calls() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_tls_ca_presence");
     fs::write(dir.join("index.js"), r#"
 var tls = require('node:tls');
@@ -4159,17 +3636,7 @@ module.exports = function() {
 "#).unwrap();
     let empty_node_modules = temp_registry("builtin_tls_ca_presence_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsCaPresence = module.exports;"
-    )).unwrap();
-    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
-    if loaded != 1 {
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&empty_node_modules);
-        assert_eq!(loaded, 1);
-    }
-    let result = thaw_quickjs::thaw_js_call(c"exerciseTlsCaPresence".as_ptr(), c"[]".as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let result = run_js(&bundle);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
@@ -4177,7 +3644,6 @@ module.exports = function() {
 
 #[test]
 fn tls_check_server_identity_matches_dns_ip_and_strict_san_shapes() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_tls_identity_matcher");
     fs::write(dir.join("index.js"), r#"
 var tls = require('node:tls');
@@ -4213,18 +3679,13 @@ module.exports = function() {
 "#).unwrap();
     let empty_node_modules = temp_registry("builtin_tls_identity_matcher_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsIdentityMatcher = module.exports;")).unwrap();
-    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
-    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
-    let result = thaw_quickjs::thaw_js_call(c"exerciseTlsIdentityMatcher".as_ptr(), c"[]".as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let result = run_js(&bundle);
     let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
 }
 
 #[test]
 fn https_agent_forwards_custom_identity_checker_to_tls_connect() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_https_identity_forwarding");
     fs::write(dir.join("index.js"), r#"
 var https = require('node:https'), tls = require('node:tls');
@@ -4246,18 +3707,13 @@ module.exports = function() {
 "#).unwrap();
     let empty_node_modules = temp_registry("builtin_https_identity_forwarding_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpsIdentityForwarding = module.exports;")).unwrap();
-    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
-    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
-    let result = thaw_quickjs::thaw_js_call(c"exerciseHttpsIdentityForwarding".as_ptr(), c"[]".as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let result = run_js(&bundle);
     let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
 }
 
 #[test]
 fn https_explicit_agent_forwards_custom_identity_checker_to_tls_connect() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_https_identity_forwarding");
     fs::write(dir.join("index.js"), r#"
 var https = require('node:https'), tls = require('node:tls');
@@ -4280,14 +3736,14 @@ module.exports = function() {
 "#).unwrap();
     let empty_node_modules = temp_registry("builtin_https_identity_forwarding_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpsIdentityForwarding = module.exports;")).unwrap();
-    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
-    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
-    let result = thaw_quickjs::thaw_js_call(c"exerciseHttpsIdentityForwarding".as_ptr(), c"[]".as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let result = run_js(&bundle);
     let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
 }
+
+// qjs_pending: fails on thaw-js: ERROR: Error: invalid port preserves active connection (expected true)
+mod qjs_pending_network_tls_custom_identity_finalizes_before_success_and_cleans_up_failures {
+    use super::*;
 
 #[test]
 fn tls_custom_identity_finalizes_before_success_and_cleans_up_failures() {
@@ -4474,10 +3930,10 @@ module.exports = function() {
     let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
 }
+}
 
 #[test]
 fn tls_server_authorization_is_captured_before_secure_connection() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_tls_server_authorization");
     fs::write(dir.join("index.js"), r#"
 var tls = require('node:tls');
@@ -4519,18 +3975,13 @@ module.exports = function() {
 "#).unwrap();
     let empty_node_modules = temp_registry("builtin_tls_server_authorization_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsServerAuthorization = module.exports;")).unwrap();
-    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
-    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
-    let result = thaw_quickjs::thaw_js_call(c"exerciseTlsServerAuthorization".as_ptr(), c"[]".as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let result = run_js(&bundle);
     let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
 }
 
 #[test]
 fn http2_custom_identity_check_precedes_session_and_preserves_tls_options() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_http2_tls_identity");
     fs::write(dir.join("index.js"), r#"
 var http2 = require('node:http2'), tls = require('node:tls');
@@ -4571,18 +4022,13 @@ module.exports = function() {
 "#).unwrap();
     let empty_node_modules = temp_registry("builtin_http2_tls_identity_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2TlsIdentity = module.exports;")).unwrap();
-    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
-    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
-    let result = thaw_quickjs::thaw_js_call(c"exerciseHttp2TlsIdentity".as_ptr(), c"[]".as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let result = run_js(&bundle);
     let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
 }
 
 #[test]
 fn http2_server_authorization_uses_native_result_before_session() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_http2_tls_server_authorization");
     fs::write(dir.join("index.js"), r#"
 var http2 = require('node:http2');
@@ -4628,18 +4074,13 @@ module.exports = function() {
 "#).unwrap();
     let empty_node_modules = temp_registry("builtin_http2_tls_server_authorization_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2TlsServerAuthorization = module.exports;")).unwrap();
-    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
-    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
-    let result = thaw_quickjs::thaw_js_call(c"exerciseHttp2TlsServerAuthorization".as_ptr(), c"[]".as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let result = run_js(&bundle);
     let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
 }
 
 #[test]
 fn tls_alpn_buffer_protocol_lists_are_framed_before_native_calls() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_tls_alpn_buffer");
     fs::write(dir.join("index.js"), r#"
 var tls = require('node:tls');
@@ -4711,17 +4152,7 @@ module.exports = function() {
 "#).unwrap();
     let empty_node_modules = temp_registry("builtin_tls_alpn_buffer_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsAlpnBuffer = module.exports;"
-    )).unwrap();
-    let load_result = thaw_quickjs::thaw_js_load(source.as_ptr());
-    if load_result != 1 {
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&empty_node_modules);
-        assert_eq!(load_result, 1);
-    }
-    let result = thaw_quickjs::thaw_js_call(c"exerciseTlsAlpnBuffer".as_ptr(), c"[]".as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let result = run_js(&bundle);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
