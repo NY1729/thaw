@@ -29,6 +29,7 @@ fn next_timer_id() -> u64 {
 
 const TIMEOUT_MAX: f64 = 2147483647.0;
 const MAIN_FILE_LOADER: &str = include_str!("web/main_file.js");
+const ESM_LOADER: &str = include_str!("web/worker_esm.js");
 const PROCESS_STDIN: &str = include_str!("web/process_stdin.js");
 /// Per-thread evaluator state (depth, stack_limit, max_depth, run_id) carried across coroutine switches.
 type CoSnapshot = (usize, usize, usize, u32);
@@ -2118,7 +2119,8 @@ impl Interp {
             .unwrap_or_else(|_| panic!("thaw-js promise prelude must evaluate"));
     }
 
-    /// Defines `__thaw_run_main_file` (the disk CommonJS loader) and its file-read host primitive.
+    /// Defines `__thaw_run_main_file` (the disk CommonJS loader), `__thaw_run_main_esm` (the data: ES-module entry) and
+    /// the file-read host primitive.
     pub(crate) fn install_main_file_loader(&mut self) {
         let read = self.native(|it, _, a| {
             let path = it.to_str(&arg(a, 0)).to_string();
@@ -2130,6 +2132,8 @@ impl Interp {
         self.global.declare("__thaw_worker_read_source", read, true);
         self.run_builtin(MAIN_FILE_LOADER)
             .unwrap_or_else(|_| panic!("thaw-js main file loader must evaluate"));
+        self.run_builtin(ESM_LOADER)
+            .unwrap_or_else(|_| panic!("thaw-js ES module loader must evaluate"));
     }
 
     fn install_process(&mut self) {

@@ -994,6 +994,12 @@ impl crate::Interp {
             }
         });
         self.global.declare("__thaw_esm_convert", convert, true);
+        // the ESM loader's factory text, parsed with the module goal (`import.meta` and `import()` parse there)
+        let compile = self.native(|it, _, a| {
+            let source = it.to_str(&crate::arg(a, 0)).to_string();
+            it.eval_module_function(&source)
+        });
+        self.global.declare("__thaw_esm_compile", compile, true);
     }
 }
 
@@ -1180,5 +1186,27 @@ mod entry_native_tests {
             err.starts_with("SyntaxError:failed to parse module"),
             "{err}"
         );
+    }
+
+    // `__thaw_esm_compile` parses its text with the module goal: `import.meta` reaches the factory's parameter, while
+    // `new Function` (the script goal) still rejects it.
+    #[test]
+    fn compile_accepts_import_meta_and_function_constructor_still_rejects_it() {
+        let mut it = Interp::new();
+        let f = it
+            .eval_function(
+                "(function () { var fn = __thaw_esm_compile('(async function (__thaw_esm_meta) { return import.meta.url; })'); \
+                 var r = fn.call(undefined, { url: 'u' }); return typeof fn + ':' + typeof r.then; })",
+            )
+            .expect("compiles");
+        let out = it.call(&f, &Value::Undefined, &[]).expect("runs");
+        assert_eq!(it.to_str(&out).to_string(), "function:function");
+        let g = it
+            .eval_function(
+                "(function () { try { new Function('import.meta'); return 'no'; } catch (e) { return e.name; } })",
+            )
+            .expect("compiles");
+        let out = it.call(&g, &Value::Undefined, &[]).expect("runs");
+        assert_eq!(it.to_str(&out).to_string(), "SyntaxError");
     }
 }
