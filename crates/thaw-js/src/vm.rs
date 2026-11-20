@@ -8,7 +8,7 @@ use std::mem::ManuallyDrop;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::{arg, find_own, Interp, Obj, Scope, Slot, Value, R, SK_VMGLOBAL};
+use crate::{arg, Interp, Obj, Scope, Value, R, SK_VMGLOBAL};
 
 /// Host globals a context must not see (`typeof` gives `undefined`; a bare read is `undefined` too).
 const HOST_ONLY: &[&str] = &[
@@ -79,14 +79,19 @@ pub(crate) struct VmRealm {
     /// Scope `scope -> with(sandbox) -> global` holding the context's var/let/const/function
     /// bindings; built on the first run with a sandbox.
     pub(crate) script: Option<Rc<Scope>>,
-    /// Global bindings at index >= `n0` were made by sandboxed runs (implicit globals).
-    n0: usize,
-    /// Var and function names of earlier runs, and implicit globals already copied to the sandbox.
-    vars: Vec<Rc<str>>,
-    /// The sandbox of the latest run: the context's promise jobs, run later, see the same one.
-    sandbox: Option<Obj>,
     /// let/const/class names of earlier runs (a later `var` or function of the same name is a redeclaration).
     lets: Vec<Rc<str>>,
+    /// var and function names of earlier runs (a later let/const/class of the same name is a redeclaration).
+    vars: Vec<Rc<str>>,
+}
+
+impl Drop for VmRealm {
+    /// The realm's sandbox leaves `SANDBOXES` with it.
+    fn drop(&mut self) {
+        let key = Rc::as_ptr(&self.interp.global_object) as usize;
+        let old = SANDBOXES.with(|m| m.borrow_mut().remove(&key));
+        drop(old);
+    }
 }
 
 /// One context: `realm` is `None` until the first run, and taken out while the context runs.
@@ -108,6 +113,14 @@ thread_local! {
         RefCell::new(ManuallyDrop::new(HashMap::new()));
 }
 
+thread_local! {
+    /// The sandbox of each context realm that has run one, by the address of its realm's global object. A
+    /// `globalThis` access finds its sandbox here whichever Interp runs it (a context closure called by the host runs
+    /// on the host's Interp). Moves with `CONTEXTS` at a hand-off; an entry leaves with its realm (`VmRealm::drop`).
+    static SANDBOXES: RefCell<ManuallyDrop<HashMap<usize, Obj>>> =
+        RefCell::new(ManuallyDrop::new(HashMap::new()));
+}
+
 /// Process-wide, not thread-local: a context made on a coroutine thread must not reuse an id of another thread's table.
 static NEXT_ID: AtomicU32 = AtomicU32::new(0);
 
@@ -115,6 +128,36 @@ static NEXT_ID: AtomicU32 = AtomicU32::new(0);
 /// (`host::park_host_tls`); the table left behind is empty.
 pub(crate) fn take_contexts() -> ManuallyDrop<HashMap<u32, VmSlot>> {
     CONTEXTS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+/// This thread's sandbox table, moved out at a hand-off with `take_contexts`.
+pub(crate) fn take_sandboxes() -> ManuallyDrop<HashMap<usize, Obj>> {
+    SANDBOXES.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+/// Puts back a table from `take_sandboxes` (`host::adopt_host_tls`); the table it replaces is empty.
+pub(crate) fn restore_sandboxes(
+    table: ManuallyDrop<HashMap<usize, Obj>>,
+) -> ManuallyDrop<HashMap<usize, Obj>> {
+    SANDBOXES.with(|c| c.replace(table))
+}
+
+/// The sandbox of the context whose global object is `global`; `None` for any other object.
+pub(crate) fn sandbox_of(global: &Obj) -> Option<Obj> {
+    SANDBOXES.with(|m| {
+        let m = m.borrow();
+        if m.is_empty() {
+            return None;
+        }
+        m.get(&(Rc::as_ptr(global) as usize)).cloned()
+    })
+}
+
+/// Records `sandbox` for the realm whose global object is `global` (the realm's first sandboxed run).
+fn register_sandbox(global: &Obj, sandbox: &Obj) {
+    let key = Rc::as_ptr(global) as usize;
+    let old = SANDBOXES.with(|m| m.borrow_mut().insert(key, sandbox.clone()));
+    drop(old);
 }
 
 /// Puts back a table from `take_contexts` (`host::adopt_host_tls`); the table it replaces is empty.
@@ -175,9 +218,7 @@ pub(crate) fn drain_owned_jobs(host: &Interp) -> R<bool> {
         let Some(mut realm) = claimed else { continue };
         ran = true;
         realm.interp.restore(host.snapshot());
-        realm.interp.vm_sandbox = realm.sandbox.clone();
         let r = realm.interp.run_jobs();
-        realm.interp.vm_sandbox = None;
         // the realm goes back (or drops here, if its context was freed while the job ran)
         CONTEXTS.with(|c| {
             if let Some(slot) = c.borrow_mut().get_mut(&id) {
@@ -206,60 +247,23 @@ impl VmSlot {
     }
 }
 
-/// Runs `code` with `sb` as the sandbox: before the run, vars the host changed on `sb` are read
-/// back in; after it (also after a throw), vars, functions and implicit globals are copied out to `sb`.
-fn run_in_sandbox(it: &mut Interp, realm: &mut VmRealm, sb: &Obj, code: &str) -> R<Value> {
+/// Runs `code` with `sb` as the sandbox. The context's vars, functions and implicit globals are properties of `sb`
+/// (`run_vm_script`), so nothing is copied in or out.
+fn run_in_sandbox(realm: &mut VmRealm, sb: &Obj, code: &str) -> R<Value> {
     let script = match &realm.script {
         Some(script) => script.clone(),
         None => {
             let with = Scope::new_with(realm.interp.global.clone(), sb.clone());
             with.kind.set(SK_VMGLOBAL);
             let script = Scope::new(Some(with));
-            realm.n0 = realm.interp.global.vars.borrow().list.len();
+            register_sandbox(&realm.interp.global_object, sb);
             realm.script = Some(script.clone());
             script
         }
     };
-    for name in &realm.vars {
-        if let Some((Slot::Data(v), _)) = find_own(sb, name) {
-            if let Some(b) = script.vars.borrow_mut().get_mut(name) {
-                b.value = v;
-            }
-        }
-    }
-    let (r, names) = realm
+    realm
         .interp
-        .run_vm_script(code, &script, sb, &mut realm.lets);
-    let mut out: Vec<(Rc<str>, Value)> = Vec::new();
-    {
-        let vars = script.vars.borrow();
-        for name in names.iter().chain(&realm.vars) {
-            if let Some(b) = vars.get(name) {
-                out.push((name.clone(), b.value.clone()));
-            }
-        }
-    }
-    let implicit: Vec<(Rc<str>, Value)> = realm.interp.global.vars.borrow().list[realm.n0..]
-        .iter()
-        .filter(|(name, _)| !realm.vars.contains(name) && !names.contains(name))
-        .map(|(name, b)| (name.clone(), b.value.clone()))
-        .collect();
-    for name in names.iter() {
-        if !realm.vars.contains(name) {
-            realm.vars.push(name.clone());
-        }
-    }
-    for (name, _) in &implicit {
-        realm.vars.push(name.clone());
-    }
-    let target = Value::Object(sb.clone());
-    let mut synced: R<()> = Ok(());
-    for (name, value) in out.into_iter().chain(implicit) {
-        if synced.is_ok() {
-            synced = it.set(&target, &name, value);
-        }
-    }
-    r.and_then(|v| synced.map(|()| v))
+        .run_vm_script(code, &script, sb, &mut realm.lets, &mut realm.vars)
 }
 
 /// The filename a vm call was given: `None` when it was not a value (no filename, no stack frame).
@@ -374,24 +378,19 @@ pub(crate) fn install(it: &mut Interp) {
             Claim::Taken(None) => Box::new(VmRealm {
                 interp: new_realm(it),
                 script: None,
-                n0: 0,
-                vars: Vec::new(),
-                sandbox: None,
                 lets: Vec::new(),
+                vars: Vec::new(),
             }),
         };
         // stack limits and depth follow the calling thread
         realm.interp.restore(it.snapshot());
-        realm.interp.vm_sandbox = sandbox.clone();
-        realm.sandbox = sandbox.clone();
         let prev = std::mem::replace(&mut realm.interp.script_filename, file);
         arm(&mut realm.interp, ms);
         let r = match &sandbox {
-            Some(sb) => run_in_sandbox(it, &mut realm, sb, &code),
+            Some(sb) => run_in_sandbox(&mut realm, sb, &code),
             None => realm.interp.run_vm_plain(&code),
         };
         disarm(&mut realm.interp);
-        realm.interp.vm_sandbox = None;
         realm.interp.script_filename = prev;
         // put the realm back unless the context was freed while it ran (then it drops here, after the borrow)
         CONTEXTS.with(|c| {
