@@ -117,3 +117,71 @@ fn take_c_string(pointer: *mut std::ffi::c_char) -> String {
     unsafe { thaw_js::host::thaw_tjs_free(pointer) };
     text
 }
+
+/// Test-only route for the QuickJS-era tests (`thaw_quickjs::thaw_js_load` / `thaw_js_call` / `eval_json`).
+/// It shadows the `thaw_quickjs` extern crate name inside the tests module
+/// (the glob import from `use super::*` wins over the extern prelude), so those tests run on thaw-js with no
+/// body edits. Script route: `thaw_js_load` runs the source as a sloppy script in thaw-js's default realm,
+/// `thaw_js_call` calls a global function by name (awaited), `eval_json` returns the completion value as JSON.
+/// Not a product API; the shipped code path is `thaw_js::host::Package`.
+mod thaw_quickjs {
+    use std::ffi::{c_char, CStr, CString};
+
+    #[repr(C)]
+    pub struct ThawResult {
+        value: *mut c_char,
+        error: *mut c_char,
+    }
+
+    extern "C" {
+        fn thaw_tjs_eval_json(source: *const c_char) -> ThawResult;
+        fn thaw_tjs_call_reference(context: *mut std::ffi::c_void, args: *const c_char) -> *const c_char;
+    }
+
+    pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {
+        thaw_js::host::thaw_tjs_load_script(source)
+    }
+
+    /// Completion value of `source` as JSON (`None` for undefined), or the thrown error text.
+    pub fn eval_json(source: &str) -> Result<Option<String>, String> {
+        let source = CString::new(source).unwrap();
+        let result = unsafe { thaw_tjs_eval_json(source.as_ptr()) };
+        // Leaked on purpose: test-only shim, the strings live for the test process.
+        let take = |p: *mut c_char| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        if !result.error.is_null() {
+            return Err(take(result.error));
+        }
+        Ok((!result.value.is_null()).then(|| take(result.value)))
+    }
+
+    pub extern "C" fn thaw_js_call(name: *const c_char, args: *const c_char) -> *const c_char {
+        let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned();
+        let _ = eval_json(&format!("globalThis.__thaw_napi_reference_1 = globalThis[{name:?}]; 0"));
+        let text = unsafe { thaw_tjs_call_reference(std::ptr::without_provenance_mut(1), args) };
+        let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
+        let text = match text.strip_prefix('\u{2}') {
+            Some(error) => format!("{{\"__thaw_error__\":{error}}}"),
+            None => text,
+        };
+        CString::new(text).unwrap().into_raw()
+    }
+}
+
+/// The JSON of the member at `path` of a registry `bundle`'s exports (`""` = the entry export itself), not called.
+/// For the native-ESM bundles, which only `Package::load` registers (`__thaw_register_native_bundle`).
+/// Errors come back as `ERROR: {error}`. 256 MB stack, like `run_js_outcome`.
+fn run_js_get(bundle: &str, path: &str) -> String {
+    let (bundle, path) = (bundle.to_string(), path.to_string());
+    std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || match thaw_js::host::Package::load(&bundle) {
+            Ok(mut package) => package
+                .get(&path)
+                .map(|value| value.to_json())
+                .unwrap_or_else(|error| format!("ERROR: {error}")),
+            Err(error) => format!("ERROR: {error}"),
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}

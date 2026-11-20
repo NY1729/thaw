@@ -1,6 +1,7 @@
 // qjs_pending: fails on thaw-js: util.types.isProxy(new Proxy({}, {})) is true, expected false (last element)
 mod qjs_pending_network_util_types_identifies_standard_and_typed_objects {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn util_types_identifies_standard_and_typed_objects() {
@@ -1470,6 +1471,7 @@ fn http_server_supports_standard_timeout_configuration() {
 // qjs_pending: fails on thaw-js: /streamed-later response does not end with "ok" (assert at line 1484), then the client join panics
 mod qjs_pending_network_http_server_releases_completed_connection_close_responses {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn http_server_releases_completed_connection_close_responses() {
@@ -3744,6 +3746,7 @@ module.exports = function() {
 // qjs_pending: fails on thaw-js: ERROR: Error: invalid port preserves active connection (expected true)
 mod qjs_pending_network_tls_custom_identity_finalizes_before_success_and_cleans_up_failures {
     use super::*;
+    use ::thaw_quickjs;
 
 #[test]
 fn tls_custom_identity_finalizes_before_success_and_cleans_up_failures() {

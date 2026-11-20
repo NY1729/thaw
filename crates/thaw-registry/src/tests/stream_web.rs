@@ -996,6 +996,7 @@ fn transform_start_errors_reach_both_streams() {
 
 mod qjs_pending_stream_web {
     use super::*;
+    use ::thaw_quickjs;
 
     // thaw-js: no TypeError for a Symbol argument (TextEncoder symbol conversion)
     #[test]
