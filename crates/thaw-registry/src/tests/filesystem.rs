@@ -452,12 +452,8 @@ fn fs_stats_and_utimes_use_host_timestamps_across_api_styles() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-mod qjs_pending_filesystem_fs_ownership_apis_use_host_uid_and_gid {
-    use super::*;
-
 #[test]
 fn fs_ownership_apis_use_host_uid_and_gid() {
-    use std::ffi::{CStr, CString};
     use std::os::unix::fs::MetadataExt;
     let dir = temp_registry("builtin_fs_ownership");
     fs::write(
@@ -469,32 +465,15 @@ fn fs_ownership_apis_use_host_uid_and_gid() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsOwnership = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let owner = fs::metadata(&dir).unwrap();
     let uid = owner.uid();
     let gid = owner.gid();
-    let arguments = CString::new(
-        serde_json::to_string(&[
-            serde_json::json!(dir.to_string_lossy()),
-            serde_json::json!(uid),
-            serde_json::json!(gid),
-        ])
-        .unwrap(),
-    )
-    .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsOwnership").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned()), thaw_js::host::Native::Number(uid as f64), thaw_js::host::Native::Number(gid as f64)]);
     assert_eq!(result, format!("[{uid},{gid},{uid},{gid}]"));
     let link_metadata = fs::symlink_metadata(dir.join("owned-link")).unwrap();
     assert_eq!((link_metadata.uid(), link_metadata.gid()), (uid, gid));
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
-}
 }
 
 #[test]
@@ -915,14 +894,10 @@ fn fs_stream_positions_reject_invalid_original_values_before_open() {
 }
 
 #[cfg(unix)]
-mod qjs_pending_filesystem_fs_stat_no_entry_option_respects_sync_and_async_boundaries {
-    use super::*;
-
 #[test]
 fn fs_stat_no_entry_option_respects_sync_and_async_boundaries() {
     // Unrun regression: sync lstat suppresses only ENOENT; async lstat never
     // suppresses missing entries, while stat suppresses ENOENT and ENOTDIR.
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_stat_no_entry");
     fs::write(
         dir.join("index.js"),
@@ -933,27 +908,14 @@ fn fs_stat_no_entry_option_respects_sync_and_async_boundaries() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStatNoEntry = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsStatNoEntry").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[[true,true],[[null,true],true],["ENOENT",true],"ENOENT",true,"ENOTDIR",[[null,true],true,["ENOTDIR",true]],[true,true],["bigint",7,true],["EACCES","EINVAL"],[true,true,true],true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
-}
-
-mod qjs_pending_filesystem_fs_creation_apis_honor_requested_modes {
-    use super::*;
 
 #[test]
 fn fs_creation_apis_honor_requested_modes() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_creation_modes");
     fs::write(
             dir.join("index.js"),
@@ -964,21 +926,10 @@ fn fs_creation_apis_honor_requested_modes() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsCreationModes = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsCreationModes").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
     assert_eq!(result, r#"[384,384,384,384,384,384,448,384,384,"TypeError","TypeError","TypeError",false,false]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
-}
 }
 
 #[test]
@@ -1180,12 +1131,8 @@ fn fs_glob_parses_patterns_and_prunes_excluded_directories() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-mod qjs_pending_filesystem_fs_recursive_mkdir_returns_first_created_path_across_api_styles {
-    use super::*;
-
 #[test]
 fn fs_recursive_mkdir_returns_first_created_path_across_api_styles() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_mkdir_result");
     fs::write(
         dir.join("index.js"),
@@ -1195,17 +1142,7 @@ fn fs_recursive_mkdir_returns_first_created_path_across_api_styles() {
     let empty_node_modules = temp_registry("builtin_fs_mkdir_result_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsMkdirResult = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let arguments =
-        CString::new(serde_json::to_string(&(dir.to_string_lossy().into_owned(), cfg!(unix))).unwrap())
-            .unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseFsMkdirResult").unwrap().as_ptr(),
-        arguments.as_ptr(),
-    );
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned()), thaw_js::host::Native::Bool(cfg!(unix))]);
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     let base = dir.join("mkdir").to_string_lossy().into_owned();
     assert_eq!(parsed, serde_json::json!([
@@ -1222,7 +1159,6 @@ fn fs_recursive_mkdir_returns_first_created_path_across_api_styles() {
     ]));
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
-}
 }
 
 #[cfg(unix)]
@@ -1440,12 +1376,8 @@ fn fs_bigint_statfs_keeps_exact_wire_values_across_consumers() {
 }
 
 #[cfg(unix)]
-mod qjs_pending_filesystem_fs_cp_rejects_canonical_aliases_before_removal_or_recursive_creation {
-    use super::*;
-
 #[test]
 fn fs_cp_rejects_canonical_aliases_before_removal_or_recursive_creation() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_cp_alias_safety");
     fs::write(
         dir.join("index.js"),
@@ -1488,12 +1420,7 @@ fn fs_cp_rejects_canonical_aliases_before_removal_or_recursive_creation() {
     .unwrap();
     let modules = temp_registry("builtin_fs_cp_alias_safety_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCpAliasSafety = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseCpAliasSafety").unwrap();
-    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let parsed: serde_json::Value = serde_json::from_str(&unsafe { CStr::from_ptr(result) }.to_string_lossy()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())])).unwrap();
     let values = parsed.as_array().unwrap();
     // node 22: ERR_FS_CP_EINVAL for every alias / same-inode / copy-into-self case (a symlink cycle with dereference does not fail in node; Thaw still refuses it).
     assert!(values[..6].iter().all(|value| value == "ERR_FS_CP_EINVAL"));
@@ -1506,7 +1433,6 @@ fn fs_cp_rejects_canonical_aliases_before_removal_or_recursive_creation() {
     assert!(values[6].as_str().is_some_and(|code| code != "none"));
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
-}
 }
 
 #[test]
