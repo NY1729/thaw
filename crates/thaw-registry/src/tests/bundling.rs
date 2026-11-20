@@ -1723,17 +1723,11 @@ fn native_opaque_export_from_namespace_and_default_reach_the_exports_object() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: fails on thaw-js: Package route ERROR: TypeError: requireAsync is not a function; script route needs __thaw_register_native_bundle
-mod qjs_pending_bundling_native_mixed_cjs_dynamic_import_uses_bound_native_ready {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn native_mixed_cjs_dynamic_import_uses_bound_native_ready() {
     // Unrun regression: the CJS factory starts after its native importer
     // links, then dynamically imports another native module through the same
     // registration. It must not invoke the renderer's native stub.
-    use std::ffi::{CStr, CString};
     let root = temp_registry("native-mixed-cjs-dynamic");
     let modules = root.join("node_modules");
     let package = modules.join("native-mixed-dynamic-pkg");
@@ -1744,12 +1738,8 @@ fn native_mixed_cjs_dynamic_import_uses_bound_native_ready() {
     let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-mixed-dynamic-pkg", &package, "index.mjs").unwrap();
     assert_eq!(count, 3);
     assert!(bundle.contains("__thaw_register_native_bundle"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.readNativeDynamic = function() {{ return module.exports.result; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"readNativeDynamic".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[17,17,1]");
+    assert_eq!(run_js_probe(&bundle, "exports.result"), "[17,17,1]");
     let _ = fs::remove_dir_all(root);
-}
 }
 
 // qjs_pending: needs JS global read after load (__thaw_side_module_this); script route fails: __thaw_register_native_bundle is not a function
@@ -1827,16 +1817,10 @@ fn native_mixed_removed_named_edges_fail_before_any_factory_runs() {
     }
 }
 
-// qjs_pending: fails on thaw-js: Package route ERROR: TypeError: requireAsync is not a function; script route needs __thaw_register_native_bundle
-mod qjs_pending_bundling_native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling() {
     // Unrun regression: the loader already declared native.mjs for the
     // static import before a CJS factory dynamically requests the same key.
-    use std::ffi::{CStr, CString};
     let root = temp_registry("native-mixed-static-then-dynamic");
     let modules = root.join("node_modules");
     let package = modules.join("native-mixed-static-dynamic-pkg");
@@ -1847,12 +1831,8 @@ fn native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling() {
     let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-mixed-static-dynamic-pkg", &package, "index.mjs").unwrap();
     assert_eq!(count, 3);
     assert!(bundle.contains("__thaw_register_native_bundle"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.readMixedStaticDynamic = function() {{ return module.exports.result; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"readMixedStaticDynamic".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[17,17,1]");
+    assert_eq!(run_js_probe(&bundle, "exports.result"), "[17,17,1]");
     let _ = fs::remove_dir_all(root);
-}
 }
 
 // qjs_pending: needs in-context lazy-load helpers across calls; script route fails: __thaw_register_native_bundle is not a function
