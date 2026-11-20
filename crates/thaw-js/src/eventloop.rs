@@ -2511,6 +2511,10 @@ impl Interp {
                     .or_else(|| buffer_json_bytes(it, &chunk))
                     .or_else(|| data_view_bytes(it, &chunk))
                     .or_else(|| encoded_text_bytes(it, &chunk, &arg(a, 1)));
+                // Node rejects a non-text primitive; objects keep the text fallback (sysio_stdin_tests pins it)
+                if raw.is_none() && !matches!(chunk, Value::Str(_) | Value::Object(_)) {
+                    return Err(node_error(it, "TypeError", "ERR_INVALID_ARG_TYPE", "The \"chunk\" argument must be of type string or an instance of Buffer, TypedArray, or DataView."));
+                }
                 let text = match &raw {
                     Some(b) => String::from_utf8_lossy(b).into_owned(),
                     None => it.to_str(&chunk).to_string(),
@@ -2908,6 +2912,17 @@ mod process_state_tests {
         assert_eq!(
             output(&mut it, "console.log(typeof process.stdout.isTTY)"),
             expected
+        );
+    }
+
+    #[test]
+    fn stdout_write_rejects_a_non_text_chunk_like_node() {
+        // Node 22: TypeError ERR_INVALID_ARG_TYPE, thrown synchronously (recorded with node v22.23.1)
+        assert_eq!(
+            main_output(
+                "try { process.stdout.write(1); } catch (e) { console.log(e.name, e.code); }"
+            ),
+            "TypeError ERR_INVALID_ARG_TYPE"
         );
     }
 
