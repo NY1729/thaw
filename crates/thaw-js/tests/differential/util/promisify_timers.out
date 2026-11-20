@@ -1,0 +1,7 @@
+types function function undefined
+flags function undefined true false false
+stable true true
+timeout v
+immediate w
+abort AbortError ABORT_ERR The operation was aborted
+done

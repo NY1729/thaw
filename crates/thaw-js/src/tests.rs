@@ -1132,6 +1132,17 @@ fn dataview_util_types_agree_with_is_view() {
 }
 
 #[test]
+fn timers_expose_promisify_custom_accessor_like_node() {
+    assert_eq!(
+        one(
+            "var c = Symbol.for('nodejs.util.promisify.custom'), d = Object.getOwnPropertyDescriptor(setTimeout, c);
+             console.log(typeof setTimeout[c], typeof setImmediate[c], typeof setInterval[c], typeof d.get, d.set, d.enumerable, d.configurable, setTimeout[c] === setTimeout[c])"
+        ),
+        "function function undefined function undefined true false true"
+    );
+}
+
+#[test]
 fn dataview_structured_clone_keeps_window_and_shares_cloned_buffer() {
     assert_eq!(
         one("var b = new ArrayBuffer(8), d = new DataView(b, 2, 4); d.setUint8(0, 9);
