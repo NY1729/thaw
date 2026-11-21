@@ -43,10 +43,13 @@ fn value_edge<'a>(buf: &mut Vec<Edge<'a>>, v: &'a Value) {
 /// is borrowed, a shared proxy, or a kind whose edges are not enumerated yet): then `f` was not called at all.
 pub(crate) fn obj_edges(o: &ObjData, f: &mut dyn FnMut(Edge)) -> bool {
     // Read `raw_props`, never `props()`: materialising a lazy `prototype` is a mutation.
-    let (Ok(props), Ok(proto), Ok(kind)) = (
+    let (Ok(props), Ok(proto), Ok(kind), Ok(sparse)) = (
         o.raw_props.try_borrow(),
         o.proto.try_borrow(),
         o.kind.try_borrow(),
+        o.sparse
+            .get()
+            .map_or(Ok(None), |c| c.try_borrow().map(Some)),
     ) else {
         return false;
     };
@@ -107,6 +110,11 @@ pub(crate) fn obj_edges(o: &ObjData, f: &mut dyn FnMut(Edge)) -> bool {
         Kind::Array(items) => {
             for v in items {
                 value_edge(&mut buf, v);
+            }
+            if let Some(s) = sparse.as_ref() {
+                for v in s.elems.values() {
+                    value_edge(&mut buf, v);
+                }
             }
         }
         Kind::Closure { def, scope } => {
@@ -351,11 +359,14 @@ fn collect_nodes() -> usize {
         }
         match g.node(id) {
             Some(Node::Obj(o)) => {
-                let (Ok(mut props), Ok(mut index), Ok(mut proto), Ok(mut kind)) = (
+                let (Ok(mut props), Ok(mut index), Ok(mut proto), Ok(mut kind), Ok(mut sparse)) = (
                     o.raw_props.try_borrow_mut(),
                     o.index.try_borrow_mut(),
                     o.proto.try_borrow_mut(),
                     o.kind.try_borrow_mut(),
+                    o.sparse
+                        .get()
+                        .map_or(Ok(None), |c| c.try_borrow_mut().map(Some)),
                 ) else {
                     continue;
                 };
@@ -363,6 +374,11 @@ fn collect_nodes() -> usize {
                 taken.push(Taken::Index(index.take()));
                 if let Some(p) = proto.take() {
                     taken.push(Taken::Obj(p));
+                }
+                if let Some(s) = sparse.as_mut() {
+                    taken.push(Taken::Values(
+                        std::mem::take(&mut s.elems).into_values().collect(),
+                    ));
                 }
                 match &mut *kind {
                     Kind::Array(items) => taken.push(Taken::Values(std::mem::take(items))),

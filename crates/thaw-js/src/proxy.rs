@@ -107,7 +107,7 @@ impl Interp {
         if let Some(valid) = crate::typed::typed_own_key(o, key) {
             return Ok(valid);
         }
-        let is_index = matches!(&*o.kind.borrow(), Kind::Array(items) if key == "length" || array_index(key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))));
+        let is_index = matches!(&*o.kind.borrow(), Kind::Array(items) if key == "length" || array_index(key).is_some_and(|i| array_elem(o, items, i).is_some()));
         if matches!(&*o.kind.borrow(), Kind::Global) {
             // a context's global: the sandbox's chain answers first (its vars, its names, Object.prototype)
             if let Some(sb) = crate::vm::sandbox_of(o) {
@@ -252,6 +252,7 @@ impl Interp {
         };
         let all: Vec<Value> = if trap.is_callable() {
             let r = self.call(&trap, &handler, std::slice::from_ref(&target))?;
+            self.sparse_unsupported(&r)?;
             self.array_items(&r)
         } else if enumerable_only {
             self.own_keys(&target)
@@ -264,6 +265,7 @@ impl Interp {
                 .unwrap_or(Value::Undefined);
             let names = self.get(&object, "getOwnPropertyNames")?;
             let r = self.call(&names, &object, std::slice::from_ref(&target))?;
+            self.sparse_unsupported(&r)?;
             self.array_items(&r)
         };
         if !enumerable_only {

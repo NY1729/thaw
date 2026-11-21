@@ -15,8 +15,8 @@
 //! * scopes are `HashMap` chains (no slot resolution), no TDZ;
 //! * integer-keyed object properties are not ordered first; arrays have no holes.
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::{BTreeMap, HashMap};
 use std::rc::{Rc, Weak};
 
 use classes::ClassInfo;
@@ -168,10 +168,82 @@ pub(crate) const STACK_OVERFLOW: &str = "Maximum call stack size exceeded";
 const MAX_NEST: usize = 2000;
 /// Nested error builds before `throw_error` falls back to a plain string (stops a throwing error constructor).
 const MAX_ERROR_NEST: usize = 4;
-/// Dense storage ceiling for one array (24 bytes per slot, so about 1.6 GB at the ceiling). A larger
-/// index or length is a RangeError, not an allocation abort. Sparse arrays are not implemented.
-// ponytail: dense-only arrays; a length past this ceiling needs the sparse-array design (a separate project)
+/// Dense storage ceiling for one array (24 bytes per slot, so about 1.6 GB at the ceiling). A length or an
+/// index at or past it makes the array exotic (see `SparseArr`) instead of allocating.
 pub(crate) const MAX_DENSE_ARRAY_LEN: usize = 1 << 26;
+
+/// An exotic array's `length` and its elements at indices past the dense slots (`items`). Those indices
+/// are `>= items.len()`, so a dense slot and a sparse entry never share an index.
+#[derive(Default)]
+pub(crate) struct SparseArr {
+    pub(crate) len: u32,
+    pub(crate) elems: BTreeMap<u32, Value>,
+}
+
+/// The present element `i` of array `o` whose dense slots are `items`: a non-hole dense slot, or a sparse entry.
+pub(crate) fn array_elem(o: &ObjData, items: &[Value], i: usize) -> Option<Value> {
+    match items.get(i) {
+        Some(Value::Hole) => None,
+        Some(v) => Some(v.clone()),
+        None => {
+            let key = u32::try_from(i).ok()?;
+            o.sparse.get()?.borrow().elems.get(&key).cloned()
+        }
+    }
+}
+
+/// The `length` of array `o` whose dense slots number `dense`.
+pub(crate) fn array_length(o: &ObjData, dense: usize) -> f64 {
+    match o.sparse.get() {
+        Some(s) => s.borrow().len as f64,
+        None => dense as f64,
+    }
+}
+
+/// True for an exotic array whose `length` is past its dense slots (a sparse tail, or a bare length past them).
+pub(crate) fn array_has_sparse_tail(o: &ObjData) -> bool {
+    let dense = match &*o.kind.borrow() {
+        Kind::Array(items) => items.len(),
+        _ => return false,
+    };
+    o.is_exotic() && array_length(o, dense) != dense as f64
+}
+
+/// The `length` of array `o` and its present elements (non-hole dense slots, then the sparse tail) as
+/// (index, value) in index order.
+pub(crate) fn array_present(o: &ObjData) -> (f64, Vec<(f64, Value)>) {
+    let (dense, mut out) = match &*o.kind.borrow() {
+        Kind::Array(items) => (
+            items.len(),
+            items
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| !matches!(v, Value::Hole))
+                .map(|(i, v)| (i as f64, v.clone()))
+                .collect::<Vec<_>>(),
+        ),
+        _ => (0, Vec::new()),
+    };
+    if let Some(s) = o.sparse.get() {
+        out.extend(s.borrow().elems.iter().map(|(k, v)| (*k as f64, v.clone())));
+    }
+    (array_length(o, dense), out)
+}
+
+/// Makes array `o` exotic (if it is not yet) with `length` `len`, dropping sparse entries at `len` and past it.
+/// The caller has already cut the dense slots down to `len` when it shrinks.
+pub(crate) fn set_exotic_len(o: &ObjData, len: u32) {
+    let mut s = o.sparse.get_or_init(Default::default).borrow_mut();
+    s.elems.retain(|k, _| *k < len);
+    s.len = len;
+}
+
+/// Stores the sparse entry `i` of exotic array `o`, growing its `length` to cover it.
+pub(crate) fn set_sparse_elem(o: &ObjData, i: u32, value: Value) {
+    let mut s = o.sparse.get_or_init(Default::default).borrow_mut();
+    s.len = s.len.max(i + 1);
+    s.elems.insert(i, value);
+}
 
 #[derive(Clone)]
 pub enum Value {
@@ -217,6 +289,10 @@ pub struct ObjData {
     len_ro: Cell<bool>,
     /// 0 extensible, 1 non-extensible (`preventExtensions`), 2 sealed.
     ext: Cell<u8>,
+    /// An array with a sparse tail: the cell holds its `length` and its elements past the dense slots. Set once
+    /// and never cleared (`is_exotic`); an ordinary array keeps `length` = dense slots and the cell empty. One
+    /// pointer wide, so an ordinary object's record does not grow past one word for this.
+    sparse: OnceCell<Box<RefCell<SparseArr>>>,
     /// Key -> position in `props`, built lazily for objects with many properties (`None` = stale).
     index: RefCell<Option<FxMap<Rc<str>, usize>>>,
     /// Bytes this object has charged to the heap limit (`heap_limit`); credited back when it drops.
@@ -285,6 +361,11 @@ pub(crate) fn account(o: &ObjData) {
 const INDEX_MIN: usize = 10;
 
 impl ObjData {
+    /// True for an exotic array: its sparse cell was ever set (`set_exotic_len` / `set_sparse_elem`).
+    pub(crate) fn is_exotic(&self) -> bool {
+        self.sparse.get().is_some()
+    }
+
     /// Writability of an array's `length`: frozen or made read-only both clear it.
     fn len_writable(&self) -> bool {
         !self.frozen.get() && !self.len_ro.get()
@@ -1235,6 +1316,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         frozen: Cell::new(false),
         len_ro: Cell::new(false),
         ext: Cell::new(0),
+        sparse: OnceCell::new(),
         index: RefCell::new(None),
         charged: Cell::new(0),
         closure_counted,
@@ -2226,6 +2308,7 @@ impl Interp {
 
     /// `Array.prototype.join`, fallible: a nested array past the stack guard is a `RangeError`, as in Node.
     pub(crate) fn try_join(&mut self, this: &Value, sep: &str) -> R<JsStr> {
+        self.sparse_unsupported(this)?;
         let Value::Object(o) = this else {
             return Ok("".into());
         };
@@ -2418,7 +2501,7 @@ impl Interp {
                     _ => None,
                 };
                 let text: String = match kind {
-                    K::Arr(items) if items.is_empty() => "[]".into(),
+                    K::Arr(items) if items.is_empty() && !array_has_sparse_tail(o) => "[]".into(),
                     K::Arr(items) => {
                         let mut parts: Vec<String> = Vec::new();
                         let mut i = 0;
@@ -2438,7 +2521,38 @@ impl Interp {
                                 i += 1;
                             }
                         }
-                        format!("[ {} ]", parts.join(", "))
+                        // the sparse tail: each gap between its present indices (and the end of `length`)
+                        // is a run of empty items, so a huge length prints without being materialized
+                        let tail: Vec<(u32, Value)> = match o.sparse.get() {
+                            Some(s) => s
+                                .borrow()
+                                .elems
+                                .iter()
+                                .map(|(k, v)| (*k, v.clone()))
+                                .collect(),
+                            None => Vec::new(),
+                        };
+                        let mut next = items.len() as f64;
+                        let gap = |parts: &mut Vec<String>, n: f64| {
+                            if n > 0.0 {
+                                let n = n as u64;
+                                parts.push(format!(
+                                    "<{n} empty item{}>",
+                                    if n == 1 { "" } else { "s" }
+                                ));
+                            }
+                        };
+                        for (k, v) in tail {
+                            gap(&mut parts, k as f64 - next);
+                            parts.push(self.inspect(&v, false));
+                            next = k as f64 + 1.0;
+                        }
+                        gap(&mut parts, array_length(o, items.len()) - next);
+                        if parts.is_empty() {
+                            "[]".into()
+                        } else {
+                            format!("[ {} ]", parts.join(", "))
+                        }
                     }
                     K::Fun => match self.get(v, "name") {
                         Ok(Value::Str(n)) if !n.is_empty() => format!("[Function: {n}]"),
@@ -2544,6 +2658,10 @@ impl Interp {
                             .filter(|&i| !matches!(items[i], Value::Hole))
                             .map(|i| Rc::from(i.to_string())),
                     );
+                    // the sparse tail: its indices are past the dense slots, so they come after them in order
+                    if let Some(s) = o.sparse.get() {
+                        keys.extend(s.borrow().elems.keys().map(|k| Rc::from(k.to_string())));
+                    }
                 }
                 if let Kind::Typed(t) = &*o.kind.borrow() {
                     keys.extend((0..t.cur_len()).map(|i| Rc::from(i.to_string())));
@@ -2665,10 +2783,11 @@ impl Interp {
                     Kind::Proxy(_) => Fast::Proxy,
                     Kind::Array(items) => {
                         if key == "length" {
-                            Fast::Hit(Value::Number(items.len() as f64))
+                            Fast::Hit(Value::Number(array_length(o, items.len())))
                         } else {
-                            array_index(key)
-                                .map_or(Fast::Chain, |i| Fast::Hit(unhole(items.get(i))))
+                            array_index(key).map_or(Fast::Chain, |i| {
+                                Fast::Hit(array_elem(o, items, i).unwrap_or(Value::Undefined))
+                            })
                         }
                     }
                     Kind::Wrapper(Value::Str(s)) => {
@@ -2788,29 +2907,35 @@ impl Interp {
         let frozen = o.frozen.get();
         let not_ext = frozen || o.ext.get() != 0;
         let len_ro = o.len_ro.get();
-        // set when a dense array would need more slots than MAX_DENSE_ARRAY_LEN (a RangeError below)
-        let mut too_long = false;
+        // set when a new array length is not a uint32 (a RangeError below)
+        let mut bad_len = false;
         let refused = {
             let mut kind = o.kind.borrow_mut();
             match &mut *kind {
                 Kind::Array(items) => {
+                    let dense = items.len();
                     if let Some(i) = array_index(key) {
-                        let exists = i < items.len() && !matches!(items[i], Value::Hole);
+                        let exists = array_elem(o, items, i).is_some();
                         if frozen && exists {
                             Some((key.to_string(), Refusal::ReadOnly))
-                        } else if len_ro && i >= items.len() {
+                        } else if len_ro && i as f64 >= array_length(o, dense) {
                             Some(("length".to_string(), Refusal::ReadOnly))
                         } else if not_ext && !exists {
                             Some((key.to_string(), Refusal::NotExtensible))
-                        } else if i >= MAX_DENSE_ARRAY_LEN {
-                            too_long = true;
-                            None
-                        } else {
-                            if i >= items.len() {
-                                let cap = items.capacity();
-                                items.resize(i + 1, Value::Hole);
-                                grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
+                        } else if i < dense {
+                            items[i] = value.clone();
+                            return Ok(());
+                        } else if o.is_exotic() || i >= MAX_DENSE_ARRAY_LEN {
+                            // past the dense slots: a sparse entry, so no slots are allocated for the gap
+                            if !o.is_exotic() {
+                                set_exotic_len(o, dense as u32);
                             }
+                            set_sparse_elem(o, i as u32, value.clone());
+                            return Ok(());
+                        } else {
+                            let cap = items.capacity();
+                            items.resize(i + 1, Value::Hole);
+                            grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
                             items[i] = value.clone();
                             return Ok(());
                         }
@@ -2819,14 +2944,22 @@ impl Interp {
                             Some(("length".to_string(), Refusal::ReadOnly))
                         } else {
                             let n = match value {
-                                Value::Number(n) if n >= 0.0 => n,
+                                Value::Number(n) => n,
                                 _ => 0.0,
                             };
-                            if n >= MAX_DENSE_ARRAY_LEN as f64 {
-                                too_long = true;
+                            // ToUint32(n) must equal n (ArraySetLength), else RangeError
+                            if n.fract() != 0.0 || !(0.0..=4294967295.0).contains(&n) {
+                                bad_len = true;
                                 None
                             } else {
                                 let n = n as usize;
+                                if n < dense {
+                                    items.truncate(n);
+                                }
+                                if o.is_exotic() || n >= MAX_DENSE_ARRAY_LEN {
+                                    set_exotic_len(o, n as u32);
+                                    return Ok(());
+                                }
                                 let cap = items.capacity();
                                 items.resize(n, Value::Hole);
                                 grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
@@ -2843,7 +2976,7 @@ impl Interp {
         if let Some((k, why)) = refused {
             return self.refuse_write(strict, o, &k, why);
         }
-        if too_long {
+        if bad_len {
             return self.throw_error("RangeError", "Invalid array length");
         }
         let typed = match &*o.kind.borrow() {
@@ -5400,7 +5533,9 @@ impl Interp {
     fn get_index(&mut self, obj: &Value, i: usize) -> R<Value> {
         if let Value::Object(o) = obj {
             match &*o.kind.borrow() {
-                Kind::Array(items) => return Ok(unhole(items.get(i))),
+                Kind::Array(items) => {
+                    return Ok(array_elem(o, items, i).unwrap_or(Value::Undefined))
+                }
                 Kind::Typed(t) => return Ok(t.get_value(i).unwrap_or(Value::Undefined)),
                 _ => {}
             }
@@ -5417,7 +5552,8 @@ impl Interp {
                         items[i] = value;
                         return Ok(());
                     }
-                    if i == items.len() {
+                    // an exotic array takes its appends through `set_impl` (its tail may hold sparse entries)
+                    if i == items.len() && !o.is_exotic() {
                         let cap = items.capacity();
                         items.push(value);
                         grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
@@ -5732,12 +5868,11 @@ fn read_own(o: &ObjData, key: &str) -> Option<Read> {
         // Array (`Array.prototype`) serves them to the objects that inherit from it
         return match &*o.kind.borrow() {
             Kind::Array(items) if key == "length" => {
-                Some(Read::Data(Value::Number(items.len() as f64)))
+                Some(Read::Data(Value::Number(array_length(o, items.len()))))
             }
             Kind::Array(items) => array_index(key)
-                .and_then(|i| items.get(i))
-                .filter(|v| !matches!(v, Value::Hole))
-                .map(|v| Read::Data(v.clone())),
+                .and_then(|i| array_elem(o, items, i))
+                .map(Read::Data),
             _ => None,
         };
     };
@@ -6249,6 +6384,8 @@ fn declare_hoisted(names: &[Rc<str>], scope: &Rc<Scope>) {
     }
 }
 
+#[cfg(test)]
+mod array_exotic_tests;
 #[cfg(test)]
 mod array_proto_tests;
 #[cfg(test)]

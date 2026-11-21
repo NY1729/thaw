@@ -2608,6 +2608,10 @@ impl WireOut {
                 self.seen.push((key, index));
                 let node = if matches!(&*o.kind.borrow(), Kind::Array(_)) {
                     let mut parts = Vec::new();
+                    // a sparse array has no dense copy (stage-1 guard; see `Interp::sparse_unsupported`)
+                    if crate::array_has_sparse_tail(o) {
+                        return Err(HostError::Unsupported("sparse array".into()));
+                    }
                     for item in it.array_items_raw(&v) {
                         parts.push(match item {
                             Value::Hole => "{\"h\":1}".to_string(),
