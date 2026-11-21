@@ -127,8 +127,8 @@ fn names_direct_function_values_stay_anonymous() {
     assert_eq!(got, vec![r#"["","",""]"#.to_string()]);
 }
 
-/// Variable declarations and assignments: differential only. The interpreter leaves these anonymous (Node
-/// names them), so this is a parity check; naming them is a follow-up outside item 1.
+/// Variable declarations and assignments: a parity check of the names (explicit Node values are in
+/// `names_identifier_targets_as_node_does`).
 #[test]
 fn names_declarations_and_assignments_match_the_interpreter() {
     same(
@@ -169,4 +169,23 @@ fn names_default_params_and_class_fields_match_the_interpreter() {
         "#,
         0,
     );
+}
+
+/// Identifier targets (var/let/const, `=`, `||=`, destructuring and parameter defaults) name the function
+/// on both the compiled and the interpreted path; member targets do not. Node 22 is the reference.
+#[test]
+fn names_identifier_targets_as_node_does() {
+    let got = same(
+        r#"
+        function decl() { const f = function () {}; let g = () => 1; var h = class {}; return [f.name, g.name, h.name].join(); }
+        function asg() { let f; f = function () {}; let g; g ||= () => 2; let i; i &&= () => 3; let m = {}; m.p = () => 1; return [f.name, g.name, String(i), m.p.name].join(); }
+        function des() { var {x = () => 1} = {}; var [y = class {}] = []; return [x.name, y.name].join(); }
+        function par(a = () => 1, b = function () {}) { return [a.name, b.name].join(); }
+        for (let n = 0; n < 3; n++) { console.log(decl()); console.log(asg()); console.log(des()); console.log(par()); }
+        "#,
+        1,
+    );
+    let one = ["f,g,h", "f,g,undefined,", "x,y", "a,b"];
+    let want: Vec<String> = (0..3).flat_map(|_| one.map(String::from)).collect();
+    assert_eq!(got, want);
 }

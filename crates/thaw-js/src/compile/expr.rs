@@ -187,6 +187,20 @@ fn store(p: Place, rhs: Ex) -> Ex {
     })
 }
 
+/// NamedEvaluation for an identifier target, compiled: when `e` is an anonymous function definition its
+/// value takes `name` (the interpreter's `name_if_anonymous_def`). Any other `e` is returned unchanged.
+pub(crate) fn named(e: &a::Expr, name: &str, ex: Ex) -> Ex {
+    if !crate::is_anonymous_fn_def(e) {
+        return ex;
+    }
+    let name: Rc<str> = name.into();
+    mk_ex(move |it, f| {
+        let v = ex(it, f)?;
+        crate::name_anonymous_fn(&v, &name);
+        Ok(v)
+    })
+}
+
 /// `x &&= e`, `x ||= e`, `x ??= e`: the right-hand side only when the current value does not keep.
 fn logical_assign(p: Place, op: a::AssignOp, rhs: Ex) -> Ex {
     use a::AssignOp as A;
@@ -298,7 +312,20 @@ fn assign(g: &mut Gen, asg: &a::AssignExpr) -> CG<Ex> {
     };
     let p = Place::of(g, id);
     // `operand` compiles exactly what `compile` does for the right-hand side, but keeps the Number-valued forms
-    let rhs: Side = num::operand(g, &asg.right)?;
+    let plain = matches!(
+        asg.op,
+        A::Assign | A::AndAssign | A::OrAssign | A::NullishAssign
+    );
+    let rhs: Side = if plain && crate::is_anonymous_fn_def(&asg.right) {
+        // a function value is never a Number: the named form takes the generic path (what `operand` does for it)
+        Side::L(num::Leaf::Ex(named(
+            &asg.right,
+            &id.sym,
+            compile(g, &asg.right)?,
+        )))
+    } else {
+        num::operand(g, &asg.right)?
+    };
     match asg.op {
         A::Assign => match (p, rhs) {
             (Place::Slot { k, mutable: true }, Side::N(n)) => Ok(num::store_slot(k, n)),

@@ -302,19 +302,22 @@ fn var_decl(g: &mut Gen, v: &a::VarDecl) -> CG<St> {
             match g.var_local(name) {
                 Some(l) => {
                     if let Some(e) = &d.init {
-                        steps.push(store(l.slot, expr::compile(g, e)?));
+                        steps.push(store(l.slot, expr::named(e, name, expr::compile(g, e)?)));
                     }
                 }
                 None if g.is_scoped(name) => {
                     if let Some(e) = &d.init {
-                        steps.push(assign_scoped(name, expr::compile(g, e)?));
+                        steps.push(assign_scoped(
+                            name,
+                            expr::named(e, name, expr::compile(g, e)?),
+                        ));
                     }
                 }
                 None => return reject(),
             }
         } else {
             let init = match &d.init {
-                Some(e) => expr::compile(g, e)?,
+                Some(e) => expr::named(e, name, expr::compile(g, e)?),
                 None => gen::undefined(),
             };
             // declared after the initialiser: `let x = x` reads the outer binding
