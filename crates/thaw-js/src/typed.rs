@@ -855,8 +855,13 @@ impl Interp {
                 } else {
                     let n = self.get(&a0, "length")?;
                     let n = self.num(&n);
+                    let n = if n.is_nan() { 0.0 } else { n };
+                    // the element buffer is allocated before any element is read: past the ceiling, RangeError
+                    if n >= crate::MAX_DENSE_ARRAY_LEN as f64 {
+                        return self.throw_error("RangeError", "Array buffer allocation failed");
+                    }
                     let mut v = Vec::new();
-                    for i in 0..(if n.is_nan() { 0 } else { n as usize }) {
+                    for i in 0..n as usize {
                         v.push(self.get(&a0, &i.to_string())?);
                     }
                     v
