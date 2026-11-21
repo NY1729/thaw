@@ -1582,6 +1582,42 @@ fn native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn native_opaque_cjs_import_star_is_node_namespace() {
+    // Expectations recorded from real Node 22 (3 runs): `import * as ns` of a CJS module is
+    // {default: module.exports} plus its names, a Module-tagged object, the same object per module.
+    let root = temp_registry("native-opaque-cjs-import-star");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-opaque-cjs-import-star-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "import * as num from './num.cjs'; import * as fn from './fn.cjs'; import * as obj from './obj.cjs'; import * as names from './names.cjs'; import * as esm from './esm.cjs'; import * as cls from './cls.cjs'; import * as again from './num.cjs';\nexport const probe = [\n  [Object.keys(num), typeof num.default, num.default, Object.prototype.toString.call(num), num === again, typeof num],\n  [Object.keys(fn), typeof fn.default, Object.prototype.toString.call(fn)],\n  [Object.keys(obj), obj.default.a, obj.default.b],\n  [Object.keys(names), names.default.x, names.x],\n  [typeof esm.default, esm.default.default],\n  [Object.keys(cls), typeof cls.default],\n];").unwrap();
+    fs::write(package.join("num.cjs"), "module.exports = 9;").unwrap();
+    fs::write(package.join("fn.cjs"), "module.exports = function g() {};").unwrap();
+    fs::write(package.join("obj.cjs"), "const a = 1, b = 2; module.exports = { a, b };").unwrap();
+    fs::write(package.join("names.cjs"), "exports.x = 1;").unwrap();
+    fs::write(package.join("esm.cjs"), "module.exports = { __esModule: true, default: 5, k: 1 };").unwrap();
+    fs::write(package.join("cls.cjs"), "class K {}; module.exports = K;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-opaque-cjs-import-star-pkg", &package, "index.mjs").unwrap();
+    assert!(bundle.contains("__thaw_register_native_bundle"));
+    assert_eq!(run_js_probe(&bundle, "exports.probe"),
+        "[[[\"default\"],\"number\",9,\"[object Module]\",true,\"object\"],[[\"default\"],\"function\",\"[object Module]\"],[[\"a\",\"b\",\"default\"],1,2],[[\"default\",\"x\"],1,1],[\"object\",5],[[\"default\"],\"function\"]]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_node_path_default_and_namespace_match_node() {
+    // Expectations recorded from real Node 22 (3 runs): node:path has no `default` or `__esModule`,
+    // so `default` of its namespace is the module.exports object itself.
+    let root = temp_registry("native-node-path-namespace");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-node-path-namespace-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "import path from 'node:path'; import * as ns from 'node:path'; import { join } from 'node:path'; import posix from 'node:path/posix';\nexport const probe = [typeof path, typeof ns, typeof ns.default, typeof join, path === ns.default, typeof posix, join('a', 'b'), posix.join('a', 'b')];").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-node-path-namespace-pkg", &package, "index.mjs").unwrap();
+    assert_eq!(run_js_probe(&bundle, "exports.probe"), "[\"object\",\"object\",\"object\",\"function\",true,\"object\",\"a/b\",\"a/b\"]");
+    let _ = fs::remove_dir_all(root);
+}
+
 // qjs_pending: needs in-context helpers and namespace identity after load; script route fails: __thaw_register_native_bundle is not a function
 mod qjs_pending_bundling_native_mixed_pure_namespace_keeps_engine_identity {
     use super::*;

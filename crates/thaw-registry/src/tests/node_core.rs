@@ -749,6 +749,7 @@ module.exports = function() {
   same(coercionOrder, false, 'posix resolve does not coerce earlier arguments');
   same([p.posix === p, p.win32 === w, w.posix === p, w.win32 === w, posixSubpath === p, winSubpath === w],
     [true,true,true,true,true,true], 'reciprocal aliases');
+  same([typeof path.default, typeof p.default, typeof w.default], ['undefined','undefined','undefined'], 'no default alias (Node path has none)');
   return true;
 };
 "#).unwrap();

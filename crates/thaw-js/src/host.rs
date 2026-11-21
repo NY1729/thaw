@@ -467,6 +467,22 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function (graphs) {
       });
       canonical.set(exportsObject, table);
     }
+    // Node's namespace of an opaque CJS module: `default` is module.exports, plus its own enumerable names
+    // (ponytail: runtime own keys, a superset of cjs-module-lexer's static names). One object per spec while
+    // its value holds. A plain prototype, not null: a null-prototype object crosses to Json with a marker key.
+    var namespaces = Object.create(null);
+    function namespaceOf(spec) {
+      var value = edged(spec);
+      if (own.call(namespaces, spec) && Object.is(namespaces[spec].value, value)) return namespaces[spec].ns;
+      var names = value !== null && (typeof value === 'object' || typeof value === 'function') ? Object.keys(value).filter(function (name) { return name !== 'default'; }) : [];
+      names.push('default');
+      var ns = {};
+      names.sort().forEach(function (name) { Object.defineProperty(ns, name, { value: name === 'default' ? value : value[name], enumerable: true, writable: true }); });
+      Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module' });
+      Object.preventExtensions(ns);
+      namespaces[spec] = { value: value, ns: ns };
+      return ns;
+    }
     var origin = {
       track: function (exports) { exportsObject = exports; link(); },
       edge: function (spec, value) { edges[spec] = value; link(); },
@@ -477,7 +493,7 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function (graphs) {
       defaultImport: function (spec, value) { return value && value.__esModule ? value.default : value; },
       readDefault: function (spec) { return origin.defaultImport(spec, edged(spec)); },
       readImport: function (spec, name) { return edged(spec)[name]; },
-      namespaceImport: function (spec) { return edged(spec); }
+      namespaceImport: function (spec) { return namespaceOf(spec); }
     };
     return origin;
   }
