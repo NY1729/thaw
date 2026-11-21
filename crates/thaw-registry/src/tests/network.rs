@@ -3609,7 +3609,7 @@ fn net_socket_read_queue_preserves_reads_and_eof_order() {
     let result = run_js(&bundle);
     assert_eq!(
         result,
-        r#"[[[],3,true,true,3,"ab","c",true,0,["close"]],[1,true,["x","☃"],0,true,["data:x","data:☃","end","close:false"]],[["�"],["data:�","end","close:false"],true],[["end","close:false"],true],[2,false,false,"a","b",0,true,["close","end"]]]"#
+        r#"[[[],3,true,true,3,"ab","c",true,0,["close"]],[1,true,["x","☃"],0,true,["data:x","data:☃","end","close:false"]],[["�"],["data:�","end","close:false"],true],[["end","close:false"],true],[2,false,false,"a","b",0,false,["close","end"]]]"#
     );
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);

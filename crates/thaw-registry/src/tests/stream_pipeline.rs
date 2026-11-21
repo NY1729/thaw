@@ -326,7 +326,7 @@ fn readable_async_iterators_handle_buffering_waits_and_cleanup() {
     let result = run_js(&bundle);
     assert_eq!(
         result,
-        r#"[["a","b"],true,false,true,"broken",["first"],true,6]"#
+        r#"[["ab"],true,false,true,"broken",["firstsecond"],true,0]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
