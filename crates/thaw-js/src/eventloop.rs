@@ -1801,7 +1801,7 @@ impl Interp {
 
     /// Run a script as a program: evaluate it, then run the event loop. Returns the exit code.
     pub fn run_main(&mut self, source: &str) -> R<i32> {
-        let ran = self.run(source);
+        let ran = self.run_main_source(source);
         self.finish_main(ran)
     }
 
