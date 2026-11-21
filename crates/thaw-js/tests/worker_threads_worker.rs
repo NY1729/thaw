@@ -1267,6 +1267,25 @@ fn worker_cpu_usage_rejects_before_online_and_after_exit() {
     );
 }
 
+// worker.getHeapStatistics() (Node 22.23.1: same keys and types as v8.getHeapStatistics, rejects like cpuUsage)
+#[test]
+fn worker_get_heap_statistics_has_node_keys_and_rejects_when_not_running() {
+    let src = "const wt = __thaw_worker_threads_exports;
+      const w = new wt.Worker(`require('node:worker_threads').parentPort.on('message',()=>{});`, { eval: true });
+      (async () => {
+        const pre = await w.getHeapStatistics().then(() => 'resolved', (e) => e.code + ' ' + e.message);
+        await new Promise((resolve) => w.once('online', resolve));
+        const h = await w.getHeapStatistics();
+        console.log('pre ' + pre + '|keys ' + Object.keys(h).join(',') + '|types ' + Object.entries(h).map(([k, v]) => k + ':' + typeof v).join(',') + '|nctx ' + h.number_of_native_contexts + '|used>0 ' + (h.used_heap_size > 0) + '|limit>used ' + (h.heap_size_limit > h.used_heap_size) + '|avail ' + (h.total_available_size >= 0));
+        await w.terminate();
+        console.log('post ' + await w.getHeapStatistics().then(() => 'resolved', (e) => e.code + ' ' + e.message));
+      })().catch((e) => { console.log('failed ' + e); w.terminate(); });";
+    assert_eq!(
+        run_main(src),
+        "pre ERR_WORKER_NOT_RUNNING Worker instance not running|keys total_heap_size,total_heap_size_executable,total_physical_size,total_available_size,used_heap_size,heap_size_limit,malloced_memory,peak_malloced_memory,does_zap_garbage,number_of_native_contexts,number_of_detached_contexts,total_global_handles_size,used_global_handles_size,external_memory|types total_heap_size:number,total_heap_size_executable:number,total_physical_size:number,total_available_size:number,used_heap_size:number,heap_size_limit:number,malloced_memory:number,peak_malloced_memory:number,does_zap_garbage:boolean,number_of_native_contexts:number,number_of_detached_contexts:number,total_global_handles_size:number,used_global_handles_size:number,external_memory:number|nctx 1|used>0 true|limit>used true|avail true|post ERR_WORKER_NOT_RUNNING Worker instance not running"
+    );
+}
+
 #[test]
 fn worker_prepend_once_listener_runs_first_and_only_once() {
     // Node 22 (verified): `first,regular,regular 1 function true 10 true`

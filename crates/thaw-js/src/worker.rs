@@ -60,14 +60,17 @@ enum Evt {
     PortClose(u64),
     /// The answer to a `cpuUsage` request: its ack id, then the worker thread's user and system CPU microseconds.
     Cpu(u32, u64, u64),
+    /// The answer to a `getHeapStatistics` request: its ack id, then the worker thread's `__thaw_memory_usage` JSON.
+    Heap(u32, String),
 }
 
-/// `worker.cpuUsage()` requests queued by the parent for the worker thread. The parent queues an ack and raises
-/// `requested`; the worker takes the queue in `serve_cpu`, from its interrupt check.
+/// `worker.cpuUsage()` and `worker.getHeapStatistics()` requests queued by the parent for the worker thread: (ack,
+/// is a heap request). The parent queues an ack and raises `requested`; the worker takes the queue in `serve_cpu`,
+/// from its interrupt check.
 #[derive(Default)]
 pub(crate) struct CpuProbe {
     requested: AtomicBool,
-    acks: Mutex<Vec<u32>>,
+    acks: Mutex<Vec<(u32, bool)>>,
 }
 
 /// A worker that can receive a `postMessageToThread`: its command channel, and its port token (a port moved to it is
@@ -532,10 +535,10 @@ fn spawn(
 }
 
 impl CpuProbe {
-    /// Parent side: queues `ack` and wakes the worker's next interrupt check.
-    fn request(&self, ack: u32) {
+    /// Parent side: queues `ack` (a heap request when `heap`) and wakes the worker's next interrupt check.
+    fn request(&self, ack: u32, heap: bool) {
         let mut acks = self.acks.lock().unwrap_or_else(|e| e.into_inner());
-        acks.push(ack);
+        acks.push((ack, heap));
         self.requested.store(true, Ordering::Relaxed);
     }
 }
@@ -579,8 +582,17 @@ fn serve_cpu(side: &Side) {
         return;
     }
     let (user, system) = thread_cpu_micros();
-    for ack in acks {
-        let _ = side.tx.send(Evt::Cpu(ack, user, system));
+    // the memory walk is only paid for when a heap request is queued
+    let usage = acks
+        .iter()
+        .any(|&(_, heap)| heap)
+        .then(crate::sysio::memory_usage_json);
+    for (ack, heap) in acks {
+        let evt = match &usage {
+            Some(json) if heap => Evt::Heap(ack, json.clone()),
+            _ => Evt::Cpu(ack, user, system),
+        };
+        let _ = side.tx.send(evt);
     }
 }
 
@@ -822,6 +834,9 @@ fn pump(it: &mut Interp, ports_only: bool) -> String {
                 Evt::Cpu(ack, user, system) => format!(
                     r#"{{"handle":{id},"type":"cpu","ack":{ack},"user":{user},"system":{system}}}"#
                 ),
+                Evt::Heap(ack, usage) => {
+                    format!(r#"{{"handle":{id},"type":"heap","ack":{ack},"usage":{usage}}}"#)
+                }
             };
             items.push(Item::Json(json));
         }
@@ -1019,19 +1034,22 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     g.declare("__thaw_worker_terminate", f, true);
-    // worker.cpuUsage(): queues `ack` for the worker; false when the worker is gone (JS rejects ERR_WORKER_NOT_RUNNING)
-    let f = it.native(|it, _, a| {
-        let (h, ack) = (it.num(&arg(a, 0)) as u32, it.num(&arg(a, 1)) as u32);
-        let sent = match it.worker.workers.get(&h) {
-            Some(w) if !w.exited => {
-                w.cpu.request(ack);
-                true
-            }
-            _ => false,
-        };
-        Ok(Value::Bool(sent))
-    });
-    g.declare("__thaw_worker_cpu", f, true);
+    // worker.cpuUsage() / worker.getHeapStatistics(): queues `ack` for the worker; false when the worker is gone
+    // (JS rejects ERR_WORKER_NOT_RUNNING)
+    for (name, heap) in [("__thaw_worker_cpu", false), ("__thaw_worker_heap", true)] {
+        let f = it.native(move |it, _, a| {
+            let (h, ack) = (it.num(&arg(a, 0)) as u32, it.num(&arg(a, 1)) as u32);
+            let sent = match it.worker.workers.get(&h) {
+                Some(w) if !w.exited => {
+                    w.cpu.request(ack, heap);
+                    true
+                }
+                _ => false,
+            };
+            Ok(Value::Bool(sent))
+        });
+        g.declare(name, f, true);
+    }
     let f = it.native(|it, _, a| {
         let (h, refd) = (it.num(&arg(a, 0)) as u32, arg(a, 1).truthy());
         if let Some(w) = it.worker.workers.get_mut(&h) {
