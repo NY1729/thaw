@@ -14,6 +14,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # No build: a text diff of the blocker list against the base branch. Plain job like clippy (no measurement label),
+  # so it runs on every pull request. The full rule is in designs/blocked-bundles-gate.md, section 1.
+  blocked-bundles-shrink-only:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Blocked-bundles list may only shrink
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          list=tools/blocked-bundles.txt
+          # Comments, padding and blank lines dropped; only bundle and blocker (columns 1-2) are compared, so
+          # editing a reason or note is allowed and adding a (bundle, blocker) row is not.
+          norm() { LC_ALL=C sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' | cut -f1,2 | LC_ALL=C sort -u; }
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          if ! git cat-file -e "FETCH_HEAD:$list" 2>/dev/null; then
+            echo "::notice::$list is not on $BASE_REF yet, so there is nothing to compare against"
+            exit 0
+          fi
+          git show "FETCH_HEAD:$list" | norm > "$RUNNER_TEMP/blocked-base.txt"
+          if [ -f "$list" ]; then norm < "$list" > "$RUNNER_TEMP/blocked-head.txt"; else : > "$RUNNER_TEMP/blocked-head.txt"; fi
+          added=$(LC_ALL=C comm -13 "$RUNNER_TEMP/blocked-base.txt" "$RUNNER_TEMP/blocked-head.txt")
+          if [ -n "$added" ]; then
+            while IFS= read -r line; do echo "::error::$list gained '$line' compared with $BASE_REF"; done <<< "$added"
+            echo "::error::New blocked bundles are not allowed. Fix the regression in the scanner or the bundle path; do not add a row to $list (the list may only shrink)."
+            exit 1
+          fi
+          echo "No bundle/blocker row was added to $list compared with $BASE_REF"
+
   clippy:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
