@@ -3624,6 +3624,18 @@ impl Interp {
         self.run_parsed(source, thaw_parser::parse_javascript(source), true)
     }
 
+    /// [`run`](Self::run) for a main file. Node runs a plain `.js` main as a sloppy CommonJS script, so it is
+    /// parsed as a script first; only text that fails as a script (import/export, top-level await) is parsed
+    /// as a module.
+    pub(crate) fn run_main_source(&mut self, source: &str) -> R<Value> {
+        if too_nested(source) {
+            return self.throw_error("RangeError", STACK_OVERFLOW);
+        }
+        let parsed = thaw_parser::parse_javascript_script(source)
+            .or_else(|_| thaw_parser::parse_javascript(source));
+        self.run_parsed(source, parsed, true)
+    }
+
     /// Like [`run`](Self::run) for `eval` / `new Function` text: parsed as a sloppy-mode script.
     pub fn run_sloppy(&mut self, source: &str) -> R<Value> {
         if too_nested(source) {
