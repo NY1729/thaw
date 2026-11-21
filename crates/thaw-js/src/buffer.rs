@@ -39,7 +39,9 @@ impl Interp {
             };
             let bytes: Vec<u8> = s
                 .as_bytes()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map_while(|pair| Some(digit(pair[0])? * 16 + digit(pair[1])?))
                 .collect();
             Ok(it.u8_from_vec(bytes))
