@@ -1155,9 +1155,7 @@ fn rewrite_native_opaque_edges_named(
                 }
                 Some(text)
             }
-            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export))
-                if opaque_specs.contains(export.src.value.to_string_lossy().as_ref()) =>
-                Some(format!("import {};", js_string_literal(&export.src.value.to_string_lossy()))),
+            // `export * from` stays in the source: the runtime copies the target's keys (thaw-js convert).
             ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) if export.src.is_none() => {
                 let mut kept = Vec::new();
                 let mut changed = false;

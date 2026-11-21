@@ -182,8 +182,8 @@ struct Converted {
     // mutable exports (`export let x`, reassigned here) and remote names of this module's named imports
     live: Vec<String>,
     imported: Vec<String>,
-    // `export * from`: copies every name of its source, so any live export of the bundle may be copied
-    star: bool,
+    // specifiers of `export * from`: each copies every name of its source, so any live export may be copied
+    stars: Vec<String>,
 }
 
 /// Names assigned or updated anywhere in the module (`x = ..`, `x += ..`, `x++`).
@@ -239,7 +239,7 @@ fn convert_module(
     let (rq, ex) = (names.require, names.exports);
     let snippet = |span| cm.span_to_snippet(span).unwrap_or_default();
     let mut head =
-        format!("\"use strict\";\nObject.defineProperty({ex}, '__esModule', {{ value: true }});\n");
+        format!("\"use strict\";\nObject.defineProperty({ex}, '__esModule', {{ value: true, configurable: true }});\nObject.defineProperty({ex}, '__thaw_esm_stars', {{ value: Object.create(null) }});\n");
     head.push_str(
         "function __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\n\
          function __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); \
@@ -247,6 +247,7 @@ fn convert_module(
          ns.default = m; return ns; }\n",
     );
     let mut body = String::new();
+    let mut prologue = String::new();
     let mut specs: Vec<String> = Vec::new();
     // names this source re-exports itself (`export { X } from`); the export graph repeats them as indirect entries
     let mut reexported: BTreeSet<String> = BTreeSet::new();
@@ -254,7 +255,7 @@ fn convert_module(
     let mut live: Vec<String> = Vec::new();
     // remote names this module reads from another module (imports, re-exports, indirect entries)
     let mut pulled: Vec<String> = Vec::new();
-    let mut star = false;
+    let mut stars: Vec<String> = Vec::new();
     let mut counter = 0usize;
     let mut uses_origin = false;
     let reassigned = reassigned_names(module);
@@ -298,7 +299,8 @@ fn convert_module(
                     json_quote(&spec, &mut q);
                     specs.push(spec);
                     let m = tmp(&mut counter);
-                    body.push_str(&format!("var {m} = {rq}({q});\n"));
+                    // every request runs before the body, as ES module evaluation does
+                    prologue.push_str(&format!("var {m} = {rq}({q});\n"));
                     for sp in &i.specifiers {
                         match sp {
                             a::ImportSpecifier::Default(d) => body.push_str(&format!(
@@ -387,7 +389,7 @@ fn convert_module(
                         json_quote(&spec, &mut q);
                         specs.push(spec);
                         let m = tmp(&mut counter);
-                        body.push_str(&format!("var {m} = {rq}({q});\n"));
+                        prologue.push_str(&format!("var {m} = {rq}({q});\n"));
                         m
                     });
                     for sp in &e.specifiers {
@@ -433,14 +435,17 @@ fn convert_module(
                     }
                 }
                 a::ModuleDecl::ExportAll(e) => {
-                    star = true;
                     let spec = e.src.value.to_string_lossy().into_owned();
                     let mut q = String::new();
                     json_quote(&spec, &mut q);
-                    specs.push(spec);
+                    specs.push(spec.clone());
+                    if stars.is_empty() {
+                        head.push_str(STAR_HELPER);
+                    }
+                    stars.push(spec);
                     let m = tmp(&mut counter);
-                    body.push_str(&format!(
-                        "var {m} = {rq}({q});\nObject.keys({m}).forEach(function (k) {{ if (k !== 'default' && k !== '__esModule' && !Object.prototype.hasOwnProperty.call({ex}, k)) Object.defineProperty({ex}, k, {{ enumerable: true, get: function () {{ return {m}[k]; }} }}); }});\n"
+                    prologue.push_str(&format!(
+                        "var {m} = {rq}({q});\n__thaw_esm_star({ex}, {m});\n"
                     ));
                 }
                 _ => problems.push("esm-declaration"),
@@ -467,20 +472,45 @@ fn convert_module(
         head.push_str(
             "function __thaw_esm_origin_obj(t) { var nsCache = Object.create(null); return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, \
              read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); }, \
-             readImport: function (s, n) { return t[s]()[n]; }, namespaceImport: function (s) { var m = t[s](); if (!nsCache[s] || !Object.is(nsCache[s].m, m)) nsCache[s] = { m: m, ns: __thaw_esm_cjs_ns(m) }; return nsCache[s].ns; }, \
+             readImport: function (s, n) { return t[s]()[n]; }, namespaceImport: function (s) { var m = t[s](); if (m !== null && (typeof m === 'object' || typeof m === 'function') && Object.prototype.hasOwnProperty.call(m, '__thaw_esm_stars')) return __thaw_esm_ns(m); if (!nsCache[s] || !Object.is(nsCache[s].m, m)) nsCache[s] = { m: m, ns: __thaw_esm_cjs_ns(m) }; return nsCache[s].ns; }, \
              defaultImport: function (s, m) { return __thaw_esm_default(m); } }; }\n\
              function __thaw_esm_cjs_ns(m) { var names = m !== null && (typeof m === 'object' || typeof m === 'function') ? Object.keys(m).filter(function (k) { return k !== 'default'; }) : []; names.push('default'); var ns = {}; names.sort().forEach(function (k) { Object.defineProperty(ns, k, { value: k === 'default' ? m : m[k], enumerable: true, writable: true }); }); Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module' }); return Object.preventExtensions(ns); }\n",
         );
     }
     Converted {
-        body: format!("{head}{body}"),
+        body: format!("{head}{prologue}{body}"),
         specs,
         problems,
         live,
         imported: pulled,
-        star,
+        stars,
     }
 }
+
+// The runtime half of `export *`: copies the names of `m` (the target's own enumerable keys, read once it has
+// evaluated) onto `ex` as live getters. An explicit or indirect export wins; `default` is never a star name; a
+// name two stars provide through different bindings is ambiguous and absent. `__thaw_esm_stars` (non-enumerable)
+// records each star name's canonical binding, so a diamond through a re-exporting module stays one name.
+// Every converted module has `__thaw_esm_stars` (the marker that its namespace is ESM-shaped, see the origin).
+const STAR_HELPER: &str = r#"function __thaw_esm_star(ex, m) { var own = Object.prototype.hasOwnProperty;
+  var table = ex.__thaw_esm_stars;
+  var mine = m !== null && (typeof m === 'object' || typeof m === 'function') && own.call(m, '__thaw_esm_stars') ? m.__thaw_esm_stars : null;
+  (m === null || m === undefined ? [] : Object.keys(m)).forEach(function (k) {
+    if (k === 'default') return;
+    var bind = mine && own.call(mine, k) ? mine[k].bind : { m: m, k: k };
+    if (own.call(table, k)) {
+      if (!table[k].amb && (table[k].bind.m !== bind.m || table[k].bind.k !== bind.k)) {
+        table[k].amb = true;
+        if (k === '__esModule') Object.defineProperty(ex, k, { value: true, configurable: true }); else delete ex[k];
+      }
+      return;
+    }
+    if (k !== '__esModule' && own.call(ex, k)) return;
+    table[k] = { bind: bind, amb: false };
+    Object.defineProperty(ex, k, { enumerable: true, configurable: true, get: function () { return bind.m[bind.k]; } });
+  });
+}
+"#;
 
 /// The factory text, the unsound-construct feature names, and whether the bundle is the pure native shape.
 pub(crate) type NativeBundle = (String, BTreeSet<&'static str>, bool);
@@ -536,12 +566,17 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
             .to_string();
         let src = text(field(fields, "source")).ok_or("native module without source")?;
         let mut imports: Vec<(String, String)> = Vec::new();
+        let mut opaque_specs = BTreeSet::new();
         if let Some(Native::Object(map)) = field(fields, "imports") {
             for (spec, target) in map {
                 if let Native::Str(t) = target {
                     if spec.starts_with(ORIGIN_SPEC) || t.starts_with("__thaw_private_origin_key/")
                     {
                         continue;
+                    }
+                    // a star of an opaque CJS module is not a live-binding copy (its names are runtime reads)
+                    if opaque.contains_key(t) {
+                        opaque_specs.insert(spec.clone());
                     }
                     let t = opaque.get(t).unwrap_or(t);
                     imports.push((spec.clone(), t.clone()));
@@ -554,7 +589,7 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
         problems.extend(converted.problems);
         live_exports.extend(converted.live);
         imported_names.extend(converted.imported);
-        any_star |= converted.star;
+        any_star |= converted.stars.iter().any(|s| !opaque_specs.contains(s));
         graph.insert(
             key.clone(),
             imports
@@ -891,7 +926,7 @@ mod convert_pin_tests {
         let indirect = [("c".to_string(), "./y.js".to_string(), "c".to_string())];
         let converted = convert(source, &[], &indirect).expect("convert");
         let expected = concat!(
-            "\"use strict\";\nObject.defineProperty(exports, '__esModule', { value: true });\n",
+            "\"use strict\";\nObject.defineProperty(exports, '__esModule', { value: true, configurable: true });\nObject.defineProperty(exports, '__thaw_esm_stars', { value: Object.create(null) });\n",
             "function __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\n",
             "function __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); ",
             "if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } ",
@@ -914,7 +949,7 @@ mod convert_pin_tests {
             export * from './s.js';\nexport { q as r } from './t.js';\nexport * as ns from './u.js';\n\
             export const v = __thaw_esm_origin_0.readDefault('node:os');\n";
         let converted = convert(source, &["node:os".to_string()], &[]).expect("convert");
-        assert_eq!(converted.body, "\"use strict\";\nObject.defineProperty(exports, '__esModule', { value: true });\nfunction __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\nfunction __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } ns.default = m; return ns; }\nif (!Object.prototype.hasOwnProperty.call(exports, \"r\")) Object.defineProperty(exports, \"r\", { enumerable: true, get: function () { return __thaw_esm_m2[\"q\"]; } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"ns\")) Object.defineProperty(exports, \"ns\", { enumerable: true, get: function () { return __thaw_esm_ns(__thaw_esm_m3); } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"v\")) Object.defineProperty(exports, \"v\", { enumerable: true, get: function () { return v; } });\nfunction __thaw_esm_origin_obj(t) { var nsCache = Object.create(null); return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); }, readImport: function (s, n) { return t[s]()[n]; }, namespaceImport: function (s) { var m = t[s](); if (!nsCache[s] || !Object.is(nsCache[s].m, m)) nsCache[s] = { m: m, ns: __thaw_esm_cjs_ns(m) }; return nsCache[s].ns; }, defaultImport: function (s, m) { return __thaw_esm_default(m); } }; }\nfunction __thaw_esm_cjs_ns(m) { var names = m !== null && (typeof m === 'object' || typeof m === 'function') ? Object.keys(m).filter(function (k) { return k !== 'default'; }) : []; names.push('default'); var ns = {}; names.sort().forEach(function (k) { Object.defineProperty(ns, k, { value: k === 'default' ? m : m[k], enumerable: true, writable: true }); }); Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module' }); return Object.preventExtensions(ns); }\nvar __thaw_esm_origin_0 = __thaw_esm_origin_obj({ \"node:os\": function () { return require(\"node:os\"); } });\nvar __thaw_esm_m1 = require(\"./s.js\");\nObject.keys(__thaw_esm_m1).forEach(function (k) { if (k !== 'default' && k !== '__esModule' && !Object.prototype.hasOwnProperty.call(exports, k)) Object.defineProperty(exports, k, { enumerable: true, get: function () { return __thaw_esm_m1[k]; } }); });\nvar __thaw_esm_m2 = require(\"./t.js\");\nvar __thaw_esm_m3 = require(\"./u.js\");\nconst v = __thaw_esm_origin_0.readDefault('node:os');;\n");
+        assert_eq!(converted.body, "\"use strict\";\nObject.defineProperty(exports, '__esModule', { value: true, configurable: true });\nObject.defineProperty(exports, '__thaw_esm_stars', { value: Object.create(null) });\nfunction __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\nfunction __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } ns.default = m; return ns; }\nfunction __thaw_esm_star(ex, m) { var own = Object.prototype.hasOwnProperty;\n  var table = ex.__thaw_esm_stars;\n  var mine = m !== null && (typeof m === 'object' || typeof m === 'function') && own.call(m, '__thaw_esm_stars') ? m.__thaw_esm_stars : null;\n  (m === null || m === undefined ? [] : Object.keys(m)).forEach(function (k) {\n    if (k === 'default') return;\n    var bind = mine && own.call(mine, k) ? mine[k].bind : { m: m, k: k };\n    if (own.call(table, k)) {\n      if (!table[k].amb && (table[k].bind.m !== bind.m || table[k].bind.k !== bind.k)) {\n        table[k].amb = true;\n        if (k === '__esModule') Object.defineProperty(ex, k, { value: true, configurable: true }); else delete ex[k];\n      }\n      return;\n    }\n    if (k !== '__esModule' && own.call(ex, k)) return;\n    table[k] = { bind: bind, amb: false };\n    Object.defineProperty(ex, k, { enumerable: true, configurable: true, get: function () { return bind.m[bind.k]; } });\n  });\n}\nif (!Object.prototype.hasOwnProperty.call(exports, \"r\")) Object.defineProperty(exports, \"r\", { enumerable: true, get: function () { return __thaw_esm_m2[\"q\"]; } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"ns\")) Object.defineProperty(exports, \"ns\", { enumerable: true, get: function () { return __thaw_esm_ns(__thaw_esm_m3); } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"v\")) Object.defineProperty(exports, \"v\", { enumerable: true, get: function () { return v; } });\nfunction __thaw_esm_origin_obj(t) { var nsCache = Object.create(null); return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); }, readImport: function (s, n) { return t[s]()[n]; }, namespaceImport: function (s) { var m = t[s](); if (m !== null && (typeof m === 'object' || typeof m === 'function') && Object.prototype.hasOwnProperty.call(m, '__thaw_esm_stars')) return __thaw_esm_ns(m); if (!nsCache[s] || !Object.is(nsCache[s].m, m)) nsCache[s] = { m: m, ns: __thaw_esm_cjs_ns(m) }; return nsCache[s].ns; }, defaultImport: function (s, m) { return __thaw_esm_default(m); } }; }\nfunction __thaw_esm_cjs_ns(m) { var names = m !== null && (typeof m === 'object' || typeof m === 'function') ? Object.keys(m).filter(function (k) { return k !== 'default'; }) : []; names.push('default'); var ns = {}; names.sort().forEach(function (k) { Object.defineProperty(ns, k, { value: k === 'default' ? m : m[k], enumerable: true, writable: true }); }); Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module' }); return Object.preventExtensions(ns); }\nvar __thaw_esm_m1 = require(\"./s.js\");\n__thaw_esm_star(exports, __thaw_esm_m1);\nvar __thaw_esm_m2 = require(\"./t.js\");\nvar __thaw_esm_m3 = require(\"./u.js\");\nvar __thaw_esm_origin_0 = __thaw_esm_origin_obj({ \"node:os\": function () { return require(\"node:os\"); } });\nconst v = __thaw_esm_origin_0.readDefault('node:os');;\n");
     }
 }
 
