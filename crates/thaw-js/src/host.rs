@@ -931,6 +931,8 @@ fn bundle_table(bundle_js: &str, name: &str) -> Option<serde_json::Value> {
 /// module's virtual path. A worker that runs a bundled module's file starts here instead of the disk loader.
 pub(crate) fn run_bundle_main(it: &mut Interp, name: &str, bundle_js: &str, key: &str) -> R<Value> {
     let parts = parse_bundle(bundle_js).map_err(|e| Ctl::Throw(Value::str(&e)))?;
+    // registered so a worker this module spawns (`new Worker(new URL('./nested.js', ...))`) finds its bundle here
+    crate::worker::register_bundle(it, name, bundle_js, &parts);
     let (exports, pending) = boot_bundle(it, parts, bundle_js, name, key)?;
     // not awaited here: the worker's event loop runs a top-level await; only the BOOTING slot is released
     if pending.is_some() && !name.is_empty() {
