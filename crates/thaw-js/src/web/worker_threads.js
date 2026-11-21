@@ -364,6 +364,12 @@
       // port events have no handle: a port end of this thread, routed by the main thread (messaging.js)
       if (event.type === 'port') { __thaw_port_deliver(event.addr, event.value); continue; }
       if (event.type === 'portClose') { __thaw_port_hangup(event.addr); continue; }
+      // thread messages from threads below this thread's children (its inbox, worker.rs `pump`): no handle
+      if (event.handle === undefined && event.type === 'thread') {
+        deliverThreadMessage(event.ack, event.source, event.value, (ack, status, wire) => __thaw_thread_reply(event.source, ack, status, wire));
+        continue;
+      }
+      if (event.handle === undefined && event.type === 'threadAck') { settleSend(event.ack, event.status, event.value); continue; }
       const worker = byHandle.get(event.handle);
       if (worker === undefined) continue;
       const state = states.get(worker);
