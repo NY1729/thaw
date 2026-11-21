@@ -1992,6 +1992,22 @@ fn native_esm_dynamic_absolute_name_cannot_escape_its_bundle() {
     }).join().unwrap();
 }
 }
+
+#[test]
+fn native_esm_dynamic_absolute_name_blocks_import_without_top_level_await() {
+    // No-TLA port of the pending test above: the bundle-prefix literal is a scheme Node refuses
+    // (ERR_UNSUPPORTED_ESM_URL_SCHEME), so the rejection handler returns true, as Node does.
+    let root = temp_registry("native-esm-absolute-escape-no-tla");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-escape-pkg");
+    fs::create_dir_all(&package).unwrap();
+    let literal = serde_json::to_string("thaw-bundle:1:native-escape-pkg/index.mjs").unwrap();
+    fs::write(package.join("index.mjs"), format!("export const blocked = import({literal}).then(function() {{ return false; }}, function() {{ return true; }});")).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-escape-pkg", &package, "index.mjs").unwrap();
+    assert_eq!(run_js_probe(&bundle, "exports.blocked"), "true");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn native_esm_bundle_name_is_fresh_for_same_key_new_source_on_thaw_js() {
     // Replacement for the pending QuickJS test above, Node-visible only: two sequential loads of the same

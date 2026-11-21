@@ -503,12 +503,39 @@ fn package_host_loads_modules_and_exchanges_plain_data() {
 
 #[test]
 fn package_host_reports_unsupported_constructs_by_name() {
-    use crate::host::{HostError, Package};
-    let bundle = MINI.replace("exports.VERSION = '1.0';", "exports.VERSION = import('x');");
-    match Package::load(&bundle) {
-        Err(HostError::Unsupported(f)) => assert_eq!(f, "import()"),
-        other => panic!("{:?}", other.err()),
-    }
+    // Node 22 (CJS importer): `import('x')` of a bare name the bundle lacks REJECTS with ERR_MODULE_NOT_FOUND;
+    // it used to be Unsupported "import()" at load.
+    use crate::host::{Native, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.missing = function () { return import('x').then(null, function (e) { return e.code; }); };",
+    );
+    let mut p = Package::load(&bundle).expect("loads: import() rejects, it does not throw");
+    assert!(matches!(p.call("missing", &[]), Ok(Native::Str(c)) if c == "ERR_MODULE_NOT_FOUND"));
+}
+
+#[test]
+fn bundle_factory_import_rejects_with_node_codes() {
+    // Node 22, recorded from a CJS importer (same codes from an ESM importer): each unmapped specifier rejects;
+    // 123 is a bare name (ERR_MODULE_NOT_FOUND); Symbol() is a TypeError with no code. A mapped './h' still loads.
+    use crate::host::Package;
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.codes = function () { return Promise.all(['/nonexistent-thaw-probe/outside.mjs', './missing.mjs', 'node:nonexistent', 'pkg-not-installed', 123, Symbol('s'), 'http://127.0.0.1:1/x.mjs', 'thaw-bundle:1:x/index.mjs'].map(function (s) { return import(s).then(function () { return 'resolved'; }, function (e) { return String(e.code); }); })); }; exports.mapped = function () { return import('./h').then(function (ns) { return ns.default.dbl(4); }); };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    assert_eq!(
+        p.call("codes", &[])
+            .unwrap_or_else(|e| panic!("{e}"))
+            .to_json(),
+        r#"["ERR_MODULE_NOT_FOUND","ERR_MODULE_NOT_FOUND","ERR_UNKNOWN_BUILTIN_MODULE","ERR_MODULE_NOT_FOUND","ERR_MODULE_NOT_FOUND","undefined","ERR_UNSUPPORTED_ESM_URL_SCHEME","ERR_UNSUPPORTED_ESM_URL_SCHEME"]"#
+    );
+    assert_eq!(
+        p.call("mapped", &[])
+            .unwrap_or_else(|e| panic!("{e}"))
+            .to_json(),
+        "8"
+    );
 }
 
 #[test]
