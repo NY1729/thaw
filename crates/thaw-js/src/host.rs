@@ -75,6 +75,9 @@ struct Loader {
     /// The thrown value of each module whose factory threw synchronously: its cache entry stays, so a later
     /// `import()` rejects with the same error instead of resolving the partial exports (Node caches the failure).
     failed: RefCell<HashMap<String, Value>>,
+    /// The keys whose factory is running right now (a synchronous evaluation in progress). A `require` that
+    /// re-enters one across the CommonJS/ES boundary is a cycle Node refuses (`cycle_refused`).
+    loading: RefCell<HashSet<String>>,
     /// [`PROMISE_OF`]: wraps a thunk in a promise, so `requireAsync` rejects instead of throwing.
     promise_of: Value,
     /// [`CJS_NAMESPACE`]: builds a CommonJS module's namespace object.
@@ -170,6 +173,12 @@ fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R
         Some(key) if key.ends_with(".node") => addon_of(loader, it),
         // refused before the cache insert and before the factory runs, as Node refuses it
         Some(key) if loader.parts.async_keys.contains(&key) => Err(require_async_error(it)),
+        Some(key)
+            if loader.loading.borrow().contains(&key) && cycle_refused(loader, from, &key) =>
+        {
+            let target_is_esm = loader.esm_keys.contains(&key);
+            Err(require_cycle_error(it, from, spec, &key, target_is_esm))
+        }
         Some(key) => load_module(loader, it, &key),
         None => match peer_exports(it, spec)? {
             Some(exports) => Ok(exports),
@@ -285,14 +294,44 @@ fn module_namespace(loader: &Rc<Loader>, it: &mut Interp, key: &str, exports: Va
 
 /// `require()` of a module with top-level await: Node 22's error (first line of its message; the code is what callers test).
 fn require_async_error(it: &mut Interp) -> Ctl {
-    let err = js_error(
+    coded_error(
         it,
+        "ERR_REQUIRE_ASYNC_MODULE",
         "require() cannot be used on an ESM graph with top-level await. Use import() instead. To see where the top-level await comes from, use --experimental-print-required-tla.",
-    );
+    )
+}
+
+/// An Error with a Node `code` property.
+fn coded_error(it: &mut Interp, code: &str, message: &str) -> Ctl {
+    let err = js_error(it, message);
     if let Ctl::Throw(value) = &err {
-        let _ = it.set(value, "code", Value::str("ERR_REQUIRE_ASYNC_MODULE"));
+        let _ = it.set(value, "code", Value::str(code));
     }
     err
+}
+
+/// Node refuses a synchronous `require` that re-enters a module still evaluating across the module-format boundary:
+/// a CommonJS `require` of an ES module under evaluation, or an ES module importing a CommonJS module still loading.
+/// Same-format cycles (CJS to CJS, ESM to ESM) keep their partial exports.
+fn cycle_refused(loader: &Loader, from: &str, key: &str) -> bool {
+    !key.starts_with("node:") && loader.esm_keys.contains(key) != loader.esm_keys.contains(from)
+}
+
+/// ERR_REQUIRE_CYCLE_MODULE with Node 22's first line of message (the importer's path stands in for Node's).
+fn require_cycle_error(
+    it: &mut Interp,
+    from: &str,
+    spec: &str,
+    key: &str,
+    target_is_esm: bool,
+) -> Ctl {
+    let importer = format!("/thaw_modules/{from}");
+    let message = if target_is_esm {
+        format!("Cannot require() ES Module /thaw_modules/{key} in a cycle. (from {importer})")
+    } else {
+        format!("Cannot import CommonJS Module {spec} in a cycle. (from {importer})")
+    };
+    coded_error(it, "ERR_REQUIRE_CYCLE_MODULE", &message)
 }
 
 fn is_module_not_found(it: &mut Interp, err: &Value) -> bool {
@@ -424,6 +463,11 @@ fn builtin_key(loader: &Loader, spec: &str) -> Option<String> {
 fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     let cached = loader.cache.borrow().get(key).cloned();
     if let Some(m) = cached {
+        // a failed ES module stays failed: every later require rethrows its evaluation error (Node caches it)
+        let failed = loader.failed.borrow().get(key).cloned();
+        if let Some(reason) = failed.filter(|_| loader.esm_keys.contains(key)) {
+            return Err(Ctl::Throw(reason));
+        }
         return it.get(&m, "exports");
     }
     let Some(factory) = loader.factories.get(key).cloned() else {
@@ -519,6 +563,7 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         Some(keys) if !keys.contains(key) => Value::Undefined,
         _ => exports.clone(),
     };
+    loader.loading.borrow_mut().insert(key.to_string());
     let ran = it.call(
         &f,
         &this,
@@ -532,6 +577,7 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
             require,
         ],
     );
+    loader.loading.borrow_mut().remove(key);
     let pending = match &ran {
         Ok(result) if it.is_promise(result) => Some(result.clone()),
         _ => None,
@@ -804,6 +850,7 @@ fn boot_bundle(
         namespaces: RefCell::new(HashMap::new()),
         ready: RefCell::new(HashMap::new()),
         failed: RefCell::new(HashMap::new()),
+        loading: RefCell::new(HashSet::new()),
         promise_of,
         cjs_namespace,
     });
