@@ -349,10 +349,22 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     let require_async = {
         let (l, k) = (loader.clone(), key.to_string());
         it.native(move |it, _, args| {
-            // the specifier is coerced once here; the thunk and every lookup below use this string
-            let spec = it.to_str(&crate::arg(args, 0)).to_string();
-            let (l2, k2) = (l.clone(), k.clone());
-            let thunk = it.native(move |it, _, _| require_async_namespace(&l2, it, &k2, &spec));
+            // `import()` coerces the specifier once, here (ToString); a failure rejects the promise, never throws
+            let arg = crate::arg(args, 0);
+            let converted = if matches!(&arg, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Symbol { .. })) {
+                it.throw_error("TypeError", "Cannot convert a Symbol value to a string")
+            } else {
+                it.try_to_str(&arg)
+            };
+            let thunk = match converted {
+                Ok(spec) => {
+                    let spec = spec.to_string();
+                    let (l2, k2) = (l.clone(), k.clone());
+                    it.native(move |it, _, _| require_async_namespace(&l2, it, &k2, &spec))
+                }
+                Err(Ctl::Throw(reason)) => it.native(move |_, _, _| Err(Ctl::Throw(reason.clone()))),
+                Err(other) => return Err(other),
+            };
             let promise_of = l.promise_of.clone();
             it.call(&promise_of, &Value::Undefined, &[thunk])
         })
@@ -9223,6 +9235,9 @@ var __thaw_bundle_factories = {
     var n = 0, spec = { toString: function () { n++; return './c.js'; } };
     return requireAsync(spec).then(function () { return n; });
   };
+  exports.loadSymbol = function () { return requireAsync(Symbol('dep')); };
+  exports.loadThrowing = function () { return requireAsync({ toString: function () { throw new Error('conversion failed'); } }); };
+  exports.kindOf = function (e) { return e instanceof TypeError ? 'TypeError' : 'other'; };
 },
 "p/c.js": function(module, exports) { exports.a = 1; exports.b = 2; },
 "p/n.js": function(module, exports) { exports.v = 7; },
@@ -9313,6 +9328,31 @@ var __thaw_bundle_export_graphs = JSON.parse("{\"p/n.js\":{\"local\":{},\"indire
         let mut pkg = Package::load(BUNDLE).expect("loads");
         let count = settled(&mut pkg, "coerce", &[]).ok().expect("resolves");
         assert_eq!(text(&mut pkg, "same", &[count, Value::Number(1.0)]), "true");
+    }
+
+    #[test]
+    fn dynamic_import_of_a_symbol_rejects_with_type_error() {
+        let mut pkg = Package::load(BUNDLE).expect("loads");
+        let reason = settled(&mut pkg, "loadSymbol", &[])
+            .err()
+            .expect("rejects, not a synchronous throw");
+        assert_eq!(
+            text(&mut pkg, "kindOf", std::slice::from_ref(&reason)),
+            "TypeError"
+        );
+        assert_eq!(
+            text(&mut pkg, "messageOf", &[reason]),
+            "Cannot convert a Symbol value to a string"
+        );
+    }
+
+    #[test]
+    fn dynamic_import_rejects_when_the_specifier_conversion_throws() {
+        let mut pkg = Package::load(BUNDLE).expect("loads");
+        let reason = settled(&mut pkg, "loadThrowing", &[])
+            .err()
+            .expect("rejects, not a synchronous throw");
+        assert_eq!(text(&mut pkg, "messageOf", &[reason]), "conversion failed");
     }
 
     #[test]
