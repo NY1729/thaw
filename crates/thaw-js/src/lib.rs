@@ -3576,7 +3576,11 @@ impl Interp {
             }
             a::Pat::Assign(d) => {
                 let v = if matches!(value, Value::Undefined) {
-                    self.eval(&d.right, scope)?
+                    let v = self.eval(&d.right, scope)?;
+                    if let a::Pat::Ident(id) = &*d.left {
+                        name_if_anonymous_def(&d.right, &v, &id.id.sym);
+                    }
+                    v
                 } else {
                     value
                 };
@@ -3636,6 +3640,7 @@ impl Interp {
                             if matches!(v, Value::Undefined) {
                                 if let Some(d) = &ap.value {
                                     v = self.eval(d, scope)?;
+                                    name_if_anonymous_def(d, &v, &k);
                                 }
                             }
                             used.push(k.clone());
@@ -4372,6 +4377,9 @@ impl Interp {
                 None if is_var => continue, // hoisted already
                 None => Value::Undefined,
             };
+            if let (Some(e), a::Pat::Ident(id)) = (&d.init, &d.name) {
+                name_if_anonymous_def(e, &value, &id.id.sym);
+            }
             match &d.name {
                 a::Pat::Ident(id) if !is_var => {
                     let name = self.intern(&id.id.sym);
@@ -5216,7 +5224,13 @@ impl Interp {
             _ => return unsupported("assignment target"),
         };
         let value = match asg.op {
-            A::Assign => self.eval(&asg.right, scope)?,
+            A::Assign => {
+                let v = self.eval(&asg.right, scope)?;
+                if let Loc::Ident(id) = &loc {
+                    name_if_anonymous_def(&asg.right, &v, &id.sym);
+                }
+                v
+            }
             A::AndAssign | A::OrAssign | A::NullishAssign => {
                 let cur = self.read_loc(&loc, scope)?;
                 let keep = match asg.op {
@@ -5227,7 +5241,11 @@ impl Interp {
                 if keep {
                     return Ok(cur);
                 }
-                self.eval(&asg.right, scope)?
+                let v = self.eval(&asg.right, scope)?;
+                if let Loc::Ident(id) = &loc {
+                    name_if_anonymous_def(&asg.right, &v, &id.sym);
+                }
+                v
             }
             op => {
                 let mut cur = self.read_loc(&loc, scope)?;
@@ -5918,6 +5936,14 @@ fn name_anonymous_fn(v: &Value, name: &str) {
         if anonymous && find_own(o, "name").is_none() {
             put_with(o, "name", Value::str(name), false, false, true);
         }
+    }
+}
+
+/// NamedEvaluation for an identifier target (`let x = e`, `x = e`, `x ||= e`, `{x = e}`, `[x = e]`):
+/// the value of `e` takes `name` when `e` is an anonymous function definition. Other targets are never named.
+fn name_if_anonymous_def(e: &a::Expr, v: &Value, name: &str) {
+    if is_anonymous_fn_def(e) {
+        name_anonymous_fn(v, name);
     }
 }
 

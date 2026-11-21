@@ -8078,6 +8078,48 @@ fn object_literal_anonymous_function_takes_its_key_as_name() {
     );
 }
 
+/// ES NamedEvaluation for identifier targets (var/let/const, `=`, `||=`, `&&=`, `??=`, destructuring
+/// and parameter defaults). Expected values were recorded under Node 22.
+#[test]
+fn anonymous_functions_take_their_declaration_name() {
+    assert_eq!(
+        one("let a = function(){}; var b = () => 1; const c = class {}; var d = function named(){}; let q = (function(){}); console.log([a.name,b.name,c.name,d.name,q.name].join())"),
+        "a,b,c,named,q"
+    );
+}
+
+#[test]
+fn anonymous_functions_take_their_assignment_name_for_identifier_targets_only() {
+    assert_eq!(
+        one("let e; e = function(){}; let f; f ||= () => 1; let h = null; h ??= class {}; let k; k ??= () => 2; let j = 1; j ||= () => 3; let g = 0; g &&= function(){}; let m = {}; m.p = function(){}; let r = (0, function(){}); let cc = true; let s = cc ? () => 1 : 2; console.log([e.name,f.name,h.name,k.name,j,typeof g,m.p.name,r.name,s.name].join())"),
+        "e,f,h,k,1,number,,,"
+    );
+}
+
+#[test]
+fn anonymous_functions_take_their_destructuring_default_name() {
+    assert_eq!(
+        one("var {x = () => 1} = {}; var [y = class {}] = []; var {z: zz = function(){}} = {}; var {w = () => 2} = {}; var [u = function(){}] = [undefined]; var {v = () => 2} = {v: 7}; console.log([x.name,y.name,zz.name,w.name,u.name,v].join())"),
+        "x,y,zz,w,u,7"
+    );
+}
+
+#[test]
+fn anonymous_functions_take_their_parameter_default_name() {
+    assert_eq!(
+        one("function par(a = () => 1, b = function(){}) { return [a.name, b.name].join(); } console.log(par())"),
+        "a,b"
+    );
+}
+
+#[test]
+fn class_static_name_member_is_not_overwritten_by_the_binding_name() {
+    assert_eq!(
+        one("const K = class { static name = 'S'; }; let t = class { static name(){} }; let anon = class {}; console.log([K.name, typeof t.name, anon.name].join())"),
+        "S,function,anon"
+    );
+}
+
 #[test]
 fn stdout_write_takes_typed_array_and_arraybuffer_bytes() {
     let mut it = Interp::new();
