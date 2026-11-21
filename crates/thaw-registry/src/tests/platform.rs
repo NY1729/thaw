@@ -1899,3 +1899,167 @@ fn terminating_a_worker_stops_a_child_blocked_in_atomics_wait() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
+#[test]
+fn nested_worker_port_routes_from_grandchild_through_middle_worker() {
+    // Node 22.23.1 (3 runs identical, nw4-probes/p6.js and p13.js): a port moved main -> w1 -> its child (thread 3) answers
+    // on the main-thread end, and the main thread's ping reaches the child back through w1. w2 is created second, so the
+    // child is the third thread of the tree.
+    let dir = temp_registry("nested_worker_port_route");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        var kid = "var wt = require('node:worker_threads'); wt.parentPort.on('message', function (m) { if (m.port) { m.port.on('message', function (v) { if (v === 'ping') { m.port.postMessage({ echo: 'pong', tid: wt.threadId }); m.port.close(); wt.parentPort.close(); } }); m.port.postMessage({ hello: 'from kid via main-hub', tid: wt.threadId }); } });";
+        var mid = "var wt = require('node:worker_threads'); var c = new wt.Worker(" + JSON.stringify(kid) + ", { eval: true }); wt.parentPort.on('message', function (m) { if (m.port) c.postMessage({ port: m.port }, [m.port]); }); c.on('exit', function () { wt.parentPort.close(); });";
+        module.exports = async function () {
+            var w1 = new Worker(mid, { eval: true });
+            var w2 = new Worker("require('node:worker_threads').parentPort.on('message', function () {});", { eval: true });
+            var channel = new MessageChannel();
+            var messages = [];
+            var done = new Promise(function (resolve) {
+                channel.port1.on('message', function (m) {
+                    messages.push(m);
+                    // main -> kid -> main: the kid's hello comes first, then its echo to our ping
+                    if (messages.length === 1) channel.port1.postMessage('ping');
+                    else resolve(messages);
+                });
+            });
+            w1.postMessage({ port: channel.port2 }, [channel.port2]);
+            var value = await Promise.race([done, new Promise(function (r) { setTimeout(function () { r('timeout'); }, 3000); })]);
+            channel.port1.close();
+            await Promise.all([w1.terminate(), w2.terminate()]);
+            return value;
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("nested_worker_port_route_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(
+        run_js(&bundle),
+        r#"[{"hello":"from kid via main-hub","tid":3},{"echo":"pong","tid":3}]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn nested_worker_cousin_post_message_reaches_the_sibling_subtree() {
+    // Node 22.23.1 (3 runs identical, nw4-probes/p6.js): thread 3 posts to thread 2, its cousin (neither its parent nor
+    // its child). The receiver sees {x:1} from 3 before the sender's ack reaches the sender's parent.
+    let dir = temp_registry("nested_worker_cousin_message");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        var kid = "var wt = require('node:worker_threads'); wt.parentPort.on('message', function (m) { if (m.cmd === 'to') { wt.postMessageToThread(m.target, { x: 1 }, [], 1000).then(function () { wt.parentPort.postMessage('cousin ok'); wt.parentPort.close(); }, function (e) { wt.parentPort.postMessage('cousin ' + e.code); wt.parentPort.close(); }); } });";
+        var mid = "var wt = require('node:worker_threads'); var c = new wt.Worker(" + JSON.stringify(kid) + ", { eval: true }); wt.parentPort.on('message', function (m) { if (m.cmd === 'to') c.postMessage(m); }); c.on('message', function (m) { wt.parentPort.postMessage(m); }); c.on('exit', function () { wt.parentPort.close(); });";
+        module.exports = async function () {
+            var w1 = new Worker(mid, { eval: true });
+            var receiverSource = "var wt = require('node:worker_threads'); process.on('workerMessage', function (v, src) { wt.parentPort.postMessage({ got: v, src: src }); }); wt.parentPort.postMessage('ready'); wt.parentPort.on('message', function (m) { if (m === 'quit') wt.parentPort.close(); });";
+            var w2 = new Worker(receiverSource, { eval: true });
+            var resolveReady;
+            var ready = new Promise(function (r) { resolveReady = r; });
+            var seen = [];
+            var resolveBoth;
+            var both = new Promise(function (r) { resolveBoth = r; });
+            var collect = function (m) { seen.push(m); if (seen.length === 2) resolveBoth(); };
+            w1.on('message', collect);
+            w2.on('message', function (m) { if (m === 'ready') resolveReady(); else collect(m); });
+            await ready;
+            w1.postMessage({ cmd: 'to', target: w2.threadId });
+            var result = await Promise.race([both.then(function () { return seen; }), new Promise(function (r) { setTimeout(function () { r(['timeout']); }, 3000); })]);
+            await Promise.all([w1.terminate(), w2.terminate()]);
+            return result;
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("nested_worker_cousin_message_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), r#"[{"got":{"x":1},"src":3},"cousin ok"]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn nested_worker_post_message_to_main_thread_reaches_its_workermessage() {
+    // Node 22.23.1 (3 runs identical, nw4-probes/p7.js): a grandchild's postMessageToThread(0) fires the main thread's
+    // process 'workerMessage' with the grandchild's thread id (2) as the source
+    let dir = temp_registry("nested_worker_to_main_message");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        var grandchild = "var wt = require('node:worker_threads'); wt.postMessageToThread(0, { hi: 'grandchild' }).then(function () {}, function () {}); wt.parentPort.close();";
+        var mid = "var wt = require('node:worker_threads'); var c = new wt.Worker(" + JSON.stringify(grandchild) + ", { eval: true }); c.on('exit', function () { wt.parentPort.close(); });";
+        module.exports = async function () {
+            var got = new Promise(function (resolve) { process.on('workerMessage', function (value, source) { resolve([value, source]); }); });
+            var top = new Worker(mid, { eval: true });
+            var result = await Promise.race([got, new Promise(function (r) { setTimeout(function () { r('no workerMessage'); }, 3000); })]);
+            await top.terminate();
+            return result;
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("nested_worker_to_main_message_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), r#"[{"hi":"grandchild"},2]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn nested_worker_port_closes_for_its_peer_when_its_owner_stops() {
+    // Node 22.23.1 (3 runs identical, nw4-probes/p12.js). A: a started port owned by a worker that exits by itself: exit,
+    // then the peer's close. B: the owner is a child of a parent that keeps running: the peer closes, then the parent
+    // exits when told to. C: the owner is a child of a parent that is terminated: the peer closes before the parent's
+    // exit, and terminate() resolves 1.
+    let dir = temp_registry("nested_worker_port_close");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        var owner = "var wt = require('node:worker_threads'); wt.parentPort.on('message', function (m) { if (m.port) { m.port.on('message', function () {}); m.port.unref(); wt.parentPort.close(); } });";
+        var ownerStays = "var wt = require('node:worker_threads'); wt.parentPort.on('message', function (m) { if (m.port) { m.port.on('message', function () {}); m.port.unref(); } });";
+        var midB = "var wt = require('node:worker_threads'); var c = new wt.Worker(" + JSON.stringify(owner) + ", { eval: true }); wt.parentPort.on('message', function (m) { if (m.port) c.postMessage({ port: m.port }, [m.port]); if (m === 'stop') wt.parentPort.close(); });";
+        var midC = "var wt = require('node:worker_threads'); var c = new wt.Worker(" + JSON.stringify(ownerStays) + ", { eval: true }); wt.parentPort.on('message', function (m) { if (m.port) { c.postMessage({ port: m.port }, [m.port]); wt.parentPort.postMessage('kid-holds'); } });";
+        module.exports = async function () {
+            var watchdog = function () { return new Promise(function (r) { setTimeout(function () { r('timeout'); }, 3000); }); };
+            var ports = [], workers = [];
+            var closed = function (port, log, label) { return new Promise(function (r) { port.on('close', function () { log.push(label + ' close'); r(); }); }); };
+            var logA = [], a = new MessageChannel();
+            ports.push(a.port1); a.port1.on('message', function () {});
+            var wa = new Worker(owner, { eval: true }); workers.push(wa);
+            wa.on('exit', function (code) { logA.push('A exit ' + code); });
+            var aClosed = closed(a.port1, logA, 'A');
+            wa.postMessage({ port: a.port2 }, [a.port2]);
+            await Promise.race([aClosed, watchdog()]);
+            var logB = [], b = new MessageChannel();
+            ports.push(b.port1); b.port1.on('message', function () {});
+            var wb = new Worker(midB, { eval: true }); workers.push(wb);
+            var bExit = new Promise(function (r) { wb.on('exit', function (code) { logB.push('B mid exit ' + code); r(); }); });
+            var bClosed = closed(b.port1, logB, 'B');
+            wb.postMessage({ port: b.port2 }, [b.port2]);
+            await Promise.race([bClosed, watchdog()]);
+            wb.postMessage('stop');
+            await Promise.race([bExit, watchdog()]);
+            var logC = [], c = new MessageChannel();
+            ports.push(c.port1); c.port1.on('message', function () {});
+            var wc = new Worker(midC, { eval: true }); workers.push(wc);
+            var cExit = new Promise(function (r) { wc.on('exit', function (code) { logC.push('C exit ' + code); r(); }); });
+            var cClosed = closed(c.port1, logC, 'C');
+            var cCode;
+            wc.on('message', function (m) { if (m === 'kid-holds') setTimeout(function () { wc.terminate().then(function (code) { cCode = code; }); }, 200); });
+            wc.postMessage({ port: c.port2 }, [c.port2]);
+            await Promise.race([Promise.all([cClosed, cExit]), watchdog()]);
+            ports.forEach(function (port) { port.close(); });
+            await Promise.all(workers.map(function (w) { return w.terminate(); }));
+            return [logA, logB, logC, cCode];
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("nested_worker_port_close_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(
+        run_js(&bundle),
+        r#"[["A exit 0","A close"],["B close","B mid exit 0"],["C close","C exit 1"],1]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
