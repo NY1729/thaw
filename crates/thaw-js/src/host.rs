@@ -52,6 +52,8 @@ struct Loader {
     parts: BundleParts,
     factories: HashMap<String, Value>,
     cache: RefCell<HashMap<String, Value>>,
+    /// The JS `require.cache` object every module's `require` and every created require share.
+    cache_obj: Value,
     /// The package's addon object, built on first use (`addon_of`).
     addon: RefCell<Option<Value>>,
     /// The package name the napi bridge keys its exports by.
@@ -177,6 +179,26 @@ fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R
                 Err(Ctl::Throw(err))
             }
         },
+    }
+}
+
+/// `require.resolve(spec)` from module `from`: a builtin answers the spec as given (`path`, `node:path`, as Node
+/// does), a bundled module its virtual path. MODULE_NOT_FOUND when neither names it.
+fn resolve_in(loader: &Loader, it: &mut Interp, from: &str, spec: &str) -> R<Value> {
+    match module_key(loader, from, spec) {
+        Some(found) if found.starts_with("node:") => Ok(Value::str(spec)),
+        Some(found) => Ok(Value::str(&format!("/thaw_modules/{found}"))),
+        None => {
+            let ctor = it
+                .lookup(&it.global.clone(), "Error")
+                .unwrap_or(Value::Undefined);
+            let err = it.construct(
+                &ctor,
+                &[Value::str(&format!("Cannot find module '{spec}'"))],
+            )?;
+            it.set(&err, "code", Value::str("MODULE_NOT_FOUND"))?;
+            Err(Ctl::Throw(err))
+        }
     }
 }
 
@@ -399,6 +421,10 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         .cache
         .borrow_mut()
         .insert(key.to_string(), module.clone());
+    // the shared `require.cache`: CommonJS file modules by filename (ESM and builtins are not cached, as in Node)
+    if !key.starts_with("node:") && !loader.esm_keys.contains(key) {
+        it.set(&loader.cache_obj, &file, module.clone())?;
+    }
     let (l, k) = (loader.clone(), key.to_string());
     let require = it.native(move |it, _, args| {
         let spec = it.to_str(&crate::arg(args, 0));
@@ -408,23 +434,10 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     let (l, k) = (loader.clone(), key.to_string());
     let resolve = it.native(move |it, _, args| {
         let spec = it.to_str(&crate::arg(args, 0)).to_string();
-        match module_key(&l, &k, &spec) {
-            Some(found) if found.starts_with("node:") => Ok(Value::str(&found)),
-            Some(found) => Ok(Value::str(&format!("/thaw_modules/{found}"))),
-            None => {
-                let ctor = it
-                    .lookup(&it.global.clone(), "Error")
-                    .unwrap_or(Value::Undefined);
-                let err = it.construct(
-                    &ctor,
-                    &[Value::str(&format!("Cannot find module '{spec}'"))],
-                )?;
-                it.set(&err, "code", Value::str("MODULE_NOT_FOUND"))?;
-                Err(Ctl::Throw(err))
-            }
-        }
+        resolve_in(&l, it, &k, &spec)
     });
     it.set(&require, "resolve", resolve)?;
+    it.set(&require, "cache", loader.cache_obj.clone())?;
     let require_async = {
         let (l, k) = (loader.clone(), key.to_string());
         it.native(move |it, _, args| {
@@ -615,36 +628,47 @@ fn install_module_loader(it: &mut Interp, loader: &Rc<Loader>, bundle_js: &str) 
             rest.find(");").map(|end| rest[..end].to_string())
         })
         .ok_or_else(|| Ctl::Throw(Value::str("bundle has no __thaw_bundle_builtin_names")))?;
-    let keys = serde_json::to_string(&loader.factories.keys().collect::<Vec<_>>())
-        .expect("string keys serialize");
+    // a created require resolves from its base's bundle key exactly as the module's own `require` does
     let l = loader.clone();
-    let load = it.native(move |it, _, args| {
-        let key = it.to_str(&crate::arg(args, 0));
-        load_module(&l, it, &key)
+    let from_load = it.native(move |it, _, args| {
+        let from = it.to_str(&crate::arg(args, 0)).to_string();
+        let spec = it.to_str(&crate::arg(args, 1)).to_string();
+        require_in(&l, it, &from, &spec)
     });
-    // ponytail: only stateless builtins are served through created requires (a separate realm would split
-    // identity); any other spec is a MODULE_NOT_FOUND
+    let l = loader.clone();
+    let from_resolve = it.native(move |it, _, args| {
+        let from = it.to_str(&crate::arg(args, 0)).to_string();
+        let spec = it.to_str(&crate::arg(args, 1)).to_string();
+        resolve_in(&l, it, &from, &spec)
+    });
+    // ponytail: a base outside the bundle (no `/thaw_modules/` prefix) resolves builtins only
     let prelude = format!(
-        r#"function (load) {{
-          var names = Object.freeze({names}), keys = {keys};
-          function nameOf(spec) {{ spec = String(spec); return spec.indexOf('node:') === 0 ? spec.slice(5) : spec; }}
-          function missing(spec) {{ var e = new Error("Cannot find module '" + spec + "'"); e.code = 'MODULE_NOT_FOUND'; return e; }}
+        r#"function (fromLoad, fromResolve, cache) {{
+          var names = Object.freeze({names}), PREFIX = '/thaw_modules/';
+          function keyOf(base) {{
+            var path = String(base);
+            if (path.indexOf('file://') === 0) path = path.slice(7);
+            if (path.charAt(0) !== '/') {{ var e = new TypeError("The argument 'filename' must be a file URL object, file URL string, or absolute path string. Received '" + base + "'"); e.code = 'ERR_INVALID_ARG_VALUE'; throw e; }}
+            return path.indexOf(PREFIX) === 0 ? path.slice(PREFIX.length) : '';
+          }}
           globalThis.__thaw_bundle_builtin_names = names;
-          // first wins: a group's later member shares the realm and keeps the first loader's builtins
+          // first wins: a group's later member shares the realm and keeps the first loader's bundle
           if (!globalThis.__thaw_bundle_create_require) globalThis.__thaw_bundle_create_require = function (base) {{
-            var created = function (spec) {{
-              var n = nameOf(spec);
-              if (names.indexOf(n) < 0 || keys.indexOf('node:' + n) < 0) throw missing(spec);
-              return load('node:' + n);
-            }};
-            created.resolve = function (spec) {{ if (names.indexOf(nameOf(spec)) < 0) throw missing(spec); return String(spec); }};
-            created.cache = {{}};
+            var key = keyOf(base);
+            var created = function (spec) {{ return fromLoad(key, spec); }};
+            created.resolve = function (spec) {{ return fromResolve(key, spec); }};
+            created.cache = cache;
             return created;
           }};
         }}"#
     );
     let install = it.eval_function(&prelude)?;
-    it.call(&install, &Value::Undefined, &[load])?;
+    let cache = loader.cache_obj.clone();
+    it.call(
+        &install,
+        &Value::Undefined,
+        &[from_load, from_resolve, cache],
+    )?;
     Ok(())
 }
 
@@ -711,10 +735,12 @@ fn boot_bundle(
             (key, names)
         })
         .collect();
+    let cache_obj = Value::Object(it.plain());
     let loader = Rc::new(Loader {
         parts,
         factories,
         cache: RefCell::new(HashMap::new()),
+        cache_obj,
         addon: RefCell::new(None),
         package: name.to_string(),
         origins,

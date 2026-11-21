@@ -530,23 +530,16 @@ module.exports = async function() {
     .unwrap();
 }
 
-mod qjs_pending_stream_integrations {
-    use super::*;
-    use ::thaw_quickjs;
-
-    // thaw-js: the ported test fails ("ERROR: TypeError: `` is not a function": module.createRequire / bundled require.resolve contract); stays on QuickJS until that feature is implemented
-    #[test]
-    fn module_create_require_loads_relative_and_builtin_dependencies() {
-        use std::ffi::{CStr, CString};
-
+#[test]
+fn module_create_require_loads_relative_and_builtin_dependencies() {
         let dir = temp_registry("builtin_module_create_require");
         fs::write(
                 dir.join("index.js"),
                 "import { createRequire, isBuiltin, builtinModules, registerHooks } from 'node:module';\n\
-                 const localRequire = createRequire('pkg/index.js');\n\
+                 const localRequire = createRequire(import.meta.url);\n\
                  export default function () {\n\
                  \x20 const dependency = localRequire('./dependency'); const path = localRequire('node:path'); const hooks = registerHooks({}); hooks.deregister();\n\
-                 \x20 return [dependency.value, path.basename('/tmp/file.txt'), localRequire.resolve('./dependency'), Object.keys(localRequire.cache).length >= 3, isBuiltin('node:path'), isBuiltin('missing'), builtinModules.includes('stream'), isBuiltin('child_process'), isBuiltin('node:https'), builtinModules.includes('child_process'), builtinModules.includes('https'), hooks.active];\n\
+                 \x20 return [dependency.value, path.basename('/tmp/file.txt'), localRequire.resolve('./dependency').endsWith('/pkg/dependency.js'), Object.keys(localRequire.cache).length >= 3, isBuiltin('node:path'), isBuiltin('missing'), builtinModules.includes('stream'), isBuiltin('child_process'), isBuiltin('node:https'), builtinModules.includes('child_process'), builtinModules.includes('https'), hooks.active];\n\
                  }",
             )
             .unwrap();
@@ -555,24 +548,11 @@ mod qjs_pending_stream_integrations {
         let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
         assert_eq!(file_count, 4);
-        let script = format!(
-                "globalThis.module = {{ exports: {{}} }};\n\
-                 globalThis.exports = globalThis.module.exports;\n\
-                 globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
-                 {bundle}\n\
-                 globalThis.exerciseModule = module.exports.default;\n"
-            );
-        let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-        let func = CString::new("exerciseModule").unwrap();
-        let args = CString::new("[]").unwrap();
-        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        // Node 22 with real files and an absolute `import.meta.url` base; `hooks.active` is undefined there (null in the array)
         assert_eq!(
-            result,
-            r#"[42,"file.txt","pkg/dependency.js",true,true,false,true,true,true,true,true,false]"#
+            run_js_export(&bundle, "default", Vec::new()),
+            r#"[42,"file.txt",true,false,true,false,true,true,true,true,true,null]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
-    }
 }

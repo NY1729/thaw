@@ -25,7 +25,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              Module.builtinModules = builtinModules; Module.isBuiltin = isBuiltin; Module.createRequire = createRequire; Module._cache = {}; Module._extensions = { '.js': function() {}, '.json': function() {}, '.node': function() {} };\n\
              function syncBuiltinESMExports() {} function findSourceMap() { return undefined; }\n\
              function SourceMap(payload) { if (!(this instanceof SourceMap)) return new SourceMap(payload); this.payload = payload || {}; } SourceMap.prototype.findEntry = function(line, column) { return { generatedLine: Number(line), generatedColumn: Number(column || 0), originalSource: undefined, originalLine: undefined, originalColumn: undefined, name: undefined }; }; SourceMap.prototype.findOrigin = function(line, column) { return this.findEntry(line, column); };\n\
-             function register() { return undefined; } function registerHooks(hooks) { var active = true; return { deregister: function() { active = false; }, get active() { return active; }, hooks: hooks }; }\n\
+             function register() { return undefined; } function registerHooks(hooks) { return { deregister: function() {} }; }\n\
              Object.assign(Module, { Module: Module, createRequire: createRequire, builtinModules: builtinModules, isBuiltin: isBuiltin, syncBuiltinESMExports: syncBuiltinESMExports, findSourceMap: findSourceMap, SourceMap: SourceMap, register: register, registerHooks: registerHooks });\n\
              module.exports = Module; module.exports.default = Module; module.exports.__esModule = true;\n",
         ),
