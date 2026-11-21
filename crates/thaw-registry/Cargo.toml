@@ -21,4 +21,6 @@ ureq = "3.4.0"
 brotli = "8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 libc = "0.2"
+# tests only: the node:wasi preview1 natives (the registry tests run node:wasi through thaw-js); a normal-dependency feature would also change the thaw-js that thaw-cli ships
+thaw-js = { path = "../thaw-js", features = ["wasi"] }
 thaw-quickjs = { path = "../thaw-quickjs" }
