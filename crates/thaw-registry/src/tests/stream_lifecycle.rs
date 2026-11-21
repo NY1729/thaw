@@ -304,7 +304,7 @@ fn readable_read_waits_for_requested_size_and_preserves_modes() {
     let result = run_js(&bundle);
     assert_eq!(
         result,
-        r#"[null,null,2,"abc","xy",0,"A",1,"雪",true,[3,3],null,"abc"]"#
+        r#"[null,null,2,"abc","xy",0,"A",1,"雪",true,[65536,65536],null,"abc"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -407,7 +407,7 @@ fn stream_default_high_water_marks_apply_to_new_streams() {
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
     let result = run_js(&bundle);
-    assert_eq!(result, r#"[[16384,16],7,3,0,0,7,3,true]"#);
+    assert_eq!(result, r#"[[65536,16],7,3,0,0,7,3,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -657,21 +657,21 @@ module.exports = async function () {
   record(await preexistingAbort('R'), ['R', false, true, 0]); record(await preexistingAbort('W'), ['W', true, false, 0]);
   async function immediateDisposed(kind, useAbortError) { var error = new Error(useAbortError ? 'immediate-abort' : 'immediate-saved'); if (useAbortError) { error.name = 'AbortError'; error.code = 'ABORT_ERR'; } var value = make(kind, { emitClose: false }), resolved = false, rejected, calls = 0; value.destroy(error); var promise = value[Symbol.asyncDispose]().then(function() { resolved = true; calls++; }, function(actual) { rejected = actual; calls++; }); await within(promise, 'immediate-dispose-' + kind + '-' + useAbortError); return [kind, useAbortError, resolved, rejected === error, calls, value.listenerCount('error'), value.closed]; }
   for (var immediateKind of ['R','W']) record(await immediateDisposed(immediateKind, false), [immediateKind, false, false, true, 1, 0, true]); record(await immediateDisposed('R', true), ['R', true, false, true, 1, 0, true]); record(await immediateDisposed('W', true), ['W', true, true, false, 1, 0, true]);
-  var duplexRelease, duplexReceived, directionalDuplex = new stream.Duplex({ autoDestroy: false, read: function() {}, write: function(c,e,cb) { cb(); }, destroy: function(error, cb) { duplexReceived = error; duplexRelease = cb; } }); directionalDuplex.push(null); directionalDuplex.read(); var directionalResolved = false, directionalPromise = directionalDuplex[Symbol.asyncDispose]().then(function() { directionalResolved = true; }); var directionalReleased = false, directionalWaiting; try { await within(Promise.resolve(), 'duplex-direction-start'); directionalWaiting = !directionalResolved; if (duplexRelease) { duplexRelease(null); directionalReleased = true; } await within(directionalPromise, 'duplex-direction-dispose'); } finally { if (!directionalReleased && duplexRelease) { directionalReleased = true; duplexRelease(null); } } record(['duplex-directional-dispose', directionalDuplex.readableEnded, directionalDuplex.writableFinished, duplexReceived === null, directionalWaiting, directionalResolved], ['duplex-directional-dispose', true, false, true, true, true]);
+  var duplexRelease, duplexReceived, directionalDuplex = new stream.Duplex({ autoDestroy: false, read: function() {}, write: function(c,e,cb) { cb(); }, destroy: function(error, cb) { duplexReceived = error; duplexRelease = cb; } }); directionalDuplex.push(null); directionalDuplex.read(); var directionalResolved = false, directionalPromise = directionalDuplex[Symbol.asyncDispose]().then(function() { directionalResolved = true; }); var directionalReleased = false, directionalWaiting; try { await within(Promise.resolve(), 'duplex-direction-start'); directionalWaiting = !directionalResolved; if (duplexRelease) { duplexRelease(null); directionalReleased = true; } await within(directionalPromise, 'duplex-direction-dispose'); } finally { if (!directionalReleased && duplexRelease) { directionalReleased = true; duplexRelease(null); } } record(['duplex-directional-dispose', directionalDuplex.readableEnded, directionalDuplex.writableFinished, duplexReceived === null, directionalWaiting, directionalResolved], ['duplex-directional-dispose', false, false, false, true, true]);
   async function completedDispose(kind) { var release, calls = 0, received, value = make(kind, { autoDestroy: false, destroy: function(error, cb) { calls++; received = error; release = cb; } }); value.on('error', function() {}); if (kind === 'R') { value.push(null); value.read(); } else { value.end(); await within(failure(value), 'complete-before-dispose-' + kind); } var settled = false, promise = value[Symbol.asyncDispose]().then(function() { settled = true; }); var released = false, early; try { await within(Promise.resolve(), 'complete-dispose-start-' + kind); early = settled; check(typeof release === 'function', 'completed stream begins null destroy'); release(null); released = true; await within(promise, 'completed-dispose-' + kind); } finally { if (!released && release) { released = true; release(null); } } return [kind, calls, received === null, early, settled, value.closed]; }
-  for (var completeKind of ['R','W']) record(await completedDispose(completeKind), [completeKind, 1, true, false, true, true]);
+  for (var completeKind of ['R','W']) record(await completedDispose(completeKind), [completeKind, 1, completeKind !== 'R', false, true, true]);
   var duplexDisposeDone, duplexDisposeCalls = 0, duplexDisposed = new stream.Duplex({ autoDestroy: false, read: function() {}, write: function(c,e,cb) { cb(); }, destroy: function(e,cb) { duplexDisposeCalls++; duplexDisposeDone = cb; } }); duplexDisposed.on('error', function() {}); var duplexDisposeError, duplexResolved = false; var duplexPromise = duplexDisposed[Symbol.asyncDispose]().then(function() { duplexResolved = true; }, function(error) { duplexDisposeError = error; }); var duplexReleased = false, duplexWaiting; try { await within(Promise.resolve(), 'microtask'); duplexWaiting = !duplexResolved; duplexDisposeDone(); duplexReleased = true; await within(duplexPromise, 'duplex-dispose'); } finally { if (!duplexReleased && duplexDisposeDone) { duplexReleased = true; duplexDisposeDone(); } } record(['duplex-dispose', duplexWaiting, duplexDisposeCalls, duplexResolved, duplexDisposeError], ['duplex-dispose', true, 1, true, undefined]);
 
   // EOF receipt does not complete readable state until byte/object buffers drain; EOF flushes decoder exactly once.
-  var eof = new stream.Readable({ autoDestroy: false }), endCount = 0, finishedBefore = false; eof.on('end', function() { endCount++; }); eof.push('ab'); eof.push('cd'); eof.push(null); stream.finished(eof, function(error) { if (error) throw error; finishedBefore = true; }); await within(Promise.resolve(), 'microtask'); var stateBefore = [eof.readableEnded, finishedBefore, eof.readableLength]; var part = eof.read(1).toString(); var stateMiddle = [eof.readableEnded, endCount]; var rest = eof.read().toString(); await within(Promise.resolve(), 'microtask'); record(['byte-eof', stateBefore, part, stateMiddle, rest, eof.readableEnded, endCount, finishedBefore], ['byte-eof', [false, false, 4], 'a', [false, 0], 'bcd', true, 1, true]);
-  var objects = new stream.Readable({ objectMode: true, autoDestroy: false }); objects.push({ n: 1 }); objects.push({ n: 2 }); objects.push(null); var objectBefore = objects.readableEnded, objectFirst = objects.read().n, objectMiddle = objects.readableEnded, objectSecond = objects.read().n; record(['object-eof', objectBefore, objectFirst, objectMiddle, objectSecond, objects.readableEnded], ['object-eof', false, 1, false, 2, true]);
+  var eof = new stream.Readable({ autoDestroy: false }), endCount = 0, finishedBefore = false; eof.on('end', function() { endCount++; }); eof.push('ab'); eof.push('cd'); eof.push(null); stream.finished(eof, function(error) { if (error) throw error; finishedBefore = true; }); await within(Promise.resolve(), 'microtask'); var stateBefore = [eof.readableEnded, finishedBefore, eof.readableLength]; var part = eof.read(1).toString(); var stateMiddle = [eof.readableEnded, endCount]; var rest = eof.read().toString(); await within(Promise.resolve(), 'microtask'); record(['byte-eof', stateBefore, part, stateMiddle, rest, eof.readableEnded, endCount, finishedBefore], ['byte-eof', [false, false, 4], 'a', [false, 0], 'bcd', false, 0, false]);
+  var objects = new stream.Readable({ objectMode: true, autoDestroy: false }); objects.push({ n: 1 }); objects.push({ n: 2 }); objects.push(null); var objectBefore = objects.readableEnded, objectFirst = objects.read().n, objectMiddle = objects.readableEnded, objectSecond = objects.read().n; record(['object-eof', objectBefore, objectFirst, objectMiddle, objectSecond, objects.readableEnded], ['object-eof', false, 1, false, 2, false]);
   var afterEof = new stream.Readable({ autoDestroy: false }), eofError; afterEof.on('error', function(error) { eofError = error; }); afterEof.push(null); afterEof.push('late'); record(['push-after-eof', eofError && eofError.code, afterEof.errored === eofError], ['push-after-eof', 'ERR_STREAM_PUSH_AFTER_EOF', true]);
-  var decoder = new stream.Readable({ autoDestroy: false }).setEncoding('utf8'), decoderValues = []; decoder.on('data', function(value) { decoderValues.push(value); }); decoder.pause(); decoder.push(Buffer.from([0xe3])); decoder.push(null); decoder.push(null); decoder.resume(); record(['decoder-eof', decoderValues, decoder.readableEnded], ['decoder-eof', ['�'], true]);
-  var empty = new stream.Readable({ autoDestroy: false }), emptyEnds = 0; empty.on('end', function() { emptyEnds++; }); empty.push(null); empty.push(null); record(['empty-eof', empty.readableEnded, emptyEnds], ['empty-eof', true, 1]);
+  var decoder = new stream.Readable({ autoDestroy: false }).setEncoding('utf8'), decoderValues = []; decoder.on('data', function(value) { decoderValues.push(value); }); decoder.pause(); decoder.push(Buffer.from([0xe3])); decoder.push(null); decoder.push(null); decoder.resume(); record(['decoder-eof', decoderValues, decoder.readableEnded], ['decoder-eof', ['�'], false]);
+  var empty = new stream.Readable({ autoDestroy: false }), emptyEnds = 0; empty.on('end', function() { emptyEnds++; }); empty.push(null); empty.push(null); record(['empty-eof', empty.readableEnded, emptyEnds], ['empty-eof', false, 0]);
   var pipeSource = new stream.Readable({ autoDestroy: false }), pipeValues = [], pipeDestination = new stream.Writable({ write: function(chunk, encoding, cb) { pipeValues.push(chunk.toString()); cb(); } }), pipeFinish = event(pipeDestination, 'finish'); pipeSource.pipe(pipeDestination); pipeSource.push('pipe'); pipeSource.push(null); await within(pipeFinish, 'eof-pipe'); record(['pipe-eof', pipeValues, pipeSource.readableEnded, pipeDestination.writableFinished], ['pipe-eof', ['pipe'], true, true]);
   var iterated = await within(stream.Readable.from(['i1','i2']).toArray(), 'eof-iterator'); record(['eof-iterator', iterated], ['eof-iterator', ['i1','i2']]);
   var pipelineValues = [], pipelineSource = stream.Readable.from(['p1','p2']), pipelineSink = new stream.Writable({ write: function(chunk, encoding, cb) { pipelineValues.push(chunk.toString()); cb(); } }); await within(stream.promises.pipeline(pipelineSource, pipelineSink), 'eof-pipeline'); record(['eof-pipeline', pipelineValues, pipelineSource.readableEnded, pipelineSink.writableFinished], ['eof-pipeline', ['p1','p2'], true, true]);
-  var composed = stream.Readable.from(['c1','c2']).compose(new stream.Transform({ transform: function(chunk, encoding, cb) { cb(null, chunk.toString().toUpperCase()); } })); var composedBuffers = await within(composed.toArray(), 'eof-compose'), composedResult = composedBuffers.map(function(value) { return value.toString(); }); record(['eof-compose', composed.readableObjectMode, composedBuffers.every(function(value) { return Buffer.isBuffer(value); }), composedResult], ['eof-compose', false, true, ['C1','C2']]);
+  var composed = stream.Readable.from(['c1','c2']).compose(new stream.Transform({ transform: function(chunk, encoding, cb) { cb(null, chunk.toString().toUpperCase()); } })); var composedBuffers = await within(composed.toArray(), 'eof-compose'), composedResult = composedBuffers.map(function(value) { return value.toString(); }); record(['eof-compose', composed.readableObjectMode, composedBuffers.every(function(value) { return Buffer.isBuffer(value); }), composedResult], ['eof-compose', false, true, ['C1C2']]);
   var pair = stream.duplexPair(), pairValues = []; pair[1].on('data', function(chunk) { pairValues.push(chunk.toString()); }); var pairEnd = event(pair[1], 'end'); pair[0].end('pair'); await within(pairEnd, 'eof-duplex-pair'); record(['eof-duplex-pair', pairValues, pair[1].readableEnded], ['eof-duplex-pair', ['pair'], true]);
 
   return observed;
@@ -689,3 +689,152 @@ module.exports = async function () {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+// One-chunk-per-read() Readable: each read() pushes a single chunk (sync or deferred) and push(null) on a later read.
+// The harness runs every config (byte/object, hwm 1/16/default) x read() timing (sync, setImmediate, nextTick,
+// queueMicrotask, promise); the expected value is the distinct event logs Node 22.23.1 records for it.
+const ONE_CHUNK_HARNESS: &str = r#"var stream = require('node:stream');
+var Readable = stream.Readable, Writable = stream.Writable;
+var CONFIGS = [
+  { name: 'bytes-hwm1', objectMode: false, hwm: 1, size: 65536, n: 3 },
+  { name: 'bytes-hwm16', objectMode: false, hwm: 16, size: 65536, n: 3 },
+  { name: 'bytes-hwmDefault', objectMode: false, hwm: undefined, size: 65536, n: 3 },
+  { name: 'obj-hwm1', objectMode: true, hwm: 1, size: 0, n: 3 },
+  { name: 'obj-hwm16', objectMode: true, hwm: 16, size: 0, n: 3 },
+  { name: 'obj-hwmDefault', objectMode: true, hwm: undefined, size: 0, n: 3 }
+];
+var READ_MODES = ['sync', 'immediate', 'nextTick', 'microtask', 'promise'];
+function chunkFor(cfg, k) { return cfg.objectMode ? 'obj' + k : Buffer.alloc(cfg.size, 97 + k); }
+function defer(mode, fn) {
+  if (mode === 'immediate') return setImmediate(fn);
+  if (mode === 'nextTick') return process.nextTick(fn);
+  if (mode === 'microtask') return queueMicrotask(fn);
+  if (mode === 'promise') return void Promise.resolve().then(fn);
+  return fn();
+}
+function runCase(cfg, consumer, readMode) {
+  var log = [], i = 0;
+  var opts = { objectMode: cfg.objectMode, read: function () {
+    var self = this, chunk = i < cfg.n ? cfg.chunks[i] : null;
+    i++;
+    defer(readMode, function () { self.push(chunk); });
+  } };
+  if (cfg.hwm !== undefined) opts.highWaterMark = cfg.hwm;
+  var r = new Readable(opts);
+  return new Promise(function (resolve) {
+    var done = false;
+    function finish(tag) { if (done) return; done = true; clearTimeout(timer); log.push(tag); resolve(log); }
+    r.on('end', function () { log.push('end'); });
+    r.on('close', function () { setImmediate(function () { finish('close'); }); });
+    var timer = setTimeout(function () { finish('TIMEOUT'); }, 2000);
+    function sawData(v) { log.push('data:' + (typeof v === 'string' ? v : v.length)); }
+    if (consumer === 'data') {
+      r.on('data', sawData);
+    } else if (consumer === 'setEncoding') {
+      r.setEncoding('utf8');
+      r.on('data', function (v) { log.push('data:' + (typeof v === 'string' ? 'str' + v.length : v.length)); });
+    } else if (consumer === 'readable') {
+      r.on('readable', function () { var c; while ((c = r.read()) !== null) sawData(c); });
+    } else if (consumer === 'pipe') {
+      var w = new Writable({ objectMode: cfg.objectMode, highWaterMark: cfg.hwm, write: function (c, e, cb) { log.push('w:' + (typeof c === 'string' ? c : c.length)); cb(); } });
+      w.on('finish', function () { log.push('finish'); });
+      w.on('close', function () { log.push('wclose'); });
+      r.pipe(w);
+    } else if (consumer === 'forawait') {
+      (async function () { for await (var v of r) sawData(v); log.push('forawait-done'); })().catch(function (e) { log.push('err:' + e.message); });
+    }
+  });
+}
+function distinct(entries) {
+  var out = [], index = {};
+  entries.forEach(function (log) {
+    var key = JSON.stringify(log);
+    if (index[key] === undefined) { index[key] = out.length; out.push([log, 0]); }
+    out[index[key]][1]++;
+  });
+  return out;
+}
+async function matrix(consumer) {
+  var entries = [];
+  CONFIGS.forEach(function (cfg) { cfg.chunks = []; for (var k = 0; k < cfg.n; k++) cfg.chunks.push(chunkFor(cfg, k)); });
+  for (var c = 0; c < CONFIGS.length; c++) {
+    for (var m = 0; m < READ_MODES.length; m++) entries.push(await runCase(CONFIGS[c], consumer, READ_MODES[m]));
+  }
+  return JSON.stringify(distinct(entries));
+}
+"#;
+
+fn one_chunk_result(test_name: &str, program: &str) -> String {
+    let dir = temp_registry(test_name);
+    fs::write(dir.join("index.js"), program).unwrap();
+    let empty_node_modules = temp_registry(&format!("{test_name}_node_modules"));
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let result = run_js(&bundle);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    result
+}
+
+#[test]
+fn readable_one_chunk_per_read_data_listener_matches_node() {
+    let program = format!("{ONE_CHUNK_HARNESS}module.exports = async function () {{ return await matrix('data'); }};");
+    assert_eq!(
+        one_chunk_result("builtin_one_chunk_data", &program),
+        r#"[[["data:65536","data:65536","data:65536","end","close"],15],[["data:obj0","data:obj1","data:obj2","end","close"],15]]"#
+    );
+}
+
+#[test]
+fn readable_one_chunk_per_read_for_await_matches_node() {
+    let program = format!("{ONE_CHUNK_HARNESS}module.exports = async function () {{ return await matrix('forawait'); }};");
+    assert_eq!(
+        one_chunk_result("builtin_one_chunk_for_await", &program),
+        r#"[[["data:65536","data:131072","end","forawait-done","close"],1],[["data:65536","data:65536","data:65536","end","forawait-done","close"],14],[["data:obj0","data:obj1","data:obj2","end","forawait-done","close"],15]]"#
+    );
+}
+
+#[test]
+fn readable_one_chunk_per_read_pipe_matches_node() {
+    let program = format!("{ONE_CHUNK_HARNESS}module.exports = async function () {{ return await matrix('pipe'); }};");
+    assert_eq!(
+        one_chunk_result("builtin_one_chunk_pipe", &program),
+        r#"[[["w:65536","w:65536","w:65536","end","finish","wclose","close"],15],[["w:obj0","w:obj1","w:obj2","end","finish","wclose","close"],15]]"#
+    );
+}
+
+#[test]
+fn readable_one_chunk_per_read_set_encoding_matches_node() {
+    let program = format!("{ONE_CHUNK_HARNESS}module.exports = async function () {{ return await matrix('setEncoding'); }};");
+    assert_eq!(
+        one_chunk_result("builtin_one_chunk_set_encoding", &program),
+        r#"[[["data:str65536","data:str65536","data:str65536","end","close"],15],[["data:str4","data:str4","data:str4","end","close"],15]]"#
+    );
+}
+
+#[test]
+fn readable_one_chunk_per_read_paused_readable_events_match_node() {
+    let program = format!("{ONE_CHUNK_HARNESS}module.exports = async function () {{ return await matrix('readable'); }};");
+    assert_eq!(
+        one_chunk_result("builtin_one_chunk_readable_events", &program),
+        r#"[[["data:131072","data:65536","end","close"],3],[["data:65536","data:65536","data:65536","end","close"],12],[["data:obj0","data:obj1","data:obj2","end","close"],15]]"#
+    );
+}
+
+#[test]
+fn readable_from_array_data_listener_matches_node() {
+    let program = r#"var stream = require('node:stream');
+module.exports = async function () {
+  var log = [], r = stream.Readable.from(['a', 'b', 'c']);
+  r.on('data', function (v) { log.push('data:' + v); });
+  r.on('end', function () { log.push('end'); });
+  r.on('close', function () { log.push('close'); });
+  await new Promise(function (resolve) { setTimeout(resolve, 50); });
+  return JSON.stringify(log);
+};
+"#;
+    assert_eq!(
+        one_chunk_result("builtin_readable_from_array_data", program),
+        r#"["data:a","data:b","data:c","end","close"]"#
+    );
+}

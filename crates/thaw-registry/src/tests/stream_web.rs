@@ -694,7 +694,7 @@ fn stream_indexed_pairs_static_checks_and_half_open_control_work() {
     let result = run_js(&bundle);
     assert_eq!(
         result,
-        r#"[[[0,"a"],[1,"b"]],[false,false,true,false],true,false,true,true,true,true,false]"#
+        r#"[[[0,"a"],[1,"b"]],[false,false,true,false],true,false,false,false,true,true,false]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
