@@ -1,9 +1,19 @@
 pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "path" => Some(r#"
-function pathArg(value) { if (typeof value !== 'string') { var error = new TypeError('The "path" argument must be of type string'); error.code = 'ERR_INVALID_ARG_TYPE'; throw error; } return value; }
+function received(value) {
+  if (value === null || value === undefined) return String(value);
+  if (typeof value === 'function') return 'function ' + value.name;
+  if (typeof value === 'object') return value.constructor && value.constructor.name ? 'an instance of ' + value.constructor.name : '[Object: null prototype] {}';
+  var text = typeof value === 'bigint' ? String(value) + 'n' : Object.is(value, -0) ? '-0' : String(value);
+  if (text.length > 28) text = text.slice(0, 25) + '...';
+  return 'type ' + typeof value + ' (' + text + ')';
+}
+function argError(name, type, value) { var error = new TypeError('The "' + name + '" argument must be of type ' + type + '. Received ' + received(value)); error.code = 'ERR_INVALID_ARG_TYPE'; return error; }
+function pathArg(value, name) { if (typeof value !== 'string') throw argError(name, 'string', value); return value; }
+function formatArg(value) { if (value === null || typeof value !== 'object' || Array.isArray(value)) throw argError('pathObject', 'object', value); return value; }
 function posixNormalize(value) {
-  var path = String(value); if (path === '') return '.';
+  var path = pathArg(value, 'path'); if (path === '') return '.';
   var absolute = path.charAt(0) === '/', trailing = path.length > 1 && path.charAt(path.length - 1) === '/';
   var input = path.split('/'), output = [];
   for (var i = 0; i < input.length; i++) {
@@ -16,35 +26,35 @@ function posixNormalize(value) {
 }
 function posixResolve() {
   var args = arguments, path = '', absolute = false;
-  for (var i = args.length - 1; i >= 0 && !absolute; i--) { var part = pathArg(args[i]); if (!part) continue; path = part + '/' + path; absolute = part.charAt(0) === '/'; }
+  for (var i = args.length - 1; i >= 0 && !absolute; i--) { var part = pathArg(args[i], 'paths[' + i + ']'); if (!part) continue; path = part + '/' + path; absolute = part.charAt(0) === '/'; }
   if (!absolute) path = (globalThis.process && process.cwd ? process.cwd() : '/') + '/' + path;
   path = posixNormalize(path); return path.length > 1 && path.charAt(path.length - 1) === '/' ? path.slice(0, -1) : path;
 }
 function posixJoin() {
-  var parts = []; for (var i = 0; i < arguments.length; i++) if (pathArg(arguments[i]) !== '') parts.push(arguments[i]);
+  var parts = []; for (var i = 0; i < arguments.length; i++) if (pathArg(arguments[i], 'path') !== '') parts.push(arguments[i]);
   return posixNormalize(Array.prototype.join.call(parts, '/'));
 }
 function posixLex(path) {
-  path = String(path); var end = path.length; while (end > 1 && path.charAt(end - 1) === '/') end--;
+  path = pathArg(path, 'path'); var end = path.length; while (end > 1 && path.charAt(end - 1) === '/') end--;
   var root = path.charAt(0) === '/' ? '/' : '', sep = path.lastIndexOf('/', end - 1), base = path.substring(sep + 1, end);
   var dir = sep < 0 ? '' : sep === 0 ? '/' : sep === 1 && path.charAt(0) === '/' && path.charAt(1) === '/' ? '//' : path.substring(0, sep);
   if (!base && root) dir = path.substring(0, end);
   return { root: root, dir: dir, base: base };
 }
 function posixDirname(path) { var lex = posixLex(path); return lex.dir || '.'; }
-function posixBasename(path, suffix) { path = String(path); var base = posixLex(path).base; if (suffix) { suffix = String(suffix); if (suffix === path) base = ''; else if (suffix && base.length > suffix.length && base.endsWith(suffix)) base = base.slice(0, -suffix.length); } return base; }
+function posixBasename(path, suffix) { if (suffix !== undefined) pathArg(suffix, 'suffix'); var base = posixLex(path).base; if (suffix) { if (suffix === path) base = ''; else if (suffix && base.length > suffix.length && base.endsWith(suffix)) base = base.slice(0, -suffix.length); } return base; }
 function extension(base) { if (base === '..' || base === '.' || !base) return ''; var dot = base.lastIndexOf('.'); return dot <= 0 ? '' : base.slice(dot); }
 function posixExtname(path) { return extension(posixLex(path).base); }
-function posixParse(path) { path = String(path); var lex = posixLex(path), dir = lex.dir === '//' && path.slice(0, 2) === '//' && path.charAt(2) !== '/' ? '/' : lex.dir, ext = lex.root && lex.dir === lex.root && lex.base === '..' ? '.' : extension(lex.base); return { root: lex.root, dir: dir, base: lex.base, ext: ext, name: ext ? lex.base.slice(0, -ext.length) : lex.base }; }
+function posixParse(path) { path = pathArg(path, 'path'); var lex = posixLex(path), dir = lex.dir === '//' && path.slice(0, 2) === '//' && path.charAt(2) !== '/' ? '/' : lex.dir, ext = lex.root && lex.dir === lex.root && lex.base === '..' ? '.' : extension(lex.base); return { root: lex.root, dir: dir, base: lex.base, ext: ext, name: ext ? lex.base.slice(0, -ext.length) : lex.base }; }
 function formatPath(value, separator) {
   var dir = value.dir || value.root || '', base = value.base;
   if (!base) { var name = String(value.name || ''), ext = String(value.ext || ''); if (ext && ext.charAt(0) !== '.') ext = '.' + ext; base = name + ext; }
   return dir ? (dir === value.root ? dir + base : dir + separator + base) : base;
 }
-function posixIsAbsolute(path) { return String(path).charAt(0) === '/'; }
-function posixRelative(from, to) { var left = posixResolve(from).split('/').filter(Boolean), right = posixResolve(to).split('/').filter(Boolean), shared = 0; while (shared < left.length && shared < right.length && left[shared] === right[shared]) shared++; return left.slice(shared).map(function() { return '..'; }).concat(right.slice(shared)).join('/'); }
+function posixIsAbsolute(path) { return pathArg(path, 'path').charAt(0) === '/'; }
+function posixRelative(from, to) { pathArg(from, 'from'); pathArg(to, 'to'); var left = posixResolve(from).split('/').filter(Boolean), right = posixResolve(to).split('/').filter(Boolean), shared = 0; while (shared < left.length && shared < right.length && left[shared] === right[shared]) shared++; return left.slice(shared).map(function() { return '..'; }).concat(right.slice(shared)).join('/'); }
 function toNamespacedPath(path) { return path; }
-var posix = { resolve: posixResolve, join: posixJoin, dirname: posixDirname, basename: posixBasename, extname: posixExtname, normalize: posixNormalize, relative: posixRelative, isAbsolute: posixIsAbsolute, parse: posixParse, format: function(value) { return formatPath(value, '/'); }, toNamespacedPath: toNamespacedPath, sep: '/', delimiter: ':' };
+var posix = { resolve: posixResolve, join: posixJoin, dirname: posixDirname, basename: posixBasename, extname: posixExtname, normalize: posixNormalize, relative: posixRelative, isAbsolute: posixIsAbsolute, parse: posixParse, format: function(value) { return formatPath(formatArg(value), '/'); }, toNamespacedPath: toNamespacedPath, sep: '/', delimiter: ':' };
 function isWinSep(char) { return char === '/' || char === '\\'; }
 function winScan(path) {
   path = String(path); var normalized = path.replace(/\\/g, '/'), drive = /^([A-Za-z]:)/.exec(normalized);
@@ -72,7 +82,7 @@ function winTailNormalize(tail, absolute) {
   return out;
 }
 function winNormalize(path) {
-  path = String(path); if (!path) return '.';
+  path = pathArg(path, 'path'); if (!path) return '.';
   var root = winScan(path), trailing = /[\\/]$/.test(path), parts = winTailNormalize(root.tail, root.absolute), tail = parts.join('/'), result;
   if (root.root) {
     if (root.device && !root.unc && !root.absolute) result = root.device + (tail || '.');
@@ -83,7 +93,7 @@ function winNormalize(path) {
 }
 function winOutput(path) { return String(path).replace(/\//g, '\\'); }
 function winJoin() {
-  var parts = []; for (var i = 0; i < arguments.length; i++) { var part = pathArg(arguments[i]); if (part !== '') parts.push(part); }
+  var parts = []; for (var i = 0; i < arguments.length; i++) { var part = pathArg(arguments[i], 'path'); if (part !== '') parts.push(part); }
   if (!parts.length) return '.';
   var preserveUnc = /^[\\/]{2}[^\\/]/.test(parts[0]), joined = parts.join('/').replace(/\\/g, '/');
   if (!preserveUnc) joined = joined.replace(/^\/{2,}/, '/');
@@ -92,7 +102,7 @@ function winJoin() {
 function winResolve() {
   var args = arguments, device = '', absolute = false, tail = '';
   for (var i = args.length - 1; i >= -1 && !(absolute && device); i--) {
-    var value = i >= 0 ? pathArg(args[i]) : '';
+    var value = i >= 0 ? pathArg(args[i], 'paths[' + i + ']') : '';
     if (i < 0 || !value) {
       if (i < 0) {
         var cwd;
@@ -117,7 +127,7 @@ function winResolve() {
   return winOutput(result);
 }
 function winLex(path) {
-  path = String(path); var normalized = path.replace(/\\/g, '/'), scan = winScan(path), rootEnd = scan.unc || scan.device ? scan.rootEnd : scan.absolute ? 1 : 0, end = normalized.length;
+  path = pathArg(path, 'path'); var normalized = path.replace(/\\/g, '/'), scan = winScan(path), rootEnd = scan.unc || scan.device ? scan.rootEnd : scan.absolute ? 1 : 0, end = normalized.length;
   while (end > rootEnd && normalized.charAt(end - 1) === '/') end--;
   if (scan.unc && end <= scan.shareEnd) return { scan: scan, end: end, baseStart: end, base: '', root: rawWinRoot(path, scan), dir: rawWinRoot(path, scan) };
   var sep = normalized.lastIndexOf('/', end - 1), baseStart = Math.max(sep + 1, rootEnd), base = normalized.slice(baseStart, end);
@@ -133,13 +143,14 @@ function rawWinRoot(path, scan) {
 }
 function winDirname(path) { var lex = winLex(path); return lex.dir || '.'; }
 function winBasename(path, suffix) {
-  path = String(path); var lex = winLex(path), scan = lex.scan, base = lex.base;
+  if (suffix !== undefined) pathArg(suffix, 'suffix');
+  var lex = winLex(path), scan = lex.scan, base = lex.base;
   if (scan.unc && lex.end <= scan.shareEnd + 1) base = scan.share;
-  if (suffix) { suffix = String(suffix); if (suffix === path) base = ''; else if (suffix && base.length > suffix.length && base.endsWith(suffix)) base = base.slice(0, -suffix.length); } return base;
+  if (suffix) { if (suffix === path) base = ''; else if (suffix && base.length > suffix.length && base.endsWith(suffix)) base = base.slice(0, -suffix.length); } return base;
 }
 function winExtname(path) { var lex = winLex(path); return lex.scan.unc && lex.end <= lex.scan.shareEnd + 1 ? extension(lex.scan.share) : extension(lex.base); }
 function winParse(path) { var lex = winLex(path), ext = extension(lex.base); return { root: lex.root, dir: lex.dir, base: lex.base, ext: ext, name: ext ? lex.base.slice(0, -ext.length) : lex.base }; }
-function winIsAbsolute(path) { path = String(path); return isWinSep(path.charAt(0)) || /^[A-Za-z]:[\\/]/.test(path); }
+function winIsAbsolute(path) { path = pathArg(path, 'path'); return isWinSep(path.charAt(0)) || /^[A-Za-z]:[\\/]/.test(path); }
 /*
  * Adapted from Node.js v22.20.0 lib/path.js.
  * Copyright Joyent, Inc. and other Node contributors.
@@ -160,6 +171,7 @@ function winIsAbsolute(path) { path = String(path); return isWinSep(path.charAt(
  * DEALINGS IN THE SOFTWARE.
  */
 function winRelative(from, to) {
+  pathArg(from, 'from'); pathArg(to, 'to');
   var fromPath = winResolve(from), toPath = winResolve(to);
   if (fromPath === toPath) return '';
   var fromLower = fromPath.toLowerCase(), toLower = toPath.toLowerCase();
@@ -214,7 +226,7 @@ function winRelative(from, to) {
   if (toPath.charAt(toStart) === '\\') toStart++;
   return toPath.slice(toStart, toEnd);
 }
-var win32 = { resolve: winResolve, join: winJoin, dirname: winDirname, basename: winBasename, extname: winExtname, normalize: winNormalize, relative: winRelative, isAbsolute: winIsAbsolute, parse: winParse, format: function(value) { return formatPath(value, '\\'); }, toNamespacedPath: toNamespacedPath, sep: '\\', delimiter: ';' };
+var win32 = { resolve: winResolve, join: winJoin, dirname: winDirname, basename: winBasename, extname: winExtname, normalize: winNormalize, relative: winRelative, isAbsolute: winIsAbsolute, parse: winParse, format: function(value) { return formatPath(formatArg(value), '\\'); }, toNamespacedPath: toNamespacedPath, sep: '\\', delimiter: ';' };
 posix.posix = posix; posix.win32 = win32; win32.posix = posix; win32.win32 = win32;
 module.exports = posix; module.exports.default = module.exports; module.exports.__esModule = true;
 "#),
