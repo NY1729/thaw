@@ -19,6 +19,46 @@ fn one(src: &str) -> String {
     run(src).join("|")
 }
 
+/// Run `src` as the main file (`run_main`, which `thaw-js-node` and `node -e` use).
+fn run_main_lines(src: &str) -> String {
+    let mut it = Interp::new();
+    match it.run_main(src) {
+        Ok(_) => it.out.join("|"),
+        Err(Ctl::Unsupported(f)) => format!("unsupported: {f}"),
+        Err(_) => "error".into(),
+    }
+}
+
+// Node 22 runs a plain .js main file as a sloppy CommonJS script, so these are valid there.
+#[test]
+fn main_plain_script_is_sloppy_like_node() {
+    assert_eq!(
+        run_main_lines("var o = {a: 1}; with (o) { console.log(a) }"),
+        "1"
+    );
+    assert_eq!(
+        run_main_lines("function eval() {} console.log(typeof eval)"),
+        "function"
+    );
+    assert_eq!(
+        run_main_lines("var arguments = 1; console.log(arguments)"),
+        "1"
+    );
+    assert_eq!(
+        run_main_lines("console.log(1)\n<!-- html comment\nconsole.log(2)\n"),
+        "1|2"
+    );
+}
+
+// Module syntax keeps the module goal: the entry is handed to the ESM path, not run as a script.
+#[test]
+fn main_module_syntax_keeps_the_module_goal() {
+    assert_eq!(
+        run_main_lines("export const x = 4; console.log(x)"),
+        "unsupported: esm-syntax"
+    );
+}
+
 #[test]
 fn arithmetic_strings_and_coercion() {
     assert_eq!(
