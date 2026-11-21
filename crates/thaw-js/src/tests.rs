@@ -4912,6 +4912,7 @@ globalThis.__thaw_poll_platform_events = function () {
     logs.push(e.type + (e.value !== undefined ? ':' + hexs(e.value) : '') + (e.type === 'exit' || e.type === 'exited' ? ':' + e.code + '/' + e.signal : '') + (e.code && e.type === 'error' ? ':' + e.code : ''));
   });
 };
+function waitFor(pred, then, n) { if (pred() || n <= 0) return then(); setTimeout(function () { waitFor(pred, then, n - 1); }, 5); }
 "#;
 
 #[test]
@@ -5009,7 +5010,9 @@ try {{ console.log('returned', __thaw_child_process_spawn('/bin/true', '[]', JSO
 catch (e) {{ console.log('threw', e.code, e.syscall, e.errno, e.message); }}
 var r = JSON.parse(__thaw_child_process_sync('/bin/true', '[]', JSON.stringify({{gid: 0}})));
 console.log('sync', r.code, r.error !== undefined);
-setTimeout(function () {{ console.log(logs.join(',')); }}, 100);"
+// control child, allowed to start: its 'exit' proves the loop polled after the refused attempt
+__thaw_child_process_spawn('/bin/true', '[]', '{{}}');
+waitFor(function () {{ return logs.some(function (l) {{ return l.indexOf('exit:') === 0; }}); }}, function () {{ console.log(logs.join(',')); }}, 300);"
     );
     let out = run_loop(&src);
     assert!(
@@ -5017,11 +5020,10 @@ setTimeout(function () {{ console.log(logs.join(',')); }}, 100);"
         "{out}"
     );
     assert!(out.contains("sync EPERM true|"), "{out}");
-    // the start never happened: no 'spawn' event and no async 'error' event
-    assert!(
-        !out.contains("spawn,") && !out.contains("error:EPERM"),
-        "{out}"
-    );
+    assert!(out.contains("exit:0/null"), "{out}");
+    // the start never happened: the only 'spawn' event is the control child's, and no async 'error' event
+    assert_eq!(out.matches("spawn,").count(), 1, "{out}");
+    assert!(!out.contains("error:EPERM"), "{out}");
 }
 
 /// Node 22: uid/gid equal to the caller's own ids start normally (setuid/setgid to self succeed for any user).
@@ -5037,7 +5039,7 @@ console.log('started', h > 0);
 try {{ __thaw_child_process_spawn('/bin/true', '[]', JSON.stringify({{uid: -1}})); console.log('returned'); }}
 catch (e) {{ console.log('threw', e.code, e.syscall, e.errno, e.message); }}
 console.log('sync', JSON.parse(__thaw_child_process_sync('/bin/true', '[]', JSON.stringify({{uid: -1}}))).code);
-setTimeout(function () {{ console.log(logs.join(',')); }}, 100);"
+waitFor(function () {{ return logs.some(function (l) {{ return l.indexOf('exit:') === 0; }}); }}, function () {{ console.log(logs.join(',')); }}, 300);"
     );
     let out = run_loop(&src);
     assert!(
