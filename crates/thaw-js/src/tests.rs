@@ -503,12 +503,39 @@ fn package_host_loads_modules_and_exchanges_plain_data() {
 
 #[test]
 fn package_host_reports_unsupported_constructs_by_name() {
-    use crate::host::{HostError, Package};
-    let bundle = MINI.replace("exports.VERSION = '1.0';", "exports.VERSION = import('x');");
-    match Package::load(&bundle) {
-        Err(HostError::Unsupported(f)) => assert_eq!(f, "import()"),
-        other => panic!("{:?}", other.err()),
-    }
+    // Node 22 (CJS importer): `import('x')` of a bare name the bundle lacks REJECTS with ERR_MODULE_NOT_FOUND;
+    // it used to be Unsupported "import()" at load.
+    use crate::host::{Native, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.missing = function () { return import('x').then(null, function (e) { return e.code; }); };",
+    );
+    let mut p = Package::load(&bundle).expect("loads: import() rejects, it does not throw");
+    assert!(matches!(p.call("missing", &[]), Ok(Native::Str(c)) if c == "ERR_MODULE_NOT_FOUND"));
+}
+
+#[test]
+fn bundle_factory_import_rejects_with_node_codes() {
+    // Node 22, recorded from a CJS importer (same codes from an ESM importer): each unmapped specifier rejects;
+    // 123 is a bare name (ERR_MODULE_NOT_FOUND); Symbol() is a TypeError with no code. A mapped './h' still loads.
+    use crate::host::Package;
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = '1.0'; exports.codes = function () { return Promise.all(['/nonexistent-thaw-probe/outside.mjs', './missing.mjs', 'node:nonexistent', 'pkg-not-installed', 123, Symbol('s'), 'http://127.0.0.1:1/x.mjs', 'thaw-bundle:1:x/index.mjs'].map(function (s) { return import(s).then(function () { return 'resolved'; }, function (e) { return String(e.code); }); })); }; exports.mapped = function () { return import('./h').then(function (ns) { return ns.default.dbl(4); }); };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    assert_eq!(
+        p.call("codes", &[])
+            .unwrap_or_else(|e| panic!("{e}"))
+            .to_json(),
+        r#"["ERR_MODULE_NOT_FOUND","ERR_MODULE_NOT_FOUND","ERR_UNKNOWN_BUILTIN_MODULE","ERR_MODULE_NOT_FOUND","ERR_MODULE_NOT_FOUND","undefined","ERR_UNSUPPORTED_ESM_URL_SCHEME","ERR_UNSUPPORTED_ESM_URL_SCHEME"]"#
+    );
+    assert_eq!(
+        p.call("mapped", &[])
+            .unwrap_or_else(|e| panic!("{e}"))
+            .to_json(),
+        "8"
+    );
 }
 
 #[test]
@@ -10838,6 +10865,31 @@ fn hinted_reads_through_large_scopes_keep_the_visible_binding() {
     let mut on = Interp::with_compile_mode(crate::compile::CompileMode::On);
     assert!(on.run(&src).is_ok());
     assert_eq!(on.out, it.out);
+}
+
+/// Hint ids are indices into one realm's table, but a closure annotated by realm `a` can run under realm
+/// `b`, where the same id names another identifier's slot. The hit must not bind `b`'s recorded name.
+#[test]
+fn foreign_hint_slot_never_binds_another_identifiers_name() {
+    for mode in [
+        crate::compile::CompileMode::Off,
+        crate::compile::CompileMode::On,
+    ] {
+        let mut a = Interp::with_compile_mode(mode);
+        // `zzq` is the first identifier of `a`'s parse, so it owns hint slot 1 there.
+        let inner = a
+            .run("(function () { let String = 1; let zzq = 'text'; return function () { return typeof zzq; }; })()")
+            .unwrap();
+        let mut b = Interp::with_compile_mode(mode);
+        // `String` is the first identifier of `b`'s parse: slot 1 records it at hops 1, index 0.
+        assert!(b
+            .run("(function () { let String = 1; return (function () { return String; })(); })()")
+            .is_ok());
+        for _ in 0..3 {
+            let got = b.call(&inner, &Value::Undefined, &[]).unwrap();
+            assert_eq!(b.to_str(&got).to_string(), "string");
+        }
+    }
 }
 
 #[test]

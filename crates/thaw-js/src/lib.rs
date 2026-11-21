@@ -4727,8 +4727,13 @@ impl Interp {
                         return self.super_call(&args, scope);
                     }
                     // `import(spec)` calls the in-scope `__thaw_esm_import` hook with the evaluated
-                    // arguments unchanged; without the binding it stays unsupported.
-                    let Some(hook) = self.lookup(scope, "__thaw_esm_import") else {
+                    // arguments unchanged. A bundle factory has no such binding, but its `requireAsync`
+                    // parameter is that module's import(): it returns a promise and never throws (host.rs).
+                    // Without either binding (a plain script) it stays unsupported.
+                    let Some(hook) = self
+                        .lookup(scope, "__thaw_esm_import")
+                        .or_else(|| self.lookup(scope, "requireAsync"))
+                    else {
                         return unsupported("import()");
                     };
                     let args = self.eval_args(&c.args, scope)?;
@@ -6119,6 +6124,8 @@ mod buffer_members_tests;
 mod builtin_integrity_tests;
 #[cfg(test)]
 mod builtin_members_tests;
+#[cfg(test)]
+mod builtin_source_tests;
 #[cfg(test)]
 mod builtin_table_tests;
 #[cfg(test)]

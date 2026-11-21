@@ -565,8 +565,9 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
         );
         let mut qk = String::new();
         json_quote(&key, &mut qk);
+        // `requireAsync` is the module's import(): a bare `import(spec)` in the body calls it (lib.rs)
         factories.push_str(&format!(
-            "{qk}: function (module, exports, require) {{\n{}\n}},\n",
+            "{qk}: function (module, exports, require, requireAsync) {{\n{}\n}},\n",
             converted.body
         ));
         let entries: Vec<String> = imports
