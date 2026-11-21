@@ -2720,6 +2720,46 @@ module.exports = function() {
 }
 
 #[test]
+fn child_process_refused_or_invalid_credentials_fail_synchronously_like_node() {
+    // Node 22 as a non-root user (measured 3 runs): spawn/exec/execFile with uid or gid 0 throw EPERM
+    // synchronously (syscall 'spawn', errno -1), spawnSync reports it on result.error, execFileSync throws
+    // (syscall 'spawnSync /bin/true'), the caller's own ids start fine, and uid -1 is EINVAL (errno -22).
+    // Root can spawn with uid 0, so the test only runs for a non-root user.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = temp_registry("builtin_child_process_credentials_node_sync");
+    fs::write(
+        dir.join("index.js"),
+        r#"var cp = require('node:child_process');
+function t(label, fn) { try { fn(); return label + ':returned'; } catch (e) { return label + ':' + e.code + ',' + e.syscall + ',' + e.errno + ',' + e.message; } }
+module.exports = function () {
+  var out = [];
+  out.push(t('execFile', function(){ return cp.execFile('/bin/true', [], { uid: 0 }, function(){}); }));
+  out.push(t('spawn', function(){ return cp.spawn('/bin/true', [], { gid: 0 }); }));
+  out.push(t('exec', function(){ return cp.exec('true', { uid: 0 }, function(){}); }));
+  var r = cp.spawnSync('/bin/true', [], { uid: 0 });
+  out.push('spawnSync:' + (r.error && r.error.code) + ',' + r.status);
+  out.push(t('execFileSync', function(){ return cp.execFileSync('/bin/true', [], { uid: 0 }); }));
+  out.push(t('own', function(){ var c = cp.spawn('/bin/true', [], { uid: process.getuid(), gid: process.getgid() }); c.on('error', function(){}); return c; }));
+  out.push(t('minus1', function(){ return cp.spawn('/bin/true', [], { uid: -1 }); }));
+  return out;
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_child_process_credentials_node_sync_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let result = run_js_json(&bundle);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(
+        result,
+        "[\"execFile:EPERM,spawn,-1,spawn EPERM\",\"spawn:EPERM,spawn,-1,spawn EPERM\",\"exec:EPERM,spawn,-1,spawn EPERM\",\"spawnSync:EPERM,null\",\"execFileSync:EPERM,spawnSync /bin/true,-1,spawnSync /bin/true EPERM\",\"own:returned\",\"minus1:EINVAL,spawn,-22,spawn EINVAL\"]"
+    );
+}
+
+#[test]
 fn path_join_skips_empty_segments_before_normalizing() {
     let dir = temp_registry("builtin_path_empty_join");
     fs::write(

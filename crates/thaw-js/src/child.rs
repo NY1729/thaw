@@ -106,6 +106,11 @@ fn id_opt(o: &Native, key: &str) -> Option<u32> {
     opt_num(o, key).map(|n| n as i32 as u32)
 }
 
+/// libuv refuses the id -1 with EINVAL before any setuid/setgid; Node reports it synchronously (throw or result.error).
+fn minus_one_id(o: &Native) -> bool {
+    [id_opt(o, "uid"), id_opt(o, "gid")].contains(&Some(u32::MAX))
+}
+
 fn command(cmd: &str, args: &Native, o: &Native) -> Command {
     let mut c = Command::new(cmd);
     if let Native::Array(a) = args {
@@ -309,11 +314,35 @@ fn error_events(handle: u32, msg: &str, code: &str) -> Vec<String> {
     ]
 }
 
-fn spawn(cmd: &str, args: &str, options: &str) -> u32 {
+/// The error Node throws when a start fails synchronously: `code`, libuv's negative `errno`, `syscall` 'spawn',
+/// `path` and the message 'spawn CODE'.
+fn start_error(it: &mut Interp, cmd: &str, e: &std::io::Error) -> Ctl {
+    let code = error_code(e);
+    let err = match it.make_error("Error", &format!("spawn {code}")) {
+        Ok(v) => v,
+        Err(ctl) => return ctl,
+    };
+    if let Value::Object(o) = &err {
+        put(o, "code", Value::str(code));
+        put(
+            o,
+            "errno",
+            Value::Number(f64::from(-e.raw_os_error().unwrap_or(0))),
+        );
+        put(o, "syscall", Value::str("spawn"));
+        put(o, "path", Value::str(cmd));
+    }
+    Ctl::Throw(err)
+}
+
+fn spawn(cmd: &str, args: &str, options: &str) -> Result<u32, std::io::Error> {
     let (args, o) = (
         parse_native(args).unwrap_or(Native::Undefined),
         parse_native(options).unwrap_or(Native::Undefined),
     );
+    if minus_one_id(&o) {
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+    }
     let handle = TABLE.with(|t| {
         let mut t = t.borrow_mut();
         t.next += 1;
@@ -334,7 +363,13 @@ fn spawn(cmd: &str, args: &str, options: &str) -> u32 {
     c.stdin(stdio_for(mode(0)))
         .stdout(stdio_for(mode(1)))
         .stderr(stdio_for(mode(2)));
+    // A refused uid/gid (EPERM for a non-root caller) fails the start synchronously, as in Node; other start
+    // errors (ENOENT, ...) stay async 'error' events.
+    let credential = id_opt(&o, "uid").is_some() || id_opt(&o, "gid").is_some();
     match spawn_retrying(&mut c) {
+        Err(e) if credential && matches!(e.raw_os_error(), Some(libc::EPERM | libc::EINVAL)) => {
+            return Err(e);
+        }
         Err(e) => TABLE.with(|t| {
             t.borrow_mut()
                 .failed
@@ -375,7 +410,7 @@ fn spawn(cmd: &str, args: &str, options: &str) -> u32 {
             });
         }
     }
-    handle
+    Ok(handle)
 }
 
 fn status_parts(s: &std::process::ExitStatus) -> (Option<i32>, Option<i32>) {
@@ -516,6 +551,9 @@ fn sync(cmd: &str, args: &str, options: &str) -> String {
             q(cmd)
         )
     };
+    if minus_one_id(&o) {
+        return fail(&std::io::Error::from_raw_os_error(libc::EINVAL), "EINVAL");
+    }
     let mut c = command(cmd, &args, &o);
     c.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -598,11 +636,10 @@ impl Interp {
             // Flush parent output first so an inheriting child's lines land after it.
             it.flush_partial();
             let cmd = s(a, 0, it);
-            Ok(Value::Number(f64::from(spawn(
-                &cmd,
-                &s(a, 1, it),
-                &s(a, 2, it),
-            ))))
+            match spawn(&cmd, &s(a, 1, it), &s(a, 2, it)) {
+                Ok(handle) => Ok(Value::Number(f64::from(handle))),
+                Err(e) => Err(start_error(it, &cmd, &e)),
+            }
         });
         g.declare("__thaw_child_process_spawn", f, true);
         let f = self.native(move |it, _, a| {
@@ -645,7 +682,7 @@ mod tests {
 
     /// Runs `sh -c script` through `spawn`/`poll`; returns output chunks as (is_stderr, bytes) in delivery order.
     fn run_sh(script: &str) -> Vec<(bool, Vec<u8>)> {
-        spawn("/bin/sh", &format!("[\"-c\",{}]", q(script)), "{}");
+        spawn("/bin/sh", &format!("[\"-c\",{}]", q(script)), "{}").expect("sh starts");
         let mut got = vec![];
         let start = Instant::now();
         loop {
