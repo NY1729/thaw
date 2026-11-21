@@ -47,6 +47,43 @@ pub struct BundleParts {
     /// `__thaw_bundle_group = "<key>"`: this bundle runs in the one realm shared by every bundle of group `key`
     /// (peer-linked packages), instead of its own Interp.
     pub group: Option<String>,
+    /// Keys whose factory is `async` (a module with top-level await, or one that statically imports one): the
+    /// ones `requireAsync` waits for and a sync `require` refuses (ERR_REQUIRE_ASYNC_MODULE).
+    pub async_keys: HashSet<String>,
+}
+
+/// Makes a factory's body strict: a `"use strict"` directive first, in the inner function of an ES-module origin
+/// wrapper. ES-module code is strict, so a plain call's `this` stays undefined instead of the global object.
+pub(crate) fn make_strict(func: &mut a::Function) {
+    if let [a::Stmt::Return(ret)] = func.body.as_mut().map_or(&mut [][..], |b| &mut b.stmts[..]) {
+        if let Some(a::Expr::Fn(inner)) = ret.arg.as_deref_mut() {
+            return make_strict(&mut inner.function);
+        }
+    }
+    let Some(body) = func.body.as_mut() else {
+        return;
+    };
+    let module =
+        thaw_parser::parse_javascript("\"use strict\";").expect("a literal directive parses");
+    if let Some(a::ModuleItem::Stmt(directive)) = module.body.into_iter().next() {
+        body.stmts.insert(0, directive);
+    }
+}
+
+/// Whether a factory is `async`: the function itself, or the function an ES-module origin wrapper
+/// (`function (origin) { return async function (module, ...) {...}; }`) returns.
+fn factory_is_async(f: &a::Function) -> bool {
+    if f.is_async {
+        return true;
+    }
+    let Some(body) = &f.body else { return false };
+    match body.stmts.as_slice() {
+        [a::Stmt::Return(ret)] => {
+            f.params.len() == 1
+                && matches!(ret.arg.as_deref(), Some(a::Expr::Fn(inner)) if inner.function.is_async)
+        }
+        _ => false,
+    }
 }
 
 fn prop_key(p: &a::PropName) -> Option<String> {
@@ -366,6 +403,11 @@ fn parse_factories(source: &str) -> Result<BundleParts, String> {
     if entry.is_empty() || factories.is_empty() {
         return Err("not a registry bundle (no entry key / factories)".into());
     }
+    let async_keys = factories
+        .iter()
+        .filter(|(_, f)| factory_is_async(f))
+        .map(|(k, _)| k.clone())
+        .collect();
     Ok(BundleParts {
         esm_problems: BTreeSet::new(),
         source: source.to_string(),
@@ -374,6 +416,7 @@ fn parse_factories(source: &str) -> Result<BundleParts, String> {
         require_maps,
         realm,
         group,
+        async_keys,
     })
 }
 

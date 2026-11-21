@@ -891,114 +891,70 @@ fn mixed_esm_bundle_supports_live_exports_cycles_imports_json_and_dynamic_import
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-// qjs_pending: fails on thaw-js: TypeError: Cannot read properties of undefined (reading 'value') on the top-level-await export
-mod qjs_pending_tests_top_level_await_initializes_dependencies_before_export_binding {
-    use super::*;
-    use ::thaw_quickjs;
-
-    #[test]
-    fn top_level_await_initializes_dependencies_before_export_binding() {
-        use std::ffi::{CStr, CString};
-
-        let dir = temp_registry("top_level_await_graph");
-        fs::write(
+#[test]
+fn top_level_await_initializes_dependencies_before_export_binding() {
+    let dir = temp_registry("top_level_await_graph");
+    fs::write(
         dir.join("index.js"),
         "import { value } from './value.js'; export default function run() { return value + 2; }",
     )
     .unwrap();
-        fs::write(
-            dir.join("value.js"),
-            "export const value = await new Promise(resolve => setTimeout(() => resolve(40), 1));",
-        )
-        .unwrap();
-        let empty_node_modules = temp_registry("top_level_await_modules");
-        let (bundle, _, file_count, _) =
-            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 2);
-        let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
-             globalThis.exports = globalThis.module.exports;\n\
-             globalThis.require = function(name) {{ throw new Error(name); }};\n\
-             {bundle}\n\
-             globalThis.runTopLevelAwait = function() {{ return module.exports.default(); }};\n"
-        );
-        let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-        let function = CString::new("runTopLevelAwait").unwrap();
-        let args = CString::new("[]").unwrap();
-        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&empty_node_modules);
-    }
+    fs::write(
+        dir.join("value.js"),
+        "export const value = await new Promise(resolve => setTimeout(() => resolve(40), 1));",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("top_level_await_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    // Node 22 twin (index.mjs + value.mjs): default() is 42
+    assert_eq!(run_js_export(&bundle, "default", Vec::new()), "42");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-// qjs_pending: fails on thaw-js: TypeError: Cannot read properties of undefined (reading 'value') on the top-level-for-await export
-mod qjs_pending_tests_top_level_for_await_initializes_dependencies_before_export_binding {
-    use super::*;
-    use ::thaw_quickjs;
-
-    #[test]
-    fn top_level_for_await_initializes_dependencies_before_export_binding() {
-        use std::ffi::{CStr, CString};
-
-        // Unrun regression: the loop has no AwaitExpr node, but its module
-        // and a static importer still require async initialization.
-        assert!(
-            !analyze_module(
-                "export async function later() { for await (const item of values) {} }"
-            )
+#[test]
+fn top_level_for_await_initializes_dependencies_before_export_binding() {
+    // Unrun regression: the loop has no AwaitExpr node, but its module
+    // and a static importer still require async initialization.
+    assert!(
+        !analyze_module("export async function later() { for await (const item of values) {} }")
             .has_top_level_await
-        );
-        assert!(
-            !analyze_module(
-                "export const later = async () => { for await (const item of values) {} };"
-            )
+    );
+    assert!(
+        !analyze_module(
+            "export const later = async () => { for await (const item of values) {} };"
+        )
+        .has_top_level_await
+    );
+    assert!(
+        analyze_module("export const values = []; for (const item of await source()) {}")
             .has_top_level_await
-        );
-        assert!(
-            analyze_module("export const values = []; for (const item of await source()) {}")
-                .has_top_level_await
-        );
-        assert!(
-            analyze_module(
-                "export let value = 0; for await (const item of values) { value = item; }"
-            )
+    );
+    assert!(
+        analyze_module("export let value = 0; for await (const item of values) { value = item; }")
             .has_top_level_await
-        );
-        let dir = temp_registry("top_level_for_await_graph");
-        fs::write(
+    );
+    let dir = temp_registry("top_level_for_await_graph");
+    fs::write(
         dir.join("index.js"),
         "import { value } from './value.js'; export default function run() { return value + 2; }",
     )
     .unwrap();
-        fs::write(
+    fs::write(
         dir.join("value.js"),
         "export let value = 0; for await (const item of [Promise.resolve(40)]) { value = item; }",
     )
     .unwrap();
-        let empty_node_modules = temp_registry("top_level_for_await_modules");
-        let (bundle, _, file_count, _) =
-            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 2);
-        let script = format!(
-        "globalThis.module = {{ exports: {{}} }}; \
-         globalThis.exports = globalThis.module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; \
-         {bundle} globalThis.runTopLevelForAwait = function() {{ return module.exports.default(); }};"
-    );
-        assert_eq!(
-            thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
-            1
-        );
-        let result = thaw_quickjs::thaw_js_call(
-            CString::new("runTopLevelForAwait").unwrap().as_ptr(),
-            CString::new("[]").unwrap().as_ptr(),
-        );
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&empty_node_modules);
-    }
+    let empty_node_modules = temp_registry("top_level_for_await_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    // Node 22 twin (index.mjs + value.mjs): default() is 42
+    assert_eq!(run_js_export(&bundle, "default", Vec::new()), "42");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
 #[test]
@@ -1134,44 +1090,34 @@ fn nested_dynamic_import_rewrites_without_overlapping_ranges() {
     assert!(rewritten.contains("'./a.js' : './b.js'"));
 }
 
-// qjs_pending: fails on thaw-js: ERROR: TypeError: requireAsync is not a function
-mod qjs_pending_tests_dynamic_import_uses_final_exports_after_async_factory_and_keeps_rejections {
-    use super::*;
-    use ::thaw_quickjs;
-
-    #[test]
-    fn dynamic_import_uses_final_exports_after_async_factory_and_keeps_rejections() {
-        use std::ffi::{CStr, CString};
-        let dir = temp_registry("dynamic_import_final_exports");
-        fs::write(dir.join("index.js"), "module.exports = async function() { var results = await Promise.all([import('./late.js'), globalThis.__thaw_bundle_create_import_async('pkg/index.js')('./late.js')]); var direct = results[0], created = results[1]; var directThrow, createdThrow, directReject, createdReject, threwSynchronously = false; try { directThrow = import('./throw.js'); createdThrow = globalThis.__thaw_bundle_create_import_async('pkg/index.js')('./throw.js'); directReject = import('./reject.js'); createdReject = globalThis.__thaw_bundle_create_import_async('pkg/index.js')('./reject.js'); } catch (error) { threwSynchronously = true; } if (threwSynchronously) return [false]; var failures = await Promise.all([directThrow, createdThrow, directReject, createdReject].map(function(promise) { return promise.then(function() { return 'resolved'; }, function(error) { return error.message; }); })); return [direct.value, created.value, direct === created].concat(failures); };").unwrap();
-        fs::write(
-            dir.join("late.js"),
-            "await Promise.resolve(); module.exports = { value: 42 };",
-        )
-        .unwrap();
-        fs::write(dir.join("throw.js"), "throw new Error('sync-fail');").unwrap();
-        fs::write(
-            dir.join("reject.js"),
-            "await Promise.reject(new Error('async-fail'));",
-        )
-        .unwrap();
-        let modules = temp_registry("dynamic_import_final_exports_modules");
-        let (bundle, _, file_count, _) =
-            bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 4);
-        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.runFinalExports = module.exports;");
-        assert_eq!(
-            thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
-            1
-        );
-        let result = thaw_quickjs::thaw_js_call(c"runFinalExports".as_ptr(), c"[]".as_ptr());
-        assert_eq!(
-            unsafe { CStr::from_ptr(result) }.to_string_lossy(),
-            "[42,42,true,\"sync-fail\",\"sync-fail\",\"async-fail\",\"async-fail\"]"
-        );
-        let _ = fs::remove_dir_all(dir);
-        let _ = fs::remove_dir_all(modules);
-    }
+#[test]
+fn dynamic_import_uses_final_exports_after_async_factory_and_keeps_rejections() {
+    // Node 22 twin (.mjs files, same bodies). The second import() of each module replaces the QuickJS-only
+    // __thaw_bundle_create_import_async half; the result is Node's array. The files are `.js` ESM: the registry
+    // routes `.mjs` through the native-ESM path, which has no async factories yet (PR-I).
+    let dir = temp_registry("dynamic_import_final_exports");
+    fs::write(dir.join("index.js"), "export default async function run() { var results = await Promise.all([import('./late.js'), import('./late.js')]); var direct = results[0], created = results[1]; var failures = await Promise.all([import('./throw.js'), import('./reject.js'), import('./throw.js'), import('./reject.js')].map(function (promise) { return promise.then(function () { return 'resolved'; }, function (error) { return error.message; }); })); return [direct.value, created.value, direct === created].concat(failures); }").unwrap();
+    fs::write(
+        dir.join("late.js"),
+        "await Promise.resolve(); export const value = 42;",
+    )
+    .unwrap();
+    fs::write(dir.join("throw.js"), "throw new Error('sync-fail');").unwrap();
+    fs::write(
+        dir.join("reject.js"),
+        "await Promise.reject(new Error('async-fail'));",
+    )
+    .unwrap();
+    let modules = temp_registry("dynamic_import_final_exports_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    assert_eq!(
+        run_js_export(&bundle, "default", Vec::new()),
+        "[42,42,true,\"sync-fail\",\"async-fail\",\"sync-fail\",\"async-fail\"]"
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
 }
 
 #[test]
