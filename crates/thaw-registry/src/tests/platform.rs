@@ -1501,6 +1501,33 @@ fn worker_saved_url_keeps_bundle_affinity_for_worker_entry() {
     let _ = fs::remove_dir_all(dir);
 }
 
+#[test]
+fn bundled_worker_nested_spawn_resolves_from_its_own_package_directory() {
+    // Node 22.23.1 (real files, pathToFileURL, 3 runs): [["A","A-bare","MODULE_NOT_FOUND","MODULE_NOT_FOUND"],["B","MODULE_NOT_FOUND"],["A",...same]]
+    // A is reported by a/nested.js, started by the bundled a/worker.js; B has no node_modules, so its bare require fails.
+    let dir = worker_fixture(
+        "bundled_worker_nested_affinity",
+        &[
+            ("index.js", "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var first = await new Promise(function (resolve, reject) { var w = new Worker(new URL('./a/worker.js', import.meta.url)); w.on('message', resolve); w.on('error', reject); }); var second = await new Promise(function (resolve, reject) { var w = new Worker(new URL('./b/worker.js', import.meta.url)); w.on('message', resolve); w.on('error', reject); }); var third = await new Promise(function (resolve, reject) { var w = new Worker(new URL('./a/worker.js', import.meta.url)); w.on('message', resolve); w.on('error', reject); }); return [first, second, third]; };"),
+            ("a/worker.js", "var wt = require('node:worker_threads'); var child = new wt.Worker(new URL('./nested.js', import.meta.url)); child.on('message', function (value) { wt.parentPort.postMessage(value); wt.parentPort.close(); }); child.on('error', function (error) { throw error; });"),
+            ("a/nested.js", "var parentPort = require('node:worker_threads').parentPort; var direct, created; try { require('affinity-missing'); } catch (error) { direct = error.code; } var makeRequire = require('node:module').createRequire(__filename); try { makeRequire('affinity-missing'); } catch (error) { created = error.code; } parentPort.postMessage([require('./dep.js').value, require('affinity-shared').value, direct, created]); parentPort.close();"),
+            ("a/dep.js", "exports.value = 'A';"),
+            ("a/node_modules/affinity-shared/package.json", r#"{"name":"affinity-shared","main":"index.js"}"#),
+            ("a/node_modules/affinity-shared/index.js", "exports.value = 'A-bare';"),
+            ("b/worker.js", "var parentPort = require('node:worker_threads').parentPort; var bare; try { bare = require('affinity-shared').value; } catch (error) { bare = error.code; } parentPort.postMessage([require('./dep.js').value, bare]); parentPort.close();"),
+            ("b/dep.js", "exports.value = 'B';"),
+        ],
+    );
+    let modules = temp_registry("bundled_worker_nested_affinity_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(
+        run_js(&bundle),
+        r#"[["A","A-bare","MODULE_NOT_FOUND","MODULE_NOT_FOUND"],["B","MODULE_NOT_FOUND"],["A","A-bare","MODULE_NOT_FOUND","MODULE_NOT_FOUND"]]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
 // qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
 mod qjs_pending_platform_worker_saved_url_keeps_bundle_affinity_across_packages_and_nested_workers {
     use super::*;

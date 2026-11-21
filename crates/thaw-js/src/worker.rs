@@ -187,10 +187,16 @@ pub(crate) fn register_bundle(
 }
 
 /// The bundled module a worker's file names, `/thaw_modules/<key>` (the virtual `__filename` of a bundled module):
-/// the first loaded bundle with that factory key, as `require` resolves a key. None keeps the disk loader.
+/// the last loaded bundle with that factory key (a re-bundled package replaces its earlier copy), as `require`
+/// resolves a key. None keeps the disk loader.
 fn main_bundle(it: &Interp, file: &str) -> Option<MainBundle> {
     let key = file.strip_prefix("/thaw_modules/")?;
-    let bundle = it.worker.bundles.iter().find(|b| b.keys.contains(key))?;
+    let bundle = it
+        .worker
+        .bundles
+        .iter()
+        .rev()
+        .find(|b| b.keys.contains(key))?;
     Some(MainBundle {
         package: bundle.package.clone(),
         text: bundle.text.clone(),
@@ -1519,5 +1525,35 @@ mod transfer_tests {
         release_wire(&wire);
         assert!(locked(&PORT_ROUTES).contains_key(&p));
         assert!(!locked(&PORT_HANGUPS).iter().any(|(_, peer)| *peer == q));
+    }
+}
+
+#[cfg(test)]
+mod main_bundle_tests {
+    use super::*;
+
+    /// A one-factory bundle whose `a/index.js` factory body is `value` (the source a worker would run).
+    fn bundle_with(value: &str) -> String {
+        format!(
+            r#"module.exports = (function(require){{ var __thaw_bundle_factories = {{"a/index.js": function(module, exports, require, _u, __filename, __dirname) {{ module.exports = '{value}'; }}}}; var __thaw_bundle_require_maps = {{"a/index.js": {{}}}}; var __thaw_bundle_entry_key = "a/index.js"; }})(globalThis.require);"#
+        )
+    }
+
+    #[test]
+    fn main_bundle_runs_the_source_of_the_last_bundle_loaded_for_a_key() {
+        // a package bundled again under the same key replaces the earlier source for a worker that starts it
+        let mut it = Interp::runtime();
+        for value in ["old", "new"] {
+            let text = bundle_with(value);
+            let parts = crate::scan::parse_bundle(&text).unwrap();
+            register_bundle(&mut it, "a", &text, &parts);
+        }
+        let main =
+            main_bundle(&it, "/thaw_modules/a/index.js").expect("a loaded bundle has the key");
+        assert!(
+            main.text.contains("'new'"),
+            "worker started the stale bundle: {}",
+            main.text
+        );
     }
 }
