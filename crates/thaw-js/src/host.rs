@@ -67,8 +67,12 @@ struct Loader {
     commonjs_contexts: Option<HashSet<String>>,
     /// The namespace object built for each CommonJS key, so every dynamic import gets the same one.
     namespaces: RefCell<HashMap<String, Value>>,
-    /// Keys whose factory returned a promise (top-level await). `requireAsync` rejects them: G3 is not done.
-    async_keys: RefCell<HashSet<String>>,
+    /// The promise each async module's factory returned (`parts.async_keys`): `requireAsync` and the package
+    /// entry wait on it. Kept after a rejection too, so a failed evaluation stays failed (Node caches it).
+    ready: RefCell<HashMap<String, Value>>,
+    /// The thrown value of each module whose factory threw synchronously: its cache entry stays, so a later
+    /// `import()` rejects with the same error instead of resolving the partial exports (Node caches the failure).
+    failed: RefCell<HashMap<String, Value>>,
     /// [`PROMISE_OF`]: wraps a thunk in a promise, so `requireAsync` rejects instead of throwing.
     promise_of: Value,
     /// [`CJS_NAMESPACE`]: builds a CommonJS module's namespace object.
@@ -162,6 +166,8 @@ fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R
     }
     match module_key(loader, from, spec) {
         Some(key) if key.ends_with(".node") => addon_of(loader, it),
+        // refused before the cache insert and before the factory runs, as Node refuses it
+        Some(key) if loader.parts.async_keys.contains(&key) => Err(require_async_error(it)),
         Some(key) => load_module(loader, it, &key),
         None => match peer_exports(it, spec)? {
             Some(exports) => Ok(exports),
@@ -195,7 +201,8 @@ fn module_key(loader: &Loader, from: &str, spec: &str) -> Option<String> {
 /// The `requireAsync(spec)` thunk of module `from` (`load_module`): the namespace dynamic `import()` gives.
 /// A CommonJS module is `{default, ...names}`, built once per key; an ESM-converted module is its exports object,
 /// which is the same object every time because the module body runs once through the cache. Addons, peers and
-/// unmapped specs get the `require` result as a CommonJS namespace. An async factory is refused (G3).
+/// unmapped specs get the `require` result as a CommonJS namespace. An async module's namespace is read once its
+/// factory's promise (`Loader::ready`) has settled, so a `module.exports` reassigned after an await is the final one.
 fn require_async_namespace(
     loader: &Rc<Loader>,
     it: &mut Interp,
@@ -215,28 +222,55 @@ fn require_async_namespace(
             return namespace_of(it, loader, exports, Some(Vec::new()));
         }
     };
-    let exports = load_module(loader, it, &key)?;
-    if loader.async_keys.borrow().contains(&key) {
-        return Err(js_error(
-            it,
-            &format!("async module factories are not supported yet: {key}"),
-        ));
+    if let Some(reason) = loader.failed.borrow().get(&key).cloned() {
+        return Err(Ctl::Throw(reason));
     }
-    if loader.esm_keys.contains(&key) {
+    let exports = load_module(loader, it, &key)?;
+    let ready = loader.ready.borrow().get(&key).cloned();
+    if let (true, Some(ready)) = (loader.parts.async_keys.contains(&key), ready) {
+        let (l, k) = (loader.clone(), key.clone());
+        let namespace_once_ready = it.native(move |it, _, _| {
+            let exports = load_module(&l, it, &k)?;
+            module_namespace(&l, it, &k, exports)
+        });
+        let then = it.get(&ready, "then")?;
+        return it.call(&then, &ready, &[namespace_once_ready]);
+    }
+    module_namespace(loader, it, &key, exports)
+}
+
+/// The namespace `import()` of the loaded module `key` gives (see [`require_async_namespace`]), built once per key.
+fn module_namespace(loader: &Rc<Loader>, it: &mut Interp, key: &str, exports: Value) -> R<Value> {
+    if loader.esm_keys.contains(key) {
         return Ok(exports);
     }
-    if let Some(ns) = loader.namespaces.borrow().get(&key).cloned() {
+    if let Some(ns) = loader.namespaces.borrow().get(key).cloned() {
         return Ok(ns);
     }
     // a builtin with no name table takes its own keys, as the registry's fallback namespace does
-    let names = match loader.cjs_names.get(&key) {
+    let names = match loader.cjs_names.get(key) {
         Some(names) => Some(names.clone()),
         None if key.starts_with("node:") => None,
         None => Some(Vec::new()),
     };
     let ns = namespace_of(it, loader, exports, names)?;
-    loader.namespaces.borrow_mut().insert(key, ns.clone());
+    loader
+        .namespaces
+        .borrow_mut()
+        .insert(key.to_string(), ns.clone());
     Ok(ns)
+}
+
+/// `require()` of a module with top-level await: Node 22's error (first line of its message; the code is what callers test).
+fn require_async_error(it: &mut Interp) -> Ctl {
+    let err = js_error(
+        it,
+        "require() cannot be used on an ESM graph with top-level await. Use import() instead. To see where the top-level await comes from, use --experimental-print-required-tla.",
+    );
+    if let Ctl::Throw(value) = &err {
+        let _ = it.set(value, "code", Value::str("ERR_REQUIRE_ASYNC_MODULE"));
+    }
+    err
 }
 
 fn is_module_not_found(it: &mut Interp, err: &Value) -> bool {
@@ -485,12 +519,24 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
             require,
         ],
     );
-    if let Ok(result) = &ran {
-        if it.is_promise(result) {
-            loader.async_keys.borrow_mut().insert(key.to_string());
-        }
+    let pending = match &ran {
+        Ok(result) if it.is_promise(result) => Some(result.clone()),
+        _ => None,
+    };
+    if let Err(Ctl::Throw(reason)) = &ran {
+        loader
+            .failed
+            .borrow_mut()
+            .insert(key.to_string(), reason.clone());
     }
-    if entry {
+    if let Some(promise) = &pending {
+        loader
+            .ready
+            .borrow_mut()
+            .insert(key.to_string(), promise.clone());
+    }
+    // an entry with top-level await keeps its BOOTING slot until `await_entry` settles it
+    if entry && pending.is_none() {
         BOOTING.with(|b| b.borrow_mut().pop());
     }
     ran?;
@@ -664,7 +710,8 @@ fn install_fetch_transport(it: &mut Interp, loader: &Rc<Loader>) -> R<()> {
     Ok(())
 }
 
-/// Evaluates the factories of `parts` on `it` and returns module `key`'s exports. The package entry
+/// Evaluates the factories of `parts` on `it` and returns module `key`'s exports, and for the package entry
+/// with top-level await its pending promise (`await_entry` settles it). The package entry
 /// ([`Package::load_named`]) and a worker realm's main module ([`run_bundle_main`]) both boot through here.
 fn boot_bundle(
     it: &mut Interp,
@@ -672,7 +719,7 @@ fn boot_bundle(
     bundle_js: &str,
     name: &str,
     key: &str,
-) -> R<Value> {
+) -> R<(Value, Option<Value>)> {
     // Evaluated before `run_id` is set and before any factory exists: a later eval perturbs the interpreter
     // state the factories rely on. Helpers are stored in `Loader`, so no eval runs mid-module.
     let promise_of = it.eval_function(PROMISE_OF)?;
@@ -680,7 +727,16 @@ fn boot_bundle(
     it.run_id = crate::next_run_id(); // factory spans come from this one parse
     it.sources
         .insert(it.run_id, std::rc::Rc::from(parts.source.as_str()));
-    for (_, func) in parts.factories.iter_mut() {
+    let commonjs_contexts =
+        bundle_table(bundle_js, "__thaw_bundle_commonjs_contexts").and_then(|v| {
+            v.as_object()
+                .map(|o| o.keys().cloned().collect::<HashSet<String>>())
+        });
+    for (key, func) in parts.factories.iter_mut() {
+        // an ES-module factory is strict code (its top-level `this` is undefined, not the global object)
+        if matches!(&commonjs_contexts, Some(keys) if !keys.contains(key)) {
+            crate::scan::make_strict(func);
+        }
         it.annotate_function(func);
     }
     let mut factories = HashMap::new();
@@ -693,8 +749,6 @@ fn boot_bundle(
     let esm_keys = bundle_table(bundle_js, "__thaw_bundle_export_graphs")
         .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()))
         .unwrap_or_default();
-    let commonjs_contexts = bundle_table(bundle_js, "__thaw_bundle_commonjs_contexts")
-        .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()));
     let cjs_names = bundle_table(bundle_js, "__thaw_bundle_cjs_export_names")
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default()
@@ -722,7 +776,8 @@ fn boot_bundle(
         cjs_names,
         commonjs_contexts,
         namespaces: RefCell::new(HashMap::new()),
-        async_keys: RefCell::new(HashSet::new()),
+        ready: RefCell::new(HashMap::new()),
+        failed: RefCell::new(HashMap::new()),
         promise_of,
         cjs_namespace,
     });
@@ -732,7 +787,31 @@ fn boot_bundle(
     if loader.factories.contains_key("node:http") {
         install_fetch_transport(it, &loader)?;
     }
-    load_module(&loader, it, key)
+    let exports = load_module(&loader, it, key)?;
+    let pending = if key == loader.parts.entry {
+        loader.ready.borrow().get(key).cloned()
+    } else {
+        None
+    };
+    Ok((exports, pending))
+}
+
+/// Settles the package entry booted by [`boot_bundle`] when its factory is async: runs the event loop until its
+/// promise settles (a rejection is the load's error). `booted` says the entry holds its BOOTING slot, which is
+/// released here, after the wait, so a peer's cycle during the wait still sees the partial exports.
+fn await_entry(it: &mut Interp, pending: Option<Value>, booted: bool) -> Result<(), HostError> {
+    let Some(ready) = pending else {
+        return Ok(());
+    };
+    let settled = it.await_settled(&ready).map_err(|c| classify(it, c));
+    if booted {
+        BOOTING.with(|b| b.borrow_mut().pop());
+    }
+    match settled? {
+        Some(Ok(_)) => Ok(()),
+        Some(Err(reason)) => Err(classify(it, Ctl::Throw(reason))),
+        None => Err(HostError::Thrown("top-level await never settled".into())),
+    }
 }
 
 /// The JSON value of the table `var <name> = JSON.parse(...)` of a registry bundle, `None` when it has none.
@@ -753,7 +832,12 @@ fn bundle_table(bundle_js: &str, name: &str) -> Option<serde_json::Value> {
 /// module's virtual path. A worker that runs a bundled module's file starts here instead of the disk loader.
 pub(crate) fn run_bundle_main(it: &mut Interp, name: &str, bundle_js: &str, key: &str) -> R<Value> {
     let parts = parse_bundle(bundle_js).map_err(|e| Ctl::Throw(Value::str(&e)))?;
-    boot_bundle(it, parts, bundle_js, name, key)
+    let (exports, pending) = boot_bundle(it, parts, bundle_js, name, key)?;
+    // not awaited here: the worker's event loop runs a top-level await; only the BOOTING slot is released
+    if pending.is_some() && !name.is_empty() {
+        BOOTING.with(|b| b.borrow_mut().pop());
+    }
+    Ok(exports)
 }
 
 /// A loaded realm: one interpreter, the bundles' modules, and the entry exports of its first package (`exports`)
@@ -813,8 +897,9 @@ impl Package {
         }
         crate::worker::register_bundle(&mut interp, name, bundle_js, &parts);
         let entry = parts.entry.clone();
-        let exports = boot_bundle(&mut interp, parts, bundle_js, name, &entry)
+        let (exports, pending) = boot_bundle(&mut interp, parts, bundle_js, name, &entry)
             .map_err(|c| classify(&mut interp, c))?;
+        await_entry(&mut interp, pending, !name.is_empty())?;
         Ok(Package {
             interp,
             exports,
@@ -834,8 +919,9 @@ impl Package {
         }
         crate::worker::register_bundle(&mut self.interp, name, bundle_js, &parts);
         let entry = parts.entry.clone();
-        let exports = boot_bundle(&mut self.interp, parts, bundle_js, name, &entry)
+        let (exports, pending) = boot_bundle(&mut self.interp, parts, bundle_js, name, &entry)
             .map_err(|c| classify(&mut self.interp, c))?;
+        await_entry(&mut self.interp, pending, true)?;
         self.roots.insert(name.to_string(), exports);
         Ok(())
     }
@@ -9472,16 +9558,101 @@ var __thaw_bundle_export_graphs = JSON.parse("{\"p/n.js\":{\"local\":{},\"indire
         assert_eq!(text(&mut pkg, "messageOf", &[reason]), "conversion failed");
     }
 
+    /// Async factories (top-level await). `p/a.js` resolves to `late` set after an await; `p/r.js` rejects
+    /// with `boom`; `p/index.js` `syncLoad(spec)` reports the code of a sync `require(spec)`.
+    const ASYNC_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require, requireAsync) {
+  exports.load = function (spec) { return requireAsync(spec); };
+  exports.syncLoad = function (spec) { try { require(spec); return 'loaded'; } catch (e) { return e.code; } };
+  exports.lateOf = function (ns) { return ns.default.late; };
+  exports.same = function (a, b) { return a === b; };
+  exports.messageOf = function (e) { return String(e && e.message); };
+  exports.runs = function (name) { return globalThis[name] || 0; };
+},
+"p/a.js": async function(module, exports) { globalThis.aRuns = (globalThis.aRuns || 0) + 1; await null; exports.late = 1; },
+"p/r.js": async function(module, exports) { globalThis.rRuns = (globalThis.rRuns || 0) + 1; await null; throw new Error('boom'); }
+};
+var __thaw_bundle_require_maps = { "p/index.js": { "./a.js": "p/a.js", "./r.js": "p/r.js" }, "p/a.js": {}, "p/r.js": {} };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#;
+
     #[test]
-    fn dynamic_import_of_an_async_factory_rejects_loudly() {
-        let mut pkg = Package::load(BUNDLE).expect("loads");
-        let reason = settled(&mut pkg, "load", &[Value::str("./a.js")])
-            .err()
-            .expect("async factories are unsupported until G3");
+    fn require_async_of_an_async_factory_resolves_its_final_namespace_once() {
+        let mut pkg = Package::load(ASYNC_BUNDLE).expect("loads");
+        let first = settled(&mut pkg, "load", &[Value::str("./a.js")])
+            .ok()
+            .expect("resolves");
+        let second = settled(&mut pkg, "load", &[Value::str("./a.js")])
+            .ok()
+            .expect("resolves");
+        assert_eq!(text(&mut pkg, "lateOf", std::slice::from_ref(&first)), "1");
+        assert_eq!(text(&mut pkg, "same", &[first, second]), "true");
+        assert_eq!(text(&mut pkg, "runs", &[Value::str("aRuns")]), "1");
+    }
+
+    #[test]
+    fn sync_require_of_an_async_factory_throws_before_its_body_runs() {
+        let mut pkg = Package::load(ASYNC_BUNDLE).expect("loads");
         assert_eq!(
-            text(&mut pkg, "messageOf", &[reason]),
-            "async module factories are not supported yet: p/a.js"
+            text(&mut pkg, "syncLoad", &[Value::str("./a.js")]),
+            "ERR_REQUIRE_ASYNC_MODULE"
         );
+        assert_eq!(text(&mut pkg, "runs", &[Value::str("aRuns")]), "0");
+        // refused, not cached: a later import still runs the body once
+        let ns = settled(&mut pkg, "load", &[Value::str("./a.js")])
+            .ok()
+            .expect("resolves");
+        assert_eq!(text(&mut pkg, "lateOf", &[ns]), "1");
+        assert_eq!(text(&mut pkg, "runs", &[Value::str("aRuns")]), "1");
+    }
+
+    #[test]
+    fn a_rejected_async_factory_is_cached_and_its_body_runs_once() {
+        let mut pkg = Package::load(ASYNC_BUNDLE).expect("loads");
+        let first = settled(&mut pkg, "load", &[Value::str("./r.js")])
+            .err()
+            .expect("rejects");
+        let second = settled(&mut pkg, "load", &[Value::str("./r.js")])
+            .err()
+            .expect("rejects again");
+        assert_eq!(text(&mut pkg, "messageOf", &[first]), "boom");
+        assert_eq!(text(&mut pkg, "messageOf", &[second]), "boom");
+        assert_eq!(text(&mut pkg, "runs", &[Value::str("rRuns")]), "1");
+    }
+
+    /// A top-level-await entry: `Package::load` returns only once its promise settled.
+    const TLA_ENTRY: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": async function(module, exports) { await new Promise(function (r) { setTimeout(r, 1); }); exports.value = 42; }
+};
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#;
+
+    #[test]
+    fn package_load_waits_for_a_top_level_await_entry() {
+        let mut pkg = Package::load(TLA_ENTRY).expect("loads after the await");
+        assert_eq!(pkg.get("value").expect("reads").to_json(), "42");
+    }
+
+    #[test]
+    fn package_load_reports_a_top_level_await_entry_rejection() {
+        let bundle = TLA_ENTRY.replace(
+            "await new Promise(function (r) { setTimeout(r, 1); }); exports.value = 42;",
+            "await null; throw new Error('boom');",
+        );
+        let error = Package::load(&bundle).err().expect("rejects");
+        assert!(error.to_string().contains("boom"), "{error}");
+    }
+
+    #[test]
+    fn package_load_reports_a_top_level_await_that_never_settles() {
+        let bundle = TLA_ENTRY.replace(
+            "await new Promise(function (r) { setTimeout(r, 1); }); exports.value = 42;",
+            "await new Promise(function () {});",
+        );
+        let error = Package::load(&bundle).err().expect("unsettled is an error");
+        assert!(error.to_string().contains("never settled"), "{error}");
     }
 
     /// A builtin-style bundle (no ESM or CJS name tables): `run` starts `requireAsync` first, then awaits a timer.

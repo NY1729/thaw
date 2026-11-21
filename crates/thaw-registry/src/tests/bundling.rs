@@ -1247,14 +1247,8 @@ fn esm_star_static_name_is_not_blocked_by_unloaded_named_native_reexport() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: fails on thaw-js: route A ReferenceError: value is not defined; Package get("value") returns null
-mod qjs_pending_bundling_async_esm_star_diamond_keeps_the_terminal_binding {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn async_esm_star_diamond_keeps_the_terminal_binding() {
-    use std::ffi::{CStr, CString};
     let root = temp_registry("async-star-origin");
     let modules = root.join("node_modules");
     let package = modules.join("origin-pkg");
@@ -1264,12 +1258,14 @@ fn async_esm_star_diamond_keeps_the_terminal_binding() {
     fs::write(package.join("b.js"), "export * from './leaf.js';").unwrap();
     fs::write(package.join("leaf.js"), "await Promise.resolve(); export const value = 9;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
-    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ return module.exports.value; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "9");
+    // Node 22: `value` is 9 and the namespace keys are ['value'] (the star names are defined after the awaited leaf).
+    // run_js_probe installs its own `__thaw_probe` property on exports; the registry's enumerable `__esModule`
+    // marker is not a Node namespace key (pre-existing exports shape, see the report). Both are left out.
+    assert_eq!(
+        run_js_probe(&bundle, "[exports.value, Object.keys(exports).filter(function (k) { return k !== '__thaw_probe' && k !== '__esModule'; })]"),
+        "[9,[\"value\"]]"
+    );
     let _ = fs::remove_dir_all(root);
-}
 }
 
 #[test]
@@ -1494,28 +1490,34 @@ fn bundled_require_cache_and_commonjs_this_respect_module_format() {
 }
 }
 
-// qjs_pending: fails on thaw-js: ERROR: TypeError: requireAsync is not a function
-mod qjs_pending_bundling_async_commonjs_factory_keeps_top_level_this_after_await {
-    use super::*;
-    use ::thaw_quickjs;
-
+// Split of the old async-CommonJS test: a `.cjs` file with top-level await is a SyntaxError in Node 22, so the
+// CommonJS half keeps `this` without an await, and the top-level-await half is an ES module (`typeof this`).
 #[test]
-fn async_commonjs_factory_keeps_top_level_this_after_await() {
-    use std::ffi::{CStr, CString};
+fn commonjs_factory_this_is_its_exports_for_dynamic_import() {
     // Node 22: `import()` of a CommonJS module exposes `this.x = …` only through `default`
     // (cjs-module-lexer does not see `this.`), so the namespace has no `answer` — read `default.answer`.
     let package = temp_registry("bundle_async_factory_context");
     let modules = temp_registry("bundle_async_factory_context_modules");
     fs::write(package.join("index.js"), "module.exports = async function() { var value = await import('./late.cjs'); return value.default.answer; };").unwrap();
-    fs::write(package.join("late.cjs"), "await Promise.resolve(); this.answer = 42;").unwrap();
+    fs::write(package.join("late.cjs"), "this.answer = 42;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
-    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.asyncFactoryContext = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"asyncFactoryContext".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+    assert_eq!(run_js(&bundle), "42");
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn esm_top_level_this_is_undefined_after_await() {
+    // Node 22 twin (.mjs): an ES module's top-level `this` is undefined, also after an await. `.js` ESM for the
+    // registry's async path (see dynamic_import_uses_final_exports...).
+    let package = temp_registry("bundle_esm_top_level_this");
+    let modules = temp_registry("bundle_esm_top_level_this_modules");
+    fs::write(package.join("index.js"), "export default async function () { var value = await import('./late.js'); return value.kind; }").unwrap();
+    fs::write(package.join("late.js"), "await Promise.resolve(); export const kind = typeof this;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
+    assert_eq!(run_js_export(&bundle, "default", Vec::new()), "undefined");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
 }
 #[test]
 fn bundled_require_resolve_finds_resolve_only_files_and_rejects_missing_modules() {
