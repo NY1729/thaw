@@ -354,14 +354,14 @@ fn thaw_js_value_export_needs_handle(pkg: &ResolvedPackage, user_source: &str, n
         && thaw_js_default_import_locals(&pkg.name, user_source)
             .iter()
             .any(|local| thaw_js_binding_needs_handle(pkg, user_source, local, true)))
-        // A builtin's default is the module's own namespace object, so calls of its functions stay typed.
-        || (name == "default" && !thaw_js_bare_namespace_locals(pkg, user_source).is_empty())
+        // A builtin's namespace used as a value is served as its own namespace object (`NAMESPACE_VALUE`).
+        || (name == thaw_js::host::NAMESPACE_VALUE && !thaw_js_bare_namespace_locals(pkg, user_source).is_empty())
 }
 
 /// The local names the program binds to the whole namespace of the builtin `pkg` (`import * as p
 /// from 'node:..'`) and uses as a value rather than only through `p.member(..)` calls. Such a
-/// namespace is the module's own value: the shim serves its `default` handle (`module.exports`) and
-/// `module_graph` binds the namespace to that handle.
+/// namespace is served as Node's namespace object (`thaw_js::host::NAMESPACE_VALUE`) and `module_graph`
+/// binds the namespace to that handle.
 fn thaw_js_bare_namespace_locals(pkg: &ResolvedPackage, user_source: &str) -> Vec<String> {
     use thaw_parser::ast::{ImportSpecifier, ModuleDecl, ModuleItem};
     if !pkg.name.starts_with("node:") {

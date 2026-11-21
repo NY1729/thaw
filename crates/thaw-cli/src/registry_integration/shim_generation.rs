@@ -2035,15 +2035,15 @@ fn generate_registry_shims_pass(
                     ty: thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue),
                 })
                 .collect::<Vec<_>>();
-            // A builtin namespace the program uses as a value (`import * as fs; const f: any = fs`) is the
-            // module's own value: served as its `default` handle (`module.exports`), see
-            // `thaw_js_bare_namespace_locals`. The `.d.ts` declares no such value for most builtins.
-            let bare_namespace_default = if thaw_js_package
-                && !pkg.values.iter().any(|value| value.name == "default")
+            // A builtin namespace the program uses as a value (`import * as fs; const f: any = fs`) is Node's
+            // namespace object of the module, served as `NAMESPACE_VALUE` (`thaw_js_bare_namespace_locals`).
+            // The `.d.ts` declares no such value for most builtins.
+            let bare_namespace_value = if thaw_js_package
+                && !pkg.values.iter().any(|value| value.name == thaw_js::host::NAMESPACE_VALUE)
                 && !thaw_js_bare_namespace_locals(pkg, user_source).is_empty()
             {
                 vec![thaw_bridge::DtsValue {
-                    name: "default".to_string(),
+                    name: thaw_js::host::NAMESPACE_VALUE.to_string(),
                     ty: thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue),
                 }]
             } else {
@@ -2101,7 +2101,7 @@ fn generate_registry_shims_pass(
                         .map(|value| (value.name.clone(), value)),
                 )
                 .chain(
-                    bare_namespace_default
+                    bare_namespace_value
                         .iter()
                         .map(|value| (value.name.clone(), value)),
                 )
@@ -2683,7 +2683,7 @@ fn generate_registry_shims_pass(
         // export can have (`module_graph::BARE_NAMESPACE_EXPORT`). Added after the default rules above so
         // they see only real exports.
         if thaw_js_routed.contains(&pkg.name) {
-            if let Some(target) = value_targets.get(&(pkg.name.clone(), "default".to_string())) {
+            if let Some(target) = value_targets.get(&(pkg.name.clone(), thaw_js::host::NAMESPACE_VALUE.to_string())) {
                 if !thaw_js_bare_namespace_locals(pkg, user_source).is_empty() {
                     package_exports.insert(
                         crate::module_graph::BARE_NAMESPACE_EXPORT.to_string(),

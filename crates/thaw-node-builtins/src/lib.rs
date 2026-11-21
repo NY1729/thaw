@@ -8,9 +8,15 @@
 /// The CommonJS source of builtin `name` (`path`, `path/posix`, ...), or `None` when this crate does not serve it.
 pub fn source(name: &str) -> Option<&'static str> {
     paths::source(name)
+        .or_else(|| util::source(name))
+        .or_else(|| events::source(name))
+        .or_else(|| url::source(name))
 }
 
+mod events;
 mod paths;
+mod url;
+mod util;
 
 #[cfg(test)]
 mod tests {

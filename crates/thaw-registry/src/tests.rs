@@ -1559,7 +1559,8 @@ fn builtin_sources_parse_for_the_defined_method_names() {
 
 #[test]
 fn node_path_bundle_text_is_pinned() {
-    // the node:path bundle must stay byte-identical when its source moves to thaw-node-builtins
+    // the node:path bundle must stay byte-identical when its source moves to thaw-node-builtins; the only
+    // intended change since is dropping module.exports.default/__esModule (Node's path has neither): 52641 -> 52551 bytes
     let bundle = builtin_bundle_with("node:path", &[]).unwrap();
     let hex: String = Sha256::digest(bundle.as_bytes())
         .iter()
@@ -1567,8 +1568,44 @@ fn node_path_bundle_text_is_pinned() {
         .collect();
     assert_eq!(
         hex,
-        "14fdc6db55b0c2bf7e4b894e883c20e8dc697babc0daad9c5199d91ac5a25431",
+        "02c836a37668275d3415443998c62ac3e06c185637c7877d53dab4696994d631",
         "node:path bundle sha256 ({} bytes)",
         bundle.len()
+    );
+}
+
+// the util/events/url bundles must stay byte-identical when their sources move to thaw-node-builtins
+fn builtin_bundle_sha256(specifier: &str) -> String {
+    let bundle = builtin_bundle_with(specifier, &[]).unwrap();
+    Sha256::digest(bundle.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[test]
+fn node_util_bundle_text_is_pinned() {
+    assert_eq!(
+        builtin_bundle_sha256("node:util"),
+        "aa182efe54849dcf8054c4dc583778a24318acea8dd0ffe5d7c524d589b90037",
+        "node:util bundle sha256"
+    );
+}
+
+#[test]
+fn node_events_bundle_text_is_pinned() {
+    assert_eq!(
+        builtin_bundle_sha256("node:events"),
+        "d2daceeec75a4a7621f8960b66abeaab57c96418d4bb36b53af40e7d51c1a4ed",
+        "node:events bundle sha256"
+    );
+}
+
+#[test]
+fn node_url_bundle_text_is_pinned() {
+    assert_eq!(
+        builtin_bundle_sha256("node:url"),
+        "ed14c972a2e5e684c3b9f520539755c156b21b14bf88e7d87ebdec5ccae66556",
+        "node:url bundle sha256"
     );
 }
