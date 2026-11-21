@@ -642,8 +642,39 @@ pub(crate) fn lossy_out(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-fn this_str(it: &mut Interp, this: &Value) -> JsStr {
-    it.to_str(this)
+/// RequireObjectCoercible, then ToString, for `String.prototype.<name>` (V8's message names the method).
+fn this_str(it: &mut Interp, this: &Value, name: &str) -> R<JsStr> {
+    if matches!(this, Value::Undefined | Value::Null) {
+        return it.throw_error(
+            "TypeError",
+            &format!("String.prototype.{name} called on null or undefined"),
+        );
+    }
+    it.tostr(this)
+}
+
+/// ToIntegerOrInfinity of a position argument, clamped to `0..=len` (`undefined` gives `default`).
+fn position_arg(it: &mut Interp, v: &Value, default: usize, len: usize) -> R<usize> {
+    if matches!(v, Value::Undefined) {
+        return Ok(default);
+    }
+    let n = it.tonum(v)?;
+    Ok(if n.is_nan() {
+        0
+    } else {
+        n.clamp(0.0, len as f64) as usize
+    })
+}
+
+/// thisStringValue, for `toString` / `valueOf`: only a String value passes (wrappers arrive unwrapped).
+fn this_string_value(it: &mut Interp, this: &Value, name: &str) -> R<JsStr> {
+    match this {
+        Value::Str(s) => Ok(s.clone()),
+        _ => it.throw_error(
+            "TypeError",
+            &format!("String.prototype.{name} requires that 'this' be a String"),
+        ),
+    }
 }
 
 /// The own `flags` slot of a RegExp instance, in canonical order ("" if absent). Readers test single
@@ -982,13 +1013,24 @@ impl Interp {
     }
 
     fn string_replace(&mut self, this: &Value, args: &[Value], all: bool) -> R<Value> {
-        let s = this_str(self, this);
+        let s = this_str(self, this, if all { "replaceAll" } else { "replace" })?;
         let pattern = arg(args, 0);
         let repl = arg(args, 1);
         // (char index, match-array-like values) of the matches to replace
         let mut matches: Vec<(usize, Vec<Value>, Value)> = Vec::new();
+        // ToString(replaceValue) runs before the matching; a callable replacement is not converted
+        let mut repl_text = None;
         if let Some((ro, re)) = self.regexp_of(&pattern) {
             let global = regexp_flags(&ro).contains('g');
+            if all && !global {
+                return self.throw_error(
+                    "TypeError",
+                    "String.prototype.replaceAll called with a non-global RegExp argument",
+                );
+            }
+            if !repl.is_callable() {
+                repl_text = Some(self.tostr(&repl)?);
+            }
             let found = if global {
                 self.regexp_all(&ro, &re, &s)?
             } else {
@@ -1009,7 +1051,10 @@ impl Interp {
                 matches.push((idx, items, groups));
             }
         } else {
-            let needle = self.to_str(&pattern);
+            let needle = self.tostr(&pattern)?;
+            if !repl.is_callable() {
+                repl_text = Some(self.tostr(&repl)?);
+            }
             if needle.is_empty() {
                 // an empty needle matches at every UTF-16 unit boundary (between the halves of a
                 // surrogate pair too); stepping by bytes would split a multi-byte char
@@ -1053,10 +1098,15 @@ impl Interp {
                     call_args.push(named.clone());
                 }
                 let r = self.call(&repl, &Value::Undefined, &call_args)?;
-                self.to_str(&r).to_string()
+                self.tostr(&r)?.to_string()
             } else {
-                let t = self.to_str(&repl);
-                self.expand_replacement(&t, &groups, &named, idx, &s)
+                self.expand_replacement(
+                    repl_text.as_deref().unwrap_or(""),
+                    &groups,
+                    &named,
+                    idx,
+                    &s,
+                )
             };
             out.push_str(&text);
             pos = idx + matched_len;
@@ -1291,12 +1341,12 @@ impl Interp {
         Ok(true)
     }
 
-    fn range(&mut self, args: &[Value], len: usize) -> (usize, usize) {
-        let rel = |it: &mut Interp, v: Value, default: usize| -> usize {
-            match v {
+    fn range(&mut self, args: &[Value], len: usize) -> R<(usize, usize)> {
+        let rel = |it: &mut Interp, v: Value, default: usize| -> R<usize> {
+            Ok(match v {
                 Value::Undefined => default,
                 v => {
-                    let n = it.num(&v);
+                    let n = it.tonum(&v)?;
                     let n = if n.is_nan() { 0.0 } else { n.trunc() };
                     if n < 0.0 {
                         (len as f64 + n).max(0.0) as usize
@@ -1304,11 +1354,11 @@ impl Interp {
                         (n.min(len as f64)) as usize
                     }
                 }
-            }
+            })
         };
-        let from = rel(self, arg(args, 0), 0);
-        let to = rel(self, arg(args, 1), len);
-        (from, to.max(from))
+        let from = rel(self, arg(args, 0), 0)?;
+        let to = rel(self, arg(args, 1), len)?;
+        Ok((from, to.max(from)))
     }
 
     /// Like [`Self::array_items`] but array holes stay `Value::Hole` (callers must not leak them).
@@ -2368,7 +2418,7 @@ impl Interp {
                 matches!(this, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)));
             if is_array {
                 let items = it.array_items_raw(this);
-                let (from, to) = it.range(args, items.len());
+                let (from, to) = it.range(args, items.len())?;
                 return Ok(it.array(items[from..to].to_vec()));
             }
             // any other array-like (typed array, arguments, `{length, 0: ..}`, string, proxy): generic
@@ -2380,7 +2430,7 @@ impl Interp {
             } else {
                 n.trunc().clamp(0.0, 9e15) as usize
             };
-            let (from, to) = it.range(args, len);
+            let (from, to) = it.range(args, len)?;
             if to.saturating_sub(from) >= MAX_DENSE_ARRAY_LEN {
                 return it.throw_error("RangeError", "Invalid array length");
             }
@@ -2435,7 +2485,10 @@ impl Interp {
             put_hidden(o, "prototype", Value::Object(sp.clone()));
             put_hidden(&sp, "constructor", string.clone());
             self.set_native(o, "fromCharCode", |it, _, args| {
-                let units: Vec<u16> = args.iter().map(|v| it.num(v) as i64 as u16).collect();
+                let units = args
+                    .iter()
+                    .map(|v| it.tonum(v).map(|n| n as i64 as u16))
+                    .collect::<R<Vec<u16>>>()?;
                 Ok(Value::Str(units_str(&units).into()))
             });
         }
@@ -2444,14 +2497,14 @@ impl Interp {
         }
         g.declare("String", string, true);
         self.set_native(&sp, "toString", |it, this, _| {
-            Ok(Value::Str(this_str(it, this)))
+            Ok(Value::Str(this_string_value(it, this, "toString")?))
         });
         self.set_native(&sp, "valueOf", |it, this, _| {
-            Ok(Value::Str(this_str(it, this)))
+            Ok(Value::Str(this_string_value(it, this, "valueOf")?))
         });
         self.set_native(&sp, "charAt", |it, this, args| {
-            let s = this_str(it, this);
-            let i = it.num(&arg(args, 0));
+            let s = this_str(it, this, "charAt")?;
+            let i = it.tonum(&arg(args, 0))?;
             Ok(Value::Str(if i >= 0.0 && (i as usize) < s.len16() {
                 s.slice_units(i as usize, i as usize + 1).into()
             } else {
@@ -2459,8 +2512,8 @@ impl Interp {
             }))
         });
         self.set_native(&sp, "charCodeAt", |it, this, args| {
-            let s = this_str(it, this);
-            let i = it.num(&arg(args, 0));
+            let s = this_str(it, this, "charCodeAt")?;
+            let i = it.tonum(&arg(args, 0))?;
             Ok(Value::Number(if i >= 0.0 {
                 s.unit_at(i as usize).map_or(f64::NAN, f64::from)
             } else {
@@ -2468,21 +2521,21 @@ impl Interp {
             }))
         });
         self.set_native(&sp, "indexOf", |it, this, args| {
-            let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
+            let (s, n) = (this_str(it, this, "indexOf")?, it.tostr(&arg(args, 0))?);
             let from = match arg(args, 1) {
                 Value::Undefined => 0,
-                v => it.num(&v).max(0.0) as usize,
+                v => it.tonum(&v)?.max(0.0) as usize,
             };
             Ok(Value::Number(
                 find_units(&s, &n, from).map_or(-1.0, |u| u as f64),
             ))
         });
         self.set_native(&sp, "lastIndexOf", |it, this, args| {
-            let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
+            let (s, n) = (this_str(it, this, "lastIndexOf")?, it.tostr(&arg(args, 0))?);
             // a NaN position means "from the end" (+Infinity)
             let from = match arg(args, 1) {
                 Value::Undefined => usize::MAX,
-                v => match it.num(&v) {
+                v => match it.tonum(&v)? {
                     p if p.is_nan() => usize::MAX,
                     p => p.max(0.0) as usize,
                 },
@@ -2492,62 +2545,89 @@ impl Interp {
             ))
         });
         self.set_native(&sp, "includes", |it, this, args| {
-            let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
-            Ok(Value::Bool(s.contains(&*n)))
+            let s = this_str(it, this, "includes")?;
+            if it.regexp_of(&arg(args, 0)).is_some() {
+                return it.throw_error(
+                    "TypeError",
+                    "First argument to String.prototype.includes must not be a regular expression",
+                );
+            }
+            let n = it.tostr(&arg(args, 0))?;
+            let from = position_arg(it, &arg(args, 1), 0, s.len16())?;
+            Ok(Value::Bool(find_units(&s, &n, from).is_some()))
         });
         self.set_native(&sp, "startsWith", |it, this, args| {
-            let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
-            let from = unit_to_byte(
-                &s,
-                it.num(&arg(args, 1)).max(0.0) as usize
-                    * (!matches!(arg(args, 1), Value::Undefined) as usize),
-            );
+            let s = this_str(it, this, "startsWith")?;
+            if it.regexp_of(&arg(args, 0)).is_some() {
+                return it.throw_error(
+                    "TypeError",
+                    "First argument to String.prototype.startsWith must not be a regular expression",
+                );
+            }
+            let n = it.tostr(&arg(args, 0))?;
+            let from = unit_to_byte(&s, position_arg(it, &arg(args, 1), 0, s.len16())?);
             Ok(Value::Bool(s[from..].starts_with(&*n)))
         });
         self.set_native(&sp, "endsWith", |it, this, args| {
-            let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
-            let end = match arg(args, 1) {
-                Value::Undefined => str_len(&s),
-                v => (it.num(&v).max(0.0) as usize).min(str_len(&s)),
-            };
+            let s = this_str(it, this, "endsWith")?;
+            if it.regexp_of(&arg(args, 0)).is_some() {
+                return it.throw_error(
+                    "TypeError",
+                    "First argument to String.prototype.endsWith must not be a regular expression",
+                );
+            }
+            let n = it.tostr(&arg(args, 0))?;
+            let end = position_arg(it, &arg(args, 1), s.len16(), s.len16())?;
             let head = &s[..unit_to_byte(&s, end)];
             Ok(Value::Bool(head.ends_with(&*n)))
         });
         self.set_native(&sp, "toUpperCase", |it, this, _| {
-            Ok(Value::Str(this_str(it, this).to_uppercase().into()))
+            Ok(Value::Str(
+                this_str(it, this, "toUpperCase")?.to_uppercase().into(),
+            ))
         });
         self.set_native(&sp, "toLowerCase", |it, this, _| {
-            Ok(Value::Str(this_str(it, this).to_lowercase().into()))
+            Ok(Value::Str(
+                this_str(it, this, "toLowerCase")?.to_lowercase().into(),
+            ))
         });
         self.set_native(&sp, "trim", |it, this, _| {
-            Ok(Value::Str(this_str(it, this).trim().into()))
+            Ok(Value::Str(this_str(it, this, "trim")?.trim().into()))
         });
         self.set_native(&sp, "trimStart", |it, this, _| {
-            Ok(Value::Str(this_str(it, this).trim_start().into()))
+            Ok(Value::Str(
+                this_str(it, this, "trimStart")?.trim_start().into(),
+            ))
         });
         self.set_native(&sp, "trimEnd", |it, this, _| {
-            Ok(Value::Str(this_str(it, this).trim_end().into()))
+            Ok(Value::Str(this_str(it, this, "trimEnd")?.trim_end().into()))
         });
         self.set_native(&sp, "repeat", |it, this, args| {
-            let n = it.num(&arg(args, 0));
-            if !(0.0..1e9).contains(&n) {
+            let s = this_str(it, this, "repeat")?;
+            let n = it.tonum(&arg(args, 0))?;
+            let count = if n.is_nan() { 0.0 } else { n.trunc() };
+            if !(0.0..1e9).contains(&count) {
                 return it.throw_error(
                     "RangeError",
                     &format!("Invalid count value: {}", number_to_string(n)),
                 );
             }
-            Ok(Value::Str(this_str(it, this).repeat(n as usize).into()))
+            Ok(Value::Str(s.repeat(count as usize).into()))
         });
         for (name, start) in [("padStart", true), ("padEnd", false)] {
             self.set_native(&sp, name, move |it, this, args| {
-                let s = this_str(it, this);
-                let target = it.num(&arg(args, 0)).max(0.0) as usize;
+                let s = this_str(it, this, name)?;
+                let target = it.tonum(&arg(args, 0))?.max(0.0) as usize;
+                // the filler is converted only when padding happens
+                let len = s.len16();
+                if target <= len {
+                    return Ok(Value::Str(s));
+                }
                 let fill: JsStr = match arg(args, 1) {
                     Value::Undefined => " ".into(),
-                    v => it.to_str(&v),
+                    v => it.tostr(&v)?,
                 };
-                let len = s.len16();
-                if target <= len || fill.is_empty() {
+                if fill.is_empty() {
                     return Ok(Value::Str(s));
                 }
                 // counted in UTF-16 units: an astral filler char contributes both surrogate halves
@@ -2566,32 +2646,22 @@ impl Interp {
             });
         }
         self.set_native(&sp, "slice", |it, this, args| {
-            let s = this_str(it, this);
-            let (from, to) = it.range(args, s.len16());
+            let s = this_str(it, this, "slice")?;
+            let (from, to) = it.range(args, s.len16())?;
             Ok(Value::Str(s.slice_units(from, to).into()))
         });
         self.set_native(&sp, "substring", |it, this, args| {
-            let s = this_str(it, this);
+            let s = this_str(it, this, "substring")?;
             let n_units = s.len16();
-            let clamp = |it: &mut Interp, v: Value, d: usize| match v {
-                Value::Undefined => d,
-                v => {
-                    let n = it.num(&v);
-                    if n.is_nan() || n < 0.0 {
-                        0
-                    } else {
-                        (n as usize).min(n_units)
-                    }
-                }
-            };
-            let (a, b) = (clamp(it, arg(args, 0), 0), clamp(it, arg(args, 1), n_units));
+            let a = position_arg(it, &arg(args, 0), 0, n_units)?;
+            let b = position_arg(it, &arg(args, 1), n_units, n_units)?;
             let (from, to) = (a.min(b), a.max(b));
             Ok(Value::Str(s.slice_units(from, to).into()))
         });
         self.set_native(&sp, "substr", |it, this, args| {
-            let s = this_str(it, this);
+            let s = this_str(it, this, "substr")?;
             let total = s.len16();
-            let n = it.num(&arg(args, 0));
+            let n = it.tonum(&arg(args, 0))?;
             let from = if n < 0.0 {
                 (total as f64 + n).max(0.0) as usize
             } else {
@@ -2599,20 +2669,23 @@ impl Interp {
             };
             let len = match arg(args, 1) {
                 Value::Undefined => total - from,
-                v => (it.num(&v).max(0.0) as usize).min(total - from),
+                v => (it.tonum(&v)?.max(0.0) as usize).min(total - from),
             };
             Ok(Value::Str(s.slice_units(from, from + len).into()))
         });
         self.set_native(&sp, "concat", |it, this, args| {
-            let mut s = this_str(it, this).to_string();
+            let mut s = this_str(it, this, "concat")?.to_string();
             for v in args {
-                let t = it.to_str(v);
+                let t = it.tostr(v)?;
                 push_joined(&mut s, &t);
             }
             Ok(Value::Str(s.into()))
         });
         self.set_native(&sp, "localeCompare", |it, this, args| {
-            let (a, b) = (this_str(it, this), it.to_str(&arg(args, 0)));
+            let (a, b) = (
+                this_str(it, this, "localeCompare")?,
+                it.tostr(&arg(args, 0))?,
+            );
             Ok(Value::Number(match collate(&a, &b) {
                 std::cmp::Ordering::Less => -1.0,
                 std::cmp::Ordering::Equal => 0.0,
@@ -2626,7 +2699,7 @@ impl Interp {
             it.string_replace(this, args, true)
         });
         self.set_native(&sp, "match", |it, this, args| {
-            let s = this_str(it, this);
+            let s = this_str(it, this, "match")?;
             let pat = arg(args, 0);
             let (ro, re) = match it.regexp_of(&pat) {
                 Some(x) => x,
@@ -2634,7 +2707,7 @@ impl Interp {
                     let src = if matches!(pat, Value::Undefined) {
                         "(?:)".into()
                     } else {
-                        it.to_str(&pat)
+                        it.tostr(&pat)?
                     };
                     let r = it.new_regexp(&src, "")?;
                     it.regexp_of(&r).unwrap()
@@ -2654,12 +2727,16 @@ impl Interp {
             it.regexp_exec(&ro, &re, &s)
         });
         self.set_native(&sp, "search", |it, this, args| {
-            let s = this_str(it, this);
+            let s = this_str(it, this, "search")?;
             let pat = arg(args, 0);
             let (_, re) = match it.regexp_of(&pat) {
                 Some(x) => x,
                 None => {
-                    let src = it.to_str(&pat);
+                    let src: JsStr = if matches!(pat, Value::Undefined) {
+                        "(?:)".into()
+                    } else {
+                        it.tostr(&pat)?
+                    };
                     let r = it.new_regexp(&src, "")?;
                     it.regexp_of(&r).unwrap()
                 }
@@ -2673,10 +2750,11 @@ impl Interp {
             ))
         });
         self.set_native(&sp, "split", |it, this, args| {
-            let s = this_str(it, this);
+            let s = this_str(it, this, "split")?;
+            // ToUint32(limit), converted before the separator (V8 order)
             let limit = match arg(args, 1) {
                 Value::Undefined => usize::MAX,
-                v => it.num(&v) as usize,
+                v => to_int32(it.tonum(&v)?) as u32 as usize,
             };
             let sep = arg(args, 0);
             let mut parts: Vec<Value> = Vec::new();
@@ -2713,7 +2791,7 @@ impl Interp {
             } else if matches!(sep, Value::Undefined) {
                 parts.push(Value::Str(s.clone()));
             } else {
-                let sep = it.to_str(&sep);
+                let sep = it.tostr(&sep)?;
                 if sep.is_empty() {
                     parts.extend(
                         str_units(&s)

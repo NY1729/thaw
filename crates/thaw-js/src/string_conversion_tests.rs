@@ -87,3 +87,14 @@ fn ordinary_objects_still_stringify() {
         "[object Object] [object Object] ok a1,b 1,2,3 function f"
     );
 }
+
+// Stage 1 (String.prototype): every expectation is the Node 22.23.1 output of data/string_conv_probe.js.
+#[test]
+fn string_prototype_conversions_match_node22() {
+    let src = include_str!("data/string_conv_probe.js");
+    let expected = include_str!("data/string_conv_node22.txt")
+        .lines()
+        .collect::<Vec<_>>()
+        .join("|");
+    assert_eq!(one(src), expected);
+}
