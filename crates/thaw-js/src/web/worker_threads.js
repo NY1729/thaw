@@ -320,16 +320,50 @@
     getHeapStatistics() {
       return askWorker(states.get(this), __thaw_worker_heap, heapStatisticsOf);
     }
+
+    // Node 22: a name is required (ERR_INVALID_ARG_TYPE, thrown). Resolves a handle whose stop() resolves the profile
+    // JSON; the profile is sampled by the worker itself (cpu_profile.rs).
+    startCpuProfile(name) {
+      const state = states.get(this);
+      if (typeof name !== 'string') throw threadError('ERR_INVALID_ARG_TYPE', `The "name" argument must be of type string. ${receivedValue(name)}`, undefined, TypeError);
+      return askWorker(state, __thaw_worker_prof, profileReply, 0, name).then(() => profileHandle(state, name));
+    }
   }
 
-  // Asks the worker thread for a figure, served from its interrupt check; `done` shapes the answer. Rejects
-  // ERR_WORKER_NOT_RUNNING before 'online', after exit, and when the request cannot be queued.
-  function askWorker(state, native, done) {
+  // The handle of a started profile: its stop() settles once (Node: later calls resolve the same string).
+  function profileHandle(state, name) {
+    let stopped;
+    const handle = {
+      stop() {
+        if (stopped === undefined) stopped = askWorker(state, __thaw_worker_prof, profileReply, 1, name);
+        return stopped;
+      },
+    };
+    handle[Symbol.asyncDispose] = () => handle.stop().then(() => undefined);
+    return handle;
+  }
+
+  // The worker's answer to a profile start (no value) or stop (the profile JSON), with Node's errors.
+  function profileReply(answer) {
+    if (answer.status === 'exists') throw threadError('ERR_CPU_PROFILE_ALREADY_STARTED', 'CPU profile already started', undefined, Error);
+    if (answer.status === 'unknown') throw threadError('ERR_CPU_PROFILE_NOT_STARTED', 'CPU profile not started', undefined, Error);
+    return answer.value;
+  }
+
+  // Asks the worker thread for a figure, served from its interrupt check; `done` shapes the answer (a throw from it
+  // rejects). `extra` follows the handle in the native's arguments. Rejects ERR_WORKER_NOT_RUNNING before 'online',
+  // after exit, and when the request cannot be queued.
+  function askWorker(state, native, done, ...extra) {
     return new Promise((resolve, reject) => {
       if (!state.online || state.exited) return reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
       const ack = nextCpuAck++;
-      state.cpuPending.set(ack, { resolve: answer => resolve(done(answer)), reject });
-      if (!native(state.handle, ack)) {
+      state.cpuPending.set(ack, {
+        resolve: answer => {
+          try { resolve(done(answer)); } catch (error) { reject(error); }
+        },
+        reject,
+      });
+      if (!native(state.handle, ack, ...extra)) {
         state.cpuPending.delete(ack);
         reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
       }
@@ -376,11 +410,11 @@
       if (event.type === 'online') {
         state.online = true;
         worker.emit('online');
-      } else if (event.type === 'cpu' || event.type === 'heap') {
+      } else if (event.type === 'cpu' || event.type === 'heap' || event.type === 'profile') {
         const request = state.cpuPending.get(event.ack);
         if (request !== undefined) {
           state.cpuPending.delete(event.ack);
-          request.resolve(event.type === 'cpu' ? { user: event.user, system: event.system } : event.usage);
+          request.resolve(event.type === 'cpu' ? { user: event.user, system: event.system } : event.type === 'profile' ? { status: event.status, value: event.value } : event.usage);
         }
       } else if (event.type === 'message') {
         let value;
