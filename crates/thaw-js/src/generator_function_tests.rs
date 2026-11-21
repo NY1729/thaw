@@ -255,3 +255,99 @@ console.log(Object.getPrototypeOf(Buffer.alloc(1)).constructor.name, Buffer.allo
         "[object Uint8Array] [object Uint8Array] [object Uint8Array] [object Uint8Array]|Uint8Array|[object Float64Array] [object BigInt64Array]|Buffer Uint8Array"
     );
 }
+
+/// Generator parameters are bound at the call (FunctionDeclarationInstantiation), not at the first `next`.
+/// A param error throws from the call itself; a sync generator returns no object.
+///
+/// Node 22.23.1 (3 identical runs; probe `tmp-run/gen3/p3.js` case A): `caught T 1`.
+#[test]
+fn generator_default_throws_at_call() {
+    assert_eq!(
+        one(r#"let n = 0; const T = () => { throw new Error('T'); };
+function* g1(a = (n++, T())) { yield 1; }
+try { g1(); console.log('returned'); } catch (e) { console.log('caught', e.message, n); }
+"#),
+        "caught T 1"
+    );
+}
+
+/// An async generator's param error is also thrown synchronously from the call, not as a rejected promise.
+///
+/// Node 22.23.1 (3 identical runs; probe case B): `sync T 1`.
+#[test]
+fn async_generator_default_throws_synchronously() {
+    assert_eq!(
+        one(r#"let n = 0; const T = () => { throw new Error('T'); };
+async function* ag(a = (n++, T())) { yield 1; }
+try { const p = ag(); console.log('returned', p instanceof Promise); } catch (e) { console.log('sync', e.message, n); }
+"#),
+        "sync T 1"
+    );
+}
+
+/// An async function's param error is a rejected promise (already so before the change; pinned).
+///
+/// Node 22.23.1 (3 identical runs; probe case C): `sync true|rej T`.
+#[test]
+fn async_function_default_rejects_promise() {
+    let mut it = Interp::new();
+    it.run(r#"const T = () => { throw new Error('T'); };
+async function af(a = T()) {}
+const p = af(); console.log('sync', p instanceof Promise); p.catch(e => console.log('rej', e.message));
+"#)
+    .ok()
+    .unwrap();
+    // `run` does not drain promise jobs: the rejection handler runs in the event loop
+    it.run_event_loop().ok().unwrap();
+    assert_eq!(it.out.join("|"), "sync true|rej T");
+}
+
+/// Parameter initialisers read their bindings at the call. `arguments` is captured at the call too.
+///
+/// Node 22.23.1 (3 identical runs; probe cases D, E): `1|1`.
+#[test]
+fn generator_params_read_at_call_time() {
+    assert_eq!(
+        one(r#"let x = 1; function* m(a = x) { yield a; }
+const it = m(); x = 2; console.log(it.next().value);
+function* k(a, b = arguments.length) { yield b; }
+console.log(k(1).next().value);
+"#),
+        "1|1"
+    );
+}
+
+/// Destructuring parameter errors throw at the call, for plain, object-method, class, static and async-generator forms.
+///
+/// Node 22.23.1 (3 identical runs; probe cases F, G): `F1 TypeError|F2 TypeError|G obj TypeError|G cls TypeError|G static TypeError|G async sync T`.
+#[test]
+fn generator_destructuring_params_throw_at_call() {
+    assert_eq!(
+        one(r#"const T = () => { throw new Error('T'); };
+function* d({ a }) {} function* d2([a]) {}
+try { d(null); console.log('F1 returned'); } catch (e) { console.log('F1', e.constructor.name); }
+try { d2(undefined); console.log('F2 returned'); } catch (e) { console.log('F2', e.constructor.name); }
+const o = { *m({ a }) { yield a; } };
+try { o.m(null); console.log('G obj returned'); } catch (e) { console.log('G obj', e.constructor.name); }
+class C { *m([a]) {} static *s({ a }) {} async *am(a = T()) {} }
+try { new C().m(undefined); console.log('G cls returned'); } catch (e) { console.log('G cls', e.constructor.name); }
+try { C.s(null); console.log('G static returned'); } catch (e) { console.log('G static', e.constructor.name); }
+try { new C().am(); console.log('G async returned'); } catch (e) { console.log('G async sync', e.message); }
+"#),
+        "F1 TypeError|F2 TypeError|G obj TypeError|G cls TypeError|G static TypeError|G async sync T"
+    );
+}
+
+/// Param side effects run once, at the call; `return` before the first `next` does not run them again.
+///
+/// Node 22.23.1 (3 identical runs; probe case H): `1|1 5 true true`.
+#[test]
+fn generator_params_run_once_at_call_before_return() {
+    assert_eq!(
+        one(r#"let s = 0; const side = () => { s++; return 1; };
+function* g(a = side()) { yield a; }
+const it = g(); console.log(s); const r = it.return(5); console.log(s, r.value, r.done, it.next().done);
+"#),
+        "1|1 5 true true"
+    );
+}

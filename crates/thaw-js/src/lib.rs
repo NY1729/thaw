@@ -2995,6 +2995,20 @@ impl Interp {
         args: &[Value],
         new_target: Option<Value>,
     ) -> R<Value> {
+        let frame = self.bind_frame(f, def, scope, this, args, new_target)?;
+        self.run_body(def, &frame)
+    }
+
+    /// FunctionDeclarationInstantiation (`this`, self name, `arguments`, params and defaults): the call's frame.
+    pub(crate) fn bind_frame(
+        &mut self,
+        f: &Value,
+        def: &Rc<FuncDef>,
+        scope: &Rc<Scope>,
+        this: &Value,
+        args: &[Value],
+        new_target: Option<Value>,
+    ) -> R<Rc<Scope>> {
         let frame = Scope::new(Some(scope.clone()));
         frame
             .kind
@@ -3053,11 +3067,16 @@ impl Interp {
                 )?;
             }
         }
+        Ok(frame)
+    }
+
+    /// The body of a call whose frame `bind_frame` already built.
+    pub(crate) fn run_body(&mut self, def: &Rc<FuncDef>, frame: &Rc<Scope>) -> R<Value> {
         match &def.body {
-            Body::Expr(e) => self.eval(e, &frame),
+            Body::Expr(e) => self.eval(e, frame),
             Body::Block(stmts) => {
-                declare_hoisted(&def.hoisted, &frame);
-                match self.exec_stmts(stmts, &frame) {
+                declare_hoisted(&def.hoisted, frame);
+                match self.exec_stmts(stmts, frame) {
                     Ok(()) => Ok(Value::Undefined),
                     Err(Ctl::Return(v)) => Ok(v),
                     Err(e) => Err(e),
