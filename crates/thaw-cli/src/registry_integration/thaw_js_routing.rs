@@ -1185,10 +1185,10 @@ pub(crate) fn add_implicit_peers(
         let Some(bundle_js) = package.bundle_js else {
             continue;
         };
-        let Ok(required) = thaw_registry::bundle_peer_requires(&bundle_js) else {
+        let Ok(served) = thaw_registry::served_peers_of(&bundle_js, &installed) else {
             continue;
         };
-        for peer in required.into_iter().filter(|peer| installed.contains(peer)) {
+        for peer in served {
             peers.insert(peer.clone());
             if !resolved_packages.contains(&peer) {
                 resolved_packages.push(peer.clone());

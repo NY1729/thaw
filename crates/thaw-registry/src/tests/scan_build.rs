@@ -45,3 +45,17 @@ fn scan_build_has_intl_with_the_intl_feature() {
     let report = scan_bundle_for_build(&bundle, false, &empty, &empty).unwrap();
     assert!(report.is_clean(), "{:?}", report.blockers);
 }
+
+#[test]
+fn scan_build_serves_an_installed_peer_the_bundle_requires() {
+    // an installed package a bundle requires by its exact name blocks a bare scan; the build's served set serves it
+    let bundle = thaw_js::scan::script_as_bundle("module.exports = function () { return require('pg'); };");
+    let installed: std::collections::HashSet<String> = ["pg".to_string()].into_iter().collect();
+    let none = std::collections::HashSet::new();
+    let bare = scan_bundle_for_build(&bundle, false, &installed, &none).unwrap();
+    assert!(!bare.is_clean(), "an installed peer that is not served must block");
+    let served: std::collections::HashSet<String> = crate::served_peers_of(&bundle, &installed).unwrap().into_iter().collect();
+    assert_eq!(served, installed);
+    let build = scan_bundle_for_build(&bundle, false, &installed, &served).unwrap();
+    assert!(build.is_clean(), "{:?}", build.blockers);
+}
