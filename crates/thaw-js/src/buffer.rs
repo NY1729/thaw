@@ -28,6 +28,23 @@ impl Interp {
             Ok(Value::str(&String::from_utf8_lossy(slice)))
         });
         g.declare("__thaw_utf8_decode", f, true);
+        // hex string -> bytes, stopping at the first pair that is not two hex digits (as Node does)
+        let f = self.native(|it, _, a| {
+            let s = it.to_str(&arg(a, 0));
+            let digit = |c: u8| match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                b'A'..=b'F' => Some(c - b'A' + 10),
+                _ => None,
+            };
+            let bytes: Vec<u8> = s
+                .as_bytes()
+                .chunks_exact(2)
+                .map_while(|pair| Some(digit(pair[0])? * 16 + digit(pair[1])?))
+                .collect();
+            Ok(it.u8_from_vec(bytes))
+        });
+        g.declare("__thaw_hex_decode", f, true);
         self.run_builtin(BUFFER_PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js buffer prelude must evaluate"));
     }
@@ -38,7 +55,7 @@ const BUFFER_PRELUDE: &str = r#"
   function def(o, name, f) {
     Object.defineProperty(o, name, { value: f, writable: true, enumerable: false, configurable: true });
   }
-  var enc8 = __thaw_utf8_encode, dec8 = __thaw_utf8_decode;
+  var enc8 = __thaw_utf8_encode, dec8 = __thaw_utf8_decode, hexDec = __thaw_hex_decode;
   var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   var B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 
@@ -110,15 +127,7 @@ const BUFFER_PRELUDE: &str = r#"
     enc = normEnc(enc);
     var out, i, n;
     if (enc === 'utf8') return enc8(s);
-    if (enc === 'hex') {
-      n = s.length >> 1; out = [];
-      for (i = 0; i < n; i++) {
-        var h = parseInt(s.substr(i * 2, 2), 16);
-        if (h !== h || !/^[0-9a-fA-F]{2}$/.test(s.substr(i * 2, 2))) break;
-        out.push(h);
-      }
-      return new U8(out);
-    }
+    if (enc === 'hex') return hexDec(s);
     if (enc === 'base64' || enc === 'base64url') {
       out = []; var acc = 0, bits = 0;
       for (i = 0; i < s.length; i++) {
