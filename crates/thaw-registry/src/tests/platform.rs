@@ -1273,37 +1273,26 @@ fn worker_entry_throw_of_each_falsy_value_reaches_the_error_event() {
     let _ = fs::remove_dir_all(modules);
 }
 
-// qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
-mod qjs_pending_platform_worker_main_ready_rejects_every_falsy_thrown_value {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn worker_main_ready_rejects_every_falsy_thrown_value() {
-    use std::ffi::{CStr, CString};
-    let package = temp_registry("worker-falsy-main-ready");
-    let modules = temp_registry("worker-falsy-main-ready-modules");
-    fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Worker(new URL('./worker.js', import.meta.url)); };").unwrap();
-    fs::write(package.join("worker.js"), "throw 0;").unwrap();
-    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "worker-falsy-pkg", &package, "index.js").unwrap();
-    let script = format!(r#"globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle}
-        (0, eval)(globalThis.__thaw_worker_bundle_source);
-        globalThis.workerFalsyReadyProbe = async function() {{
-          var reasons = [0, false, '', null, undefined], results = [];
-          for (var i = 0; i < reasons.length; i++) {{
-            var mod = {{ exports: {{}} }}, finish = globalThis.__thaw_bundle_register_worker_main('probe/' + i, mod);
-            finish(false, reasons[i]);
-            try {{ await mod.ready; results.push(false); }}
-            catch (error) {{ results.push(Object.is(error, reasons[i])); }}
-          }}
-          return results;
-        }};"#);
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"workerFalsyReadyProbe".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,true,true,true]");
-    let _ = fs::remove_dir_all(package);
-    let _ = fs::remove_dir_all(modules);
-}
+    let dir = worker_fixture("worker_main_ready_falsy", &[]);
+    let result = run_worker_fixture(
+        &dir,
+        r#"var out = [];
+        for (var source of ['throw 0', 'throw false', 'throw ""', 'throw null', 'throw undefined']) {
+            out.push(await new Promise(function (resolve) {
+                var worker = new Worker(source, { eval: true });
+                worker.on('error', function (error) { resolve(['err', typeof error, String(error)]); });
+                worker.on('exit', function (code) { resolve(['exit', code]); });
+            }));
+        }
+        return out;"#,
+    );
+    assert_eq!(
+        result,
+        r#"[["err","number","0"],["err","boolean","false"],["err","string",""],["err","object","null"],["err","undefined","undefined"]]"#
+    );
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -1317,6 +1306,32 @@ fn bundled_worker_entry_require_resolve_does_not_load_target() {
     assert_eq!(run_js(&bundle), "[\"/thaw_modules/pkg/dep.js\",\"MODULE_NOT_FOUND\",0]");
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn worker_saved_url_keeps_bundle_affinity_for_worker_entry() {
+    let dir = worker_fixture(
+        "worker_saved_url_affinity",
+        &[
+            ("worker.js", "var parentPort = require('node:worker_threads').parentPort; var direct, created; try { require('affinity-missing'); } catch (error) { direct = error.code; } var makeRequire = require('node:module').createRequire(__filename); try { makeRequire('affinity-missing'); } catch (error) { created = error.code; } parentPort.postMessage([require('./dep.js').value, require('affinity-shared').value, direct, created]); parentPort.close();"),
+            ("dep.js", "exports.value = 'A';"),
+            ("node_modules/affinity-shared/package.json", r#"{"name":"affinity-shared","main":"index.js"}"#),
+            ("node_modules/affinity-shared/index.js", "exports.value = 'A-bare';"),
+        ],
+    );
+    let result = run_worker_fixture(
+        &dir,
+        r#"var saved, real = Worker;
+        Worker = function (url) { saved = url; };
+        try { new Worker(new URL('./worker.js', import.meta.url)); } finally { Worker = real; }
+        var run = await runWorker(saved);
+        return [run.messages, run.errors];"#,
+    );
+    assert_eq!(
+        result,
+        r#"[[["A","A-bare","MODULE_NOT_FOUND","MODULE_NOT_FOUND"]],[]]"#
+    );
+    let _ = fs::remove_dir_all(dir);
 }
 
 // qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
