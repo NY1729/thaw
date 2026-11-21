@@ -123,6 +123,9 @@ pub(crate) struct Co {
     promise: Obj,
     /// Set for an async generator: its yields and completion are routed to the generator driver.
     pub(crate) gen: Option<Obj>,
+    /// A generator's bound frame, kept by the host: the coroutine body must not drop the last reference to it, since
+    /// a `Scope` dropped on the coroutine thread miscounts that thread's census and leaves a stale registry entry.
+    pub(crate) _frame: Option<Rc<Scope>>,
 }
 
 #[derive(Default)]
@@ -956,6 +959,7 @@ impl Interp {
 
     /// Start the coroutine thread for a closure body. On success the coroutine's context is on
     /// `cur_co` and the caller must `co_wait` (or the generator equivalent) on the result.
+    /// For a generator, `scope` is the frame `make_generator` already bound (`this`/`args` are then unused).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_co(
         &mut self,
@@ -980,6 +984,7 @@ impl Interp {
             interp: self as *mut Interp,
             promise,
             gen,
+            _frame: def.is_gen.then(|| scope.clone()),
         });
         // The coroutine's segment starts at its own frame. An async call's frame was pushed by the
         // caller just before (`call_as`), so the segment starts one slot below; a generator's frame is
@@ -1007,7 +1012,15 @@ impl Interp {
             // SAFETY: the host thread is blocked in `co_wait` until we send a message.
             let it = unsafe { &mut *ip };
             it.configure_stack(co::STACK_BYTES);
-            let r = it.call_closure_sync(&f, &def, &scope, &this, &args);
+            let r = if def.is_gen {
+                // the frame was bound at the call: only the body runs here
+                let caller_run = std::mem::replace(&mut it.run_id, def.src.0);
+                let r = it.run_body(&def, &scope);
+                it.run_id = caller_run;
+                r
+            } else {
+                it.call_closure_sync(&f, &def, &scope, &this, &args)
+            };
             // the coroutine's frames end with its body (see `new_co` for the segment base)
             it.frame_truncate(0);
             r

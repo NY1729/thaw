@@ -26,14 +26,13 @@ pub(crate) enum Req {
     Return,
 }
 
-/// The arguments of a generator that has not started. Each field is one `Rc` clone (`def` is not a node: it is
+/// A generator that has not started: its function, its definition and the frame bound at the call (`this`,
+/// `arguments` and the parameters live in it). Each field is one `Rc` clone (`def` is not a node: it is
 /// read by `gc::obj_edges` only through its sole-owner rule, and a clone held here makes that rule fail).
 pub(crate) struct GenStart {
     pub(crate) f: Value,
     pub(crate) def: Rc<FuncDef>,
-    pub(crate) scope: Rc<Scope>,
-    pub(crate) this: Value,
-    pub(crate) args: Vec<Value>,
+    pub(crate) frame: Rc<Scope>,
 }
 
 pub(crate) struct GenData {
@@ -188,6 +187,13 @@ impl Interp {
         this: &Value,
         args: &[Value],
     ) -> R<Value> {
+        // FunctionDeclarationInstantiation runs at the call, so a parameter error throws from the call itself
+        // (sync and async generators alike). It runs before `prototype` is read, as the spec orders it.
+        let caller_run = std::mem::replace(&mut self.run_id, def.src.0);
+        let frame = self.bind_frame(f, def, scope, this, args, None);
+        self.run_id = caller_run;
+        let frame = frame?;
+        gc_registry::capture_scope(&frame);
         let proto = match self.get(f, "prototype")? {
             Value::Object(p) => Some(p),
             _ if def.is_async => self.rt.async_generator_proto.clone(),
@@ -198,9 +204,7 @@ impl Interp {
             start: RefCell::new(Some(GenStart {
                 f: f.clone(),
                 def: def.clone(),
-                scope: scope.clone(),
-                this: this.clone(),
-                args: args.to_vec(),
+                frame,
             })),
             co: RefCell::new(None),
             queue: RefCell::new(VecDeque::new()),
@@ -229,7 +233,15 @@ impl Interp {
         let (co, snap) = if status == GStatus::Start {
             let st = g.start.borrow_mut().take().expect("generator start state");
             let promise = self.new_promise();
-            let r = self.new_co(&st.f, &st.def, &st.scope, &st.this, &st.args, promise, None);
+            let r = self.new_co(
+                &st.f,
+                &st.def,
+                &st.frame,
+                &Value::Undefined,
+                &[],
+                promise,
+                None,
+            );
             match r {
                 Ok((co, snap)) => {
                     *g.co.borrow_mut() = Some(co.clone());
@@ -322,9 +334,9 @@ impl Interp {
                     let r = self.new_co(
                         &st.f,
                         &st.def,
-                        &st.scope,
-                        &st.this,
-                        &st.args,
+                        &st.frame,
+                        &Value::Undefined,
+                        &[],
                         promise,
                         Some(gobj.clone()),
                     );
