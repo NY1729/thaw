@@ -1760,3 +1760,142 @@ fn nested_worker_thread_ids_are_one_tree_wide_sequence() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
+
+#[test]
+fn terminating_a_worker_terminates_its_children() {
+    // Node 22.23.1 (3 runs identical): terminate() resolves 1, and the grandchild's SharedArrayBuffer heartbeat is
+    // frozen once it has resolved (it was running before: frozen > 0)
+    let dir = temp_registry("nested_worker_terminate_cascade");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        var kid = "var wt = require('node:worker_threads'), hb = new Int32Array(wt.workerData); setInterval(function () { Atomics.add(hb, 0, 1); }, 10);";
+        var mid = "var wt = require('node:worker_threads'); var c = new wt.Worker(" + JSON.stringify(kid) + ", { eval: true, workerData: wt.workerData }); c.on('online', function () { wt.parentPort.postMessage('child-ready'); });";
+        module.exports = async function () {
+            var sab = new SharedArrayBuffer(4), hb = new Int32Array(sab);
+            var top = new Worker(mid, { eval: true, workerData: sab });
+            await new Promise(function (resolve, reject) {
+                top.on('message', function (m) { if (m === 'child-ready') resolve(); });
+                top.on('error', reject);
+            });
+            await new Promise(function (r) { setTimeout(r, 200); });
+            var code = await top.terminate();
+            var frozen = Atomics.load(hb, 0);
+            await new Promise(function (r) { setTimeout(r, 300); });
+            return [code, frozen > 0, Atomics.load(hb, 0) === frozen];
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("nested_worker_terminate_cascade_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), "[1,true,true]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn terminated_worker_does_not_deliver_its_children_exit_events() {
+    // Node 22.23.1 (3 runs identical): the child is stopped with its parent, and its 'exit' never reaches the parent's JS
+    let dir = temp_registry("nested_worker_terminate_child_exit");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        var kid = "setInterval(function () {}, 1000);";
+        var mid = "var wt = require('node:worker_threads'); var c = new wt.Worker(" + JSON.stringify(kid) + ", { eval: true }); c.on('exit', function (code) { wt.parentPort.postMessage(['child exit', code]); }); wt.parentPort.postMessage('ready');";
+        module.exports = async function () {
+            var messages = [];
+            var top = new Worker(mid, { eval: true });
+            await new Promise(function (resolve) {
+                top.on('message', function (m) { messages.push(m); if (m === 'ready') setTimeout(resolve, 200); });
+            });
+            var code = await top.terminate();
+            await new Promise(function (r) { setTimeout(r, 300); });
+            return [code, messages];
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("nested_worker_terminate_child_exit_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), r#"[1,["ready"]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn nested_worker_exit_code_and_error_reach_its_parent() {
+    // Node 22.23.1 (3 runs identical; the event order between the two children varies, so the log is sorted):
+    // process.exit(7) in a child is its 'exit' 7; a throw is its parent's 'error' then 'exit' 1; the top worker exits 0
+    let dir = temp_registry("nested_worker_exit_and_error");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        var mid = "var wt = require('node:worker_threads'); var c = new wt.Worker('process.exit(7);', { eval: true }); var d = new wt.Worker('throw new Error(\"boom\");', { eval: true }); c.on('exit', function (code) { wt.parentPort.postMessage(['c exit', code]); }); d.on('error', function (e) { wt.parentPort.postMessage(['d error', e.message]); }); d.on('exit', function (code) { wt.parentPort.postMessage(['d exit', code]); });";
+        module.exports = async function () {
+            var log = [];
+            var top = new Worker(mid, { eval: true });
+            top.on('message', function (m) { log.push(m); });
+            var code = await new Promise(function (r) { top.on('exit', r); });
+            log.sort(function (a, b) { var x = JSON.stringify(a), y = JSON.stringify(b); return x < y ? -1 : x > y ? 1 : 0; });
+            return [code, log];
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("nested_worker_exit_and_error_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(
+        run_js(&bundle),
+        r#"[0,[["c exit",7],["d error","boom"],["d exit",1]]]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn nested_worker_share_env_writes_reach_the_main_environment() {
+    // Node 22.23.1 (3 runs identical): a SHARE_ENV child of a SHARE_ENV worker writes the main thread's process.env
+    let dir = temp_registry("nested_worker_share_env");
+    fs::write(
+        dir.join("index.js"),
+        r#"var wt = require('node:worker_threads');
+        var kid = "process.env.THAW_N2_NESTED = 'gc';";
+        var mid = "var wt = require('node:worker_threads'); var c = new wt.Worker(" + JSON.stringify(kid) + ", { eval: true, env: wt.SHARE_ENV });";
+        module.exports = async function () {
+            var top = new wt.Worker(mid, { eval: true, env: wt.SHARE_ENV });
+            await new Promise(function (r) { top.on('exit', r); });
+            var seen = process.env.THAW_N2_NESTED;
+            delete process.env.THAW_N2_NESTED;
+            return seen;
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("nested_worker_share_env_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), "gc");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn terminating_a_worker_stops_a_child_blocked_in_atomics_wait() {
+    // Node 22.23.1 (3 runs identical): the grandchild's Atomics.wait is ended by the terminate; terminate() resolves 1
+    let dir = temp_registry("nested_worker_terminate_atomics_wait");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        var kid = "var wt = require('node:worker_threads'); var hb = new Int32Array(wt.workerData); Atomics.wait(hb, 0, 0);";
+        var mid = "var wt = require('node:worker_threads'); var c = new wt.Worker(" + JSON.stringify(kid) + ", { eval: true, workerData: wt.workerData }); wt.parentPort.postMessage('ready');";
+        module.exports = async function () {
+            var top = new Worker(mid, { eval: true, workerData: new SharedArrayBuffer(4) });
+            await new Promise(function (resolve) { top.on('message', function (m) { if (m === 'ready') setTimeout(resolve, 300); }); });
+            var code = await top.terminate();
+            return [code];
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("nested_worker_terminate_atomics_wait_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), "[1]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+

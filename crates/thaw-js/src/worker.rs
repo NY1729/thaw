@@ -8,9 +8,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::builtins::json_quote;
 use crate::heap_limit;
@@ -639,19 +640,39 @@ pub(crate) fn capture_bytes(it: &Interp, fd: u8, bytes: &[u8]) -> bool {
     true
 }
 
-/// Before this Interp is dropped: each child it still has is terminated and joined, so no child thread outlives the
-/// state it reports to. Its own `Exit` is the last event it sends, which ends the drain. A child that is stuck in a
-/// synchronous native (Atomics.wait) holds the join. ponytail: no 'exit' events are delivered for these children.
+/// How long a stopping worker waits for each child it terminated to exit. A child that runs past it (stuck in a native
+/// that does not poll the interrupt) is detached: its thread only touches its own state and ends by itself.
+// ponytail: one fixed grace per child, not a shared budget; a child stuck forever keeps its thread until process exit.
+const STOP_GRACE: Duration = Duration::from_secs(1);
+
+/// Before this Interp is dropped (or its script panicked): each child it still has is terminated and joined, so no child
+/// thread outlives the state it reports to. Its own `Exit` is the last event it sends, which ends the drain. A child that
+/// does not stop within `STOP_GRACE` is detached instead, with a diagnostic. No 'exit' events are delivered for these
+/// children.
 fn stop_children(it: &mut Interp) {
     for mut w in std::mem::take(&mut it.worker.workers).into_values() {
+        let mut stuck = false;
         if !w.exited {
             w.interrupt.store(true, Ordering::Relaxed);
             let _ = w.tx.send(Cmd::Terminate);
-            while let Ok(evt) = w.rx.recv() {
-                let exit = matches!(evt, Evt::Exit(_));
-                release_evt(&evt);
-                if exit {
-                    break;
+            let deadline = Instant::now() + STOP_GRACE;
+            loop {
+                match w
+                    .rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                {
+                    Ok(evt) => {
+                        let exit = matches!(evt, Evt::Exit(_));
+                        release_evt(&evt);
+                        if exit {
+                            break;
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        stuck = true;
+                        break;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
                 }
             }
         }
@@ -659,7 +680,11 @@ fn stop_children(it: &mut Interp) {
             release_evt(&evt);
         }
         if let Some(join) = w.join.take() {
-            let _ = join.join();
+            if stuck {
+                eprintln!("thaw-js: a worker's child did not stop within {STOP_GRACE:?}; its thread is left running");
+            } else {
+                let _ = join.join();
+            }
         }
     }
 }
@@ -687,8 +712,11 @@ fn run_worker(
         it.interrupt = Some(side.interrupt.clone());
         it.worker.side = Some(side);
         it.worker.env_table = Some(env);
-        let code = run_script(&mut it, source, opts, main);
+        // a panic in the script still stops its children: the unwind stops here, not at the outer catch
+        let ran =
+            std::panic::catch_unwind(AssertUnwindSafe(|| run_script(&mut it, source, opts, main)));
         stop_children(&mut it);
+        let code = ran.unwrap_or(1);
         // leaving the thread table and taking the queue happen under one lock: a send either queued before this (its
         // wire is released here) or finds no thread. Messages the parent sent that this worker never read still carry
         // their blocks; so does a workerData the bootstrap never reached (its wire is inside the spawn options)
@@ -1201,6 +1229,45 @@ pub(crate) fn install(it: &mut Interp) {
     // receiveMessageOnPort's sync read: the port deliveries already posted by the other threads (JSON, like poll)
     let f = it.native(|it, _, _| Ok(Value::str(&poll_ports(it))));
     g.declare("__thaw_worker_poll_ports", f, true);
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    use super::*;
+
+    #[test]
+    fn worker_teardown_gives_up_on_a_child_that_does_not_stop() {
+        // a child that ignores its Terminate (a stand-in for a native that never polls the interrupt) and exits 8 s
+        // later: the stop returns after the grace, not after the child
+        let (tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let (evt_tx, rx) = mpsc::channel::<Evt>();
+        let join = std::thread::spawn(move || {
+            let _commands = cmd_rx;
+            std::thread::sleep(Duration::from_secs(8));
+            let _ = evt_tx.send(Evt::Exit(0));
+        });
+        let mut it = Interp::new();
+        it.worker.workers.insert(
+            1,
+            Worker {
+                tx,
+                rx,
+                interrupt: Arc::new(AtomicBool::new(false)),
+                refd: true,
+                exited: false,
+                token: 0,
+                join: Some(join),
+                cpu: Arc::new(CpuProbe::default()),
+            },
+        );
+        let started = Instant::now();
+        stop_children(&mut it);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "teardown waited {:?} for a child that never stopped",
+            started.elapsed()
+        );
+    }
 }
 
 #[cfg(test)]
