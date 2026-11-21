@@ -245,6 +245,47 @@ fn file_worker_runs_a_commonjs_file_with_relative_require() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Runs `body` as an eval `Worker` (no file, so its text goes to the CommonJS entry) and returns what it posted.
+fn posted_by_eval_worker(body: &str) -> String {
+    let src = format!(
+        "const wt = __thaw_worker_threads_exports;
+      (async () => {{
+        const worker = new wt.Worker({body:?}, {{ eval: true }});
+        await new Promise((resolve, reject) => {{ worker.once('message', (value) => {{ console.log(value); resolve(); }}); worker.once('error', reject); }});
+        await worker.terminate();
+      }})().catch((e) => console.log('failed ' + e));"
+    );
+    run_main(&src)
+}
+
+// Node 22 runs an eval worker's script sloppy (recorded 3 runs: `1,function,7,8,H,true`).
+#[test]
+fn cjs_eval_worker_main_is_sloppy_like_node() {
+    let body = "const { parentPort } = require('node:worker_threads');
+var o = {a: 1}; var r = [];
+with (o) { r.push(a) }
+function eval() {}
+r.push(typeof eval);
+var arguments = 7; r.push(arguments);
+r.push(010);
+r.push('H'); <!-- html comment
+r.push((function(){ return this === globalThis })());
+parentPort.postMessage(r.join(','));
+";
+    assert_eq!(posted_by_eval_worker(body), "1,function,7,8,H,true");
+}
+
+// Node 22 keeps a `'use strict'` eval worker's script strict (recorded 3 runs: `ReferenceError`).
+#[test]
+fn cjs_eval_worker_use_strict_stays_strict() {
+    let body = "'use strict';
+const { parentPort } = require('node:worker_threads');
+let m; try { undeclaredVar = 1; m = 'sloppy' } catch (e) { m = e.name }
+parentPort.postMessage(m);
+";
+    assert_eq!(posted_by_eval_worker(body), "ReferenceError");
+}
+
 #[test]
 fn worker_data_shares_a_shared_array_buffer() {
     // node-compat case "worker data shares a SharedArrayBuffer": the worker's store is seen by the parent's view

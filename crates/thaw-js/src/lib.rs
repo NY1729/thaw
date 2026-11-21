@@ -3708,6 +3708,12 @@ impl Interp {
                 global.set_origin(&f.ident.sym, origin);
             }
         }
+        if starts_with_use_strict(stmts) {
+            // a program-level "use strict": its statements run in a strict child scope (its vars are the hoisted globals)
+            let strict = Scope::new(Some(global));
+            strict.strict.set(true);
+            return self.run_hoisted(stmts, &strict);
+        }
         self.run_hoisted(stmts, &global)
     }
 
@@ -4041,14 +4047,14 @@ impl Interp {
         Ok(())
     }
 
-    /// Run a CommonJS-style script and return `module.exports`.
+    /// Run a CommonJS-style script and return `module.exports`. Parsed like a main file (sloppy script first).
     pub fn run_commonjs(&mut self, source: &str) -> R<Value> {
         let module = Value::Object(self.plain());
         let exports = Value::Object(self.plain());
         self.set(&module, "exports", exports.clone())?;
         self.global.declare("module", module.clone(), true);
         self.global.declare("exports", exports, true);
-        self.run(source)?;
+        self.run_main_source(source)?;
         self.get(&module, "exports")
     }
 
