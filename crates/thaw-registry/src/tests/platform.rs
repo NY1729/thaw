@@ -65,6 +65,27 @@ fn perf_hooks_builtin_shares_the_performance_timeline() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+// v8.getHeapSpaceStatistics() (Node 22.23.1: 11 spaces in this order, one key set; does_zap_garbage is a boolean)
+#[test]
+fn v8_heap_space_statistics_lists_node_spaces_in_order() {
+    let dir = temp_registry("builtin_v8_spaces");
+    fs::write(
+        dir.join("index.js"),
+        "var v8 = require('node:v8'); module.exports = function () { var spaces = v8.getHeapSpaceStatistics(); return [spaces.length, spaces.map(function(space) { return space.space_name; }).join(','), Object.keys(spaces[0]).join(','), spaces.every(function(space) { return Object.keys(space).join() === Object.keys(spaces[0]).join(); }), v8.getHeapStatistics().does_zap_garbage]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_v8_spaces_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    assert_eq!(
+        run_js(&bundle),
+        r#"[11,"read_only_space,new_space,old_space,code_space,shared_space,trusted_space,new_large_object_space,large_object_space,code_large_object_space,shared_large_object_space,trusted_large_object_space","space_name,space_size,space_used_size,space_available_size,physical_space_size",true,false]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 // qjs_pending: fails on thaw-js: "[true,true,true,true,\"thaw\",42,true,true,true,1,true,0,false,0]"
 mod qjs_pending_platform_v8_builtin_serializes_graphs_and_exposes_runtime_statistics {
     use super::*;
@@ -100,7 +121,7 @@ fn v8_builtin_serializes_graphs_and_exposes_runtime_statistics() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,true,true,true,"thaw",42,true,true,true,1,true,0,true,0]"#
+        r#"[true,true,true,true,"thaw",42,true,true,true,1,true,11,true,0]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1252,37 +1273,26 @@ fn worker_entry_throw_of_each_falsy_value_reaches_the_error_event() {
     let _ = fs::remove_dir_all(modules);
 }
 
-// qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
-mod qjs_pending_platform_worker_main_ready_rejects_every_falsy_thrown_value {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn worker_main_ready_rejects_every_falsy_thrown_value() {
-    use std::ffi::{CStr, CString};
-    let package = temp_registry("worker-falsy-main-ready");
-    let modules = temp_registry("worker-falsy-main-ready-modules");
-    fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Worker(new URL('./worker.js', import.meta.url)); };").unwrap();
-    fs::write(package.join("worker.js"), "throw 0;").unwrap();
-    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "worker-falsy-pkg", &package, "index.js").unwrap();
-    let script = format!(r#"globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle}
-        (0, eval)(globalThis.__thaw_worker_bundle_source);
-        globalThis.workerFalsyReadyProbe = async function() {{
-          var reasons = [0, false, '', null, undefined], results = [];
-          for (var i = 0; i < reasons.length; i++) {{
-            var mod = {{ exports: {{}} }}, finish = globalThis.__thaw_bundle_register_worker_main('probe/' + i, mod);
-            finish(false, reasons[i]);
-            try {{ await mod.ready; results.push(false); }}
-            catch (error) {{ results.push(Object.is(error, reasons[i])); }}
-          }}
-          return results;
-        }};"#);
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"workerFalsyReadyProbe".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,true,true,true]");
-    let _ = fs::remove_dir_all(package);
-    let _ = fs::remove_dir_all(modules);
-}
+    let dir = worker_fixture("worker_main_ready_falsy", &[]);
+    let result = run_worker_fixture(
+        &dir,
+        r#"var out = [];
+        for (var source of ['throw 0', 'throw false', 'throw ""', 'throw null', 'throw undefined']) {
+            out.push(await new Promise(function (resolve) {
+                var worker = new Worker(source, { eval: true });
+                worker.on('error', function (error) { resolve(['err', typeof error, String(error)]); });
+                worker.on('exit', function (code) { resolve(['exit', code]); });
+            }));
+        }
+        return out;"#,
+    );
+    assert_eq!(
+        result,
+        r#"[["err","number","0"],["err","boolean","false"],["err","string",""],["err","object","null"],["err","undefined","undefined"]]"#
+    );
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -1296,6 +1306,32 @@ fn bundled_worker_entry_require_resolve_does_not_load_target() {
     assert_eq!(run_js(&bundle), "[\"/thaw_modules/pkg/dep.js\",\"MODULE_NOT_FOUND\",0]");
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn worker_saved_url_keeps_bundle_affinity_for_worker_entry() {
+    let dir = worker_fixture(
+        "worker_saved_url_affinity",
+        &[
+            ("worker.js", "var parentPort = require('node:worker_threads').parentPort; var direct, created; try { require('affinity-missing'); } catch (error) { direct = error.code; } var makeRequire = require('node:module').createRequire(__filename); try { makeRequire('affinity-missing'); } catch (error) { created = error.code; } parentPort.postMessage([require('./dep.js').value, require('affinity-shared').value, direct, created]); parentPort.close();"),
+            ("dep.js", "exports.value = 'A';"),
+            ("node_modules/affinity-shared/package.json", r#"{"name":"affinity-shared","main":"index.js"}"#),
+            ("node_modules/affinity-shared/index.js", "exports.value = 'A-bare';"),
+        ],
+    );
+    let result = run_worker_fixture(
+        &dir,
+        r#"var saved, real = Worker;
+        Worker = function (url) { saved = url; };
+        try { new Worker(new URL('./worker.js', import.meta.url)); } finally { Worker = real; }
+        var run = await runWorker(saved);
+        return [run.messages, run.errors];"#,
+    );
+    assert_eq!(
+        result,
+        r#"[[["A","A-bare","MODULE_NOT_FOUND","MODULE_NOT_FOUND"]],[]]"#
+    );
+    let _ = fs::remove_dir_all(dir);
 }
 
 // qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
