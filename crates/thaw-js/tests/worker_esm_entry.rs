@@ -540,3 +540,65 @@ fn esm_sync_sibling_runs_while_an_async_sibling_awaits() {
         vec![r#"online | message:["a0","c","a1","body"] | exit:0"#]
     );
 }
+
+// STEP 4: `util`, `events` and `url` come from thaw-node-builtins too. Each expected sequence is what Node 22.23.1 prints.
+
+#[test]
+fn esm_worker_imports_node_util() {
+    let src = "import { parentPort } from 'node:worker_threads'; import util from 'node:util'; parentPort.postMessage([util.format('%s:%d', 'a', 7), util.inspect({a:1,b:[2]}), util.types.isDate(new Date()), typeof util.promisify]);";
+    assert_eq!(
+        run_modules(&[src]),
+        vec![r#"online | message:["a:7","{ a: 1, b: [ 2 ] }",true,"function"] | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_worker_util_namespace_and_default_are_one_object() {
+    let src = "import { parentPort } from 'node:worker_threads'; import * as ns from 'node:util'; import util from 'util'; parentPort.postMessage([typeof ns.format, ns.default === util, typeof util.promisify, util.isDeepStrictEqual({a:1},{a:1}), typeof ns.inspect, typeof ns.types.isDate]);";
+    assert_eq!(
+        run_modules(&[src]),
+        vec![
+            r#"online | message:["function",true,"function",true,"function","function"] | exit:0"#
+        ]
+    );
+}
+
+#[test]
+fn esm_worker_imports_node_events_with_once_ordering() {
+    let src = "import { parentPort } from 'node:worker_threads'; import { EventEmitter, once } from 'node:events'; import events from 'events'; const e = new EventEmitter(); const log = []; e.on('x', (v) => log.push('on:' + v)); e.once('x', (v) => log.push('once:' + v)); e.prependListener('x', (v) => log.push('pre:' + v)); e.emit('x', 1); e.emit('x', 2); const p = once(e, 'ready'); e.emit('ready', 'r1', 'r2'); const got = await p; parentPort.postMessage([log.join(','), e.listenerCount('x'), events === EventEmitter, got]);";
+    assert_eq!(
+        run_modules(&[src]),
+        vec![r#"online | message:["pre:1,on:1,once:1,pre:2,on:2",2,true,["r1","r2"]] | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_worker_events_namespace_and_default_identity() {
+    let src = "import { parentPort } from 'node:worker_threads'; import * as ns from 'node:events'; import EE from 'node:events'; parentPort.postMessage([typeof ns.once, ns.default === EE, typeof ns.EventEmitter, ns.EventEmitter === EE, typeof EE.once, typeof EE.on]);";
+    assert_eq!(
+        run_modules(&[src]),
+        vec![
+            r#"online | message:["function",true,"function",true,"function","function"] | exit:0"#
+        ]
+    );
+}
+
+#[test]
+fn esm_worker_events_once_returns_a_promise() {
+    let src = "import { parentPort } from 'node:worker_threads'; import { once } from 'events'; import { EventEmitter } from 'node:events'; const e = new EventEmitter(); const p = once(e, 'go'); const isPromise = p instanceof Promise; setTimeout(() => e.emit('go', 42), 0); parentPort.postMessage([isPromise, await p]);";
+    assert_eq!(
+        run_modules(&[src]),
+        vec![r#"online | message:[true,[42]] | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_worker_imports_node_url() {
+    let src = "import { parentPort } from 'node:worker_threads'; import { parse, format } from 'node:url'; import url from 'url'; parentPort.postMessage([format({protocol:'https', host:'a.test', pathname:'/x'}), parse('http://u.test/p?q=1').query, typeof url.fileURLToPath, url.pathToFileURL('/tmp/a b').href]);";
+    assert_eq!(
+        run_modules(&[src]),
+        vec![
+            r#"online | message:["https://a.test/x","q=1","function","file:///tmp/a%20b"] | exit:0"#
+        ]
+    );
+}

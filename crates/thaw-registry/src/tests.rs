@@ -1572,3 +1572,39 @@ fn node_path_bundle_text_is_pinned() {
         bundle.len()
     );
 }
+
+// the util/events/url bundles must stay byte-identical when their sources move to thaw-node-builtins
+fn builtin_bundle_sha256(specifier: &str) -> String {
+    let bundle = builtin_bundle_with(specifier, &[]).unwrap();
+    Sha256::digest(bundle.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[test]
+fn node_util_bundle_text_is_pinned() {
+    assert_eq!(
+        builtin_bundle_sha256("node:util"),
+        "aa182efe54849dcf8054c4dc583778a24318acea8dd0ffe5d7c524d589b90037",
+        "node:util bundle sha256"
+    );
+}
+
+#[test]
+fn node_events_bundle_text_is_pinned() {
+    assert_eq!(
+        builtin_bundle_sha256("node:events"),
+        "d2daceeec75a4a7621f8960b66abeaab57c96418d4bb36b53af40e7d51c1a4ed",
+        "node:events bundle sha256"
+    );
+}
+
+#[test]
+fn node_url_bundle_text_is_pinned() {
+    assert_eq!(
+        builtin_bundle_sha256("node:url"),
+        "ed14c972a2e5e684c3b9f520539755c156b21b14bf88e7d87ebdec5ccae66556",
+        "node:url bundle sha256"
+    );
+}
