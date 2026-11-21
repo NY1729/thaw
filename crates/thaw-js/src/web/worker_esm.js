@@ -43,12 +43,13 @@
     configurable: true,
     value: path => formatOf(String(path)) === 'esm',
   });
-  // the builtins a worker module can import: only worker_threads (the worker's require serves no other module)
-  const builtinNames = { 'node:worker_threads': 'node:worker_threads', worker_threads: 'node:worker_threads' };
+  // the builtins a worker module can import: worker_threads, and every name the realm's builtin table serves
+  // (`__thaw_builtin_source`), with or without `node:`. A builtin wins over a same-named package, as in Node.
+  const builtinName = name => (name.startsWith('node:') ? name.slice('node:'.length) : name);
   const shown = url => (url.startsWith('file:') ? pathOf(url) : url);
   const resolve = (spec, parent) => {
     const name = String(spec);
-    if (builtinNames[name] !== undefined) return builtinNames[name];
+    if (name === 'node:worker_threads' || name === 'worker_threads') return 'node:worker_threads';
     if (name.startsWith('data:')) return name;
     if (name.startsWith('./') || name.startsWith('../') || name.startsWith('/') || name.startsWith('file:')) {
       if (!parent.startsWith('file:')) {
@@ -56,6 +57,7 @@
       }
       return new URL(name, parent).href;
     }
+    if (globalThis.__thaw_builtin_source(builtinName(name)) !== undefined) return 'node:' + builtinName(name);
     if (name.startsWith('node:')) throw failure(Error, 'ERR_UNKNOWN_BUILTIN_MODULE', 'No such built-in module: ' + name);
     throw failure(Error, 'ERR_MODULE_NOT_FOUND', "Cannot find package '" + name + "' imported from " + shown(parent));
   };
@@ -78,6 +80,10 @@
     if (url === 'node:worker_threads') {
       record = { url, kind: 'builtin', specs: [], deps: new Map(), linked: true, exports: globalThis.__thaw_worker_side_exports, state: 2, promise: undefined };
       record.promise = Promise.resolve(record.exports);
+    } else if (url.startsWith('node:')) {
+      const exports = globalThis.__thaw_builtin_exports(builtinName(url));
+      record = { url, kind: 'builtin', specs: [], deps: new Map(), linked: true, exports, state: 2, promise: undefined };
+      record.promise = Promise.resolve(exports);
     } else if (url.startsWith('file:')) {
       const path = pathOf(url);
       let source;

@@ -21,6 +21,7 @@ thaw-intl = { path = "../thaw-intl", optional = true }
 thaw-wasm = { path = "../thaw-wasm", optional = true }
 thaw-sqlite = { path = "../thaw-sqlite", optional = true }
 thaw-parser = { path = "../thaw-parser" }
+thaw-node-builtins = { path = "../thaw-node-builtins" }
 thaw-arena = { path = "../thaw-arena" }
 swc_ecma_visit = "29.0.0"
 regress = "0.11.1"

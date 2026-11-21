@@ -39,7 +39,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/release
-          key: parity-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-arena/**') }}
+          key: parity-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-arena/**') }}
           restore-keys: |
             parity-${{ runner.os }}-
       - name: Build thaw-js-node runner (release, with the intl and wasm features that run.sh requires)

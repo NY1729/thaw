@@ -1556,3 +1556,19 @@ fn builtin_sources_parse_for_the_defined_method_names() {
         }
     }
 }
+
+#[test]
+fn node_path_bundle_text_is_pinned() {
+    // the node:path bundle must stay byte-identical when its source moves to thaw-node-builtins
+    let bundle = builtin_bundle_with("node:path", &[]).unwrap();
+    let hex: String = Sha256::digest(bundle.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        hex,
+        "14fdc6db55b0c2bf7e4b894e883c20e8dc697babc0daad9c5199d91ac5a25431",
+        "node:path bundle sha256 ({} bytes)",
+        bundle.len()
+    );
+}

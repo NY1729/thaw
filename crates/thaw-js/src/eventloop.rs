@@ -30,6 +30,7 @@ fn next_timer_id() -> u64 {
 const TIMEOUT_MAX: f64 = 2147483647.0;
 const MAIN_FILE_LOADER: &str = include_str!("web/main_file.js");
 const ESM_LOADER: &str = include_str!("web/worker_esm.js");
+const BUILTIN_MODULES: &str = include_str!("web/builtin_modules.js");
 const PROCESS_STDIN: &str = include_str!("web/process_stdin.js");
 /// Per-thread evaluator state (depth, stack_limit, max_depth, run_id) carried across coroutine switches.
 type CoSnapshot = (usize, usize, usize, u32);
@@ -2130,8 +2131,20 @@ impl Interp {
             }
         });
         self.global.declare("__thaw_worker_read_source", read, true);
+        // the Node builtin sources (thaw-node-builtins) by name, `undefined` when not served
+        let builtin_source = self.native(|it, _, a| {
+            let name = it.to_str(&arg(a, 0)).to_string();
+            Ok(match thaw_node_builtins::source(&name) {
+                Some(text) => Value::str(text),
+                None => Value::Undefined,
+            })
+        });
+        self.global
+            .declare("__thaw_builtin_source", builtin_source, true);
         self.run_builtin(MAIN_FILE_LOADER)
             .unwrap_or_else(|_| panic!("thaw-js main file loader must evaluate"));
+        self.run_builtin(BUILTIN_MODULES)
+            .unwrap_or_else(|_| panic!("thaw-js builtin modules must evaluate"));
         self.run_builtin(ESM_LOADER)
             .unwrap_or_else(|_| panic!("thaw-js ES module loader must evaluate"));
     }

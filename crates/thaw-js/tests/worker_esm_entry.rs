@@ -312,16 +312,33 @@ fn esm_dynamic_import_of_the_worker_threads_builtin_namespace() {
     );
 }
 
-/// Node: `"function:function"`. Needs a `node:path` in the worker realm: a worker's builtins are only
-/// `node:worker_threads` today (worker_esm.js `builtinNames`), and the path shim lives in thaw-registry, which depends
-/// on thaw-js (so it cannot be read from here). A builtin-table decision is a follow-up.
+/// Node: `"function:function"`. The worker realm serves `node:path` from thaw-node-builtins (worker_esm.js `load`).
 #[test]
-#[ignore = "needs node:path in the worker realm (builtin source table, follow-up)"]
 fn esm_dynamic_import_of_a_builtin_namespace() {
     let src = "import { parentPort } from 'node:worker_threads'; const p = await import('node:path'); parentPort.postMessage(typeof p.join + ':' + typeof p.default.join);";
     assert_eq!(
         run_modules(&[src]),
         vec![r#"online | message:"function:function" | exit:0"#]
+    );
+}
+
+#[test]
+fn esm_builtin_imports_resolve_with_or_without_the_prefix_to_one_namespace() {
+    let src = "import { parentPort } from 'node:worker_threads'; import path from 'node:path'; import { join } from 'path'; const p = await import('node:path'); const q = await import('path'); parentPort.postMessage([typeof join, join('a', 'b'), path.join('x', 'y'), typeof p.join, typeof p.default.join, p.default === path, p.default === q.default, (await import('node:path')) === p]);";
+    assert_eq!(
+        run_modules(&[src]),
+        vec![
+            r#"online | message:["function","a/b","x/y","function","function",true,true,true] | exit:0"#
+        ]
+    );
+}
+
+#[test]
+fn esm_import_of_an_unknown_builtin_rejects_with_its_code() {
+    let src = "import { parentPort } from 'node:worker_threads'; try { await import('node:nonexistent'); parentPort.postMessage('no throw'); } catch (e) { parentPort.postMessage(e.code); }";
+    assert_eq!(
+        run_modules(&[src]),
+        vec![r#"online | message:"ERR_UNKNOWN_BUILTIN_MODULE" | exit:0"#]
     );
 }
 
